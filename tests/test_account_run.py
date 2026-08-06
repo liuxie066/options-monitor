@@ -109,7 +109,6 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
 
     audit_events: list[dict[str, Any]] = []
     state_writes: list[tuple[str, dict[str, Any]]] = []
-    event_prefetch_calls: list[dict[str, Any]] = []
 
     acct_report_dir = request.accounts_root / request.acct / "reports"
     acct_state_dir = request.accounts_root / request.acct / "state"
@@ -135,24 +134,10 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     monkeypatch.setattr(mod.state_repo, "write_shared_state", lambda base, name, payload: state_writes.append((name, dict(payload))))
     monkeypatch.setattr(mod.state_repo, "append_run_audit_jsonl", lambda *args, **kwargs: None)
 
-    def _prefetch_event_data(**kwargs):
-        event_prefetch_calls.append(dict(kwargs))
-        return {
-            "summary": {
-                "errors": 0,
-                "unique_symbols_total": 1,
-                "fetch_attempts": 0,
-            },
-            "symbols": {},
-        }
-
-    monkeypatch.setattr(mod, "prefetch_event_data", _prefetch_event_data)
-
     return {
         "mod": mod,
         "audit_fn": _audit,
         "audit_events": audit_events,
-        "event_prefetch_calls": event_prefetch_calls,
         "state_writes": state_writes,
         "acct_report_dir": acct_report_dir,
         "acct_state_dir": acct_state_dir,
@@ -315,11 +300,6 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     assert outcome.prefetch_done is True
     assert outcome.result.notification_text == "hello world"
     assert outcome.acct_metrics["ran_scan"] is True
-    assert any(evt["action"] == "event_prefetch" for evt in env["audit_events"])
-    assert any(
-        evt["step"] == "event_prefetch" and evt["status"] == "start"
-        for evt in runlog.events
-    )
     assert not any(evt["step"] == "fetch_chain_cache" for evt in runlog.events)
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
@@ -450,7 +430,7 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         },
     )
 
-    def _drift_during_event_prefetch(**_kwargs):
+    def _drift_published_paths() -> None:
         replacement = json.loads(
             request.account_config_authority.canonical_bytes.decode("utf-8")
         )
@@ -460,14 +440,10 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         request.account_config_authority.compatibility_path.write_bytes(
             replacement_bytes
         )
-        return {
-            "summary": {"errors": 0, "unique_symbols_total": 1},
-            "symbols": {},
-        }
-
     observed_pipeline: dict[str, Any] = {}
 
     def _run_pipeline_script(**kwargs):
+        _drift_published_paths()
         observed_pipeline.update(kwargs)
         kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
         (kwargs["report_dir"] / "symbols_notification.txt").write_text(
@@ -476,7 +452,6 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
         )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(env["mod"], "prefetch_event_data", _drift_during_event_prefetch)
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
     monkeypatch.setattr(
         env["mod"],
@@ -703,287 +678,6 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
     assert seen_gate["reason"] == "lx_due"
     assert outcome.ran_pipeline is True
     assert outcome.result.notification_text == "account due"
-
-
-def test_run_one_account_appends_candidate_reject_summary_for_no_candidate_run(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-    from src.application.candidate_filter_trace import append_candidate_filter_trace_rows, build_candidate_filter_trace_row
-
-    request = _make_request(tmp_path, prefetch_done=True)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": True,
-            "ran_scan": True,
-            "meaningful": True,
-            "result_reason": "run",
-        },
-    )
-
-    def _run_pipeline_script(**kwargs):
-        report_dir = kwargs["report_dir"]
-        report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("📋 本轮扫描完成，暂无符合条件的候选。\n", encoding="utf-8")
-        append_candidate_filter_trace_rows(
-            report_dir / "candidate_filter_trace.jsonl",
-            [
-                build_candidate_filter_trace_row(
-                    run_id="run-1",
-                    account="lx",
-                    symbol="PDD",
-                    function="sell_put",
-                    mode="put",
-                    status="post_filtered",
-                    stage="post_filter",
-                    rule="volatility_estimate_missing",
-                ),
-                build_candidate_filter_trace_row(
-                    run_id="run-1",
-                    account="lx",
-                    symbol="FUTU",
-                    function="sell_call",
-                    mode="call",
-                    status="rejected",
-                    stage="stage3_risk_filter",
-                    rule="risk_spread",
-                ),
-            ],
-        )
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
-    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
-    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert "### 拒绝摘要" in outcome.result.notification_text
-    assert "过滤 2 条" in outcome.result.notification_text
-    assert "主要原因：数据缺失 1、流动性不足 1" in outcome.result.notification_text
-    assert "涉及模块" not in outcome.result.notification_text
-    assert "样例" not in outcome.result.notification_text
-
-
-def test_run_one_account_passes_force_mode_only_to_event_prefetch(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application.account_run import run_one_account
-
-    request = _make_request(
-        tmp_path,
-        prefetch_done=True,
-        force_mode=True,
-    )
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": True,
-            "ran_scan": True,
-            "meaningful": True,
-            "result_reason": "run",
-        },
-    )
-
-    def _run_pipeline_script(**kwargs):
-        report_dir = kwargs["report_dir"]
-        report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("hello world\n", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
-    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
-    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert outcome.ran_pipeline is True
-    assert env["event_prefetch_calls"][0]["force_refresh"] is True
-    assert outcome.prefetch_done is True
-
-
-def test_run_one_account_force_event_prefetch_uses_shared_state_once(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application.account_run import run_one_account
-
-    base_request = _make_request(
-        tmp_path,
-        prefetch_done=True,
-        force_mode=True,
-    )
-    shared_prefetch_state: dict[str, Any] = {"done": False}
-    prefetch_calls: list[str] = []
-
-    def _run(acct: str):
-        request = _request_for_account(
-            base_request,
-            acct,
-            prefetch_state=shared_prefetch_state,
-        )
-        env = _install_common_patches(monkeypatch, request)
-        runlog = _FakeRunlog()
-
-        monkeypatch.setattr(
-            env["mod"],
-            "decide_account_scan_gate",
-            lambda **kwargs: {
-                "run_pipeline": True,
-                "ran_scan": True,
-                "meaningful": True,
-                "result_reason": "run",
-            },
-        )
-
-        def _prefetch_event_data(**kwargs):
-            prefetch_calls.append(acct)
-            return {
-                "summary": {"errors": 0},
-                "symbols": {},
-            }
-
-        monkeypatch.setattr(env["mod"], "prefetch_event_data", _prefetch_event_data)
-
-        def _run_pipeline_script(**kwargs):
-            report_dir = kwargs["report_dir"]
-            report_dir.mkdir(parents=True, exist_ok=True)
-            (report_dir / "symbols_notification.txt").write_text(f"{acct} ok\n", encoding="utf-8")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
-        monkeypatch.setattr(
-            env["mod"],
-            "normalize_pipeline_subprocess_output",
-            lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"},
-        )
-        monkeypatch.setattr(
-            env["mod"],
-            "decide_pipeline_execution_result",
-            lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"},
-        )
-
-        return run_one_account(
-            request=request,
-            runlog=runlog,
-            audit_fn=env["audit_fn"],
-            fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-        )
-
-    first = _run("lx")
-    second = _run("sy")
-
-    assert first.ran_pipeline is True
-    assert second.ran_pipeline is True
-    assert first.prefetch_done is True
-    assert second.prefetch_done is True
-    assert shared_prefetch_state["event_done"] is True
-    assert shared_prefetch_state["event_force_done"] is True
-    assert prefetch_calls == ["lx"]
-
-
-def test_run_one_account_force_event_prefetch_failure_does_not_mark_shared_done(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application.account_run import run_one_account
-
-    base_request = _make_request(
-        tmp_path,
-        prefetch_done=True,
-        force_mode=True,
-    )
-    shared_prefetch_state: dict[str, Any] = {"done": False}
-    prefetch_results: list[object] = [
-        RuntimeError("event provider unavailable"),
-        {"summary": {"errors": 0}, "symbols": {}},
-    ]
-    prefetch_calls: list[str] = []
-
-    def _run(acct: str):
-        request = _request_for_account(
-            base_request,
-            acct,
-            prefetch_state=shared_prefetch_state,
-        )
-        env = _install_common_patches(monkeypatch, request)
-        runlog = _FakeRunlog()
-
-        monkeypatch.setattr(
-            env["mod"],
-            "decide_account_scan_gate",
-            lambda **kwargs: {
-                "run_pipeline": True,
-                "ran_scan": True,
-                "meaningful": True,
-                "result_reason": "run",
-            },
-        )
-
-        def _prefetch_event_data(**kwargs):
-            prefetch_calls.append(acct)
-            result = prefetch_results.pop(0)
-            if isinstance(result, Exception):
-                raise result
-            return result
-
-        monkeypatch.setattr(env["mod"], "prefetch_event_data", _prefetch_event_data)
-
-        def _run_pipeline_script(**kwargs):
-            report_dir = kwargs["report_dir"]
-            report_dir.mkdir(parents=True, exist_ok=True)
-            (report_dir / "symbols_notification.txt").write_text(f"{acct} ok\n", encoding="utf-8")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
-        monkeypatch.setattr(
-            env["mod"],
-            "normalize_pipeline_subprocess_output",
-            lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"},
-        )
-        monkeypatch.setattr(
-            env["mod"],
-            "decide_pipeline_execution_result",
-            lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"},
-        )
-
-        return run_one_account(
-            request=request,
-            runlog=runlog,
-            audit_fn=env["audit_fn"],
-            fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-        )
-
-    first = _run("lx")
-    assert first.ran_pipeline is True
-    assert first.prefetch_done is True
-    assert "event_done" not in shared_prefetch_state
-    assert "event_force_done" not in shared_prefetch_state
-
-    second = _run("sy")
-    assert second.ran_pipeline is True
-    assert second.prefetch_done is True
-    assert shared_prefetch_state["event_done"] is True
-    assert shared_prefetch_state["event_force_done"] is True
-    assert prefetch_calls == ["lx", "sy"]
 
 
 def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch, tmp_path: Path) -> None:

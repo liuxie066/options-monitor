@@ -28,7 +28,7 @@ def _extract_title_strikes(text: str) -> list[float]:
     return strikes
 
 
-def test_scan_sell_call_filter_and_rank_baseline() -> None:
+def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() -> None:
     _add_repo_to_syspath()
     from src.application.scan_sell_call import run_sell_call_scan
 
@@ -175,12 +175,11 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
             quiet=True,
         )
 
-        assert list(out["contract_symbol"]) == ["B", "A"]
+        assert list(out["contract_symbol"]) == ["A", "B", "C", "D", "F", "E"]
+        assert out["period_net_premium_return"].notna().all()
         reject_path = out_path.with_name(f"{out_path.stem}_reject_log.csv")
         reject_log = pd.read_csv(reject_path)
-        assert not reject_log.empty
-        assert set(reject_log["reject_stage"].dropna().astype(str).tolist()) == {"step3_risk_gate"}
-        assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
+        assert reject_log.empty
 
 
 def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Path) -> None:
@@ -230,7 +229,7 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
     assert int(out.iloc[0]["covered_contracts_available"]) == 1
 
 
-def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
+def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy() -> None:
     _add_repo_to_syspath()
     from src.application.scan_sell_call import run_sell_call_scan
 
@@ -315,8 +314,12 @@ def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
             quiet=True,
         )
 
-        assert list(out["contract_symbol"]) == ["AT_COST_MULTIPLIER"]
-        assert float(out["strike"].min()) >= 102.0
+        assert list(out["contract_symbol"]) == [
+            "BELOW_COST",
+            "AT_COST",
+            "AT_COST_MULTIPLIER",
+        ]
+        assert float(out["strike"].min()) == 99.0
 
 
 def test_sell_call_risk_bands_are_stable() -> None:
@@ -334,7 +337,7 @@ def test_sell_call_risk_bands_are_stable() -> None:
 
 def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
     _add_repo_to_syspath()
-    from domain.domain.engine import build_strategy_config, rank_scored_candidates
+    from domain.domain.engine import rank_candidate_rows
     from src.application.render_sell_call_alerts import render_sell_call_alerts
 
     with TemporaryDirectory() as td:
@@ -440,8 +443,7 @@ def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
         )
         df.to_csv(in_path, index=False)
 
-        cfg = build_strategy_config("call")
-        expected = rank_scored_candidates(df, cfg, layered=True, top=3)
+        expected = pd.DataFrame(rank_candidate_rows(df.to_dict("records"), mode="call")).head(3)
 
         text = render_sell_call_alerts(
             input_path=in_path,

@@ -12,12 +12,10 @@ repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from src.application.event_risk_filter import annotate_candidates_with_event_risk
 from domain.domain.engine import CandidateCalculationError, calculate_opening_candidate_metrics
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_CALL_WINDOW,
-    resolve_event_risk_config,
 )
 from domain.domain.sell_call_risk_bands import classify_sell_call_risk
 from domain.domain.sell_call_config import (
@@ -30,7 +28,6 @@ from domain.domain.risk_capacity import compute_sell_call_share_capacity
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
-    resolve_candidate_score_weights,
     run_candidate_scan,
 )
 
@@ -74,7 +71,6 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "realized_volatility_20",
     "realized_volatility_60",
     "realized_volatility_120",
-    "realized_volatility_estimate",
     "term_matched_rv",
     "term_matched_rv_status",
     "term_matched_rv_reason",
@@ -109,11 +105,6 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "earnings_event_dates",
     "earnings_snapshot_hash",
     "earnings_artifact_path",
-    "event_flag",
-    "event_types",
-    "event_dates",
-    "event_source_status",
-    "event_source_error",
     "reject_stage_candidate",
 ]
 
@@ -215,9 +206,6 @@ def _build_candidate_row_factory(
             shares_locked=shares_locked,
             shares_available_for_cover=shares_available_for_cover,
         )
-        if covered_contracts_available < 1:
-            return None
-
         shares_total = int(shares)
         shares_locked_value = int(shares_locked or 0)
         payload = contract.to_gate_payload()
@@ -273,7 +261,7 @@ def run_sell_call_scan(
     *,
     symbols: list[str],
     input_root: Path,
-    output: Path,
+    output: Path | None,
     avg_cost: float,
     shares: int = 100,
     shares_can_sell: int | None = None,
@@ -290,15 +278,10 @@ def run_sell_call_scan(
     min_open_interest: float | None = None,
     min_volume: float | None = None,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
-    event_risk_cfg: dict[str, Any] | None = None,
-    score_weights: dict[str, Any] | None = None,
     reject_log_output: Path | None = None,
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
     quiet: bool = False,
-    risk_policy_version: str | None = None,
-    quote_snapshot_id: str | None = None,
-    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
@@ -323,7 +306,7 @@ def run_sell_call_scan(
             mode="call",
             symbols=symbols,
             input_root=Path(input_root),
-            output=Path(output),
+            output=(Path(output) if output is not None else None),
             empty_output_columns=SELL_CALL_EMPTY_OUTPUT_COLUMNS,
             min_dte=int(min_dte),
             max_dte=int(max_dte),
@@ -334,12 +317,9 @@ def run_sell_call_scan(
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
-            score_weights=resolve_candidate_score_weights(score_weights),
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
             quiet=bool(quiet),
-            risk_policy_version=risk_policy_version,
-            quote_snapshot_id=quote_snapshot_id,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=_make_compute_metrics(avg_cost),
@@ -351,27 +331,9 @@ def run_sell_call_scan(
                 shares_available_for_cover=shares_available_for_cover,
                 capacity_facts=capacity_facts,
             ),
-            build_hard_constraint_kwargs_fn=lambda contract: {
-                "call_covered_contracts_available": _resolve_sell_call_contract_capacity(
-                    multiplier=contract.multiplier,
-                    shares=shares,
-                    shares_can_sell=declared_can_sell,
-                    shares_locked=shares_locked,
-                    shares_available_for_cover=shares_available_for_cover,
-                )[1]
-            },
-            annualized_return_value_fn=lambda metrics: metrics.get("annualized_net_premium_return"),
-            annotate_event_risk_fn=lambda df, base_dir, cfg: annotate_candidates_with_event_risk(
-                df,
-                base_dir=base_dir,
-                event_risk_cfg=cfg,
-            ),
             print_summary_fn=_print_summary,
             metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost),
-            all_decisions_sink_fn=all_decisions_sink_fn,
         ),
-        event_risk_cfg=event_risk_cfg,
-        base_dir=Path(__file__).resolve().parents[2],
         reject_log_output=reject_log_output,
     )
 
@@ -394,9 +356,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
     parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
-    parser.add_argument("--event-risk-enabled", dest="event_risk_enabled", action="store_true", default=None)
-    parser.add_argument("--no-event-risk-enabled", dest="event_risk_enabled", action="store_false")
-    parser.add_argument("--event-risk-mode", dest="event_risk_mode", type=str, default="warn")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     parser.add_argument("--output", default=None, help="Output CSV path (default: output_shared/reports/sell_call_candidates.csv)")
     parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
@@ -431,12 +390,6 @@ def main(argv: list[str] | None = None) -> int:
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,
             max_spread_ratio=args.max_spread_ratio,
-            event_risk_cfg=resolve_event_risk_config(
-                {
-                    "enabled": True if args.event_risk_enabled is None else bool(args.event_risk_enabled),
-                    "mode": args.event_risk_mode,
-                }
-            ),
             reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
             quiet=args.quiet,
         )

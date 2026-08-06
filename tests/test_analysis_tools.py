@@ -193,7 +193,6 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
         _CatalogContext(),
         {
             "views": [
-                "candidate_filter_diagnostics",
                 "close_advice_snapshot",
                 "runtime_tick_status",
                 "quote_freshness",
@@ -203,7 +202,6 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
         },
     )
 
-    assert data["views"]["candidate_filter_diagnostics"]["row_grain"] == "run_id + account + symbol + option_type + rule"
     assert data["views"]["close_advice_snapshot"]["row_grain"] == "account + position_id + advice_run_id"
     assert data["views"]["runtime_tick_status"]["row_grain"] == "market + account + latest_run"
     assert "notification_status" in data["views"]["runtime_tick_status"]["fields"]
@@ -587,126 +585,6 @@ def test_analysis_query_select_constant_materializes_no_views(monkeypatch: pytes
     assert data["rows"] == [{"ok": 1}]
     assert meta["requested_views"] == []
     assert meta["materialized_views"] == []
-
-
-def test_analysis_query_candidate_filter_diagnostics_reads_trace_artifact(tmp_path: Path) -> None:
-    trace_path = tmp_path / "output_shared" / "reports" / "candidate_filter_trace.jsonl"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text(
-        (
-            '{"run_id":"run-1","account":"lx","symbol":"NVDA","function":"sell_put",'
-            '"option_type":"put","status":"rejected","stage":"risk","rule":"delta_too_high",'
-            '"metric_value":0.42,"threshold":0.3,"message":"delta too high"}\n'
-        ),
-        encoding="utf-8",
-    )
-
-    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
-        _AnalysisQueryContext(tmp_path),
-        {
-            "sql": (
-                "select run_id, account, symbol, status, rule "
-                "from candidate_filter_diagnostics where symbol = 'NVDA'"
-            ),
-            "limit": 10,
-        },
-    )
-
-    assert warnings == []
-    assert data["rows"] == [
-        {"run_id": "run-1", "account": "lx", "symbol": "NVDA", "status": "rejected", "rule": "delta_too_high"}
-    ]
-    assert data["evidence"]["diagnostics"] == [
-        {
-            "view": "candidate_filter_diagnostics",
-            "status": "observed_rejection",
-            "severity": "info",
-            "accounts": ["lx"],
-            "symbols": ["NVDA"],
-            "observed_rules": ["delta_too_high"],
-            "summary": "candidate diagnostic contains observed rejection/filter evidence by rules: delta_too_high",
-            "answer_boundary": "observed_filter_evidence_only",
-        }
-    ]
-    assert meta["requested_views"] == ["candidate_filter_diagnostics"]
-    assert meta["materialized_views"] == ["candidate_filter_diagnostics"]
-
-
-def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_config_path(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    config_path = runtime / "config.hk.json"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("{}", encoding="utf-8")
-    run_dir = runtime / "output_runs" / "run-hk-1"
-    trace_path = run_dir / "accounts" / "sy" / "candidate_filter_trace.jsonl"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text(
-        (
-            '{"run_id":"run-hk-1","account":"sy","symbol":"9992.HK","function":"sell_put",'
-            '"option_type":"put","status":"rejected","stage":"risk","rule":"risk_spread",'
-            '"metric_value":0.35,"threshold":0.2,"message":"spread too wide"}\n'
-        ),
-        encoding="utf-8",
-    )
-    pointer_dir = runtime / "output_shared" / "state"
-    pointer_dir.mkdir(parents=True)
-    (pointer_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
-
-    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
-        _AnalysisQueryContext(repo),
-        {
-            "config_path": str(config_path),
-            "sql": (
-                "select run_id, account, symbol, status, rule "
-                "from candidate_filter_diagnostics where symbol = '9992.HK'"
-            ),
-            "limit": 10,
-        },
-    )
-
-    assert warnings == []
-    assert data["rows"] == [
-        {"run_id": "run-hk-1", "account": "sy", "symbol": "9992.HK", "status": "rejected", "rule": "risk_spread"}
-    ]
-    assert meta["requested_views"] == ["candidate_filter_diagnostics"]
-    assert meta["materialized_views"] == ["candidate_filter_diagnostics"]
-
-
-def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_config_key(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    config_path = runtime / "config.hk.json"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("{}", encoding="utf-8")
-    run_dir = runtime / "output_runs" / "run-hk-key"
-    trace_path = run_dir / "accounts" / "sy" / "candidate_filter_trace.jsonl"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text(
-        (
-            '{"run_id":"run-hk-key","account":"sy","symbol":"9992.HK","function":"sell_put",'
-            '"option_type":"put","status":"rejected","stage":"risk","rule":"risk_delta",'
-            '"metric_value":-0.42,"threshold":-0.3,"message":"delta too high"}\n'
-        ),
-        encoding="utf-8",
-    )
-
-    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
-        _AnalysisQueryContext(repo, config_path=config_path),
-        {
-            "config_key": "hk",
-            "sql": (
-                "select run_id, account, symbol, status, rule "
-                "from candidate_filter_diagnostics where symbol = '9992.HK'"
-            ),
-            "limit": 10,
-        },
-    )
-
-    assert warnings == []
-    assert data["rows"] == [
-        {"run_id": "run-hk-key", "account": "sy", "symbol": "9992.HK", "status": "rejected", "rule": "risk_delta"}
-    ]
 
 
 def test_analysis_query_strategy_replay_read_surface_reads_research_artifacts(tmp_path: Path) -> None:

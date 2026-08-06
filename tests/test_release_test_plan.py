@@ -7,12 +7,11 @@ from pathlib import Path
 import pytest
 
 
-def test_release_test_plan_maps_event_and_service_changes() -> None:
+def test_release_test_plan_maps_service_changes_without_retired_event_suite() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
     plan = build_release_test_plan(
         changed_files=[
-            "src/application/events/source_futu.py",
             "src/application/service_upgrade.py",
         ],
         mode="standard",
@@ -24,7 +23,7 @@ def test_release_test_plan_maps_event_and_service_changes() -> None:
     assert plan["requires_full_pytest"] is False
     assert plan["commands"][0] == "./.venv/bin/python scripts/release_check.py --tag v1.2.183"
     assert "git diff --check" in plan["commands"]
-    assert "./.venv/bin/python -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py" in plan["commands"]
+    assert not any("test_event_prefetch.py" in command for command in plan["commands"])
     assert (
         "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
         "tests/test_release_delta_coverage.py "
@@ -32,7 +31,7 @@ def test_release_test_plan_maps_event_and_service_changes() -> None:
         "tests/test_install_script.py tests/test_release_test_plan.py"
     ) in plan["commands"]
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in plan["commands"]
-    assert {rule["name"] for rule in plan["matched_rules"]} >= {"event_source", "service_release"}
+    assert {rule["name"] for rule in plan["matched_rules"]} >= {"service_release"}
 
 
 def test_release_test_plan_requires_full_pytest_for_ledger_changes() -> None:

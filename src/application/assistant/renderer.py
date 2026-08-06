@@ -171,9 +171,9 @@ def _render_candidate_filter_explain(data: dict[str, Any]) -> str:
     lines: list[str] = []
     title_symbol = symbol if symbol != "-" else raw
     if count <= 0:
-        lines.append(f"没有找到 {title_symbol} 的候选过滤 trace 匹配记录，不能判断确定原因。")
+        lines.append(f"没有找到 {title_symbol} 的开仓候选快照记录，不能判断确定原因。")
     else:
-        lines.append(f"{title_symbol} 候选过滤诊断：{count} 条 trace 记录。")
+        lines.append(f"{title_symbol} 开仓候选诊断：{count} 条快照记录。")
     if raw != "-" and symbol != "-" and raw != symbol:
         lines.append(f"输入已解析：{raw} -> {symbol}。")
 
@@ -201,9 +201,9 @@ def _render_candidate_filter_explain(data: dict[str, Any]) -> str:
             line += f"；{event}"
         lines.append(line)
     if count > 0 and not observed:
-        lines.append("已读取 trace，但没有观察到匹配的过滤函数记录。")
+        lines.append("已读取开仓候选快照，但没有观察到匹配的策略记录。")
 
-    lines.append("数据来源：OM candidate filter trace")
+    lines.append("数据来源：OM sealed opening candidate snapshot")
     return "\n".join(lines)
 
 
@@ -589,7 +589,6 @@ def _analysis_diagnostic_warning_lines(evidence: dict[str, Any]) -> list[str]:
 
 def _diagnostic_view_label(view: str) -> str:
     return {
-        "candidate_filter_diagnostics": "候选诊断",
         "close_advice_snapshot": "平仓建议快照",
         "runtime_tick_status": "运行状态",
         "quote_freshness": "行情新鲜度",
@@ -666,8 +665,6 @@ def _compact_analysis_warning(warning: str) -> str:
 def _analysis_warning_label_and_message(text: str) -> tuple[str, str]:
     raw_label, sep, raw_message = text.partition(":")
     label_map = {
-        "candidate_filter_diagnostics missing": "候选诊断",
-        "candidate_filter_diagnostics empty": "候选诊断",
         "close_advice_snapshot missing": "平仓建议快照",
         "close_advice_snapshot empty": "平仓建议快照",
         "runtime_tick_status missing": "运行状态",

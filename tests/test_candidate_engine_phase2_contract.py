@@ -39,6 +39,8 @@ def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # t
         "multiplier": 100,
         "opening_contract_status": "ready",
         "opening_contract_reason_codes": "",
+        "max_new_contracts": 1,
+        "covered_contracts_available": 1,
     }
     row.update(overrides)
     return row

@@ -47,7 +47,6 @@ from src.interfaces.cli.config_ops import (
 )
 from src.interfaces.cli.copilot_ops import add_copilot_commands, handle_copilot_command
 from src.interfaces.cli.daily_brief_ops import add_daily_brief_commands, handle_daily_brief_command
-from src.interfaces.cli.event_source_ops import add_event_source_commands, handle_event_source_command
 from src.interfaces.cli.operator_ops import (
     add_operator_commands,
     handle_operator_command,
@@ -134,8 +133,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_operator_commands(sub)
 
     add_channel_commands(sub)
-
-    add_event_source_commands(sub)
 
     add_account_commands(sub)
 
@@ -278,9 +275,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "channel":
             return _print(handle_channel_command(args, repo_base_fn=repo_base))
-
-        if args.command == "event-source":
-            return _print(handle_event_source_command(args))
 
         if args.command == "accounts":
             return _print(handle_account_command(

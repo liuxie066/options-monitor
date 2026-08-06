@@ -38,12 +38,20 @@ def add_sell_put_labels(base: Path, input_path: Path, output_path: Path) -> None
     _ = base
     df = _safe_read_csv(input_path)
 
-    if 'otm_pct' in df.columns:
-        risk_series = df['otm_pct'].apply(
-            lambda v: classify_sell_put_risk(None if pd.isna(v) else float(v))
-        )
-        df['otm_band'] = risk_series.apply(lambda r: r.band)
-        df['risk_label'] = risk_series.apply(lambda r: r.risk_label)
+    df = label_sell_put_candidates(df)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
+
+
+def label_sell_put_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """Add deterministic Sell Put display bands without file I/O."""
+
+    out = df.copy()
+    if 'otm_pct' in out.columns:
+        risk_series = out['otm_pct'].apply(
+            lambda v: classify_sell_put_risk(None if pd.isna(v) else float(v))
+        )
+        out['otm_band'] = risk_series.apply(lambda r: r.band)
+        out['risk_label'] = risk_series.apply(lambda r: r.risk_label)
+    return out

@@ -6,12 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import (
-    attach_opening_decision_provenance,
-    build_candidate_decision,
-    evaluate_candidate_invariants,
-)
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OpeningCandidateSnapshotError,
@@ -28,8 +22,8 @@ from src.application.opening_candidate_snapshot import (
 NOW = datetime(2026, 8, 6, 9, 30, tzinfo=timezone.utc)
 
 
-def _decision(*, contract_symbol: str, period_return: float) -> dict:
-    normalized = {
+def _candidate(*, contract_symbol: str, period_return: float) -> dict:
+    return {
         "symbol": "NVDA",
         "contract_symbol": contract_symbol,
         "expiration": "2026-09-18",
@@ -53,57 +47,13 @@ def _decision(*, contract_symbol: str, period_return: float) -> dict:
         "term_matched_rv": 0.30,
         "iv_rv_ratio": 1.4,
         "iv_minus_rv": 0.12,
-        "event_source_status": "ok",
-        "event_earnings_coverage_status": "complete",
-        "event_flag": False,
-    }
-    invariant = evaluate_candidate_invariants(
-        normalized,
-        mode="put",
-        risk_policy_version="candidate_pipeline_policy.v2",
-        quote_snapshot_id="c" * 64,
-        min_dte=21,
-        max_dte=60,
-        min_strike=None,
-        max_strike=100,
-        min_annualized_return=0.10,
-        min_net_income=50,
-        annualized_return=normalized["annualized_net_return_on_cash_basis"],
-        net_income=295,
-        min_open_interest=None,
-        min_volume=None,
-        max_spread_ratio=0.3,
-        event_flag=False,
-        event_mode="reject",
-        open_interest=500,
-        volume=50,
-        spread_ratio=0.0667,
-        extra_required_fields=(),
-    )
-    opening = attach_opening_decision_provenance(
-        build_candidate_decision(
-            mode="put",
-            symbol="NVDA",
-            contract_symbol=contract_symbol,
-            accepted=True,
-            normalized_input=dict(invariant["normalized_input"]),
-        ),
-        risk_policy_version="candidate_pipeline_policy.v2",
-        risk_policy_hash=str(invariant["risk_policy_hash"]),
-        quote_snapshot_id="c" * 64,
-        normalized_input=dict(invariant["normalized_input"]),
-    )
-    return {
-        "schema_version": "candidate_all_decisions.v1",
-        "candidate_id": canonical_sha256({"contract": contract_symbol}),
-        "strategy_mode": "put",
-        "normalized_input": invariant["normalized_input"],
-        "normalized_input_hash": invariant["normalized_input_hash"],
-        "risk_policy_version": invariant["risk_policy_version"],
-        "risk_policy_hash": invariant["risk_policy_hash"],
-        "quote_snapshot_id": invariant["quote_snapshot_id"],
-        "opening_decision": opening,
-        "invariant_decision": invariant,
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "max_new_contracts": 1,
+        "policy_min_dte": 21,
+        "policy_max_dte": 60,
+        "policy_max_strike": 100.0,
+        "policy_max_spread_ratio": 0.30,
     }
 
 
@@ -136,11 +86,11 @@ def _dependencies(base: Path, run_id: str, account: str) -> list[dict]:
 
 
 def _seal(base: Path, *, run_id: str = "run-1", account: str = "lx") -> dict:
-    high = _decision(
+    high = _candidate(
         contract_symbol="NVDA260918P00090000",
         period_return=0.04,
     )
-    low = _decision(
+    low = _candidate(
         contract_symbol="NVDA260918P00085000",
         period_return=0.03,
     )
@@ -165,15 +115,11 @@ def _seal(base: Path, *, run_id: str = "run-1", account: str = "lx") -> dict:
                 "symbol": "NVDA",
                 "strategy_mode": "put",
                 "status": "completed",
-                "reason": "all_decisions_captured",
                 "quote_snapshot_id": "c" * 64,
                 "quote_receipt_relpath": "quotes/NVDA/receipt.json",
             }
         ],
-        candidate_decisions=[low, high],
-        final_candidates={
-            "put": [low["normalized_input"], high["normalized_input"]],
-        },
+        final_candidates={"put": [low, high]},
         sealed_at=NOW,
     )
 
@@ -261,7 +207,6 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
                 "status": "completed",
             }
         ],
-        candidate_decisions=[],
         final_candidates={"put": []},
         sealed_at=NOW,
     )
@@ -282,12 +227,12 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
 def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(
     tmp_path: Path,
 ) -> None:
-    decision = _decision(
+    candidate = _candidate(
         contract_symbol="NVDA260918P00090000",
         period_return=0.04,
     )
-    decision["normalized_input"]["open_interest"] = None
-    decision["normalized_input"]["volume"] = None
+    candidate["open_interest"] = None
+    candidate["volume"] = None
     payload = seal_opening_candidate_snapshot(
         base=tmp_path,
         run_id="run-partial",
@@ -308,8 +253,7 @@ def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(
             {"symbol": "NVDA", "strategy_mode": "put", "status": "completed"},
             {"symbol": "NVDA", "strategy_mode": "call", "status": "failed"},
         ],
-        candidate_decisions=[decision],
-        final_candidates={"put": [decision["normalized_input"]], "call": []},
+        final_candidates={"put": [candidate], "call": []},
         sealed_at=NOW,
     )
 
@@ -392,7 +336,6 @@ def test_immutable_conflict_and_latest_pointer_fail_closed(tmp_path: Path) -> No
                         "status": "completed",
                     }
                 ],
-                "candidate_decisions": [],
                 "final_candidates": {"put": []},
                 "sealed_at": NOW,
             }

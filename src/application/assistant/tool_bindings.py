@@ -135,7 +135,7 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "required_arguments": ("symbol",),
         "direct_executable": True,
         "examples": ("泡泡玛特被哪个参数过滤了？", "为什么 NVDA 没出现在候选里？", "lx NVDA sell_put 为什么被过滤？"),
-        "summary": "explain a single symbol's observed candidate filter/rejection/missing trace rows from runtime candidate_filter_trace artifacts",
+        "summary": "explain a symbol's recorded opening status and accepted decisions from the sealed account snapshot",
         "scope_policy": "symbol_market_config_optional",
     },
     "analysis_catalog": {

@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import explain_candidate_rank, rank_candidate_rows
+from domain.domain.engine import (
+    evaluate_opening_candidate_policy,
+    explain_candidate_rank,
+    rank_candidate_rows,
+)
 from domain.domain.symbol_identity import symbol_market
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -68,7 +72,6 @@ def seal_opening_candidate_snapshot(
     strategy_policy_sha256: str,
     dependencies: Iterable[Mapping[str, Any]],
     scan_statuses: Iterable[Mapping[str, Any]],
-    candidate_decisions: Iterable[Mapping[str, Any]],
     final_candidates: Mapping[str, Iterable[Mapping[str, Any]]],
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
@@ -87,10 +90,12 @@ def seal_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError("opening candidate strategy modes are missing")
 
     decisions, decision_index = _snapshot_decisions(
-        candidate_decisions,
+        final_candidates,
+        statuses=statuses,
         account=account_norm,
         futu_account_id=str(authority["futu_account_id"]),
         market=market_norm,
+        risk_policy_hash=policy_hash,
     )
     ranked = _ranked_candidates(
         final_candidates,
@@ -413,42 +418,58 @@ def dependency_from_hash(*, kind: str, sha256: str) -> dict[str, Any]:
 
 
 def _snapshot_decisions(
-    rows: Iterable[Mapping[str, Any]],
+    rows_by_mode: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
+    statuses: Iterable[Mapping[str, Any]],
     account: str,
     futu_account_id: str,
     market: str,
+    risk_policy_hash: str,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str, str], dict[str, Any]]]:
+    quote_bindings = {
+        (
+            str(item.get("symbol") or "").strip().upper(),
+            _mode(item.get("strategy_mode")),
+        ): str(item.get("quote_snapshot_id") or "").strip() or None
+        for item in statuses
+    }
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for raw in rows:
-        source = dict(raw or {})
-        # Replacement/roll eligibility belongs to Position Advice.  The opening
-        # snapshot carries only the recorded opening decision and its facts.
-        source.pop("replacement_candidate_decision", None)
-        mode = _mode(source.get("strategy_mode"))
-        normalized = dict(source.get("normalized_input") or {})
-        key = _contract_key(mode, normalized)
-        if key in index:
-            raise OpeningCandidateSnapshotError("opening candidate contract identity is duplicated")
-        candidate_id = _bound_candidate_id(
-            account=account,
-            futu_account_id=futu_account_id,
-            market=market,
-            mode=mode,
-            normalized=normalized,
-        )
-        opening = dict(source.get("opening_decision") or {})
-        invariant = dict(source.get("invariant_decision") or {})
-        decision = {
-            **source,
-            "candidate_id": candidate_id,
-            "source_candidate_id": source.get("candidate_id"),
-            "normalized_input": normalized,
-            "normalized_input_hash": canonical_sha256(normalized),
-        }
-        out.append(decision)
-        index[key] = decision
+    for raw_mode, rows in rows_by_mode.items():
+        mode = _mode(raw_mode)
+        for raw in rows:
+            normalized = dict(raw or {})
+            key = _contract_key(mode, normalized)
+            if key in index:
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate contract identity is duplicated"
+                )
+            opening = evaluate_opening_candidate_policy(normalized, mode=mode)
+            if opening.get("accepted") is not True:
+                raise OpeningCandidateSnapshotError(
+                    "final candidate is not accepted by opening policy"
+                )
+            candidate_id = _bound_candidate_id(
+                account=account,
+                futu_account_id=futu_account_id,
+                market=market,
+                mode=mode,
+                normalized=normalized,
+            )
+            decision = {
+                "schema_version": "opening_candidate_decision.v1",
+                "candidate_id": candidate_id,
+                "strategy_mode": mode,
+                "normalized_input": normalized,
+                "normalized_input_hash": canonical_sha256(normalized),
+                "risk_policy_hash": risk_policy_hash,
+                "quote_snapshot_id": quote_bindings.get(
+                    (str(normalized.get("symbol") or "").strip().upper(), mode)
+                ),
+                "opening_decision": opening,
+            }
+            out.append(decision)
+            index[key] = decision
     out.sort(key=lambda row: (str(row.get("strategy_mode")), str(row.get("candidate_id"))))
     return out, index
 

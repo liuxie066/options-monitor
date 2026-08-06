@@ -71,12 +71,11 @@ _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
         "ranked[].rank",
         "ranked[].symbol",
         "ranked[].contract_symbol",
-        "ranked[].strategy_score",
+        "ranked[].period_net_return",
         "ranked[].annualized_return",
         "ranked[].net_income",
         "ranked[].rank_reason",
-        "ranked[].risk_notes",
-        "ranked[].score_warnings",
+        "ranked[].primary_drivers",
     ],
 }
 

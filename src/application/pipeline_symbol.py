@@ -9,7 +9,6 @@ from run_pipeline.py with minimal/no behavioral changes.
 from __future__ import annotations
 
 from pathlib import Path
-from functools import partial
 from typing import Any, Callable
 
 from src.application.exchange_rate_loader import build_converter
@@ -18,13 +17,10 @@ from src.application.multiplier_steps import apply_multiplier_cache_to_required_
 from src.application.required_data_steps import ensure_required_data
 from src.application.sell_call_steps import (
     empty_sell_call_summary,
-    materialize_empty_sell_call_artifacts,
     run_sell_call_scan_and_summarize,
 )
 from src.application.sell_put_steps import (
-    _enrich_and_filter_sell_put_cash,
     empty_sell_put_summary,
-    materialize_empty_sell_put_artifacts,
     run_sell_put_scan_and_summarize,
 )
 from src.application.combo_yield_steps import (
@@ -55,9 +51,7 @@ def process_symbol(
     is_scheduled: bool = False,
     runtime_config: dict | None = None,
     fetch_only: bool = False,
-    risk_policy_version: str | None = None,
     quote_snapshot_id: str | None = None,
-    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     position_advice_producer_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
@@ -89,9 +83,7 @@ def process_symbol(
             is_scheduled=bool(is_scheduled),
             runtime_config=runtime_config,
             fetch_only=bool(fetch_only),
-            risk_policy_version=risk_policy_version,
             quote_snapshot_id=quote_snapshot_id,
-            all_decisions_sink_fn=all_decisions_sink_fn,
             position_advice_producer_run_id=position_advice_producer_run_id,
             required_data_snapshot_manifest=required_data_snapshot_manifest,
             required_data_snapshot_run_id=required_data_snapshot_run_id,
@@ -109,13 +101,8 @@ def process_symbol(
             empty_sell_put_summary_fn=empty_sell_put_summary,
             run_sell_call_scan_fn=run_sell_call_scan_and_summarize,
             empty_sell_call_summary_fn=empty_sell_call_summary,
-            materialize_empty_sell_call_artifacts_fn=materialize_empty_sell_call_artifacts,
-            run_combo_yield_scan_fn=partial(
-                run_combo_yield_for_symbol_and_summarize,
-                cash_filter_put_candidates_fn=_enrich_and_filter_sell_put_cash,
-            ),
+            run_combo_yield_scan_fn=run_combo_yield_for_symbol_and_summarize,
             empty_combo_yield_summary_fn=empty_combo_yield_summary,
-            materialize_empty_sell_put_artifacts_fn=materialize_empty_sell_put_artifacts,
             materialize_empty_combo_yield_artifacts_fn=materialize_empty_combo_yield_artifacts,
         ),
     )

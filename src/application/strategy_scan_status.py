@@ -39,13 +39,8 @@ def canonical_strategy_artifacts(
     root = Path(report_dir).resolve()
     lower = str(symbol or "").strip().lower()
     family = str(strategy_family or "").strip().lower()
-    if family == "sell_put":
-        names = (
-            f"{lower}_sell_put_candidates.csv",
-            f"{lower}_sell_put_candidates_labeled.csv",
-        )
-    elif family == "covered_call":
-        names = (f"{lower}_sell_call_candidates.csv",)
+    if family in {"sell_put", "covered_call"}:
+        names: tuple[str, ...] = ()
     elif family == "combo_yield":
         names = (f"{lower}_combo_yield_candidates.csv",)
     else:
@@ -285,7 +280,9 @@ def _validate_status(
                 "strategy success-empty evidence is invalid"
             )
     artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
+    if not isinstance(artifacts, list):
+        raise StrategyScanStatusError("strategy status artifacts are invalid")
+    if strategy_family.lower() == "combo_yield" and not artifacts:
         raise StrategyScanStatusError("strategy status artifacts are invalid")
     for artifact in artifacts:
         if not isinstance(artifact, dict):

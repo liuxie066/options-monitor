@@ -2026,14 +2026,7 @@ def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path
                     },
                 ],
             },
-            "runtime": {
-                "event_risk_source": {
-                    "mode": "fallback",
-                    "default_provider": "futu",
-                    "providers": {"futu": {}, "yfinance": {}},
-                    "market_rules": {market: {"chain": ["futu", "yfinance"]}},
-                }
-            },
+            "runtime": {},
         }
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return path
@@ -2062,9 +2055,7 @@ def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path
     assert out["version"]["update_status"] == "not_checked"
     assert out["config"]["us"]["ok"] is True
     assert out["config"]["hk"]["freshness_ok"] is True
-    assert out["event_source"]["default_provider"] == "futu"
-    assert out["event_source"]["providers"] == ["futu", "yfinance"]
-    assert out["event_source"]["markets"]["us"]["chain"] == ["futu", "yfinance"]
+    assert "event_source" not in out
     assert out["services"]["status"] == "unknown"
     assert out["upgrade"] == {"available": False, "has_status_record": False, "last_status": None}
 

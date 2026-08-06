@@ -185,13 +185,11 @@ def _account_run_inputs(
                 "symbol": "NVDA",
                 "strategy_mode": mode,
                 "status": "completed",
-                "reason": "all_decisions_captured",
                 "quote_snapshot_id": quote["snapshot_id"],
                 "quote_receipt_relpath": "quotes/NVDA/receipt.json",
             }
             for mode in ("put", "call")
         ],
-        candidate_decisions=[],
         final_candidates={"put": [], "call": []},
         sealed_at=NOW,
     )
@@ -291,10 +289,10 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
     )
 
     assert result["source_kinds"] == [
-        "candidate_decisions",
         "cash_capacity",
         "fx",
         "ledger_decision_state",
+        "opening_candidates",
         "portfolio",
         "quotes",
         "share_coverage",
@@ -315,7 +313,7 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
         "fx",
     }
     assert (
-        by_kind["candidate_decisions"]["receipt"]["dependencies"][0][
+        by_kind["opening_candidates"]["receipt"]["dependencies"][0][
             "snapshot_id"
         ]
         == quote["snapshot_id"]
@@ -367,20 +365,20 @@ def test_account_run_publishes_completed_zero_candidate_source_with_quote_depend
     candidate = next(
         item
         for item in result["receipts"]
-        if item["source_kind"] == "candidate_decisions"
+        if item["source_kind"] == "opening_candidates"
     )
     validated = validate_source_receipt(
         candidate["receipt"],
         producer_root=state,
         now=NOW + timedelta(seconds=4),
-        expected_source_kind="candidate_decisions",
+        expected_source_kind="opening_candidates",
     )
     payload = json.loads(
         validated["payload_path"].read_text(encoding="utf-8")
     )
     assert payload["candidate_decisions"] == []
-    assert payload["candidate_count"] == 0
-    assert payload["quote_snapshot_ids"] == [quote["snapshot_id"]]
+    assert payload["ranked_candidates"] == []
+    assert payload["opening_status"] == "no_candidate"
     assert len(validated["dependencies"]) == 1
     assert validated["dependencies"][0]["source_kind"] == "quotes"
 

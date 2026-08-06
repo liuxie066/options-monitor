@@ -1,5 +1,4 @@
 pandas
 pyyaml
 futu-api>=10.9.6908
-yfinance>=1.4.1
 jsonschema>=4.23,<5

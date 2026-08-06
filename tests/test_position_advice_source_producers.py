@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from src.application.ledger.lifecycle_overlay import (
     resolve_account_lifecycle_overlay,
 )
 from src.application.position_advice_source_producers import (
-    publish_candidate_decisions_snapshot,
+    publish_opening_candidate_snapshot_receipt,
     publish_cash_capacity_snapshot,
     publish_fx_source_snapshot,
     publish_ledger_source_snapshot,
@@ -244,22 +245,26 @@ def test_candidate_and_capacity_dependencies_are_closed(
         producer_root=tmp_path,
         now=NOW + timedelta(seconds=2),
     )
-    candidate_path, candidate = publish_candidate_decisions_snapshot(
+    opening_snapshot = {
+        "schema_version": "opening_candidate_snapshot.v1",
+        "content_sha256": "c" * 64,
+        "strategy_policy_sha256": "d" * 64,
+        "ranked_candidates": [
+            {"candidate_id": "candidate-1", "quote_snapshot_id": quote["snapshot_id"]}
+        ],
+    }
+    (tmp_path / "opening_candidate_snapshot.json").write_text(
+        json.dumps(opening_snapshot),
+        encoding="utf-8",
+    )
+    candidate_path, candidate = publish_opening_candidate_snapshot_receipt(
         producer_root=tmp_path,
         account_run_id="run-1",
         account="lx",
         broker="futu",
         portfolio_account_identity_hash=IDENTITY,
         included_markets=["US"],
-        decisions=[
-            {
-                "schema_version": "candidate_all_decisions.v1",
-                "candidate_id": "candidate-1",
-                "strategy_mode": "put",
-                "quote_snapshot_id": quote["snapshot_id"],
-                "risk_policy_hash": "d" * 64,
-            }
-        ],
+        snapshot=opening_snapshot,
         quote_dependencies=[quote_dep],
         source_observed_at=NOW,
         completed_at=NOW + timedelta(seconds=2),

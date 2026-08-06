@@ -185,13 +185,11 @@ def enrich_sell_put_candidates_with_cash(
     symbol: str,
     portfolio_ctx: dict | None,
     exchange_rate_converter: CurrencyConverter,
-    out_path,
+    out_path=None,
 ) -> pd.DataFrame:
     """Add cash secured usage / cash available / cash required columns onto labeled candidates.
 
-    Writes the enriched DataFrame back to out_path (csv) and returns it.
-
-    NOTE: Behavior preserved from the original inline block as much as possible.
+    When ``out_path`` is supplied by an explicit export workflow, also writes CSV.
     """
 
     df_sp_lab = df_labeled
@@ -199,10 +197,11 @@ def enrich_sell_put_candidates_with_cash(
         return df_sp_lab
 
     if not portfolio_ctx:
-        try:
-            df_sp_lab.to_csv(out_path, index=False)
-        except Exception as e:
-            log.warning("sell_put_cash: failed to write CSV: %s", e)
+        if out_path is not None:
+            try:
+                df_sp_lab.to_csv(out_path, index=False)
+            except Exception as e:
+                log.warning("sell_put_cash: failed to write CSV: %s", e)
         return df_sp_lab
 
     option_ctx: dict[str, Any] | None = None
@@ -490,9 +489,10 @@ def enrich_sell_put_candidates_with_cash(
         if available_cny is not None:
             df_sp_lab.at[idx, 'cash_available_total_cny'] = available_cny
 
-    try:
-        df_sp_lab.to_csv(out_path, index=False)
-    except Exception as e:
-        log.warning("sell_put_cash: failed to write CSV: %s", e)
+    if out_path is not None:
+        try:
+            df_sp_lab.to_csv(out_path, index=False)
+        except Exception as e:
+            log.warning("sell_put_cash: failed to write CSV: %s", e)
 
     return df_sp_lab

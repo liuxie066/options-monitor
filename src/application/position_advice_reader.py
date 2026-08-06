@@ -419,7 +419,7 @@ def _source_freshness_status(
             expired.add(str(item.get("source_kind") or ""))
     if "fx" in expired:
         return "stale_fx"
-    if expired & {"quotes", "candidate_decisions"}:
+    if expired & {"quotes", "opening_candidates"}:
         return "stale_market_data"
     if expired:
         return "stale_capacity_or_holdings"

@@ -59,7 +59,7 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 def _source_manifest() -> list[dict[str, object]]:
     kinds = (
         "quotes",
-        "candidate_decisions",
+        "opening_candidates",
         "portfolio",
         "ledger_decision_state",
         "cash_capacity",

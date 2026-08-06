@@ -289,7 +289,6 @@ def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             }
             for mode in ("put", "call")
         ],
-        candidate_decisions=[],
         final_candidates={"put": [], "call": []},
         sealed_at=completed_at,
     )

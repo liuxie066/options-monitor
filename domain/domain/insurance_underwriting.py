@@ -14,11 +14,11 @@ class InsuranceUnderwritingConfig:
     min_net_income: float = 50.0
     min_iv_rv_ratio: float = 1.10
     min_iv_minus_rv: float = 0.05
-    reject_event_risk: bool = True
-    event_source_fail_closed: bool = True
-    premium_score_cap: float = 1.5
     min_strike: float | None = None
     max_strike: float | None = None
+    min_dte: int | None = None
+    max_dte: int | None = None
+    max_spread_ratio: float = 0.40
 
     @property
     def enabled(self) -> bool:
@@ -45,12 +45,19 @@ def evaluate_underwriting_candidate(
     decision = evaluate_opening_candidate_policy(
         {**row, **fields},
         mode=mode_norm,
+        min_dte=cfg.min_dte,
+        max_dte=cfg.max_dte,
+        min_strike=_first_float(row, "effective_min_strike", "policy_min_strike")
+        if mode_norm == "call"
+        else cfg.min_strike,
+        max_strike=cfg.max_strike,
         min_annualized_return=cfg.min_annualized_return,
         min_net_premium_cny=cfg.min_net_income,
         min_iv_rv_ratio=cfg.min_iv_rv_ratio,
         min_iv_minus_rv=cfg.min_iv_minus_rv,
-        require_earnings_evidence=cfg.event_source_fail_closed,
-        reject_known_earnings=cfg.reject_event_risk,
+        max_spread_ratio=cfg.max_spread_ratio,
+        require_earnings_evidence=True,
+        reject_known_earnings=True,
     )
     if bool(decision.get("accepted")):
         return {
@@ -68,54 +75,6 @@ def evaluate_underwriting_candidate(
     )
 
 
-def evaluate_event_risk_candidate(
-    row: dict[str, Any],
-    *,
-    reject_event_risk: bool = True,
-    event_source_fail_closed: bool = True,
-    fields: dict[str, Any] | None = None,
-    required_event_type: str | None = None,
-) -> dict[str, Any]:
-    decision_fields = dict(fields or {})
-    event_status = str(row.get("event_source_status") or "").strip().lower()
-    if event_source_fail_closed and event_status not in {"ok", "ok_with_fallback"}:
-        return _reject(
-            "event_source_unavailable",
-            event_status or None,
-            "ok",
-            decision_fields,
-            message="event source unavailable for underwriting",
-        )
-    event_type = str(required_event_type or "").strip().lower()
-    if event_source_fail_closed and event_type:
-        coverage_status = str(
-            row.get(f"event_{event_type}_coverage_status") or ""
-        ).strip().lower()
-        if coverage_status != "complete":
-            return _reject(
-                f"event_{event_type}_coverage_incomplete",
-                coverage_status or None,
-                "complete",
-                decision_fields,
-                message=f"{event_type} event coverage is incomplete",
-            )
-    event_types = {
-        item.strip().lower()
-        for item in str(row.get("event_types") or "").split(",")
-        if item.strip()
-    }
-    matching_event = not event_type or event_type in event_types
-    if reject_event_risk and _truthy(row.get("event_flag")) and matching_event:
-        return _reject(
-            "event_risk_within_expiry",
-            True,
-            False,
-            decision_fields,
-            message="event risk before expiration",
-        )
-    return {"accepted": True, "rule": "event_risk_candidate_accepted", "fields": decision_fields}
-
-
 def underwriting_fields(
     row: dict[str, Any],
     *,
@@ -131,6 +90,11 @@ def underwriting_fields(
         "short_vega_profile": "short_vega",
         "iv_rv_ratio": _round_or_none(iv_rv_ratio),
         "iv_minus_rv": _round_or_none(iv_minus_rv),
+        "policy_min_dte": cfg.min_dte,
+        "policy_max_dte": cfg.max_dte,
+        "policy_min_strike": cfg.min_strike,
+        "policy_max_strike": cfg.max_strike,
+        "policy_max_spread_ratio": cfg.max_spread_ratio,
     }
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)
@@ -168,28 +132,6 @@ def underwriting_rank_key(row: dict[str, Any], *, mode: str) -> tuple[Any, ...]:
     return tuple(
         build_candidate_rank_key(row, mode=mode_norm)["sort_tuple"]
     )
-
-
-def premium_edge_score(
-    row: dict[str, Any],
-    *,
-    mode: str,
-    cfg: InsuranceUnderwritingConfig,
-    iv_rv_ratio: float | None = None,
-    iv_minus_rv: float | None = None,
-) -> float:
-    mode_norm = _mode(mode)
-    annualized_return = _annualized_return(row, mode=mode_norm)
-    if iv_rv_ratio is None or iv_minus_rv is None:
-        iv_rv_ratio, iv_minus_rv = _vol_edge(row)
-
-    return_edge = _threshold_score(annualized_return, cfg.min_annualized_return, cap=cfg.premium_score_cap)
-    iv_rv_edge = _threshold_score(iv_rv_ratio, cfg.min_iv_rv_ratio, cap=cfg.premium_score_cap)
-    iv_minus_rv_edge = _threshold_score(iv_minus_rv, cfg.min_iv_minus_rv, cap=cfg.premium_score_cap)
-    vol_pieces = [value for value in (iv_rv_edge, iv_minus_rv_edge) if value is not None]
-    vol_edge = min(vol_pieces) if vol_pieces else None
-    usable = [value for value in (return_edge, vol_edge) if value is not None]
-    return round(sum(usable) / len(usable), 6) if usable else 0.0
 
 
 def _reject(
@@ -260,14 +202,6 @@ def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConf
     return round((strike - min_strike) / min_strike, 6)
 
 
-def _threshold_score(value: float | None, threshold: float, *, cap: float) -> float | None:
-    if threshold <= 0:
-        return None
-    if value is None:
-        return 0.0
-    return min(max(float(value) / float(threshold), 0.0), cap)
-
-
 def _first_float(row: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
         value = _float(row.get(key))
@@ -292,17 +226,6 @@ def _float(value: Any) -> float | None:
 
 def _round_or_none(value: float | None) -> float | None:
     return round(value, 6) if value is not None else None
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    text = str(value).strip().lower()
-    if text in {"", "0", "false", "no", "n", "none", "nan"}:
-        return False
-    return True
 
 
 def _mode(value: Any) -> str:

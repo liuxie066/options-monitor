@@ -452,7 +452,6 @@ def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() 
     assert 'min_annualized_net_return' not in resolved['sell_call']
     assert resolved['_global_sell_put_liquidity'] == {'min_open_interest': 50}
     assert resolved['_global_sell_call_liquidity'] == {'min_volume': 12}
-    assert resolved['_global_sell_put_event_risk'] == {'enabled': True, 'mode': 'warn'}
 
 
 def test_resolve_watchlist_item_runtime_config_revalidates_merged_dte_window() -> None:

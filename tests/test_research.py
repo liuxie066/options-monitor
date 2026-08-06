@@ -559,7 +559,8 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     assert ranking_row["metrics"]["annualized_return"] == 0.12
     assert ranking_row["metrics"]["otm_pct"] == 0.066667
     assert ranking_row["cash_constraint"]["cash_headroom_ratio"] == 2.0
-    assert ranking_row["rank_explanation"]["score_inputs"]["spread_ratio"] == 0.12
+    assert ranking_row["rank_explanation"]["ranking_policy"] == "candidate_engine"
+    assert ranking_row["rank_explanation"]["primary_drivers"] == ["period_net_return_on_cash_basis"]
     assert shadow_replay["schema_version"] == "shadow_replay_readiness.v1"
     assert shadow_replay["summary"]["candidate_snapshot_count"] == 3
     assert shadow_replay["summary"]["counterfactual_candidate_count"] == 2

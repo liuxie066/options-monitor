@@ -62,7 +62,7 @@ def run_setup_check(
         hint="Run scripts/install.sh or create .venv and install requirements.txt with constraints.txt." if not venv_python.exists() else None,
     )
 
-    runtime_imports = ["pandas", "futu", "yfinance"]
+    runtime_imports = ["pandas", "futu"]
     missing_deps = [name for name in runtime_imports if importlib.util.find_spec(name) is None]
     add(
         "install.dependencies",

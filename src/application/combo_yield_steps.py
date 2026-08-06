@@ -16,10 +16,9 @@ from domain.domain.candidate_defaults import (
     CandidateWindowDefaults,
     resolve_candidate_liquidity,
     resolve_candidate_window,
-    resolve_event_risk_config,
 )
 from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
-from domain.domain.insurance_underwriting import evaluate_event_risk_candidate
+from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_filter_trace import (
@@ -40,6 +39,7 @@ from src.application.sell_put_call_helper import (
     select_best_yield_enhancement_pairs,
 )
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from src.application.yield_enhancement_config import (
     YieldEnhancementPolicy,
     derive_yield_enhancement_policy,
@@ -114,6 +114,56 @@ def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
     return float(value)
 
 
+def _has_text(value: Any) -> bool:
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    return bool(str(value or "").strip())
+
+
+def enrich_and_filter_combo_funding_cash(
+    *,
+    df_labeled: pd.DataFrame,
+    symbol: str,
+    portfolio_ctx: dict[str, Any] | None,
+    exchange_rate_converter: CurrencyConverter,
+    out_path: Path | None = None,
+    **_compat: Any,
+) -> pd.DataFrame:
+    """Combo-owned cash gate; opening Sell Put no longer owns this stage."""
+
+    enriched = enrich_sell_put_candidates_with_cash(
+        df_labeled=df_labeled,
+        symbol=symbol,
+        portfolio_ctx=portfolio_ctx,
+        exchange_rate_converter=exchange_rate_converter,
+    )
+    if enriched is None or enriched.empty:
+        filtered = enriched
+    else:
+        keep = enriched.apply(
+            lambda row: compute_sell_put_cash_capacity(
+                cash_required_native=row.get("cash_required_native"),
+                cash_free_effective_native=row.get("cash_free_effective_native"),
+                cash_native_currency=row.get("cash_native_currency"),
+                cash_required_cny=row.get("cash_required_cny"),
+                cash_free_cny=row.get("cash_free_cny"),
+                cash_free_total_cny=row.get("cash_free_total_cny"),
+                cash_required_usd=row.get("cash_required_usd"),
+                cash_free_usd=row.get("cash_free_usd"),
+            ).accepted
+            and not _has_text(row.get("cash_secured_unavailable_reason"))
+            and not _has_text(row.get("cash_requirement_unavailable_reason")),
+            axis=1,
+        ).astype(bool)
+        filtered = enriched.loc[keep].copy()
+    if out_path is not None:
+        filtered.to_csv(out_path, index=False)
+    return filtered
+
+
 def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
     return ComboYieldResult(
         recommended_pairs=pd.DataFrame(),
@@ -121,68 +171,6 @@ def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
         candidates_path=(report_dir / f"{symbol_lower}_combo_yield_candidates.csv").resolve(),
         alerts_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
     )
-
-
-def _filter_combo_yield_event_risk(
-    df: pd.DataFrame,
-    *,
-    symbol: str,
-    sell_put_cfg: dict[str, Any],
-    policy: YieldEnhancementPolicy,
-    out_path: Path,
-) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    reject_event_risk = bool(sell_put_cfg.get("reject_event_risk", True))
-    event_source_fail_closed = bool(sell_put_cfg.get("event_source_fail_closed", True))
-    scope = infer_trace_scope_from_path(out_path)
-    keep_mask: list[bool] = []
-    trace_rows: list[dict[str, Any]] = []
-    for _, row in df.iterrows():
-        decision = evaluate_event_risk_candidate(
-            row.to_dict(),
-            reject_event_risk=reject_event_risk,
-            event_source_fail_closed=event_source_fail_closed,
-        )
-        keep_mask.append(bool(decision["accepted"]))
-        if decision["accepted"]:
-            continue
-        trace_rows.append(
-            build_candidate_filter_trace_row(
-                run_id=scope.get("run_id"),
-                account=scope.get("account"),
-                symbol=row.get("symbol") or symbol,
-                function=COMBO_YIELD_FAMILY,
-                mode=policy.mode,
-                strategy_family=COMBO_YIELD_FAMILY,
-                strategy_profile=policy.mode,
-                status="rejected",
-                stage="combo_event_risk",
-                rule=decision["rule"],
-                metric_value=decision.get("metric_value"),
-                threshold=decision.get("threshold"),
-                contract_symbol=row.get("contract_symbol"),
-                expiration=row.get("expiration"),
-                strike=row.get("strike"),
-                message=decision.get("message") or "combo yield event risk filter",
-                evidence_path=out_path.name,
-                config_values={
-                    **policy.to_fields(),
-                    "reject_event_risk": reject_event_risk,
-                    "event_source_fail_closed": event_source_fail_closed,
-                },
-                replay_fields=row.to_dict(),
-            )
-        )
-
-    filtered = df.loc[keep_mask].copy()
-    try:
-        _atomic_write_dataframe(out_path, filtered)
-    except Exception as exc:
-        raise RuntimeError(f"failed to persist combo yield event-filtered put universe: {out_path}") from exc
-    append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), trace_rows)
-    return filtered
 
 
 def run_combo_yield_scan_and_summarize(
@@ -201,7 +189,6 @@ def run_combo_yield_scan_and_summarize(
     report_dir: Path,
     yield_window: CandidateWindowDefaults,
     liquidity: CandidateLiquidityDefaults,
-    event_risk: dict[str, Any],
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     top_n: int,
@@ -212,7 +199,7 @@ def run_combo_yield_scan_and_summarize(
     select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_yield_enhancement_pairs,
     attach_calls_fn: Callable[..., pd.DataFrame] = attach_best_linked_calls,
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
-    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = None,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
@@ -249,8 +236,6 @@ def run_combo_yield_scan_and_summarize(
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
-        event_risk_cfg=event_risk,
-        score_weights=None,
         strategy_family=COMBO_YIELD_FAMILY,
         strategy_profile=yield_enhancement_policy.mode,
         quiet=True,
@@ -263,17 +248,10 @@ def run_combo_yield_scan_and_summarize(
         df_yield_put_universe["put_only_annualized_net_return"] = df_yield_put_universe.get(
             "annualized_net_return_on_cash_basis"
         )
-    df_yield_put_event_filtered = _filter_combo_yield_event_risk(
-        df_yield_put_universe,
-        symbol=symbol,
-        sell_put_cfg=yield_sp,
-        policy=yield_enhancement_policy,
-        out_path=symbol_yield_put_universe_labeled,
-    )
-    df_yield_put_cash_filtered = df_yield_put_event_filtered
-    if cash_filter_put_candidates_fn is not None and not df_yield_put_event_filtered.empty:
+    df_yield_put_cash_filtered = df_yield_put_universe
+    if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
         df_yield_put_cash_filtered = cash_filter_put_candidates_fn(
-            df_labeled=df_yield_put_event_filtered.copy(),
+            df_labeled=df_yield_put_universe.copy(),
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
@@ -289,7 +267,10 @@ def run_combo_yield_scan_and_summarize(
             sell_put_cfg=yield_sp,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            out_path=symbol_yield_put_universe_underwritten,
+        )
+        _atomic_write_dataframe(
+            symbol_yield_put_universe_underwritten,
+            df_yield_put_candidates_for_pairs,
         )
 
     raw_yield_pairs_df = find_pairs_fn(
@@ -358,9 +339,6 @@ def run_combo_yield_scan_and_summarize(
         yield_rule = "combo_yield_no_funding_put_eligible"
         yield_status = "post_filtered"
         yield_threshold = funding_put_min_annualized_return
-    elif df_yield_put_event_filtered.empty:
-        yield_rule = "combo_yield_put_event_filtered"
-        yield_status = "post_filtered"
     elif df_yield_put_cash_filtered.empty:
         yield_rule = "combo_yield_put_cash_filtered"
         yield_status = "post_filtered"
@@ -494,8 +472,7 @@ def run_combo_yield_for_symbol_and_summarize(
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
-    global_sell_put_event_risk: dict[str, Any] | None = None,
-    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = None,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
@@ -507,7 +484,6 @@ def run_combo_yield_for_symbol_and_summarize(
 
     materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
-    event_risk = resolve_event_risk_config(global_sell_put_event_risk)
     yield_window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
     funding_put_cfg = dict(sell_put_cfg)
     funding_put_cfg["strategy"] = policy.derived_from_sell_put_strategy
@@ -533,7 +509,6 @@ def run_combo_yield_for_symbol_and_summarize(
         report_dir=report_dir,
         yield_window=yield_window,
         liquidity=liquidity,
-        event_risk=event_risk,
         exchange_rate_converter=exchange_rate_converter,
         portfolio_ctx=portfolio_ctx,
         top_n=top_n,

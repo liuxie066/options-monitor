@@ -53,7 +53,6 @@ _INTEGER_ARGUMENT_NAMES = frozenset(
     {
         "as_of_ms",
         "audit_scan_limit",
-        "candidate_evidence_min_sample",
         "exp_within_days",
         "limit",
         "limit_expirations",

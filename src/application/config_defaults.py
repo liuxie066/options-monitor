@@ -19,8 +19,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "max_spread_ratio": 0.4,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
-                    "reject_event_risk": True,
-                    "event_source_fail_closed": True,
                 }
             },
             "call_base": {
@@ -32,8 +30,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_strike_cost_multiplier": 1.02,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
-                    "reject_event_risk": True,
-                    "event_source_fail_closed": True,
                 }
             },
         },
@@ -107,23 +103,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "pipeline_timeout_sec": 600,
             "option_positions_context_ttl_sec": 900,
             "portfolio_context_ttl_sec": 900,
-            "event_risk_source": {
-                "mode": "primary_fallback",
-                "default_provider": "futu",
-                "providers": {
-                    "futu": {
-                        "enabled": True,
-                        "role": "primary",
-                        "host": "127.0.0.1",
-                        "port": 11111,
-                    },
-                    "yfinance": {"enabled": True, "role": "fallback"},
-                },
-                "market_rules": {
-                    "hk": {"chain": ["futu"]},
-                    "us": {"chain": ["futu", "yfinance"]},
-                },
-            },
         },
         "notifications": {
             "daily_brief": {

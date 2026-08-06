@@ -14,7 +14,6 @@ from domain.domain import (
     normalize_notification_provider,
 )
 from domain.domain.fetch_source import normalize_fetch_source
-from domain.domain.candidate_defaults import EVENT_RISK_MODES
 from src.application.account_config import (
     ACCOUNT_TYPES,
     account_settings_from_config,
@@ -160,10 +159,6 @@ RETIRED_FEISHU_CALLBACK_KEYS = {
     'verification_token',
     'verification_token_env',
 }
-OPENING_EVENT_RISK_ALLOWED_FIELDS = {
-    'enabled',
-    'mode',
-}
 OPENING_STRATEGY_ALLOWED_FIELDS = {
     'enabled',
     'strategy',
@@ -179,9 +174,6 @@ OPENING_STRATEGY_ALLOWED_FIELDS = {
     'min_annualized_net_premium_return',
     'min_iv_rv_ratio',
     'min_iv_minus_rv',
-    'reject_event_risk',
-    'event_source_fail_closed',
-    'event_risk',
     'min_strike_cost_multiplier',
     # Retired fields stay recognized so their targeted migration errors remain
     # more useful than a generic unknown-key error.
@@ -496,35 +488,14 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
                 f'{path}.strategy={strategy or "<empty>"} is no longer supported for opening config; '
                 'use insurance_underwriting'
             )
-    event_risk = cfg.get('event_risk')
-    if event_risk is not None:
-        if not isinstance(event_risk, dict):
-            die(f'{path}.event_risk must be an object')
-        _reject_unknown_keys(event_risk, OPENING_EVENT_RISK_ALLOWED_FIELDS, f'{path}.event_risk')
-        _validate_optional_bool(event_risk, 'enabled', f'{path}.event_risk')
-        if 'mode' in event_risk and event_risk.get('mode') is not None:
-            mode = str(event_risk.get('mode') or '').strip().lower()
-            if mode not in EVENT_RISK_MODES:
-                die(f"{path}.event_risk.mode must be one of: {', '.join(sorted(EVENT_RISK_MODES))}")
     short_vol = cfg.get('short_vol')
     if short_vol is not None:
         die(
             f'{path}.short_vol has been removed from opening config; '
-            'put min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, and event_source_fail_closed on the opening config'
+            'put min_iv_rv_ratio and min_iv_minus_rv on the opening config'
         )
     for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
         _validate_optional_non_negative_number(cfg, key, path)
-    for key in ('reject_event_risk', 'event_source_fail_closed'):
-        _validate_optional_bool(cfg, key, path)
-    if strategy == 'insurance_underwriting' and isinstance(event_risk, dict) and event_risk.get('enabled') is False:
-        fail_closed = True
-        if cfg.get('event_source_fail_closed') is not None:
-            fail_closed = bool(cfg.get('event_source_fail_closed'))
-        if fail_closed:
-            die(
-                f'{path}.event_risk.enabled=false conflicts with '
-                f'{path}.event_source_fail_closed=true'
-            )
     concentration = cfg.get('concentration')
     if concentration is not None:
         die(f'{path}.concentration has been removed from opening config; manage assignment exposure outside candidate scan')

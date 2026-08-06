@@ -42,7 +42,6 @@ class StrategySemantics:
     scan_requires_rv: bool
     scan_uses_underwriting_gate: bool
     scan_uses_short_vol_gate: bool
-    scan_uses_event_risk: bool
     scan_uses_path_risk: bool
     yield_enhancement_mode: str | None
     yield_enhancement_requires_rv: bool
@@ -208,7 +207,6 @@ def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySema
         scan_requires_rv=uses_underwriting,
         scan_uses_underwriting_gate=uses_underwriting,
         scan_uses_short_vol_gate=False,
-        scan_uses_event_risk=uses_underwriting,
         scan_uses_path_risk=False,
         yield_enhancement_mode=yield_mode,
         yield_enhancement_requires_rv=(

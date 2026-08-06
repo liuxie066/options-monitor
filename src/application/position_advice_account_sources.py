@@ -18,7 +18,7 @@ from src.application.ledger.api import (
     open_position_ledger,
 )
 from src.application.position_advice_source_producers import (
-    publish_candidate_decisions_snapshot,
+    publish_opening_candidate_snapshot_receipt,
     publish_cash_capacity_snapshot,
     publish_fx_source_snapshot,
     publish_ledger_source_snapshot,
@@ -33,7 +33,6 @@ from src.application.position_advice_source_receipts import (
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
-    ranked_opening_candidate_decisions,
 )
 
 
@@ -159,12 +158,6 @@ def publish_account_run_sources(
         )
     except OpeningCandidateSnapshotError as exc:
         raise PositionAdviceAccountSourceError(str(exc)) from exc
-    try:
-        candidate_decisions = ranked_opening_candidate_decisions(
-            opening_snapshot
-        )
-    except OpeningCandidateSnapshotError as exc:
-        raise PositionAdviceAccountSourceError(str(exc)) from exc
     quote_receipt_relpaths = {
         str(item.get("symbol") or "").strip().upper(): str(
             item.get("quote_receipt_relpath") or ""
@@ -186,21 +179,21 @@ def publish_account_run_sources(
     candidate_observed_at = _latest_observation(
         item["receipt"]["source_observed_at"] for item in quote_records
     )
-    candidate_path, candidate_receipt = publish_candidate_decisions_snapshot(
+    candidate_path, candidate_receipt = publish_opening_candidate_snapshot_receipt(
         producer_root=state_root,
         account_run_id=run_id,
         account=account,
         broker=_required_text(broker, "broker"),
         portfolio_account_identity_hash=identity_hash,
         included_markets=markets,
-        decisions=candidate_decisions,
+        snapshot=opening_snapshot,
         quote_dependencies=quote_dependencies,
         source_observed_at=candidate_observed_at,
         completed_at=completed,
     )
     receipt_records.append(
         _receipt_record(
-            source_kind="candidate_decisions",
+            source_kind="opening_candidates",
             producer_root=state_root,
             receipt_path=candidate_path,
             receipt=candidate_receipt,
@@ -562,32 +555,6 @@ def build_share_coverage(
         "by_symbol": by_symbol,
         "complete": all(bool(item["complete"]) for item in rows),
     }
-
-
-def _validate_candidate_capture(
-    capture: Mapping[str, Any],
-    *,
-    account_run_id: str,
-    account: str,
-) -> None:
-    if capture.get("schema_version") != (
-        "position_advice_candidate_all_decisions_capture.v1"
-    ):
-        raise PositionAdviceAccountSourceError(
-            "candidate capture schema is invalid"
-        )
-    if capture.get("complete") is not True:
-        raise PositionAdviceAccountSourceError(
-            "candidate capture is incomplete"
-        )
-    if capture.get("account_run_id") != account_run_id:
-        raise PositionAdviceAccountSourceError(
-            "candidate capture run mismatch"
-        )
-    if str(capture.get("account") or "").strip().lower() != account:
-        raise PositionAdviceAccountSourceError(
-            "candidate capture account mismatch"
-        )
 
 
 def _validate_option_context_fingerprint(

@@ -16,74 +16,19 @@ from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
-    resolve_event_risk_config,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import canonical_symbol
-from src.infrastructure.io_utils import safe_read_csv
-from src.application.candidate_underwriting_decisions import (
-    apply_insurance_underwriting_to_all_decisions,
-)
 from src.application.covered_call_strategy_risk import (
     enrich_and_filter_covered_call_underwriting,
-    resolve_covered_call_underwriting_config,
 )
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
-from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
-from src.application.candidate_filter_trace import (
-    append_candidate_filter_trace_rows,
-    build_candidate_filter_trace_row,
-    candidate_trace_path_for_output,
-    infer_trace_scope_from_path,
-)
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
 )
 from domain.domain.risk_capacity import compute_sell_call_share_capacity
-from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
-
-
-COVERED_CALL_TRACE_LABEL = strategy_display_name(STRATEGY_COVERED_CALL).lower()
-
-
-def _append_share_coverage_trace(
-    *,
-    output_path: Path,
-    symbol: str,
-    status: str,
-    rule: str,
-    message: str,
-    metric_value: Any = None,
-    threshold: Any = None,
-    strategy_family: str | None = None,
-    strategy_profile: str | None = None,
-    config_values: dict[str, Any] | None = None,
-) -> None:
-    scope = infer_trace_scope_from_path(output_path)
-    append_candidate_filter_trace_rows(
-        candidate_trace_path_for_output(output_path),
-        [
-            build_candidate_filter_trace_row(
-                run_id=scope.get("run_id"),
-                account=scope.get("account"),
-                symbol=symbol,
-                function="share_coverage",
-                mode="call",
-                strategy_family=strategy_family,
-                strategy_profile=strategy_profile,
-                status=status,
-                stage="post_filter",
-                rule=rule,
-                metric_value=metric_value,
-                threshold=threshold,
-                message=message,
-                evidence_path=output_path.name,
-                config_values=config_values or {},
-            )
-        ],
-    )
 
 
 def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
@@ -95,17 +40,11 @@ def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
 
 def _empty_sell_call_result(
     *,
-    report_dir: Path,
-    symbol_lower: str,
     symbol: str,
     symbol_cfg: dict[str, Any],
     status: str,
     reason: str,
 ) -> dict[str, Any]:
-    materialize_empty_sell_call_artifacts(
-        report_dir=report_dir,
-        symbol_lower=symbol_lower,
-    )
     result = summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     result["_strategy_status"] = status
     result["_strategy_reason"] = reason
@@ -133,17 +72,10 @@ def run_sell_call_scan_and_summarize(
     locked_shares_by_symbol: dict[str, int] | None = None,
     locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict[str, Any] | None = None,
-    global_sell_call_event_risk: dict[str, Any] | None = None,
-    risk_policy_version: str | None = None,
-    quote_snapshot_id: str | None = None,
-    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run sell_call scan + (optional) render + summarize.
-
-    Returns the summary row dict (same schema as summarize_sell_call).
-    """
-    symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+    """Run the Covered Call opening policy in memory and summarize it."""
+    del py, base, symbol_lower, top_n, report_dir, timeout_sec, is_scheduled
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     portfolio_source = str(
         (portfolio_ctx or {}).get("portfolio_source_name")
@@ -159,36 +91,14 @@ def run_sell_call_scan_and_summarize(
     if portfolio_source and (
         portfolio_source != "futu" or authority.get("status") != "available"
     ):
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="unavailable",
-            rule="physical_account_capacity_authority_unavailable",
-            message=f"{COVERED_CALL_TRACE_LABEL} physical OpenD account authority unavailable",
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="unavailable",
             reason="physical_account_capacity_authority_unavailable",
         )
     if not stock:
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="not_applicable",
-            rule="stock_context_missing",
-            message=f"{COVERED_CALL_TRACE_LABEL} stock context missing",
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="not_applicable",
@@ -205,18 +115,7 @@ def run_sell_call_scan_and_summarize(
         shares_can_sell = int(shares_can_sell_raw)
         avg_cost = float(avg_cost_raw)
     except Exception:
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="not_applicable",
-            rule="stock_context_invalid",
-            message=f"{COVERED_CALL_TRACE_LABEL} stock context invalid",
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="not_applicable",
@@ -224,21 +123,7 @@ def run_sell_call_scan_and_summarize(
         )
 
     if shares_total <= 0 or shares_can_sell < 0 or avg_cost <= 0:
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="not_applicable",
-            rule="stock_context_non_positive",
-            message=f"{COVERED_CALL_TRACE_LABEL} shares or avg_cost non-positive",
-            metric_value=shares_total,
-            threshold=1,
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-            config_values={"avg_cost": avg_cost},
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="not_applicable",
@@ -253,18 +138,7 @@ def run_sell_call_scan_and_summarize(
                 locked_shares_unavailable_reason
                 or "option_positions_context_unavailable"
             )
-            _append_share_coverage_trace(
-                output_path=symbol_cc,
-                symbol=symbol,
-                status="unavailable",
-                rule="locked_shares_context_unavailable",
-                message=reason,
-                strategy_family=sell_call_semantics.strategy_family,
-                strategy_profile=sell_call_semantics.scan_strategy_profile,
-            )
             return _empty_sell_call_result(
-                report_dir=report_dir,
-                symbol_lower=symbol_lower,
                 symbol=symbol,
                 symbol_cfg=symbol_cfg,
                 status="unavailable",
@@ -272,18 +146,7 @@ def run_sell_call_scan_and_summarize(
             )
         if locked_shares_unavailable_by_symbol and symbol_key in locked_shares_unavailable_by_symbol:
             reason = str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable")
-            _append_share_coverage_trace(
-                output_path=symbol_cc,
-                symbol=symbol,
-                status="unavailable",
-                rule="locked_shares_unavailable",
-                message=reason,
-                strategy_family=sell_call_semantics.strategy_family,
-                strategy_profile=sell_call_semantics.scan_strategy_profile,
-            )
             return _empty_sell_call_result(
-                report_dir=report_dir,
-                symbol_lower=symbol_lower,
                 symbol=symbol,
                 symbol_cfg=symbol_cfg,
                 status="unavailable",
@@ -292,18 +155,7 @@ def run_sell_call_scan_and_summarize(
         if locked_shares_by_symbol and symbol:
             locked = int(locked_shares_by_symbol.get(symbol_key, 0) or 0)
     except Exception:
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="post_filtered",
-            rule="share_coverage_calc_failed",
-            message=f"{COVERED_CALL_TRACE_LABEL} share coverage calculation failed",
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="unavailable",
@@ -316,20 +168,7 @@ def run_sell_call_scan_and_summarize(
         multiplier=1,
     )
     if share_facts.reason == "locked_shares_exceed_eligible_underlying":
-        _append_share_coverage_trace(
-            output_path=symbol_cc,
-            symbol=symbol,
-            status="unavailable",
-            rule="locked_shares_exceed_eligible_underlying",
-            message=f"{COVERED_CALL_TRACE_LABEL} locked shares exceed OpenD deliverable shares",
-            metric_value=locked,
-            threshold=min(shares_total, shares_can_sell),
-            strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.scan_strategy_profile,
-        )
         return _empty_sell_call_result(
-            report_dir=report_dir,
-            symbol_lower=symbol_lower,
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="unavailable",
@@ -338,28 +177,11 @@ def run_sell_call_scan_and_summarize(
     shares_available_for_cover = int(share_facts.shares_available_for_cover)
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
-    event_risk = resolve_event_risk_config(global_sell_call_event_risk)
     window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
-    underwriting_cfg = resolve_covered_call_underwriting_config(cc)
-    scan_decisions_sink = all_decisions_sink_fn
-    if all_decisions_sink_fn is not None and underwriting_cfg.enabled:
-
-        def _underwritten_sink(rows: list[dict[str, Any]]) -> None:
-            all_decisions_sink_fn(
-                apply_insurance_underwriting_to_all_decisions(
-                    rows,
-                    mode="call",
-                    cfg=underwriting_cfg,
-                    exchange_rate_converter=exchange_rate_converter,
-                )
-            )
-
-        scan_decisions_sink = _underwritten_sink
-
-    run_sell_call_scan(
+    df_cc = run_sell_call_scan(
         symbols=[symbol],
         input_root=required_data_dir,
-        output=symbol_cc,
+        output=None,
         avg_cost=float(avg_cost),
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
@@ -388,56 +210,29 @@ def run_sell_call_scan_and_summarize(
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
-        event_risk_cfg=event_risk,
-        score_weights=None,
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
-        quiet=bool(is_scheduled),
-        risk_policy_version=risk_policy_version,
-        quote_snapshot_id=quote_snapshot_id,
-        all_decisions_sink_fn=scan_decisions_sink,
+        quiet=True,
     )
 
-    df_cc = safe_read_csv(symbol_cc)
     if not df_cc.empty:
         df_cc = enrich_and_filter_covered_call_underwriting(
             df_labeled=df_cc,
             symbol=symbol,
-            sell_call_cfg=cc,
+            sell_call_cfg={
+                **cc,
+                "max_spread_ratio": liquidity.max_spread_ratio,
+            },
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            out_path=symbol_cc,
         )
     if final_candidates_sink_fn is not None:
         final_candidates_sink_fn(
             "call",
             [dict(item) for item in df_cc.to_dict("records")],
         )
-    if not is_scheduled:
-        render_sell_call_alerts(
-            input_path=report_dir / f'{symbol_lower}_sell_call_candidates.csv',
-            symbol=symbol,
-            top=int(top_n),
-            layered=True,
-            output_path=report_dir / f'{symbol_lower}_sell_call_alerts.txt',
-            base_dir=base,
-        )
 
     return summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
-
-
-def materialize_empty_sell_call_artifacts(*, report_dir: Path, symbol_lower: str) -> None:
-    """Replace current Covered Call outputs with explicit empty artifacts."""
-
-    report_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame().to_csv(
-        (report_dir / f"{symbol_lower}_sell_call_candidates.csv").resolve(),
-        index=False,
-    )
-    (report_dir / f"{symbol_lower}_sell_call_alerts.txt").resolve().write_text(
-        "",
-        encoding="utf-8",
-    )
 
 
 def empty_sell_call_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

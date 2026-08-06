@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -27,6 +26,7 @@ def _candidate(**overrides):
         "multiplier": 100.0,
         "currency": "USD",
         "cash_required_cny": 70_000.0,
+        "max_new_contracts": 1,
         "net_income_cny": 1_400.0,
         "option_contract_point_value_cny": 700.0,
         "implied_volatility": 0.36,
@@ -126,41 +126,10 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert risk.unavailable_reasons == ()
 
 
-def test_enrich_and_filter_sell_put_underwriting_writes_reject_trace(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(implied_volatility=0.25, term_matched_rv=0.24)])
-
-    filtered = enrich_and_filter_sell_put_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_put_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
-    )
-
-    assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "risk_iv_rv_ratio" in trace
-    assert '"strategy_family": "sell_put"' in trace
-    assert '"strategy_profile": "insurance_underwriting"' in trace
-    trace_row = json.loads(trace)
-    assert trace_row["dte"] == 30
-    assert trace_row["abs_delta"] == 0.2
-    assert trace_row["iv_rv_ratio"] == 1.041667
-    assert trace_row["iv_minus_rv"] == 0.01
-
-
 def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate(earnings_has_event=True, earnings_event_dates="2026-06-01")])
 
     filtered = enrich_and_filter_sell_put_underwriting(
@@ -169,12 +138,9 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
         sell_put_cfg={"strategy": "insurance_underwriting"},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "risk_earnings_event" in trace
 
 
 def test_sell_put_underwriting_does_not_hard_reject_non_earnings_event() -> None:
@@ -225,8 +191,6 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missi
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate(net_income_cny=None)])
 
     filtered = enrich_and_filter_sell_put_underwriting(
@@ -235,20 +199,15 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missi
         sell_put_cfg={"strategy": "insurance_underwriting"},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        out_path=out_path,
     )
 
     assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "return_net_premium_cny" in trace
 
 
 def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_concentration(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame(
         [
             _candidate(
@@ -270,7 +229,6 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
         },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert len(filtered) == 1
@@ -283,8 +241,6 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
     portfolio_ctx = {
         "_global_portfolio_ctx": {
             "cash_by_currency": {"CNY": 800_000.0},
@@ -309,7 +265,6 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
         sell_put_cfg={"strategy": "insurance_underwriting"},
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert len(filtered) == 1
@@ -320,8 +275,6 @@ def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentrati
     assert row["total_short_put_concentration_after"] == 0.141176
     assert row["concentration_score"] == 0.8
     assert bool(row["concentration_evaluable"])
-    persisted = pd.read_csv(out_path).iloc[0]
-    assert persisted["symbol_concentration_after"] == 0.2
 
 
 def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(tmp_path: Path) -> None:
@@ -345,7 +298,6 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
     }
     rows: list[dict] = []
     for symbol in ("NVDA", "AAPL"):
-        out_path = tmp_path / f"{symbol.lower()}_sell_put_candidates_labeled.csv"
         filtered = enrich_and_filter_sell_put_underwriting(
             df_labeled=pd.DataFrame(
                 [
@@ -359,7 +311,6 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
             sell_put_cfg={"strategy": "insurance_underwriting"},
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=converter,
-            out_path=out_path,
         )
         rows.extend(filtered.to_dict("records"))
 
@@ -373,8 +324,6 @@ def test_sell_put_underwriting_ranking_prefers_period_return_then_discount(tmp_p
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame(
         [
             _candidate(contract_symbol="NEAR", strike=105.0, net_income=210.0, net_income_cny=1470.0),
@@ -389,38 +338,9 @@ def test_sell_put_underwriting_ranking_prefers_period_return_then_discount(tmp_p
         sell_put_cfg={"strategy": "insurance_underwriting", "max_strike": 110.0, "min_net_income": 1000.0},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert list(filtered["contract_symbol"]) == ["RICH", "FAR", "NEAR"]
     by_contract = filtered.set_index("contract_symbol")
     assert "premium_edge_score" not in by_contract.columns
     assert by_contract.loc["RICH", "strike_safety_margin_pct"] > by_contract.loc["NEAR", "strike_safety_margin_pct"]
-
-
-def test_enrich_and_filter_sell_put_underwriting_raises_when_filtered_csv_cannot_be_written(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    import pytest
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
-    out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate()])
-
-    def _boom(self, *args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(pd.DataFrame, "to_csv", _boom)
-
-    with pytest.raises(RuntimeError, match="failed to persist insurance-underwriting filtered sell-put candidates"):
-        enrich_and_filter_sell_put_underwriting(
-            df_labeled=df,
-            symbol="NVDA",
-            sell_put_cfg={"strategy": "insurance_underwriting"},
-            portfolio_ctx=None,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-            out_path=out_path,
-        )

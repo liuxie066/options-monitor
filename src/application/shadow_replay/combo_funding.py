@@ -13,11 +13,12 @@ from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
-    resolve_event_risk_config,
 )
-from src.application.combo_yield_steps import run_combo_yield_scan_and_summarize
+from src.application.combo_yield_steps import (
+    enrich_and_filter_combo_funding_cash,
+    run_combo_yield_scan_and_summarize,
+)
 from src.application.exchange_rate_loader import build_converter
-from src.application.sell_put_steps import _enrich_and_filter_sell_put_cash
 from src.application.shadow_replay.common import (
     dataset_dir_from_arg,
     dataset_write_lock,
@@ -116,15 +117,11 @@ def prepare_combo_funding_puts(
                     (manifest.get("normalized_global_sell_put_liquidity") or {}).get(symbol)
                     or {}
                 ),
-                event_risk=resolve_event_risk_config(
-                    (manifest.get("normalized_global_sell_put_event_risk") or {}).get(symbol)
-                    or {}
-                ),
                 exchange_rate_converter=converter,
                 portfolio_ctx=context,
                 top_n=1000,
                 is_scheduled=False,
-                cash_filter_put_candidates_fn=_enrich_and_filter_sell_put_cash,
+                cash_filter_put_candidates_fn=enrich_and_filter_combo_funding_cash,
             )
             underwritten = (
                 symbol_report

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -44,8 +43,6 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate()])
 
     filtered = enrich_and_filter_covered_call_underwriting(
@@ -54,7 +51,6 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
         sell_call_cfg={"strategy": "insurance_underwriting", "min_strike": 120.0},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert len(filtered) == 1
@@ -69,43 +65,11 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     assert "call_gap_up_opportunity_cost_cny" not in top
 
 
-def test_covered_call_underwriting_writes_reject_trace(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(implied_volatility=0.25, term_matched_rv=0.24)])
-
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
-        sell_call_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
-    )
-
-    assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "risk_iv_rv_ratio" in trace
-    assert "\"function\": \"sell_call\"" in trace
-    assert '"strategy_family": "sell_call"' in trace
-    assert '"strategy_profile": "insurance_underwriting"' in trace
-    trace_row = json.loads(trace)
-    assert trace_row["dte"] == 30
-    assert trace_row["abs_delta"] == 0.2
-    assert trace_row["iv_rv_ratio"] == 1.041667
-    assert trace_row["iv_minus_rv"] == 0.01
-
-
 def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budget(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(strike=100.0)])
+    df = pd.DataFrame([_candidate(strike=120.0)])
 
     filtered = enrich_and_filter_covered_call_underwriting(
         df_labeled=df,
@@ -117,7 +81,6 @@ def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budge
         },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert len(filtered) == 1
@@ -128,8 +91,6 @@ def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> N
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate(annualized_net_premium_return=0.08)])
 
     filtered = enrich_and_filter_covered_call_underwriting(
@@ -138,20 +99,15 @@ def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> N
         sell_call_cfg={"strategy": "insurance_underwriting", "min_annualized_net_premium_return": 0.10},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "return_annualized" in trace
 
 
 def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate()])
 
     filtered = enrich_and_filter_covered_call_underwriting(
@@ -160,20 +116,15 @@ def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: P
         sell_call_cfg={"strategy": "insurance_underwriting"},
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        out_path=out_path,
     )
 
     assert filtered.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "return_net_premium_cny" in trace
 
 
 def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicates_income(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
     df = pd.DataFrame(
         [
             _candidate(contract_symbol="LOW_UPSIDE", strike=125.0, spot=110.0, net_income=210.0),
@@ -192,7 +143,6 @@ def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicate
         },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        out_path=out_path,
     )
 
     assert list(filtered["contract_symbol"]) == ["HIGH_UPSIDE", "RICH", "LOW_UPSIDE"]
@@ -200,31 +150,3 @@ def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicate
     by_contract = filtered.set_index("contract_symbol")
     assert "premium_edge_score" not in by_contract.columns
     assert by_contract.loc["HIGH_UPSIDE", "strike_upside_margin_pct"] > by_contract.loc["RICH", "strike_upside_margin_pct"]
-
-
-def test_covered_call_underwriting_raises_when_filtered_csv_cannot_be_written(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    import pytest
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
-    out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate()])
-
-    def _boom(self, *args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(pd.DataFrame, "to_csv", _boom)
-
-    with pytest.raises(RuntimeError, match="failed to persist insurance-underwriting filtered covered-call candidates"):
-        enrich_and_filter_covered_call_underwriting(
-            df_labeled=df,
-            symbol="NVDA",
-            sell_call_cfg={"strategy": "insurance_underwriting"},
-            portfolio_ctx=None,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-            out_path=out_path,
-        )

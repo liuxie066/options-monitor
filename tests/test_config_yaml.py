@@ -171,8 +171,8 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
         assert "short_vol" not in side_cfg
         assert side_cfg["min_iv_rv_ratio"] == 1.10
         assert side_cfg["min_iv_minus_rv"] == 0.05
-        assert side_cfg["reject_event_risk"] is True
-        assert side_cfg["event_source_fail_closed"] is True
+        assert "reject_event_risk" not in side_cfg
+        assert "event_source_fail_closed" not in side_cfg
     for side_cfg in (futu["sell_put"], futu["sell_call"]):
         assert "concentration" not in side_cfg
         assert "score_weights" not in side_cfg

@@ -5,7 +5,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 
@@ -13,18 +13,15 @@ repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from src.application.event_risk_filter import annotate_candidates_with_event_risk
 from domain.domain.engine import CandidateCalculationError, calculate_opening_candidate_metrics
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_PUT_WINDOW,
-    resolve_event_risk_config,
 )
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
-    resolve_candidate_score_weights,
     run_candidate_scan,
 )
 
@@ -56,7 +53,6 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "realized_volatility_20",
     "realized_volatility_60",
     "realized_volatility_120",
-    "realized_volatility_estimate",
     "term_matched_rv",
     "term_matched_rv_status",
     "term_matched_rv_reason",
@@ -91,13 +87,6 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "earnings_event_dates",
     "earnings_snapshot_hash",
     "earnings_artifact_path",
-    "event_flag",
-    "event_types",
-    "event_dates",
-    "event_source_status",
-    "event_source_error",
-    "event_earnings_coverage_status",
-    "event_earnings_coverage_error",
     "reject_stage_candidate",
 ]
 
@@ -162,17 +151,6 @@ def _build_candidate_row(
     return payload
 
 
-def _earnings_event_flag(row: dict[str, Any]) -> bool:
-    if not bool(row.get("event_flag")):
-        return False
-    event_types = {
-        item.strip().lower()
-        for item in str(row.get("event_types") or "").split(",")
-        if item.strip()
-    }
-    return "earnings" in event_types
-
-
 def _print_summary(out: pd.DataFrame, out_path: Path, reject_out_path: Path) -> None:
     print(f"[DONE] sell put scan -> {out_path}")
     print(f"[DONE] reject log -> {reject_out_path}")
@@ -197,7 +175,7 @@ def run_sell_put_scan(
     *,
     symbols: list[str],
     input_root: Path,
-    output: Path,
+    output: Path | None,
     min_dte: int = DEFAULT_SELL_PUT_WINDOW.min_dte,
     max_dte: int = DEFAULT_SELL_PUT_WINDOW.max_dte,
     min_annualized_net_return: float | None = None,
@@ -207,16 +185,10 @@ def run_sell_put_scan(
     min_open_interest: float | None = None,
     min_volume: float | None = None,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
-    event_risk_cfg: dict[str, Any] | None = None,
-    score_weights: dict[str, Any] | None = None,
     reject_log_output: Path | None = None,
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
     quiet: bool = False,
-    risk_policy_version: str | None = None,
-    quote_snapshot_id: str | None = None,
-    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
-    put_cash_capacity_fn: Callable[[CandidateContractInput], dict[str, Any]] | None = None,
     quote_freshness_now_utc: datetime | None = None,
 ) -> pd.DataFrame:
     """执行卖出看跌期权扫描并写出候选 CSV。"""
@@ -235,7 +207,7 @@ def run_sell_put_scan(
             mode="put",
             symbols=symbols,
             input_root=Path(input_root),
-            output=Path(output),
+            output=(Path(output) if output is not None else None),
             empty_output_columns=SELL_PUT_EMPTY_OUTPUT_COLUMNS,
             min_dte=int(min_dte),
             max_dte=int(max_dte),
@@ -246,12 +218,9 @@ def run_sell_put_scan(
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
-            score_weights=resolve_candidate_score_weights(score_weights),
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
             quiet=bool(quiet),
-            risk_policy_version=risk_policy_version,
-            quote_snapshot_id=quote_snapshot_id,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=lambda contract: compute_metrics(
@@ -259,27 +228,12 @@ def run_sell_put_scan(
                 now_utc=scan_now_utc,
             ),
             build_row_fn=_build_candidate_row,
-            build_hard_constraint_kwargs_fn=(
-                put_cash_capacity_fn
-                if put_cash_capacity_fn is not None
-                else (lambda _contract: {})
-            ),
-            annualized_return_value_fn=lambda metrics: metrics.get("annualized_net_return_on_cash_basis"),
-            annotate_event_risk_fn=lambda df, base_dir, cfg: annotate_candidates_with_event_risk(
-                df,
-                base_dir=base_dir,
-                event_risk_cfg=cfg,
-            ),
             print_summary_fn=_print_summary,
             metric_reject_reason_fn=lambda contract: explain_metrics_rejection(
                 contract,
                 now_utc=scan_now_utc,
             ),
-            all_decisions_sink_fn=all_decisions_sink_fn,
-            event_reject_flag_fn=_earnings_event_flag,
         ),
-        event_risk_cfg=event_risk_cfg,
-        base_dir=Path(__file__).resolve().parents[2],
         reject_log_output=reject_log_output,
     )
 
@@ -296,9 +250,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
     parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
-    parser.add_argument("--event-risk-enabled", dest="event_risk_enabled", action="store_true", default=None)
-    parser.add_argument("--no-event-risk-enabled", dest="event_risk_enabled", action="store_false")
-    parser.add_argument("--event-risk-mode", dest="event_risk_mode", type=str, default="warn")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     parser.add_argument("--output", default=None, help="Output CSV path (default: output_shared/reports/sell_put_candidates.csv)")
     parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
@@ -327,12 +278,6 @@ def main(argv: list[str] | None = None) -> int:
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,
             max_spread_ratio=args.max_spread_ratio,
-            event_risk_cfg=resolve_event_risk_config(
-                {
-                    "enabled": True if args.event_risk_enabled is None else bool(args.event_risk_enabled),
-                    "mode": args.event_risk_mode,
-                }
-            ),
             reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
             quiet=args.quiet,
         )

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import csv
 import importlib
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
@@ -46,41 +44,6 @@ def _quote_probe_message(probe: dict[str, Any], *, ready: bool) -> str:
     return str(probe.get("error_code") or "OpenD quote readiness failed")
 
 
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return list(value)
-    return [value]
-
-
-def _read_countable_json_rows(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if not isinstance(value, dict):
-        return []
-    for key in ("rows", "records", "items", "data", "candidates"):
-        rows = value.get(key)
-        if isinstance(rows, list):
-            return rows
-    return []
-
-
-def _count_evidence_rows(path: Path) -> int:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        with path.open("r", encoding="utf-8-sig", newline="") as fh:
-            return sum(1 for _row in csv.DictReader(fh))
-    if suffix == ".jsonl":
-        with path.open("r", encoding="utf-8") as fh:
-            return sum(1 for line in fh if line.strip())
-    if suffix == ".json":
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return len(_read_countable_json_rows(payload))
-    with path.open("r", encoding="utf-8") as fh:
-        return sum(1 for line in fh if line.strip())
-
-
 def _agent_tool_mode(definition: Any, *, write_enabled: bool) -> str:
     capabilities = set(definition.capabilities)
     if definition.requires_confirm and "release_metadata" in capabilities:
@@ -100,133 +63,6 @@ def _agent_tool_availability(*, write_enabled: bool) -> dict[str, dict[str, Any]
         definition.name: {"available": True, "mode": _agent_tool_mode(definition, write_enabled=write_enabled)}
         for definition in registry.AGENT_TOOL_DEFINITIONS
     }
-
-
-def _candidate_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], report_dir: Path | None, patterns: tuple[str, ...]) -> list[Path]:
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for key in keys:
-        for item in _list(payload.get(key)):
-            text = str(item or "").strip()
-            if not text:
-                continue
-            path = Path(text)
-            marker = str(path)
-            if marker not in seen:
-                paths.append(path)
-                seen.add(marker)
-    if report_dir is not None:
-        for pattern in patterns:
-            for path in sorted(report_dir.glob(pattern)):
-                marker = str(path)
-                if marker not in seen:
-                    paths.append(path)
-                    seen.add(marker)
-    return paths
-
-
-def _candidate_evidence_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any] | None, list[str]]:
-    relevant_keys = {
-        "candidate_report_dir",
-        "candidate_path",
-        "candidate_paths",
-        "candidate_reject_log_path",
-        "candidate_reject_log_paths",
-        "reject_log_path",
-        "reject_log_paths",
-        "candidate_trace_path",
-        "candidate_trace_paths",
-        "trace_path",
-        "trace_paths",
-    }
-    if not any(payload.get(key) for key in relevant_keys):
-        return None, []
-
-    report_dir_value = str(payload.get("candidate_report_dir") or "").strip()
-    report_dir = Path(report_dir_value) if report_dir_value else None
-    warnings: list[str] = []
-    groups = {
-        "candidates": _candidate_evidence_paths(
-            payload,
-            keys=("candidate_path", "candidate_paths"),
-            report_dir=report_dir,
-            patterns=("*candidates*.csv", "*candidates*.json", "*candidates*.jsonl"),
-        ),
-        "reject_logs": _candidate_evidence_paths(
-            payload,
-            keys=("candidate_reject_log_path", "candidate_reject_log_paths", "reject_log_path", "reject_log_paths"),
-            report_dir=report_dir,
-            patterns=("*reject*.csv", "*reject*.json", "*reject*.jsonl"),
-        ),
-        "traces": _candidate_evidence_paths(
-            payload,
-            keys=("candidate_trace_path", "candidate_trace_paths", "trace_path", "trace_paths"),
-            report_dir=report_dir,
-            patterns=("*candidate_filter_trace*.json", "*candidate_filter_trace*.jsonl"),
-        ),
-    }
-    try:
-        min_sample = int(payload.get("candidate_evidence_min_sample") or payload.get("min_sample") or 5)
-    except Exception:
-        min_sample = 5
-    min_sample = max(1, min_sample)
-
-    files: dict[str, list[dict[str, Any]]] = {}
-    totals: dict[str, int] = {}
-    problems: list[str] = []
-    for group, paths in groups.items():
-        files[group] = []
-        totals[group] = 0
-        for path in paths:
-            entry: dict[str, Any] = {"path": mask_path(path), "exists": path.exists(), "rows": 0}
-            if not path.exists():
-                entry["error"] = "file_not_found"
-                problems.append(f"{group}: missing {path.name}")
-            elif path.is_dir():
-                entry["error"] = "path_is_directory"
-                problems.append(f"{group}: {path.name} is a directory")
-            else:
-                try:
-                    rows = _count_evidence_rows(path)
-                    entry["rows"] = rows
-                    totals[group] += rows
-                except Exception as exc:
-                    entry["error"] = f"{type(exc).__name__}: {exc}"
-                    problems.append(f"{group}: failed to read {path.name}")
-            files[group].append(entry)
-
-    candidate_rows = totals["candidates"]
-    trace_rows = totals["traces"]
-    reject_rows = totals["reject_logs"]
-    evaluable = candidate_rows >= min_sample and (trace_rows > 0 or reject_rows > 0)
-    readiness_notes: list[str] = []
-    if candidate_rows < min_sample:
-        readiness_notes.append(f"candidate_rows_below_min_sample:{candidate_rows}/{min_sample}")
-    if trace_rows == 0 and reject_rows == 0:
-        readiness_notes.append("missing_filter_or_reject_evidence")
-    if problems:
-        readiness_notes.extend(problems)
-
-    if readiness_notes:
-        warnings.append("Candidate evidence is not ready for scan-quality diagnostics: " + "; ".join(readiness_notes))
-    return (
-        {
-            "name": "candidate_evidence",
-            "status": ("ok" if evaluable and not problems else "warn"),
-            "message": (
-                f"candidate evidence rows candidates={candidate_rows} "
-                f"reject_logs={reject_rows} traces={trace_rows}"
-            ),
-            "value": {
-                "evaluable": evaluable,
-                "min_sample": min_sample,
-                "row_counts": totals,
-                "files": files,
-                "notes": readiness_notes,
-            },
-        },
-        warnings,
-    )
 
 
 def run_healthcheck_tool(
@@ -477,11 +313,6 @@ def run_healthcheck_tool(
                 "value": {"status": option_positions_bootstrap_status},
             }
         )
-
-    candidate_evidence_check, candidate_evidence_warnings = _candidate_evidence_check(payload, mask_path=mask_path)
-    if candidate_evidence_check is not None:
-        checks.append(candidate_evidence_check)
-        warnings.extend(candidate_evidence_warnings)
 
     mapping_errors: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}

@@ -14,7 +14,7 @@ from src.application.position_advice_source_receipts import publish_source_recei
 
 PORTFOLIO_SOURCE_SCHEMA = "position_advice_portfolio_source.v1"
 LEDGER_SOURCE_SCHEMA = "position_advice_ledger_source.v1"
-CANDIDATE_SOURCE_SCHEMA = "position_advice_candidate_all_decisions.v1"
+OPENING_CANDIDATE_SOURCE_SCHEMA = "opening_candidate_snapshot.v1"
 CASH_CAPACITY_SOURCE_SCHEMA = "position_advice_cash_capacity.v1"
 SHARE_COVERAGE_SOURCE_SCHEMA = "position_advice_share_coverage.v1"
 FX_SOURCE_SCHEMA = "position_advice_fx_source.v1"
@@ -131,7 +131,7 @@ def publish_ledger_source_snapshot(
     )
 
 
-def publish_candidate_decisions_snapshot(
+def publish_opening_candidate_snapshot_receipt(
     *,
     producer_root: Path,
     account_run_id: str,
@@ -139,62 +139,66 @@ def publish_candidate_decisions_snapshot(
     broker: str,
     portfolio_account_identity_hash: str,
     included_markets: Iterable[str],
-    decisions: Iterable[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
     quote_dependencies: Iterable[Mapping[str, Any]],
     source_observed_at: datetime | str,
     completed_at: datetime | str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    rows = [dict(item) for item in decisions]
+    payload = dict(snapshot or {})
     dependencies = [dict(item) for item in quote_dependencies]
     quote_ids = {
         str(item.get("snapshot_id") or "")
         for item in dependencies
         if item.get("source_kind") == "quotes"
     }
+    ranked = [
+        dict(item)
+        for item in payload.get("ranked_candidates") or []
+        if isinstance(item, Mapping)
+    ]
     if not quote_ids or any(
-        str(row.get("quote_snapshot_id") or "") not in quote_ids for row in rows
+        str(row.get("quote_snapshot_id") or "") not in quote_ids
+        for row in ranked
     ):
         raise ValueError(
-            "candidate decisions do not bind their quote dependencies"
+            "opening candidates do not bind their quote dependencies"
         )
-    policy_hashes = sorted(
-        {str(row.get("risk_policy_hash") or "") for row in rows}
-    )
-    if rows and (
-        any(len(item) != 64 for item in policy_hashes)
-        or any(
-            row.get("schema_version") != "candidate_all_decisions.v1"
-            for row in rows
-        )
+    if (
+        payload.get("schema_version") != OPENING_CANDIDATE_SOURCE_SCHEMA
+        or len(str(payload.get("content_sha256") or "")) != 64
+        or len(str(payload.get("strategy_policy_sha256") or "")) != 64
     ):
-        raise ValueError("candidate all-decisions payload is invalid")
-    payload = {
-        "schema_version": CANDIDATE_SOURCE_SCHEMA,
-        "candidate_decisions": rows,
-        "candidate_count": len(rows),
-        "risk_policy_hashes": policy_hashes,
-        "quote_snapshot_ids": sorted(quote_ids),
-    }
-    return _publish_json(
+        raise ValueError("opening candidate snapshot is invalid")
+    root = Path(producer_root).resolve()
+    payload_path = root / "opening_candidate_snapshot.json"
+    payload_bytes = payload_path.read_bytes()
+    run_id = _required_text(account_run_id, "account_run_id")
+    payload_hash = str(payload["content_sha256"])
+    run_key = canonical_sha256({"producer_run_id": run_id})
+    prefix = (
+        f"position_advice_producers/opening_candidates/{run_key}/{payload_hash}"
+    )
+    receipt = publish_source_receipt(
         producer_root=producer_root,
-        account_run_id=account_run_id,
-        account=account,
+        receipt_relpath=f"{prefix}/receipt.json",
+        payload_relpath="opening_candidate_snapshot.json",
+        payload_bytes=payload_bytes,
+        source_kind="opening_candidates",
+        producer_schema_version=OPENING_CANDIDATE_SOURCE_SCHEMA,
+        producer_run_id=run_id,
+        producer_scope="account",
+        producer_account_run_id=run_id,
         broker=broker,
+        account=account,
         portfolio_account_identity_hash=portfolio_account_identity_hash,
         included_markets=included_markets,
-        source_kind="candidate_decisions",
-        producer_schema_version=CANDIDATE_SOURCE_SCHEMA,
+        source_native_id=f"opening_candidates:{account}:{payload_hash}",
         source_observed_at=source_observed_at,
-        producer_policy_hash=canonical_sha256(
-            {
-                "schema": CANDIDATE_SOURCE_SCHEMA,
-                "risk_policy_hashes": policy_hashes,
-            }
-        ),
-        payload=payload,
+        completed_at=completed_at or datetime.now(timezone.utc),
+        producer_policy_hash=str(payload["strategy_policy_sha256"]),
         dependencies=dependencies,
-        completed_at=completed_at,
     )
+    return root / f"{prefix}/receipt.json", receipt
 
 
 def publish_cash_capacity_snapshot(
@@ -404,13 +408,13 @@ def _required_text(value: Any, field: str) -> str:
 
 
 __all__ = [
-    "CANDIDATE_SOURCE_SCHEMA",
     "CASH_CAPACITY_SOURCE_SCHEMA",
     "FX_SOURCE_SCHEMA",
     "LEDGER_SOURCE_SCHEMA",
     "PORTFOLIO_SOURCE_SCHEMA",
     "SHARE_COVERAGE_SOURCE_SCHEMA",
-    "publish_candidate_decisions_snapshot",
+    "OPENING_CANDIDATE_SOURCE_SCHEMA",
+    "publish_opening_candidate_snapshot_receipt",
     "publish_cash_capacity_snapshot",
     "publish_fx_source_snapshot",
     "publish_ledger_source_snapshot",

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank
+from domain.domain.engine import explain_candidate_rank
 
 from src.application.candidate_filter_trace import (
     build_candidate_replay_fields,
@@ -1475,7 +1475,7 @@ def rank_snapshots_for_candidates(candidates: list[dict[str, Any]]) -> list[dict
         if mode not in {"put", "call"}:
             continue
         try:
-            explanation = explain_candidate_rank(row, mode=mode, score_weights=CandidateScoreWeights())
+            explanation = explain_candidate_rank(row, mode=mode)
         except Exception as exc:
             explanation = {"error": f"{type(exc).__name__}: {exc}"}
         out.append(

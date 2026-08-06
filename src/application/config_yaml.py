@@ -24,7 +24,6 @@ from src.application.config_primitives import (
     resolve_config_path as _resolve_path,
 )
 from src.application.config_validator import (
-    OPENING_EVENT_RISK_ALLOWED_FIELDS,
     OPENING_STRATEGY_ALLOWED_FIELDS,
     YIELD_ENHANCEMENT_ALLOWED_FIELDS,
     YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS,
@@ -321,13 +320,6 @@ def _normalize_strategy(
     if allowed_keys is not None:
         _reject_unknown_authoring_keys(raw, allowed=allowed_keys, path=path)
     out = deepcopy(raw)
-    event_risk = out.get("event_risk")
-    if allowed_keys is not None and isinstance(event_risk, dict):
-        _reject_unknown_authoring_keys(
-            event_risk,
-            allowed=OPENING_EVENT_RISK_ALLOWED_FIELDS,
-            path=f"{path}.event_risk",
-        )
     if allow_ranges:
         _apply_range_shorthand(out, key="dte", min_key="min_dte", max_key="max_dte", path=path)
         _apply_range_shorthand(out, key="strike", min_key="min_strike", max_key="max_strike", path=path)

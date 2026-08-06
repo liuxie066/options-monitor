@@ -435,7 +435,7 @@ def _source_manifest_fresh_and_complete(
     ]
     required = {
         "quotes",
-        "candidate_decisions",
+        "opening_candidates",
         "portfolio",
         "ledger_decision_state",
         "cash_capacity",
@@ -607,7 +607,7 @@ def _fixture_stale_source() -> tuple[bool, str]:
         }
         for kind in (
             "quotes",
-            "candidate_decisions",
+            "opening_candidates",
             "portfolio",
             "ledger_decision_state",
             "cash_capacity",

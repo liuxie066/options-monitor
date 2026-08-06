@@ -91,7 +91,6 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
-from src.application.events.annotator import annotate_candidates_with_event_snapshot, load_event_snapshot
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
     SELL_PUT_FAMILY,
@@ -256,13 +255,6 @@ QUOTE_ISSUE_FLAGS = {
     "invalid_spread",
 }
 ACTIONABLE_CLOSE_TIERS = {"strong", "medium", "weak", "optional"}
-EVENT_SOURCE_COLUMNS = (
-    "event_flag",
-    "event_types",
-    "event_dates",
-    "event_source_status",
-    "event_source_error",
-)
 CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION = "standard_short_option"
 CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG = "yield_enhancement_put_leg"
 CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG = "yield_enhancement_long_call_leg"
@@ -1338,95 +1330,6 @@ def _lifecycle_not_evaluable_row(
         )
         row.update(_position_strategy_metadata(pos))
     return row
-
-
-def _resolve_event_snapshot_path(
-    *,
-    config: dict[str, Any],
-    base_dir: Path,
-    output_dir: Path,
-) -> Path | None:
-    runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
-    raw = str(runtime.get("event_snapshot_path") or "").strip()
-    if raw:
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = (Path(base_dir) / path).resolve()
-        return path
-
-    search_roots = [Path(output_dir).resolve(), *Path(output_dir).resolve().parents]
-    for root in search_roots:
-        for candidate in (root / "state" / "event_snapshot.json", root / "event_snapshot.json"):
-            if candidate.exists():
-                return candidate.resolve()
-
-    shared_candidate = (Path(base_dir) / "output_shared" / "state" / "event_snapshot.json").resolve()
-    if shared_candidate.exists():
-        return shared_candidate
-    return None
-
-
-def _event_risk_cfg_for_position(
-    *,
-    pos: dict[str, Any],
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    default = {"enabled": True, "mode": "warn"}
-    try:
-        resolution = resolve_position_strategy(position=pos, config=config)
-        side_cfg = strategy_side_config_for_resolution(
-            resolution=resolution,
-            position=pos,
-            config=config,
-        )
-    except Exception:
-        side_cfg = {}
-    raw = side_cfg.get("event_risk") if isinstance(side_cfg, dict) else None
-    if not isinstance(raw, dict):
-        return default
-    out = dict(default)
-    out.update(raw)
-    out["enabled"] = bool(out.get("enabled", True))
-    out["mode"] = str(out.get("mode") or "warn").strip().lower() or "warn"
-    return out
-
-
-def _merge_event_snapshot_for_short_vol_positions(
-    *,
-    config: dict[str, Any],
-    positions: list[dict[str, Any]],
-    quotes: dict[tuple[str, str, str, str], dict[str, Any]],
-    base_dir: Path,
-    output_dir: Path,
-    business_date: date,
-) -> None:
-    snapshot_path = _resolve_event_snapshot_path(config=config, base_dir=base_dir, output_dir=output_dir)
-    snapshot = load_event_snapshot(snapshot_path)
-    for pos in positions:
-        if not isinstance(pos, dict) or not _position_requires_short_vol_source_data(pos, config):
-            continue
-        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
-        if not all(key):
-            continue
-        if key not in quotes:
-            continue
-        quote = dict(quotes.get(key) or {})
-        quote.setdefault("symbol", key[0])
-        quote.setdefault("option_type", key[1])
-        quote.setdefault("expiration", key[2])
-        quote.setdefault("strike", key[3])
-        annotated = annotate_candidates_with_event_snapshot(
-            pd.DataFrame([quote]),
-            snapshot=snapshot,
-            event_risk_cfg=_event_risk_cfg_for_position(pos=pos, config=config),
-            as_of_date=business_date,
-        )
-        if annotated.empty:
-            continue
-        event_row = annotated.iloc[0].to_dict()
-        for col in EVENT_SOURCE_COLUMNS:
-            quote[col] = event_row.get(col)
-        quotes[key] = quote
 
 
 def _is_yield_enhancement_short_put(row: dict[str, Any]) -> bool:
@@ -3110,14 +3013,6 @@ def run_close_advice(
             covered_keys=covered_keys,
             base_dir=Path(base_dir),
         )
-    _merge_event_snapshot_for_short_vol_positions(
-        config=config,
-        positions=quote_positions,
-        quotes=quotes,
-        base_dir=Path(base_dir),
-        output_dir=output_dir,
-        business_date=business_date,
-    )
     issue_reasons = {
         **freshness_reasons,
         **coverage_reasons,
