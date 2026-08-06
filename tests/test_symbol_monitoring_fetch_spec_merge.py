@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -344,12 +346,23 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     assert status["receipt_relpath"] == "quotes/receipt.json"
 
 
-def test_frozen_success_empty_publishes_completed_zero_status_evidence(
+@pytest.mark.parametrize(
+    ("reason_code", "expected_status", "expected_capture_reason"),
+    [
+        ("no_expirations", "completed", "opening_candidates_captured"),
+        ("market_closed", "unavailable", "market_closed"),
+    ],
+)
+def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
     tmp_path: Path,
+    reason_code: str,
+    expected_status: str,
+    expected_capture_reason: str,
 ) -> None:
     import src.application.symbol_monitoring as mod
 
     report_dir = tmp_path / "reports"
+    capture_statuses: list[dict[str, object]] = []
 
     def run_sell_put(**kwargs):
         kwargs["final_candidates_sink_fn"]("put", [])
@@ -377,7 +390,7 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
             "snapshot_id": "snapshot-empty",
             "receipt_relpath": "quotes/empty/receipt.json",
             "source_outcome": "success_empty",
-            "reason_code": "no_expirations",
+            "reason_code": reason_code,
         },
         run_sell_put_scan_fn=run_sell_put,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {},
@@ -409,6 +422,7 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
             runtime_config={"portfolio": {"account": "lx"}},
             final_candidates_sink_fn=lambda _mode, _rows: None,
             position_advice_producer_run_id="run-1",
+            candidate_capture_status_sink_fn=capture_statuses.append,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
         ),
@@ -422,12 +436,28 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
             / "nvda_sell_put_scan_status.json"
         ).read_text(encoding="utf-8")
     )
-    assert status["status"] == "completed"
-    assert status["candidate_count"] == 0
-    assert status["source_outcome"] == "success_empty"
-    assert status["reason_code"] == "no_expirations"
+    assert status["status"] == expected_status
+    if expected_status == "completed":
+        assert status["candidate_count"] == 0
+        assert status["source_outcome"] == "success_empty"
+        assert status["reason_code"] == reason_code
+    else:
+        assert "candidate_count" not in status
+        assert "source_outcome" not in status
+        assert "reason_code" not in status
+        assert status["reason"] == "market_closed"
     assert status["snapshot_id"] == "snapshot-empty"
     assert status["receipt_relpath"] == "quotes/empty/receipt.json"
+    assert capture_statuses == [
+        {
+            "symbol": "NVDA",
+            "strategy_mode": "put",
+            "status": expected_status,
+            "reason": expected_capture_reason,
+            "quote_snapshot_id": "snapshot-empty",
+            "quote_receipt_relpath": "quotes/empty/receipt.json",
+        }
+    ]
 
 
 def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:

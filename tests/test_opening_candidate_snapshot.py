@@ -153,6 +153,66 @@ def test_snapshot_seals_final_candidate_order_and_account_binding(tmp_path: Path
     )
 
 
+def test_same_snapshot_replay_is_byte_hash_and_order_stable(tmp_path: Path) -> None:
+    first = _seal(tmp_path)
+    snapshot_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+        / OPENING_CANDIDATE_SNAPSHOT_FILE
+    )
+    first_bytes = snapshot_path.read_bytes()
+
+    second = _seal(tmp_path)
+
+    assert second["content_sha256"] == first["content_sha256"]
+    assert second["ranked_candidates"] == first["ranked_candidates"]
+    assert snapshot_path.read_bytes() == first_bytes
+
+
+def test_account_execution_order_does_not_change_market_facts(tmp_path: Path) -> None:
+    forward_root = tmp_path / "forward"
+    reverse_root = tmp_path / "reverse"
+    forward = {
+        account: _seal(forward_root, account=account)
+        for account in ("sy", "lx")
+    }
+    reverse = {
+        account: _seal(reverse_root, account=account)
+        for account in ("lx", "sy")
+    }
+
+    for account in ("lx", "sy"):
+        assert forward[account]["content_sha256"] == reverse[account][
+            "content_sha256"
+        ]
+        assert forward[account]["ranked_candidates"] == reverse[account][
+            "ranked_candidates"
+        ]
+
+    lx_decisions = {
+        row["normalized_input"]["contract_symbol"]: row
+        for row in forward["lx"]["candidate_decisions"]
+    }
+    sy_decisions = {
+        row["normalized_input"]["contract_symbol"]: row
+        for row in forward["sy"]["candidate_decisions"]
+    }
+    contract_symbol = "NVDA260918P00090000"
+    lx_decision = lx_decisions[contract_symbol]
+    sy_decision = sy_decisions[contract_symbol]
+    assert lx_decision["normalized_input_hash"] == sy_decision[
+        "normalized_input_hash"
+    ]
+    assert forward["lx"]["ranked_candidates"][0]["facts"] == forward["sy"][
+        "ranked_candidates"
+    ][0]["facts"]
+    assert lx_decision["candidate_id"] != sy_decision["candidate_id"]
+
+
 def test_agent_filter_explains_sealed_scope_without_refiltering(
     tmp_path: Path,
 ) -> None:
@@ -222,6 +282,50 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
         / "state"
         / OPENING_CANDIDATE_SNAPSHOT_FILE
     ).is_file()
+
+
+def test_market_closed_is_sealed_as_explicit_unavailable_state(
+    tmp_path: Path,
+) -> None:
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-closed",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, "run-closed", "lx"),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "unavailable",
+                "reason": "market_closed",
+            },
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "call",
+                "status": "not_applicable",
+            },
+        ],
+        final_candidates={"put": [], "call": []},
+        sealed_at=NOW,
+    )
+
+    assert payload["opening_status"] == "market_closed"
+    assert payload["ranked_candidates"] == []
+    assert {
+        row["strategy_mode"]: row["strategy_status"]
+        for row in payload["strategy_results"]
+    } == {"call": "not_applicable", "put": "data_unavailable"}
 
 
 def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(

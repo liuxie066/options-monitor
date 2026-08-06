@@ -183,6 +183,10 @@ def test_term_matched_rv_uses_remaining_sessions_and_excludes_current_bar(
     assert len(observation.input_hash) == 64
     assert observation.term_matched_rv is not None
     assert observation.legacy_weighted_rv is not None
+    assert observation.shadow_difference == round(
+        observation.term_matched_rv - observation.legacy_weighted_rv,
+        6,
+    )
     assert gateway.history_calls[0]["autype"] == "QFQ"
 
 

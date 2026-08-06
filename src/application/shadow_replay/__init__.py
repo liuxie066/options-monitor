@@ -36,6 +36,10 @@ from src.application.shadow_replay.combo_variants import (
     load_combo_variant_spec,
     publish_combo_pair_facet,
 )
+from src.application.shadow_replay.opening_policy import (
+    OPENING_POLICY_SHADOW_SCHEMA,
+    compare_opening_policy_shadow,
+)
 
 __all__ = [
     "analyze_shadow_replay_dataset",
@@ -53,6 +57,8 @@ __all__ = [
     "load_combo_pair_facet",
     "load_combo_variant_spec",
     "mark_shadow_replay_dataset",
+    "OPENING_POLICY_SHADOW_SCHEMA",
+    "compare_opening_policy_shadow",
     "publish_position_advice_promotion_evidence",
     "publish_combo_pair_facet",
     "run_shadow_replay_candidate_impact",
