@@ -6,6 +6,8 @@ from typing import Any, Callable, cast
 
 import pandas as pd
 
+from src.application.opening_quote_evidence import OpeningUnderlierObservation
+
 
 def test_opend_iv_is_always_converted_from_percent_to_decimal() -> None:
     from src.application.opend_normalize import normalize_iv
@@ -58,7 +60,24 @@ def _setup_common(monkeypatch, tmp_path: Path, *, gateway) -> Callable[..., dict
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
-    monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_observation_opend",
+        lambda gateway, code, **kwargs: OpeningUnderlierObservation(
+            schema_version="opening_underlier_observation.v1",
+            code=code,
+            market="US",
+            last_price=100.0,
+            update_time="2026-04-28 10:00:00",
+            observed_at_utc="2026-04-28T14:00:00+00:00",
+            age_seconds=0.0,
+            market_state="MORNING",
+            sec_status="NORMAL",
+            suspension=False,
+            status="ready",
+            reason_code=None,
+        ),
+    )
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     return mod.fetch_symbol
 

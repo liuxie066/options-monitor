@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from src.application.opend_market_snapshot_fetching import MarketSnapshotFetchResult
 from src.application.opend_symbol_chain_fetching import SymbolOptionChainResult
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot
+from src.application.opening_quote_evidence import OpeningUnderlierObservation
 
 
 def _chain_bundle(*, rows: list[dict[str, object]], source_outcome: str) -> SymbolOptionChainResult:
@@ -253,7 +255,7 @@ def test_observed_missing_spot_is_not_fetched_again(
     def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("an observed missing spot must not be fetched again")
 
-    monkeypatch.setattr(mod, "get_spot_opend", forbidden)
+    monkeypatch.setattr(mod, "get_underlier_observation_opend", forbidden)
     monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", forbidden)
     monkeypatch.setattr(mod, "fetch_option_snapshots", forbidden)
 
@@ -383,3 +385,114 @@ def test_duplicate_snapshot_code_is_a_typed_overall_error(
         item["error_code"] == "SNAPSHOT_DUPLICATE_CODES"
         for item in payload["meta"]["errors"]
     )
+
+
+def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    ready_code = "US.NVDA260821P00170000"
+    conflict_code = "US.NVDA260821P00160000"
+    chain_rows = [
+        {
+            "code": code,
+            "strike_time": "2026-08-21",
+            "strike_price": strike,
+            "option_type": "PUT",
+            "lot_size": lot_size,
+            "stock_type": "DRVT",
+            "stock_owner": "US.NVDA",
+            "option_standard_type": "STANDARD",
+            "suspension": False,
+        }
+        for code, strike, lot_size in (
+            (ready_code, 170.0, 100),
+            (conflict_code, 160.0, 50),
+        )
+    ]
+    _install_symbol_dependencies(
+        monkeypatch,
+        chain_bundle=_chain_bundle(rows=chain_rows, source_outcome="success_rows"),
+    )
+    observed_now = datetime.now(timezone.utc)
+    update_time = observed_now.astimezone(
+        ZoneInfo("America/New_York")
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    snapshots = {
+        code: {
+            "code": code,
+            "bid_price": 1.0,
+            "ask_price": 1.2,
+            "last_price": 9.9,
+            "update_time": update_time,
+            "price_spread": 0.01,
+            "option_implied_volatility": 25.0,
+            "option_delta": -0.2,
+            "option_open_interest": 0,
+            "volume": 0,
+            "option_contract_size": 100,
+            "sec_status": "NORMAL",
+            "suspension": False,
+        }
+        for code in (ready_code, conflict_code)
+    }
+    monkeypatch.setattr(
+        mod,
+        "fetch_option_snapshots",
+        lambda **_kwargs: MarketSnapshotFetchResult(
+            snap_map=snapshots,
+            errors=[],
+            requested_codes=frozenset(snapshots),
+            returned_codes=frozenset(snapshots),
+            missing_codes=frozenset(),
+            unexpected_codes=frozenset(),
+            complete=True,
+        ),
+    )
+    underlier = OpeningUnderlierObservation(
+        schema_version="opening_underlier_observation.v1",
+        code="US.NVDA",
+        market="US",
+        last_price=180.0,
+        update_time=update_time,
+        observed_at_utc=observed_now.isoformat(),
+        age_seconds=0.0,
+        market_state="MORNING",
+        sec_status="NORMAL",
+        suspension=False,
+        status="ready",
+        reason_code=None,
+    )
+
+    payload = mod.fetch_symbol_request(
+        mod.FetchSymbolRequest(
+            symbol="NVDA",
+            base_dir=tmp_path,
+            gateway=object(),
+            spot_override=180.0,
+            underlier_observation=underlier.to_dict(),
+            option_types="put",
+        )
+    )
+    rows = {row["contract_symbol"]: row for row in payload["rows"]}
+
+    assert payload["meta"]["status"] == "ok"
+    assert rows[ready_code]["opening_contract_status"] == "ready"
+    assert rows[ready_code]["multiplier"] == 100
+    assert rows[ready_code]["mid"] == 1.1
+    assert rows[ready_code]["open_interest"] == 0
+    assert rows[conflict_code]["opening_contract_status"] == "data_unavailable"
+    assert "option_multiplier_conflict" in rows[conflict_code][
+        "opening_contract_reason_codes"
+    ]
+    assert rows[conflict_code]["multiplier"] is None
+
+
+def test_opening_mid_requires_a_valid_two_sided_quote() -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    assert mod.calc_mid(1.0, 1.2, 9.9) == 1.1
+    assert mod.calc_mid(None, None, 9.9) is None
+    assert mod.calc_mid(1.2, 1.0, 1.1) is None

@@ -14,7 +14,10 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from src.application import opend_utils
-from src.application.opend_market_snapshot_fetching import get_underlier_spot
+from src.application.opend_market_snapshot_fetching import (
+    get_underlier_observation as get_underlier_spot,
+)
+from src.application.opening_quote_evidence import OpeningUnderlierObservation
 from src.application.opend_symbol_chain_fetching import (
     OptionExpirationDiscoveryResult,
     discover_option_expirations,
@@ -151,6 +154,7 @@ class RequiredDataFetchPlanBundle:
     spot_reference: float | None
     side_plans: list[OptionSideFetchPlan]
     merged_specs: list[RequiredDataFetchSpec]
+    underlier_observation: OpeningUnderlierObservation | None = None
     expiration_discovery_complete: bool = True
     expiration_discovery_error: str | None = None
     expiration_discovery: OptionExpirationDiscoveryResult | None = None
@@ -161,7 +165,7 @@ class RequiredDataFetchPlanBundle:
     spot_observation_error: str | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "symbol": self.symbol,
             "spot_reference": self.spot_reference,
             "side_plans": [plan.to_debug_dict() for plan in self.side_plans],
@@ -179,6 +183,9 @@ class RequiredDataFetchPlanBundle:
             "spot_observation_complete": bool(self.spot_observation_complete),
             "spot_observation_error": self.spot_observation_error,
         }
+        if self.underlier_observation is not None:
+            payload["underlier_observation"] = self.underlier_observation.to_dict()
+        return payload
 
 
 def _safe_float(value: Any) -> float | None:
@@ -199,7 +206,7 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
-def _resolve_spot_reference(
+def _resolve_underlier_observation(
     *,
     symbol: str,
     host: str,
@@ -208,9 +215,9 @@ def _resolve_spot_reference(
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
-) -> float | None:
+) -> OpeningUnderlierObservation | None:
     try:
-        fresh = get_underlier_spot(
+        observed = get_underlier_spot(
             symbol,
             host=host,
             port=port,
@@ -219,8 +226,26 @@ def _resolve_spot_reference(
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
         )
-        if fresh is not None and fresh > 0:
-            return fresh
+        if isinstance(observed, OpeningUnderlierObservation):
+            return observed
+        legacy_spot = _safe_float(observed)
+        if legacy_spot is None or not math.isfinite(legacy_spot) or legacy_spot <= 0:
+            return None
+        underlier = opend_utils.normalize_underlier(symbol, base_dir=base_dir)
+        return OpeningUnderlierObservation(
+            schema_version="opening_underlier_observation.v1",
+            code=underlier.code,
+            market=underlier.market,
+            last_price=legacy_spot,
+            update_time=None,
+            observed_at_utc=None,
+            age_seconds=None,
+            market_state="MORNING",
+            sec_status="NORMAL",
+            suspension=False,
+            status="ready",
+            reason_code="legacy_test_observation",
+        )
     except Exception:
         pass
     return None
@@ -633,18 +658,21 @@ def _spot_observation_cache_key(
 
 def _cached_spot_observation(
     *,
-    cache: MutableMapping[SpotObservationCacheKey, float | None],
+    cache: MutableMapping[
+        SpotObservationCacheKey,
+        OpeningUnderlierObservation | None,
+    ],
     cache_key: SpotObservationCacheKey,
-) -> float | None:
+) -> OpeningUnderlierObservation | None:
     cached = cache[cache_key]
     if cached is None:
         return None
-    if isinstance(cached, bool):
+    if not isinstance(cached, OpeningUnderlierObservation):
         raise RuntimeError("spot-observation cache contains an invalid value")
-    spot = _safe_float(cached)
+    spot = _safe_float(cached.last_price)
     if spot is None or not math.isfinite(spot) or spot <= 0:
         raise RuntimeError("spot-observation cache contains an invalid value")
-    return spot
+    return cached
 
 
 def _expiration_discovery_cache_entries(
@@ -1073,7 +1101,11 @@ def build_required_data_fetch_plan(
         | None
     ) = None,
     spot_observation_cache: (
-        MutableMapping[SpotObservationCacheKey, float | None] | None
+        MutableMapping[
+            SpotObservationCacheKey,
+            OpeningUnderlierObservation | None,
+        ]
+        | None
     ) = None,
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
@@ -1158,6 +1190,7 @@ def build_required_data_fetch_plan(
             )
         except Exception as exc:
             trading_date_resolution_error = exc
+    underlier_observation: OpeningUnderlierObservation | None = None
     spot_reference: float | None = None
     if frozen_trading_date is not None:
         spot_cache_key = _spot_observation_cache_key(
@@ -1171,12 +1204,12 @@ def build_required_data_fetch_plan(
             spot_observation_cache is not None
             and spot_cache_key in spot_observation_cache
         ):
-            spot_reference = _cached_spot_observation(
+            underlier_observation = _cached_spot_observation(
                 cache=spot_observation_cache,
                 cache_key=spot_cache_key,
             )
         else:
-            spot_reference = _resolve_spot_reference(
+            underlier_observation = _resolve_underlier_observation(
                 symbol=symbol,
                 host=fetch_host,
                 port=fetch_port,
@@ -1186,9 +1219,13 @@ def build_required_data_fetch_plan(
                 snapshot_max_calls=snapshot_max_calls,
             )
             if spot_observation_cache is not None:
-                spot_observation_cache[spot_cache_key] = spot_reference
+                spot_observation_cache[spot_cache_key] = underlier_observation
+    if underlier_observation is not None:
+        spot_reference = _safe_float(underlier_observation.last_price)
     spot_observation_complete = (
-        spot_reference is not None
+        underlier_observation is not None
+        and underlier_observation.status == "ready"
+        and spot_reference is not None
         and math.isfinite(float(spot_reference))
         and float(spot_reference) > 0
     )
@@ -1333,6 +1370,7 @@ def build_required_data_fetch_plan(
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
         spot_reference=spot_reference,
+        underlier_observation=underlier_observation,
         side_plans=side_plans,
         merged_specs=_merge_side_plans(
             symbol=symbol,
