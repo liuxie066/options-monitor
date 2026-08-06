@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -98,19 +99,19 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         run_id=run_id,
         data_config=data_config,
     )
-    fx_calls: list[Path] = []
+    fx_calls: list[list[str]] = []
 
-    def _rates(*, cache_path, **_kwargs):
-        fx_calls.append(Path(cache_path))
+    def _rates(configs):
+        fx_calls.append([account for account, _config in configs])
         return {
-            "timestamp": "2026-08-05T01:00:00+00:00",
-            "source": "test",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "opend_fx_market_snapshot",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         }
 
     monkeypatch.setattr(
         mod,
-        "get_exchange_rates_or_fetch_latest",
+        "fetch_opend_exchange_rate_observation",
         _rates,
     )
 
@@ -126,6 +127,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     assert batch.ledger_read_count == 1
     assert batch.fx_observation_count == 1
     assert len(fx_calls) == 1
+    assert fx_calls == [["lx", "sy"]]
     assert batch.unavailable_by_account == {}
     assert set(batch.manifests) == {"lx", "sy"}
 

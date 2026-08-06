@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import pandas as pd
 
@@ -46,9 +46,18 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "spot",
     "avg_cost",
     "shares_total",
+    "shares_can_sell",
+    "shares_eligible",
     "shares_locked",
     "shares_available_for_cover",
     "covered_contracts_available",
+    "max_new_contracts",
+    "capacity_identity_hash",
+    "futu_account_id",
+    "capacity_trd_env",
+    "capacity_market",
+    "capacity_source_observed_at",
+    "capacity_authority_status",
     "is_fully_covered_available",
     "shares",
     "bid",
@@ -167,11 +176,13 @@ def _resolve_sell_call_contract_capacity(
     *,
     multiplier: float | None,
     shares: int,
+    shares_can_sell: int,
     shares_locked: int,
     shares_available_for_cover: int | None,
 ) -> tuple[int, int, bool]:
     capacity = compute_sell_call_share_capacity(
         shares_total=shares,
+        shares_can_sell=shares_can_sell,
         shares_locked=shares_locked,
         shares_available_for_cover=shares_available_for_cover,
         multiplier=multiplier,
@@ -187,8 +198,10 @@ def _build_candidate_row_factory(
     *,
     avg_cost: float,
     shares: int,
+    shares_can_sell: int,
     shares_locked: int,
     shares_available_for_cover: int | None,
+    capacity_facts: Mapping[str, Any] | None,
 ) -> Callable[[CandidateContractInput, CandidateBaseValues, dict[str, Any]], dict[str, Any] | None]:
     def _build(
         contract: CandidateContractInput,
@@ -198,6 +211,7 @@ def _build_candidate_row_factory(
         available, covered_contracts_available, is_fully_covered_available = _resolve_sell_call_contract_capacity(
             multiplier=contract.multiplier,
             shares=shares,
+            shares_can_sell=shares_can_sell,
             shares_locked=shares_locked,
             shares_available_for_cover=shares_available_for_cover,
         )
@@ -214,11 +228,15 @@ def _build_candidate_row_factory(
             "strike": base_values.strike,
             "avg_cost": avg_cost,
             "shares_total": shares_total,
+            "shares_can_sell": int(shares_can_sell),
+            "shares_eligible": min(shares_total, int(shares_can_sell)),
             "shares_locked": shares_locked_value,
             "shares_available_for_cover": available,
             "covered_contracts_available": covered_contracts_available,
+            "max_new_contracts": covered_contracts_available,
             "is_fully_covered_available": is_fully_covered_available,
             "shares": shares_total,
+            **dict(capacity_facts or {}),
             "open_interest": base_values.open_interest,
             "volume": base_values.volume,
             **metrics,
@@ -258,8 +276,10 @@ def run_sell_call_scan(
     output: Path,
     avg_cost: float,
     shares: int = 100,
+    shares_can_sell: int | None = None,
     shares_locked: int = 0,
     shares_available_for_cover: int | None = None,
+    capacity_facts: Mapping[str, Any] | None = None,
     min_dte: int = DEFAULT_SELL_CALL_WINDOW.min_dte,
     max_dte: int = DEFAULT_SELL_CALL_WINDOW.max_dte,
     min_strike: float | None = None,
@@ -296,6 +316,7 @@ def run_sell_call_scan(
         avg_cost=avg_cost,
         cost_multiplier=cost_multiplier,
     )
+    declared_can_sell = int(shares if shares_can_sell is None else shares_can_sell)
 
     return run_candidate_scan(
         config=CandidateScanConfig(
@@ -325,13 +346,16 @@ def run_sell_call_scan(
             build_row_fn=_build_candidate_row_factory(
                 avg_cost=avg_cost,
                 shares=shares,
+                shares_can_sell=declared_can_sell,
                 shares_locked=shares_locked,
                 shares_available_for_cover=shares_available_for_cover,
+                capacity_facts=capacity_facts,
             ),
             build_hard_constraint_kwargs_fn=lambda contract: {
                 "call_covered_contracts_available": _resolve_sell_call_contract_capacity(
                     multiplier=contract.multiplier,
                     shares=shares,
+                    shares_can_sell=declared_can_sell,
                     shares_locked=shares_locked,
                     shares_available_for_cover=shares_available_for_cover,
                 )[1]
@@ -357,6 +381,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--avg-cost", type=float, required=True, help="Average holding cost per share")
     parser.add_argument("--shares", type=int, default=100)
+    parser.add_argument("--shares-can-sell", type=int, default=None)
     parser.add_argument("--shares-locked", type=int, default=0)
     parser.add_argument("--shares-available-for-cover", type=int, default=None)
     parser.add_argument("--min-dte", type=int, default=DEFAULT_SELL_CALL_WINDOW.min_dte)
@@ -393,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
             output=out_path,
             avg_cost=args.avg_cost,
             shares=args.shares,
+            shares_can_sell=args.shares_can_sell,
             shares_locked=args.shares_locked,
             shares_available_for_cover=args.shares_available_for_cover,
             min_dte=args.min_dte,

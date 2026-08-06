@@ -188,7 +188,7 @@ def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
         max_strike=140,
         put_cash_required=15500,
         put_cash_free=12000,
-        put_cash_capacity_reason="native_cash_only_cross_currency_fx_stale:CNY",
+        put_cash_capacity_reason="known_cash_only_cross_currency_fx_stale:CNY",
     )
 
     assert payload["accepted"] is False
@@ -196,7 +196,7 @@ def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
     assert reasons == ["hard_dte", "hard_strike", "hard_capacity_put"]
     assert all(r["stage"] == STAGE_HARD_CONSTRAINTS for r in payload["rejects"])
     assert payload["rejects"][-1]["message"].endswith(
-        "native_cash_only_cross_currency_fx_stale:CNY"
+        "known_cash_only_cross_currency_fx_stale:CNY"
     )
 
 

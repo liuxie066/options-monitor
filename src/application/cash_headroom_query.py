@@ -16,7 +16,13 @@ from domain.domain.cash_secured_utils import (
 )
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
-from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+from src.infrastructure.exchange_rates import (
+    exchange_rate_observation_status,
+    save_exchange_rate_observation,
+)
+from src.application.exchange_rate_loader import (
+    fetch_opend_exchange_rate_observation,
+)
 from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.ledger.api import list_position_lot_snapshots, open_position_ledger
@@ -74,17 +80,6 @@ def _load_runtime_config(
     if not isinstance(cfg, dict):
         raise SystemExit('[CONFIG_ERROR] runtime config must be a JSON object')
     return _normalize_runtime_config(cfg)
-
-
-def _load_exchange_rate_payload(*, cache_path: Path, enabled: bool, write_cache: bool = True) -> dict:
-    if not enabled:
-        return {}
-    payload = get_exchange_rates_or_fetch_latest(
-        cache_path=cache_path,
-        max_age_hours=24,
-        write_cache=write_cache,
-    )
-    return payload if isinstance(payload, dict) else {}
 
 
 def _load_option_position_records(data_config_path: Path) -> list[dict]:
@@ -238,11 +233,26 @@ def query_sell_put_cash(
     )
 
     option_records = _load_option_position_records(data_config_path)
-    exchange_rate_payload = _load_exchange_rate_payload(
-        cache_path=(out_dir_path / 'rate_cache.json').resolve(),
-        enabled=(not no_exchange_rates),
-        write_cache=write_cache,
-    )
+    exchange_rate_payload: dict[str, Any] = {}
+    if not no_exchange_rates:
+        embedded = (
+            portfolio.get("exchange_rates")
+            if isinstance(portfolio, Mapping)
+            else None
+        )
+        if exchange_rate_observation_status(embedded, max_age_hours=24) == "ready":
+            exchange_rate_payload = dict(embedded)
+        else:
+            candidate = fetch_opend_exchange_rate_observation(
+                (("runtime", runtime_cfg),)
+            )
+            if exchange_rate_observation_status(candidate, max_age_hours=24) == "ready":
+                exchange_rate_payload = dict(candidate or {})
+        if exchange_rate_payload and write_cache:
+            save_exchange_rate_observation(
+                (out_dir_path / "rate_cache.json").resolve(),
+                exchange_rate_payload,
+            )
     opt = build_option_positions_context(
         option_records,
         broker=market,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def test_load_exchange_rates_fetches_latest_when_cache_missing(monkeypatch, tmp_path: Path) -> None:
@@ -60,20 +63,23 @@ def test_load_exchange_rates_uses_shared_run_cache_when_supplied(
     assert observed == [(shared_state / "rate_cache.json").resolve()]
 
 
-def test_load_exchange_rates_disables_stale_fallback_for_cross_currency_cash(
-    monkeypatch,
+def test_load_exchange_rates_rejects_stale_cache_without_fallback(
     tmp_path: Path,
 ) -> None:
     from src.application import pipeline_context as ctx
-    from src.infrastructure import exchange_rates
 
-    monkeypatch.setattr(
-        exchange_rates,
-        "get_exchange_rates_or_fetch_latest",
-        lambda **_kwargs: {
-            "rates": {"USDCNY": 7.25, "HKDCNY": 0.93},
-            "freshness_status": "stale_fallback",
-        },
+    cache_path = tmp_path / "rate_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "rates": {"USDCNY": 7.25, "HKDCNY": 0.93},
+                "timestamp": (
+                    datetime.now(timezone.utc) - timedelta(hours=25)
+                ).isoformat(),
+                "source": "opend_fx_market_snapshot",
+            }
+        ),
+        encoding="utf-8",
     )
     messages: list[str] = []
     status: dict[str, str] = {}
@@ -84,8 +90,63 @@ def test_load_exchange_rates_disables_stale_fallback_for_cross_currency_cash(
         log=messages.append,
         status_out=status,
     ) == (None, None)
-    assert status == {"status": "unavailable_stale"}
-    assert any("exceed 24h" in message for message in messages)
+    assert status == {"status": "unavailable"}
+    assert any("OpenD exchange_rate observation missing/stale" in message for message in messages)
+
+
+def test_fetch_opend_exchange_rate_observation_uses_canonical_quote_route(
+    monkeypatch,
+) -> None:
+    from src.application import exchange_rate_loader as loader
+    from src.infrastructure.exchange_rates import exchange_rate_observation_status
+
+    observed_codes: list[tuple[str, ...]] = []
+    closed: list[bool] = []
+
+    class _Gateway:
+        def get_snapshot(self, codes):
+            observed_codes.append(tuple(codes))
+            now = datetime.now(timezone.utc).timestamp()
+            return [
+                {
+                    "code": "FX.USDCNH",
+                    "bid_price": 7.20,
+                    "ask_price": 7.22,
+                    "update_timestamp": now,
+                },
+                {
+                    "code": "FX.USDHKD",
+                    "bid_price": 7.80,
+                    "ask_price": 7.82,
+                    "update_timestamp": now,
+                },
+            ]
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(
+        loader,
+        "resolve_shared_futu_quote_route",
+        lambda _configs: SimpleNamespace(
+            ok=True,
+            host="127.0.0.1",
+            port=11111,
+        ),
+    )
+    monkeypatch.setattr(
+        loader,
+        "build_ready_futu_quote_gateway",
+        lambda **_kwargs: _Gateway(),
+    )
+
+    observation = loader.fetch_opend_exchange_rate_observation(
+        (("us", {"symbols": []}),)
+    )
+
+    assert observed_codes == [("FX.USDCNH", "FX.USDHKD")]
+    assert closed == [True]
+    assert exchange_rate_observation_status(observation, max_age_hours=24) == "ready"
 
 
 def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
