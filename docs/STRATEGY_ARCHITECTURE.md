@@ -1,6 +1,6 @@
 # 策略架构设计
 
-本文只描述开仓策略架构。全局产品域、模块定义和依赖关系以 [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md) 为准。
+本文只描述开仓策略架构。全局产品域、模块定义和依赖关系以 [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md) 为准。Sell Put / Covered Call 的召回、数据、筛选、容量和排序细则只以 [candidate_strategy.md](candidate_strategy.md) 为准；本文不复制第二份策略参数。
 
 ## 策略范围
 
@@ -43,112 +43,13 @@
 
 Sell Put 的核心目标是：在愿意以合适价格接货、但不主动追求接货的前提下，按 `mid` 挂限价等待，通过整个持有周期的净权利金收益参与投资布局。候选是等待机会，不是即时成交承诺。
 
-### 召回
-
-- option type: put
-- DTE 保持市场/symbol 当前配置窗口，通常 US 7–60、HK 7–90
-- 召回上界为 `min(configured max_strike, OpenD spot)`；未配置 max 时使用 spot
-- 从召回上界向下抓取 20%，显式且更严格的 `min_strike` 继续生效
-- OpenD spot 缺失时 fail closed，不读取旧 required-data spot，也不只用配置 max 猜测窗口
-- `bid > 0`、`ask > 0`、`ask >= bid`，按 `mid=(bid+ask)/2` 计算限价机会
-- OpenD 原始 `update_time` 在活跃交易时段内不超过 5 分钟；闭市报价只作观察证据，不参与正式排序
-
-`max_strike` 是愿意接货的最高价，现价是自然上限。二者组成同一个硬门槛，不再在门槛通过后重复增加一层“价格安全边际”筛选。
-
-### 硬筛
-
-- 年化净收益率达到阈值
-- 单笔净收益达到阈值
-- `IV / RV` 达到阈值
-- `IV - RV` 达到阈值
-- 到期前无财报，且 earnings coverage 完整、事件源可用
-- 相对价差 `(ask-bid)/mid <= 40%`
-- 完整 `strike * multiplier` 接货金额有可靠现金覆盖
-
-OI 和 volume 不再是 Sell Put 硬门槛：OI 只在收益接近时参与次级排序，缺失值排在可靠值之后；volume 只展示。delta 也只展示。
-
-OpenD IV 在适配层固定从百分数除以 100。RV 从 OpenD 前复权日线计算，并按 DTE 匹配：`<=30` 使用 RV20/RV60 的 70%/30%；`31–60` 使用 RV20/RV60/RV120 的 30%/50%/20%；`61–90` 使用 20%/40%/40%。期限档要求的任一窗口缺失即 fail closed，不重新归一化。
-
-现金硬门槛与收益资金口径分离：
-
-```text
-period_net_return = net_income / (strike * multiplier - net_income)
-assignment_cash_required = strike * multiplier
-```
-
-已有 Short Put 担保现金先按币种扣除。结算币种现金按 100% 计入，其他币种按可靠 FX 折算后只计 95%；FX 超过 24 小时时禁用跨币种覆盖、保留结算币种现金，并明确标记 `fx_stale`。不再增加额外通用现金缓冲。
-
-不再作为 Sell Put 开仓硬筛：
-
-- stress / gap-down
-- sigma stress loss
-- symbol exposure after assignment
-- max total assignment NAV
-- single-trade / symbol / total concentration
-- capital charge
-- delta band
-
-这些指标在当前产品目标下要么依赖大量主观假设，要么会把策略重新推回“交易波动率/路径压力”的旧模型。
-
-### 排序
-
-排序目标是推荐最优候选项，不是继续叠加一套软评分。
-
-排序顺序：
-
-1. 所有硬门槛通过。
-2. 正式主收益为持有周期非年化 `period_net_return`；最低年化收益只负责硬门槛。
-3. 对每轮剩余候选，以最高 period return 为锚点，把差值不超过 `0.002` 的候选组成收益区间，再处理下一组。
-4. 同一标的区间内依次用净接货折价、spread、OI、净收益额和合约标识选代表合约；同标的内不使用集中度。
-5. 不同标的代表合约区间内依次用较低的接货后 symbol concentration、净接货折价、spread、OI、净收益额、symbol 和合约标识排序。
-
-`net_assignment_discount_pct = (spot - breakeven) / spot`。集中度只在不同标的且收益接近时参与选择，不是硬风险门槛。delta、volume、`strategy_score`、`premium_edge_score` 和研究 score 不改变正式推荐顺序。
-
-正式排序唯一所有者是 `domain/domain/engine/candidate_engine.py::rank_candidate_rows`；underwriting、DataFrame adapter、通知和 explain 工具只委托或解释这一结果。
+架构上，应用层负责冻结 OpenD、账户和 ledger 事实，Candidate Engine 负责唯一的正式过滤与排序，输出账户/run 级不可变候选快照。现金担保、期限匹配 RV、财报日历和失败范围的规范见 [Sell Put / Covered Call 候选策略合同](candidate_strategy.md#5-sell-put)。
 
 ## Covered Call
 
-Covered Call 的核心目标是：在愿意以某个价格卖出正股的前提下，选择最值得承保的 call。
+Covered Call 的核心目标是：在愿意以合适价格卖出正股、但不主动追求被叫走的前提下，按 `mid` 挂限价等待，用整个周期的净权利金增强持股收益。
 
-### 召回
-
-- option type: call
-- DTE 在配置窗口内
-- `strike >= min_strike`
-- `strike <= max_strike`，其中 `max_strike` 可为空
-- 基础流动性满足配置
-- 持股覆盖仍由现有 share coverage 逻辑负责
-
-`min_strike` 是愿意卖出正股的最低价。通过这个边界后，`strike` 离 `min_strike` 的距离只在年化净权利金收益相同时用于破同分。
-
-### 硬筛
-
-- 年化净权利金收益率达到阈值
-- 单笔净收益达到阈值
-- `IV / RV` 达到阈值
-- `IV - RV` 达到阈值
-- 事件风险可接受
-- spread、open interest、volume 等基础流动性通过
-
-不再作为 Covered Call 开仓硬筛：
-
-- gap-up opportunity cost
-- concentration
-- delta band
-- path stress
-
-Covered Call 的上行放弃是这个策略的自然代价，应通过 `min_strike` / `max_strike` 和排序表达，而不是在开仓推荐里引入额外路径压力模型。
-
-### 排序
-
-排序顺序：
-
-1. 所有硬门槛通过。
-2. 每个标的只保留 `annualized_net_premium_return` 最高的合约。
-3. 不同标的继续按 `annualized_net_premium_return` 降序。
-4. 年化净权利金收益相同时，依次用 `strike_upside_margin_pct`、`concentration_score`、spread、OI 和净收益额稳定破同分。
-
-`strike_upside_margin_pct = (strike - min_strike) / min_strike`
+架构上，OpenD 物理账户持仓与 SQLite short-call 锁定共同构成覆盖事实；Candidate Engine 负责唯一的正式过滤与排序。成本底线、召回区间、当前市值收益口径、混合持股归属和收益接近时优先更高 strike 的规范见 [Sell Put / Covered Call 候选策略合同](candidate_strategy.md#6-covered-call)。
 
 ## Combo Yield
 
@@ -304,7 +205,7 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 
 `fetch.limit_expirations` 不再裁剪正式策略 universe；底层抓取仍可保留该参数供非策略 CLI 使用。到期日发现失败时，全局计划 fail closed，不能用部分数据声称得到了“全局最优”。DTE 窗口仍有业务意义，窗口数量上限没有。
 
-## 当前实现边界
+## 现有实现边界（待按候选策略合同收敛）
 
 本轮实现范围：
 
