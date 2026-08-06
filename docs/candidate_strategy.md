@@ -498,17 +498,22 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 历史 artifact 可以继续只读解释，但不能重新进入当前开仓候选路径。
 
-## 13. 当前实现差距
+## 13. 实施状态与上线边界
 
-截至本文确认日期，当前代码仍存在需要后续实施和验证的差距，至少包括：
+`feat/opening-candidate-policy-alignment` 分支已按本合同完成源码实施和离线验证：
 
-- RV 仍使用 20/60/120 分档加权，而不是唯一期限匹配 RV；
-- yfinance、多数据源事件 resolver 和财报价格历史接口仍在运行代码中；
-- 当前本地 `futu-api 10.4.6408` 不支持财报日历，且低于仓库声明的最低版本；
-- Sell Put 跨币种现金仍可见 `0.95` 折扣和逻辑账户聚合；
-- Covered Call 仍有年化收益主排序和旧 score/tie-break 语义；
-- Candidate Engine 和 application 后处理仍有重复过滤、排序与兼容字段；
-- 当前 CSV/JSONL/事件 artifact 与目标不可变 snapshot 仍未完成收敛。
+- 正式开仓候选使用 OpenD 报价、合约、市场状态、财报日历、QFQ 日线、
+  交易日历和汇率证据；
+- 期限匹配 RV 是 Candidate Engine 唯一正式 RV；RV20/60/120 和旧加权值只保留为
+  诊断或离线 shadow 对照，不进入正式 decision；
+- Sell Put / Covered Call 的计算、硬筛和排序由 Candidate Engine 唯一所有；
+- 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
+  无 `0.95` haircut；
+- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，Agent、Daily Brief 和
+  Position Advice 读取同一封存事实；
+- yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV/JSONL 权威路径和重复
+  Position Advice 候选 artifact 已退出当前开仓路径；历史读取只保留在明确的
+  Close Advice、Combo Yield、research/archive/shadow 兼容边界。
 
-后续代码变更必须以本文件为验收基线，并通过 focused tests、全量测试和数据契约验证；
-在实现完成前，任何“当前生产已按本文运行”的说法都不成立。
+上述结论只证明该实施分支的源码状态。在合并 main、发布和受控远程升级分别获得授权并
+完成验证前，不得宣称生产环境已按本合同运行。
