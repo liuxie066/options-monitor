@@ -10,11 +10,6 @@ from domain.domain.engine import (
     normalize_strategy_mode,
     rank_candidate_rows,
 )
-from domain.domain.insurance_underwriting import (
-    INSURANCE_UNDERWRITING_PROFILE,
-    InsuranceUnderwritingConfig,
-    rank_underwriting_candidates,
-)
 from src.application.agent_tool_contracts import AgentToolError
 
 
@@ -269,158 +264,6 @@ def _first_number(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _row_uses_underwriting(row: dict[str, Any]) -> bool:
-    underwriting_fields = {
-        "insurance_underwriting_mode",
-        "premium_edge_score",
-        "net_assignment_discount_pct",
-        "strike_safety_margin_pct",
-        "strike_upside_margin_pct",
-    }
-    profile = str(row.get("strategy_profile") or row.get("scan_strategy_profile") or "").strip().lower()
-    if profile == INSURANCE_UNDERWRITING_PROFILE:
-        return True
-    return any(str(row.get(key) or "").strip() for key in underwriting_fields)
-
-
-def _rows_use_underwriting(rows: list[dict[str, Any]]) -> bool:
-    return bool(rows) and all(_row_uses_underwriting(row) for row in rows)
-
-
-def _partition_rows_by_ranking_policy(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    groups: list[list[dict[str, Any]]] = []
-    by_policy: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        policy = INSURANCE_UNDERWRITING_PROFILE if _row_uses_underwriting(row) else "candidate_engine"
-        bucket = by_policy.get(policy)
-        if bucket is None:
-            bucket = []
-            by_policy[policy] = bucket
-            groups.append(bucket)
-        bucket.append(row)
-    return groups
-
-
-def _underwriting_margin_key(*, mode: str) -> str:
-    return "net_assignment_discount_pct" if mode == "put" else "strike_upside_margin_pct"
-
-
-def _rank_underwriting_rows_for_explain(rows: list[dict[str, Any]], *, mode: str) -> list[dict[str, Any]]:
-    margin_key = _underwriting_margin_key(mode=mode)
-    rows_for_sort = [dict(row) for row in rows]
-    if any(
-        _number_or_none(row.get("premium_edge_score")) is None or _number_or_none(row.get(margin_key)) is None
-        for row in rows_for_sort
-    ):
-        enriched = {
-            str(row.get("_rank_explain_row_id")): row
-            for row in rank_underwriting_candidates(rows_for_sort, mode=mode, cfg=InsuranceUnderwritingConfig())
-        }
-        for row in rows_for_sort:
-            fallback = enriched.get(str(row.get("_rank_explain_row_id"))) or {}
-            for key in (
-                "strategy_profile",
-                "insurance_underwriting_mode",
-                "iv_rv_ratio",
-                "iv_minus_rv",
-                "premium_edge_score",
-                margin_key,
-            ):
-                if not str(row.get(key) or "").strip() and key in fallback:
-                    row[key] = fallback.get(key)
-
-    return rank_underwriting_candidates(rows_for_sort, mode=mode)
-
-
-def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, Any]:
-    mode_norm = normalize_strategy_mode(mode)
-    margin_key = _underwriting_margin_key(mode=mode_norm)
-    margin_label = "净接货折价" if mode_norm == "put" else "strike 上行距离"
-    annualized_return = _first_number(
-        row,
-        "annualized_net_return_on_cash_basis" if mode_norm == "put" else "annualized_net_premium_return",
-        "annualized_return",
-    )
-    dte = _first_number(row, "dte")
-    period_return = _first_number(
-        row,
-        "period_net_return_on_cash_basis",
-        "period_net_return",
-    )
-    if (
-        mode_norm == "put"
-        and period_return is None
-        and annualized_return is not None
-        and dte is not None
-        and dte > 0
-    ):
-        period_return = annualized_return * dte / 365.0
-    score_components = {
-        "annualized_return": _sort_number(annualized_return),
-        "period_net_return": _sort_number(period_return),
-        "premium_edge_score": _sort_number(row.get("premium_edge_score")),
-        margin_key: _sort_number(row.get(margin_key)),
-        "concentration_score": _sort_number(row.get("concentration_score")),
-        "net_income": _sort_number(_first_number(row, "net_income_cny", "net_credit", "net_income")),
-        "spread_ratio": _sort_number(row.get("spread_ratio")),
-    }
-    score_inputs = {
-        "annualized_return": annualized_return,
-        "period_net_return": period_return,
-        "net_income": _first_number(row, "net_income_cny", "net_credit", "net_income"),
-        "spread_ratio": _first_number(row, "spread_ratio"),
-        "iv_rv_ratio": _first_number(row, "iv_rv_ratio"),
-        "iv_minus_rv": _first_number(row, "iv_minus_rv"),
-        margin_key: _first_number(row, margin_key),
-    }
-    return {
-        "mode": mode_norm,
-        "ranking_policy": INSURANCE_UNDERWRITING_PROFILE,
-        "symbol": str(row.get("symbol") or "").strip().upper() or None,
-        "contract_symbol": str(row.get("contract_symbol") or row.get("option_symbol") or "").strip() or None,
-        "option_type": str(row.get("option_type") or ("put" if mode_norm == "put" else "call")).strip().lower() or None,
-        "expiration": str(row.get("expiration") or "").strip() or None,
-        "strike": _first_number(row, "strike"),
-        "strategy_score": _sort_number(row.get("premium_edge_score")),
-        "strategy_score_role": "diagnostic_only",
-        "annualized_return": score_inputs["annualized_return"],
-        "period_net_return": score_inputs["period_net_return"],
-        "net_income": score_inputs["net_income"],
-        "score_components": score_components,
-        "score_component_labels": {
-            "annualized_return": "年化净收益",
-            "period_net_return": "持有期净收益",
-            "premium_edge_score": "承保补偿诊断分",
-            margin_key: margin_label,
-            "concentration_score": "集中度",
-            "net_income": "净收入",
-            "spread_ratio": "价差",
-        },
-        "score_inputs": score_inputs,
-        "score_warnings": [],
-        "risk_notes": [],
-        "primary_drivers": (
-            ["period_net_return", margin_key, "concentration_score"]
-            if mode_norm == "put"
-            else ["annualized_return", margin_key, "concentration_score"]
-        ),
-        "primary_driver_labels": (
-            ["持有期净收益", margin_label, "集中度"]
-            if mode_norm == "put"
-            else ["年化净收益", margin_label, "集中度"]
-        ),
-        "rank_reason": (
-            (
-                f"硬门槛通过后按持有期净收益形成 0.20 个百分点收益带；同标的带内依次比较"
-                f"{margin_label}、价差、未平仓量和净收入；跨标的代表合约带内先比较接货后集中度，"
-                f"再比较{margin_label}、价差、未平仓量和净收入"
-                if mode_norm == "put"
-                else f"硬门槛通过后先按年化净收益排序；收益相同时再比较{margin_label}和集中度，随后比较价差、未平仓量和净收入"
-            )
-        ),
-    }
-
-
 def _baseline_changes(
     rows: list[dict[str, Any]],
     *,
@@ -469,28 +312,19 @@ def _explain_group(
     compare_baseline: bool,
     mask_path: Callable[[Any], str | None],
 ) -> dict[str, Any]:
-    uses_underwriting = _rows_use_underwriting(rows)
-    if uses_underwriting:
-        ranked_rows = _rank_underwriting_rows_for_explain(rows, mode=mode)
-    else:
-        ranked_rows = rank_candidate_rows(rows, mode=mode, score_weights=score_weights)
+    ranked_rows = rank_candidate_rows(rows, mode=mode, score_weights=score_weights)
     ranked: list[dict[str, Any]] = []
     for idx, row in enumerate(ranked_rows[:top_n], start=1):
-        if uses_underwriting:
-            explanation = _explain_underwriting_rank(row, mode=mode)
-        else:
-            explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
+        explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
         explanation["rank"] = idx
         explanation["source_file"] = mask_path(row.get("_rank_explain_source_file"))
         ranked.append(explanation)
     out = {
         "mode": mode,
-        "ranking_policy": INSURANCE_UNDERWRITING_PROFILE if uses_underwriting else "candidate_engine",
+        "ranking_policy": "candidate_engine",
         "row_count": len(rows),
         "ranked": ranked,
     }
-    if uses_underwriting and score_weights is not None:
-        out["score_weights_ignored"] = True
     if compare_baseline:
         out["baseline"] = {
             "name": "return_then_income",
@@ -543,17 +377,16 @@ def candidate_rank_explain_tool(
         rows = rows_by_mode.get(mode, [])
         if not rows:
             continue
-        for group_rows in _partition_rows_by_ranking_policy(rows):
-            groups.append(
-                _explain_group(
-                    group_rows,
-                    mode=mode,
-                    score_weights=score_weights,
-                    top_n=top_n,
-                    compare_baseline=compare_baseline,
-                    mask_path=mask_path,
-                )
+        groups.append(
+            _explain_group(
+                rows,
+                mode=mode,
+                score_weights=score_weights,
+                top_n=top_n,
+                compare_baseline=compare_baseline,
+                mask_path=mask_path,
             )
+        )
     if not groups:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",

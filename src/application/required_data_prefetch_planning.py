@@ -118,7 +118,7 @@ def build_cross_account_prefetch_config(
                 min_strike = resolve_effective_sell_call_min_strike(
                     min_strike=cc.get("min_strike"),
                     avg_cost=filtered.stock.get("avg_cost"),
-                    cost_multiplier=cc.get("min_strike_cost_multiplier", 1.0),
+                    cost_multiplier=cc.get("min_strike_cost_multiplier", 1.02),
                 )
                 if min_strike is not None:
                     cc["min_strike"] = min_strike

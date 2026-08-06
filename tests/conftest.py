@@ -10,6 +10,45 @@ import pytest
 BASE = Path(__file__).resolve().parents[1]
 
 
+def phase2_opening_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Add the normalized Phase-1 evidence required by formal candidate scans."""
+
+    out = dict(row)
+    symbol = str(out.get("symbol") or "NVDA").strip().upper()
+    market = str(out.get("market") or ("HK" if symbol.endswith(".HK") else "US")).upper()
+    if market == "HK":
+        digits = symbol.removesuffix(".HK")
+        owner = f"HK.{digits.zfill(5)}"
+    else:
+        owner = f"US.{symbol}"
+    multiplier = out.get("multiplier")
+    out.setdefault("market", market)
+    out.setdefault("quote_update_time", "2026-04-01 10:59:00")
+    out.setdefault("quote_observed_at_utc", "2026-04-01T14:59:00Z")
+    out.setdefault("quote_age_seconds", 60)
+    out.setdefault("spot_update_time", "2026-04-01 10:59:00")
+    out.setdefault("spot_observed_at_utc", "2026-04-01T14:59:00Z")
+    out.setdefault("spot_age_seconds", 60)
+    out.setdefault("market_state", "MORNING")
+    out.setdefault("underlier_observation_status", "ready")
+    out.setdefault("underlier_observation_reason_code", None)
+    out.setdefault("price_tick", 0.01)
+    out.setdefault("term_matched_rv", out.get("realized_volatility_estimate", 0.20))
+    out.setdefault("term_matched_rv_status", "ready")
+    out.setdefault("term_matched_rv_reason", None)
+    out.setdefault("term_matched_rv_input_hash", "b" * 64)
+    out.setdefault("option_standard_type", "STANDARD")
+    out.setdefault("stock_owner", owner)
+    out.setdefault("stock_type", "DRVT")
+    out.setdefault("option_sec_status", "NORMAL")
+    out.setdefault("option_suspension", False)
+    out.setdefault("chain_multiplier", multiplier)
+    out.setdefault("snapshot_multiplier", multiplier)
+    out.setdefault("opening_contract_status", "ready")
+    out.setdefault("opening_contract_reason_codes", "")
+    return out
+
+
 @pytest.fixture
 def example_config_path(tmp_path: Path) -> Path:
     from src.application.config_yaml import build_yaml_runtime_config_file

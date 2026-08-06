@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
@@ -14,6 +15,22 @@ FUTU_US_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_283"
 FUTU_HK_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_335"
 FUTU_US_OPTION_FEE_BASIS = "futu_us_fixed_package_2026-07-22"
 FUTU_HK_OPTION_FEE_BASIS = "futu_hk_tier1_upper_bound_2026-07-22"
+FUTU_OPTION_FEE_SCHEDULE_VERSION = "futu_option_sell_fee.v1"
+FUTU_US_OPTION_CANDIDATE_FEE_BASIS = "futu_us_candidate_upper_bound_2026-08-06"
+FUTU_US_CANDIDATE_PLATFORM_FEE_UPPER_BOUND = 0.60
+FUTU_US_FIXED_PLATFORM_FEE = 0.30
+
+
+@dataclass(frozen=True)
+class OptionFeeEstimate:
+    amount: float
+    currency: str
+    fee_schedule_version: str
+    fee_basis: str
+    fee_schedule_url: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 _ACTUAL_FEE_TOTAL_KEYS = (
     "total_fee",
@@ -68,7 +85,7 @@ def calc_futu_us_option_fee(
     transaction_amount = price * unit_multiplier * qty
     commission_per_contract = 0.65 if price > 0.1 else 0.15
     commission = max(commission_per_contract * qty, 1.99)
-    platform_fee = 0.30 * qty
+    platform_fee = FUTU_US_FIXED_PLATFORM_FEE * qty
     orf = 0.013 * qty
     occ_fee = min(0.02 * qty, 55.0)
     settlement_fee = 0.18 * qty
@@ -127,6 +144,54 @@ def calc_futu_option_fee(
         contracts=contracts,
         multiplier=multiplier,
         is_sell=is_sell,
+    )
+
+
+def estimate_futu_option_sell_fee(
+    currency: str | None,
+    order_price: float,
+    *,
+    contracts: int,
+    multiplier: int,
+) -> OptionFeeEstimate:
+    """Return the versioned candidate-stage sell-fee estimate.
+
+    Candidate calculations must bind the broker-observed contract multiplier;
+    this strict facade intentionally has no multiplier default. Actual trade
+    performance continues to use broker-reported fees via ``extract_actual_fees``.
+    """
+
+    ccy = normalize_currency(currency)
+    if ccy == "USD":
+        basis = FUTU_US_OPTION_CANDIDATE_FEE_BASIS
+        url = FUTU_US_FEE_SCHEDULE_URL
+    elif ccy == "HKD":
+        basis = FUTU_HK_OPTION_FEE_BASIS
+        url = FUTU_HK_FEE_SCHEDULE_URL
+    else:
+        raise ValueError("currency must resolve to USD or HKD")
+    amount = calc_futu_option_fee(
+        ccy,
+        order_price,
+        contracts=contracts,
+        multiplier=multiplier,
+        is_sell=True,
+    )
+    if ccy == "USD":
+        # Opening candidates have no account-level package fact. Use the
+        # confirmed conservative platform-fee upper bound without changing
+        # compatibility callers that explicitly model the fixed package.
+        amount += (
+            FUTU_US_CANDIDATE_PLATFORM_FEE_UPPER_BOUND
+            - FUTU_US_FIXED_PLATFORM_FEE
+        ) * int(contracts)
+        amount = round(amount, 6)
+    return OptionFeeEstimate(
+        amount=amount,
+        currency=ccy,
+        fee_schedule_version=FUTU_OPTION_FEE_SCHEDULE_VERSION,
+        fee_basis=basis,
+        fee_schedule_url=url,
     )
 
 

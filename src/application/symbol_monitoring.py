@@ -143,7 +143,7 @@ def run_symbol_monitoring(
         effective_min_strike = resolve_effective_sell_call_min_strike(
             min_strike=cc.get("min_strike"),
             avg_cost=stock.get("avg_cost"),
-            cost_multiplier=cc.get("min_strike_cost_multiplier", 1.0),
+            cost_multiplier=cc.get("min_strike_cost_multiplier", 1.02),
         )
         if effective_min_strike is not None:
             cc["min_strike"] = effective_min_strike

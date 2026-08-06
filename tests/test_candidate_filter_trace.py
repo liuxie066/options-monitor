@@ -8,6 +8,8 @@ from typing import Any
 
 import pandas as pd
 
+from conftest import phase2_opening_row
+
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -25,72 +27,76 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
     parsed.mkdir(parents=True)
     pd.DataFrame(
         [
-            {
-                "symbol": "NVDA",
-                "market": "US",
-                "quote_update_time": "2026-04-01 10:59:00",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "contract_symbol": "PASS",
-                "currency": "USD",
-                "dte": 30,
-                "strike": 100,
-                "spot": 110,
-                "bid": 1.0,
-                "ask": 1.2,
-                "last_price": 1.1,
-                "mid": 1.1,
-                "open_interest": 100,
-                "volume": 50,
-                "implied_volatility": 0.3,
-                "realized_volatility_estimate": 0.2,
-                "delta": -0.2,
-                "multiplier": 100,
-            },
-            {
-                "symbol": "NVDA",
-                "market": "US",
-                "quote_update_time": "2026-04-01 10:59:00",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "contract_symbol": "FAIL_LIQUIDITY",
-                "currency": "USD",
-                "dte": 30,
-                "strike": 98,
-                "spot": 110,
-                "bid": 1.0,
-                "ask": 1.2,
-                "last_price": 1.1,
-                "mid": 1.1,
-                "open_interest": 1,
-                "volume": 0,
-                "implied_volatility": 0.3,
-                "realized_volatility_estimate": 0.2,
-                "delta": -0.2,
-                "multiplier": 100,
-            },
-            {
-                "symbol": "NVDA",
-                "market": "US",
-                "quote_update_time": "2026-04-01 10:59:00",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "contract_symbol": "FAIL_METRICS",
-                "currency": "USD",
-                "dte": 30,
-                "strike": 96,
-                "spot": 110,
-                "bid": 1.0,
-                "ask": 1.2,
-                "last_price": 1.1,
-                "mid": 0.0,
-                "open_interest": 100,
-                "volume": 50,
-                "implied_volatility": 0.3,
-                "realized_volatility_estimate": 0.2,
-                "delta": -0.2,
-                "multiplier": 100,
-            },
+            phase2_opening_row(row)
+            for row in [
+                {
+                    "symbol": "NVDA",
+                    "market": "US",
+                    "quote_update_time": "2026-04-01 10:59:00",
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "contract_symbol": "PASS",
+                    "currency": "USD",
+                    "dte": 30,
+                    "strike": 100,
+                    "spot": 110,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "last_price": 1.1,
+                    "mid": 1.1,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "implied_volatility": 0.3,
+                    "realized_volatility_estimate": 0.2,
+                    "delta": -0.2,
+                    "multiplier": 100,
+                },
+                {
+                    "symbol": "NVDA",
+                    "market": "US",
+                    "quote_update_time": "2026-04-01 10:59:00",
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "contract_symbol": "FAIL_LIQUIDITY",
+                    "currency": "USD",
+                    "dte": 30,
+                    "strike": 98,
+                    "spot": 110,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "last_price": 1.1,
+                    "mid": 1.1,
+                    "open_interest": 1,
+                    "volume": 0,
+                    "implied_volatility": 0.3,
+                    "realized_volatility_estimate": 0.2,
+                    "delta": -0.2,
+                    "multiplier": 100,
+                },
+                {
+                    "symbol": "NVDA",
+                    "market": "US",
+                    "quote_update_time": "2026-04-01 10:59:00",
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "contract_symbol": "FAIL_METRICS",
+                    "currency": "USD",
+                    "dte": 30,
+                    "strike": 96,
+                    "spot": 110,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "last_price": 1.1,
+                    "mid": 0.0,
+                    "price_tick": None,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "implied_volatility": 0.3,
+                    "realized_volatility_estimate": 0.2,
+                    "delta": -0.2,
+                    "multiplier": 100,
+                },
+            ]
         ]
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
 
@@ -118,7 +124,7 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
     assert "candidate_accepted" in rules
     assert "risk_open_interest" not in rules
     assert "risk_volume" not in rules
-    assert "metrics_mid_non_positive" in rules
+    assert "price_tick_missing_or_invalid" in rules
     assert {row["function"] for row in trace_rows} == {"sell_put"}
     assert {row["option_type"] for row in trace_rows} == {"put"}
     assert {row["strategy_family"] for row in trace_rows} == {"sell_put"}
@@ -822,21 +828,15 @@ def test_candidate_rank_explain_uses_period_return_for_underwriting_put(tmp_path
     )
 
     assert warnings == []
-    assert data["groups"][0]["ranking_policy"] == "insurance_underwriting"
+    assert data["groups"][0]["ranking_policy"] == "candidate_engine"
     assert data["ranked"][0]["contract_symbol"] == "NVDA_NEAR"
-    assert data["ranked"][0]["ranking_policy"] == "insurance_underwriting"
+    assert data["ranked"][0]["ranking_policy"] == "candidate_engine"
     assert data["ranked"][0]["annualized_return"] > data["ranked"][1]["annualized_return"]
-    assert data["ranked"][0]["score_components"]["net_assignment_discount_pct"] < data["ranked"][1][
-        "score_components"
-    ]["net_assignment_discount_pct"]
-    assert data["ranked"][0]["primary_drivers"] == [
-        "period_net_return",
-        "net_assignment_discount_pct",
-        "concentration_score",
-    ]
+    assert data["ranked"][0]["period_net_return"] > data["ranked"][1]["period_net_return"]
+    assert data["ranked"][0]["primary_drivers"] == ["period_net_return_on_cash_basis"]
 
 
-def test_candidate_rank_explain_uses_annualized_return_for_covered_call(tmp_path: Path) -> None:
+def test_candidate_rank_explain_uses_period_return_for_covered_call(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_call_candidates_labeled.csv"
@@ -862,14 +862,10 @@ def test_candidate_rank_explain_uses_annualized_return_for_covered_call(tmp_path
 
     assert warnings == []
     assert data["ranked"][0]["contract_symbol"] == "NVDA_RICH"
-    assert data["ranked"][0]["primary_drivers"] == [
-        "annualized_return",
-        "strike_upside_margin_pct",
-        "concentration_score",
-    ]
+    assert data["ranked"][0]["primary_drivers"] == ["period_net_premium_return"]
 
 
-def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path) -> None:
+def test_candidate_rank_explain_unifies_mixed_profiles_under_candidate_engine(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     legacy_path = tmp_path / "legacy_sell_put_candidates_labeled.csv"
@@ -905,12 +901,12 @@ def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path
         mask_path=lambda path: f".../{Path(path).name}" if path else None,
     )
 
-    groups_by_policy = {group["ranking_policy"]: group for group in data["groups"]}
     assert warnings == []
-    assert len(data["groups"]) == 2
-    assert groups_by_policy["candidate_engine"]["ranked"][0]["contract_symbol"] == "NVDA_LEGACY"
-    assert groups_by_policy["candidate_engine"].get("score_weights_ignored") is None
-    assert groups_by_policy["insurance_underwriting"]["ranked"][0]["contract_symbol"] == "AMD_UW"
-    assert groups_by_policy["insurance_underwriting"]["score_weights_ignored"] is True
+    assert len(data["groups"]) == 1
+    assert data["groups"][0]["ranking_policy"] == "candidate_engine"
+    assert [row["contract_symbol"] for row in data["groups"][0]["ranked"]] == [
+        "NVDA_LEGACY",
+        "AMD_UW",
+    ]
     assert meta["source_files"][0]["row_count"] == 1
     assert meta["source_files"][1]["row_count"] == 1

@@ -1224,7 +1224,7 @@ def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_
     assert isinstance(side_strike_windows, dict)
     assert side_strike_windows["call"]["min_strike"] == 444.8
     assert side_strike_windows["call"]["min_strike"] < 500
-    assert side_strike_windows["call"]["max_strike"] > 670
+    assert side_strike_windows["call"]["max_strike"] == 660.0
     assert captured["spot_override"] == 444.8
 
 

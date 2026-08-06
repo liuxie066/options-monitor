@@ -31,6 +31,7 @@ def _candidate(**overrides):
         "option_contract_point_value_cny": 700.0,
         "implied_volatility": 0.36,
         "realized_volatility_estimate": 0.24,
+        "term_matched_rv": 0.24,
         "delta": -0.20,
         "annualized_net_return_on_cash_basis": 0.12,
         "net_income": 200.0,
@@ -39,8 +40,9 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
         "otm_pct": 0.10,
-        "event_source_status": "ok",
-        "event_earnings_coverage_status": "complete",
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "earnings_event_dates": "",
     }
     row.update(overrides)
     return row
@@ -60,7 +62,7 @@ def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_ga
     assert fields["iv_rv_ratio"] == 1.5
     assert fields["iv_minus_rv"] == 0.12
     assert fields["strike_safety_margin_pct"] == 0.090909
-    assert fields["premium_edge_score"] == 1.281818
+    assert "premium_edge_score" not in fields
     assert "single_trade_concentration" not in fields
 
 
@@ -68,12 +70,12 @@ def test_sell_put_underwriting_rejects_when_iv_rv_edge_is_too_low() -> None:
     from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
     decision = evaluate_sell_put_underwriting_row(
-        _candidate(implied_volatility=0.25, realized_volatility_estimate=0.24),
+        _candidate(implied_volatility=0.25, term_matched_rv=0.24),
         cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
     )
 
     assert decision["accepted"] is False
-    assert decision["rule"] == "vol_edge_ratio_below_min"
+    assert decision["rule"] == "risk_iv_rv_ratio"
 
 
 def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
@@ -87,7 +89,7 @@ def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
     )
 
     assert decision["accepted"] is False
-    assert decision["rule"] == "annualized_return_below_min"
+    assert decision["rule"] == "return_annualized"
 
 
 def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() -> None:
@@ -130,7 +132,7 @@ def test_enrich_and_filter_sell_put_underwriting_writes_reject_trace(tmp_path: P
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
     out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(implied_volatility=0.25, realized_volatility_estimate=0.24)])
+    df = pd.DataFrame([_candidate(implied_volatility=0.25, term_matched_rv=0.24)])
 
     filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
@@ -143,7 +145,7 @@ def test_enrich_and_filter_sell_put_underwriting_writes_reject_trace(tmp_path: P
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "vol_edge_ratio_below_min" in trace
+    assert "risk_iv_rv_ratio" in trace
     assert '"strategy_family": "sell_put"' in trace
     assert '"strategy_profile": "insurance_underwriting"' in trace
     trace_row = json.loads(trace)
@@ -159,7 +161,7 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
     out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(event_flag=True, event_types="earnings", event_dates="2026-06-01")])
+    df = pd.DataFrame([_candidate(earnings_has_event=True, earnings_event_dates="2026-06-01")])
 
     filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
@@ -172,7 +174,7 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "event_risk_within_expiry" in trace
+    assert "risk_earnings_event" in trace
 
 
 def test_sell_put_underwriting_does_not_hard_reject_non_earnings_event() -> None:
@@ -196,12 +198,12 @@ def test_sell_put_underwriting_fails_closed_on_stale_event_source() -> None:
     )
 
     decision = evaluate_sell_put_underwriting_row(
-        _candidate(event_source_status="stale"),
+        _candidate(earnings_evidence_status="data_unavailable", earnings_reason_code="stale"),
         cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
     )
 
     assert decision["accepted"] is False
-    assert decision["rule"] == "event_source_unavailable"
+    assert decision["rule"] == "risk_earnings_unavailable"
 
 
 def test_sell_put_underwriting_requires_complete_earnings_coverage() -> None:
@@ -211,12 +213,12 @@ def test_sell_put_underwriting_requires_complete_earnings_coverage() -> None:
     )
 
     decision = evaluate_sell_put_underwriting_row(
-        _candidate(event_earnings_coverage_status="partial"),
+        _candidate(earnings_evidence_status="data_unavailable", earnings_reason_code="coverage_incomplete"),
         cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
     )
 
     assert decision["accepted"] is False
-    assert decision["rule"] == "event_earnings_coverage_incomplete"
+    assert decision["rule"] == "risk_earnings_unavailable"
 
 
 def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
@@ -238,7 +240,7 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missi
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "net_income_missing" in trace
+    assert "return_net_premium_cny" in trace
 
 
 def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_concentration(tmp_path: Path) -> None:
@@ -252,7 +254,7 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
             _candidate(
                 spot=102.0,
                 implied_volatility=0.70,
-                realized_volatility_estimate=0.50,
+                term_matched_rv=0.50,
                 dte=60,
             )
         ]
@@ -367,7 +369,7 @@ def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(t
     assert ranked[0]["symbol_concentration_after"] < ranked[1]["symbol_concentration_after"]
 
 
-def test_sell_put_underwriting_ranking_prefers_annualized_return_then_discount(tmp_path: Path) -> None:
+def test_sell_put_underwriting_ranking_prefers_period_return_then_discount(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -392,7 +394,7 @@ def test_sell_put_underwriting_ranking_prefers_annualized_return_then_discount(t
 
     assert list(filtered["contract_symbol"]) == ["RICH", "FAR", "NEAR"]
     by_contract = filtered.set_index("contract_symbol")
-    assert by_contract.loc["RICH", "premium_edge_score"] == by_contract.loc["NEAR", "premium_edge_score"]
+    assert "premium_edge_score" not in by_contract.columns
     assert by_contract.loc["RICH", "strike_safety_margin_pct"] > by_contract.loc["NEAR", "strike_safety_margin_pct"]
 
 

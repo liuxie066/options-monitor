@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from conftest import phase2_opening_row
+
 
 def _add_repo_to_syspath() -> Path:
     base = Path(__file__).resolve().parents[1]
@@ -1565,7 +1567,7 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
         out_path = root / 'sell_put_candidates.csv'
 
         pd.DataFrame(
-            [
+            [phase2_opening_row(row) for row in [
                 {
                         'symbol': 'AAPL',
                         'market': 'US',
@@ -1608,7 +1610,7 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
                     'implied_volatility': 0.30,
                     'delta': -0.18,
                 },
-            ]
+            ]]
         ).to_csv(parsed / 'AAPL_required_data.csv', index=False)
 
         out = run_sell_put_scan(

@@ -23,6 +23,7 @@ def _candidate(**overrides):
         "currency": "USD",
         "implied_volatility": 0.36,
         "realized_volatility_estimate": 0.24,
+        "term_matched_rv": 0.24,
         "delta": 0.20,
         "annualized_net_premium_return": 0.12,
         "net_income": 200.0,
@@ -31,7 +32,9 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
         "strike_above_spot_pct": 0.166667,
-        "event_source_status": "ok",
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "earnings_event_dates": "",
     }
     row.update(overrides)
     return row
@@ -72,7 +75,7 @@ def test_covered_call_underwriting_writes_reject_trace(tmp_path: Path) -> None:
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
     out_path.parent.mkdir(parents=True)
-    df = pd.DataFrame([_candidate(implied_volatility=0.25, realized_volatility_estimate=0.24)])
+    df = pd.DataFrame([_candidate(implied_volatility=0.25, term_matched_rv=0.24)])
 
     filtered = enrich_and_filter_covered_call_underwriting(
         df_labeled=df,
@@ -85,7 +88,7 @@ def test_covered_call_underwriting_writes_reject_trace(tmp_path: Path) -> None:
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "vol_edge_ratio_below_min" in trace
+    assert "risk_iv_rv_ratio" in trace
     assert "\"function\": \"sell_call\"" in trace
     assert '"strategy_family": "sell_call"' in trace
     assert '"strategy_profile": "insurance_underwriting"' in trace
@@ -140,7 +143,7 @@ def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> N
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "annualized_return_below_min" in trace
+    assert "return_annualized" in trace
 
 
 def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
@@ -162,7 +165,7 @@ def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: P
 
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "net_income_missing" in trace
+    assert "return_net_premium_cny" in trace
 
 
 def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicates_income(tmp_path: Path) -> None:
@@ -195,7 +198,7 @@ def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicate
     assert list(filtered["contract_symbol"]) == ["HIGH_UPSIDE", "RICH", "LOW_UPSIDE"]
     assert set(filtered["effective_min_strike"]) == {120.0}
     by_contract = filtered.set_index("contract_symbol")
-    assert by_contract.loc["RICH", "premium_edge_score"] == by_contract.loc["LOW_UPSIDE", "premium_edge_score"]
+    assert "premium_edge_score" not in by_contract.columns
     assert by_contract.loc["HIGH_UPSIDE", "strike_upside_margin_pct"] > by_contract.loc["RICH", "strike_upside_margin_pct"]
 
 

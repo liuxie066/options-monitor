@@ -332,7 +332,7 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert call_plan.strike_window.max_strike is not None
     assert call_plan.strike_window.max_strike > 505.0
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 606.00
-    assert "near/far bounds" in call_plan.planning_reason
+    assert "exact spot-based 20% cap" in call_plan.planning_reason
     assert plan.merged_specs[0].include_realized_volatility is True
 
 
@@ -564,11 +564,11 @@ def test_sell_call_without_strikes_derives_bounds_from_spot(monkeypatch, tmp_pat
     assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 564.00
     assert call_plan.strike_window.max_strike is not None
-    assert call_plan.strike_window.max_strike > (call_plan.strike_window.base_max_strike or 0.0)
-    assert "derive sell_call near/far bounds from spot" in call_plan.planning_reason
+    assert call_plan.strike_window.max_strike == call_plan.strike_window.base_max_strike
+    assert "exact 20% bounds from spot reference" in call_plan.planning_reason
 
 
-def test_sell_call_min_strike_without_spot_still_binds_fetch_max(monkeypatch, tmp_path: Path) -> None:
+def test_sell_call_min_strike_without_spot_fails_closed(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
@@ -588,10 +588,11 @@ def test_sell_call_min_strike_without_spot_still_binds_fetch_max(monkeypatch, tm
     )
 
     call_plan = plan.side_plans[0]
-    assert call_plan.strike_window.base_min_strike == 505.0
-    assert call_plan.strike_window.base_max_strike is not None
-    assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 606.00
-    assert call_plan.strike_window.max_strike is not None
+    assert call_plan.strike_window.base_min_strike is None
+    assert call_plan.strike_window.base_max_strike is None
+    assert call_plan.strike_window.min_strike is None
+    assert call_plan.strike_window.max_strike is None
+    assert call_plan.strike_window.source == "sell_call.no_spot_no_bounds"
 
 
 def test_sell_call_max_strike_only_keeps_configured_far_bound(monkeypatch, tmp_path: Path) -> None:
@@ -616,8 +617,8 @@ def test_sell_call_max_strike_only_keeps_configured_far_bound(monkeypatch, tmp_p
     call_plan = plan.side_plans[0]
     assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 550.00
-    assert round(call_plan.strike_window.max_strike or 0.0, 2) == 561.00
-    assert "near/far bounds" in call_plan.planning_reason
+    assert round(call_plan.strike_window.max_strike or 0.0, 2) == 550.00
+    assert "exact spot-based 20% cap" in call_plan.planning_reason
 
 
 def test_sell_call_without_strikes_uses_spot_20pct_max(monkeypatch, tmp_path: Path) -> None:
@@ -643,7 +644,7 @@ def test_sell_call_without_strikes_uses_spot_20pct_max(monkeypatch, tmp_path: Pa
     assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 564.00
     assert call_plan.strike_window.max_strike is not None
-    assert call_plan.strike_window.max_strike > 564.00
+    assert call_plan.strike_window.max_strike == 564.00
 
 
 def test_sell_put_max_strike_only_derives_far_bound_from_near_bound(monkeypatch, tmp_path: Path) -> None:
@@ -1225,9 +1226,9 @@ def test_call_max_only_strategy_stays_lower_unbounded_when_merged_with_position(
     side_plan = plan.side_plans[0]
     assert side_plan.option_type == "call"
     assert side_plan.strike_window.min_strike is None
-    assert side_plan.strike_window.max_strike == 120.0
+    assert side_plan.strike_window.max_strike is None
     assert side_plan.strike_window.base_min_strike is None
-    assert side_plan.strike_window.base_max_strike == 100.0
+    assert side_plan.strike_window.base_max_strike is None
     assert side_plan.required_exact_strikes_by_expiration == {
         "2026-08-21": [120.0]
     }

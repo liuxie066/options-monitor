@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from conftest import phase2_opening_row
+
 
 def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None:
     from src.application.scan_sell_put import run_sell_put_scan
@@ -15,7 +17,7 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None
 
         pd.DataFrame(
             [
-                {
+                phase2_opening_row({
                     "symbol": "0700.HK",
                     "market": "hk",
                     "option_type": "put",
@@ -34,7 +36,7 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None
                     "delta": -0.2,
                     "multiplier": 100,
                     "currency": "HKD",
-                }
+                })
             ]
         ).to_csv(parsed_dir / "0700.HK_required_data.csv", index=False)
 

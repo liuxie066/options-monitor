@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from conftest import phase2_opening_row
+
 
 def _add_repo_to_syspath() -> Path:
     base = Path(__file__).resolve().parents[1]
@@ -37,7 +39,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
         out_path = root / "sell_call_candidates.csv"
 
         pd.DataFrame(
-            [
+            [phase2_opening_row(row) for row in [
                     # pass; same annualized return as B, lower strike-upside tie-break
                 {
                     "symbol": "AAPL",
@@ -158,7 +160,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.2,
                 },
-            ]
+            ]]
         ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
         out = run_sell_call_scan(
@@ -189,7 +191,7 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
     parsed.mkdir(parents=True)
     pd.DataFrame(
         [
-            {
+            phase2_opening_row({
                 "symbol": "SMALL",
                 "option_type": "call",
                 "expiration": "2026-05-15",
@@ -207,7 +209,7 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
                 "volume": 50,
                 "implied_volatility": 0.3,
                 "delta": 0.2,
-            }
+            })
         ]
     ).to_csv(parsed / "SMALL_required_data.csv", index=False)
 
@@ -239,7 +241,7 @@ def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
         out_path = root / "sell_call_candidates.csv"
 
         pd.DataFrame(
-            [
+            [phase2_opening_row(row) for row in [
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -297,7 +299,7 @@ def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.45,
                 },
-            ]
+            ]]
         ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
         out = run_sell_call_scan(

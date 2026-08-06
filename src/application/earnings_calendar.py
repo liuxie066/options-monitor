@@ -353,6 +353,138 @@ def prefetch_market_earnings_calendars(
     }
 
 
+def load_earnings_evidence_for_candidate(
+    *,
+    input_root: Path,
+    market: str,
+    symbol: str,
+    expiration: str,
+) -> dict[str, Any]:
+    """Read one immutable run-shared OpenD earnings projection fail closed."""
+
+    market_norm = str(market or "").strip().upper()
+    path = Path(input_root) / "earnings_calendar" / f"{market_norm}.json"
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_snapshot_missing",
+            artifact_path=path,
+        )
+    except Exception as exc:
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_snapshot_invalid",
+            artifact_path=path,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    if not isinstance(snapshot, dict):
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_snapshot_invalid",
+            artifact_path=path,
+        )
+    recorded_hash = str(snapshot.get("snapshot_hash") or "")
+    hash_input = {key: value for key, value in snapshot.items() if key != "snapshot_hash"}
+    if (
+        snapshot.get("schema_version") != EARNINGS_CALENDAR_SCHEMA_VERSION
+        or snapshot.get("source") != "opend"
+        or str(snapshot.get("market") or "").upper() != market_norm
+        or not recorded_hash
+        or recorded_hash != _payload_hash(hash_input)
+    ):
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_snapshot_identity_invalid",
+            artifact_path=path,
+            snapshot_hash=recorded_hash or None,
+        )
+    try:
+        identity = resolve_symbol_identity(symbol)
+        if identity is None or identity.market != market_norm:
+            raise ValueError("symbol market mismatch")
+        projection = (
+            snapshot.get("evidence_by_underlier", {})
+            .get(identity.futu_code, {})
+            .get(str(expiration or "").strip())
+        )
+    except Exception as exc:
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_candidate_identity_invalid",
+            artifact_path=path,
+            snapshot_hash=recorded_hash,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    if not isinstance(projection, Mapping):
+        return _candidate_earnings_unavailable(
+            "earnings_calendar_projection_missing",
+            artifact_path=path,
+            snapshot_hash=recorded_hash,
+        )
+    status = str(projection.get("status") or "").strip().lower()
+    events = [dict(item) for item in projection.get("events", []) if isinstance(item, Mapping)]
+    has_event = bool(projection.get("has_earnings_event"))
+    if status != "ready":
+        return _candidate_earnings_unavailable(
+            str(projection.get("reason_code") or "earnings_calendar_coverage_incomplete"),
+            artifact_path=path,
+            snapshot_hash=recorded_hash,
+        )
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_has_event": has_event,
+        "earnings_event_dates": ",".join(
+            sorted({str(item.get("earnings_date") or "") for item in events if item.get("earnings_date")})
+        ),
+        "earnings_events": events,
+        "earnings_snapshot_hash": recorded_hash,
+        "earnings_artifact_path": path.as_posix(),
+    }
+
+
+def annotate_candidates_with_earnings_evidence(
+    candidates: Any,
+    *,
+    input_root: Path,
+) -> Any:
+    """Attach the single formal earnings truth to candidate rows."""
+
+    import pandas as pd
+
+    if candidates is None or not isinstance(candidates, pd.DataFrame) or candidates.empty:
+        return candidates
+    rows: list[dict[str, Any]] = []
+    for row in candidates.to_dict("records"):
+        payload = dict(row)
+        payload.update(
+            load_earnings_evidence_for_candidate(
+                input_root=input_root,
+                market=str(payload.get("market") or ""),
+                symbol=str(payload.get("symbol") or ""),
+                expiration=str(payload.get("expiration") or ""),
+            )
+        )
+        rows.append(payload)
+    return pd.DataFrame(rows)
+
+
+def _candidate_earnings_unavailable(
+    reason_code: str,
+    *,
+    artifact_path: Path,
+    snapshot_hash: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "earnings_evidence_status": "data_unavailable",
+        "earnings_reason_code": str(reason_code),
+        "earnings_has_event": None,
+        "earnings_event_dates": "",
+        "earnings_events": [],
+        "earnings_snapshot_hash": snapshot_hash,
+        "earnings_artifact_path": Path(artifact_path).as_posix(),
+        "earnings_error": error,
+    }
+
+
 class _UnavailableEarningsGateway:
     def __init__(self, error: Exception) -> None:
         self.error = error
