@@ -9,7 +9,10 @@ import pytest
 
 from src.application.opend_market_snapshot_fetching import MarketSnapshotFetchResult
 from src.application.opend_symbol_chain_fetching import SymbolOptionChainResult
-from src.application.short_vol_metrics import RealizedVolatilitySnapshot
+from src.application.short_vol_metrics import (
+    RealizedVolatilitySnapshot,
+    TermMatchedRVObservation,
+)
 from src.application.opening_quote_evidence import OpeningUnderlierObservation
 
 
@@ -142,6 +145,66 @@ def test_required_realized_volatility_failure_is_typed_overall_error(
         item["error_code"] == "REQUIRED_REALIZED_VOLATILITY_INCOMPLETE"
         for item in payload["meta"]["errors"]
     )
+
+
+def test_partial_realized_volatility_only_blocks_dependent_expiration() -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    ready = TermMatchedRVObservation(
+        schema_version="term_matched_rv.v1",
+        expiration="2026-06-19",
+        status="ok",
+        reason=None,
+        term_matched_rv=0.22,
+        remaining_sessions=20,
+        lookback_sessions=20,
+        input_start="2026-04-20",
+        input_end="2026-05-19",
+        input_close_session_count=21,
+        input_return_count=20,
+        input_hash="a" * 64,
+    )
+    unavailable = TermMatchedRVObservation(
+        schema_version="term_matched_rv.v1",
+        expiration="2026-07-17",
+        status="data_unavailable",
+        reason="qfq_history_session_gap",
+        term_matched_rv=None,
+        remaining_sessions=40,
+        lookback_sessions=40,
+        input_start=None,
+        input_end=None,
+        input_close_session_count=0,
+        input_return_count=0,
+        input_hash=None,
+    )
+    snapshot = RealizedVolatilitySnapshot(
+        status="partial",
+        reason="term_matched_rv_incomplete",
+        term_matched={
+            ready.expiration: ready,
+            unavailable.expiration: unavailable,
+        },
+    )
+
+    assert (
+        mod._required_realized_volatility_error(
+            snapshot,
+            expirations=[ready.expiration, unavailable.expiration],
+        )
+        is None
+    )
+    assert (
+        mod._required_realized_volatility_error(
+            snapshot,
+            expirations=[unavailable.expiration],
+        )
+        is None
+    )
+    assert mod._required_realized_volatility_error(
+        snapshot,
+        expirations=["2026-09-18"],
+    )["missing_expirations"] == ["2026-09-18"]
 
 
 def test_success_empty_marks_rv_not_applicable_without_provider_call(

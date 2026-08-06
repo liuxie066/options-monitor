@@ -105,7 +105,9 @@ def test_strategy_bounds_coverage_requires_rv_when_requested(tmp_path: Path) -> 
                 "expiration": "2026-06-19",
                 "dte": 30,
                 "strike": 80,
-                "realized_volatility_estimate": 0.24,
+                "term_matched_rv": 0.24,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
             },
         ],
     )
@@ -368,7 +370,9 @@ def test_fetch_plan_coverage_requires_rv_for_short_vol_spec(tmp_path: Path) -> N
                 "dte": 30,
                 "strike": strike,
                 "spot": 100.0,
-                "realized_volatility_estimate": 0.24,
+                "term_matched_rv": 0.24,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
             }
             for strike in (80, 90, 100)
         ]
@@ -449,7 +453,16 @@ def test_required_rv_coverage_requires_every_value_to_be_finite_and_positive() -
         "strike": 100,
     }
     for invalid in (None, float("nan"), float("inf"), 0.0, -0.1, "bad"):
-        frame = pd.DataFrame([{**base_row, "realized_volatility_estimate": invalid}])
+        frame = pd.DataFrame(
+            [
+                {
+                    **base_row,
+                    "term_matched_rv": invalid,
+                    "term_matched_rv_status": "ok",
+                    "term_matched_rv_reason": None,
+                }
+            ]
+        )
         assert required_data_frame_covers_strategy_bounds(
             df=frame,
             option_types="put",
@@ -458,8 +471,19 @@ def test_required_rv_coverage_requires_every_value_to_be_finite_and_positive() -
 
     mixed = pd.DataFrame(
         [
-            {**base_row, "realized_volatility_estimate": 0.24},
-            {**base_row, "strike": 105, "realized_volatility_estimate": 0.0},
+            {
+                **base_row,
+                "term_matched_rv": 0.24,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+            },
+            {
+                **base_row,
+                "strike": 105,
+                "term_matched_rv": 0.0,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+            },
         ]
     )
     assert required_data_frame_covers_strategy_bounds(
@@ -467,3 +491,38 @@ def test_required_rv_coverage_requires_every_value_to_be_finite_and_positive() -
         option_types="put",
         require_realized_volatility=True,
     ) is False
+
+
+def test_required_rv_coverage_accepts_typed_expiry_scoped_unavailability() -> None:
+    from src.application.required_data_coverage import (
+        required_data_frame_covers_strategy_bounds,
+    )
+
+    frame = pd.DataFrame(
+        [
+            {
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "strike": 100,
+                "term_matched_rv": 0.24,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+            },
+            {
+                "option_type": "put",
+                "expiration": "2026-07-17",
+                "dte": 58,
+                "strike": 100,
+                "term_matched_rv": None,
+                "term_matched_rv_status": "data_unavailable",
+                "term_matched_rv_reason": "qfq_history_session_gap",
+            },
+        ]
+    )
+
+    assert required_data_frame_covers_strategy_bounds(
+        df=frame,
+        option_types="put",
+        require_realized_volatility=True,
+    )

@@ -97,25 +97,40 @@ def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:
 def _required_realized_volatility_error(
     snapshot: RealizedVolatilitySnapshot,
     *,
-    dtes: list[int | None],
+    expirations: list[str],
 ) -> dict[str, Any] | None:
     status = str(snapshot.status or "").strip().lower()
-    missing_dtes = [
-        dte
-        for dte in dtes
-        if dte is None
-        or snapshot.to_row_fields(dte=dte).get("realized_volatility_estimate") is None
+    requested_expirations = sorted(set(expirations))
+    unbound_expirations = [
+        expiration
+        for expiration in requested_expirations
+        if snapshot.term_matched.get(expiration) is None
     ]
-    if status == "ok" and not missing_dtes:
+    unavailable_expirations = [
+        expiration
+        for expiration in requested_expirations
+        if snapshot.term_matched.get(expiration) is not None
+        and (
+            snapshot.term_matched[expiration].status != "ok"
+            or snapshot.term_matched[expiration].term_matched_rv is None
+        )
+    ]
+    missing_expirations = [*unbound_expirations, *unavailable_expirations]
+    if status == "ok" and not missing_expirations:
+        return None
+    if status == "partial" and not unbound_expirations and unavailable_expirations:
         return None
     reason = str(snapshot.reason or "").strip()
-    detail = reason or f"status={status or 'missing'}, missing_dtes={missing_dtes!r}"
+    detail = reason or (
+        f"status={status or 'missing'}, "
+        f"missing_expirations={missing_expirations!r}"
+    )
     return {
         "stage": "realized_volatility",
         "error_code": REQUIRED_REALIZED_VOLATILITY_INCOMPLETE,
         "message": f"required realized volatility is incomplete: {detail}",
         "realized_volatility_status": status or "missing",
-        "missing_dtes": missing_dtes,
+        "missing_expirations": missing_expirations,
     }
 
 
@@ -664,6 +679,9 @@ def fetch_symbol_request(
                     gateway,
                     underlier_code=u.code,
                     trading_day=today,
+                    market=u.market,
+                    expirations=expirations,
+                    base_dir=effective_base_dir,
                 )
             else:
                 rv_snapshot = _no_contracts_realized_volatility()
@@ -759,7 +777,7 @@ def fetch_symbol_request(
                 'volume': vol,
                 'open_interest': oi,
                 'implied_volatility': iv,
-                **rv_snapshot.to_row_fields(dte=dte),
+                **rv_snapshot.to_row_fields(dte=dte, expiration=exp),
                 'in_the_money': None,
                 'currency': u.currency,
                 'otm_pct': None,
@@ -797,7 +815,7 @@ def fetch_symbol_request(
         rv_error = (
             _required_realized_volatility_error(
                 rv_snapshot,
-                dtes=[to_float(row.get("dte")) for row in rows],
+                expirations=[str(row.get("expiration") or "") for row in rows],
             )
             if request.include_realized_volatility and option_codes
             else None
