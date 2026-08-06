@@ -203,6 +203,11 @@ def ensure_required_data(
                 chain_cache_force_refresh=False,
                 opend_fetch_config=opend_fetch_config,
                 spot_override=fetch_plan.spot_reference,
+                underlier_observation=(
+                    fetch_plan.underlier_observation.to_dict()
+                    if fetch_plan.underlier_observation is not None
+                    else None
+                ),
             )
             for spec in fetch_plan.merged_specs
         ]

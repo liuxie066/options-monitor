@@ -69,11 +69,24 @@ REQUIRED_DATA_COLUMNS = [
     "contract_symbol",
     "strike",
     "spot",
+    "spot_update_time",
+    "spot_observed_at_utc",
+    "spot_age_seconds",
+    "market_state",
+    "underlier_sec_status",
+    "underlier_suspension",
+    "underlier_observation_status",
+    "underlier_observation_reason_code",
     "bid",
     "ask",
     "last_price",
     "mid",
     "quote_update_time",
+    "bid_update_time",
+    "ask_update_time",
+    "quote_observed_at_utc",
+    "quote_age_seconds",
+    "price_tick",
     "volume",
     "open_interest",
     "implied_volatility",
@@ -85,7 +98,16 @@ REQUIRED_DATA_COLUMNS = [
     "currency",
     "otm_pct",
     "delta",
+    "option_standard_type",
+    "stock_owner",
+    "stock_type",
+    "option_sec_status",
+    "option_suspension",
+    "chain_multiplier",
+    "snapshot_multiplier",
     "multiplier",
+    "opening_contract_status",
+    "opening_contract_reason_codes",
 ]
 
 
@@ -753,6 +775,19 @@ def _validate_raw_underlier_binding(
             "scope_identity_mismatch: required-data payload underlier identity "
             "mismatch"
         )
+    fetch_plan = contract.get("fetch_plan")
+    expected_observation = (
+        fetch_plan.get("underlier_observation")
+        if isinstance(fetch_plan, Mapping)
+        else None
+    )
+    if expected_observation is not None:
+        meta = raw_payload.get("meta")
+        observed = meta.get("underlier_observation") if isinstance(meta, Mapping) else None
+        if observed != expected_observation:
+            raise PositionAdviceSourceError(
+                "scope_identity_mismatch: required-data underlier observation mismatch"
+            )
     return expected_underlier
 
 

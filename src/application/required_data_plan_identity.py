@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.domain.fetch_source import normalize_fetch_source
 from domain.domain.symbol_identity import resolve_symbol_identity
+from src.application.opening_quote_evidence import OpeningUnderlierObservation
 
 
 REQUIRED_DATA_EXPECTED_FETCH_CONTRACT_SCHEMA = (
@@ -193,6 +194,28 @@ def validate_required_data_expected_fetch_contract(
         plan_payload.get("spot_reference"),
         field="required-data expected spot reference",
     )
+    raw_underlier_observation = plan_payload.get("underlier_observation")
+    if raw_underlier_observation is not None:
+        if not isinstance(raw_underlier_observation, Mapping):
+            raise ValueError("required-data underlier observation is invalid")
+        try:
+            underlier_observation = OpeningUnderlierObservation.from_mapping(
+                raw_underlier_observation
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "required-data underlier observation is invalid"
+            ) from exc
+        symbol_identity = resolve_symbol_identity(symbol)
+        if (
+            symbol_identity is None
+            or underlier_observation.code != symbol_identity.futu_code
+            or underlier_observation.market != symbol_identity.market
+            or underlier_observation.last_price != spot_reference
+        ):
+            raise ValueError(
+                "required-data underlier observation contradicts fetch plan"
+            )
     top_level_side_plans = plan_payload.get("side_plans")
     if not isinstance(top_level_side_plans, list) or any(
         not isinstance(item, Mapping) for item in top_level_side_plans

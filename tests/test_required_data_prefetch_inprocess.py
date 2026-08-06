@@ -243,13 +243,18 @@ def _strict_success_rows_for_fetch(
                         "spot": spot_value,
                     }
                 )
+    payload_meta = dict(meta or {})
+    if fetch_kwargs.get("underlier_observation") is not None:
+        payload_meta["underlier_observation"] = dict(
+            fetch_kwargs["underlier_observation"]  # type: ignore[arg-type]
+        )
     return _strict_success_rows_payload(
         symbol,
         rows,
         trading_date=trading_date.isoformat(),
         host=str(fetch_kwargs.get("host") or "127.0.0.1"),
         port=int(fetch_kwargs.get("port") or 11111),
-        meta=meta,
+        meta=payload_meta,
     )
 
 

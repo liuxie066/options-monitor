@@ -43,9 +43,14 @@ from src.application.opend_fetch_config import OpenDFetchLimits
 from src.application.opend_market_snapshot_fetching import (
     MarketSnapshotFetchResult,
     fetch_option_snapshots,
-    get_spot_opend,
+    get_underlier_observation_opend,
 )
-from src.application.opend_normalize import normalize_iv, normalize_opend_option_type
+from src.application.opend_normalize import normalize_opend_option_type
+from src.application.opening_quote_evidence import (
+    OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+    OpeningUnderlierObservation,
+    normalize_option_observation,
+)
 from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
@@ -63,10 +68,13 @@ def to_float(v):
 
 
 def calc_mid(bid, ask, last_price=None):
-    if bid is not None and ask is not None and bid > 0 and ask > 0:
+    if (
+        bid is not None
+        and ask is not None
+        and bid > 0
+        and ask >= bid
+    ):
         return round((bid + ask) / 2, 6)
-    if last_price is not None and last_price > 0:
-        return round(last_price, 6)
     return None
 
 
@@ -279,17 +287,6 @@ def _resolve_request_trading_date(
     return parsed
 
 
-def _safe_int(x):
-    try:
-        if x is None:
-            return None
-        if isinstance(x, float) and math.isnan(x):
-            return None
-        return int(x)
-    except Exception:
-        return None
-
-
 def _pick_col(row: Any, *cands: str):
     # row can be a pandas Series or a plain dict (we prefer dicts for memory efficiency)
     try:
@@ -326,6 +323,7 @@ class FetchSymbolRequest:
     host: str = '127.0.0.1'
     port: int = 11111
     spot_override: float | None = None
+    underlier_observation: dict[str, Any] | None = None
     fetch_spot_if_missing: bool = True
     base_dir: Path | None = None
     option_types: str = 'put,call'
@@ -378,7 +376,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, underlier_observation: dict[str, Any] | None = None, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -386,6 +384,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             host=host,
             port=port,
             spot_override=spot_override,
+            underlier_observation=underlier_observation,
             fetch_spot_if_missing=fetch_spot_if_missing,
             base_dir=base_dir,
             option_types=option_types,
@@ -479,6 +478,8 @@ def fetch_symbol_request(
     spot_fetch_meta: dict[str, Any] = {
         "spot_snapshot_opend_calls": 0,
         "spot_snapshot_requested_codes": 0,
+        "spot_market_state_opend_calls": 0,
+        "spot_market_state_requested_codes": 0,
     }
     rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
     if external_gateway:
@@ -491,15 +492,27 @@ def fetch_symbol_request(
         )
 
     try:
-        spot = spot_override
-
-        # Spot policy:
-        # - HK/CN: try OpenD snapshot (usually available)
-        # - US: also rely on OpenD only; if quote right is missing, keep spot as None
-        if spot is None and request.fetch_spot_if_missing:
-            spot = get_spot_opend(
+        underlier_observation: OpeningUnderlierObservation
+        if request.underlier_observation is not None:
+            underlier_observation = OpeningUnderlierObservation.from_mapping(
+                request.underlier_observation
+            )
+            if (
+                underlier_observation.code != u.code
+                or underlier_observation.market != u.market
+            ):
+                raise ValueError("underlier observation identity mismatch")
+            if (
+                spot_override is not None
+                and underlier_observation.last_price is not None
+                and float(spot_override) != float(underlier_observation.last_price)
+            ):
+                raise ValueError("spot override contradicts underlier observation")
+        elif spot_override is None and request.fetch_spot_if_missing:
+            underlier_observation = get_underlier_observation_opend(
                 gateway,
                 u.code,
+                market=u.market,
                 base_dir=effective_base_dir,
                 snapshot_max_wait_sec=snapshot_limit.max_wait_sec,
                 snapshot_window_sec=snapshot_limit.window_sec,
@@ -508,6 +521,22 @@ def fetch_symbol_request(
                 rate_limited_call=rate_limited_opend_call,
                 metrics=spot_fetch_meta,
             )
+        else:
+            underlier_observation = OpeningUnderlierObservation(
+                schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+                code=u.code,
+                market=u.market,
+                last_price=to_float(spot_override),
+                update_time=None,
+                observed_at_utc=None,
+                age_seconds=None,
+                market_state=None,
+                sec_status=None,
+                suspension=None,
+                status="data_unavailable",
+                reason_code="underlier_observation_unattested",
+            )
+        spot = underlier_observation.last_price
 
         # Trading-date anchor for DTE / cache freshness.
         today = _resolve_request_trading_date(
@@ -588,6 +617,9 @@ def fetch_symbol_request(
                     'rate_gate_wait_sec': float(fetch_meta.get('rate_gate_wait_sec') or 0.0),
                     'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
                     'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
+                    'spot_market_state_opend_calls': int(spot_fetch_meta.get('spot_market_state_opend_calls') or 0),
+                    'spot_market_state_requested_codes': int(spot_fetch_meta.get('spot_market_state_requested_codes') or 0),
+                    'underlier_observation': underlier_observation.to_dict(),
                     **_snapshot_completeness_meta(None, empty_complete=(source_outcome == "success_empty")),
                     'realized_volatility': rv_snapshot.to_meta(),
                     'source_observed_at': fetch_meta.get('source_observed_at'),
@@ -663,6 +695,10 @@ def fetch_symbol_request(
 
         chain_columns = {str(column): idx for idx, column in enumerate(chain.columns)}
         for r in chain.itertuples(index=False, name=None):
+            chain_record = {
+                column: _tuple_col(r, chain_columns, column)
+                for column in chain_columns
+            }
             opt_code = str(_tuple_col(r, chain_columns, 'code'))
             exp = str(_tuple_col(r, chain_columns, 'expiration'))
             try:
@@ -682,27 +718,22 @@ def fetch_symbol_request(
                     option_type = 'put'
 
             srow = snap_map.get(opt_code)
-            # srow is a dict of minimal snapshot fields
-            last_price = to_float(_pick_col(srow, 'last_price')) if srow is not None else None
-            bid = to_float(_pick_col(srow, 'bid_price', 'bid')) if srow is not None else None
-            ask = to_float(_pick_col(srow, 'ask_price', 'ask')) if srow is not None else None
-            vol = to_float(_pick_col(srow, 'volume')) if srow is not None else None
-
-            # Option-specific columns may be prefixed in market_snapshot
-            oi = _pick_col(srow, 'option_open_interest', 'open_interest', 'net_open_interest') if srow is not None else None
-            oi = to_float(oi)
-            iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
-            iv = to_float(iv)
-            iv = normalize_iv(iv)
-            delta = _pick_col(srow, 'option_delta', 'delta') if srow is not None else None
-            delta = to_float(delta)
-
-            # Prefer multiplier from snapshot if present (more authoritative), fallback to chain lot_size.
-            snap_mult = _safe_int(_pick_col(srow, 'option_contract_multiplier', 'option_contract_size', 'lot_size')) if srow is not None else None
-
-            # OpenD provides lot_size in option_chain; for stock options this is usually the contract multiplier.
-            lot_size = _safe_int(_tuple_col(r, chain_columns, 'lot_size'))
-            multiplier = snap_mult or lot_size
+            option_observation = normalize_option_observation(
+                expected_owner=u.code,
+                market=u.market,
+                currency=u.currency,
+                chain_row=chain_record,
+                snapshot_row=srow,
+                underlier_observation=underlier_observation,
+            )
+            last_price = option_observation.last_price
+            bid = option_observation.bid
+            ask = option_observation.ask
+            vol = option_observation.volume
+            oi = option_observation.open_interest
+            iv = option_observation.implied_volatility
+            delta = option_observation.delta
+            multiplier = option_observation.multiplier
 
             row = {
                 'symbol': symbol,
@@ -713,6 +744,14 @@ def fetch_symbol_request(
                 'contract_symbol': opt_code,  # keep column name, value becomes futu option code
                 'strike': strike,
                 'spot': spot,
+                'spot_update_time': underlier_observation.update_time,
+                'spot_observed_at_utc': underlier_observation.observed_at_utc,
+                'spot_age_seconds': underlier_observation.age_seconds,
+                'market_state': underlier_observation.market_state,
+                'underlier_sec_status': underlier_observation.sec_status,
+                'underlier_suspension': underlier_observation.suspension,
+                'underlier_observation_status': underlier_observation.status,
+                'underlier_observation_reason_code': underlier_observation.reason_code,
                 'bid': bid,
                 'ask': ask,
                 'last_price': last_price,
@@ -727,9 +766,21 @@ def fetch_symbol_request(
                 'delta': delta,
                 # contract multiplier (shares per contract)
                 'multiplier': multiplier,
-                # Preserve OpenD's raw business observation time. Candidate
-                # freshness must not substitute fetch completion time.
-                'quote_update_time': _pick_col(srow, 'update_time') if srow is not None else None,
+                'quote_update_time': option_observation.quote_update_time,
+                'bid_update_time': option_observation.quote_update_time,
+                'ask_update_time': option_observation.quote_update_time,
+                'quote_observed_at_utc': option_observation.quote_observed_at_utc,
+                'quote_age_seconds': option_observation.quote_age_seconds,
+                'price_tick': option_observation.price_tick,
+                'option_standard_type': option_observation.option_standard_type,
+                'stock_owner': option_observation.stock_owner,
+                'stock_type': option_observation.stock_type,
+                'option_sec_status': option_observation.sec_status,
+                'option_suspension': option_observation.suspension,
+                'chain_multiplier': option_observation.chain_multiplier,
+                'snapshot_multiplier': option_observation.snapshot_multiplier,
+                'opening_contract_status': option_observation.status,
+                'opening_contract_reason_codes': list(option_observation.reason_codes),
             }
 
             if strike is not None and spot is not None and spot > 0 and option_type in ('put','call'):
@@ -837,6 +888,9 @@ def fetch_symbol_request(
                 'rate_gate_wait_sec': float(fetch_result_meta.get('rate_gate_wait_sec') or 0.0),
                 'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
                 'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
+                'spot_market_state_opend_calls': int(spot_fetch_meta.get('spot_market_state_opend_calls') or 0),
+                'spot_market_state_requested_codes': int(spot_fetch_meta.get('spot_market_state_requested_codes') or 0),
+                'underlier_observation': underlier_observation.to_dict(),
                 'option_codes': len(option_codes),
                 **_snapshot_completeness_meta(snapshot_result),
                 'snapshot_opend_call_count': int(snapshot_opend_call_count),
