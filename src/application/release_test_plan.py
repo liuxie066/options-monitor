@@ -23,19 +23,6 @@ class TestRule:
 
 TEST_RULES: tuple[TestRule, ...] = (
     TestRule(
-        name="event_source",
-        patterns=(
-            "src/application/events/**",
-            "src/application/event_risk_filter.py",
-            "src/interfaces/cli/event_source_ops.py",
-            "tests/test_event_source_futu.py",
-        ),
-        reason="event source or event-risk files changed",
-        commands=(
-            "./.venv/bin/python -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py",
-        ),
-    ),
-    TestRule(
         name="config",
         patterns=(
             "src/application/config_*.py",

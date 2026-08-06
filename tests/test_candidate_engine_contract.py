@@ -1,885 +1,218 @@
 from __future__ import annotations
 
-
-def test_candidate_engine_stage_order_matches_strategy_contract() -> None:
-    from domain.domain.engine import (
-        CANDIDATE_STAGE_ORDER,
-        STAGE_HARD_CONSTRAINTS,
-        STAGE_INPUT_NORMALIZATION,
-        STAGE_RANKING,
-        STAGE_RETURN_FLOOR,
-        STAGE_RISK_FILTER,
-    )
-
-    assert CANDIDATE_STAGE_ORDER == (
-        STAGE_INPUT_NORMALIZATION,
-        STAGE_HARD_CONSTRAINTS,
-        STAGE_RETURN_FLOOR,
-        STAGE_RISK_FILTER,
-        STAGE_RANKING,
-    )
-
-
-def test_candidate_engine_builds_reject_and_decision_payload() -> None:
-    from domain.domain.engine import (
-        SCHEMA_KIND_CANDIDATE_DECISION,
-        STAGE_RETURN_FLOOR,
-        build_candidate_decision,
-        build_candidate_reject,
-    )
-
-    reject = build_candidate_reject(
-        stage=STAGE_RETURN_FLOOR,
-        reason="return_annualized",
-        message="annualized return below threshold",
-        metric_value=0.08,
-        threshold=0.1,
-    )
-    payload = build_candidate_decision(
-        mode="put",
-        symbol="nvda",
-        contract_symbol="NVDA_TEST",
-        accepted=False,
-        rejects=[reject],
-        score=0.08,
-        rank_key={"annualized_return": 0.08},
-    )
-
-    assert payload["schema_kind"] == SCHEMA_KIND_CANDIDATE_DECISION
-    assert payload["mode"] == "put"
-    assert payload["symbol"] == "NVDA"
-    assert payload["accepted"] is False
-    assert payload["rejects"] == [reject]
-    assert payload["score"] == 0.08
-    assert payload["rank_key"] == {"annualized_return": 0.08}
-
-
-def test_candidate_engine_rejects_unknown_stage_reason_and_mode() -> None:
-    from domain.domain.engine import build_candidate_decision, build_candidate_reject
-
-    try:
-        build_candidate_reject(stage="unknown", reason="return_annualized")
-        raise AssertionError("expected unsupported stage")
-    except ValueError as e:
-        assert "unsupported candidate reject stage" in str(e)
-
-    try:
-        build_candidate_reject(stage="stage2_return_floor", reason="unknown")
-        raise AssertionError("expected unsupported reason")
-    except ValueError as e:
-        assert "unsupported candidate reject reason" in str(e)
-
-    try:
-        build_candidate_decision(mode="straddle", symbol="NVDA", accepted=True)
-        raise AssertionError("expected unsupported mode")
-    except ValueError as e:
-        assert "unsupported candidate strategy mode" in str(e)
-
-
-def test_candidate_engine_stage0_normalizes_valid_input() -> None:
-    from domain.domain.engine import evaluate_candidate_input
-
-    payload = evaluate_candidate_input(
-        {
-            "symbol": "nvda",
-            "option_type": "PUT",
-            "expiration": "2026-06-18",
-            "dte": "45",
-            "spot": "150.25",
-            "strike": "140",
-            "mid": "2.35",
-            "multiplier": "100",
-            "delta": "-0.21",
-            "currency": "usd",
-            "contract_symbol": "NVDA_TEST",
-        },
-        mode="put",
-    )
-
-    assert payload["accepted"] is True
-    assert payload["rejects"] == []
-    normalized = payload["normalized_input"]
-    assert normalized["symbol"] == "NVDA"
-    assert normalized["option_type"] == "put"
-    assert normalized["dte"] == 45
-    assert normalized["spot"] == 150.25
-    assert normalized["strike"] == 140.0
-    assert normalized["mid"] == 2.35
-    assert normalized["multiplier"] == 100.0
-    assert normalized["delta"] == -0.21
-    assert normalized["currency"] == "USD"
-
-
-def test_candidate_engine_stage0_rejects_missing_and_mismatched_input() -> None:
-    from domain.domain.engine import STAGE_INPUT_NORMALIZATION, evaluate_candidate_input
-
-    payload = evaluate_candidate_input(
-        {
-            "symbol": "AAPL",
-            "option_type": "call",
-            "expiration": "2026-06-18",
-            "dte": "30",
-            "spot": "190",
-            "strike": "",
-            "mid": "1.25",
-        },
-        mode="put",
-        extra_required_fields=("avg_cost",),
-    )
-
-    assert payload["accepted"] is False
-    rejects = payload["rejects"]
-    assert len(rejects) == 2
-    assert rejects[0]["stage"] == STAGE_INPUT_NORMALIZATION
-    assert rejects[0]["reason"] == "input_missing"
-    assert rejects[0]["threshold"] == ["strike", "multiplier", "avg_cost"]
-    assert rejects[1]["reason"] == "input_missing"
-    assert rejects[1]["metric_value"] == "call"
-    assert rejects[1]["threshold"] == "put"
-
-
-def test_candidate_engine_stage0_rejects_non_finite_and_crossed_quotes() -> None:
-    from domain.domain.engine import evaluate_candidate_input
-
-    base = {
-        "symbol": "NVDA",
-        "option_type": "put",
-        "expiration": "2026-06-18",
-        "dte": 30,
-        "spot": 150,
-        "strike": 140,
-        "mid": 2.35,
-        "multiplier": 100,
-    }
-
-    non_finite = evaluate_candidate_input(
-        {**base, "bid": float("inf"), "ask": 2.4},
-        mode="put",
-    )
-    assert non_finite["accepted"] is False
-    assert non_finite["rejects"][0]["reason"] == "input_invalid"
-    assert non_finite["rejects"][0]["threshold"] == ["bid"]
-
-    crossed = evaluate_candidate_input(
-        {**base, "bid": 2.5, "ask": 2.4},
-        mode="put",
-    )
-    assert crossed["accepted"] is False
-    assert crossed["rejects"][0]["reason"] == "input_invalid"
-    assert crossed["rejects"][0]["threshold"] == "ask >= bid"
-
-
-def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
-    from domain.domain.engine import STAGE_HARD_CONSTRAINTS, evaluate_candidate_hard_constraints
-
-    payload = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-06-18",
-            "dte": "95",
-            "spot": "150",
-            "strike": "155",
-            "mid": "2.1",
-            "multiplier": "100",
-        },
-        mode="put",
-        max_dte=90,
-        max_strike=140,
-        put_cash_required=15500,
-        put_cash_free=12000,
-        put_cash_capacity_reason="known_cash_only_cross_currency_fx_stale:CNY",
-    )
-
-    assert payload["accepted"] is False
-    reasons = [r["reason"] for r in payload["rejects"]]
-    assert reasons == ["hard_dte", "hard_strike", "hard_capacity_put"]
-    assert all(r["stage"] == STAGE_HARD_CONSTRAINTS for r in payload["rejects"])
-    assert payload["rejects"][-1]["message"].endswith(
-        "known_cash_only_cross_currency_fx_stale:CNY"
-    )
-
-
-def test_candidate_engine_stage1_allows_atm_put_and_rejects_itm_put() -> None:
-    from domain.domain.engine import evaluate_candidate_hard_constraints
-
-    atm = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-06-18",
-            "dte": "30",
-            "spot": "100",
-            "strike": "100",
-            "mid": "1.2",
-            "multiplier": "100",
-        },
-        mode="put",
-    )
-
-    assert atm["accepted"] is True
-
-    payload = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "expiration": "2026-06-18",
-            "dte": "30",
-            "spot": "100",
-            "strike": "101",
-            "mid": "1.2",
-            "multiplier": "100",
-        },
-        mode="put",
-        max_strike=120,
-    )
-    assert payload["accepted"] is False
-    assert [r["reason"] for r in payload["rejects"]] == ["hard_strike"]
-    assert payload["rejects"][0]["message"] == "strike above maximum"
-    assert payload["rejects"][0]["threshold"]["effective_max_strike"] == 100.0
-
-
-def test_candidate_engine_stage1_rejects_call_hard_constraints() -> None:
-    from domain.domain.engine import evaluate_candidate_hard_constraints
-
-    payload = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "AAPL",
-            "option_type": "call",
-            "expiration": "2026-06-18",
-            "dte": "30",
-            "spot": "200",
-            "strike": "204",
-            "mid": "1.1",
-            "multiplier": "100",
-        },
-        mode="call",
-        min_strike=210,
-        call_covered_contracts_available=0,
-    )
-
-    assert payload["accepted"] is False
-    rejects = payload["rejects"]
-    assert [r["reason"] for r in rejects] == ["hard_strike", "hard_capacity_call"]
-    assert rejects[0]["message"] == "strike below minimum"
-    assert rejects[1]["threshold"] == 1
-
-
-def test_candidate_engine_stage1_rejects_itm_call_by_spot_floor() -> None:
-    from domain.domain.engine import evaluate_candidate_hard_constraints
-
-    payload = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "AAPL",
-            "option_type": "call",
-            "expiration": "2026-06-18",
-            "dte": "30",
-            "spot": "200",
-            "strike": "199",
-            "mid": "1.1",
-            "multiplier": "100",
-        },
-        mode="call",
-        min_strike=180,
-    )
-
-    assert payload["accepted"] is False
-    assert [r["reason"] for r in payload["rejects"]] == ["hard_strike"]
-    assert payload["rejects"][0]["threshold"]["effective_min_strike"] == 200.0
-
-
-def test_candidate_engine_stage1_stops_when_stage0_fails() -> None:
-    from domain.domain.engine import evaluate_candidate_hard_constraints
-
-    payload = evaluate_candidate_hard_constraints(
-        {
-            "symbol": "AAPL",
-            "option_type": "put",
-            "expiration": "2026-06-18",
-            "dte": "",
-            "spot": "200",
-            "strike": "210",
-            "mid": "1.1",
-        },
-        mode="put",
-        max_dte=30,
-        max_strike=100,
-        put_cash_required=999999,
-        put_cash_free=1,
-    )
-
-    assert payload["accepted"] is False
-    assert len(payload["rejects"]) == 1
-    assert payload["rejects"][0]["reason"] == "input_missing"
-    assert payload["rejects"][0]["threshold"] == ["dte", "multiplier"]
-
-
-def _accepted_base_candidate(mode: str = "put") -> dict:
-    from domain.domain.engine import evaluate_candidate_hard_constraints
-
-    option_type = mode
-    strike = "180" if mode == "put" else "220"
-    return evaluate_candidate_hard_constraints(
-        {
-            "symbol": "TSLA",
-            "option_type": option_type,
-            "expiration": "2026-06-18",
-            "dte": "45",
-            "spot": "200",
-            "strike": strike,
-            "mid": "3",
-            "multiplier": "100",
-        },
-        mode=mode,
-        min_dte=20,
-        max_dte=90,
-        put_cash_required=18000,
-        put_cash_free=20000,
-        call_covered_contracts_available=1,
-    )
-
-
-def test_candidate_engine_stage2_rejects_return_floor() -> None:
-    from domain.domain.engine import evaluate_candidate_return_floor
-
-    put = evaluate_candidate_return_floor(
-        _accepted_base_candidate("put"),
-        min_annualized_return=0.1,
-        min_net_income=100,
-        annualized_return=0.08,
-        net_income=90,
-    )
-    assert put["accepted"] is False
-    assert [r["reason"] for r in put["rejects"]] == ["return_annualized", "return_net_income"]
-    assert all(r["stage"] == "stage2_return_floor" for r in put["rejects"])
-
-    call = evaluate_candidate_return_floor(
-        _accepted_base_candidate("call"),
-        min_annualized_return=0.1,
-        min_net_income=100,
-        annualized_return=0.11,
-        net_income=90,
-    )
-    assert call["accepted"] is False
-    assert [r["reason"] for r in call["rejects"]] == ["return_net_income"]
-
-
-def test_candidate_engine_stage2_rejects_missing_threshold_metrics() -> None:
-    from domain.domain.engine import evaluate_candidate_return_floor
-
-    payload = evaluate_candidate_return_floor(
-        _accepted_base_candidate("call"),
-        min_annualized_return=0.1,
-        min_net_income=100,
-    )
-
-    assert payload["accepted"] is False
-    assert [r["reason"] for r in payload["rejects"]] == [
-        "return_annualized",
-        "return_net_income",
-    ]
-
-
-def test_candidate_engine_stage3_risk_warn_does_not_reject_but_reject_mode_does() -> None:
-    from domain.domain.engine import evaluate_candidate_risk_filter
-
-    warn = evaluate_candidate_risk_filter(
-        _accepted_base_candidate("put"),
-        min_open_interest=50,
-        min_volume=10,
-        max_spread_ratio=0.3,
-        open_interest=60,
-        volume=11,
-        spread_ratio=0.2,
-        event_flag=True,
-        event_mode="warn",
-    )
-    assert warn["accepted"] is True
-    assert [r["reason"] for r in warn["rejects"]] == ["risk_event_warn"]
-
-    reject = evaluate_candidate_risk_filter(
-        _accepted_base_candidate("put"),
-        min_open_interest=50,
-        min_volume=10,
-        max_spread_ratio=0.3,
-        open_interest=20,
-        volume=5,
-        spread_ratio=0.4,
-        event_flag=True,
-        event_mode="reject",
-    )
-    assert reject["accepted"] is False
-    assert [r["reason"] for r in reject["rejects"]] == [
-        "risk_open_interest",
-        "risk_volume",
-        "risk_spread",
-        "risk_event_reject",
-    ]
-
-
-def test_candidate_engine_stage3_rejects_missing_spread_when_threshold_enabled() -> None:
-    from domain.domain.engine import evaluate_candidate_risk_filter
-
-    payload = evaluate_candidate_risk_filter(
-        _accepted_base_candidate("put"),
-        max_spread_ratio=0.3,
-        spread_ratio=None,
-    )
-
-    assert payload["accepted"] is False
-    assert [r["reason"] for r in payload["rejects"]] == ["risk_spread"]
-    assert payload["rejects"][0]["message"] == "spread ratio unavailable"
-    assert payload["rejects"][0]["metric_value"] is None
-    assert payload["rejects"][0]["threshold"] == 0.3
-
-
-def test_candidate_engine_stage4_rank_keys_match_put_call_policy() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    put_rows = [
-        {"contract_symbol": "A", "period_net_return_on_cash_basis": 0.03, "annualized_net_return_on_cash_basis": 0.12, "net_income": 100, "delta": -0.10},
-        {"contract_symbol": "B", "period_net_return_on_cash_basis": 0.02, "annualized_net_return_on_cash_basis": 0.10, "net_income": 200, "delta": -0.22},
-    ]
-    assert [r["contract_symbol"] for r in rank_candidate_rows(put_rows, mode="put")] == ["A", "B"]
-
-    call_rows = [
-        {"contract_symbol": "C1", "annualized_net_premium_return": 0.10, "if_exercised_total_return": 0.20, "net_income": 100, "delta": 0.40},
-        {"contract_symbol": "C2", "annualized_net_premium_return": 0.10, "if_exercised_total_return": 0.21, "net_income": 90, "delta": 0.28},
-    ]
-    assert [r["contract_symbol"] for r in rank_candidate_rows(call_rows, mode="call")] == ["C1", "C2"]
-
-
-def test_candidate_engine_strategy_score_keeps_legacy_default_components() -> None:
-    from domain.domain.engine import compute_candidate_strategy_score
-
-    score = compute_candidate_strategy_score(
-        mode="put",
-        annualized_return=0.12,
-        net_income=70,
-        spread_ratio=0.1,
-        open_interest=500,
-        volume=20,
-        delta=-0.2,
-        otm_pct=0.08,
-        dte=30,
-    )
-
-    assert round(score.total, 6) == round(0.12 + 70 * 1e-6, 6)
-    assert score.components["liquidity"] == 0.0
-    assert score.components["risk_distance"] == 0.0
-
-
-def test_candidate_engine_near_period_return_uses_liquidity_not_score_weights() -> None:
-    from domain.domain.engine import CandidateScoreWeights, rank_candidate_rows
-
-    rows = [
-        {
-            "contract_symbol": "HIGH_RETURN_WIDE",
-            "annualized_net_return_on_cash_basis": 0.120,
-            "net_income": 100,
-            "spread_ratio": 0.95,
-            "open_interest": 1,
-            "volume": 0,
-        },
-        {
-            "contract_symbol": "LOWER_RETURN_LIQUID",
-            "annualized_net_return_on_cash_basis": 0.115,
-            "net_income": 100,
-            "spread_ratio": 0.05,
-            "open_interest": 500,
-            "volume": 20,
-        },
-    ]
-
-    assert [r["contract_symbol"] for r in rank_candidate_rows(rows, mode="put")] == [
-        "LOWER_RETURN_LIQUID",
-        "HIGH_RETURN_WIDE",
-    ]
-    ranked = rank_candidate_rows(
-        rows,
-        mode="put",
-        score_weights=CandidateScoreWeights(liquidity=0.02),
-    )
-    assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
-
-
-def test_candidate_engine_path_risk_score_is_diagnostic_not_a_rank_override() -> None:
-    from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, rank_candidate_rows
-
-    rows = [
-        {
-            "contract_symbol": "HIGH_RIGHT_TAIL_COST",
-            "annualized_net_premium_return": 0.12,
-            "net_income": 100,
-            "call_gap_up_opportunity_cost_nav_pct": 0.02,
-        },
-        {
-            "contract_symbol": "LOW_RIGHT_TAIL_COST",
-            "annualized_net_premium_return": 0.12,
-            "net_income": 100,
-            "call_gap_up_opportunity_cost_nav_pct": 0.0,
-        },
-    ]
-    weights = CandidateScoreWeights(annualized_return=0.0, net_income=0.0, path_risk=1.0)
-
-    ranked = rank_candidate_rows(rows, mode="call", score_weights=weights)
-    high = build_candidate_rank_key(rows[0], mode="call", score_weights=weights)
-    low = build_candidate_rank_key(rows[1], mode="call", score_weights=weights)
-
-    assert [r["contract_symbol"] for r in ranked] == ["HIGH_RIGHT_TAIL_COST", "LOW_RIGHT_TAIL_COST"]
-    assert low["score_components"]["path_risk"] > high["score_components"]["path_risk"]
-
-
-def test_candidate_engine_selects_one_best_contract_per_symbol() -> None:
-    from domain.domain.engine import select_best_candidate_per_symbol
-
-    rows = [
-        {
-            "symbol": "NVDA",
-            "contract_symbol": "NVDA_HIGH",
-            "annualized_net_return_on_cash_basis": 0.20,
-            "breakeven": 95.0,
-            "spot": 110.0,
-        },
-        {
-            "symbol": "NVDA",
-            "contract_symbol": "NVDA_LOW",
-            "annualized_net_return_on_cash_basis": 0.18,
-            "breakeven": 90.0,
-            "spot": 110.0,
-        },
-        {
-            "symbol": "AAPL",
-            "contract_symbol": "AAPL_ONLY",
-            "annualized_net_return_on_cash_basis": 0.19,
-            "breakeven": 180.0,
-            "spot": 200.0,
-        },
-    ]
-
-    selected = select_best_candidate_per_symbol(rows, mode="put")
-
-    assert [row["contract_symbol"] for row in selected] == ["NVDA_LOW", "AAPL_ONLY"]
-
-
-def test_candidate_engine_uses_concentration_across_near_return_symbol_winners() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    rows = [
-        {
-            "contract_symbol": "HIGHER_RETURN",
-            "period_net_return_on_cash_basis": 0.021,
-            "annualized_net_return_on_cash_basis": 0.21,
-            "net_assignment_discount_pct": 0.01,
-            "symbol_concentration_after": 0.50,
-        },
-        {
-            "contract_symbol": "BETTER_DISCOUNT",
-            "period_net_return_on_cash_basis": 0.020,
-            "annualized_net_return_on_cash_basis": 0.20,
-            "net_assignment_discount_pct": 0.10,
-            "symbol_concentration_after": 0.10,
-        },
-        {
-            "contract_symbol": "LOWER_CONCENTRATION",
-            "period_net_return_on_cash_basis": 0.020,
-            "annualized_net_return_on_cash_basis": 0.20,
-            "net_assignment_discount_pct": 0.10,
-            "symbol_concentration_after": 0.05,
-        },
-    ]
-
-    ranked = rank_candidate_rows(rows, mode="put")
-
-    assert [row["contract_symbol"] for row in ranked] == [
-        "LOWER_CONCENTRATION",
-        "BETTER_DISCOUNT",
-        "HIGHER_RETURN",
-    ]
-
-
-def test_candidate_engine_explains_rank_score_components() -> None:
-    from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, explain_candidate_rank
-
+import pytest
+
+from domain.domain.engine import (
+    CANDIDATE_STAGE_ORDER,
+    build_candidate_reject,
+    evaluate_opening_candidate_policy,
+    explain_candidate_rank,
+    rank_candidate_rows,
+    select_best_candidate_per_symbol,
+)
+
+
+def _policy_row(*, mode: str = "put", **overrides):  # type: ignore[no-untyped-def]
     row = {
-        "symbol": "nvda",
-        "contract_symbol": "NVDA_PUT_100",
-        "option_type": "put",
-        "expiration": "2026-06-19",
-        "strike": 100,
-        "annualized_net_return_on_cash_basis": 0.12,
-        "net_income": 80,
-        "spread_ratio": 0.35,
-        "open_interest": 500,
-        "volume": 20,
-        "delta": -0.2,
-        "otm_pct": 0.08,
-        "dte": 30,
-    }
-    weights = CandidateScoreWeights(liquidity=0.02, risk_distance=0.01)
-
-    rank_key = build_candidate_rank_key(row, mode="put", score_weights=weights)
-    explanation = explain_candidate_rank(row, mode="put", score_weights=weights)
-
-    assert explanation["symbol"] == "NVDA"
-    assert explanation["contract_symbol"] == "NVDA_PUT_100"
-    assert explanation["strategy_score"] == rank_key["strategy_score"]
-    assert explanation["score_components"] == rank_key["score_components"]
-    assert explanation["score_inputs"]["annualized_return"] == 0.12
-    assert explanation["score_inputs"]["spread_ratio"] == 0.35
-    assert explanation["score_warnings"] == ["wide_spread"]
-    assert explanation["risk_notes"] == ["价差偏宽"]
-    assert explanation["primary_drivers"] == ["period_net_return_on_cash_basis"]
-    assert "持有期净收益" in explanation["primary_driver_labels"]
-    assert "持有期净收益" in explanation["rank_reason"]
-
-
-def test_sell_put_ranking_uses_period_return_before_annualized_return() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    rows = [
-        {
-            "symbol": "AAPL",
-            "contract_symbol": "SHORT_HIGH_ANNUAL",
-            "period_net_return_on_cash_basis": 0.025,
-            "annualized_net_return_on_cash_basis": 0.30,
-        },
-        {
-            "symbol": "NVDA",
-            "contract_symbol": "LONG_HIGH_PERIOD",
-            "period_net_return_on_cash_basis": 0.030,
-            "annualized_net_return_on_cash_basis": 0.15,
-        },
-    ]
-
-    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
-        "LONG_HIGH_PERIOD",
-        "SHORT_HIGH_ANNUAL",
-    ]
-
-
-def test_sell_put_within_symbol_near_return_ignores_concentration_and_volume() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    rows = [
-        {
-            "symbol": "NVDA",
-            "contract_symbol": "BETTER_DISCOUNT",
-            "period_net_return_on_cash_basis": 0.0200,
-            "net_assignment_discount_pct": 0.12,
-            "spread_ratio": 0.20,
-            "open_interest": None,
-            "volume": 0,
-            "symbol_concentration_after": 0.90,
-        },
-        {
-            "symbol": "NVDA",
-            "contract_symbol": "WORSE_DISCOUNT",
-            "period_net_return_on_cash_basis": 0.0215,
-            "net_assignment_discount_pct": 0.08,
-            "spread_ratio": 0.05,
-            "open_interest": 500,
-            "volume": 1000,
-            "symbol_concentration_after": 0.01,
-        },
-    ]
-
-    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
-        "BETTER_DISCOUNT",
-        "WORSE_DISCOUNT",
-    ]
-
-
-def test_sell_put_return_bands_are_anchored_to_current_max() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    rows = [
-        {"symbol": "NVDA", "contract_symbol": "TOP", "period_net_return_on_cash_basis": 0.0100, "net_assignment_discount_pct": 0.01},
-        {"symbol": "NVDA", "contract_symbol": "NEAR", "period_net_return_on_cash_basis": 0.0085, "net_assignment_discount_pct": 0.10},
-        {"symbol": "NVDA", "contract_symbol": "CHAIN_ONLY", "period_net_return_on_cash_basis": 0.0070, "net_assignment_discount_pct": 0.50},
-    ]
-
-    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
-        "NEAR",
-        "TOP",
-        "CHAIN_ONLY",
-    ]
-
-
-def test_sell_put_ranking_preserves_repeated_row_objects() -> None:
-    from domain.domain.engine import rank_candidate_rows
-
-    repeated = {
         "symbol": "NVDA",
-        "contract_symbol": "DUPLICATE",
-        "period_net_return_on_cash_basis": 0.01,
-        "net_assignment_discount_pct": 0.05,
-    }
-
-    ranked = rank_candidate_rows([repeated, repeated], mode="put")
-
-    assert ranked == [repeated, repeated]
-
-
-def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:
-    from domain.domain.engine import map_legacy_reject_rule, normalize_legacy_reject_log_row
-
-    try:
-        map_legacy_reject_rule("legacy_new_rule")
-        raise AssertionError("expected unsupported legacy reject rule")
-    except ValueError as e:
-        assert "unsupported legacy reject rule" in str(e)
-
-    try:
-        normalize_legacy_reject_log_row({"reject_rule": "legacy_new_rule"})
-        raise AssertionError("expected unsupported legacy reject rule")
-    except ValueError as e:
-        assert "unsupported legacy reject rule" in str(e)
-
-
-def _replacement_base_row() -> dict[str, object]:
-    return {
-        "symbol": "NVDA",
-        "option_type": "put",
+        "contract_symbol": f"NVDA-{mode}-100",
+        "option_type": mode,
         "expiration": "2026-09-18",
-        "dte": 45,
-        "spot": 120,
-        "strike": 100,
-        "bid": 1.9,
-        "ask": 2.1,
-        "mid": 2,
-        "multiplier": 100,
-        "open_interest": 500,
-        "volume": 50,
-        "spread_ratio": 0.1,
-        "currency": "USD",
-        "contract_symbol": "NVDA260918P00100000",
+        "dte": 43,
+        "spot": 110.0,
+        "strike": 100.0 if mode == "put" else 120.0,
+        "spread_ratio": 0.08,
+        "annualized_net_return_on_cash_basis": 0.12,
+        "annualized_net_premium_return": 0.12,
+        "period_net_return_on_cash_basis": 0.014,
+        "period_net_premium_return": 0.014,
+        "net_premium_cny": 700.0,
+        "iv_rv_ratio": 1.50,
+        "iv_minus_rv": 0.12,
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "max_new_contracts": 1,
+        "covered_contracts_available": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+def _reasons(decision: dict) -> set[str]:
+    return {str(item["reason"]) for item in decision["rejects"]}
+
+
+def test_candidate_engine_stage_contract_and_reject_payload_are_stable() -> None:
+    assert CANDIDATE_STAGE_ORDER == (
+        "stage0_input_normalization",
+        "stage1_hard_constraints",
+        "stage2_return_floor",
+        "stage3_risk_filter",
+        "stage4_ranking",
+    )
+    reject = build_candidate_reject(
+        stage="stage3_risk_filter",
+        reason="risk_spread",
+        message="wide",
+        metric_value=0.5,
+        threshold=0.4,
+    )
+    assert reject == {
+        "stage": "stage3_risk_filter",
+        "reason": "risk_spread",
+        "message": "wide",
+        "metric_value": 0.5,
+        "threshold": 0.4,
     }
 
 
-def _replacement_invariant(
-    *,
-    annualized_return: float = 0.12,
-    event_flag: bool = False,
-) -> dict[str, object]:
-    from domain.domain.engine import evaluate_candidate_invariants
-
-    return evaluate_candidate_invariants(
-        _replacement_base_row(),
+def test_sell_put_recall_window_uses_smaller_of_config_max_and_spot_then_80_pct() -> None:
+    accepted = evaluate_opening_candidate_policy(
+        _policy_row(strike=88.0),
         mode="put",
-        risk_policy_version="candidate_policy.v2",
-        quote_snapshot_id="quote-snapshot-1",
-        min_dte=14,
-        max_dte=60,
-        min_annualized_return=0.08,
-        min_net_income=50,
-        annualized_return=annualized_return,
-        net_income=100,
-        min_open_interest=100,
-        min_volume=10,
-        max_spread_ratio=0.3,
-        event_flag=event_flag,
-        event_mode="reject",
-        open_interest=500,
-        volume=50,
-        spread_ratio=0.1,
+        min_strike=70.0,
+        max_strike=120.0,
     )
-
-
-def _opening_with_invariant_provenance(
-    opening: dict[str, object],
-    invariant: dict[str, object],
-) -> dict[str, object]:
-    from domain.domain.engine import attach_opening_decision_provenance
-
-    return attach_opening_decision_provenance(
-        opening,
-        risk_policy_version=str(invariant["risk_policy_version"]),
-        risk_policy_hash=str(invariant["risk_policy_hash"]),
-        quote_snapshot_id=str(invariant["quote_snapshot_id"]),
-        normalized_input=dict(invariant["normalized_input"]),
-    )
-
-
-def test_replacement_candidate_defers_only_the_exact_put_capacity_reject() -> None:
-    from domain.domain.engine import (
-        REPLACEMENT_CAPACITY_DEFERRED,
-        build_replacement_candidate_decision,
-        evaluate_candidate_hard_constraints,
-    )
-
-    invariant = _replacement_invariant()
-    opening = evaluate_candidate_hard_constraints(
-        _replacement_base_row(),
+    below = evaluate_opening_candidate_policy(
+        _policy_row(strike=87.99),
         mode="put",
-        min_dte=14,
-        max_dte=60,
-        put_cash_required=10_000,
-        put_cash_free=5_000,
+        min_strike=70.0,
+        max_strike=120.0,
     )
-    bound_opening = _opening_with_invariant_provenance(opening, invariant)
-    replacement = build_replacement_candidate_decision(
-        candidate_id="NVDA260918P00100000",
-        opening_decision=bound_opening,
-        invariant_decision=invariant,
-    )
-
-    assert replacement["replacement_eligibility"] == REPLACEMENT_CAPACITY_DEFERRED
-    assert replacement["blocking_reject_reasons"] == ["hard_capacity_put"]
-    assert replacement["resource_relative_reject"] == "hard_capacity_put"
-    assert replacement["invariant_policy_parity"] is True
-    assert len(replacement["replacement_decision_hash"]) == 64
-
-
-def test_replacement_candidate_does_not_hide_later_return_or_event_rejects() -> None:
-    from domain.domain.engine import (
-        REPLACEMENT_REJECTED_INVARIANT,
-        build_replacement_candidate_decision,
-        evaluate_candidate_hard_constraints,
-    )
-
-    opening = evaluate_candidate_hard_constraints(
-        _replacement_base_row(),
+    above = evaluate_opening_candidate_policy(
+        _policy_row(strike=110.01),
         mode="put",
-        put_cash_required=10_000,
-        put_cash_free=5_000,
+        min_strike=70.0,
+        max_strike=120.0,
     )
-    for invariant in (
-        _replacement_invariant(annualized_return=0.01),
-        _replacement_invariant(event_flag=True),
-    ):
-        replacement = build_replacement_candidate_decision(
-            candidate_id="NVDA260918P00100000",
-            opening_decision=_opening_with_invariant_provenance(
-                opening,
-                invariant,
-            ),
-            invariant_decision=invariant,
+
+    assert accepted["accepted"] is True
+    assert "hard_strike" in _reasons(below)
+    assert "hard_strike" in _reasons(above)
+
+
+def test_covered_call_recall_window_starts_at_spot_and_caps_at_120_pct() -> None:
+    assert evaluate_opening_candidate_policy(
+        _policy_row(mode="call", strike=110.0),
+        mode="call",
+        min_strike=100.0,
+        max_strike=150.0,
+    )["accepted"] is True
+    assert "hard_strike" in _reasons(
+        evaluate_opening_candidate_policy(
+            _policy_row(mode="call", strike=109.99),
+            mode="call",
+            min_strike=100.0,
+            max_strike=150.0,
         )
-        assert replacement["replacement_eligibility"] == REPLACEMENT_REJECTED_INVARIANT
-        assert replacement["resource_relative_reject"] is None
-
-
-def test_replacement_candidate_requires_policy_and_normalized_input_parity() -> None:
-    from domain.domain.engine import (
-        REPLACEMENT_REJECTED_INVARIANT,
-        build_replacement_candidate_decision,
-        evaluate_candidate_hard_constraints,
+    )
+    assert "hard_strike" in _reasons(
+        evaluate_opening_candidate_policy(
+            _policy_row(mode="call", strike=132.01),
+            mode="call",
+            min_strike=100.0,
+            max_strike=150.0,
+        )
     )
 
-    invariant = _replacement_invariant()
-    opening = evaluate_candidate_hard_constraints(
-        _replacement_base_row(),
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"dte": 6}, "hard_dte"),
+        ({"max_new_contracts": 0}, "hard_capacity_put"),
+        ({"annualized_net_return_on_cash_basis": 0.09}, "return_annualized"),
+        ({"net_premium_cny": 49.99}, "return_net_premium_cny"),
+        ({"spread_ratio": 0.41}, "risk_spread"),
+        ({"iv_rv_ratio": 1.09}, "risk_iv_rv_ratio"),
+        ({"iv_minus_rv": 0.049}, "risk_iv_minus_rv"),
+        ({"earnings_evidence_status": "unavailable"}, "risk_earnings_unavailable"),
+        ({"earnings_has_event": True}, "risk_earnings_event"),
+    ],
+)
+def test_sell_put_formal_gates_fail_closed(overrides: dict, reason: str) -> None:
+    decision = evaluate_opening_candidate_policy(
+        _policy_row(**overrides),
+        mode="put",
+        min_dte=7,
+        max_dte=60,
+    )
+    assert reason in _reasons(decision)
+
+
+def test_optional_oi_volume_and_delta_do_not_create_hard_gates() -> None:
+    decision = evaluate_opening_candidate_policy(
+        _policy_row(open_interest=None, volume=None, delta=None),
         mode="put",
     )
-    bound_opening = _opening_with_invariant_provenance(opening, invariant)
-    drifted = dict(bound_opening)
-    drifted["risk_policy_hash"] = "different"
-    drifted["decision_hash"] = "f" * 64
-    replacement = build_replacement_candidate_decision(
-        candidate_id="NVDA260918P00100000",
-        opening_decision=drifted,
-        invariant_decision=invariant,
+    assert decision["accepted"] is True
+
+
+def test_covered_call_requires_physical_share_capacity() -> None:
+    decision = evaluate_opening_candidate_policy(
+        _policy_row(mode="call", covered_contracts_available=0, max_new_contracts=0),
+        mode="call",
     )
-    assert replacement["replacement_eligibility"] == REPLACEMENT_REJECTED_INVARIANT
-    assert replacement["invariant_policy_parity"] is False
+    assert "hard_capacity_call" in _reasons(decision)
+
+
+def test_rank_uses_period_return_band_then_strategy_tie_breaks() -> None:
+    put_rows = [
+        _policy_row(
+            contract_symbol="RETURN_LEADER",
+            period_net_return_on_cash_basis=0.0100,
+            net_assignment_discount_pct=0.05,
+        ),
+        _policy_row(
+            contract_symbol="NEAR_SAFER",
+            period_net_return_on_cash_basis=0.0081,
+            net_assignment_discount_pct=0.08,
+        ),
+        _policy_row(
+            contract_symbol="NEXT_BAND",
+            period_net_return_on_cash_basis=0.0079,
+            net_assignment_discount_pct=0.20,
+        ),
+    ]
+    call_rows = [
+        _policy_row(
+            mode="call",
+            contract_symbol="LOW_STRIKE",
+            strike=115.0,
+            period_net_premium_return=0.0100,
+        ),
+        _policy_row(
+            mode="call",
+            contract_symbol="NEAR_HIGH_STRIKE",
+            strike=125.0,
+            period_net_premium_return=0.0081,
+        ),
+    ]
+
+    assert [row["contract_symbol"] for row in rank_candidate_rows(put_rows, mode="put")] == [
+        "NEAR_SAFER",
+        "RETURN_LEADER",
+        "NEXT_BAND",
+    ]
+    assert [row["contract_symbol"] for row in rank_candidate_rows(call_rows, mode="call")] == [
+        "NEAR_HIGH_STRIKE",
+        "LOW_STRIKE",
+    ]
+    assert explain_candidate_rank(call_rows[1], mode="call")["primary_drivers"] == [
+        "period_net_premium_return"
+    ]
+
+
+def test_select_best_candidate_per_symbol_preserves_canonical_symbol_winner() -> None:
+    rows = [
+        _policy_row(symbol="NVDA", contract_symbol="NVDA_LOW", period_net_return_on_cash_basis=0.01),
+        _policy_row(symbol="NVDA", contract_symbol="NVDA_HIGH", period_net_return_on_cash_basis=0.02),
+        _policy_row(symbol="AMD", contract_symbol="AMD_ONLY", period_net_return_on_cash_basis=0.015),
+    ]
+    winners = select_best_candidate_per_symbol(rows, mode="put")
+    assert {row["contract_symbol"] for row in winners} == {"NVDA_HIGH", "AMD_ONLY"}
+
+
+def test_rank_api_has_no_score_weight_compatibility_alias() -> None:
+    with pytest.raises(TypeError):
+        rank_candidate_rows([_policy_row()], mode="put", score_weights={})  # type: ignore[call-arg]

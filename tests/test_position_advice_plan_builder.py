@@ -6,10 +6,7 @@ import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine.candidate_engine import (
-    attach_opening_decision_provenance,
     build_candidate_decision,
-    build_replacement_candidate_decision,
-    evaluate_candidate_invariants,
 )
 from domain.domain.position_advice_authority import scope_for
 from src.application.position_advice_plan_builder import (
@@ -54,60 +51,23 @@ def _candidate() -> dict[str, object]:
         "annualized_net_return_on_cash_basis": 0.45,
         "spread_ratio": 0.0645,
     }
-    invariant = evaluate_candidate_invariants(
-        raw,
+    opening = build_candidate_decision(
         mode="put",
-        risk_policy_version="candidate_policy.v2",
-        quote_snapshot_id="c" * 64,
-        min_dte=14,
-        max_dte=60,
-        min_strike=None,
-        max_strike=None,
-        min_annualized_return=0.08,
-        min_net_income=50,
-        annualized_return=0.45,
-        net_income=295,
-        min_open_interest=100,
-        min_volume=10,
-        max_spread_ratio=0.3,
-        event_flag=False,
-        event_mode="reject",
-        open_interest=500,
-        volume=50,
-        spread_ratio=0.0645,
-    )
-    opening = attach_opening_decision_provenance(
-        build_candidate_decision(
-            mode="put",
-            symbol="NVDA",
-            contract_symbol="NVDA260821P00090000",
-            accepted=True,
-            rejects=[],
-            rank_key={"allocation_rank": 1},
-            normalized_input=dict(invariant["normalized_input"]),
-        ),
-        risk_policy_version="candidate_policy.v2",
-        risk_policy_hash=str(invariant["risk_policy_hash"]),
-        quote_snapshot_id="c" * 64,
-        normalized_input=dict(invariant["normalized_input"]),
-    )
-    replacement = build_replacement_candidate_decision(
-        candidate_id="candidate-1",
-        opening_decision=opening,
-        invariant_decision=invariant,
+        symbol="NVDA",
+        contract_symbol="NVDA260821P00090000",
+        accepted=True,
+        rejects=[],
+        normalized_input=raw,
     )
     return {
-        "schema_version": "candidate_all_decisions.v1",
+        "schema_version": "opening_candidate_decision.v1",
         "candidate_id": "candidate-1",
         "strategy_mode": "put",
-        "normalized_input": invariant["normalized_input"],
-        "normalized_input_hash": invariant["normalized_input_hash"],
-        "risk_policy_version": invariant["risk_policy_version"],
-        "risk_policy_hash": invariant["risk_policy_hash"],
-        "quote_snapshot_id": invariant["quote_snapshot_id"],
+        "normalized_input": raw,
+        "normalized_input_hash": canonical_sha256(raw),
+        "risk_policy_hash": "b" * 64,
+        "quote_snapshot_id": "c" * 64,
         "opening_decision": opening,
-        "invariant_decision": invariant,
-        "replacement_candidate_decision": replacement,
     }
 
 
@@ -438,7 +398,7 @@ def test_production_built_shadow_plans_pass_automatic_promotion_safety() -> None
             for index, source_kind in enumerate(
                 (
                     "quotes",
-                    "candidate_decisions",
+                    "opening_candidates",
                     "portfolio",
                     "ledger_decision_state",
                     "cash_capacity",

@@ -8,9 +8,7 @@
           "min_volume": 10,
           "max_spread_ratio": 0.4,
           "min_iv_rv_ratio": 1.1,
-          "min_iv_minus_rv": 0.05,
-          "reject_event_risk": true,
-          "event_source_fail_closed": true
+          "min_iv_minus_rv": 0.05
         }
       },
       "call_base": {
@@ -21,9 +19,7 @@
           "max_spread_ratio": 0.4,
           "min_strike_cost_multiplier": 1.02,
           "min_iv_rv_ratio": 1.1,
-          "min_iv_minus_rv": 0.05,
-          "reject_event_risk": true,
-          "event_source_fail_closed": true
+          "min_iv_minus_rv": 0.05
         }
       }
     },
@@ -101,36 +97,7 @@
       "portfolio_timeout_sec": 60,
       "pipeline_timeout_sec": 600,
       "option_positions_context_ttl_sec": 900,
-      "portfolio_context_ttl_sec": 900,
-      "event_risk_source": {
-        "mode": "primary_fallback",
-        "default_provider": "futu",
-        "providers": {
-          "futu": {
-            "enabled": true,
-            "role": "primary",
-            "host": "127.0.0.1",
-            "port": 11111
-          },
-          "yfinance": {
-            "enabled": true,
-            "role": "fallback"
-          }
-        },
-        "market_rules": {
-          "hk": {
-            "chain": [
-              "futu"
-            ]
-          },
-          "us": {
-            "chain": [
-              "futu",
-              "yfinance"
-            ]
-          }
-        }
-      }
+      "portfolio_context_ttl_sec": 900
     },
     "notifications": {
       "opend_alert_cooldown_sec": 600,

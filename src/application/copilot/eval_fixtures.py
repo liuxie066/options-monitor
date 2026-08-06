@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 MODEL_SYNTHESIS_REQUIRED_FIXTURES = {
-    "candidate_filter_diagnostics_model_ready",
+    "opening_candidate_snapshot_diagnostics_model_ready",
     "close_advice_notification_diagnostics_model_ready",
     "current_option_exposure_model_ready",
 }
@@ -18,7 +18,7 @@ def fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
 
 
 def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
-    if fixture_id == "candidate_filter_diagnostics_model_ready":
+    if fixture_id == "opening_candidate_snapshot_diagnostics_model_ready":
         return [
             {
                 "tool_name": "runtime_status",
@@ -36,21 +36,35 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
             {
                 "tool_name": "candidate_filter_explain",
                 "ok": True,
-                "summary": "eval-only candidate filter trace rejects NVDA on Delta.",
+                "summary": "eval-only sealed opening snapshot rejects NVDA because earnings fall before expiration.",
                 "facts": [
-                    "symbol=NVDA canonical_symbol=NVDA trace_count=1",
-                    "function=sell_put status=rejected rule=min_delta label=Delta 过低 count=1",
+                    "symbol=NVDA canonical_symbol=NVDA account=lx trace_count=1",
+                    "function=sell_put status=rejected rule=risk_earnings_event count=1",
                 ],
                 "data": {
                     "eval_only": True,
                     "symbol": "NVDA",
                     "canonical_symbol": "NVDA",
+                    "account": "lx",
+                    "opening_status": "complete",
+                    "evidence_status": "available",
+                    "conclusion_status": "supported",
                     "trace_count": 1,
+                    "status_counts": {"rejected": 1},
+                    "function_counts": {"sell_put": 1},
                     "functions": [
                         {
                             "function": "sell_put",
                             "status": "rejected",
-                            "rejection_reasons": [{"rule": "min_delta", "label": "Delta 过低", "count": 1}],
+                            "reason_counts": {"risk_earnings_event": 1},
+                            "rejection_reason_counts": {"risk_earnings_event": 1},
+                            "rejection_reasons": [
+                                {
+                                    "rule": "risk_earnings_event",
+                                    "label": "到期前存在财报事件",
+                                    "count": 1,
+                                }
+                            ],
                         }
                     ],
                 },

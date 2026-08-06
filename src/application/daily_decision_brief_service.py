@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import json
-from collections import Counter, defaultdict
 from collections.abc import Mapping
 from datetime import datetime, time, timezone
 from pathlib import Path
@@ -15,7 +14,6 @@ from domain.domain.daily_decision_brief import (
     build_daily_brief_candidate_identity,
     normalize_daily_decision_brief,
 )
-from domain.domain.daily_decision_event_risk import build_candidate_event_risk
 from domain.domain.close_advice import (
     safe_int,
     select_close_advice_notification_rows,
@@ -27,7 +25,6 @@ from domain.domain.risk_capacity import compute_sell_call_share_capacity, comput
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
-from src.application import candidate_reject_summary as candidate_rejections
 from src.application.cash_totals import sum_by_currency_to_cny
 from src.application.strategy_scan_failures import (
     ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
@@ -70,7 +67,9 @@ from src.application.required_data_snapshot import (
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
+    ranked_opening_candidate_decisions,
     ranked_opening_candidates,
+    validate_opening_candidate_snapshot,
 )
 
 
@@ -117,7 +116,6 @@ def assemble_daily_decision_brief(
     valid_until = _valid_until_utc(config_map, market_norm, now_market)
     run_account_dir = paths.run_account_dir(base_path, run_id_norm, account_norm)
     state_dir = paths.run_account_state_dir(base_path, run_id_norm, account_norm)
-    trace_path = run_account_dir / "candidate_filter_trace.jsonl"
     strategy_failure_path = run_account_dir / STRATEGY_FAILURE_ARTIFACT_NAME
 
     data_gaps: list[dict[str, Any]] = []
@@ -311,16 +309,6 @@ def assemble_daily_decision_brief(
         else []
     )
     selected_combos = ranked_combos[:max_candidates]
-    if selected_puts or selected_calls or selected_combos:
-        event_snapshot, event_snapshot_reason = _load_event_snapshot(
-            base=base_path,
-            run_id=run_id_norm,
-            source_artifacts=source_artifacts,
-            data_gaps=data_gaps,
-        )
-    else:
-        event_snapshot, event_snapshot_reason = {}, ""
-
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
         "sell_put": [],
@@ -339,8 +327,6 @@ def assemble_daily_decision_brief(
             row,
             family="sell_put",
             market_date=market_date,
-            snapshot=event_snapshot,
-            snapshot_reason=event_snapshot_reason,
         )
         required_context_rows += 1
         if cap is None:
@@ -373,8 +359,6 @@ def assemble_daily_decision_brief(
             row,
             family="covered_call",
             market_date=market_date,
-            snapshot=event_snapshot,
-            snapshot_reason=event_snapshot_reason,
         )
         required_context_rows += 1
         if cap is None:
@@ -411,8 +395,6 @@ def assemble_daily_decision_brief(
             row,
             family="combo_yield",
             market_date=market_date,
-            snapshot=event_snapshot,
-            snapshot_reason=event_snapshot_reason,
         )
         candidate_payloads["combo_yield"].append(
             _candidate_view(row, family="combo_yield", rank=rank, event_risk=event_risk)
@@ -503,27 +485,18 @@ def assemble_daily_decision_brief(
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
 
-    reject_logs = sorted(run_account_dir.glob("*_reject_log.csv"))
-    rejections = _build_market_rejection_summary(
-        trace_path=trace_path,
-        reject_log_paths=reject_logs,
-        account=account_norm,
-        run_id=run_id_norm,
-        market=market_norm,
-        max_categories=_positive_int(
-            _daily_brief_config(config_map).get("max_rejection_reasons"),
-            default=5,
-        ),
-        run_account_dir=run_account_dir,
-    )
-    if trace_path.exists():
-        source_artifacts.append(
-            {
-                "kind": "candidate_filter_trace",
-                "path": _source_path(run_account_dir, trace_path),
-                "row_count": _count_jsonl_rows(trace_path),
-            }
-        )
+    rejections = {
+        "schema_version": "opening_candidate_rejection_summary.v1",
+        "available": False,
+        "source": "opening_candidate_snapshot",
+        "account": account_norm,
+        "run_id": run_id_norm,
+        "market": market_norm,
+        "accepted_count": len(put_rows) + len(call_rows),
+        "total_rejected": 0,
+        "top_categories": [],
+        "risk_alerts": [],
+    }
     if strategy_failure_path.exists():
         source_artifacts.append(
             {
@@ -601,8 +574,6 @@ def assemble_daily_decision_brief(
             ranked_puts=put_rows,
             ranked_calls=call_rows,
             combo_rows=combo_rows,
-            event_snapshot=event_snapshot,
-            event_snapshot_reason=event_snapshot_reason,
             data_gaps=data_gaps,
         )
         if actionability == "live_actionable"
@@ -776,53 +747,6 @@ def _load_opening_candidate_families(
     )
 
 
-def _load_sell_put_candidates(
-    *,
-    run_account_dir: Path,
-    market: str,
-    source_artifacts: list[dict[str, Any]],
-    data_gaps: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
-    labeled_suffix = "_sell_put_candidates_labeled.csv"
-    raw_suffix = "_sell_put_candidates.csv"
-    labeled_paths = sorted(run_account_dir.glob(f"*{labeled_suffix}"))
-    raw_paths = sorted(run_account_dir.glob(f"*{raw_suffix}"))
-
-    if not labeled_paths and not raw_paths:
-        data_gaps.append(
-            {"scope": "strategy", "strategy_family": "sell_put", "reason": "source_artifact_missing"}
-        )
-        return [], False
-
-    labeled_keys = {path.name[: -len(labeled_suffix)] for path in labeled_paths}
-    for raw_path in raw_paths:
-        artifact_key = raw_path.name[: -len(raw_suffix)]
-        if artifact_key in labeled_keys:
-            continue
-        data_gaps.append(
-            {
-                "scope": "source",
-                "strategy_family": "sell_put",
-                "artifact_key": artifact_key,
-                "path": _source_path(run_account_dir, raw_path),
-                "reason": "canonical_labeled_artifact_missing",
-            }
-        )
-
-    if not labeled_paths:
-        return [], False
-
-    return _load_candidate_family(
-        run_account_dir=run_account_dir,
-        market=market,
-        family="sell_put",
-        paths_to_try=labeled_paths,
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-        validate_empty_schema=True,
-    )
-
-
 def _load_candidate_family(
     *,
     run_account_dir: Path,
@@ -831,7 +755,6 @@ def _load_candidate_family(
     paths_to_try: list[Path],
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
-    validate_empty_schema: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     rows: list[dict[str, Any]] = []
     available = False
@@ -843,17 +766,6 @@ def _load_candidate_family(
         try:
             frame = pd.read_csv(path)
         except pd.errors.EmptyDataError as exc:
-            if validate_empty_schema and not _is_controlled_empty_candidate_artifact(path):
-                data_gaps.append(
-                    {
-                        "scope": "source",
-                        "strategy_family": family,
-                        "path": _source_path(run_account_dir, path),
-                        "reason": "csv_unavailable",
-                        "error_type": type(exc).__name__,
-                    }
-                )
-                continue
             available = True
             source_artifacts.append(
                 {
@@ -871,17 +783,6 @@ def _load_candidate_family(
                     "path": _source_path(run_account_dir, path),
                     "reason": "csv_unavailable",
                     "error_type": type(exc).__name__,
-                }
-            )
-            continue
-        if validate_empty_schema and frame.empty and not _has_minimum_candidate_columns(frame):
-            data_gaps.append(
-                {
-                    "scope": "source",
-                    "strategy_family": family,
-                    "path": _source_path(run_account_dir, path),
-                    "reason": "csv_unavailable",
-                    "error_type": "SchemaError",
                 }
             )
             continue
@@ -915,24 +816,6 @@ def _load_candidate_family(
         )
         rows.extend(market_rows)
     return rows, available
-
-
-def _is_controlled_empty_candidate_artifact(path: Path) -> bool:
-    try:
-        size = path.stat().st_size
-        if size > 2:
-            return False
-        with path.open("rb") as handle:
-            content = handle.read(2)
-    except OSError:
-        return False
-    return content in {b"\n", b"\r\n"}
-
-
-def _has_minimum_candidate_columns(frame: pd.DataFrame) -> bool:
-    columns = {str(column).strip() for column in frame.columns}
-    return "symbol" in columns and bool(columns.intersection({"contract_symbol", "code"}))
-
 
 def _daily_brief_advice_authority(
     *,
@@ -1490,76 +1373,6 @@ def _load_portfolio_context(
     return _json_safe(context)
 
 
-def _load_event_snapshot(
-    *,
-    base: Path,
-    run_id: str,
-    source_artifacts: list[dict[str, Any]],
-    data_gaps: list[dict[str, Any]],
-) -> tuple[dict[str, Mapping[str, Any]], str]:
-    path = paths.run_state_dir(base, run_id) / "event_snapshot.json"
-    display_path = "state/event_snapshot.json"
-    if not path.exists():
-        data_gaps.append(
-            {
-                "scope": "event",
-                "kind": "event_snapshot",
-                "strategy_family": "candidate_event_risk",
-                "reason": "event_snapshot_missing",
-            }
-        )
-        return {}, "event_snapshot_missing"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError) as exc:
-        data_gaps.append(
-            {
-                "scope": "event",
-                "kind": "event_snapshot",
-                "strategy_family": "candidate_event_risk",
-                "path": display_path,
-                "reason": "event_snapshot_malformed",
-                "error_type": type(exc).__name__,
-            }
-        )
-        return {}, "event_snapshot_malformed"
-    if not isinstance(raw, Mapping) or raw.get("schema_version") != 1 or not isinstance(raw.get("symbols"), Mapping):
-        data_gaps.append(
-            {
-                "scope": "event",
-                "kind": "event_snapshot",
-                "strategy_family": "candidate_event_risk",
-                "path": display_path,
-                "reason": "event_snapshot_malformed",
-            }
-        )
-        return {}, "event_snapshot_malformed"
-
-    symbols: dict[str, Mapping[str, Any]] = {}
-    malformed_symbols = 0
-    for raw_symbol, item in raw["symbols"].items():
-        symbol = canonical_symbol(raw_symbol) or _text(raw_symbol).upper()
-        if not symbol or not isinstance(item, Mapping):
-            malformed_symbols += 1
-            continue
-        symbols[symbol] = item
-    if malformed_symbols:
-        data_gaps.append(
-            {
-                "scope": "event",
-                "kind": "event_snapshot",
-                "strategy_family": "candidate_event_risk",
-                "path": display_path,
-                "reason": "event_snapshot_symbol_items_malformed",
-                "count": malformed_symbols,
-            }
-        )
-    source_artifacts.append(
-        {"kind": "event_snapshot", "path": display_path, "row_count": len(symbols)}
-    )
-    return symbols, ""
-
-
 def _load_strategy_step_failures(
     *,
     failure_path: Path,
@@ -1611,84 +1424,6 @@ def _strategy_family_from_failure(row: Mapping[str, Any]) -> str:
         return "sell_put"
     return ""
 
-
-def _build_market_rejection_summary(
-    *,
-    trace_path: Path,
-    reject_log_paths: list[Path],
-    account: str,
-    run_id: str,
-    market: str,
-    max_categories: int,
-    run_account_dir: Path,
-) -> dict[str, Any]:
-    """Reuse the existing rejection classifier after market-qualifying raw rows."""
-
-    trace_rows = candidate_rejections._read_trace_rows(trace_path)
-    reject_log_rows = candidate_rejections._read_reject_log_rows(reject_log_paths)
-    source = "trace" if trace_rows else ("reject_log" if reject_log_rows else "none")
-    raw_rows = trace_rows if trace_rows else reject_log_rows
-    rows = [
-        row
-        for row in raw_rows
-        if candidate_rejections._matches_account(row, account)
-        and candidate_rejections._matches_run_id(row, run_id)
-        and _text(row.get("function")).lower() in candidate_rejections.SCAN_FUNCTIONS
-        and _row_market(row) == market
-    ]
-    accepted_rows = [row for row in rows if _text(row.get("status")).lower() == "accepted"]
-    rejected_rows = [row for row in rows if candidate_rejections._row_is_rejection(row)]
-
-    category_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rejected_rows:
-        category_rows[candidate_rejections._category_for_row(row)].append(row)
-
-    top_categories: list[dict[str, Any]] = []
-    for category, grouped_rows in sorted(
-        category_rows.items(),
-        key=lambda item: (-len(item[1]), candidate_rejections._category_sort_key(item[0])),
-    )[:max_categories]:
-        rule_counts = Counter(candidate_rejections._rule_for_row(row) for row in grouped_rows)
-        top_categories.append(
-            {
-                "category": category,
-                "label": candidate_rejections.CATEGORY_LABELS.get(category, category),
-                "count": len(grouped_rows),
-                "rule_counts": dict(rule_counts.most_common(max(1, max_categories))),
-                "rule_labels": {
-                    rule: candidate_rejections._rule_label(rule)
-                    for rule, _count in rule_counts.most_common(max(1, max_categories))
-                },
-                "function_counts": dict(
-                    Counter(_text(row.get("function")).lower() for row in grouped_rows).most_common()
-                ),
-                "sample_symbols": candidate_rejections._sample_symbols(grouped_rows),
-            }
-        )
-
-    return {
-        "schema_version": candidate_rejections.SCHEMA_VERSION,
-        "available": source != "none",
-        "source": source,
-        "trace_path": _source_path(run_account_dir, trace_path) if trace_path.exists() else None,
-        "reject_log_paths": [_source_path(run_account_dir, item) for item in reject_log_paths],
-        "account": account,
-        "run_id": run_id,
-        "market": market,
-        "accepted_count": len(accepted_rows),
-        "accepted_function_counts": dict(
-            Counter(_text(row.get("function")).lower() for row in accepted_rows).most_common()
-        ),
-        "total_rejected": len(rejected_rows),
-        "status_counts": dict(
-            Counter(_text(row.get("status")).lower() or "rejected" for row in rows).most_common()
-        ),
-        "function_counts": dict(
-            Counter(_text(row.get("function")).lower() for row in rejected_rows).most_common()
-        ),
-        "risk_alerts": candidate_rejections._risk_alerts(rejected_rows),
-        "top_categories": top_categories,
-    }
 
 
 def _build_funds(
@@ -1807,8 +1542,6 @@ def _build_candidate_index(
     ranked_puts: list[dict[str, Any]],
     ranked_calls: list[dict[str, Any]],
     combo_rows: list[dict[str, Any]],
-    event_snapshot: Mapping[str, Mapping[str, Any]],
-    event_snapshot_reason: str,
     data_gaps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
@@ -1843,8 +1576,6 @@ def _build_candidate_index(
                 row,
                 family=family,
                 market_date=market_date,
-                snapshot=event_snapshot,
-                snapshot_reason=event_snapshot_reason,
             )
             representative = _candidate_view(
                 row,
@@ -2426,8 +2157,6 @@ def _candidate_event_risk(
     *,
     family: str,
     market_date: str,
-    snapshot: Mapping[str, Mapping[str, Any]],
-    snapshot_reason: str,
 ) -> dict[str, Any]:
     symbol = canonical_symbol(row.get("symbol")) or _text(row.get("symbol")).upper()
     if family == "combo_yield":
@@ -2437,13 +2166,121 @@ def _candidate_event_risk(
         }
     else:
         expirations = {"contract": row.get("expiration") or row.get("expiration_ymd")}
-    return build_candidate_event_risk(
-        symbol=symbol,
-        market_trading_date=market_date,
-        expirations=expirations,
-        snapshot_item=snapshot.get(symbol),
-        snapshot_reason=snapshot_reason,
-    )
+    status = _text(row.get("earnings_evidence_status")).lower()
+    if status != "ready":
+        return {
+            "user_state": "unknown",
+            "reason_code": _text(row.get("earnings_reason_code"))
+            or "earnings_evidence_unavailable",
+            "reliable": False,
+            "symbol": symbol,
+            "selected_provider": "opend",
+            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "coverage": {"earnings": status or "unavailable"},
+            "nearest_event": None,
+            "events": [],
+            "days_to_event": None,
+            "expiration_relations": {},
+            "in_attention_window": False,
+        }
+
+    raw_events = row.get("earnings_events") or []
+    if isinstance(raw_events, str):
+        try:
+            decoded_events = json.loads(raw_events)
+        except json.JSONDecodeError:
+            decoded_events = []
+        raw_events = decoded_events if isinstance(decoded_events, list) else []
+    events = [
+        dict(item)
+        for item in raw_events
+        if isinstance(item, Mapping)
+    ]
+    if not events:
+        events = [
+            {"earnings_date": value.strip()}
+            for value in _text(row.get("earnings_event_dates")).split(",")
+            if value.strip()
+        ]
+    normalized_events: list[dict[str, Any]] = []
+    for item in events:
+        event_date = _text(item.get("earnings_date") or item.get("event_date"))
+        if not event_date:
+            continue
+        normalized_events.append(
+            {
+                **item,
+                "event_type": "earnings",
+                "event_date": event_date,
+                "event_id": _text(item.get("event_id"))
+                or f"{symbol}:earnings:{event_date}",
+                "source": "opend",
+            }
+        )
+    normalized_events.sort(key=lambda item: _text(item.get("event_date")))
+    if not bool(row.get("earnings_has_event")) or not normalized_events:
+        return {
+            "user_state": "confirmed_none",
+            "reason_code": "confirmed_no_upcoming_earnings",
+            "reliable": True,
+            "symbol": symbol,
+            "selected_provider": "opend",
+            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "coverage": {"earnings": "complete"},
+            "nearest_event": None,
+            "events": [],
+            "days_to_event": None,
+            "expiration_relations": {},
+            "in_attention_window": False,
+        }
+
+    nearest = normalized_events[0]
+    try:
+        event_date = datetime.fromisoformat(_text(nearest["event_date"])).date()
+        as_of = datetime.fromisoformat(_text(market_date)).date()
+    except ValueError:
+        event_date = as_of = None
+    relations: dict[str, dict[str, Any]] = {}
+    for label, raw_expiration in expirations.items():
+        try:
+            expiration = datetime.fromisoformat(_text(raw_expiration)).date()
+        except ValueError:
+            continue
+        relation = "after_expiration"
+        if event_date is not None and event_date < expiration:
+            relation = "before_expiration"
+        elif event_date is not None and event_date == expiration:
+            relation = "on_expiration"
+        relations[label] = {
+            "expiration": expiration.isoformat(),
+            "relation": relation,
+            "days_before_expiration": (
+                (expiration - event_date).days
+                if event_date is not None
+                else None
+            ),
+        }
+    return {
+        "user_state": "confirmed_event",
+        "reason_code": "confirmed_earnings_event",
+        "reliable": True,
+        "symbol": symbol,
+        "selected_provider": "opend",
+        "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+        "coverage": {"earnings": "complete"},
+        "nearest_event": nearest,
+        "events": normalized_events,
+        "days_to_event": (
+            (event_date - as_of).days
+            if event_date is not None and as_of is not None
+            else None
+        ),
+        "expiration_relations": relations,
+        "in_attention_window": any(
+            item["relation"] in {"before_expiration", "on_expiration"}
+            for item in relations.values()
+        ),
+    }
 
 
 def _candidate_events(actions: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -2730,7 +2567,7 @@ def _load_adopted_candidate_source(
             dict(item)
             for item in records
             if isinstance(item, Mapping)
-            and _text(item.get("source_kind")) == "candidate_decisions"
+            and _text(item.get("source_kind")) == "opening_candidates"
         ),
         None,
     )
@@ -2767,31 +2604,43 @@ def _load_adopted_candidate_source(
         receipt,
         producer_root=root,
         now=now_utc,
-        expected_source_kind="candidate_decisions",
+        expected_source_kind="opening_candidates",
         expected_account=account,
         expected_producer_account_run_id=run_id,
     )
     payload = json.loads(
         validated["payload_path"].read_text(encoding="utf-8")
     )
-    decisions = payload.get("candidate_decisions")
-    quote_snapshot_ids = payload.get("quote_snapshot_ids")
-    if (
-        payload.get("schema_version")
-        != "position_advice_candidate_all_decisions.v1"
-        or not isinstance(decisions, list)
-        or int(payload.get("candidate_count") or 0) != len(decisions)
-        or not isinstance(quote_snapshot_ids, list)
-        or not quote_snapshot_ids
-    ):
+    try:
+        validate_opening_candidate_snapshot(
+            payload,
+            expected_run_id=run_id,
+            expected_account=account,
+            verify_dependency_root=root.parents[4],
+        )
+        decisions = ranked_opening_candidate_decisions(payload)
+    except OpeningCandidateSnapshotError as exc:
         raise PositionAdviceSourceError(
             "candidate source payload is invalid"
-        )
+        ) from exc
+    quote_snapshot_ids = {
+        _text(item.get("quote_snapshot_id"))
+        for item in payload.get("ranked_candidates") or []
+        if isinstance(item, Mapping) and _text(item.get("quote_snapshot_id"))
+    }
+    if not quote_snapshot_ids:
+        quote_snapshot_ids = {
+            _text(item.get("snapshot_id"))
+            for item in validated.get("dependencies") or []
+            if isinstance(item, Mapping)
+            and _text(item.get("source_kind")) == "quotes"
+        }
+    if not quote_snapshot_ids:
+        raise PositionAdviceSourceError("candidate quote dependencies are unavailable")
     return {
         "candidate_decisions": [
             dict(item)
             for item in decisions
-            if isinstance(item, Mapping)
         ],
         "quote_snapshot_ids": {
             _text(item)

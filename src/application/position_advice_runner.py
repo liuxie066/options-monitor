@@ -37,6 +37,10 @@ from src.application.position_advice_source_receipts import (
     safe_existing_relative_path,
     validate_source_manifest,
 )
+from src.application.opening_candidate_snapshot import (
+    ranked_opening_candidate_decisions,
+    validate_opening_candidate_snapshot,
+)
 from src.infrastructure.io_utils import atomic_write_text
 
 
@@ -165,7 +169,7 @@ def run_position_advice_v2(
         adopted_sources=adopted,
         required_for_actions={
             "quotes": ("short_put", "covered_call"),
-            "candidate_decisions": ("short_put", "covered_call"),
+            "opening_candidates": ("short_put", "covered_call"),
             "portfolio": ("short_put", "covered_call"),
             "ledger_decision_state": ("short_put", "covered_call"),
             "cash_capacity": ("short_put",),
@@ -377,15 +381,17 @@ def _build_bound_artifacts(
     checked_at: str,
 ) -> dict[str, Any]:
     payloads = _read_source_payloads(account_root, source_manifest)
-    candidate_source = _single_payload(payloads, "candidate_decisions")
+    candidate_source = _single_payload(payloads, "opening_candidates")
     cash_source = _single_payload(payloads, "cash_capacity")
     coverage_source = _single_payload(payloads, "share_coverage")
     fx_source = _single_payload(payloads, "fx")
-    candidate_decisions = [
-        dict(item)
-        for item in candidate_source.get("candidate_decisions") or []
-        if isinstance(item, Mapping)
-    ]
+    validate_opening_candidate_snapshot(
+        candidate_source,
+        expected_run_id=account_run_id,
+        expected_account=account,
+        verify_dependency_root=account_root.parents[3],
+    )
+    candidate_decisions = ranked_opening_candidate_decisions(candidate_source)
     immutable_input = build_immutable_input(
         account_run_id=account_run_id,
         normalized_account=account,
@@ -449,7 +455,7 @@ def _adopt_all_sources(
 ) -> list[dict[str, Any]]:
     adopted: list[dict[str, Any]] = []
     account_scoped = {
-        "candidate_decisions",
+        "opening_candidates",
         "portfolio",
         "ledger_decision_state",
         "cash_capacity",

@@ -46,11 +46,9 @@ def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypat
         run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -119,11 +117,9 @@ def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkey
         run_sell_put_scan_fn=_scan_should_not_run,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
         run_sell_call_scan_fn=_scan_should_not_run,
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -201,7 +197,6 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             "strategy": "sell_put",
         },
         run_sell_call_scan_fn=lambda **_kwargs: {},
-        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {
             "symbol": symbol,
             "strategy": "sell_call",
@@ -211,7 +206,6 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             "symbol": symbol,
             "strategy": "combo_yield",
         },
-        materialize_empty_sell_put_artifacts_fn=lambda **_kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
     )
 
@@ -256,14 +250,6 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     report_dir = tmp_path / "reports"
     capture_statuses: list[dict] = []
 
-    def _materialize_sell_put(**_kwargs):
-        report_dir.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "nvda_sell_put_candidates.csv",
-            "nvda_sell_put_candidates_labeled.csv",
-        ):
-            (report_dir / name).write_text("symbol\n", encoding="utf-8")
-
     deps = mod.SymbolMonitoringDependencies(
         build_converter_fn=lambda **_kwargs: object(),
         apply_prefilters_fn=lambda **kwargs: type(
@@ -296,11 +282,9 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "strategy": "sell_put",
         },
         run_sell_call_scan_fn=lambda **_kwargs: {},
-        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
         run_combo_yield_scan_fn=lambda **_kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {},
-        materialize_empty_sell_put_artifacts_fn=_materialize_sell_put,
         materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
     )
 
@@ -323,6 +307,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             state_dir=tmp_path / "state",
             is_scheduled=True,
             runtime_config={"portfolio": {"account": "lx"}},
+            final_candidates_sink_fn=lambda _mode, _rows: None,
             position_advice_producer_run_id="run-1",
             candidate_capture_status_sink_fn=capture_statuses.append,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
@@ -367,16 +352,7 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
     report_dir = tmp_path / "reports"
 
     def run_sell_put(**kwargs):
-        report_dir.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "nvda_sell_put_candidates.csv",
-            "nvda_sell_put_candidates_labeled.csv",
-        ):
-            (report_dir / name).write_text(
-                "symbol\n",
-                encoding="utf-8",
-            )
-        kwargs["all_decisions_sink_fn"]([])
+        kwargs["final_candidates_sink_fn"]("put", [])
         return {
             "symbol": "NVDA",
             "strategy": "sell_put",
@@ -406,11 +382,9 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
         run_sell_put_scan_fn=run_sell_put,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {},
         run_sell_call_scan_fn=lambda **_kwargs: {},
-        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
         run_combo_yield_scan_fn=lambda **_kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {},
-        materialize_empty_sell_put_artifacts_fn=lambda **_kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
     )
 
@@ -433,8 +407,7 @@ def test_frozen_success_empty_publishes_completed_zero_status_evidence(
             state_dir=tmp_path / "state",
             is_scheduled=True,
             runtime_config={"portfolio": {"account": "lx"}},
-            risk_policy_version="risk.v1",
-            all_decisions_sink_fn=lambda rows: None,
+            final_candidates_sink_fn=lambda _mode, _rows: None,
             position_advice_producer_run_id="run-1",
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
@@ -492,11 +465,9 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
         run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -586,11 +557,9 @@ def test_run_symbol_monitoring_lifts_sell_call_min_strike_to_avg_cost(monkeypatc
         run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -675,11 +644,9 @@ def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkey
         run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -745,11 +712,9 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
         run_sell_put_scan_fn=lambda **kwargs: [{"strategy": "sell_put"}, {"strategy": "combo_yield"}],
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -834,11 +799,9 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put recommendation should be prefiltered")),
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: None,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
@@ -927,15 +890,9 @@ def _run_strategy_decoupling_case(
             if sell_call_runner is not None
             else lambda **kwargs: {"strategy": "sell_call"}
         ),
-        materialize_empty_sell_call_artifacts_fn=lambda **kwargs: __import__(
-            "src.application.sell_call_steps", fromlist=["materialize_empty_sell_call_artifacts"]
-        ).materialize_empty_sell_call_artifacts(**kwargs),
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call", "count": 0},
         run_combo_yield_scan_fn=combo_runner,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
-        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: __import__(
-            "src.application.sell_put_steps", fromlist=["materialize_empty_sell_put_artifacts"]
-        ).materialize_empty_sell_put_artifacts(**kwargs),
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: __import__(
             "src.application.combo_yield_steps", fromlist=["materialize_empty_combo_yield_artifacts"]
         ).materialize_empty_combo_yield_artifacts(**kwargs),
@@ -982,7 +939,7 @@ def test_combo_yield_runs_when_sell_put_is_disabled(monkeypatch, tmp_path: Path)
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
 
 
-def test_combo_yield_runs_after_sell_put_failure_and_stale_put_artifacts_are_cleared(monkeypatch, tmp_path: Path) -> None:
+def test_combo_yield_runs_after_sell_put_failure_without_touching_historical_put_artifacts(monkeypatch, tmp_path: Path) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
     (report_dir / "nvda_sell_put_candidates.csv").write_text("stale\n1\n", encoding="utf-8")
@@ -997,7 +954,7 @@ def test_combo_yield_runs_after_sell_put_failure_and_stale_put_artifacts_are_cle
     )
 
     assert calls == ["combo"]
-    assert (report_dir / "nvda_sell_put_candidates.csv").read_text(encoding="utf-8") == "\n"
+    assert (report_dir / "nvda_sell_put_candidates.csv").read_text(encoding="utf-8") == "stale\n1\n"
     trace = (report_dir / "strategy_scan_failures.jsonl").read_text(encoding="utf-8")
     assert '"reason": "strategy_step_failed"' in trace
     assert '"strategy_family": "sell_put"' in trace
@@ -1039,7 +996,7 @@ def test_sell_put_result_survives_combo_yield_failure_and_stale_combo_artifacts_
     assert [row["count"] for row in out[:2]] == [1, 0]
 
 
-def test_sell_call_failure_is_traced_and_stale_call_artifacts_are_cleared(
+def test_sell_call_failure_is_traced_without_touching_historical_call_artifacts(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1057,7 +1014,7 @@ def test_sell_call_failure_is_traced_and_stale_call_artifacts_are_cleared(
         sell_call_runner=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("call failed")),
     )
 
-    assert (report_dir / "nvda_sell_call_candidates.csv").read_text(encoding="utf-8") == "\n"
+    assert (report_dir / "nvda_sell_call_candidates.csv").read_text(encoding="utf-8") == "stale\n1\n"
     trace = (report_dir / "strategy_scan_failures.jsonl").read_text(encoding="utf-8")
     assert '"reason": "strategy_step_failed"' in trace
     assert '"strategy_family": "covered_call"' in trace
@@ -1065,7 +1022,7 @@ def test_sell_call_failure_is_traced_and_stale_call_artifacts_are_cleared(
     assert out[-1]["count"] == 0
 
 
-def test_sell_call_not_applicable_clears_stale_call_artifacts(
+def test_sell_call_not_applicable_does_not_touch_historical_call_artifacts(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1083,5 +1040,5 @@ def test_sell_call_not_applicable_clears_stale_call_artifacts(
         sell_call_enabled=False,
     )
 
-    assert stale_path.read_text(encoding="utf-8") == "\n"
+    assert stale_path.read_text(encoding="utf-8") == "stale\n1\n"
     assert out[-1]["strategy"] == "sell_call"

@@ -1860,7 +1860,6 @@ def service_upgrade_verify(
     }
     upgrade_status = load_upgrade_status(runtime_root=runtime) or {}
     services = _compact_service_health(upgrade_status.get("service_health"), profile=profile)
-    event_source = _event_source_verify_summary(configs)
     update_ok = True
     if update_check is not None:
         update_ok = bool(update_check.get("ok")) and not bool(update_check.get("upgrade_available"))
@@ -1886,7 +1885,6 @@ def service_upgrade_verify(
             "upgrade_available": bool(update_check.get("upgrade_available")) if update_check else None,
         },
         "config": configs,
-        "event_source": event_source,
         "services": services,
         "upgrade": _compact_upgrade_status(upgrade_status),
     }
@@ -1942,7 +1940,6 @@ def _runtime_config_verify_summary(
     generated = cfg.get(GENERATED_KEY) if isinstance(cfg.get(GENERATED_KEY), dict) else {}
     generated_version = str(generated.get("version") or "").strip()
     version_ok = (not generated_version) or generated_version == current_version
-    event_source = cfg.get("runtime", {}).get("event_risk_source") if isinstance(cfg.get("runtime"), dict) else None
     return {
         "ok": bool(identity.get("ok")) and bool(freshness.get("ok")) and version_ok,
         "path": str(path),
@@ -1954,7 +1951,6 @@ def _runtime_config_verify_summary(
         "identity_ok": bool(identity.get("ok")),
         "freshness_ok": bool(freshness.get("ok")),
         "error_codes": _config_error_codes(identity, freshness, version_ok=version_ok),
-        "event_source": event_source if isinstance(event_source, dict) else None,
     }
 
 
@@ -1968,32 +1964,6 @@ def _config_error_codes(*results: dict[str, Any], version_ok: bool) -> list[str]
     if not version_ok:
         codes.append("generated_version_mismatch")
     return codes
-
-
-def _event_source_verify_summary(configs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    by_market: dict[str, dict[str, Any]] = {}
-    default_provider = None
-    mode = None
-    providers: dict[str, Any] | None = None
-    for market, item in configs.items():
-        source = item.get("event_source") if isinstance(item.get("event_source"), dict) else {}
-        market_rules = source.get("market_rules") if isinstance(source.get("market_rules"), dict) else {}
-        rule = market_rules.get(market) if isinstance(market_rules.get(market), dict) else {}
-        chain = rule.get("chain") if isinstance(rule.get("chain"), list) else None
-        by_market[market] = {
-            "mode": source.get("mode"),
-            "default_provider": source.get("default_provider"),
-            "chain": chain or ([source.get("default_provider")] if source.get("default_provider") else []),
-        }
-        default_provider = default_provider or source.get("default_provider")
-        mode = mode or source.get("mode")
-        providers = providers or (source.get("providers") if isinstance(source.get("providers"), dict) else None)
-    return {
-        "mode": mode,
-        "default_provider": default_provider,
-        "providers": sorted(providers) if isinstance(providers, dict) else [],
-        "markets": by_market,
-    }
 
 
 def _compact_service_health(raw: Any, *, profile: dict[str, Any]) -> dict[str, Any]:

@@ -100,7 +100,7 @@ def _build_valid_manifest(
     )
     candidate_path, _candidate = _publish(
         producer,
-        kind="candidate_decisions",
+        kind="opening_candidates",
         source_native_id="candidate-batch-1",
         producer_scope="account",
         producer_account_run_id="run-1",
@@ -130,7 +130,7 @@ def _build_valid_manifest(
         adopted_sources=[adopted_quote, adopted_candidate],
         required_for_actions={
             "quotes": ["covered_call", "short_put"],
-            "candidate_decisions": ["short_put"],
+            "opening_candidates": ["short_put"],
         },
     )
 
@@ -203,7 +203,7 @@ def test_adoption_copies_exact_bytes_and_manifest_closes_dependencies(tmp_path: 
     quote_dep = _dependency(quote_path, quote, root=producer)
     candidate_path, _candidate = _publish(
         producer,
-        kind="candidate_decisions",
+        kind="opening_candidates",
         source_native_id="candidate-batch-1",
         producer_scope="account",
         producer_account_run_id="run-1",
@@ -239,7 +239,7 @@ def test_adoption_copies_exact_bytes_and_manifest_closes_dependencies(tmp_path: 
         adopted_sources=[adopted_quote, adopted_candidate],
         required_for_actions={
             "quotes": ["short_put", "covered_call"],
-            "candidate_decisions": ["short_put"],
+            "opening_candidates": ["short_put"],
         },
     )
     validated = validate_source_manifest(
@@ -252,7 +252,7 @@ def test_adoption_copies_exact_bytes_and_manifest_closes_dependencies(tmp_path: 
     )
     assert validated["completed"] is True
     assert [item["source_kind"] for item in validated["source_manifest"]] == [
-        "candidate_decisions",
+        "opening_candidates",
         "quotes",
     ]
 
@@ -304,7 +304,7 @@ def test_manifest_rejects_missing_dependency_and_non_fx_skew(tmp_path: Path) -> 
     quote_dep = _dependency(quote_path, quote, root=producer)
     candidate_path, _candidate = _publish(
         producer,
-        kind="candidate_decisions",
+        kind="opening_candidates",
         source_native_id="candidate-batch-1",
         observed_at=NOW + timedelta(minutes=6),
         producer_scope="account",
@@ -407,7 +407,7 @@ def test_account_source_requires_complete_account_identity(tmp_path: Path) -> No
     with pytest.raises(PositionAdviceSourceError, match="lacks broker, account"):
         _publish(
             tmp_path,
-            kind="candidate_decisions",
+            kind="opening_candidates",
             source_native_id="candidate-batch-1",
             producer_scope="account",
             producer_account_run_id="run-1",

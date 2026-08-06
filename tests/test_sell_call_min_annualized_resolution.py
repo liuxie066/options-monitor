@@ -159,8 +159,7 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
 
     def _fake_run_sell_call_scan(**kwargs):
         calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
+        return pd.DataFrame()
 
     steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
@@ -268,4 +267,4 @@ def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
 
     assert out["_strategy_status"] == "unavailable"
     assert out["_strategy_reason"] == "option_positions_context_unavailable"
-    assert stale_path.read_text(encoding="utf-8") == "\n"
+    assert stale_path.read_text(encoding="utf-8") == "stale\n1\n"

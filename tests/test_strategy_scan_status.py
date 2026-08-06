@@ -149,7 +149,9 @@ def test_not_applicable_strategy_is_terminal_and_not_failed(
     assert index["items"][0]["status"] == "not_applicable"
 
 
-def test_index_synthesizes_missing_and_invalid_statuses(tmp_path: Path) -> None:
+def test_index_keeps_artifact_free_opening_status_and_synthesizes_missing(
+    tmp_path: Path,
+) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
     (report_dir / "nvda_sell_call_candidates.csv").write_text(
@@ -190,11 +192,9 @@ def test_index_synthesizes_missing_and_invalid_statuses(tmp_path: Path) -> None:
     )
 
     reasons = {item.get("reason") for item in index["items"]}
-    assert reasons == {
-        "strategy_scan_status_invalid",
-        "strategy_scan_status_missing",
-    }
-    assert index["counts"]["failed"] == 2
+    assert reasons == {None, "strategy_scan_status_missing"}
+    assert index["counts"]["completed"] == 1
+    assert index["counts"]["failed"] == 1
     payload = json.loads(
         (report_dir / "strategy_scan_status_index.v1.json").read_text(
             encoding="utf-8"

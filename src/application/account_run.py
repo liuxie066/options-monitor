@@ -18,8 +18,6 @@ from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
-from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
-from src.application.close_advice_reallocation_shadow import write_close_advice_reallocation_shadow
 from src.application.config_sections import (
     resolve_watchlist_config,
     set_watchlist_config,
@@ -39,7 +37,6 @@ from src.application.prepared_option_positions_context import (
 from src.application.prepared_portfolio_context import (
     load_prepared_portfolio_context,
 )
-from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
@@ -48,7 +45,6 @@ from src.application.multi_tick.misc import (
     _safe_runlog_data,
     ensure_account_output_dir,
 )
-from src.application.events.prefetch import prefetch_event_data
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     load_account_run_config,
@@ -470,91 +466,7 @@ def run_one_account(
             ran_pipeline=False,
         )
 
-    def _shared_event_prefetch_done() -> bool:
-        state = request.prefetch_state
-        if not isinstance(state, dict):
-            return False
-        if bool(request.force_mode):
-            return bool(state.get("event_force_done"))
-        return bool(state.get("event_done"))
-
-    def _mark_shared_event_prefetch_done(done: bool) -> None:
-        state = request.prefetch_state
-        if done and isinstance(state, dict):
-            state["event_done"] = True
-            if bool(request.force_mode):
-                state["event_force_done"] = True
-
-    def _run_event_prefetch() -> bool:
-        run_state_dir = run_repo.get_run_state_dir(request.base, request.run_id)
-        runlog.safe_event(
-            "event_prefetch",
-            "start",
-            data=_safe_runlog_data({"account": acct, "symbols_count": len(resolve_watchlist_config(cfg))}),
-        )
-        try:
-            event_stats = prefetch_event_data(
-                base=request.base,
-                cfg=cfg,
-                snapshot_path=(run_state_dir / "event_snapshot.json").resolve(),
-                force_refresh=bool(request.force_mode),
-            )
-            summary = event_stats.get("summary") if isinstance(event_stats.get("summary"), dict) else {}
-            audit_fn(
-                "tool_call",
-                "event_prefetch",
-                run_id=request.run_id,
-                account=acct,
-                status=("ok" if int(summary.get("errors") or 0) == 0 else "error"),
-                tool_name="event_prefetch",
-                extra={"summary": summary},
-            )
-            try:
-                state_repo.write_shared_state(request.base, "event_prefetch_summary.json", event_stats)
-                state_repo.append_run_audit_jsonl(
-                    request.base,
-                    request.run_id,
-                    "tool_execution_audit.jsonl",
-                    {
-                        "tool_name": "event_prefetch",
-                        "ok": int(summary.get("errors") or 0) == 0,
-                        "summary": summary,
-                    },
-                )
-            except Exception as exc:
-                _record_account_run_degraded(
-                    runlog=runlog,
-                    audit_fn=audit_fn,
-                    run_id=request.run_id,
-                    account=acct,
-                    action="write_event_prefetch_summary",
-                    exc=exc,
-                )
-            runlog.safe_event("event_prefetch", "ok", data=_safe_runlog_data(summary))
-            _mark_shared_event_prefetch_done(True)
-            return True
-        except Exception as exc:
-            _record_account_run_degraded(
-                runlog=runlog,
-                audit_fn=audit_fn,
-                run_id=request.run_id,
-                account=acct,
-                action="event_prefetch",
-                exc=exc,
-            )
-            return False
-
     prefetch_done = bool(request.prefetch_done)
-    event_prefetch_done = bool(_shared_event_prefetch_done())
-    if not event_prefetch_done:
-        if request.prefetch_lock is None:
-            event_prefetch_done = _run_event_prefetch()
-        else:
-            with request.prefetch_lock:
-                event_prefetch_done = bool(_shared_event_prefetch_done())
-                if not event_prefetch_done:
-                    event_prefetch_done = _run_event_prefetch()
-
     acct_report_dir.mkdir(parents=True, exist_ok=True)
 
     runlog.safe_event(
@@ -909,58 +821,7 @@ def run_one_account(
                 exc=exc,
             )
 
-    try:
-        capacity_shadow = write_portfolio_capacity_shadow(report_dir=acct_report_dir, account=acct)
-        audit_fn(
-            "tool_call",
-            "portfolio_capacity_shadow",
-            run_id=request.run_id,
-            account=acct,
-            status="ok",
-            tool_name="portfolio_capacity_shadow",
-            extra={
-                "rows": capacity_shadow.get("rows"),
-                "status_counts": capacity_shadow.get("status_counts"),
-            },
-        )
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="portfolio_capacity_shadow",
-            exc=exc,
-        )
-
     text = notif_path.read_text(encoding="utf-8", errors="replace").strip() if notif_path.exists() else ""
-    try:
-        trace_path = acct_report_dir / "candidate_filter_trace.jsonl"
-        reject_log_paths = sorted(acct_report_dir.glob("*_reject_log.csv"))
-        should_append_reject_summary = (
-            trace_path.exists()
-            or bool(reject_log_paths)
-            or (not text.strip())
-            or ("暂无符合条件的候选" in text)
-            or ("本轮无候选" in text)
-        )
-        if should_append_reject_summary:
-            text = append_candidate_reject_summary_to_text(
-                text,
-                trace_path=trace_path,
-                reject_log_paths=reject_log_paths,
-                account=acct,
-                run_id=request.run_id,
-            )
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="candidate_reject_summary",
-            exc=exc,
-        )
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
@@ -1076,33 +937,6 @@ def run_one_account(
                     acct_metrics=acct_metrics,
                     prefetch_done=prefetch_done,
                     ran_pipeline=False,
-                )
-            try:
-                reallocation_shadow = write_close_advice_reallocation_shadow(
-                    report_dir=acct_report_dir,
-                    context_path=(acct_state_dir / "option_positions_context.json").resolve(),
-                    account=acct,
-                )
-                audit_fn(
-                    "tool_call",
-                    "close_advice_reallocation_shadow",
-                    run_id=request.run_id,
-                    account=acct,
-                    status="ok",
-                    tool_name="close_advice_reallocation_shadow",
-                    extra={
-                        "rows": reallocation_shadow.get("rows"),
-                        "status_counts": reallocation_shadow.get("status_counts"),
-                    },
-                )
-            except Exception as exc:
-                _record_account_run_degraded(
-                    runlog=runlog,
-                    audit_fn=audit_fn,
-                    run_id=request.run_id,
-                    account=acct,
-                    action="close_advice_reallocation_shadow",
-                    exc=exc,
                 )
             close_text_path = acct_report_dir / "close_advice.txt"
             close_text = close_text_path.read_text(encoding="utf-8", errors="replace").strip() if close_text_path.exists() else ""

@@ -36,8 +36,6 @@ from src.application.agent_tool_config import resolve_output_root
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
 from src.application.config_sections import resolve_watchlist_config
 from src.application.performance.service import build_option_period_performance
-from src.application.agent_tools.candidate_filter_trace_discovery import find_candidate_filter_trace_paths
-from src.application.candidate_filter_trace import infer_trace_scope_from_path, read_candidate_filter_trace
 
 
 MAX_QUERY_LIMIT = 200
@@ -277,25 +275,6 @@ STRATEGY_CONFIG_BY_SYMBOL_ACCOUNT_FIELDS: tuple[str, ...] = (
     "max_strike",
     "min_annualized",
     "config_source",
-)
-
-
-CANDIDATE_FILTER_DIAGNOSTIC_FIELDS: tuple[str, ...] = (
-    "run_id",
-    "account",
-    "symbol",
-    "option_type",
-    "function",
-    "status",
-    "stage",
-    "rule",
-    "metric_value",
-    "threshold",
-    "contract_symbol",
-    "expiration",
-    "strike",
-    "message",
-    "source",
 )
 
 
@@ -792,17 +771,6 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "recommended_filters": ("symbol", "account", "strategy_family", "enabled"),
         "safe_join_keys": ("symbol", "account"),
     },
-    "candidate_filter_diagnostics": {
-        "description": "candidate filter trace diagnostics by run/account/symbol/function/rule",
-        "fields": CANDIDATE_FILTER_DIAGNOSTIC_FIELDS,
-        "row_grain": "run_id + account + symbol + option_type + rule",
-        "primary_keys": ("run_id", "account", "symbol", "function", "rule", "contract_symbol"),
-        "source_tools": ("candidate_filter_trace",),
-        "semantic_source": "candidate_filter_trace.jsonl artifacts",
-        "freshness": "artifact_snapshot",
-        "recommended_filters": ("run_id", "account", "symbol", "function", "status", "rule"),
-        "safe_join_keys": ("run_id", "account", "symbol", "option_type", "expiration", "strike"),
-    },
     "close_advice_snapshot": {
         "description": "latest close-advice rows with recommendation, action, tier, reason, quote status, and close PnL context",
         "fields": CLOSE_ADVICE_SNAPSHOT_FIELDS,
@@ -976,7 +944,6 @@ _CONFIG_SOURCE_VIEWS: set[str] = {
     "strategy_config_by_symbol_account",
 }
 _ARTIFACT_SOURCE_VIEWS: set[str] = {
-    "candidate_filter_diagnostics",
     "close_advice_snapshot",
     "runtime_tick_status",
     "strategy_replay_read_surface",
@@ -1729,7 +1696,6 @@ def _materialize_views(
     position_data: dict[str, Any] = {}
     event_data: dict[str, Any] = {}
     symbol_rows: list[dict[str, Any]] = []
-    candidate_rows: list[dict[str, Any]] = []
     close_advice_rows: list[dict[str, Any]] = []
     runtime_rows: list[dict[str, Any]] = []
     strategy_replay_rows: list[dict[str, Any]] = []
@@ -1800,10 +1766,6 @@ def _materialize_views(
         if not config_path:
             warnings.append("runtime config path unavailable; symbol strategy config may be incomplete")
 
-    if requested & {"candidate_filter_diagnostics"}:
-        candidate_rows, candidate_warnings = _candidate_filter_diagnostic_rows(payload)
-        warnings.extend(candidate_warnings)
-
     if requested & {"close_advice_snapshot"}:
         close_advice_rows, close_advice_warnings = _close_advice_snapshot_rows(payload)
         warnings.extend(close_advice_warnings)
@@ -1852,7 +1814,6 @@ def _materialize_views(
             _symbol_performance_attribution_rows(account_performance_reports)
         ),
         "strategy_config_by_symbol_account": _normalize_rows(_strategy_config_by_symbol_account_rows(symbol_rows)),
-        "candidate_filter_diagnostics": _normalize_rows(candidate_rows),
         "close_advice_snapshot": _normalize_rows(close_advice_rows),
         "runtime_tick_status": _normalize_rows(runtime_rows),
         "quote_freshness": _normalize_rows(quote_rows),
@@ -2221,64 +2182,6 @@ def _symbol_strategy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _candidate_filter_diagnostic_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    paths = _candidate_filter_trace_paths(_payload_with_resolved_config_path(payload))
-    if not paths:
-        return [], ["candidate_filter_diagnostics missing: no candidate_filter_trace.jsonl artifacts found"]
-    rows: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for path in paths:
-        try:
-            raw_rows = read_candidate_filter_trace(path)
-        except Exception as exc:
-            warnings.append(f"candidate_filter_diagnostics read_error: {path.name}: {type(exc).__name__}: {exc}")
-            continue
-        scope = infer_trace_scope_from_path(path)
-        for row in raw_rows:
-            if not isinstance(row, dict):
-                continue
-            rows.append(_candidate_filter_diagnostic_row(row, scope=scope))
-            if len(rows) >= MAX_MATERIALIZED_ROWS:
-                warnings.append("candidate_filter_diagnostics truncated at materialization row cap")
-                return rows, warnings
-    if not rows:
-        warnings.append("candidate_filter_diagnostics empty: trace artifacts contained no rows")
-    return rows, warnings
-
-
-def _candidate_filter_trace_paths(payload: dict[str, Any]) -> list[Path]:
-    return find_candidate_filter_trace_paths(payload, repo_base=repo_base)
-
-
-def _payload_with_resolved_config_path(payload: dict[str, Any]) -> dict[str, Any]:
-    if str(payload.get("config_path") or "").strip() or not str(payload.get("config_key") or "").strip():
-        return payload
-    config_path, _cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=None)
-    out = dict(payload)
-    out["config_path"] = str(config_path)
-    return out
-
-
-def _candidate_filter_diagnostic_row(row: dict[str, Any], *, scope: dict[str, str | None]) -> dict[str, Any]:
-    return {
-        "run_id": row.get("run_id") or scope.get("run_id"),
-        "account": row.get("account") or scope.get("account"),
-        "symbol": row.get("symbol"),
-        "option_type": row.get("option_type"),
-        "function": row.get("function"),
-        "status": row.get("status"),
-        "stage": row.get("stage"),
-        "rule": row.get("rule"),
-        "metric_value": row.get("metric_value"),
-        "threshold": row.get("threshold"),
-        "contract_symbol": row.get("contract_symbol"),
-        "expiration": row.get("expiration"),
-        "strike": row.get("strike"),
-        "message": row.get("message"),
-        "source": "candidate_filter_trace",
-    }
 
 
 def _close_advice_snapshot_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -3313,7 +3216,6 @@ def _query_diagnostics(
 
     for view_name in views_used:
         if view_name not in {
-            "candidate_filter_diagnostics",
             "close_advice_snapshot",
             "runtime_tick_status",
             "quote_freshness",
@@ -3341,7 +3243,6 @@ def _diagnostic_records_from_warnings(
         lower = text.lower()
         view_name = ""
         for candidate in (
-            "candidate_filter_diagnostics",
             "close_advice_snapshot",
             "runtime_tick_status",
             "quote_freshness",
@@ -3400,8 +3301,6 @@ def _diagnostic_records_from_rows(*, view_name: str, rows: list[dict[str, Any]])
                 "answer_boundary": "cannot infer absence of problem from empty diagnostic result",
             }
         ]
-    if view_name == "candidate_filter_diagnostics":
-        return _candidate_diagnostic_records(rows)
     if view_name == "close_advice_snapshot":
         return _close_advice_diagnostic_records(rows)
     if view_name == "runtime_tick_status":
@@ -3424,25 +3323,6 @@ def _rows_represent_no_matches(rows: list[dict[str, Any]]) -> bool:
         if count_fields and all(_float_or_none(row.get(key)) == 0 for key in count_fields):
             return True
     return False
-
-
-def _candidate_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    statuses = {str(row.get("status") or "").strip().lower() for row in rows if isinstance(row, dict)}
-    rejection_statuses = {"reject", "rejected", "filtered", "excluded", "blocked", "skip", "skipped"}
-    status = "observed_rejection" if statuses & rejection_statuses else "observed_candidate_diagnostic"
-    rules = _sorted_unique_row_values(rows, "rule")
-    return [
-        {
-            "view": "candidate_filter_diagnostics",
-            "status": status,
-            "severity": "info",
-            "accounts": _sorted_unique_row_values(rows, "account"),
-            "symbols": _sorted_unique_row_values(rows, "symbol"),
-            "observed_rules": rules,
-            "summary": _candidate_diagnostic_summary(status=status, rules=rules),
-            "answer_boundary": "observed_filter_evidence_only",
-        }
-    ]
 
 
 def _close_advice_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3683,13 +3563,6 @@ def _diagnostic_warning_summary(*, view_name: str, warning: str, status: str) ->
         return f"{view_name} diagnostic source had no rows"
     message = warning.partition(":")[2].strip()
     return message or f"{view_name} diagnostic source is missing"
-
-
-def _candidate_diagnostic_summary(*, status: str, rules: list[Any]) -> str:
-    if status == "observed_rejection":
-        suffix = f" by rules: {', '.join(str(item) for item in rules[:5])}" if rules else ""
-        return f"candidate diagnostic contains observed rejection/filter evidence{suffix}"
-    return "candidate diagnostic rows were observed"
 
 
 def _close_advice_diagnostic_summary(*, actions: list[Any], tiers: list[Any]) -> str:

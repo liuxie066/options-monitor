@@ -77,8 +77,6 @@ def _run(
         yield_sp={
             "strategy": "insurance_underwriting",
             "min_annualized_net_return": 0.10,
-            "reject_event_risk": True,
-            "event_source_fail_closed": True,
             **(yield_sp or {}),
         },
         yield_enhancement_policy=policy,
@@ -88,7 +86,6 @@ def _run(
         report_dir=report_dir,
         yield_window=CandidateWindowDefaults(min_dte=7, max_dte=60),
         liquidity=CandidateLiquidityDefaults(),
-        event_risk={"enabled": True, "mode": "warn"},
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         portfolio_ctx=None,
         top_n=3,
@@ -179,22 +176,6 @@ def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_dis
         "strategy": "insurance_underwriting",
     }
     assert captured["yield_enhancement_policy"].requires_realized_volatility is True
-
-
-def test_combo_yield_event_gate_fails_closed_without_iv_rv_underwriting(tmp_path: Path) -> None:
-    captured, trace, _scan_kwargs = _run(
-        tmp_path,
-        candidates=[
-            _candidate(event_source_status="error"),
-            _candidate(contract_symbol="NVDA260821P00095000", strike=95.0, event_flag=True),
-        ],
-        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
-    )
-
-    assert captured.empty
-    rules = {row["rule"] for row in trace if row["stage"] == "combo_event_risk"}
-    assert rules == {"event_source_unavailable", "event_risk_within_expiry"}
-    assert "combo_yield_put_event_filtered" in {row["rule"] for row in trace}
 
 
 def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -> None:

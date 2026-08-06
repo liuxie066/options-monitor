@@ -486,11 +486,6 @@ def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> No
             "NVDA.combo_yield.call",
             "max_dleta",
         ),
-        (
-            {"sell_put": {"enabled": False, "event_risk": {"enabeld": True}}},
-            "NVDA.sell_put.event_risk",
-            "enabeld",
-        ),
     ],
 )
 def test_validate_config_rejects_unknown_opening_strategy_keys(

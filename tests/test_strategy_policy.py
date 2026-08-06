@@ -117,7 +117,6 @@ def test_sell_put_strategy_semantics_matrix() -> None:
     assert underwriting.scan_requires_rv is True
     assert underwriting.scan_uses_underwriting_gate is True
     assert underwriting.scan_uses_short_vol_gate is False
-    assert underwriting.scan_uses_event_risk is True
     assert underwriting.scan_uses_path_risk is False
     assert underwriting.yield_enhancement_mode == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
     assert underwriting.yield_enhancement_requires_rv is True

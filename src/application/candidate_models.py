@@ -60,7 +60,6 @@ class CandidateContractInput:
     realized_volatility_20: float | None
     realized_volatility_60: float | None
     realized_volatility_120: float | None
-    realized_volatility_estimate: float | None
     term_matched_rv: float | None
     term_matched_rv_status: str
     term_matched_rv_reason: str
@@ -110,7 +109,6 @@ class CandidateContractInput:
             realized_volatility_20=_as_float(row.get("realized_volatility_20")),
             realized_volatility_60=_as_float(row.get("realized_volatility_60")),
             realized_volatility_120=_as_float(row.get("realized_volatility_120")),
-            realized_volatility_estimate=_as_float(row.get("realized_volatility_estimate")),
             term_matched_rv=_as_float(row.get("term_matched_rv")),
             term_matched_rv_status=str(row.get("term_matched_rv_status") or "").strip(),
             term_matched_rv_reason=str(row.get("term_matched_rv_reason") or "").strip(),
@@ -159,7 +157,6 @@ class CandidateContractInput:
             "realized_volatility_20": self.realized_volatility_20,
             "realized_volatility_60": self.realized_volatility_60,
             "realized_volatility_120": self.realized_volatility_120,
-            "realized_volatility_estimate": self.realized_volatility_estimate,
             "term_matched_rv": self.term_matched_rv,
             "term_matched_rv_status": self.term_matched_rv_status,
             "term_matched_rv_reason": self.term_matched_rv_reason,

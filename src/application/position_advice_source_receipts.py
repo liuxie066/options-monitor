@@ -19,7 +19,7 @@ MAX_NON_FX_OBSERVED_SKEW_SECONDS = 300
 
 SOURCE_MAX_AGE_SECONDS = {
     "quotes": 1800,
-    "candidate_decisions": 1800,
+    "opening_candidates": 1800,
     "portfolio": 1800,
     "ledger_decision_state": 1800,
     "cash_capacity": 1800,
@@ -29,7 +29,7 @@ SOURCE_MAX_AGE_SECONDS = {
 SOURCE_SCOPES = frozenset({"account", "market", "global"})
 ACCOUNT_SCOPED_SOURCES = frozenset(
     {
-        "candidate_decisions",
+        "opening_candidates",
         "portfolio",
         "ledger_decision_state",
         "cash_capacity",
@@ -37,7 +37,7 @@ ACCOUNT_SCOPED_SOURCES = frozenset(
     }
 )
 DERIVED_SOURCE_REQUIRED_DEPENDENCIES = {
-    "candidate_decisions": frozenset({"quotes"}),
+    "opening_candidates": frozenset({"quotes"}),
     "cash_capacity": frozenset({"portfolio", "ledger_decision_state", "fx"}),
     "share_coverage": frozenset({"portfolio", "ledger_decision_state"}),
 }

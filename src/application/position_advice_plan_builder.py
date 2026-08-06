@@ -249,12 +249,6 @@ def build_position_advice_plan(
             )[0]
             row["best_candidate"] = dict(best.get("candidate") or {})
             row["opening_decision_hash"] = best.get("opening_decision_hash")
-            row["invariant_decision_hash"] = best.get(
-                "invariant_decision_hash"
-            )
-            row["replacement_decision_hash"] = best.get(
-                "replacement_decision_hash"
-            )
             row["replacement_eligibility"] = best.get(
                 "replacement_eligibility"
             )
@@ -545,8 +539,7 @@ def _proposal_for_candidate(
     if lifecycle_state != "open":
         return None
     opening = dict(decision.get("opening_decision") or {})
-    invariant = dict(decision.get("invariant_decision") or {})
-    if opening.get("accepted") is not True or invariant.get("accepted") is not True:
+    if opening.get("accepted") is not True:
         return None
     # Position Advice owns replacement eligibility.  A sealed opening
     # candidate is the input fact; replacement economics and capacity are
@@ -566,20 +559,12 @@ def _proposal_for_candidate(
     current_price = _quality_price(
         current_quote,
         side="ask",
-        max_spread_ratio=(
-            dict(decision.get("invariant_decision") or {})
-            .get("risk_policy", {})
-            .get("max_spread_ratio")
-        ),
+        max_spread_ratio=None,
     )
     candidate_price = _quality_price(
         candidate,
         side="bid",
-        max_spread_ratio=(
-            dict(decision.get("invariant_decision") or {})
-            .get("risk_policy", {})
-            .get("max_spread_ratio")
-        ),
+        max_spread_ratio=None,
     )
     if current_price is None or candidate_price is None:
         return None
@@ -851,9 +836,7 @@ def _proposal_for_candidate(
         ),
         "evidence_status": "complete",
         "risk_eligibility_status": "accepted",
-        "opening_decision_hash": opening.get("decision_hash"),
-        "invariant_decision_hash": invariant.get("decision_hash"),
-        "replacement_decision_hash": None,
+        "opening_decision_hash": canonical_sha256(opening),
         "replacement_eligibility": eligibility,
         "candidate": candidate,
         "current_extrinsic": economics["current_extrinsic"],
@@ -920,12 +903,6 @@ def _apply_selected_proposal(
             "best_candidate": dict(selected.get("candidate") or {}),
             "opening_decision_hash": selected.get(
                 "opening_decision_hash"
-            ),
-            "invariant_decision_hash": selected.get(
-                "invariant_decision_hash"
-            ),
-            "replacement_decision_hash": selected.get(
-                "replacement_decision_hash"
             ),
             "replacement_eligibility": selected.get(
                 "replacement_eligibility"
@@ -1149,8 +1126,6 @@ def _base_row(
         "comparison_currency": None,
         "best_candidate": None,
         "opening_decision_hash": None,
-        "invariant_decision_hash": None,
-        "replacement_decision_hash": None,
         "replacement_eligibility": None,
         "candidate_daily_carry": None,
         "candidate_capital_efficiency": None,
@@ -1224,28 +1199,22 @@ def _validated_candidates(
         reasons: list[str] = []
         if not candidate_id or candidate_id in seen:
             reasons.append("candidate_identity_conflict")
-        if item.get("schema_version") != "candidate_all_decisions.v1":
+        if item.get("schema_version") != "opening_candidate_decision.v1":
             reasons.append("candidate_schema_invalid")
         normalized = dict(item.get("normalized_input") or {})
         if item.get("normalized_input_hash") != canonical_sha256(normalized):
             reasons.append("candidate_input_hash_mismatch")
         opening = dict(item.get("opening_decision") or {})
-        invariant = dict(item.get("invariant_decision") or {})
-        if not _embedded_hash_valid(opening, "decision_hash"):
-            reasons.append("opening_decision_hash_mismatch")
-        if not _embedded_hash_valid(invariant, "decision_hash"):
-            reasons.append("invariant_decision_hash_mismatch")
-        risk_policy = dict(invariant.get("risk_policy") or {})
         if (
-            not risk_policy
-            or invariant.get("risk_policy_hash")
-            != canonical_sha256(risk_policy)
+            opening.get("schema_kind") != "candidate_decision"
+            or opening.get("schema_version") != "1.0"
+            or dict(opening.get("normalized_input") or {}) != normalized
         ):
+            reasons.append("opening_decision_invalid")
+        if len(str(item.get("risk_policy_hash") or "")) != 64:
             reasons.append("risk_policy_hash_mismatch")
         if opening.get("accepted") is not True:
             reasons.append("opening_candidate_not_accepted")
-        if invariant.get("accepted") is not True:
-            reasons.append("opening_invariant_not_accepted")
         if reasons:
             errors[candidate_id or f"invalid-{len(errors)}"] = tuple(
                 sorted(set(reasons))
@@ -1254,12 +1223,6 @@ def _validated_candidates(
         seen.add(candidate_id)
         valid.append(item)
     return valid, errors
-
-
-def _embedded_hash_valid(payload: Mapping[str, Any], field: str) -> bool:
-    item = dict(payload or {})
-    expected = item.pop(field, None)
-    return isinstance(expected, str) and expected == canonical_sha256(item)
 
 
 def _quote_index(

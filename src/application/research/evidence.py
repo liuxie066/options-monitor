@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank, yield_enhancement_rank_key
+from domain.domain.engine import explain_candidate_rank, yield_enhancement_rank_key
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
@@ -1087,11 +1087,6 @@ def _ranking_row_evidence(
         if configured_attribution_allowed
         else {}
     )
-    score_weights = (
-        _candidate_score_weights(_dict_or_empty(strategy_cfg.get("score_weights")))
-        if configured_attribution_allowed
-        else None
-    )
     rank_explanation: dict[str, Any] | None = None
     rank_key: dict[str, Any] | None = None
 
@@ -1102,7 +1097,7 @@ def _ranking_row_evidence(
         }
     elif mode in {"put", "call"}:
         try:
-            rank_explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
+            rank_explanation = explain_candidate_rank(row, mode=mode)
         except Exception as exc:
             rank_explanation = {"error": f"{type(exc).__name__}: {exc}"}
     elif strategy == "combo_yield":
@@ -1144,11 +1139,6 @@ def _ranking_row_evidence(
         "metrics": _ranking_metrics(row),
         "cash_constraint": _cash_constraint(row),
         "configured_thresholds": _strategy_thresholds(strategy_cfg),
-        "configured_score_weights": (
-            _score_weights_payload(score_weights)
-            if score_weights is not None
-            else None
-        ),
         "rank_explanation": rank_explanation,
         "combo_yield_rank": rank_key,
     }
@@ -1248,38 +1238,6 @@ def _template_map(cfg: dict[str, Any]) -> dict[str, Any]:
 def _template_names(value: Any) -> list[str]:
     raw_items = value if isinstance(value, list) else ([value] if value else [])
     return [str(item).strip() for item in raw_items if str(item or "").strip()]
-
-
-def _candidate_score_weights(raw: dict[str, Any]) -> CandidateScoreWeights:
-    defaults = CandidateScoreWeights()
-    return CandidateScoreWeights(
-        annualized_return=_float_setting(raw, "annualized_return", defaults.annualized_return),
-        net_income=_float_setting(raw, "net_income", defaults.net_income),
-        liquidity=_float_setting(raw, "liquidity", defaults.liquidity),
-        risk_distance=_float_setting(raw, "risk_distance", defaults.risk_distance),
-        vol_edge=_float_setting(raw, "vol_edge", defaults.vol_edge),
-        delta_target=_float_setting(raw, "delta_target", defaults.delta_target),
-        concentration=_float_setting(raw, "concentration", defaults.concentration),
-        path_risk=_float_setting(raw, "path_risk", defaults.path_risk),
-    )
-
-
-def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
-    parsed = _float_or_none(raw.get(key))
-    return float(default if parsed is None or parsed < 0 else parsed)
-
-
-def _score_weights_payload(weights: CandidateScoreWeights) -> dict[str, float]:
-    return {
-        "annualized_return": float(weights.annualized_return),
-        "net_income": float(weights.net_income),
-        "liquidity": float(weights.liquidity),
-        "risk_distance": float(weights.risk_distance),
-        "vol_edge": float(weights.vol_edge),
-        "delta_target": float(weights.delta_target),
-        "concentration": float(weights.concentration),
-        "path_risk": float(weights.path_risk),
-    }
 
 
 def _strategy_thresholds(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
