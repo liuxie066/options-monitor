@@ -566,6 +566,16 @@ def _opening_status(
     *,
     scan_statuses: list[dict[str, Any]],
 ) -> str:
+    observed_scopes = [
+        item
+        for item in scan_statuses
+        if str(item.get("status") or "") != "not_applicable"
+    ]
+    if observed_scopes and all(
+        str(item.get("reason") or "") == "market_closed"
+        for item in observed_scopes
+    ):
+        return "market_closed"
     scope_states = {str(item.get("status") or "") for item in scan_statuses}
     if scope_states & {"completed", "not_applicable"} and scope_states & {
         "failed",

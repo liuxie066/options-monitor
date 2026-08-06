@@ -7,6 +7,7 @@ from typing import Any, Callable, Protocol
 
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
+from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
@@ -400,12 +401,19 @@ def run_symbol_monitoring(
         if (
             candidate_count == 0
             and quote_source_outcome == "success_empty"
+            and quote_reason_code in SUCCESS_EMPTY_REASON_CODES
         ):
             return {
                 "source_outcome": quote_source_outcome,
                 "reason_code": quote_reason_code or None,
             }
         return {"source_outcome": None, "reason_code": None}
+
+    def _completed_scan_status(candidate_count: int) -> tuple[str, str | None]:
+        if candidate_count == 0 and quote_reason_code == "market_closed":
+            return "unavailable", "market_closed"
+        return "completed", None
+
     def _report_capture(
         *,
         strategy_mode: str,
@@ -453,9 +461,11 @@ def run_symbol_monitoring(
                 put_result,
             )
             put_candidate_count = _summary_candidate_count(put_result)
+            put_status, put_reason = _completed_scan_status(put_candidate_count)
             _publish_status(
                 family="sell_put",
-                status="completed",
+                status=put_status,
+                reason=put_reason,
                 candidate_count=put_candidate_count,
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
@@ -464,8 +474,8 @@ def run_symbol_monitoring(
             if configured_put:
                 _report_capture(
                     strategy_mode="put",
-                    status="completed",
-                    reason="opening_candidates_captured",
+                    status=put_status,
+                    reason=put_reason or "opening_candidates_captured",
                 )
         except Exception as exc:
             log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
@@ -593,6 +603,12 @@ def run_symbol_monitoring(
                 call_result,
             )
             call_candidate_count = _summary_candidate_count(call_result)
+            if call_status == "completed":
+                call_status, closed_reason = _completed_scan_status(
+                    call_candidate_count
+                )
+                if closed_reason is not None:
+                    call_reason = closed_reason
             _publish_status(
                 family="covered_call",
                 status=call_status,
@@ -602,7 +618,7 @@ def run_symbol_monitoring(
                 receipt_relpath=quote_receipt_relpath,
                 **(
                     _completed_empty_evidence(call_candidate_count)
-                    if call_status == "completed"
+                    if call_status == "completed" or call_reason == "market_closed"
                     else {}
                 ),
             )
