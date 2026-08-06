@@ -4,6 +4,7 @@ from domain.domain.risk_capacity import (
     allocate_portfolio_capacity_shadow,
     compute_sell_call_share_capacity,
     compute_sell_put_cash_capacity,
+    compute_sell_put_effective_cash,
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
 )
@@ -91,6 +92,46 @@ def test_sell_put_cash_capacity_fails_closed_when_basis_missing() -> None:
     assert not capacity.accepted
     assert capacity.basis is None
     assert capacity.reason == "cash_basis_missing"
+
+
+def test_sell_put_effective_cash_haircuts_only_positive_non_native_cash() -> None:
+    rates = {("CNY", "USD"): 1.0 / 7.0}
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 10_000, "CNY": 70_000},
+        cash_secured_by_currency={"USD": 2_000, "CNY": 7_000},
+        native_currency="USD",
+        convert_currency=lambda amount, source, target: amount * rates[(source, target)],
+    )
+
+    assert result.available
+    assert result.cash_free == 8_000 + 9_000 * 0.95
+
+
+def test_sell_put_effective_cash_keeps_native_cash_when_foreign_fx_is_missing() -> None:
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "CNY": 70_000},
+        cash_secured_by_currency={"USD": 2_000},
+        native_currency="USD",
+        convert_currency=lambda _amount, _source, _target: None,
+    )
+
+    assert result.available
+    assert result.cash_free == 18_000
+    assert result.reason == "native_cash_only_cross_currency_fx_unavailable:CNY"
+
+
+def test_sell_put_effective_cash_marks_stale_fx_while_keeping_native_cash() -> None:
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "CNY": 70_000},
+        cash_secured_by_currency={"USD": 2_000},
+        native_currency="USD",
+        convert_currency=lambda _amount, _source, _target: None,
+        fx_status="unavailable_stale",
+    )
+
+    assert result.available
+    assert result.cash_free == 18_000
+    assert result.reason == "native_cash_only_cross_currency_fx_stale:CNY"
 
 
 def test_sell_call_share_capacity_uses_actual_multiplier() -> None:

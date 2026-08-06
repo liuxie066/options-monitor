@@ -43,6 +43,49 @@ class ShortVolPortfolioContext:
     warnings: tuple[str, ...] = ()
 
 
+def resolve_short_vol_assessment_config(raw: dict[str, Any] | None) -> ShortVolAssessmentConfig:
+    """Resolve the historical short-vol thesis used by Close Advice.
+
+    Current opening configs keep the IV/RV and event fields at the strategy
+    top level. Older position snapshots may still carry the broader thesis
+    under ``short_vol`` and ``concentration``. Close Advice owns that read
+    compatibility; opening strategy adapters should not recreate it.
+    """
+
+    cfg = raw if isinstance(raw, dict) else {}
+    short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
+    concentration = cfg.get("concentration") if isinstance(cfg.get("concentration"), dict) else {}
+
+    return ShortVolAssessmentConfig(
+        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, cfg, short_vol),
+        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, cfg, short_vol),
+        min_abs_delta=_float_setting(short_vol, "min_abs_delta", 0.15),
+        max_abs_delta=_float_setting(short_vol, "max_abs_delta", 0.30),
+        target_abs_delta=_float_setting(short_vol, "target_abs_delta", 0.20),
+        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, cfg, short_vol),
+        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, cfg, short_vol),
+        enable_stress_check=_bool_setting(short_vol, "enable_stress_check", True),
+        stress_down_sigma_multiple=_float_setting(short_vol, "stress_down_sigma_multiple", 2.0),
+        max_put_sigma_stress_loss_nav_pct=_float_setting(short_vol, "max_put_sigma_stress_loss_nav_pct", 0.02),
+        gap_down_pct=_float_setting(short_vol, "gap_down_pct", 0.10),
+        max_put_gap_down_loss_nav_pct=_float_setting(short_vol, "max_put_gap_down_loss_nav_pct", 0.03),
+        call_gap_up_pct=_float_setting(short_vol, "call_gap_up_pct", 0.10),
+        max_call_gap_up_opportunity_cost_nav_pct=_float_setting(
+            short_vol,
+            "max_call_gap_up_opportunity_cost_nav_pct",
+            0.02,
+        ),
+        max_call_gap_up_opportunity_cost_to_premium=_float_setting(
+            short_vol,
+            "max_call_gap_up_opportunity_cost_to_premium",
+            3.0,
+        ),
+        max_single_trade_nav_pct=_float_setting(concentration, "max_single_trade_nav_pct", 0.08),
+        max_symbol_nav_pct=_float_setting(concentration, "max_symbol_nav_pct", 0.20),
+        max_total_short_put_nav_pct=_float_setting(concentration, "max_total_short_put_nav_pct", 0.50),
+    )
+
+
 def short_vol_assessment_fields(
     row: dict[str, Any],
     *,
@@ -50,7 +93,6 @@ def short_vol_assessment_fields(
     cfg: ShortVolAssessmentConfig,
     risk_ctx: ShortVolPortfolioContext,
 ) -> dict[str, Any]:
-    symbol = canonical_symbol(row.get("symbol"))
     iv = _float(row.get("implied_volatility"))
     rv = _first_float(
         row,
@@ -65,6 +107,64 @@ def short_vol_assessment_fields(
     iv_rv_ratio = (iv / rv) if (iv is not None and rv is not None and rv > 0) else None
     iv_minus_rv = (iv - rv) if (iv is not None and rv is not None) else None
 
+    nav = risk_ctx.nav_cny
+    concentration_fields = portfolio_concentration_fields(row, mode=mode, risk_ctx=risk_ctx)
+
+    delta_quality = None
+    if abs_delta is not None:
+        tolerance = max(cfg.max_abs_delta - cfg.min_abs_delta, 0.000001)
+        delta_quality = max(0.0, 1.0 - (abs(abs_delta - cfg.target_abs_delta) / tolerance))
+
+    vol_edge_score = None
+    if iv_rv_ratio is not None and iv_minus_rv is not None:
+        ratio_score = min(2.0, max(0.0, iv_rv_ratio - 1.0))
+        spread_score = min(2.0, max(0.0, iv_minus_rv))
+        vol_edge_score = ratio_score + spread_score
+
+    equity_delta_equivalent = None
+    if delta is not None:
+        if mode == "put":
+            equity_delta_equivalent = abs(delta)
+        else:
+            equity_delta_equivalent = max(0.0, 1.0 - abs(delta))
+
+    event_fields = _event_risk_fields(row)
+    stress_fields = _path_stress_fields(
+        row,
+        cfg=cfg,
+        mode=mode,
+        nav_cny=nav,
+        rv=rv,
+    )
+
+    return {
+        "strategy_profile": "short_vol",
+        "short_vol_mode": mode,
+        "short_gamma_profile": "short_gamma",
+        "short_vega_profile": "short_vega",
+        "implied_volatility": _round_optional(iv),
+        "realized_volatility_estimate": _round_optional(rv),
+        "iv_rv_ratio": _round_optional(iv_rv_ratio),
+        "iv_minus_rv": _round_optional(iv_minus_rv),
+        "abs_delta": _round_optional(abs_delta),
+        "equity_delta_equivalent": _round_optional(equity_delta_equivalent),
+        "delta_target_score": _round_optional(delta_quality),
+        "vol_edge_score": _round_optional(vol_edge_score),
+        **concentration_fields,
+        **event_fields,
+        **stress_fields,
+    }
+
+
+def portfolio_concentration_fields(
+    row: dict[str, Any],
+    *,
+    mode: ShortVolMode,
+    risk_ctx: ShortVolPortfolioContext,
+) -> dict[str, Any]:
+    """Project candidate concentration facts without imposing an opening gate."""
+
+    symbol = canonical_symbol(row.get("symbol"))
     assignment = _first_float(row, "assignment_notional_cny", "cash_required_cny")
     covered_notional = _first_float(row, "covered_notional_cny", "underlying_notional_cny")
     candidate_notional = assignment if mode == "put" else covered_notional
@@ -100,50 +200,11 @@ def short_vol_assessment_fields(
         symbol_after = (symbol_exposure / nav) if concentration_evaluable and nav else None
         total_after = ((existing_total_short_put or 0.0) / nav) if concentration_evaluable and nav else None
 
-    delta_quality = None
-    if abs_delta is not None:
-        tolerance = max(cfg.max_abs_delta - cfg.min_abs_delta, 0.000001)
-        delta_quality = max(0.0, 1.0 - (abs(abs_delta - cfg.target_abs_delta) / tolerance))
-
-    vol_edge_score = None
-    if iv_rv_ratio is not None and iv_minus_rv is not None:
-        ratio_score = min(2.0, max(0.0, iv_rv_ratio - 1.0))
-        spread_score = min(2.0, max(0.0, iv_minus_rv))
-        vol_edge_score = ratio_score + spread_score
-
     concentration_score = None
     if symbol_after is not None and total_after is not None:
         concentration_score = max(0.0, 1.0 - max(symbol_after, total_after))
 
-    equity_delta_equivalent = None
-    if delta is not None:
-        if mode == "put":
-            equity_delta_equivalent = abs(delta)
-        else:
-            equity_delta_equivalent = max(0.0, 1.0 - abs(delta))
-
-    event_fields = _event_risk_fields(row)
-    stress_fields = _path_stress_fields(
-        row,
-        cfg=cfg,
-        mode=mode,
-        nav_cny=nav,
-        rv=rv,
-    )
-
     return {
-        "strategy_profile": "short_vol",
-        "short_vol_mode": mode,
-        "short_gamma_profile": "short_gamma",
-        "short_vega_profile": "short_vega",
-        "implied_volatility": _round_optional(iv),
-        "realized_volatility_estimate": _round_optional(rv),
-        "iv_rv_ratio": _round_optional(iv_rv_ratio),
-        "iv_minus_rv": _round_optional(iv_minus_rv),
-        "abs_delta": _round_optional(abs_delta),
-        "equity_delta_equivalent": _round_optional(equity_delta_equivalent),
-        "delta_target_score": _round_optional(delta_quality),
-        "vol_edge_score": _round_optional(vol_edge_score),
         "portfolio_nav_cny": _round_optional(nav),
         "assignment_notional_cny": _round_optional(assignment),
         "covered_notional_cny": _round_optional(covered_notional),
@@ -157,8 +218,6 @@ def short_vol_assessment_fields(
         "concentration_evaluable": concentration_evaluable,
         "concentration_unavailable_reason": ";".join(risk_ctx.unavailable_reasons) or None,
         "portfolio_risk_warnings": ";".join(risk_ctx.warnings) or None,
-        **event_fields,
-        **stress_fields,
     }
 
 
@@ -185,6 +244,41 @@ def _float(value: Any) -> float | None:
     except Exception:
         pass
     return parsed
+
+
+def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
+    parsed = _float(raw.get(key, default))
+    return float(default) if parsed is None else float(parsed)
+
+
+def _float_setting_from_sources(key: str, default: float, *sources: dict[str, Any]) -> float:
+    for source in sources:
+        if isinstance(source, dict) and key in source:
+            return _float_setting(source, key, default)
+    return float(default)
+
+
+def _bool_setting(raw: dict[str, Any], key: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def _bool_setting_from_sources(key: str, default: bool, *sources: dict[str, Any]) -> bool:
+    for source in sources:
+        if isinstance(source, dict) and key in source:
+            return _bool_setting(source, key, default)
+    return bool(default)
 
 
 def _event_risk_fields(row: dict[str, Any]) -> dict[str, Any]:

@@ -37,8 +37,11 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
     )
 
     row = result.iloc[0]
-    assert row["cash_available_total_cny"] == 10920.0
-    assert row["cash_free_total_cny"] == 10460.0
+    assert row["cash_available_total_cny"] == 10420.0
+    assert row["cash_free_total_cny"] == 9960.0
+    assert row["cash_available_effective_native"] == 10420.0 / 0.92
+    assert row["cash_free_effective_native"] == 9960.0 / 0.92
+    assert row["cash_capacity_basis"] == "native_plus_haircut:HKD"
     assert row["cash_available_cny"] == 10000.0
     assert row["cash_free_cny"] == 9540.0
 
@@ -151,7 +154,60 @@ def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_
     row = result.iloc[0]
     assert pd.isna(row["cash_required_usd"])
     assert pd.isna(row["cash_required_cny"])
-    assert row["cash_requirement_unavailable_reason"] == "sell_put_candidate_cny_rate_missing:HKD"
+    assert row["cash_requirement_unavailable_reason"] == "cross_currency_cash_fx_unavailable:USD"
+
+
+def test_enrich_sell_put_candidates_keeps_native_cash_when_fx_is_unavailable(tmp_path: Path) -> None:
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=pd.DataFrame(
+            [{"symbol": "NVDA", "strike": 100.0, "multiplier": 100, "currency": "USD"}]
+        ),
+        symbol="NVDA",
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {"USD": 2_000.0},
+                "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        out_path=tmp_path / "sell_put_candidates_labeled.csv",
+    )
+
+    row = result.iloc[0]
+    assert row["cash_free_effective_native"] == 18_000.0
+    assert row["cash_fx_status"] == "native_cash_only_cross_currency_fx_unavailable:CNY"
+    assert pd.isna(row["cash_requirement_unavailable_reason"])
+
+
+def test_enrich_sell_put_candidates_marks_expired_fx_without_blocking_native_cash(tmp_path: Path) -> None:
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=pd.DataFrame(
+            [{"symbol": "NVDA", "strike": 100.0, "multiplier": 100, "currency": "USD"}]
+        ),
+        symbol="NVDA",
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 20_000.0, "CNY": 100_000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {"USD": 2_000.0},
+                "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 2_000.0}},
+            },
+            "_sell_put_fx_status": "unavailable_stale",
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        out_path=tmp_path / "sell_put_candidates_labeled.csv",
+    )
+
+    row = result.iloc[0]
+    assert row["cash_free_effective_native"] == 18_000.0
+    assert row["cash_fx_status"] == "native_cash_only_cross_currency_fx_stale:CNY"
+    assert pd.isna(row["cash_requirement_unavailable_reason"])
 
 
 def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: Path) -> None:

@@ -73,6 +73,7 @@ def evaluate_underwriting_candidate(
         reject_event_risk=cfg.reject_event_risk,
         event_source_fail_closed=cfg.event_source_fail_closed,
         fields=fields,
+        required_event_type=("earnings" if mode_norm == "put" else None),
     )
     if not event_decision["accepted"]:
         return event_decision
@@ -86,6 +87,7 @@ def evaluate_event_risk_candidate(
     reject_event_risk: bool = True,
     event_source_fail_closed: bool = True,
     fields: dict[str, Any] | None = None,
+    required_event_type: str | None = None,
 ) -> dict[str, Any]:
     decision_fields = dict(fields or {})
     event_status = str(row.get("event_source_status") or "").strip().lower()
@@ -97,7 +99,26 @@ def evaluate_event_risk_candidate(
             decision_fields,
             message="event source unavailable for underwriting",
         )
-    if reject_event_risk and _truthy(row.get("event_flag")):
+    event_type = str(required_event_type or "").strip().lower()
+    if event_source_fail_closed and event_type:
+        coverage_status = str(
+            row.get(f"event_{event_type}_coverage_status") or ""
+        ).strip().lower()
+        if coverage_status != "complete":
+            return _reject(
+                f"event_{event_type}_coverage_incomplete",
+                coverage_status or None,
+                "complete",
+                decision_fields,
+                message=f"{event_type} event coverage is incomplete",
+            )
+    event_types = {
+        item.strip().lower()
+        for item in str(row.get("event_types") or "").split(",")
+        if item.strip()
+    }
+    matching_event = not event_type or event_type in event_types
+    if reject_event_risk and _truthy(row.get("event_flag")) and matching_event:
         return _reject(
             "event_risk_within_expiry",
             True,
@@ -147,29 +168,19 @@ def rank_underwriting_candidates(
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 
-    return sorted(enriched, key=lambda item: underwriting_rank_key(item, mode=mode_norm))
+    from domain.domain.engine.candidate_engine import rank_candidate_rows
+
+    return rank_candidate_rows(enriched, mode=mode_norm)
 
 
 def underwriting_rank_key(row: dict[str, Any], *, mode: str) -> tuple[Any, ...]:
     """Canonical typed underwriting sort tuple used by ranking provenance."""
 
     mode_norm = _mode(mode)
-    margin_key = "net_assignment_discount_pct" if mode_norm == "put" else "strike_upside_margin_pct"
-    annualized_return = _annualized_return(row, mode=mode_norm)
-    return (
-        annualized_return is None,
-        -_sort_number(annualized_return),
-        -_sort_number(
-            row.get(margin_key)
-            if _float(row.get(margin_key)) is not None
-            else (_net_assignment_discount(row) if mode_norm == "put" else None)
-        ),
-        -_concentration_tie_break(row),
-        _sort_number(row.get("spread_ratio")),
-        -_sort_number(row.get("open_interest")),
-        -_sort_number(_first_present(row, "net_income_cny", "net_income")),
-        str(row.get("symbol") or "").strip().upper(),
-        str(row.get("contract_symbol") or row.get("option_symbol") or ""),
+    from domain.domain.engine.candidate_engine import build_candidate_rank_key
+
+    return tuple(
+        build_candidate_rank_key(row, mode=mode_norm)["sort_tuple"]
     )
 
 
@@ -253,22 +264,6 @@ def _net_assignment_discount(row: dict[str, Any]) -> float | None:
     return round((spot - breakeven) / spot, 6)
 
 
-def _concentration_tie_break(row: dict[str, Any]) -> float:
-    score = _first_float(row, "concentration_score")
-    if score is not None:
-        return score
-    exposures = [
-        value
-        for value in (
-            _first_float(row, "single_trade_concentration"),
-            _first_float(row, "symbol_concentration_after"),
-            _first_float(row, "total_short_put_concentration_after"),
-        )
-        if value is not None
-    ]
-    return -max(exposures) if exposures else 0.0
-
-
 def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConfig) -> float | None:
     min_strike = _first_float(row, "effective_min_strike", "min_strike")
     if min_strike is None:
@@ -285,14 +280,6 @@ def _threshold_score(value: float | None, threshold: float, *, cap: float) -> fl
     if value is None:
         return 0.0
     return min(max(float(value) / float(threshold), 0.0), cap)
-
-
-def _first_present(row: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = row.get(key)
-        if _float(value) is not None:
-            return value
-    return None
 
 
 def _first_float(row: dict[str, Any], *keys: str) -> float | None:
@@ -315,13 +302,6 @@ def _float(value: Any) -> float | None:
         return parsed
     except Exception:
         return None
-
-
-def _sort_number(value: Any) -> float:
-    parsed = _float(value)
-    if parsed is None:
-        return 0.0
-    return parsed
 
 
 def _round_or_none(value: float | None) -> float | None:

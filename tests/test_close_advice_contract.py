@@ -19,7 +19,10 @@ from domain.domain.close_advice import (
     evaluate_long_call_convexity_advice,
     evaluate_short_vol_close_advice,
 )
-from domain.domain.short_vol_assessment import ShortVolAssessmentConfig
+from domain.domain.short_vol_assessment import (
+    ShortVolAssessmentConfig,
+    resolve_short_vol_assessment_config,
+)
 
 
 def _short_put_input(**overrides) -> CloseAdviceInput:
@@ -487,3 +490,29 @@ def test_long_call_let_expire_contract() -> None:
 
     assert row["exit_state"] == EXIT_STATE_LET_EXPIRE
     assert row["exit_reason_type"] == EXIT_REASON_TYPE_THESIS_EXPIRED
+
+
+def test_close_advice_short_vol_config_reads_current_top_level_and_historical_nested_fields() -> None:
+    cfg = resolve_short_vol_assessment_config(
+        {
+            "min_iv_rv_ratio": 1.10,
+            "min_iv_minus_rv": 0.05,
+            "reject_event_risk": False,
+            "event_source_fail_closed": False,
+            "short_vol": {
+                "min_iv_rv_ratio": 1.25,
+                "min_iv_minus_rv": 0.10,
+                "reject_event_risk": True,
+                "event_source_fail_closed": True,
+                "gap_down_pct": 0.15,
+            },
+            "concentration": {"max_symbol_nav_pct": 0.30},
+        }
+    )
+
+    assert cfg.min_iv_rv_ratio == 1.10
+    assert cfg.min_iv_minus_rv == 0.05
+    assert cfg.reject_event_risk is False
+    assert cfg.event_source_fail_closed is False
+    assert cfg.gap_down_pct == 0.15
+    assert cfg.max_symbol_nav_pct == 0.30

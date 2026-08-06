@@ -40,6 +40,7 @@ def _candidate(**overrides):
         "dte": 30,
         "otm_pct": 0.10,
         "event_source_status": "ok",
+        "event_earnings_coverage_status": "complete",
     }
     row.update(overrides)
     return row
@@ -61,31 +62,6 @@ def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_ga
     assert fields["strike_safety_margin_pct"] == 0.090909
     assert fields["premium_edge_score"] == 1.281818
     assert "single_trade_concentration" not in fields
-
-
-def test_sell_put_close_thesis_config_prefers_top_level_underwriting_fields() -> None:
-    from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
-
-    cfg = resolve_sell_put_short_vol_config(
-        {
-            "strategy": "insurance_underwriting",
-            "min_iv_rv_ratio": 1.10,
-            "min_iv_minus_rv": 0.05,
-            "reject_event_risk": False,
-            "event_source_fail_closed": False,
-            "short_vol": {
-                "min_iv_rv_ratio": 1.25,
-                "min_iv_minus_rv": 0.10,
-                "reject_event_risk": True,
-                "event_source_fail_closed": True,
-            },
-        }
-    )
-
-    assert cfg.min_iv_rv_ratio == 1.10
-    assert cfg.min_iv_minus_rv == 0.05
-    assert cfg.reject_event_risk is False
-    assert cfg.event_source_fail_closed is False
 
 
 def test_sell_put_underwriting_rejects_when_iv_rv_edge_is_too_low() -> None:
@@ -199,6 +175,50 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
     assert "event_risk_within_expiry" in trace
 
 
+def test_sell_put_underwriting_does_not_hard_reject_non_earnings_event() -> None:
+    from src.application.sell_put_strategy_risk import (
+        evaluate_sell_put_underwriting_row,
+        resolve_sell_put_underwriting_config,
+    )
+
+    decision = evaluate_sell_put_underwriting_row(
+        _candidate(event_flag=True, event_types="ex_dividend", event_dates="2026-06-01"),
+        cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
+    )
+
+    assert decision["accepted"] is True
+
+
+def test_sell_put_underwriting_fails_closed_on_stale_event_source() -> None:
+    from src.application.sell_put_strategy_risk import (
+        evaluate_sell_put_underwriting_row,
+        resolve_sell_put_underwriting_config,
+    )
+
+    decision = evaluate_sell_put_underwriting_row(
+        _candidate(event_source_status="stale"),
+        cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
+    )
+
+    assert decision["accepted"] is False
+    assert decision["rule"] == "event_source_unavailable"
+
+
+def test_sell_put_underwriting_requires_complete_earnings_coverage() -> None:
+    from src.application.sell_put_strategy_risk import (
+        evaluate_sell_put_underwriting_row,
+        resolve_sell_put_underwriting_config,
+    )
+
+    decision = evaluate_sell_put_underwriting_row(
+        _candidate(event_earnings_coverage_status="partial"),
+        cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
+    )
+
+    assert decision["accepted"] is False
+    assert decision["rule"] == "event_earnings_coverage_incomplete"
+
+
 def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
@@ -253,6 +273,98 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
 
     assert len(filtered) == 1
     assert filtered.iloc[0]["contract_symbol"] == "NVDA260619P00100000"
+    assert not bool(filtered.iloc[0]["concentration_evaluable"])
+    assert filtered.iloc[0]["concentration_unavailable_reason"] == "holdings_context_missing"
+
+
+def test_enrich_and_filter_sell_put_underwriting_projects_assignment_concentration(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    portfolio_ctx = {
+        "_global_portfolio_ctx": {
+            "cash_by_currency": {"CNY": 800_000.0},
+            "stocks_by_symbol": {
+                "NVDA": {
+                    "symbol": "NVDA",
+                    "shares": 10,
+                    "market_value_cny": 50_000.0,
+                    "currency": "USD",
+                }
+            },
+        },
+        "_global_option_ctx": {
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 7_000.0}},
+            "cash_secured_total_cny": 50_000.0,
+        },
+    }
+
+    filtered = enrich_and_filter_sell_put_underwriting(
+        df_labeled=pd.DataFrame([_candidate()]),
+        symbol="NVDA",
+        sell_put_cfg={"strategy": "insurance_underwriting"},
+        portfolio_ctx=portfolio_ctx,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        out_path=out_path,
+    )
+
+    assert len(filtered) == 1
+    row = filtered.iloc[0]
+    assert row["portfolio_nav_cny"] == 850_000.0
+    assert row["assignment_notional_cny"] == 70_000.0
+    assert row["symbol_concentration_after"] == 0.2
+    assert row["total_short_put_concentration_after"] == 0.141176
+    assert row["concentration_score"] == 0.8
+    assert bool(row["concentration_evaluable"])
+    persisted = pd.read_csv(out_path).iloc[0]
+    assert persisted["symbol_concentration_after"] == 0.2
+
+
+def test_sell_put_cross_symbol_ranking_uses_projected_assignment_concentration(tmp_path: Path) -> None:
+    from domain.domain.engine import rank_candidate_rows
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    converter = CurrencyConverter(ExchangeRates(usd_per_cny=0.14))
+    portfolio_ctx = {
+        "_global_portfolio_ctx": {
+            "cash_by_currency": {"CNY": 500_000.0},
+            "stocks_by_symbol": {
+                "NVDA": {"symbol": "NVDA", "shares": 10, "market_value_cny": 400_000.0},
+                "AAPL": {"symbol": "AAPL", "shares": 10, "market_value_cny": 50_000.0},
+            },
+        },
+        "_global_option_ctx": {
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 14_000.0}},
+            "cash_secured_total_cny": 100_000.0,
+        },
+    }
+    rows: list[dict] = []
+    for symbol in ("NVDA", "AAPL"):
+        out_path = tmp_path / f"{symbol.lower()}_sell_put_candidates_labeled.csv"
+        filtered = enrich_and_filter_sell_put_underwriting(
+            df_labeled=pd.DataFrame(
+                [
+                    _candidate(
+                        symbol=symbol,
+                        contract_symbol=f"{symbol}_PUT",
+                    )
+                ]
+            ),
+            symbol=symbol,
+            sell_put_cfg={"strategy": "insurance_underwriting"},
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=converter,
+            out_path=out_path,
+        )
+        rows.extend(filtered.to_dict("records"))
+
+    ranked = rank_candidate_rows(rows, mode="put")
+
+    assert [row["symbol"] for row in ranked] == ["AAPL", "NVDA"]
+    assert ranked[0]["symbol_concentration_after"] < ranked[1]["symbol_concentration_after"]
 
 
 def test_sell_put_underwriting_ranking_prefers_annualized_return_then_discount(tmp_path: Path) -> None:

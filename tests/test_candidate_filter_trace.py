@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
         [
             {
                 "symbol": "NVDA",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "option_type": "put",
                 "expiration": "2026-06-19",
                 "contract_symbol": "PASS",
@@ -46,6 +49,8 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
             },
             {
                 "symbol": "NVDA",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "option_type": "put",
                 "expiration": "2026-06-19",
                 "contract_symbol": "FAIL_LIQUIDITY",
@@ -66,6 +71,8 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
             },
             {
                 "symbol": "NVDA",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "option_type": "put",
                 "expiration": "2026-06-19",
                 "contract_symbol": "FAIL_METRICS",
@@ -101,15 +108,16 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
         max_spread_ratio=1.0,
         strategy_family="sell_put",
         strategy_profile="short_vol",
+        quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         quiet=True,
     )
 
-    assert list(out["contract_symbol"]) == ["PASS"]
+    assert set(out["contract_symbol"]) == {"PASS", "FAIL_LIQUIDITY"}
     trace_rows = _read_jsonl(out_path.parent / "candidate_filter_trace.jsonl")
     rules = {row["rule"] for row in trace_rows}
     assert "candidate_accepted" in rules
-    assert "risk_open_interest" in rules
-    assert "risk_volume" in rules
+    assert "risk_open_interest" not in rules
+    assert "risk_volume" not in rules
     assert "metrics_mid_non_positive" in rules
     assert {row["function"] for row in trace_rows} == {"sell_put"}
     assert {row["option_type"] for row in trace_rows} == {"put"}
@@ -123,6 +131,7 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
     assert by_contract["PASS"]["iv_minus_rv"] == 0.1
     assert by_contract["FAIL_LIQUIDITY"]["dte"] == 30
     assert by_contract["FAIL_LIQUIDITY"]["abs_delta"] == 0.2
+    assert by_contract["FAIL_LIQUIDITY"]["rule"] == "candidate_accepted"
 
 
 def test_candidate_scan_traces_missing_required_data_chain(tmp_path: Path) -> None:
@@ -180,7 +189,7 @@ def test_sell_put_cash_filter_writes_cash_reserve_trace(tmp_path: Path) -> None:
     assert trace_rows[0]["function"] == "cash_reserve"
     assert trace_rows[0]["account"] == "lx"
     assert trace_rows[0]["run_id"] == "run-1"
-    assert trace_rows[0]["rule"] == "usd_cash_insufficient"
+    assert trace_rows[0]["rule"] == "effective_native_cash_insufficient"
 
 
 def test_tcom_sell_put_cash_filter_accepts_lx_total_cny_capacity(tmp_path: Path) -> None:
@@ -228,6 +237,9 @@ def test_tcom_sell_put_cash_filter_accepts_lx_total_cny_capacity(tmp_path: Path)
     assert filtered["strike"].tolist() == [35.0, 40.0]
     capacities = [
         compute_sell_put_cash_capacity(
+            cash_required_native=row["cash_required_native"],
+            cash_free_effective_native=row["cash_free_effective_native"],
+            cash_native_currency=row["cash_native_currency"],
             cash_required_cny=row["cash_required_cny"],
             cash_free_cny=row["cash_free_cny"],
             cash_free_total_cny=row["cash_free_total_cny"],
@@ -237,8 +249,8 @@ def test_tcom_sell_put_cash_filter_accepts_lx_total_cny_capacity(tmp_path: Path)
         for _, row in filtered.iterrows()
     ]
     assert [capacity.accepted for capacity in capacities] == [True, True]
-    assert [capacity.basis for capacity in capacities] == ["total_cny", "total_cny"]
-    assert [round(float(capacity.cash_required or 0.0), 2) for capacity in capacities] == [23698.85, 27084.4]
+    assert [capacity.basis for capacity in capacities] == ["native_plus_haircut:USD", "native_plus_haircut:USD"]
+    assert [round(float(capacity.cash_required or 0.0), 2) for capacity in capacities] == [3500.0, 4000.0]
     trace_path = out_path.parent / "candidate_filter_trace.jsonl"
     assert not trace_path.exists()
 
@@ -279,8 +291,8 @@ def test_tcom_sell_put_cash_filter_rejects_insufficient_total_cny(tmp_path: Path
 
     assert filtered.empty
     trace_rows = _read_jsonl(out_path.parent / "candidate_filter_trace.jsonl")
-    assert [row["rule"] for row in trace_rows] == ["total_cny_cash_insufficient"]
-    assert trace_rows[0]["config_values"] == {"basis": "total_cny"}
+    assert [row["rule"] for row in trace_rows] == ["effective_native_cash_insufficient"]
+    assert trace_rows[0]["config_values"] == {"basis": "native_plus_haircut:USD"}
 
 
 def test_tcom_sell_put_cash_filter_rejects_missing_cash_basis(tmp_path: Path) -> None:
@@ -785,7 +797,7 @@ def test_candidate_rank_explain_prefers_final_labeled_put_artifact_over_raw(
     assert meta["source_files"] == data["source_files"]
 
 
-def test_candidate_rank_explain_uses_annualized_return_for_underwriting_put(tmp_path: Path) -> None:
+def test_candidate_rank_explain_uses_period_return_for_underwriting_put(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
@@ -818,7 +830,7 @@ def test_candidate_rank_explain_uses_annualized_return_for_underwriting_put(tmp_
         "score_components"
     ]["net_assignment_discount_pct"]
     assert data["ranked"][0]["primary_drivers"] == [
-        "annualized_return",
+        "period_net_return",
         "net_assignment_discount_pct",
         "concentration_score",
     ]
