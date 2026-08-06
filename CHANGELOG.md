@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.10.11 - 2026-08-06
+
+### Improvements
+- Aligned Sell Put opportunity selection with assignment-tolerant underwriting by using a spot-bounded 20% strike recall window, mid-price limit economics, whole-period net return, and near-return tie-breaks where concentration and open interest remain ranking evidence instead of hard gates.
+- Made Sell Put market and capital evidence explicit with five-minute active-session quote freshness, DTE-matched OpenD realized volatility, fixed implied-volatility units, and settlement-currency cash capacity with stale-FX controls.
+- Consolidated Close Advice short-vol compatibility in the domain model and removed obsolete opening-strategy adapters without changing historical position interpretation.
+
+### Bug Fixes
+- Made Sell Put fail closed when live spot, quote, required realized-volatility windows, earnings coverage, cash headroom, or required FX evidence is missing or stale, preventing incomplete OpenD or runtime data from becoming actionable recommendations.
+
 ## 1.10.10 - 2026-08-06
 
 ### Improvements
