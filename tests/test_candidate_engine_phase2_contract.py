@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.engine import (
     CandidateCalculationError,
     calculate_opening_candidate_metrics,
@@ -178,6 +180,157 @@ def test_common_policy_uses_cny_iv_rv_spread_and_opend_earnings_only() -> None:
         mode="put",
     )
     assert rejected["rejects"][0]["reason"] == "risk_earnings_event"
+
+
+@pytest.mark.parametrize(
+    ("market", "currency", "mode"),
+    [
+        ("US", "USD", "put"),
+        ("US", "USD", "call"),
+        ("HK", "HKD", "put"),
+        ("HK", "HKD", "call"),
+    ],
+)
+def test_opening_policy_matrix_accepts_us_hk_put_and_call(
+    market: str,
+    currency: str,
+    mode: str,
+) -> None:
+    strike = 120.0 if mode == "call" else 100.0
+    fx_to_cny = 7.2 if currency == "USD" else 0.92
+    source = _opening_row(
+        mode=mode,
+        currency=currency,
+        market=market,
+        strike=strike,
+        bid=2.0,
+        ask=2.1,
+        price_tick=0.05,
+    )
+    metrics = calculate_opening_candidate_metrics(
+        source,
+        mode=mode,
+        avg_cost=90.0 if mode == "call" else None,
+        cny_per_currency_unit=fx_to_cny,
+    )
+
+    decision = evaluate_opening_candidate_policy(
+        {
+            **source,
+            **metrics,
+            "earnings_evidence_status": "ready",
+            "earnings_has_event": False,
+        },
+        mode=mode,
+    )
+
+    assert decision["accepted"] is True
+    assert decision["rejects"] == []
+
+
+def test_market_closed_contract_fails_closed_before_candidate_calculation() -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                opening_contract_status="market_closed",
+                underlier_observation_status="market_closed",
+                underlier_observation_reason_code="market_closed",
+            ),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == "opening_contract_not_ready"
+
+
+def test_offline_shadow_classifies_every_approved_policy_difference() -> None:
+    from src.application.shadow_replay import compare_opening_policy_shadow
+
+    source = _opening_row(
+        bid=2.0,
+        ask=2.1,
+        price_tick=0.05,
+    )
+    metrics = calculate_opening_candidate_metrics(
+        source,
+        mode="put",
+        cny_per_currency_unit=7.2,
+    )
+    opening = {
+        **source,
+        **metrics,
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "earnings_source": "opend",
+        "rank": 1,
+    }
+    legacy = {
+        **opening,
+        "status": "accepted",
+        "max_dte": 45,
+        "max_strike": 95.0,
+        "sell_limit": 2.0,
+        "annualized_return": 0.20,
+        "cash_basis": 10_000.0,
+        "realized_volatility_estimate": 0.25,
+        "event_source": "yfinance",
+        "max_new_contracts": 2,
+        "rank": 2,
+        "strategy_score": 0.8,
+    }
+
+    comparison = compare_opening_policy_shadow(
+        legacy_candidate=legacy,
+        opening_candidate=opening,
+        mode="put",
+    )
+
+    assert comparison["opening"]["accepted"] is True
+    assert comparison["promotion_ready"] is True
+    assert comparison["unclassified_differences"] == []
+    assert {item["category"] for item in comparison["differences"]} == {
+        "recall_boundary",
+        "fee_and_tick",
+        "return_basis",
+        "realized_volatility",
+        "earnings",
+        "capacity",
+        "ranking",
+    }
+
+
+def test_offline_shadow_blocks_unexplained_acceptance_change() -> None:
+    from src.application.shadow_replay import compare_opening_policy_shadow
+
+    source = _opening_row(bid=2.0, ask=2.1, price_tick=0.05)
+    metrics = calculate_opening_candidate_metrics(source, mode="put")
+    opening = {
+        **source,
+        **metrics,
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+        "spread_ratio": 0.50,
+    }
+
+    legacy = {
+        **opening,
+        "status": "accepted",
+        "annualized_return": opening["period_net_return_on_cash_basis"],
+        "cash_basis": opening["net_cash_basis"],
+        "realized_volatility_estimate": opening["term_matched_rv"],
+        "strategy_score": opening["period_net_return_on_cash_basis"],
+    }
+    comparison = compare_opening_policy_shadow(
+        legacy_candidate=legacy,
+        opening_candidate=opening,
+        mode="put",
+    )
+
+    assert comparison["opening"]["accepted"] is False
+    assert comparison["differences"] == []
+    assert comparison["unclassified_differences"] == [
+        "acceptance_change_without_classified_evidence"
+    ]
+    assert comparison["promotion_ready"] is False
 
 
 def test_covered_call_rank_uses_anchored_period_band_then_higher_strike() -> None:
