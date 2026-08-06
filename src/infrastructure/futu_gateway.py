@@ -401,12 +401,6 @@ class _FutuAPIClient:
             kwargs=kwargs,
         )
 
-    def get_financials_earnings_price_history(self, **kwargs: Any) -> Any:
-        quote = self._quote()
-        if hasattr(quote, "get_financials_earnings_price_history"):
-            return self._unwrap(quote.get_financials_earnings_price_history(**kwargs))
-        raise AttributeError("get_financials_earnings_price_history unavailable; upgrade futu-api")
-
     def get_earnings_calendar(self, **kwargs: Any) -> Any:
         quote = self._quote()
         method = getattr(quote, FUTU_EARNINGS_CALENDAR_CAPABILITY, None)
@@ -417,18 +411,6 @@ class _FutuAPIClient:
                 reason_code=FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON,
             )
         return self._unwrap(method(**kwargs))
-
-    def get_corporate_actions_dividends(self, **kwargs: Any) -> Any:
-        quote = self._quote()
-        if hasattr(quote, "get_corporate_actions_dividends"):
-            return self._unwrap(quote.get_corporate_actions_dividends(**kwargs))
-        raise AttributeError("get_corporate_actions_dividends unavailable; upgrade futu-api")
-
-    def get_corporate_actions_stock_splits(self, **kwargs: Any) -> Any:
-        quote = self._quote()
-        if hasattr(quote, "get_corporate_actions_stock_splits"):
-            return self._unwrap(quote.get_corporate_actions_stock_splits(**kwargs))
-        raise AttributeError("get_corporate_actions_stock_splits unavailable; upgrade futu-api")
 
 
 class FutuGatewayError(RuntimeError):
@@ -749,13 +731,6 @@ class FutuGateway:
             self._raise_mapped(exc, action="request_history_kline")
         raise AssertionError("unreachable")
 
-    def get_financials_earnings_price_history(self, code: str) -> Any:
-        try:
-            return self.client.get_financials_earnings_price_history(code=code)
-        except Exception as exc:
-            self._raise_mapped(exc, action="get_financials_earnings_price_history")
-        raise AssertionError("unreachable")
-
     def get_earnings_calendar(
         self,
         *,
@@ -781,27 +756,6 @@ class FutuGateway:
         except Exception as exc:
             self._raise_mapped(exc, action=FUTU_EARNINGS_CALENDAR_CAPABILITY)
         raise AssertionError("unreachable")
-
-    def get_corporate_actions_dividends(self, code: str) -> Any:
-        try:
-            return self.client.get_corporate_actions_dividends(code=code)
-        except Exception as exc:
-            self._raise_mapped(exc, action="get_corporate_actions_dividends")
-        raise AssertionError("unreachable")
-
-    def get_corporate_actions_stock_splits(
-        self,
-        code: str,
-        *,
-        next_key: str | None = None,
-        num: int | None = None,
-    ) -> Any:
-        try:
-            return self.client.get_corporate_actions_stock_splits(code=code, next_key=next_key, num=num)
-        except Exception as exc:
-            self._raise_mapped(exc, action="get_corporate_actions_stock_splits")
-        raise AssertionError("unreachable")
-
 
 def build_futu_gateway(
     *,

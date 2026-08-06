@@ -310,12 +310,6 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=state_dir,
         config_payload=authority_config,
     )
-    if shared_context_dir is not None:
-        runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-        runtime_cfg = dict(runtime_cfg)
-        runtime_cfg["event_snapshot_path"] = str((shared_context_dir / "event_snapshot.json").resolve())
-        cfg["runtime"] = runtime_cfg
-
     py = sys.executable
 
     if "symbols" in cfg:
@@ -502,6 +496,5 @@ def main(argv: list[str] | None = None) -> int:
     top_n = cfg.get("outputs", {}).get("top_n_alerts", 3)
     process_symbol(py, runtime_root, cfg, top_n, report_dir=report_dir, state_dir=state_dir, is_scheduled=is_scheduled)
     print("\n[DONE] Single-symbol pipeline finished")
-    print(f"- {report_dir}/{{symbol}}_sell_put_candidates*.csv / alerts.txt")
-    print(f"- {report_dir}/{{symbol}}_sell_call_candidates.csv / alerts.txt")
+    print(f"- {state_dir}/opening_candidate_snapshot.json")
     return 0

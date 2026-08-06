@@ -39,11 +39,6 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
         "profile_path": None,
         "env_file": None,
         "include_service_status": False,
-        "candidate_report_dir": None,
-        "candidate_paths": None,
-        "candidate_reject_log_paths": None,
-        "candidate_trace_paths": None,
-        "candidate_evidence_min_sample": None,
     }]
 
 
@@ -123,11 +118,6 @@ def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, caps
         "profile_path": "service.profile.json",
         "env_file": None,
         "include_service_status": True,
-        "candidate_report_dir": None,
-        "candidate_paths": None,
-        "candidate_reject_log_paths": None,
-        "candidate_trace_paths": None,
-        "candidate_evidence_min_sample": None,
     }]
 
 
@@ -164,56 +154,12 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
         "profile_path": None,
         "env_file": str(env_file),
         "include_service_status": False,
-        "candidate_report_dir": None,
-        "candidate_paths": None,
-        "candidate_reject_log_paths": None,
-        "candidate_trace_paths": None,
-        "candidate_evidence_min_sample": None,
     }]
     assert bootstrap_calls == [{
         "repo_root": cli.repo_base(),
         "env_file": str(env_file),
         "include_local_env_file": True,
     }]
-
-
-def test_top_level_doctor_forwards_candidate_evidence_diagnostics(monkeypatch, capsys) -> None:
-    import src.interfaces.cli.main as cli
-
-    calls: list[dict] = []
-
-    def _healthcheck(**kwargs):
-        calls.append(kwargs)
-        return {"tool_name": "healthcheck", "ok": True, "data": {"status": "pass"}}
-
-    monkeypatch.setattr(cli, "run_healthcheck", _healthcheck)
-
-    rc = cli.main(
-        [
-            "doctor",
-            "--config-key",
-            "us",
-            "--candidate-report-dir",
-            "output_shared/reports",
-            "--candidate-path",
-            "candidate.csv",
-            "--candidate-reject-log-path",
-            "reject.csv",
-            "--candidate-trace-path",
-            "trace.jsonl",
-            "--candidate-evidence-min-sample",
-            "10",
-        ]
-    )
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "doctor"
-    assert calls[0]["candidate_report_dir"] == "output_shared/reports"
-    assert calls[0]["candidate_paths"] == ["candidate.csv"]
-    assert calls[0]["candidate_reject_log_paths"] == ["reject.csv"]
-    assert calls[0]["candidate_trace_paths"] == ["trace.jsonl"]
-    assert calls[0]["candidate_evidence_min_sample"] == 10
 
 
 def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:

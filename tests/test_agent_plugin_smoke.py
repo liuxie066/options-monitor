@@ -477,35 +477,6 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
     assert not any("Replace example starter symbols" in item for item in out["warnings"])
 
 
-def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = _write_healthcheck_config(tmp_path)
-    candidate_path = tmp_path / "sell_put_candidates.csv"
-    candidate_path.write_text("symbol,dte\nNVDA,30\nMSFT,31\n", encoding="utf-8")
-    trace_path = tmp_path / "candidate_filter_trace.jsonl"
-    trace_path.write_text('{"symbol":"NVDA","result":"accepted"}\n', encoding="utf-8")
-
-    _patch_healthcheck_dependencies(monkeypatch)
-
-    out = run_tool(
-        "healthcheck",
-        {
-            "config_path": str(cfg_path),
-            "candidate_paths": [str(candidate_path)],
-            "candidate_trace_paths": [str(trace_path)],
-            "candidate_evidence_min_sample": 2,
-        },
-    )
-
-    assert out["ok"] is True
-    check = next(item for item in out["data"]["checks"] if item["name"] == "candidate_evidence")
-    assert check["status"] == "ok"
-    assert check["value"]["evaluable"] is True
-    assert check["value"]["row_counts"]["candidates"] == 2
-    assert check["value"]["row_counts"]["traces"] == 1
-
-
 def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
@@ -1805,7 +1776,7 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     assert shared_compatibility["text"] == "shared notification\n"
     assert shared_compatibility["artifact_kind"] == "compatibility_notification_bundle"
     assert shared_compatibility["primary_renderer"] == "compact"
-    assert shared_compatibility["may_include"] == ["candidate_reject_summary", "close_advice"]
+    assert shared_compatibility["may_include"] == ["close_advice"]
     assert shared_compatibility["authority"] == "compatibility_only"
     assert shared_compatibility["delivery_evidence"] is False
     assert "deprecated_field" not in shared_compatibility

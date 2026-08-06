@@ -82,29 +82,6 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
     return path
 
 
-def _write_event_snapshot(base: Path, symbols: dict) -> None:
-    state_dir = base / "output_runs" / "run-1" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "event_snapshot.json").write_text(
-        json.dumps({"schema_version": 1, "symbols": symbols}),
-        encoding="utf-8",
-    )
-
-
-def _complete_event_item(*, events: list[dict] | None = None, source_status: str = "ok") -> dict:
-    return {
-        "symbol": "NVDA",
-        "selected_provider": "futu",
-        "source_status": source_status,
-        "events": list(events or []),
-        "coverage": {
-            "earnings": {"status": "complete", "error": ""},
-            "ex_dividend": {"status": "complete", "error": ""},
-            "split": {"status": "complete", "error": ""},
-        },
-    }
-
-
 def _config(*, timezone_name: str = "America/New_York") -> dict:
     return {
         "schedule": {
@@ -186,10 +163,20 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
             except Exception:
                 mode_failed[mode] = True
                 continue
-            rows_by_mode[mode].extend(
-                dict(item)
-                for item in json.loads(frame.to_json(orient="records"))
-            )
+            for item in json.loads(frame.to_json(orient="records")):
+                row = dict(item)
+                raw_events = row.get("earnings_events")
+                if isinstance(raw_events, str):
+                    try:
+                        parsed_events = json.loads(raw_events)
+                    except json.JSONDecodeError:
+                        parsed_events = []
+                    row["earnings_events"] = (
+                        parsed_events
+                        if isinstance(parsed_events, list)
+                        else []
+                    )
+                rows_by_mode[mode].append(row)
 
     market_norm = market.upper()
     for mode, rows in rows_by_mode.items():
@@ -344,6 +331,12 @@ def _put_row(
         "volume": 20,
         "cash_required_cny": 10_000,
         "cash_free_cny": 25_000,
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": "",
+        "earnings_has_event": False,
+        "earnings_event_dates": "",
+        "earnings_events": [],
+        "earnings_snapshot_hash": "e" * 64,
     }
     if priority is not None:
         row["tier"] = priority
@@ -360,7 +353,7 @@ def _install_success_empty_strategy_evidence(
         save_outputs,
     )
     from src.application.position_advice_source_producers import (
-        publish_candidate_decisions_snapshot,
+        publish_opening_candidate_snapshot_receipt,
     )
     from src.application.position_advice_source_receipts import (
         sha256_bytes,
@@ -525,6 +518,12 @@ def _install_success_empty_strategy_evidence(
         required_data_root=required_data_root,
         now=completed_at,
     )
+    _materialize_opening_snapshot_fixture(base, market="US")
+    snapshot = json.loads(
+        (state_dir / "opening_candidate_snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
     quote_dependency = source_dependency_from_receipt(
         receipt_path=quote_receipt_path,
         producer_root=required_data_root,
@@ -532,14 +531,14 @@ def _install_success_empty_strategy_evidence(
         expected_source_kind="quotes",
     )
     candidate_receipt_path, candidate_receipt = (
-        publish_candidate_decisions_snapshot(
+        publish_opening_candidate_snapshot_receipt(
             producer_root=state_dir,
             account_run_id="run-1",
             account="lx",
             broker="futu",
             portfolio_account_identity_hash="a" * 64,
             included_markets=["US"],
-            decisions=[],
+            snapshot=snapshot,
             quote_dependencies=[quote_dependency],
             source_observed_at=observed_at,
             completed_at=completed_at,
@@ -553,14 +552,12 @@ def _install_success_empty_strategy_evidence(
                 "portfolio_account_identity_hash": "a" * 64,
                 "source_receipts": [
                     {
-                        "source_kind": "candidate_decisions",
+                        "source_kind": "opening_candidates",
                         "producer_root": str(state_dir.resolve()),
                         "receipt_path": str(
                             candidate_receipt_path.resolve()
                         ),
-                        "snapshot_id": candidate_receipt[
-                            "snapshot_id"
-                        ],
+                        "snapshot_id": candidate_receipt["snapshot_id"],
                         "receipt_hash": sha256_bytes(
                             candidate_receipt_path.read_bytes()
                         ),
@@ -1239,22 +1236,22 @@ def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> Non
 
 def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
-    _write_event_snapshot(
-        tmp_path,
+    row = _put_row()
+    row.update(
         {
-            "NVDA": _complete_event_item(
-                events=[
-                    {
-                        "type": "earnings",
-                        "date": "2026-08-05",
-                        "raw": {"fiscal_year": "2026", "financial_type": "Q2"},
-                    }
-                ]
-            )
-        },
+            "earnings_has_event": True,
+            "earnings_event_dates": "2026-08-05",
+            "earnings_events": [
+                {
+                    "earnings_date": "2026-08-05",
+                    "fiscal_year": "2026",
+                    "financial_type": "Q2",
+                }
+            ],
+        }
+    )
+    pd.DataFrame([row]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
     )
 
     brief = _assemble(tmp_path)
@@ -1288,8 +1285,6 @@ def test_candidate_event_projection_confirms_complete_primary_absence(tmp_path: 
     pd.DataFrame([_put_row()]).to_csv(
         account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
     )
-    _write_event_snapshot(tmp_path, {"NVDA": _complete_event_item()})
-
     brief = _assemble(tmp_path)
 
     assert brief["candidates"]["sell_put"][0]["event_risk"]["user_state"] == "confirmed_none"
@@ -1301,6 +1296,8 @@ def test_candidate_event_projection_never_falls_back_to_candidate_csv_fields(tmp
     row = _put_row()
     row.update(
         {
+            "earnings_evidence_status": "data_unavailable",
+            "earnings_reason_code": "earnings_evidence_unavailable",
             "event_flag": True,
             "event_types": "earnings",
             "event_dates": "2026-08-05",
@@ -1312,25 +1309,8 @@ def test_candidate_event_projection_never_falls_back_to_candidate_csv_fields(tmp
     brief = _assemble(tmp_path)
 
     assert brief["candidates"]["sell_put"][0]["event_risk"]["user_state"] == "unknown"
-    assert brief["candidates"]["sell_put"][0]["event_risk"]["reason_code"] == "event_snapshot_missing"
+    assert brief["candidates"]["sell_put"][0]["event_risk"]["reason_code"] == "earnings_evidence_unavailable"
     assert brief["events"] == []
-
-
-def test_malformed_event_snapshot_degrades_candidate_to_unknown(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
-    state_dir = tmp_path / "output_runs" / "run-1" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "event_snapshot.json").write_text("{broken", encoding="utf-8")
-
-    brief = _assemble(tmp_path)
-
-    risk = brief["candidates"]["sell_put"][0]["event_risk"]
-    assert risk["user_state"] == "unknown"
-    assert risk["reason_code"] == "event_snapshot_malformed"
-    assert any(item["reason"] == "event_snapshot_malformed" for item in brief["data_gaps"])
 
 
 def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp_path: Path) -> None:
@@ -1348,7 +1328,23 @@ def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp
         for item in without_snapshot["actions"]
         if item["action_type"] == "open_candidate"
     }
-    _write_event_snapshot(tmp_path, {"NVDA": _complete_event_item()})
+    with_events = []
+    for row in (
+        _put_row(contract="NVDA_LOW", annualized=0.10),
+        _put_row(contract="NVDA_HIGH", annualized=0.25),
+    ):
+        row.update(
+            {
+                "earnings_has_event": True,
+                "earnings_event_dates": "2026-08-05",
+                "earnings_events": [{"earnings_date": "2026-08-05"}],
+            }
+        )
+        with_events.append(row)
+    pd.DataFrame(with_events).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
     with_snapshot = _assemble(tmp_path)
     after = {
         item["contract_symbol"]: item["action_id"]
@@ -1843,13 +1839,16 @@ def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path
                 "put_strike": 100,
                 "call_strike": 125,
                 "annualized_net_credit_yield": 0.20,
+                "earnings_evidence_status": "ready",
+                "earnings_has_event": True,
+                "earnings_event_dates": "2026-08-30",
+                "earnings_events": [
+                    {"earnings_date": "2026-08-30"}
+                ],
+                "earnings_snapshot_hash": "e" * 64,
             }
         ]
     ).to_csv(account_dir / "nvda_combo_yield_candidates.csv", index=False)
-    _write_event_snapshot(
-        tmp_path,
-        {"NVDA": _complete_event_item(events=[{"type": "earnings", "date": "2026-08-30"}])},
-    )
 
     brief = _assemble(tmp_path)
     candidate = brief["candidates"]["combo_yield"][0]
@@ -2074,46 +2073,6 @@ def test_status_index_treats_completed_zero_as_available_with_partial_failure(
         and item.get("reason") == "empty_chain"
         for item in brief["data_gaps"]
     )
-
-
-def test_rejection_summary_is_market_qualified(tmp_path: Path) -> None:
-    from src.application.candidate_filter_trace import (
-        append_candidate_filter_trace_rows,
-        build_candidate_filter_trace_row,
-    )
-
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "0700_sell_put_candidates_labeled.csv", index=False
-    )
-    append_candidate_filter_trace_rows(
-        account_dir / "candidate_filter_trace.jsonl",
-        [
-            build_candidate_filter_trace_row(
-                run_id="run-1",
-                account="lx",
-                symbol="NVDA",
-                function="sell_put",
-                status="rejected",
-                stage="risk",
-                rule="risk_spread",
-            ),
-            build_candidate_filter_trace_row(
-                run_id="run-1",
-                account="lx",
-                symbol="0700.HK",
-                function="sell_put",
-                status="rejected",
-                stage="risk",
-                rule="risk_volume",
-            ),
-        ],
-    )
-
-    brief = _assemble(tmp_path, market="HK")
-
-    assert brief["rejections"]["total_rejected"] == 1
-    assert brief["rejections"]["top_categories"][0]["sample_symbols"] == ["0700.HK"]
 
 
 def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:

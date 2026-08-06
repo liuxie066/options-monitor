@@ -42,14 +42,6 @@ def _print_healthcheck(payload: dict[str, Any]) -> int:
     return 0 if _healthcheck_readiness_ok(payload) else 2
 
 
-def _add_candidate_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--candidate-report-dir", default=None, help="directory containing candidate diagnostic evidence files")
-    parser.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
-    parser.add_argument("--candidate-reject-log-path", action="append", dest="candidate_reject_log_paths", default=None)
-    parser.add_argument("--candidate-trace-path", action="append", dest="candidate_trace_paths", default=None)
-    parser.add_argument("--candidate-evidence-min-sample", type=int, default=None)
-
-
 def add_diagnostic_commands(subparsers: Any) -> None:
     health = subparsers.add_parser("healthcheck", help="run readiness checks")
     health.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -62,7 +54,6 @@ def add_diagnostic_commands(subparsers: Any) -> None:
     health.add_argument("--env-file", default=None)
     health.add_argument("--no-local-env-file", action="store_true")
     health.add_argument("--include-service-status", action="store_true")
-    _add_candidate_evidence_diagnostic_args(health)
 
     doctor = subparsers.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
     doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -75,7 +66,6 @@ def add_diagnostic_commands(subparsers: Any) -> None:
     doctor.add_argument("--env-file", default=None)
     doctor.add_argument("--no-local-env-file", action="store_true")
     doctor.add_argument("--include-service-status", action="store_true")
-    _add_candidate_evidence_diagnostic_args(doctor)
 
     support = subparsers.add_parser("support", help="collect redacted support diagnostics")
     support_sub = support.add_subparsers(dest="support_command", required=True)
@@ -148,11 +138,6 @@ def _healthcheck_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "profile_path": args.profile_path,
         "include_service_status": bool(args.include_service_status),
         "env_file": args.env_file,
-        "candidate_report_dir": args.candidate_report_dir,
-        "candidate_paths": args.candidate_paths,
-        "candidate_reject_log_paths": args.candidate_reject_log_paths,
-        "candidate_trace_paths": args.candidate_trace_paths,
-        "candidate_evidence_min_sample": args.candidate_evidence_min_sample,
     }
 
 

@@ -16,10 +16,7 @@ from domain.domain.alert_rules import render_sell_call_comment
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.report_formatting import num, pct, strike_text
-from domain.domain.engine import (
-    build_strategy_config,
-    rank_scored_candidates,
-)
+from domain.domain.engine import rank_candidate_rows
 
 
 COVERED_CALL_DISPLAY = strategy_display_name(STRATEGY_COVERED_CALL)
@@ -104,14 +101,10 @@ def render_sell_call_alerts(
         print(text)
         return text
 
-    if (
-        "strategy_profile" in df.columns
-        and df["strategy_profile"].fillna("").astype(str).str.strip().eq("insurance_underwriting").all()
-    ):
-        top_df = df.head(top) if top is not None else df
-    else:
-        strategy_cfg = build_strategy_config("call")
-        top_df = rank_scored_candidates(df, strategy_cfg, layered=layered, top=top)
+    del layered
+    top_df = pd.DataFrame(rank_candidate_rows(df.to_dict("records"), mode="call"))
+    if top is not None:
+        top_df = top_df.head(top)
 
     blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"

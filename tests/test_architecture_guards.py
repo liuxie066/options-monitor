@@ -297,7 +297,7 @@ def test_copilot_keeps_generic_answer_quality_model_turn_fixtures() -> None:
     fixture_root = ROOT / "tests" / "fixtures" / "copilot"
 
     for name in (
-        "candidate_filter_diagnostics_model_turns.json",
+        "opening_candidate_snapshot_diagnostics_model_turns.json",
         "close_advice_notification_diagnostics_model_turns.json",
         "june_income_attribution_model_turns.json",
         "current_option_exposure_model_turns.json",
