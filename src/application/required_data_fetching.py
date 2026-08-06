@@ -583,13 +583,93 @@ def _merged_realized_volatility_meta(
         return None, True
     if any(not isinstance(value, dict) for value in values):
         return None, False
-    canonical = {
-        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-        for value in values
-    }
-    if len(canonical) != 1:
+    rv_items = [dict(value) for value in values if isinstance(value, dict)]
+    if len(rv_items) == 1:
+        return rv_items[0], True
+    diagnostic_fields = (
+        "realized_volatility_20",
+        "realized_volatility_60",
+        "realized_volatility_120",
+        "realized_volatility_estimate",
+        "estimation_policy",
+    )
+    if any(
+        any(item.get(field) != rv_items[0].get(field) for field in diagnostic_fields)
+        for item in rv_items[1:]
+    ):
         return None, False
-    return dict(values[0]), True
+    merged_terms: dict[str, object] = {}
+    for item in rv_items:
+        terms = item.get("term_matched")
+        if not isinstance(terms, dict):
+            return None, False
+        for expiration, observation in terms.items():
+            existing = merged_terms.get(str(expiration))
+            if existing is not None and existing != observation:
+                return None, False
+            merged_terms[str(expiration)] = observation
+    history_items = [item.get("qfq_history") for item in rv_items]
+    if any(not isinstance(item, dict) for item in history_items):
+        return None, False
+    history_core_fields = (
+        "status",
+        "market",
+        "underlier_code",
+        "autype",
+        "cache_identity",
+        "completed_before",
+    )
+    first_history = history_items[0]
+    assert isinstance(first_history, dict)
+    if any(
+        any(item.get(field) != first_history.get(field) for field in history_core_fields)
+        for item in history_items[1:]
+        if isinstance(item, dict)
+    ):
+        return None, False
+    calendar_items = [item.get("trading_calendar") for item in rv_items]
+    if any(
+        not isinstance(item, dict)
+        or str(item.get("status") or "").strip().lower() != "ok"
+        for item in calendar_items
+    ):
+        return None, False
+    merged = dict(rv_items[0])
+    merged["status"] = (
+        "ok"
+        if all(
+            isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower() == "ok"
+            for item in merged_terms.values()
+        )
+        else "partial"
+    )
+    merged["reason"] = (
+        None
+        if merged["status"] == "ok"
+        else "term_matched_rv_incomplete"
+    )
+    merged["sample_count"] = max(
+        int(item.get("sample_count") or 0) for item in rv_items
+    )
+    merged["term_matched"] = dict(sorted(merged_terms.items()))
+    merged["qfq_history"] = {
+        **{field: first_history.get(field) for field in history_core_fields},
+        "cache_status": "merged_requests",
+        "request_count": len(history_items),
+        "requests": history_items,
+        "revision_detected": any(
+            bool(item.get("revision_detected"))
+            for item in history_items
+            if isinstance(item, dict)
+        ),
+    }
+    merged["trading_calendar"] = {
+        "status": "ok",
+        "request_count": len(calendar_items),
+        "requests": calendar_items,
+    }
+    return merged, True
 
 
 def _common_provider_meta_value(

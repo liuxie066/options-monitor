@@ -1333,7 +1333,9 @@ def test_position_expiration_outside_strategy_dte_expands_plan_and_is_coverable(
                 "dte": dte,
                 "strike": strike,
                 "spot": 110,
-                "realized_volatility_estimate": 0.24,
+                    "term_matched_rv": 0.24,
+                    "term_matched_rv_status": "ok",
+                    "term_matched_rv_reason": None,
             }
             for expiration, dte, strikes in (
                 ("2026-08-07", 11, (80, 100)),

@@ -6,6 +6,27 @@ from pathlib import Path
 import pytest
 
 
+def _ready_underlier_observation(
+    *,
+    symbol: str = "NVDA",
+    last_price: float = 100.0,
+) -> dict[str, object]:
+    return {
+        "schema_version": "opening_underlier_observation.v1",
+        "code": f"US.{symbol}",
+        "market": "US",
+        "last_price": last_price,
+        "update_time": "2026-04-28 15:59:00",
+        "observed_at_utc": "2026-04-28T19:59:00+00:00",
+        "age_seconds": 1.0,
+        "market_state": "AFTERNOON",
+        "sec_status": "NORMAL",
+        "suspension": False,
+        "status": "ready",
+        "reason_code": None,
+    }
+
+
 def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_symbol_fetching as mod
 
@@ -62,7 +83,6 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
-    monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
     payload = mod.fetch_symbol(
         "NVDA",
         limit_expirations=1,
@@ -70,6 +90,7 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
         explicit_expirations=["2026-04-29", "2026-06-29"],
         option_types="put,call",
         chain_cache=True,
+        underlier_observation=_ready_underlier_observation(),
     )
 
     expirations = sorted({str(row.get("expiration")) for row in (payload.get("rows") or [])})
@@ -121,8 +142,6 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
-    monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
-
     payload = mod.fetch_symbol(
         "FUTU",
         limit_expirations=1,
@@ -130,6 +149,7 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
         explicit_expirations=[1777420800, "1781740800000"],
         option_types="put",
         chain_cache=False,
+        underlier_observation=_ready_underlier_observation(symbol="FUTU"),
     )
 
     expirations = sorted({str(row.get("expiration")) for row in (payload.get("rows") or [])})
@@ -144,7 +164,10 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
     clock_behavior: str,
 ) -> None:
     import src.application.opend_symbol_fetching as mod
-    from src.application.short_vol_metrics import RealizedVolatilitySnapshot
+    from src.application.short_vol_metrics import (
+        RealizedVolatilitySnapshot,
+        TermMatchedRVObservation,
+    )
 
     requested_chain_dates: list[tuple[str, str]] = []
     rv_calls: list[tuple[str, date]] = []
@@ -200,8 +223,30 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
         *,
         underlier_code: str,
         trading_day: date,
+        market: str,
+        expirations: list[str],
+        base_dir: Path,
     ) -> RealizedVolatilitySnapshot:
         rv_calls.append((underlier_code, trading_day))
+        assert market == "US"
+        assert expirations == ["2026-08-07"]
+        assert base_dir == tmp_path
+        term = TermMatchedRVObservation(
+            schema_version="term_matched_rv.v1",
+            expiration="2026-08-07",
+            status="ok",
+            reason=None,
+            term_matched_rv=0.22,
+            remaining_sessions=9,
+            lookback_sessions=20,
+            input_start="2026-06-26",
+            input_end="2026-07-24",
+            input_close_session_count=21,
+            input_return_count=20,
+            input_hash="a" * 64,
+            legacy_weighted_rv=0.212,
+            shadow_difference=0.008,
+        )
         return RealizedVolatilitySnapshot(
             rv_20=0.20,
             rv_60=0.24,
@@ -209,15 +254,13 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
             rv_estimate=0.25,
             sample_count=120,
             status="ok",
+            term_matched={"2026-08-07": term},
+            qfq_history_evidence={"status": "ok"},
+            trading_calendar_evidence={"status": "ok"},
         )
 
     monkeypatch.setattr(mod, "get_trading_date", current_clock)
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
-    monkeypatch.setattr(
-        mod,
-        "get_spot_opend",
-        lambda gateway, code, **kwargs: 100.0,
-    )
     monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", fetch_rv)
 
     payload = mod.fetch_symbol_request(
@@ -230,6 +273,7 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
             option_types="put",
             include_realized_volatility=True,
             gateway=_Gateway(),
+            underlier_observation=_ready_underlier_observation(),
         )
     )
 
@@ -489,7 +533,10 @@ def test_fetch_symbol_reports_underlier_snapshot_errors(monkeypatch, tmp_path: P
     assert meta["spot_errors"][0]["error_code"] == "UNKNOWN"
 
 
-def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path: Path) -> None:
+def test_fetch_symbol_does_not_retry_underlier_observation_signature(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     import src.application.opend_symbol_fetching as mod
 
     calls: list[dict] = []
@@ -498,12 +545,16 @@ def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path
         def close(self):  # noqa: ANN201
             return None
 
-    def _get_spot(_gateway, _code, **kwargs):  # noqa: ANN001
+    def _get_underlier_observation(_gateway, _code, **kwargs):  # noqa: ANN001
         calls.append(dict(kwargs))
-        raise TypeError("legacy spot signature is not supported")
+        raise TypeError("underlier observation signature is invalid")
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
-    monkeypatch.setattr(mod, "get_spot_opend", _get_spot)
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_observation_opend",
+        _get_underlier_observation,
+    )
 
     payload = mod.fetch_symbol(
         "NVDA",
@@ -519,6 +570,7 @@ def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path
 
     assert len(calls) == 1
     assert calls[0]["base_dir"] == tmp_path
+    assert calls[0]["market"] == "US"
     assert calls[0]["snapshot_max_calls"] == 8
     assert calls[0]["snapshot_window_sec"] == 18
     assert calls[0]["snapshot_max_wait_sec"] == 28

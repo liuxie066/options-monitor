@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -96,6 +97,7 @@ def _strict_success_rows_payload(
     from src.application.short_vol_metrics import realized_volatility_estimate_for_dte
 
     normalized_rows: list[dict[str, object]] = []
+    term_matched: dict[str, dict[str, object]] = {}
     for index, raw_row in enumerate(rows):
         row = dict(raw_row)
         option_type = str(row.get("option_type") or "put").lower()
@@ -131,6 +133,59 @@ def _strict_success_rows_payload(
                 rv_60=float(row["realized_volatility_60"]),
                 rv_120=float(row["realized_volatility_120"]),
             )
+        remaining_sessions = max(1, int(row["dte"]))
+        lookback_sessions = max(20, remaining_sessions)
+        term_value = float(row.get("term_matched_rv") or 0.22)
+        term = {
+            "schema_version": "term_matched_rv.v1",
+            "expiration": expiration,
+            "status": "ok",
+            "reason": None,
+            "term_matched_rv": term_value,
+            "remaining_sessions": remaining_sessions,
+            "lookback_sessions": lookback_sessions,
+            "input_start": "2026-01-02",
+            "input_end": trading_date,
+            "input_close_session_count": lookback_sessions + 1,
+            "input_return_count": lookback_sessions,
+            "input_hash": hashlib.sha256(
+                f"fixture:{symbol}:{expiration}:{term_value}".encode()
+            ).hexdigest(),
+            "missing_sessions": [],
+            "legacy_weighted_rv": row["realized_volatility_estimate"],
+            "shadow_difference": term_value
+            - float(row["realized_volatility_estimate"]),
+        }
+        existing_term = term_matched.get(expiration)
+        if existing_term is not None:
+            term = existing_term
+        else:
+            term_matched[expiration] = term
+        row.update(
+            {
+                "term_matched_rv": term["term_matched_rv"],
+                "term_matched_rv_status": term["status"],
+                "term_matched_rv_reason": term["reason"],
+                "term_matched_rv_remaining_sessions": term[
+                    "remaining_sessions"
+                ],
+                "term_matched_rv_lookback_sessions": term[
+                    "lookback_sessions"
+                ],
+                "term_matched_rv_input_start": term["input_start"],
+                "term_matched_rv_input_end": term["input_end"],
+                "term_matched_rv_input_session_count": term[
+                    "input_close_session_count"
+                ],
+                "term_matched_rv_input_hash": term["input_hash"],
+                "term_matched_rv_legacy_shadow": term[
+                    "legacy_weighted_rv"
+                ],
+                "term_matched_rv_shadow_difference": term[
+                    "shadow_difference"
+                ],
+            }
+        )
         normalized_rows.append(row)
     code_set = [str(row["contract_symbol"]) for row in normalized_rows]
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -156,11 +211,37 @@ def _strict_success_rows_payload(
         "snapshot_complete": True,
         "realized_volatility": {
             "status": "ok",
+            "reason": None,
             "sample_count": 120,
             "realized_volatility_20": 0.20,
             "realized_volatility_60": 0.24,
             "realized_volatility_120": 0.28,
             "realized_volatility_estimate": None,
+            "estimation_policy": "term_matched_sessions_v1",
+            "term_matched": term_matched,
+            "qfq_history": {
+                "status": "ok",
+                "market": "US",
+                "underlier_code": resolve_symbol_identity(symbol).futu_code,
+                "autype": "QFQ",
+                "cache_identity": (
+                    f"US:{resolve_symbol_identity(symbol).futu_code}:QFQ"
+                ),
+                "completed_before": trading_date,
+                "session_count": 120,
+                "input_hash": hashlib.sha256(
+                    f"fixture:qfq:{symbol}:{trading_date}".encode()
+                ).hexdigest(),
+                "cache_status": "fixture",
+                "revision_detected": False,
+            },
+            "trading_calendar": {
+                "status": "ok",
+                "market": "US",
+                "start": "2026-01-01",
+                "end": max(term_matched) if term_matched else trading_date,
+                "session_count": 120,
+            },
         },
     }
     payload_meta.update(meta or {})

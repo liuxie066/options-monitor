@@ -37,6 +37,88 @@ CONTRACT_CODE = "NVDA260821P00100000"
 CALL_CONTRACT_CODE = "NVDA260821C00120000"
 
 
+def _term_matched_rv_fixture(
+    *,
+    expiration: str = "2026-08-21",
+    value: float = 0.183,
+    remaining_sessions: int = 17,
+) -> dict[str, object]:
+    lookback_sessions = max(20, remaining_sessions)
+    return {
+        "schema_version": "term_matched_rv.v1",
+        "expiration": expiration,
+        "status": "ok",
+        "reason": None,
+        "term_matched_rv": value,
+        "remaining_sessions": remaining_sessions,
+        "lookback_sessions": lookback_sessions,
+        "input_start": "2026-07-06",
+        "input_end": "2026-08-03",
+        "input_close_session_count": lookback_sessions + 1,
+        "input_return_count": lookback_sessions,
+        "input_hash": hashlib.sha256(
+            f"fixture:{expiration}:{value}".encode()
+        ).hexdigest(),
+        "missing_sessions": [],
+        "legacy_weighted_rv": value,
+        "shadow_difference": 0.0,
+    }
+
+
+def _term_matched_rv_row_fields(
+    term: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "term_matched_rv": term["term_matched_rv"],
+        "term_matched_rv_status": term["status"],
+        "term_matched_rv_reason": term["reason"],
+        "term_matched_rv_remaining_sessions": term["remaining_sessions"],
+        "term_matched_rv_lookback_sessions": term["lookback_sessions"],
+        "term_matched_rv_input_start": term["input_start"],
+        "term_matched_rv_input_end": term["input_end"],
+        "term_matched_rv_input_session_count": term[
+            "input_close_session_count"
+        ],
+        "term_matched_rv_input_hash": term["input_hash"],
+        "term_matched_rv_legacy_shadow": term["legacy_weighted_rv"],
+        "term_matched_rv_shadow_difference": term["shadow_difference"],
+    }
+
+
+def _realized_volatility_meta_fixture() -> dict[str, object]:
+    term = _term_matched_rv_fixture()
+    return {
+        "status": "ok",
+        "reason": None,
+        "sample_count": 120,
+        "realized_volatility_20": 0.18,
+        "realized_volatility_60": 0.19,
+        "realized_volatility_120": 0.2,
+        "realized_volatility_estimate": 0.19,
+        "estimation_policy": "term_matched_sessions_v1",
+        "term_matched": {"2026-08-21": term},
+        "qfq_history": {
+            "status": "ok",
+            "market": "US",
+            "underlier_code": "US.NVDA",
+            "autype": "QFQ",
+            "cache_identity": "US:US.NVDA:QFQ",
+            "completed_before": "2026-08-04",
+            "session_count": 120,
+            "input_hash": hashlib.sha256(b"fixture:qfq").hexdigest(),
+            "cache_status": "fixture",
+            "revision_detected": False,
+        },
+        "trading_calendar": {
+            "status": "ok",
+            "market": "US",
+            "start": "2026-07-01",
+            "end": "2026-08-21",
+            "session_count": 37,
+        },
+    }
+
+
 def _side_plan() -> dict[str, object]:
     return {
         "option_type": "put",
@@ -166,6 +248,7 @@ def _contract(*, request_count: int = 1) -> dict[str, object]:
 
 
 def _payload(*, multiplier: object = 100.0) -> dict[str, object]:
+    term = _term_matched_rv_fixture()
     return {
         "symbol": "NVDA",
         "underlier_code": "US.NVDA",
@@ -192,6 +275,7 @@ def _payload(*, multiplier: object = 100.0) -> dict[str, object]:
                 "realized_volatility_60": 0.19,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.183,
+                **_term_matched_rv_row_fields(term),
                 "in_the_money": False,
                 "currency": "USD",
                 "otm_pct": 0.0909090909,
@@ -218,13 +302,7 @@ def _payload(*, multiplier: object = 100.0) -> dict[str, object]:
             "snapshot_missing_code_set": [],
             "snapshot_unexpected_code_set": [],
             "snapshot_complete": True,
-            "realized_volatility": {
-                "status": "ok",
-                "realized_volatility_20": 0.18,
-                "realized_volatility_60": 0.19,
-                "realized_volatility_120": 0.2,
-                "realized_volatility_estimate": 0.19,
-            },
+            "realized_volatility": _realized_volatility_meta_fixture(),
         },
     }
 
@@ -490,6 +568,57 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
         port=PORT,
     )
     return payload, contract
+
+
+def test_validator_accepts_typed_expiry_scoped_rv_unavailability() -> None:
+    payload = _payload()
+    rows = payload["rows"]
+    meta = payload["meta"]
+    assert isinstance(rows, list) and isinstance(rows[0], dict)
+    assert isinstance(meta, dict)
+    rv_meta = meta["realized_volatility"]
+    assert isinstance(rv_meta, dict)
+    terms = rv_meta["term_matched"]
+    assert isinstance(terms, dict)
+    term = terms["2026-08-21"]
+    assert isinstance(term, dict)
+    term.update(
+        {
+            "status": "data_unavailable",
+            "reason": "qfq_history_session_gap",
+            "term_matched_rv": None,
+            "input_start": None,
+            "input_end": None,
+            "input_close_session_count": 0,
+            "input_return_count": 0,
+            "input_hash": None,
+            "missing_sessions": ["2026-07-17"],
+            "shadow_difference": None,
+        }
+    )
+    rv_meta.update(
+        {
+            "status": "partial",
+            "reason": "term_matched_rv_incomplete",
+        }
+    )
+    rows[0].update(
+        {
+            "term_matched_rv": None,
+            "term_matched_rv_status": "data_unavailable",
+            "term_matched_rv_reason": "qfq_history_session_gap",
+            "term_matched_rv_input_start": None,
+            "term_matched_rv_input_end": None,
+            "term_matched_rv_input_session_count": 0,
+            "term_matched_rv_input_hash": None,
+            "term_matched_rv_shadow_difference": None,
+        }
+    )
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=_contract(),
+    )
 
 
 @pytest.mark.parametrize("require_realized_volatility", [False, True])

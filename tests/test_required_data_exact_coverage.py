@@ -147,7 +147,9 @@ def _frame(
         "spot": spot,
     }
     if rv is not None:
-        row["realized_volatility_estimate"] = rv
+        row["term_matched_rv"] = rv
+        row["term_matched_rv_status"] = "ok"
+        row["term_matched_rv_reason"] = None
     return pd.DataFrame([row])
 
 
