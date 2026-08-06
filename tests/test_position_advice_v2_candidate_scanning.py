@@ -47,7 +47,7 @@ def _scan(
                 "contract_symbol": "NVDA_EVENT_BLOCKED",
                 "currency": "USD",
                 "dte": 45,
-                "strike": 95,
+                "strike": 98,
                 "spot": 120,
                 "bid": 1.9,
                 "ask": 2.1,

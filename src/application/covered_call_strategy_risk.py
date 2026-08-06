@@ -75,7 +75,7 @@ def enrich_and_filter_covered_call_underwriting(
         effective_min_strike = resolve_effective_sell_call_min_strike(
             min_strike=sell_call_cfg.get("min_strike"),
             avg_cost=row_payload.get("avg_cost"),
-            cost_multiplier=sell_call_cfg.get("min_strike_cost_multiplier", 1.0),
+            cost_multiplier=sell_call_cfg.get("min_strike_cost_multiplier", 1.02),
         )
         spot = _float(row_payload.get("spot"))
         if spot is not None:

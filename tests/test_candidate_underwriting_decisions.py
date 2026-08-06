@@ -34,6 +34,14 @@ def _write_put_required_data(
                 "symbol": "NVDA",
                 "market": "US",
                 "quote_update_time": "2026-04-01 10:59:00",
+                "quote_observed_at_utc": "2026-04-01T14:59:00Z",
+                "quote_age_seconds": 60,
+                "spot_update_time": "2026-04-01 10:59:00",
+                "spot_observed_at_utc": "2026-04-01T14:59:00Z",
+                "spot_age_seconds": 60,
+                "market_state": "MORNING",
+                "underlier_observation_status": "ready",
+                "underlier_observation_reason_code": None,
                 "option_type": "put",
                 "expiration": "2026-09-18",
                 "contract_symbol": "NVDA-20260918-PUT-100",
@@ -44,11 +52,25 @@ def _write_put_required_data(
                 "bid": 1.9,
                 "ask": 2.1,
                 "mid": 2.0,
+                "price_tick": 0.01,
                 "open_interest": 500,
                 "volume": 50,
                 "implied_volatility": implied_volatility,
                 "realized_volatility_estimate": realized_volatility_estimate,
+                "term_matched_rv": realized_volatility_estimate,
+                "term_matched_rv_status": "ready",
+                "term_matched_rv_reason": None,
+                "term_matched_rv_input_hash": "b" * 64,
+                "option_standard_type": "STANDARD",
+                "stock_owner": "US.NVDA",
+                "stock_type": "DRVT",
+                "option_sec_status": "NORMAL",
+                "option_suspension": False,
+                "chain_multiplier": 100,
+                "snapshot_multiplier": 100,
                 "multiplier": 100,
+                "opening_contract_status": "ready",
+                "opening_contract_reason_codes": "",
             }
         ]
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
@@ -127,7 +149,7 @@ def test_underwriting_reject_is_bound_to_opening_and_replacement_sidecar(
         == REPLACEMENT_REJECTED_INVARIANT
     )
     assert decision["normalized_input"]["insurance_underwriting_rule"] == (
-        "vol_edge_ratio_below_min"
+        "risk_iv_rv_ratio"
     )
     assert (
         decision["opening_decision"]["risk_policy_hash"]

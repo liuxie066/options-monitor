@@ -310,12 +310,12 @@ def run_sell_call_scan_and_summarize(
         min_strike=resolve_effective_sell_call_min_strike(
             min_strike=cc.get('min_strike'),
             avg_cost=avg_cost,
-            cost_multiplier=cc.get('min_strike_cost_multiplier', 1.0),
+            cost_multiplier=cc.get('min_strike_cost_multiplier', 1.02),
         ),
         max_strike=_optional_float(cc, 'max_strike'),
         # Underwriting applies return/income thresholds once, after CNY enrichment.
         min_annualized_net_return=0.0,
-        min_strike_cost_multiplier=float(cc.get('min_strike_cost_multiplier', 1.0) or 1.0),
+        min_strike_cost_multiplier=float(cc.get('min_strike_cost_multiplier', 1.02) or 1.02),
         min_net_income=0.0,
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,

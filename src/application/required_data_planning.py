@@ -47,9 +47,9 @@ ExpirationDiscoveryCacheKey = tuple[str, str, str, int, str]
 SpotObservationCacheKey = tuple[str, str, str, int, str]
 
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
-DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
 DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT = 0.40
+DEFAULT_COMBO_YIELD_CALL_STRIKE_BUFFER_PCT = 0.02
 
 
 class RequiredDataPlanningError(RuntimeError):
@@ -425,55 +425,68 @@ def _resolve_sell_call_strike_window(
     source_prefix: str = "sell_call",
     fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
+    strike_buffer_pct: float = 0.0,
 ) -> tuple[StrikeWindowPlan, str, list[str]]:
+    del fallback_min_pct
     min_strike = _safe_float(sell_call_cfg.get("min_strike"))
     max_strike = _safe_float(sell_call_cfg.get("max_strike"))
     has_spot = spot_reference is not None and spot_reference > 0
-    if min_strike is not None or max_strike is not None or has_spot:
-        base_min = min_strike
-        if has_spot:
-            base_min = max(value for value in (base_min, spot_reference) if value is not None)
-        base_max = max_strike
-        if base_min is not None and base_max is None:
-            base_max = base_min * (1.0 + float(fallback_max_pct))
-        if base_min is not None and base_max is not None and base_max < base_min:
-            base_max = base_min
-        fetch_min = base_min
-        fetch_max = base_max
-        if fetch_max is not None:
-            fetch_max = fetch_max * (1.0 + DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT)
+    if has_spot:
+        base_min = max(
+            value for value in (min_strike, spot_reference) if value is not None
+        )
+        derived_max = base_min * (1.0 + float(fallback_max_pct))
+        base_max = min(max_strike, derived_max) if max_strike is not None else derived_max
+        buffer_pct = max(float(strike_buffer_pct), 0.0)
+        fetch_max = (
+            base_max
+            if base_max < base_min
+            else base_max * (1.0 + buffer_pct)
+        )
         source = f"{source_prefix}.configured_bounds" if min_strike is not None or max_strike is not None else f"{source_prefix}.spot_derived_bounds"
-        reason = f"use configured {source_prefix} near/far bounds" if min_strike is not None or max_strike is not None else f"derive {source_prefix} near/far bounds from spot reference"
+        if buffer_pct > 0:
+            reason = (
+                f"use configured {source_prefix} bounds with {buffer_pct:.0%} fetch buffer"
+                if min_strike is not None or max_strike is not None
+                else f"derive {source_prefix} bounds from spot with {buffer_pct:.0%} fetch buffer"
+            )
+        else:
+            reason = (
+                f"use configured {source_prefix} bounds with exact spot-based 20% cap"
+                if min_strike is not None or max_strike is not None
+                else f"derive {source_prefix} exact 20% bounds from spot reference"
+            )
+        if base_max < base_min:
+            reason = f"{source_prefix} has no feasible strike window because configured max is below recall min"
         fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike"] if min_strike is not None or max_strike is not None else ["spot"]
         if has_spot and "spot" not in fields:
             fields = fields + ["spot"]
         return (
             StrikeWindowPlan(
-                min_strike=fetch_min,
+                min_strike=base_min,
                 max_strike=fetch_max,
                 source=source,
-                buffer_applied=(fetch_max is not None and base_max is not None and fetch_max != base_max),
-                buffer_pct=DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT,
+                buffer_applied=buffer_pct > 0,
+                buffer_pct=buffer_pct,
                 base_min_strike=base_min,
                 base_max_strike=base_max,
             ),
             reason,
             fields,
         )
-    if spot_reference is None or spot_reference <= 0:
-        return (
-            StrikeWindowPlan(
-                min_strike=None,
-                max_strike=None,
-                source=f"{source_prefix}.no_spot_no_bounds",
-                buffer_applied=False,
-                buffer_pct=0.0,
-                base_min_strike=None,
-                base_max_strike=None,
-            ),
-            "spot unavailable; no near/far bounds could be derived",
-            ["spot"],
-        )
+    return (
+        StrikeWindowPlan(
+            min_strike=None,
+            max_strike=None,
+            source=f"{source_prefix}.no_spot_no_bounds",
+            buffer_applied=False,
+            buffer_pct=0.0,
+            base_min_strike=None,
+            base_max_strike=None,
+        ),
+        "spot unavailable; no near/far bounds could be derived",
+        ["spot"],
+    )
 
 
 def _resolve_call_side_plan(
@@ -489,6 +502,7 @@ def _resolve_call_side_plan(
     dte_source_prefix: str | None = None,
     fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
+    strike_buffer_pct: float = 0.0,
 ) -> OptionSideFetchPlan:
     window = resolve_candidate_window(sell_call_cfg, defaults=defaults)
     filtered = _filter_expirations_by_dte(
@@ -505,6 +519,7 @@ def _resolve_call_side_plan(
         source_prefix=source_prefix,
         fallback_min_pct=fallback_min_pct,
         fallback_max_pct=fallback_max_pct,
+        strike_buffer_pct=strike_buffer_pct,
     )
     return OptionSideFetchPlan(
         option_type="call",
@@ -569,6 +584,7 @@ def _resolve_combo_yield_call_plan(
         dte_source_prefix=dte_source_prefix,
         fallback_min_pct=0.0,
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
+        strike_buffer_pct=DEFAULT_COMBO_YIELD_CALL_STRIKE_BUFFER_PCT,
     )
     if structure_mode != "staggered_expiry_pair":
         return plan

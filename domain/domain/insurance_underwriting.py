@@ -40,45 +40,32 @@ def evaluate_underwriting_candidate(
 ) -> dict[str, Any]:
     mode_norm = _mode(mode)
     fields = underwriting_fields(row, mode=mode_norm, cfg=cfg)
+    from domain.domain.engine.candidate_engine import evaluate_opening_candidate_policy
 
-    annualized_return = _annualized_return(row, mode=mode_norm)
-    if cfg.min_annualized_return > 0:
-        if annualized_return is None:
-            return _reject("annualized_return_missing", None, cfg.min_annualized_return, fields)
-        if annualized_return < cfg.min_annualized_return:
-            return _reject("annualized_return_below_min", annualized_return, cfg.min_annualized_return, fields)
-
-    net_income = _net_income_for_threshold(row)
-    if cfg.min_net_income > 0:
-        if net_income is None:
-            return _reject("net_income_missing", None, cfg.min_net_income, fields)
-        if net_income < cfg.min_net_income:
-            return _reject("net_income_below_min", net_income, cfg.min_net_income, fields)
-
-    iv_rv_ratio = _float(fields.get("iv_rv_ratio"))
-    iv_minus_rv = _float(fields.get("iv_minus_rv"))
-    if cfg.min_iv_rv_ratio > 0:
-        if iv_rv_ratio is None:
-            return _reject("vol_edge_not_evaluable", None, cfg.min_iv_rv_ratio, fields)
-        if iv_rv_ratio < cfg.min_iv_rv_ratio:
-            return _reject("vol_edge_ratio_below_min", iv_rv_ratio, cfg.min_iv_rv_ratio, fields)
-    if cfg.min_iv_minus_rv > 0:
-        if iv_minus_rv is None:
-            return _reject("vol_edge_not_evaluable", None, cfg.min_iv_minus_rv, fields)
-        if iv_minus_rv < cfg.min_iv_minus_rv:
-            return _reject("vol_edge_spread_below_min", iv_minus_rv, cfg.min_iv_minus_rv, fields)
-
-    event_decision = evaluate_event_risk_candidate(
-        row,
-        reject_event_risk=cfg.reject_event_risk,
-        event_source_fail_closed=cfg.event_source_fail_closed,
-        fields=fields,
-        required_event_type=("earnings" if mode_norm == "put" else None),
+    decision = evaluate_opening_candidate_policy(
+        {**row, **fields},
+        mode=mode_norm,
+        min_annualized_return=cfg.min_annualized_return,
+        min_net_premium_cny=cfg.min_net_income,
+        min_iv_rv_ratio=cfg.min_iv_rv_ratio,
+        min_iv_minus_rv=cfg.min_iv_minus_rv,
+        require_earnings_evidence=cfg.event_source_fail_closed,
+        reject_known_earnings=cfg.reject_event_risk,
     )
-    if not event_decision["accepted"]:
-        return event_decision
-
-    return {"accepted": True, "rule": "insurance_underwriting_candidate_accepted", "fields": fields}
+    if bool(decision.get("accepted")):
+        return {
+            "accepted": True,
+            "rule": "candidate_engine_policy_accepted",
+            "fields": fields,
+        }
+    reject = dict((decision.get("rejects") or [{}])[0])
+    return _reject(
+        str(reject.get("reason") or "candidate_engine_policy_rejected"),
+        reject.get("metric_value"),
+        reject.get("threshold"),
+        fields,
+        message=str(reject.get("message") or "Candidate Engine policy rejected candidate"),
+    )
 
 
 def evaluate_event_risk_candidate(
@@ -144,7 +131,6 @@ def underwriting_fields(
         "short_vega_profile": "short_vega",
         "iv_rv_ratio": _round_or_none(iv_rv_ratio),
         "iv_minus_rv": _round_or_none(iv_minus_rv),
-        "premium_edge_score": premium_edge_score(row, mode=mode_norm, cfg=cfg, iv_rv_ratio=iv_rv_ratio, iv_minus_rv=iv_minus_rv),
     }
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)
@@ -238,7 +224,7 @@ def _vol_edge(row: dict[str, Any]) -> tuple[float | None, float | None]:
     ratio = _float(row.get("iv_rv_ratio"))
     spread = _float(row.get("iv_minus_rv"))
     iv = _first_float(row, "implied_volatility", "iv")
-    rv = _first_float(row, "realized_volatility_estimate", "realized_volatility", "rv")
+    rv = _first_float(row, "term_matched_rv")
     if ratio is None and iv is not None and rv is not None and rv > 0:
         ratio = iv / rv
     if spread is None and iv is not None and rv is not None:
