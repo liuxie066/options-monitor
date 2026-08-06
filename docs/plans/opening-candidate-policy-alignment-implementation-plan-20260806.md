@@ -1,6 +1,6 @@
 # Sell Put / Covered Call 开仓候选策略对齐实施方案
 
-> 状态：已批准，Phase 1 实施中（2026-08-06）
+> 状态：源码实施与离线验证已完成（2026-08-07）；待后续独立授权合并、发布与升级
 >
 > 日期：2026-08-06
 >
@@ -426,6 +426,9 @@ seal 是唯一 commit marker：先在内存完成所有 scope，再校验依赖/
 
 ## 9. 计划审阅检查点
 
-本方案已获批准，现从 Phase 1 开始实施。策略数值、FX 24 小时上限和排序口径均以已提交的 `docs/candidate_strategy.md` 为准，不在实现过程中重新发明。
+本方案已获批准并完成六个实施阶段的源码落地与离线验证。策略数值、FX 24 小时上限和排序口径均以已提交的 `docs/candidate_strategy.md` 为准，实施过程中没有另建平行策略。
+
+完成证据见
+[`opening-candidate-policy-alignment-completion-audit-20260807.md`](opening-candidate-policy-alignment-completion-audit-20260807.md)。
 
 方案获批不包含 commit/push、合并 main、发布或远端升级授权；这些仍是独立边界。
