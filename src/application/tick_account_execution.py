@@ -676,6 +676,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 shared_required=request.shared_required,
                 force_refresh=bool(request.force_mode),
                 producer_run_id=request.run_id,
+                scan_at_utc=run_started_at_utc,
             )
             snapshot_manifest_path = (
                 run_state_dir / "required_data_snapshot_manifest.json"

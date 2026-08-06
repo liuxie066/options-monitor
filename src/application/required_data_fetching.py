@@ -586,6 +586,8 @@ def _merged_realized_volatility_meta(
     rv_items = [dict(value) for value in values if isinstance(value, dict)]
     if len(rv_items) == 1:
         return rv_items[0], True
+    if all(item == rv_items[0] for item in rv_items[1:]):
+        return rv_items[0], True
     diagnostic_fields = (
         "realized_volatility_20",
         "realized_volatility_60",
