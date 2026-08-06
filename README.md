@@ -57,12 +57,12 @@ trade_events -> projection -> position_lots
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
 
-开仓策略支持两种口径：
+Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
+`return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
 
-- `return_first`：收益筛选器，检查收益、期限、strike、流动性和覆盖能力。
-- `insurance_underwriting`：承保评估器，在收益条件之外检查 IV/RV、事件、流动性、现金或股票覆盖，并按安全距离和承保补偿排序。
-
-阈值、排序和兼容命名会随实现演进，README 不复制完整规则；当前行为以 [策略架构](docs/STRATEGY_ARCHITECTURE.md)、[候选策略](docs/candidate_strategy.md) 和代码测试为准。
+README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
+[策略架构](docs/STRATEGY_ARCHITECTURE.md) 定义模块责任；目标是否已经上线必须以当前代码和测试验证，
+不能只凭文档判断。
 
 ## 安装
 
