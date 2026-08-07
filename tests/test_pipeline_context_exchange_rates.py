@@ -76,7 +76,7 @@ def test_load_exchange_rates_rejects_stale_cache_without_fallback(
                 "timestamp": (
                     datetime.now(timezone.utc) - timedelta(hours=25)
                 ).isoformat(),
-                "source": "opend_fx_market_snapshot",
+                "source": "opend_account_funds_conversion",
             }
         ),
         encoding="utf-8",
@@ -94,36 +94,13 @@ def test_load_exchange_rates_rejects_stale_cache_without_fallback(
     assert any("OpenD exchange_rate observation missing/stale" in message for message in messages)
 
 
-def test_fetch_opend_exchange_rate_observation_uses_canonical_quote_route(
+def test_fetch_opend_exchange_rate_observation_uses_canonical_opend_route(
     monkeypatch,
 ) -> None:
     from src.application import exchange_rate_loader as loader
     from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
-    observed_codes: list[tuple[str, ...]] = []
-    closed: list[bool] = []
-
-    class _Gateway:
-        def get_snapshot(self, codes):
-            observed_codes.append(tuple(codes))
-            now = datetime.now(timezone.utc).timestamp()
-            return [
-                {
-                    "code": "FX.USDCNH",
-                    "bid_price": 7.20,
-                    "ask_price": 7.22,
-                    "update_timestamp": now,
-                },
-                {
-                    "code": "FX.USDHKD",
-                    "bid_price": 7.80,
-                    "ask_price": 7.82,
-                    "update_timestamp": now,
-                },
-            ]
-
-        def close(self):
-            closed.append(True)
+    observed_accounts: list[str] = []
 
     monkeypatch.setattr(
         loader,
@@ -134,18 +111,28 @@ def test_fetch_opend_exchange_rate_observation_uses_canonical_quote_route(
             port=11111,
         ),
     )
+    from src.application import futu_portfolio_context
+
+    def _fetch(*, cfg, account):
+        del cfg
+        observed_accounts.append(account)
+        return {
+            "rates": {"USDCNY": 7.21, "HKDCNY": 0.92},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "opend_account_funds_conversion",
+        }
+
     monkeypatch.setattr(
-        loader,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: _Gateway(),
+        futu_portfolio_context,
+        "fetch_futu_exchange_rate_observation",
+        _fetch,
     )
 
     observation = loader.fetch_opend_exchange_rate_observation(
-        (("us", {"symbols": []}),)
+        (("lx", {"symbols": []}),)
     )
 
-    assert observed_codes == [("FX.USDCNH", "FX.USDHKD")]
-    assert closed == [True]
+    assert observed_accounts == ["lx"]
     assert exchange_rate_observation_status(observation, max_age_hours=24) == "ready"
 
 

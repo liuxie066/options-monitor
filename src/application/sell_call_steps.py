@@ -73,6 +73,9 @@ def run_sell_call_scan_and_summarize(
     locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict[str, Any] | None = None,
     final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
+    candidate_decisions_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Run the Covered Call opening policy in memory and summarize it."""
     del py, base, symbol_lower, top_n, report_dir, timeout_sec, is_scheduled
@@ -175,6 +178,7 @@ def run_sell_call_scan_and_summarize(
             reason=share_facts.reason,
         )
     shares_available_for_cover = int(share_facts.shares_available_for_cover)
+    candidate_decisions: list[dict[str, Any]] = []
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
     window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
@@ -213,6 +217,7 @@ def run_sell_call_scan_and_summarize(
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
         quiet=True,
+        calculation_decision_sink_fn=candidate_decisions.extend,
     )
 
     if not df_cc.empty:
@@ -225,12 +230,15 @@ def run_sell_call_scan_and_summarize(
             },
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
+            decision_sink_fn=candidate_decisions.extend,
         )
     if final_candidates_sink_fn is not None:
         final_candidates_sink_fn(
             "call",
             [dict(item) for item in df_cc.to_dict("records")],
         )
+    if candidate_decisions_sink_fn is not None:
+        candidate_decisions_sink_fn("call", candidate_decisions)
 
     return summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
 

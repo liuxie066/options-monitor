@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -312,51 +310,55 @@ def test_build_futu_portfolio_context_binds_capacity_to_physical_account() -> No
     assert primary["cash_capacity_by_currency"]["USD"]["pool_additive_across_candidates"] is False
 
 
-def test_build_opend_exchange_rate_observation_uses_bid_ask_mid_and_provider_time() -> None:
+def test_build_opend_exchange_rate_observation_uses_account_funds_conversion() -> None:
     from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
     from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
-    provider_time = datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    observed_at = "2026-08-07T00:00:00+00:00"
     observation = build_opend_exchange_rate_observation(
-        [
-            {
-                "code": "FX.USDCNH",
-                "bid_price": 7.20,
-                "ask_price": 7.22,
-                "update_time": provider_time,
-            },
-            {
-                "code": "FX.USDHKD",
-                "bid_price": 7.80,
-                "ask_price": 7.82,
-                "update_time": provider_time,
-            },
-        ]
+        {
+            "CNH": [{"currency": "CNH", "total_assets": 7200.0}],
+            "USD": [{"currency": "USD", "total_assets": 1000.0}],
+            "HKD": [{"currency": "HKD", "total_assets": 7800.0}],
+        },
+        observed_at_utc=observed_at,
     )
 
     assert observation is not None
-    assert observation["rates"]["USDCNY"] == pytest.approx(7.21)
-    assert observation["rates"]["HKDCNY"] == pytest.approx(7.21 / 7.81)
-    assert observation["source"] == "opend_fx_market_snapshot"
+    assert observation["rates"]["USDCNY"] == pytest.approx(7.2)
+    assert observation["rates"]["HKDCNY"] == pytest.approx(7200.0 / 7800.0)
+    assert observation["source"] == "opend_account_funds_conversion"
+    assert observation["timestamp"] == observed_at
+    assert observation["value_basis"] == "total_assets"
     assert exchange_rate_observation_status(observation, max_age_hours=24) == "ready"
 
 
-def test_build_opend_exchange_rate_observation_without_provider_time_is_stale() -> None:
+def test_build_opend_exchange_rate_observation_fails_closed_without_nonzero_basis() -> None:
     from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
-    from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
     observation = build_opend_exchange_rate_observation(
-        [
-            {"code": "FX.USDCNH", "last_price": 7.21},
-            {"code": "FX.USDHKD", "last_price": 7.81},
-        ]
+        {
+            "CNH": [{"currency": "CNH", "total_assets": 0.0}],
+            "USD": [{"currency": "USD", "total_assets": 1000.0}],
+            "HKD": [{"currency": "HKD", "total_assets": 7800.0}],
+        }
     )
 
-    assert observation is not None
-    assert "timestamp" not in observation
-    assert exchange_rate_observation_status(observation, max_age_hours=24) == "unavailable_stale"
+    assert observation is None
+
+
+def test_build_opend_exchange_rate_observation_fails_closed_when_currency_is_ignored() -> None:
+    from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
+
+    observation = build_opend_exchange_rate_observation(
+        {
+            "CNH": [{"currency": "CNH", "total_assets": 7200.0}],
+            "USD": [{"currency": "CNH", "total_assets": 7200.0}],
+            "HKD": [{"currency": "CNH", "total_assets": 7200.0}],
+        }
+    )
+
+    assert observation is None
 
 
 def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> None:
@@ -428,7 +430,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
-    assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
+    assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)] * 3
     assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
 
 
@@ -498,7 +500,14 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
     finally:
         fc.build_ready_futu_broker_gateway = old_build_gateway  # type: ignore[assignment]
 
-    assert captured["balance"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
+    assert captured["balance"] == [
+        {
+            "currency": currency,
+            "acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY),
+            "trd_env": "REAL",
+        }
+        for currency in ("CNH", "USD", "HKD")
+    ]
     assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
     assert out["cash_by_currency"] == {"USD": 2500.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]

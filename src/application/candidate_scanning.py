@@ -6,6 +6,11 @@ from typing import Any, Callable, cast
 
 import pandas as pd
 
+from domain.domain.engine import (
+    STAGE_INPUT_NORMALIZATION,
+    build_candidate_decision,
+)
+from domain.domain.engine.candidate_engine import REJECT_INPUT_INVALID
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 
@@ -121,11 +126,52 @@ def _calculation_reject_row(
     }
 
 
+def _calculation_decision_record(
+    *,
+    contract: CandidateContractInput,
+    config: CandidateScanConfig,
+    reason: dict[str, Any] | None,
+) -> dict[str, Any]:
+    detail = dict(reason or {})
+    specific_reason = str(
+        detail.get("rule") or "candidate_metrics_unavailable"
+    )
+    normalized_input = contract.to_gate_payload()
+    opening_decision = build_candidate_decision(
+        mode=config.mode,
+        symbol=contract.symbol,
+        contract_symbol=contract.contract_symbol,
+        accepted=False,
+        rejects=[
+            {
+                "stage": STAGE_INPUT_NORMALIZATION,
+                "reason": REJECT_INPUT_INVALID,
+                "message": str(
+                    detail.get("message") or "candidate metrics unavailable"
+                ),
+                "metric_value": {
+                    "reason_code": specific_reason,
+                    "metric_value": detail.get("metric_value"),
+                },
+                "threshold": detail.get("threshold"),
+            }
+        ],
+        normalized_input=normalized_input,
+    )
+    return {
+        "normalized_input": normalized_input,
+        "opening_decision": opening_decision,
+    }
+
+
 def run_candidate_scan(
     *,
     config: CandidateScanConfig,
     deps: CandidateScanDependencies,
     reject_log_output: Path | None = None,
+    calculation_decision_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None,
 ) -> pd.DataFrame:
     """Build normalized, calculable rows; do not filter or rank strategy policy."""
 
@@ -146,6 +192,7 @@ def run_candidate_scan(
 
     rows: list[dict[str, Any]] = []
     reject_rows: list[dict[str, Any]] = []
+    calculation_decisions: list[dict[str, Any]] = []
     for symbol in config.symbols:
         data = _load_required_data_rows(
             input_root=config.input_root,
@@ -165,6 +212,13 @@ def run_candidate_scan(
                         detail = None
                 reject_rows.append(
                     _calculation_reject_row(
+                        contract=contract,
+                        config=config,
+                        reason=detail,
+                    )
+                )
+                calculation_decisions.append(
+                    _calculation_decision_record(
                         contract=contract,
                         config=config,
                         reason=detail,
@@ -195,4 +249,6 @@ def run_candidate_scan(
             reject_log.to_csv(reject_out_path, index=False)
     if not config.quiet and out_path is not None and reject_out_path is not None:
         deps.print_summary_fn(out, out_path, reject_out_path)
+    if calculation_decision_sink_fn is not None:
+        calculation_decision_sink_fn(calculation_decisions)
     return out

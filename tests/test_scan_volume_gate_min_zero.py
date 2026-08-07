@@ -53,3 +53,53 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None
         )
 
         assert len(out) == 1
+
+
+def test_sell_put_scan_emits_calculation_reject_without_csv_authority() -> None:
+    from src.application.scan_sell_put import run_sell_put_scan
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        parsed_dir = root / "parsed"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                phase2_opening_row(
+                    {
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "expiration": "2026-05-01",
+                        "dte": 14,
+                        "contract_symbol": "BAD_MULTIPLIER",
+                        "strike": 90.0,
+                        "spot": 100.0,
+                        "bid": 1.9,
+                        "ask": 2.1,
+                        "implied_volatility": 0.30,
+                        "multiplier": 100,
+                        "snapshot_multiplier": 50,
+                        "currency": "USD",
+                    }
+                )
+            ]
+        ).to_csv(parsed_dir / "NVDA_required_data.csv", index=False)
+        captured: list[dict] = []
+
+        out = run_sell_put_scan(
+            symbols=["NVDA"],
+            input_root=root,
+            output=None,
+            min_net_income=0,
+            min_annualized_net_return=0,
+            quiet=True,
+            calculation_decision_sink_fn=captured.extend,
+        )
+
+        assert out.empty
+        assert len(captured) == 1
+        decision = captured[0]["opening_decision"]
+        assert decision["accepted"] is False
+        assert decision["rejects"][0]["reason"] == "input_invalid"
+        assert decision["rejects"][0]["metric_value"]["reason_code"] == (
+            "option_multiplier_conflict"
+        )

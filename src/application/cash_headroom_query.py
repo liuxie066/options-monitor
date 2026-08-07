@@ -244,7 +244,7 @@ def query_sell_put_cash(
             exchange_rate_payload = dict(embedded)
         else:
             candidate = fetch_opend_exchange_rate_observation(
-                (("runtime", runtime_cfg),)
+                ((account, runtime_cfg),)
             )
             if exchange_rate_observation_status(candidate, max_age_hours=24) == "ready":
                 exchange_rate_payload = dict(candidate or {})

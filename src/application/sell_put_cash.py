@@ -29,6 +29,30 @@ from src.infrastructure.exchange_rates import CurrencyConverter
 log = logging.getLogger(__name__)
 
 
+def _cash_secured_context_unavailable_reason(
+    option_ctx: dict[str, Any] | None,
+) -> str:
+    if not isinstance(option_ctx, dict):
+        return "option_positions_cash_secured_context_unavailable"
+    context_status = str(option_ctx.get("context_status") or "").strip().lower()
+    if context_status and context_status != "available":
+        return "option_positions_cash_secured_context_unavailable"
+    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
+    if unavailable is not None and not isinstance(unavailable, dict):
+        return "option_positions_cash_secured_context_unavailable"
+    if isinstance(unavailable, dict) and unavailable:
+        return ";".join(
+            f"{str(sym)}:{str(reason)}"
+            for sym, reason in sorted(
+                unavailable.items(),
+                key=lambda item: str(item[0]),
+            )
+        )
+    if not isinstance(option_ctx.get("cash_secured_by_symbol_by_ccy"), dict):
+        return "option_positions_cash_secured_context_unavailable"
+    return ""
+
+
 def _effective_cash_in_native_currency(
     *,
     cash_by_ccy: dict[str, Any] | None,
@@ -93,18 +117,15 @@ def sell_put_opening_capacity_inputs(
         }
 
     option_ctx = portfolio_ctx.get("option_ctx")
-    if not isinstance(option_ctx, dict):
-        return {
-            "put_cash_capacity_available": False,
-            "put_cash_capacity_reason": "option_position_cash_secured_context_missing",
-        }
-    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
-    if isinstance(unavailable, dict) and unavailable:
+    cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
+        option_ctx if isinstance(option_ctx, dict) else None
+    )
+    if cash_secured_unavailable_reason:
         return {
             "put_cash_required": strike_value * multiplier_value,
             "put_cash_free": None,
             "put_cash_capacity_available": False,
-            "put_cash_capacity_reason": "cash_secured_state_unavailable",
+            "put_cash_capacity_reason": cash_secured_unavailable_reason,
         }
 
     try:
@@ -215,19 +236,17 @@ def enrich_sell_put_candidates_with_cash(
     used_total_usd = 0.0
     used_total_cny = None
     used_symbol_cny = None
-    cash_secured_unavailable_reason = ""
+    cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
+        option_ctx
+    )
     total_by_ccy_norm: dict[str, float] = {}
 
-    if option_ctx:
-        unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
-        if isinstance(unavailable, dict) and unavailable:
-            cash_secured_unavailable_reason = ";".join(
-                f"{sym}:{reason}" for sym, reason in sorted(unavailable.items())
-            )
-            log.warning(
-                "sell_put_cash: cash_secured unavailable; fail-closed cash gating: %s",
-                cash_secured_unavailable_reason,
-            )
+    if cash_secured_unavailable_reason:
+        log.warning(
+            "sell_put_cash: cash_secured unavailable; fail-closed cash gating: %s",
+            cash_secured_unavailable_reason,
+        )
+    if option_ctx and not cash_secured_unavailable_reason:
         try:
             norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(option_ctx)
             total_by_ccy_norm = normalize_cash_secured_total_by_ccy(option_ctx, by_symbol_by_ccy=norm_by_ccy)
@@ -442,35 +461,44 @@ def enrich_sell_put_candidates_with_cash(
             cash_required_native=required_native,
             fx_status=fx_status,
         )
-        free_headroom = _effective_cash_in_native_currency(
-            cash_by_ccy=cash_by_ccy,
-            cash_secured_by_ccy=total_by_ccy_norm,
-            native_currency=native_currency,
+        capacity = sell_put_opening_capacity_inputs(
+            symbol=symbol,
+            strike=row.get('strike'),
+            multiplier=row.get('multiplier'),
+            currency=native_currency,
+            portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            cash_required_native=required_native,
-            fx_status=fx_status,
         )
-        df_sp_lab.at[idx, 'cash_fx_status'] = free_headroom.reason
+        capacity_reason = str(
+            capacity.get("put_cash_capacity_reason") or ""
+        ).strip()
+        df_sp_lab.at[idx, 'cash_fx_status'] = capacity_reason or pd.NA
         if cash_secured_unavailable_reason:
             continue
-        if not free_headroom.available or free_headroom.cash_free is None:
+        if (
+            capacity.get("put_cash_capacity_available") is not True
+            or capacity.get("put_cash_free") is None
+        ):
             raw_reason = df_sp_lab.at[idx, 'cash_requirement_unavailable_reason']
             empty_reason = '' if pd.isna(raw_reason) else str(raw_reason).strip()
             if not empty_reason:
-                df_sp_lab.at[idx, 'cash_requirement_unavailable_reason'] = free_headroom.reason
+                df_sp_lab.at[idx, 'cash_requirement_unavailable_reason'] = (
+                    capacity_reason or "sell_put_cash_capacity_unavailable"
+                )
             continue
-        df_sp_lab.at[idx, 'cash_free_effective_native'] = free_headroom.cash_free
+        free_cash = float(capacity["put_cash_free"])
+        df_sp_lab.at[idx, 'cash_free_effective_native'] = free_cash
         df_sp_lab.at[idx, 'max_new_contracts'] = int(
-            free_headroom.cash_free // required_native
+            free_cash // required_native
         )
         if available_headroom.available and available_headroom.cash_free is not None:
             df_sp_lab.at[idx, 'cash_available_effective_native'] = available_headroom.cash_free
         df_sp_lab.at[idx, 'cash_capacity_basis'] = f'same_currency_then_fx:{native_currency}'
 
         if native_currency == 'USD':
-            df_sp_lab.at[idx, 'cash_free_usd'] = free_headroom.cash_free
+            df_sp_lab.at[idx, 'cash_free_usd'] = free_cash
         free_cny = exchange_rate_converter.convert(
-            free_headroom.cash_free,
+            free_cash,
             from_ccy=native_currency,
             to_ccy='CNY',
         )

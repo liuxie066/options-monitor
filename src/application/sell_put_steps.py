@@ -75,12 +75,16 @@ def run_sell_put_scan_and_summarize(
     run_sell_put: bool = True,
     yield_enhancement_sell_put_cfg: dict[str, Any] | None = None,
     final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
+    candidate_decisions_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None,
 ) -> list[dict[str, Any]]:
     del py, base, top_n, report_dir, timeout_sec, yield_enhancement_sell_put_cfg
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
+    candidate_decisions: list[dict[str, Any]] = []
 
     if run_sell_put:
         underwriting_cfg = resolve_sell_put_underwriting_config(sp)
@@ -101,6 +105,7 @@ def run_sell_put_scan_and_summarize(
             strategy_family=sell_put_semantics.strategy_family,
             strategy_profile=sell_put_semantics.scan_strategy_profile,
             quiet=True,
+            calculation_decision_sink_fn=candidate_decisions.extend,
         )
         df_sp_lab = label_sell_put_candidates(df_sp_lab)
         if not df_sp_lab.empty:
@@ -120,6 +125,7 @@ def run_sell_put_scan_and_summarize(
                 },
                 portfolio_ctx=portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
+                decision_sink_fn=candidate_decisions.extend,
             )
     else:
         df_sp_lab = pd.DataFrame()
@@ -130,6 +136,8 @@ def run_sell_put_scan_and_summarize(
             "put",
             [dict(item) for item in df_sp_lab.to_dict("records")],
         )
+    if candidate_decisions_sink_fn is not None:
+        candidate_decisions_sink_fn("put", candidate_decisions)
 
     return [summarize_sell_put(df_sp_lab, symbol, symbol_cfg=symbol_cfg)]
 

@@ -349,7 +349,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
 @pytest.mark.parametrize(
     ("reason_code", "expected_status", "expected_capture_reason"),
     [
-        ("no_expirations", "completed", "opening_candidates_captured"),
+        ("no_expirations", "completed", "no_expirations"),
         ("market_closed", "unavailable", "market_closed"),
     ],
 )

@@ -1,6 +1,8 @@
 accounts:
   lx:
     type: futu
+    futu:
+      trd_env: REAL
     futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
   sy:
     type: external_holdings

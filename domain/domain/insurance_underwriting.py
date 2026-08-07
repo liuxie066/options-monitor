@@ -64,15 +64,18 @@ def evaluate_underwriting_candidate(
             "accepted": True,
             "rule": "candidate_engine_policy_accepted",
             "fields": fields,
+            "opening_decision": decision,
         }
     reject = dict((decision.get("rejects") or [{}])[0])
-    return _reject(
+    result = _reject(
         str(reject.get("reason") or "candidate_engine_policy_rejected"),
         reject.get("metric_value"),
         reject.get("threshold"),
         fields,
         message=str(reject.get("message") or "Candidate Engine policy rejected candidate"),
     )
+    result["opening_decision"] = decision
+    return result
 
 
 def underwriting_fields(
@@ -83,6 +86,11 @@ def underwriting_fields(
 ) -> dict[str, Any]:
     mode_norm = _mode(mode)
     iv_rv_ratio, iv_minus_rv = _vol_edge(row)
+    resolved_min_strike = (
+        _first_float(row, "effective_min_strike", "policy_min_strike")
+        if mode_norm == "call"
+        else cfg.min_strike
+    )
     out: dict[str, Any] = {
         "strategy_profile": INSURANCE_UNDERWRITING_PROFILE,
         "insurance_underwriting_mode": mode_norm,
@@ -92,8 +100,12 @@ def underwriting_fields(
         "iv_minus_rv": _round_or_none(iv_minus_rv),
         "policy_min_dte": cfg.min_dte,
         "policy_max_dte": cfg.max_dte,
-        "policy_min_strike": cfg.min_strike,
+        "policy_min_strike": resolved_min_strike,
         "policy_max_strike": cfg.max_strike,
+        "policy_min_annualized_return": cfg.min_annualized_return,
+        "policy_min_net_premium_cny": cfg.min_net_income,
+        "policy_min_iv_rv_ratio": cfg.min_iv_rv_ratio,
+        "policy_min_iv_minus_rv": cfg.min_iv_minus_rv,
         "policy_max_spread_ratio": cfg.max_spread_ratio,
     }
     if mode_norm == "put":

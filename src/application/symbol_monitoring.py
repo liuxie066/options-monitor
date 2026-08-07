@@ -57,6 +57,9 @@ class SymbolMonitoringInputs:
     final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
+    candidate_decisions_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -414,11 +417,25 @@ def run_symbol_monitoring(
             return "unavailable", "market_closed"
         return "completed", None
 
+    def _capture_reason(
+        candidate_count: int,
+        strategy_reason: str | None,
+    ) -> str | None:
+        if strategy_reason:
+            return strategy_reason
+        if (
+            candidate_count == 0
+            and quote_source_outcome == "success_empty"
+            and quote_reason_code in SUCCESS_EMPTY_REASON_CODES
+        ):
+            return quote_reason_code
+        return None
+
     def _report_capture(
         *,
         strategy_mode: str,
         status: str,
-        reason: str,
+        reason: str | None,
     ) -> None:
         if inputs.candidate_capture_status_sink_fn is None:
             return
@@ -455,6 +472,7 @@ def run_symbol_monitoring(
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 run_sell_put=True,
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
+                candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
             )
             _append_summary_result(
                 summary_rows,
@@ -475,7 +493,7 @@ def run_symbol_monitoring(
                 _report_capture(
                     strategy_mode="put",
                     status=put_status,
-                    reason=put_reason or "opening_candidates_captured",
+                    reason=_capture_reason(put_candidate_count, put_reason),
                 )
         except Exception as exc:
             log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
@@ -591,6 +609,7 @@ def run_symbol_monitoring(
                 locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
                 global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
+                candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
             )
             call_status = "completed"
             call_reason = None
@@ -626,10 +645,9 @@ def run_symbol_monitoring(
                 _report_capture(
                     strategy_mode="call",
                     status=call_status,
-                    reason=(
-                        str(call_reason)
-                        if call_status != "completed" and call_reason
-                        else "opening_candidates_captured"
+                    reason=_capture_reason(
+                        call_candidate_count,
+                        str(call_reason) if call_reason else None,
                     ),
                 )
         except Exception as exc:

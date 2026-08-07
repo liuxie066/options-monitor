@@ -426,11 +426,11 @@ def evaluate_opening_candidate_policy(
     max_dte: int | None = None,
     min_strike: float | None = None,
     max_strike: float | None = None,
-    min_annualized_return: float = OPENING_CANDIDATE_MIN_ANNUALIZED_RETURN,
-    min_net_premium_cny: float = OPENING_CANDIDATE_MIN_NET_PREMIUM_CNY,
-    min_iv_rv_ratio: float = OPENING_CANDIDATE_MIN_IV_RV_RATIO,
-    min_iv_minus_rv: float = OPENING_CANDIDATE_MIN_IV_MINUS_RV,
-    max_spread_ratio: float = OPENING_CANDIDATE_MAX_SPREAD_RATIO,
+    min_annualized_return: float | None = None,
+    min_net_premium_cny: float | None = None,
+    min_iv_rv_ratio: float | None = None,
+    min_iv_minus_rv: float | None = None,
+    max_spread_ratio: float | None = None,
     require_earnings_evidence: bool = True,
     reject_known_earnings: bool = True,
 ) -> dict[str, Any]:
@@ -452,6 +452,36 @@ def evaluate_opening_candidate_policy(
     resolved_max_strike = _first_float({"value": max_strike}, "value")
     if resolved_max_strike is None:
         resolved_max_strike = _first_float(src, "policy_max_strike")
+    resolved_min_annualized_return = _resolved_policy_float(
+        min_annualized_return,
+        src,
+        "policy_min_annualized_return",
+        OPENING_CANDIDATE_MIN_ANNUALIZED_RETURN,
+    )
+    resolved_min_net_premium_cny = _resolved_policy_float(
+        min_net_premium_cny,
+        src,
+        "policy_min_net_premium_cny",
+        OPENING_CANDIDATE_MIN_NET_PREMIUM_CNY,
+    )
+    resolved_min_iv_rv_ratio = _resolved_policy_float(
+        min_iv_rv_ratio,
+        src,
+        "policy_min_iv_rv_ratio",
+        OPENING_CANDIDATE_MIN_IV_RV_RATIO,
+    )
+    resolved_min_iv_minus_rv = _resolved_policy_float(
+        min_iv_minus_rv,
+        src,
+        "policy_min_iv_minus_rv",
+        OPENING_CANDIDATE_MIN_IV_MINUS_RV,
+    )
+    resolved_max_spread_ratio = _resolved_policy_float(
+        max_spread_ratio,
+        src,
+        "policy_max_spread_ratio",
+        OPENING_CANDIDATE_MAX_SPREAD_RATIO,
+    )
     dte = _first_float(src, "dte")
     if resolved_min_dte is not None and (dte is None or dte < resolved_min_dte):
         _reject(
@@ -563,58 +593,61 @@ def evaluate_opening_candidate_policy(
         if mode_norm == "put"
         else "annualized_net_premium_return",
     )
-    if annualized is None or annualized < float(min_annualized_return):
+    if annualized is None or annualized < resolved_min_annualized_return:
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
             reason=REJECT_RETURN_ANNUALIZED,
             message="annualized net return below formal minimum or unavailable",
             metric_value=annualized,
-            threshold=float(min_annualized_return),
+            threshold=resolved_min_annualized_return,
         )
 
     net_premium_cny = _first_float(src, "net_premium_cny", "net_income_cny")
-    if net_premium_cny is None or net_premium_cny < float(min_net_premium_cny):
+    if (
+        net_premium_cny is None
+        or net_premium_cny < resolved_min_net_premium_cny
+    ):
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
             reason=REJECT_RETURN_NET_PREMIUM_CNY,
             message="one-contract net premium in CNY below minimum or unavailable",
             metric_value=net_premium_cny,
-            threshold=float(min_net_premium_cny),
+            threshold=resolved_min_net_premium_cny,
         )
 
     spread_ratio = _first_float(src, "spread_ratio")
-    if spread_ratio is None or spread_ratio > float(max_spread_ratio):
+    if spread_ratio is None or spread_ratio > resolved_max_spread_ratio:
         _reject(
             rejects,
             stage=STAGE_RISK_FILTER,
             reason=REJECT_RISK_SPREAD,
             message="raw quote spread ratio above maximum or unavailable",
             metric_value=spread_ratio,
-            threshold=float(max_spread_ratio),
+            threshold=resolved_max_spread_ratio,
         )
 
     iv_rv_ratio = _first_float(src, "iv_rv_ratio")
-    if iv_rv_ratio is None or iv_rv_ratio < float(min_iv_rv_ratio):
+    if iv_rv_ratio is None or iv_rv_ratio < resolved_min_iv_rv_ratio:
         _reject(
             rejects,
             stage=STAGE_RISK_FILTER,
             reason=REJECT_RISK_IV_RV_RATIO,
             message="IV to term-matched RV ratio below minimum or unavailable",
             metric_value=iv_rv_ratio,
-            threshold=float(min_iv_rv_ratio),
+            threshold=resolved_min_iv_rv_ratio,
         )
 
     iv_minus_rv = _first_float(src, "iv_minus_rv")
-    if iv_minus_rv is None or iv_minus_rv < float(min_iv_minus_rv):
+    if iv_minus_rv is None or iv_minus_rv < resolved_min_iv_minus_rv:
         _reject(
             rejects,
             stage=STAGE_RISK_FILTER,
             reason=REJECT_RISK_IV_MINUS_RV,
             message="IV minus term-matched RV below minimum or unavailable",
             metric_value=iv_minus_rv,
-            threshold=float(min_iv_minus_rv),
+            threshold=resolved_min_iv_minus_rv,
         )
 
     if require_earnings_evidence:
@@ -651,6 +684,16 @@ def evaluate_opening_candidate_policy(
     )
 
 
+def _resolved_policy_float(
+    explicit: Any,
+    row: dict[str, Any],
+    field: str,
+    default: float,
+) -> float:
+    resolved = _first_float({"value": explicit}, "value")
+    if resolved is None:
+        resolved = _first_float(row, field)
+    return float(default if resolved is None else resolved)
 
 
 def _first_float(src: dict[str, Any], *names: str) -> float | None:

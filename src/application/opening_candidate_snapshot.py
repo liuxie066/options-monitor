@@ -11,6 +11,7 @@ from domain.domain.engine import (
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
     rank_candidate_rows,
+    validate_candidate_decision_payload,
 )
 from domain.domain.symbol_identity import symbol_market
 from src.application.tick_run_workspace import (
@@ -73,6 +74,9 @@ def seal_opening_candidate_snapshot(
     dependencies: Iterable[Mapping[str, Any]],
     scan_statuses: Iterable[Mapping[str, Any]],
     final_candidates: Mapping[str, Iterable[Mapping[str, Any]]],
+    candidate_evaluations: (
+        Mapping[str, Iterable[Mapping[str, Any]]] | None
+    ) = None,
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run snapshot."""
@@ -96,6 +100,7 @@ def seal_opening_candidate_snapshot(
         futu_account_id=str(authority["futu_account_id"]),
         market=market_norm,
         risk_policy_hash=policy_hash,
+        candidate_evaluations=candidate_evaluations,
     )
     ranked = _ranked_candidates(
         final_candidates,
@@ -105,6 +110,16 @@ def seal_opening_candidate_snapshot(
         futu_account_id=str(authority["futu_account_id"]),
         market=market_norm,
     )
+    accepted_decision_ids = {
+        str(item["candidate_id"])
+        for item in decisions
+        if bool((item.get("opening_decision") or {}).get("accepted"))
+    }
+    ranked_candidate_ids = {str(item["candidate_id"]) for item in ranked}
+    if accepted_decision_ids != ranked_candidate_ids:
+        raise OpeningCandidateSnapshotError(
+            "accepted opening decisions and final candidates do not match"
+        )
     strategy_results = _strategy_results(
         modes=modes,
         statuses=statuses,
@@ -374,8 +389,69 @@ def validate_opening_candidate_snapshot(
     candidate_ids = [str(row.get("candidate_id") or "") for row in decisions]
     if any(not value for value in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
         raise OpeningCandidateSnapshotError("opening candidate identities are invalid")
+    decision_by_id: dict[str, dict[str, Any]] = {}
+    validated_decision_ids: set[str] = set()
+    accepted_decision_ids: set[str] = set()
+    for raw_decision in decisions:
+        if not isinstance(raw_decision, Mapping):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate decision is invalid"
+            )
+        decision = dict(raw_decision)
+        candidate_id = str(decision.get("candidate_id") or "")
+        decision_by_id[candidate_id] = decision
+        # opening_candidate_snapshot.v1 historically allowed a minimal
+        # candidate-id record for read-only ranked projections. New seals use
+        # the complete opening_candidate_decision.v1 contract below.
+        if decision.get("schema_version") != "opening_candidate_decision.v1":
+            continue
+        mode = _mode(decision.get("strategy_mode"))
+        normalized = decision.get("normalized_input")
+        if not isinstance(normalized, dict):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate normalized input is invalid"
+            )
+        try:
+            opening = validate_candidate_decision_payload(
+                dict(decision.get("opening_decision") or {})
+            )
+        except (TypeError, ValueError) as exc:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate decision payload is invalid"
+            ) from exc
+        if opening.get("mode") != mode:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate decision mode mismatch"
+            )
+        if canonical_sha256(normalized) != decision.get("normalized_input_hash"):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate normalized input hash mismatch"
+            )
+        if canonical_sha256(opening) != decision.get("decision_hash"):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate decision hash mismatch"
+            )
+        if decision.get("risk_policy_hash") != item.get("strategy_policy_sha256"):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate policy binding mismatch"
+            )
+        if candidate_id != _bound_candidate_id(
+            account=expected_account,
+            futu_account_id=str(item.get("futu_account_id") or ""),
+            market=_market(item.get("market")),
+            mode=mode,
+            normalized=normalized,
+        ):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate account identity mismatch"
+            )
+        validated_decision_ids.add(candidate_id)
+        if opening.get("accepted") is True:
+            accepted_decision_ids.add(candidate_id)
+
     decision_ids = set(candidate_ids)
     mode_positions: dict[str, int] = {}
+    validated_ranked_ids: set[str] = set()
     for row in ranked:
         mode = str(row.get("strategy_mode") or "")
         mode_positions[mode] = mode_positions.get(mode, 0) + 1
@@ -383,6 +459,36 @@ def validate_opening_candidate_snapshot(
             raise OpeningCandidateSnapshotError("opening candidate rank order is invalid")
         if row.get("candidate_id") not in decision_ids:
             raise OpeningCandidateSnapshotError("ranked candidate is not bound to a decision")
+        candidate_id = str(row.get("candidate_id") or "")
+        decision = decision_by_id[candidate_id]
+        if candidate_id not in validated_decision_ids:
+            continue
+        if not bool((decision.get("opening_decision") or {}).get("accepted")):
+            raise OpeningCandidateSnapshotError(
+                "ranked candidate decision is not accepted"
+            )
+        if row.get("decision_hash") != decision.get("decision_hash"):
+            raise OpeningCandidateSnapshotError(
+                "ranked candidate decision hash mismatch"
+            )
+        validated_ranked_ids.add(candidate_id)
+    if validated_decision_ids and validated_decision_ids != decision_ids:
+        raise OpeningCandidateSnapshotError(
+            "opening candidate decision contracts may not be mixed"
+        )
+    if validated_ranked_ids != accepted_decision_ids:
+        raise OpeningCandidateSnapshotError(
+            "accepted opening decisions and ranked candidates do not match"
+        )
+    contract_scope_ids = {
+        str(row.get("candidate_id") or "")
+        for row in scopes
+        if isinstance(row, Mapping) and row.get("scope") == "contract"
+    }
+    if validated_decision_ids and contract_scope_ids != decision_ids:
+        raise OpeningCandidateSnapshotError(
+            "opening candidate contract scopes do not match decisions"
+        )
 
 
 def dependency_from_file(
@@ -425,29 +531,84 @@ def _snapshot_decisions(
     futu_account_id: str,
     market: str,
     risk_policy_hash: str,
+    candidate_evaluations: (
+        Mapping[str, Iterable[Mapping[str, Any]]] | None
+    ),
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str, str], dict[str, Any]]]:
+    status_rows = list(statuses)
+    expected_modes = {str(item["strategy_mode"]) for item in status_rows}
     quote_bindings = {
         (
             str(item.get("symbol") or "").strip().upper(),
             _mode(item.get("strategy_mode")),
         ): str(item.get("quote_snapshot_id") or "").strip() or None
-        for item in statuses
+        for item in status_rows
     }
+    evaluation_rows: dict[str, list[dict[str, Any]]] = {}
+    if candidate_evaluations is None:
+        for raw_mode, rows in rows_by_mode.items():
+            mode = _mode(raw_mode)
+            for raw in rows:
+                normalized = dict(raw or {})
+                opening = evaluate_opening_candidate_policy(normalized, mode=mode)
+                if opening.get("accepted") is not True:
+                    raise OpeningCandidateSnapshotError(
+                        "final candidate is not accepted by opening policy"
+                    )
+                evaluation_rows.setdefault(mode, []).append(
+                    {
+                        "normalized_input": normalized,
+                        "opening_decision": opening,
+                    }
+                )
+    else:
+        for raw_mode, rows in candidate_evaluations.items():
+            mode = _mode(raw_mode)
+            materialized = [dict(item or {}) for item in rows]
+            if mode not in expected_modes and materialized:
+                raise OpeningCandidateSnapshotError(
+                    "candidate decision strategy scope was not scanned"
+                )
+            if mode in expected_modes:
+                evaluation_rows.setdefault(mode, []).extend(materialized)
+
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for raw_mode, rows in rows_by_mode.items():
-        mode = _mode(raw_mode)
-        for raw in rows:
-            normalized = dict(raw or {})
+    for mode, rows in evaluation_rows.items():
+        for record in rows:
+            normalized = dict(record.get("normalized_input") or {})
             key = _contract_key(mode, normalized)
             if key in index:
                 raise OpeningCandidateSnapshotError(
                     "opening candidate contract identity is duplicated"
                 )
-            opening = evaluate_opening_candidate_policy(normalized, mode=mode)
-            if opening.get("accepted") is not True:
+            try:
+                opening = validate_candidate_decision_payload(
+                    dict(record.get("opening_decision") or {})
+                )
+            except (TypeError, ValueError) as exc:
                 raise OpeningCandidateSnapshotError(
-                    "final candidate is not accepted by opening policy"
+                    "opening candidate decision payload is invalid"
+                ) from exc
+            if opening.get("mode") != mode:
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate decision mode mismatch"
+                )
+            decision_input = opening.get("normalized_input")
+            if not isinstance(decision_input, dict) or canonical_sha256(
+                decision_input
+            ) != canonical_sha256(normalized):
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate normalized input mismatch"
+                )
+            if (
+                str(opening.get("symbol") or "").strip().upper()
+                != str(normalized.get("symbol") or "").strip().upper()
+                or str(opening.get("contract_symbol") or "").strip()
+                != str(normalized.get("contract_symbol") or "").strip()
+            ):
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate decision identity mismatch"
                 )
             candidate_id = _bound_candidate_id(
                 account=account,
@@ -462,6 +623,7 @@ def _snapshot_decisions(
                 "strategy_mode": mode,
                 "normalized_input": normalized,
                 "normalized_input_hash": canonical_sha256(normalized),
+                "decision_hash": canonical_sha256(opening),
                 "risk_policy_hash": risk_policy_hash,
                 "quote_snapshot_id": quote_bindings.get(
                     (str(normalized.get("symbol") or "").strip().upper(), mode)
@@ -485,7 +647,20 @@ def _ranked_candidates(
 ) -> list[dict[str, Any]]:
     combined: list[dict[str, Any]] = []
     for mode in modes:
-        source_rows = [dict(item) for item in rows_by_mode.get(mode, [])]
+        source_rows: list[dict[str, Any]] = []
+        for item in rows_by_mode.get(mode, []):
+            final_row = dict(item)
+            decision = decision_index.get(_contract_key(mode, final_row))
+            if decision is None:
+                raise OpeningCandidateSnapshotError(
+                    "final candidate is not represented in candidate decisions"
+                )
+            opening = dict(decision.get("opening_decision") or {})
+            if opening.get("accepted") is not True:
+                raise OpeningCandidateSnapshotError(
+                    "final candidate is not accepted by opening policy"
+                )
+            source_rows.append(dict(decision.get("normalized_input") or {}))
         for mode_rank, ranked_row in enumerate(
             rank_candidate_rows(source_rows, mode=mode),
             start=1,
@@ -517,7 +692,7 @@ def _ranked_candidates(
                     "rank": mode_rank,
                     "facts": ranked_row,
                     "ranking": explain_candidate_rank(ranked_row, mode=mode),
-                    "decision_hash": opening.get("decision_hash"),
+                    "decision_hash": decision.get("decision_hash"),
                     "risk_policy_hash": decision.get("risk_policy_hash"),
                     "quote_snapshot_id": decision.get("quote_snapshot_id"),
                 }
@@ -632,7 +807,9 @@ def _scope_results(
                         if str(item.get("reason") or "")
                     }
                 ),
-                "decision_hash": opening.get("decision_hash"),
+                "rejects": rejects,
+                "normalized_input_hash": decision.get("normalized_input_hash"),
+                "decision_hash": decision.get("decision_hash"),
             }
         )
     return sorted(
