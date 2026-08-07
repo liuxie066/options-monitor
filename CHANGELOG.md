@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.16 - 2026-08-07
+
+### Bug Fixes
+- Classified OpenD zero-bid option snapshots as an ineligible market state when contract identity, quote, and state evidence are complete, so no-current-bid contracts no longer degrade opening scans to partial_data; missing or negative bid values still fail closed as data_unavailable.
+
 ## 1.10.15 - 2026-08-07
 
 ### Bug Fixes
