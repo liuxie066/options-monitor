@@ -53,6 +53,35 @@ def _version_at_least(value: Any, minimum: str) -> bool:
     return observed + (0,) * (width - len(observed)) >= required + (0,) * (width - len(required))
 
 
+def _normalize_trade_date_market(value: Any) -> Any:
+    """Map an internal market label to futu TradeDateMarket; pass enums through.
+
+    Fails fast on unknown values instead of letting OpenD return a generic
+    parameter error detached from the original label.
+
+    TradeDateMarket members are plain string constants (e.g. ``US = 'US'``),
+    so the normalized form is the uppercase string itself; importing futu is
+    deliberately avoided here because it can fail on log-file setup.
+    """
+
+    if value in (None, ""):
+        return value
+    name = str(value).strip().upper()
+    known = {
+        "NONE": "N/A",
+        "HK": "HK",
+        "US": "US",
+        "CN": "CN",
+        "NT": "NT",
+        "ST": "ST",
+        "JP_FUTURE": "JP_FUTURE",
+        "SG_FUTURE": "SG_FUTURE",
+    }
+    if name in known.values() or name in known:
+        return known.get(name, name)
+    raise ValueError(f"unsupported trade date market: {value!r}")
+
+
 def _futu_package_root() -> Path | None:
     try:
         spec = importlib_util.find_spec("futu")
@@ -683,7 +712,10 @@ class FutuGateway:
 
     def get_trading_days(self, **kwargs: Any) -> Any:
         try:
-            return self.client.get_trading_days(**kwargs)
+            params = dict(kwargs)
+            if "market" in params:
+                params["market"] = _normalize_trade_date_market(params["market"])
+            return self.client.get_trading_days(**params)
         except Exception as exc:
             self._raise_mapped(exc, action="get_trading_days")
         raise AssertionError("unreachable")
@@ -703,8 +735,11 @@ class FutuGateway:
         **kwargs: Any,
     ) -> Any:
         try:
+            params = dict(kwargs)
+            if "market" in params:
+                params["market"] = _normalize_trade_date_market(params["market"])
             return self.client.get_trading_days_with_receipt(
-                **kwargs
+                **params
             )
         except Exception as exc:
             self._raise_mapped(
@@ -800,6 +835,8 @@ def _futu_enum_value(namespace: str, value: Any) -> Any:
         if hasattr(enum_ns, name):
             return getattr(enum_ns, name)
         upper = name.upper()
+        if namespace == "KL_FIELD" and upper == "TIME_KEY":
+            upper = "DATE_TIME"
         if hasattr(enum_ns, upper):
             return getattr(enum_ns, upper)
     except Exception:

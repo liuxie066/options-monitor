@@ -42,6 +42,81 @@ def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
     assert data["codes"] == ["US.NVDA", "US.TSLA"]
 
 
+def test_get_trading_days_normalizes_market_label() -> None:
+    import sys
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
+
+        def get_trading_days(self, **kwargs):
+            return {"market": kwargs.get("market"), "start": kwargs.get("start")}
+
+        def get_trading_days_with_receipt(self, **kwargs):
+            return {"market": kwargs.get("market"), "coverage_complete": True}
+
+    gw = build_futu_gateway(
+        host="127.0.0.9",
+        port=11119,
+        is_option_chain_cache_enabled=True,
+        backend_cls=FakeBackend,
+        client_cls=FakeClient,
+    )
+
+    data = gw.get_trading_days(market="us", start="2026-08-01")
+    assert data["market"] == "US"
+    receipt = gw.get_trading_days_with_receipt(market="HK", start="2026-08-01")
+    assert receipt["market"] == "HK"
+
+
+def test_get_trading_days_rejects_unknown_market() -> None:
+    import sys
+
+    import pytest
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
+
+        def get_trading_days(self, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("client must not be called for unknown market")
+
+    gw = build_futu_gateway(
+        host="127.0.0.9",
+        port=11119,
+        is_option_chain_cache_enabled=True,
+        backend_cls=FakeBackend,
+        client_cls=FakeClient,
+    )
+
+    with pytest.raises(Exception, match="unsupported trade date market"):
+        gw.get_trading_days(market="MOON", start="2026-08-01")
+
+
 def test_gateway_error_mapping_need_2fa() -> None:
     import sys
 
@@ -191,6 +266,58 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
         "end": "2026-05-03",
         "ktype": "K_DAY",
     }
+
+
+def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    fake_futu = SimpleNamespace(
+        KLType=SimpleNamespace(K_DAY="k-day"),
+        AuType=SimpleNamespace(QFQ="qfq"),
+        KL_FIELD=SimpleNamespace(DATE_TIME="date-time", CLOSE="close"),
+    )
+    monkeypatch.setitem(sys.modules, "futu", fake_futu)
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def request_history_kline(self, **kwargs):
+            self.kwargs = dict(kwargs)
+            return 0, [], None
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.quote = FakeQuote()
+
+        def _ensure_clients(self):
+            return self.quote, None
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
+
+    gateway = build_futu_gateway(
+        backend_cls=FakeBackend,
+        client_cls=FakeClient,
+    )
+
+    gateway.request_history_kline(
+        code="US.NVDA",
+        start="2026-07-01",
+        end="2026-08-06",
+        ktype="K_DAY",
+        autype="QFQ",
+        fields=["time_key", "close"],
+    )
+
+    assert gateway.backend.quote.kwargs["fields"] == ["date-time", "close"]
 
 
 def test_gateway_market_state_delegates_to_quote_client() -> None:
