@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.14 - 2026-08-07
+
+### Bug Fixes
+- Made post-upgrade Feishu WebSocket health checks explicitly merge the managed credential env file after the base service env under `sudo`, preventing secure credential deployments from being falsely rolled back as missing credentials.
+
 ## 1.10.13 - 2026-08-07
 
 ### Improvements

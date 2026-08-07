@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.14",
+  "base": {
+    "tag": "v1.10.13",
+    "commit": "429e3ca30ae35eda43854499299c92fe2541ca5b"
+  },
+  "reviewed_head": "08112e80e8e22aaad065260ae258ce92e70e51d1",
+  "commits": [
+    {
+      "sha": "9ac99fc98f4208cd050cb76fb95c8faba7b5a821",
+      "subject": "fix: preserve Feishu credentials in upgrade health check"
+    },
+    {
+      "sha": "08112e80e8e22aaad065260ae258ce92e70e51d1",
+      "subject": "Merge pull request #135 from liuxie066/fix/feishu-credential-health-check"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Made post-upgrade Feishu WebSocket health checks explicitly merge the managed credential env file after the base service env under `sudo`, preventing secure credential deployments from being falsely rolled back as missing credentials.",
+      "commits": [
+        "9ac99fc98f4208cd050cb76fb95c8faba7b5a821"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "08112e80e8e22aaad065260ae258ce92e70e51d1",
+      "reason": "Merge commit for PR #135; it contains no independent user-facing change beyond the mapped implementation commit."
+    }
+  ]
+}
