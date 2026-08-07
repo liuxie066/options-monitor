@@ -419,6 +419,8 @@ om service render \
   --output-dir /tmp/options-monitor-service
 ```
 
+Linux 主机如果已预置 `systemd-creds` 加密的 Feishu Agent 凭据，可在 render 时显式加上 `--include-feishu-agent-credential`，将 credential oneshot、materializer helper 和消费服务 drop-in 纳入 service profile 与 drift；该开关不会创建或修改凭据。
+
 平台部署、升级、回滚和服务检查见 [DEPLOY.md](DEPLOY.md)、[Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md) 与 [RUNBOOK.md](RUNBOOK.md)。
 
 ## 文档
