@@ -62,6 +62,9 @@
   （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
 - 期权 bid/ask 的可用性由本次 snapshot 的盘口合法性（`bid > 0`、`ask >= bid`、
   tick、spread、合约身份与状态）判定，不由 `update_time` 判定。
+- OpenD 明确返回 `bid=0` 且其余身份/盘口/状态证据完整时，视为当前无有效
+  买盘的合法市场状态，合约归为 `ineligible`，不作为“证据缺失”告警；`bid`
+  缺失、非有限或为负仍 `data_unavailable`。
 - 不回退旧 required-data、CSV、收盘价或 `last` 作为 bid/ask 替代。
 - 市场状态、spot 或关键时间戳缺失时，在最小受影响范围内 `data_unavailable`。
 
