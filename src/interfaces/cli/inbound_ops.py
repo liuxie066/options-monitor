@@ -46,6 +46,11 @@ def add_inbound_commands(subparsers: Any) -> None:
     inbound_ws.add_argument("--assistant-config", default=None)
     inbound_ws.add_argument("--audit-db", default=None)
     inbound_ws.add_argument("--env-file", default=None)
+    inbound_ws.add_argument(
+        "--credential-env-file",
+        default=None,
+        help="additional credential env file for --check, loaded after --env-file",
+    )
     inbound_ws.add_argument("--no-local-env-file", action="store_true")
     inbound_ws.add_argument("--no-reply", action="store_true")
     inbound_ws.add_argument("--reply-in-thread", action="store_true", default=None)
@@ -111,6 +116,11 @@ def handle_inbound_command(
         return _print(out)
 
     if args.inbound_command == "feishu-ws":
+        if args.credential_env_file and not args.check:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="--credential-env-file is only supported with --check",
+            )
         settings = build_feishu_ws_settings_fn(
             config_key=args.config_key,
             config_path=args.config_path,
@@ -122,6 +132,7 @@ def handle_inbound_command(
             queue_size=args.queue_size,
             environ=os.environ,
             env_file=args.env_file,
+            credential_env_file=args.credential_env_file,
         )
         if args.check:
             return _print(check_feishu_ws_settings_fn(settings))
