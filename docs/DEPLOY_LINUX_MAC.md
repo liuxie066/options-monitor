@@ -108,6 +108,20 @@ cd "$REPO"
 
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
+如果 Linux 主机已通过 `systemd-creds` 预置了加密的 Feishu Agent 凭据，可以额外传入：
+
+```bash
+--include-feishu-agent-credential
+```
+
+这是显式 opt-in，只支持 systemd。它会把以下不含明文秘密的资产纳入同一个 `service.profile.json` 和 service drift 契约：
+
+- `/etc/systemd/system/options-monitor-feishu-agent-credential.service`；
+- `/usr/local/libexec/options-monitor-materialize-feishu-agent-credential`，权限 `0755`；
+- 每个由该 profile 生成的非 OpenD options-monitor service 下的 `zzzz-feishu-agent-credential.conf` drop-in。
+
+默认读取 `/etc/credstore.encrypted/pm-feishu-agent-app-secret` 和 `/etc/credstore.encrypted/om-feishu-holdings-app-secret`，将解密结果原子写入 tmpfs 上的 `/run/credentials/options-monitor-feishu-agent.env`，权限为 `0440 root:<deploy_user>`。渲染和 drift 不会创建、修改或输出加密凭据；这两个 credential store 必须由运维事先独立配置。OpenD 不读取 Feishu 凭据，因此不会添加该 drop-in。
+
 如果要启用远端自动升级，建议 `$REPO` 使用 `/opt/options-monitor/current` 这样的 symlink 布局，并额外传：
 
 ```bash
@@ -128,7 +142,7 @@ cd "$REPO"
 
 启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。必须同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。缺少可用 YAML authoring source 时升级会 fail closed，不再从 legacy JSON profile 恢复。
 
-升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
+升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json`、systemd unit 和 profile 显式声明的 helper/drop-in。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 和 credential oneshot 会执行 `systemctl enable --now`；credential helper 还会校验内容、`0755` 权限和 oneshot `Result=success`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
 如果要让远端持续积累 Strategy Lab / Shadow Replay 复盘数据，额外显式开启 recorder：
 
@@ -212,11 +226,40 @@ sudo systemctl enable --now options-monitor-trade-intake.service
 sudo systemctl enable --now options-monitor-feishu-ws.service
 ```
 
+如果 render 时传了 `--include-feishu-agent-credential`，先确认加密凭据已经存在，再安装 helper 和 drop-in：
+
+```bash
+sudo test -f /etc/credstore.encrypted/pm-feishu-agent-app-secret
+sudo test -f /etc/credstore.encrypted/om-feishu-holdings-app-secret
+sudo install -D -m 0755 \
+  /tmp/options-monitor-service/systemd/libexec/options-monitor-materialize-feishu-agent-credential \
+  /usr/local/libexec/options-monitor-materialize-feishu-agent-credential
+while IFS= read -r source; do
+  relative="${source#/tmp/options-monitor-service/systemd/}"
+  sudo install -D -m 0644 "$source" "/etc/systemd/system/$relative"
+done < <(find /tmp/options-monitor-service/systemd -type f -name zzzz-feishu-agent-credential.conf -print)
+sudo systemctl daemon-reload
+sudo systemctl enable --now options-monitor-feishu-agent-credential.service
+sudo systemctl show --property=Result --value options-monitor-feishu-agent-credential.service
+```
+
+最后一条必须输出 `success`。不要在 shell 中解密或回显 credential store 内容。
+
 如果 render 时传了 `--include-auto-upgrade`，再启用升级 timer：
 
 ```bash
 sudo systemctl enable --now options-monitor-upgrade.timer
 ```
+
+对于原先把 credential unit 放在 `/usr/lib/systemd/system/` 的存量主机，升级到首个包含此能力的 release 后需要做一次显式收编：
+
+```bash
+./om service drift --runtime-root "$RUNTIME"
+./om service drift --runtime-root "$RUNTIME" --confirm
+./om service drift --runtime-root "$RUNTIME"
+```
+
+第一条应显示 `legacy_feishu_agent_credential_inferred`；第二条会把 unit 收编到 `/etc/systemd/system/`、补齐 helper/drop-in 并把显式 opt-in 写回 profile；第三条应返回 clean。首次升级进程是由旧 release 启动的，不能依赖它自己执行新 release 才提供的收编逻辑；这一次收编完成后，后续手动和 06:10 自动升级都会从 profile 保留该意图并自动 reconcile。在仍需要回滚到不识别新 profile 字段的旧 release 期间，保留 `/usr/lib/systemd/system/` 下的 legacy unit；drift 不会自动删除它。
 
 `options-monitor-auto-close-*.timer` 每天北京时间 09:00 运行一次 `./om option-positions auto-close-expired --apply --yes --quiet`。入口会按 runtime config 的 `_generated.market` 过滤 open lots，US/HK timer 只处理各自市场标的；`grace_days=1` 的到期 +1 天 cutoff 按标的市场本地日期计算，US 使用美东时间，HK 使用香港时间。短仓期权还必须有到期后的 OpenD spot 证明已经价外才会自动写入过期平仓；价内/平值或缺少 spot 时会进入 assignment review，等待指派/行权结果。这里使用 `--yes` 是因为 systemd/launchd 属于非交互脚本，高风险写入必须显式确认并输出 `audit_id`。
 `options-monitor-projection-verify.timer` 每天北京时间 09:30 运行一次 `./om option-positions verify-projection --mode auto`，用于校验 `trade_events -> position_lots` 并复用 checkpoint。

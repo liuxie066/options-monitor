@@ -179,6 +179,127 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "deploy_home" not in profile
 
 
+def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import (
+        FEISHU_AGENT_CREDENTIAL_DROPIN,
+        FEISHU_AGENT_CREDENTIAL_SERVICE,
+        render_service_bundle,
+        write_service_bundle,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    helper = tmp_path / "installed" / "libexec" / "credential-helper"
+    agent_store = tmp_path / "credstore" / "agent"
+    holdings_store = tmp_path / "credstore" / "holdings"
+    runtime_env = tmp_path / "run" / "options-monitor-feishu-agent.env"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_opend=True,
+        include_feishu_agent_credential=True,
+        feishu_agent_credential_helper_path=helper,
+        feishu_agent_credential_store=agent_store,
+        feishu_holdings_credential_store=holdings_store,
+        feishu_agent_credential_env_file=runtime_env,
+        deploy_user="liuxie",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    unit = files[f"systemd/{FEISHU_AGENT_CREDENTIAL_SERVICE}"]
+    helper_item = files[
+        "systemd/libexec/options-monitor-materialize-feishu-agent-credential"
+    ]
+    profile = json.loads(files["service.profile.json"]["content"])
+    credential_profile = profile["feishu_agent_credential"]
+    dropins = [
+        item
+        for item in bundle["files"]
+        if item.get("kind") == "systemd_dropin"
+    ]
+
+    assert unit["install_path"] == f"/etc/systemd/system/{FEISHU_AGENT_CREDENTIAL_SERVICE}"
+    assert f"ExecStart={helper}" in unit["content"]
+    assert f"--agent-store {agent_store}" in unit["content"]
+    assert f"--holdings-store {holdings_store}" in unit["content"]
+    assert f"--runtime-env-file {runtime_env}" in unit["content"]
+    assert "--deploy-group liuxie" in unit["content"]
+    assert helper_item["install_path"] == str(helper)
+    assert helper_item["mode"] == 0o755
+    assert "systemd-creds decrypt" in helper_item["content"]
+    assert "OM_FEISHU_APP_SECRET=%s" in helper_item["content"]
+    assert "OM_FEISHU_BOT_APP_SECRET=%s" in helper_item["content"]
+    assert "^[A-Za-z0-9_-]+$" in helper_item["content"]
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=helper_item["content"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    assert credential_profile == {
+        "enabled": True,
+        "service_name": FEISHU_AGENT_CREDENTIAL_SERVICE,
+        "helper_path": str(helper),
+        "agent_store": str(agent_store),
+        "holdings_store": str(holdings_store),
+        "runtime_env_file": str(runtime_env),
+        "consumer_services": credential_profile["consumer_services"],
+    }
+    assert credential_profile["consumer_services"]
+    assert FEISHU_AGENT_CREDENTIAL_SERVICE not in credential_profile["consumer_services"]
+    assert not any(
+        name.startswith("options-monitor-opend")
+        for name in credential_profile["consumer_services"]
+    )
+    assert len(dropins) == len(credential_profile["consumer_services"])
+    assert all(
+        f"Before={consumer}" in unit["content"]
+        for consumer in credential_profile["consumer_services"]
+    )
+    assert {
+        Path(item["install_path"]).parent.name.removesuffix(".d")
+        for item in dropins
+    } == set(credential_profile["consumer_services"])
+    assert all(
+        Path(item["install_path"]).name == FEISHU_AGENT_CREDENTIAL_DROPIN
+        for item in dropins
+    )
+    assert all(
+        f"EnvironmentFile={runtime_env}" in item["content"]
+        and f"Requires={FEISHU_AGENT_CREDENTIAL_SERVICE}" in item["content"]
+        for item in dropins
+    )
+    assert (
+        f"systemctl enable --now {FEISHU_AGENT_CREDENTIAL_SERVICE}"
+        in bundle["commands"]["enable"]
+    )
+
+    output_dir = tmp_path / "rendered"
+    written = write_service_bundle(bundle, output_dir)
+    rendered_helper = output_dir / helper_item["relative_path"]
+    assert str(rendered_helper) in written
+    assert rendered_helper.stat().st_mode & 0o777 == 0o755
+
+
+def test_render_launchd_bundle_rejects_feishu_agent_credential(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    with pytest.raises(ValueError, match="supported only for systemd"):
+        render_service_bundle(
+            target="launchd",
+            repo_root=tmp_path,
+            include_feishu_agent_credential=True,
+        )
+
+
 
 
 def test_systemd_unit_rejects_non_positive_start_timeout(tmp_path: Path) -> None:
@@ -451,6 +572,285 @@ def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: 
         if name in skip:
             continue
         (systemd_root / name).write_text(item["content"], encoding="utf-8")
+
+
+def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import (
+        FEISHU_AGENT_CREDENTIAL_SERVICE,
+        render_service_bundle,
+    )
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    helper = tmp_path / "libexec" / "credential-helper"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_feishu_agent_credential=True,
+        feishu_agent_credential_helper_path=helper,
+        feishu_agent_credential_store=tmp_path / "credstore" / "agent",
+        feishu_holdings_credential_store=tmp_path / "credstore" / "holdings",
+        feishu_agent_credential_env_file=tmp_path / "run" / "credential.env",
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={FEISHU_AGENT_CREDENTIAL_SERVICE},
+    )
+    calls: list[list[str]] = []
+    execution_result = {"value": "success"}
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if "is-enabled" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"{execution_result['value']}\n",
+                stderr="",
+            )
+        if command[-2:] == ["start", FEISHU_AGENT_CREDENTIAL_SERVICE]:
+            execution_result["value"] = "success"
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    before = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        run_cmd=_run_cmd,
+    )
+
+    assert before["summary"]["status"] == "error"
+    assert before["missing_required_units"] == [FEISHU_AGENT_CREDENTIAL_SERVICE]
+    assert str(helper) in before["missing_managed_files"]
+    assert before["missing_managed_files"]
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert out["changed"] is True
+    assert out["missing_managed_files"] == []
+    assert out["mismatched_managed_files"] == []
+    assert out["mode_mismatched_managed_files"] == []
+    assert out["execution_states"] == {FEISHU_AGENT_CREDENTIAL_SERVICE: "success"}
+    assert (systemd_root / FEISHU_AGENT_CREDENTIAL_SERVICE).is_file()
+    assert helper.is_file()
+    assert helper.stat().st_mode & 0o777 == 0o755
+    for consumer in profile["feishu_agent_credential"]["consumer_services"]:
+        assert (
+            systemd_root
+            / f"{consumer}.d"
+            / "zzzz-feishu-agent-credential.conf"
+        ).is_file()
+    assert any(
+        command[-3:] == ["enable", "--now", FEISHU_AGENT_CREDENTIAL_SERVICE]
+        for command in calls
+    )
+
+    helper.chmod(0o644)
+    execution_result["value"] = "exit-code"
+    mode_drift = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        run_cmd=_run_cmd,
+    )
+    assert mode_drift["mode_mismatched_managed_files"] == [str(helper)]
+    assert mode_drift["execution_drift_units"] == [
+        FEISHU_AGENT_CREDENTIAL_SERVICE
+    ]
+
+    repaired = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+    assert repaired["summary"]["status"] == "ok"
+    assert helper.stat().st_mode & 0o777 == 0o755
+    assert repaired["applied"]["started_services"] == [
+        FEISHU_AGENT_CREDENTIAL_SERVICE
+    ]
+    assert any(
+        command[-2:] == ["start", FEISHU_AGENT_CREDENTIAL_SERVICE]
+        for command in calls
+    )
+
+    stale_dropin = (
+        systemd_root
+        / "options-monitor-retired.service.d"
+        / "zzzz-feishu-agent-credential.conf"
+    )
+    stale_dropin.parent.mkdir(parents=True)
+    stale_dropin.write_text("stale\n", encoding="utf-8")
+    stale_key = str(
+        Path("/etc/systemd/system")
+        / stale_dropin.parent.name
+        / stale_dropin.name
+    )
+    stale_drift = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        run_cmd=_run_cmd,
+    )
+    assert stale_drift["extra_managed_files"] == [stale_key]
+
+    retired = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+    assert retired["summary"]["status"] == "ok"
+    assert retired["applied"]["retired_managed_files"] == [stale_key]
+    assert not stale_dropin.exists()
+
+
+def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_deploy import (
+        FEISHU_AGENT_CREDENTIAL_DROPIN,
+        FEISHU_AGENT_CREDENTIAL_SERVICE,
+        render_service_bundle,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    helper = tmp_path / "libexec" / "credential-helper"
+    legacy_unit = tmp_path / "usr-lib-systemd" / FEISHU_AGENT_CREDENTIAL_SERVICE
+    repo.mkdir()
+    runtime.mkdir()
+    legacy_unit.parent.mkdir(parents=True)
+    legacy_unit.write_text("[Service]\nType=oneshot\n", encoding="utf-8")
+    monkeypatch.setattr(
+        service_drift_module,
+        "LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH",
+        legacy_unit,
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER",
+        helper,
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE",
+        tmp_path / "credstore" / "agent",
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE",
+        tmp_path / "credstore" / "holdings",
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE",
+        tmp_path / "run" / "credential.env",
+    )
+
+    base_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in base_bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(base_bundle, systemd_root)
+    legacy_dropin = (
+        systemd_root
+        / "options-monitor-tick-us.service.d"
+        / FEISHU_AGENT_CREDENTIAL_DROPIN
+    )
+    legacy_dropin.parent.mkdir(parents=True)
+    legacy_dropin.write_text("legacy\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if "is-enabled" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    before = service_drift_module.service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        run_cmd=_run_cmd,
+    )
+
+    assert before["missing_profile_units"] == [FEISHU_AGENT_CREDENTIAL_SERVICE]
+    assert before["compatibility_warnings"] == [
+        {
+            "code": "legacy_feishu_agent_credential_inferred",
+            "source": "installed_assets",
+            "unit_path": str(legacy_unit),
+            "dropin_count": 1,
+        }
+    ]
+
+    adopted = service_drift_module.service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+    refreshed = json.loads(
+        (runtime / "service.profile.json").read_text(encoding="utf-8")
+    )
+
+    assert adopted["summary"]["status"] == "ok"
+    assert refreshed["feishu_agent_credential"]["enabled"] is True
+    assert refreshed["feishu_agent_credential"]["helper_path"] == str(helper)
+    assert {"name": FEISHU_AGENT_CREDENTIAL_SERVICE} in refreshed["services"]
+    assert (systemd_root / FEISHU_AGENT_CREDENTIAL_SERVICE).is_file()
+    assert legacy_unit.is_file()
 
 
 def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -> None:
@@ -737,6 +1137,51 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
     assert any(item.get("sudo_fallback") for item in out["operations"] if item.get("operation") == "write_unit")
     assert ["sudo", "-n", "systemctl", "daemon-reload"] in calls
     assert ["sudo", "-n", "systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+
+
+def test_service_drift_sudo_fallback_applies_managed_file_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    target = tmp_path / "protected" / "credential-helper"
+    original_write_text = Path.write_text
+
+    def _write_text(path: Path, content: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == target:
+            raise PermissionError("permission denied")
+        return original_write_text(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _write_text)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[:4] == ["sudo", "-n", "sh", "-c"]:
+            original_write_text(
+                Path(command[-1]),
+                str(kwargs.get("input") or ""),
+                encoding="utf-8",
+            )
+        elif command[:3] == ["sudo", "-n", "chmod"]:
+            Path(command[-1]).chmod(int(command[-2], 8))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/bin/sh\n",
+        ctx={"provider": "systemd"},
+        run_cmd=_run_cmd,
+        mode=0o755,
+    )
+
+    assert out["ok"] is True
+    assert out["sudo_fallback"] is True
+    assert target.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert ["sudo", "-n", "chmod", "0755", str(target)] in calls
 
 
 def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declares_it(tmp_path: Path) -> None:
@@ -2632,7 +3077,12 @@ def test_service_status_from_profile_can_check_systemd_enabled_state() -> None:
     ]
 
 
-def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("auto", [False, True])
+def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
+    monkeypatch,
+    tmp_path: Path,
+    auto: bool,
+) -> None:
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
@@ -2647,14 +3097,24 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     current.symlink_to(v100, target_is_directory=True)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    credential_helper = tmp_path / "libexec" / "credential-helper"
     (runtime / "service.profile.json").write_text(
         json.dumps(
             {
                 "service_provider": "systemd",
                 "restart": {"requires_sudo": False},
+                "feishu_agent_credential": {
+                    "enabled": True,
+                    "service_name": "options-monitor-feishu-agent-credential.service",
+                    "helper_path": str(credential_helper),
+                    "agent_store": str(tmp_path / "credstore" / "agent"),
+                    "holdings_store": str(tmp_path / "credstore" / "holdings"),
+                    "runtime_env_file": str(tmp_path / "run" / "credential.env"),
+                },
                 "services": [
                     {"name": "options-monitor-tick-us.timer"},
                     {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-agent-credential.service"},
                 ],
             }
         ),
@@ -2686,17 +3146,21 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     dry = service_upgrade(
         repo_root=current,
         runtime_root=runtime,
         releases_root=releases,
+        auto=auto,
         run_cmd=_run_cmd,
     )
     assert dry["status"] == "dry_run"
     assert dry["changed"] is False
     assert dry["repo_root_is_symlink"] is True
+    assert dry["auto"] is auto
     assert dry["warnings"] == []
     assert current.resolve() == v100.resolve()
 
@@ -2705,11 +3169,13 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
         runtime_root=runtime,
         releases_root=releases,
         confirm=True,
+        auto=auto,
         run_cmd=_run_cmd,
     )
 
     assert out["status"] == "upgraded"
     assert out["changed"] is True
+    assert out["auto"] is auto
     assert current.resolve() == (releases / "1.0.1").resolve()
     cache_repo = install / "_cache" / "git" / "options-monitor.git"
     assert ["git", "clone", "--mirror", "https://example.invalid/repo.git", str(cache_repo)] in calls
@@ -2742,6 +3208,12 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
         "systemctl",
         "enable",
         "--now",
+        "options-monitor-feishu-agent-credential.service",
+    ] in calls
+    assert [
+        "systemctl",
+        "enable",
+        "--now",
         "options-monitor-position-advice-promotion.timer",
     ] in calls
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
@@ -2749,10 +3221,24 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert {
         "name": "options-monitor-position-advice-promotion.timer"
     } in refreshed_profile["services"]
+    assert refreshed_profile["feishu_agent_credential"]["enabled"] is True
+    assert refreshed_profile["feishu_agent_credential"]["helper_path"] == str(
+        credential_helper
+    )
     assert (systemd_root / "options-monitor-projection-verify.timer").exists()
     assert (
         systemd_root / "options-monitor-position-advice-promotion.timer"
     ).exists()
+    assert (
+        systemd_root / "options-monitor-feishu-agent-credential.service"
+    ).exists()
+    assert credential_helper.is_file()
+    assert credential_helper.stat().st_mode & 0o777 == 0o755
+    assert (
+        systemd_root
+        / "options-monitor-trade-intake.service.d"
+        / "zzzz-feishu-agent-credential.conf"
+    ).is_file()
     assert out["service_reconcile"]["summary"]["status"] == "ok"
     assert out["service_health"]["status"] == "ok"
     assert out["release_materialize"]["method"] == "git_cache_archive"
@@ -4954,6 +5440,53 @@ def test_cli_service_render_no_content_still_writes_files(capsys, tmp_path: Path
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["files"][0].get("content") is None
     assert "ExecStart=" in (output_dir / "systemd" / "options-monitor-tick-us.service").read_text(encoding="utf-8")
+
+
+def test_cli_service_render_can_include_feishu_agent_credential(
+    capsys,
+    tmp_path: Path,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    output_dir = tmp_path / "rendered"
+    rc = main([
+        "service",
+        "render",
+        "--target",
+        "systemd",
+        "--repo-root",
+        str(tmp_path / "repo"),
+        "--runtime-root",
+        str(tmp_path / "runtime"),
+        "--markets",
+        "us",
+        "--config-yaml",
+        str(tmp_path / "runtime" / "config.yaml"),
+        "--include-feishu-agent-credential",
+        "--output-dir",
+        str(output_dir),
+        "--no-content",
+    ])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    profile = json.loads(
+        (output_dir / "service.profile.json").read_text(encoding="utf-8")
+    )
+    helper = (
+        output_dir
+        / "systemd"
+        / "libexec"
+        / "options-monitor-materialize-feishu-agent-credential"
+    )
+    assert profile["feishu_agent_credential"]["enabled"] is True
+    assert helper.stat().st_mode & 0o777 == 0o755
+    assert (
+        output_dir
+        / "systemd"
+        / "options-monitor-feishu-agent-credential.service"
+    ).is_file()
 
 
 def test_cli_service_drift_reports_missing_units(monkeypatch, capsys, tmp_path: Path) -> None:
