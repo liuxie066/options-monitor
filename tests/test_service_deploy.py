@@ -3505,6 +3505,50 @@ def test_post_upgrade_feishu_ws_check_uses_sudo_when_env_file_is_not_readable(mo
     assert out["ok"] is True
 
 
+def test_post_upgrade_feishu_ws_check_passes_managed_credential_file_through_sudo(monkeypatch, tmp_path: Path) -> None:
+    from src.application import service_upgrade
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    env_file = tmp_path / "options-monitor.env"
+    credential_env_file = tmp_path / "run" / "feishu-agent.env"
+    repo.mkdir()
+    runtime.mkdir()
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_1\n", encoding="utf-8")
+    profile = {
+        "service_provider": "systemd",
+        "runtime_root": str(runtime),
+        "env_file": str(env_file),
+        "config_paths": {"us": str(tmp_path / "config.us.json")},
+        "feishu_ws": {"enabled": True, "config_key": "us"},
+        "feishu_agent_credential": {
+            "enabled": True,
+            "runtime_env_file": str(credential_env_file),
+        },
+        "services": [{"name": "options-monitor-feishu-ws.service"}],
+    }
+    monkeypatch.setattr(service_upgrade, "_is_root_process", lambda: False)
+    monkeypatch.setattr(service_upgrade.os, "access", lambda *_args, **_kwargs: False)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:5] == ["sudo", "-n", str(repo / "om"), "inbound", "feishu-ws"]:
+            assert "--env-file" in command
+            assert command[command.index("--env-file") + 1] == str(env_file)
+            assert "--credential-env-file" in command
+            assert command[command.index("--credential-env-file") + 1] == str(credential_env_file)
+            assert "secret" not in " ".join(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade._post_upgrade_service_health(
+        profile=profile,
+        repo_root=repo,
+        run_cmd=_run_cmd,
+        operations=[],
+    )
+
+    assert out["ok"] is True
+
+
 def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: Path) -> None:
     from src.application.service_upgrade import _restart_services_from_profile
 
