@@ -51,6 +51,21 @@ QUALITY_DAY_END_SYSTEMD_CALENDARS = {
     "us": "Mon..Fri *-*-* 16:30:00 America/New_York",
     "hk": "Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong",
 }
+FEISHU_AGENT_CREDENTIAL_SERVICE = "options-monitor-feishu-agent-credential.service"
+FEISHU_AGENT_CREDENTIAL_DROPIN = "zzzz-feishu-agent-credential.conf"
+DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER = Path(
+    "/usr/local/libexec/options-monitor-materialize-feishu-agent-credential"
+)
+DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE = Path(
+    "/etc/credstore.encrypted/pm-feishu-agent-app-secret"
+)
+DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE = Path(
+    "/etc/credstore.encrypted/om-feishu-holdings-app-secret"
+)
+DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE = Path(
+    "/run/credentials/options-monitor-feishu-agent.env"
+)
+SYSTEMD_SERVICE_ASSET_ROOT = Path(__file__).resolve().parents[2] / "services" / "systemd"
 
 
 @dataclass(frozen=True)
@@ -59,13 +74,16 @@ class RenderedServiceFile:
     content: str
     install_path: str
     kind: str
+    mode: int | None = None
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
-        out = {
+        out: dict[str, Any] = {
             "relative_path": self.relative_path,
             "install_path": self.install_path,
             "kind": self.kind,
         }
+        if self.mode is not None:
+            out["mode"] = self.mode
         if include_content:
             out["content"] = self.content
         return out
@@ -660,6 +678,26 @@ def _systemd_environment_file(path: Path) -> str:
     return f"EnvironmentFile={_systemd_quote_arg(path)}"
 
 
+def _read_systemd_service_asset(name: str) -> str:
+    path = SYSTEMD_SERVICE_ASSET_ROOT / name
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"systemd service asset is unavailable: {path}") from exc
+
+
+def _render_systemd_service_asset(name: str, replacements: dict[str, str]) -> str:
+    content = _read_systemd_service_asset(name)
+    for key, value in replacements.items():
+        token = "{{" + key + "}}"
+        if token not in content:
+            raise ValueError(f"systemd service asset token is missing: {name}:{key}")
+        content = content.replace(token, value)
+    if "{{" in content or "}}" in content:
+        raise ValueError(f"systemd service asset has unresolved tokens: {name}")
+    return content
+
+
 def _systemd_unit(
     *,
     description: str,
@@ -823,6 +861,7 @@ def build_service_profile(
     strategy_lab_recorder: dict[str, Any] | None = None,
     quality_monitoring: dict[str, Any] | None = None,
     position_advice_promotion: dict[str, Any] | None = None,
+    feishu_agent_credential: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
@@ -904,6 +943,8 @@ def build_service_profile(
         profile["position_advice_promotion"] = dict(
             position_advice_promotion
         )
+    if feishu_agent_credential is not None:
+        profile["feishu_agent_credential"] = dict(feishu_agent_credential)
     return profile
 
 
@@ -937,11 +978,18 @@ def render_service_bundle(
     strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
     include_quality_monitoring: bool = False,
+    include_feishu_agent_credential: bool = False,
+    feishu_agent_credential_helper_path: str | Path | None = None,
+    feishu_agent_credential_store: str | Path | None = None,
+    feishu_holdings_credential_store: str | Path | None = None,
+    feishu_agent_credential_env_file: str | Path | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
+    if include_feishu_agent_credential and target_key != "systemd":
+        raise ValueError("Feishu Agent credential materialization is currently supported only for systemd")
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
@@ -951,6 +999,26 @@ def render_service_bundle(
     systemd_home = default_systemd_deploy_home(systemd_user) if target_key == "systemd" and systemd_user else None
     if deploy_home is not None and str(deploy_home).strip():
         systemd_home = Path(deploy_home).expanduser()
+    credential_helper_path = _resolve_path(
+        feishu_agent_credential_helper_path,
+        base=repo,
+        default=DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER,
+    )
+    agent_credential_store = _resolve_path(
+        feishu_agent_credential_store,
+        base=repo,
+        default=DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE,
+    )
+    holdings_credential_store = _resolve_path(
+        feishu_holdings_credential_store,
+        base=repo,
+        default=DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE,
+    )
+    credential_env_file = _resolve_path(
+        feishu_agent_credential_env_file,
+        base=repo,
+        default=DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE,
+    )
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
@@ -1055,9 +1123,26 @@ def render_service_bundle(
 
     files: list[RenderedServiceFile] = []
     service_names: list[str] = []
+    credential_consumers: list[str] = []
 
-    def add(relative_path: str, content: str, *, install_path: str, kind: str, service_name: str | None = None) -> None:
-        files.append(RenderedServiceFile(relative_path=relative_path, content=content, install_path=install_path, kind=kind))
+    def add(
+        relative_path: str,
+        content: str,
+        *,
+        install_path: str,
+        kind: str,
+        service_name: str | None = None,
+        mode: int | None = None,
+    ) -> None:
+        files.append(
+            RenderedServiceFile(
+                relative_path=relative_path,
+                content=content,
+                install_path=install_path,
+                kind=kind,
+                mode=mode,
+            )
+        )
         if service_name:
             service_names.append(service_name)
 
@@ -1759,6 +1844,68 @@ def render_service_bundle(
                 kind="systemd_service",
                 service_name=wechat_service,
             )
+
+        if include_feishu_agent_credential:
+            credential_consumers = sorted(
+                name
+                for name in service_names
+                if name.endswith(".service")
+                and name != FEISHU_AGENT_CREDENTIAL_SERVICE
+                and not name.startswith("options-monitor-opend")
+            )
+            deploy_group = str(systemd_user or "root")
+            credential_exec = _systemd_join_args(
+                [
+                    str(credential_helper_path),
+                    "--agent-store",
+                    str(agent_credential_store),
+                    "--holdings-store",
+                    str(holdings_credential_store),
+                    "--runtime-env-file",
+                    str(credential_env_file),
+                    "--deploy-group",
+                    deploy_group,
+                ]
+            )
+            add(
+                f"systemd/{FEISHU_AGENT_CREDENTIAL_SERVICE}",
+                _render_systemd_service_asset(
+                    "options-monitor-feishu-agent-credential.service.in",
+                    {
+                        "BEFORE": "\n".join(
+                            f"Before={consumer}"
+                            for consumer in credential_consumers
+                        ),
+                        "EXEC_START": credential_exec,
+                    },
+                ),
+                install_path=f"/etc/systemd/system/{FEISHU_AGENT_CREDENTIAL_SERVICE}",
+                kind="systemd_service",
+                service_name=FEISHU_AGENT_CREDENTIAL_SERVICE,
+            )
+            add(
+                "systemd/libexec/options-monitor-materialize-feishu-agent-credential",
+                _read_systemd_service_asset(
+                    "options-monitor-materialize-feishu-agent-credential"
+                ),
+                install_path=str(credential_helper_path),
+                kind="systemd_executable",
+                mode=0o755,
+            )
+            credential_dropin = _render_systemd_service_asset(
+                "zzzz-feishu-agent-credential.conf.in",
+                {"ENVIRONMENT_FILE": _systemd_environment_file(credential_env_file)},
+            )
+            for consumer in credential_consumers:
+                add(
+                    f"systemd/{consumer}.d/{FEISHU_AGENT_CREDENTIAL_DROPIN}",
+                    credential_dropin,
+                    install_path=(
+                        f"/etc/systemd/system/{consumer}.d/"
+                        f"{FEISHU_AGENT_CREDENTIAL_DROPIN}"
+                    ),
+                    kind="systemd_dropin",
+                )
     else:
         for market in market_values:
             label = f"com.options-monitor.tick-{market}"
@@ -2245,6 +2392,15 @@ def render_service_bundle(
             "schedule_beijing": "05:15",
             "automatic_authority_cas": False,
         },
+        feishu_agent_credential={
+            "enabled": True,
+            "service_name": FEISHU_AGENT_CREDENTIAL_SERVICE,
+            "helper_path": str(credential_helper_path),
+            "agent_store": str(agent_credential_store),
+            "holdings_store": str(holdings_credential_store),
+            "runtime_env_file": str(credential_env_file),
+            "consumer_services": credential_consumers,
+        } if include_feishu_agent_credential else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -2296,6 +2452,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
                 or "feishu-ws" in item.install_path
                 or "wechat-clawbot" in item.install_path
                 or "quality-http" in item.install_path
+                or Path(item.install_path).name == FEISHU_AGENT_CREDENTIAL_SERVICE
             )
         ]
         return {
@@ -2329,6 +2486,9 @@ def write_service_bundle(bundle: dict[str, Any], output_dir: str | Path) -> list
         path = (root / rel).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        mode = item.get("mode")
+        if mode is not None:
+            path.chmod(int(mode))
         written.append(str(path))
     return written
 

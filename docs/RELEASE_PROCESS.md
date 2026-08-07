@@ -297,7 +297,9 @@ VERSION="$(cat VERSION)"
 
 升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。profile 必须记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config。旧 profile 缺少 YAML authoring source 时会 fail closed；先用 `config migrate-yaml` 完成一次性迁移，再重新 `service render --config-yaml <path>`。切换 symlink 前缺失来源或 rebuild/validate 失败时会在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
 
-切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 等部署意图。reconcile 会写入缺失的 systemd unit/profile、`daemon-reload`，并启用缺失 timer。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
+切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
+
+存量主机如果仍使用 `/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service`，首次升级到包含 repository-owned credential 资产的 release 后，必须用新 release 显式执行一次 `service drift` dry-run 和 `--confirm`。原因是升级进程由旧 release 启动，无法在同一次切换中可靠使用尚未加载的新 reconcile 逻辑。收编后 profile 会保留 `feishu_agent_credential` opt-in，后续手动升级、自动升级和回滚都按同一契约 reconcile。在旧 release 回滚窗口结束前保留 `/usr/lib` legacy unit，不由 drift 自动删除。
 
 如果 systemd unit 使用 `User=<deploy_user>` 运行自动升级，`service render` 会在 profile 中标记 trade-intake 和 Feishu WS 等长期服务重启使用 `sudo -n systemctl restart ...`。服务器需要给运行用户配置最小 sudoers 授权，例如：
 
