@@ -258,6 +258,22 @@ def test_ineligible_contract_is_contract_ineligible_not_input_invalid() -> None:
     assert exc_info.value.reason == "contract_ineligible"
 
 
+def test_no_current_bid_ineligible_contract_is_contract_ineligible() -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                opening_contract_status="ineligible",
+                opening_contract_reason_codes=["option_no_current_bid"],
+            ),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == "contract_ineligible"
+    assert exc_info.value.metric_value["reason_codes"] == [
+        "option_no_current_bid"
+    ]
+
+
 def test_data_unavailable_contract_is_evidence_unavailable() -> None:
     with pytest.raises(CandidateCalculationError) as exc_info:
         calculate_opening_candidate_metrics(

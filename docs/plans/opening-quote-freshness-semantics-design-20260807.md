@@ -218,8 +218,10 @@ Candidate Engine 继续执行策略硬门槛，包括：
 合约必须区分：
 
 - `ready`：证据完整，可进入 Candidate Engine；
-- `ineligible`：证据完整，但合约身份或状态明确不适用；
-- `data_unavailable`：必要证据无法证明；
+- `ineligible`：证据完整，但合约身份或状态明确不适用；OpenD 明确返回
+  `bid=0` 且其余身份/盘口/状态证据完整时，属于“当前无有效买盘”的合法
+  市场状态，归为 `ineligible`（`option_no_current_bid`），不按证据缺失处理；
+- `data_unavailable`：必要证据无法证明；`bid` 缺失、非有限或为负仍归此类别；
 - `market_closed`：当前不在可执行市场状态。
 
 Candidate Engine 的拒绝记录也应区分：
