@@ -1,0 +1,153 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.12",
+  "base": {
+    "tag": "v1.10.11",
+    "commit": "ba3a924357a49baf86e0726c7655faa652e03e18"
+  },
+  "reviewed_head": "cae15cc9bd3cfaba104552b18442de0764c98cd7",
+  "commits": [
+    {
+      "sha": "b4bcf2ade8e5396b3de76fe3a0e2c401091a1f8c",
+      "subject": "docs: define opening candidate policy contract"
+    },
+    {
+      "sha": "6332fd434af827137d8ba826d03e1a408cb7e718",
+      "subject": "docs: approve opening candidate implementation plan"
+    },
+    {
+      "sha": "d30a9dcbe52b8a92440aa7062d32ee1093c4b6fb",
+      "subject": "feat: establish earnings calendar SDK capability"
+    },
+    {
+      "sha": "8fa361eb803096ab2ded98c2da7df648b6283566",
+      "subject": "feat: normalize OpenD opening quote evidence"
+    },
+    {
+      "sha": "ef54a626936b098bc57363f65f3c0d9ba3ec39e8",
+      "subject": "feat: establish term-matched realized volatility"
+    },
+    {
+      "sha": "22458f28698ed1536e9eeaa1440065d3aa402b56",
+      "subject": "feat: establish run-shared earnings calendar"
+    },
+    {
+      "sha": "4170388ebf5568ec919bd7ecb73199820365b03b",
+      "subject": "feat: align opening candidate policy engine"
+    },
+    {
+      "sha": "68d5a74c2d2ef0bea7dece99c186777118a65bb7",
+      "subject": "feat: bind opening capacity to physical accounts"
+    },
+    {
+      "sha": "5a1f045d39dcb3107037f64289fb56b4c59ce34e",
+      "subject": "feat: seal opening candidate snapshots"
+    },
+    {
+      "sha": "10da8e636df7e210f7838706bb3313b5d5503d53",
+      "subject": "refactor: remove legacy opening candidate paths"
+    },
+    {
+      "sha": "c0586d2e8d7a427349c8ba84f7b3c280351909f5",
+      "subject": "test: add opening policy shadow and regression coverage"
+    },
+    {
+      "sha": "f21697770d87dc8c1a2f6ef0c672f62f31c193fb",
+      "subject": "fix: fail closed on unclassified opening shadow differences"
+    },
+    {
+      "sha": "b2df949ce2d3428d06522859ca893bfb0215323c",
+      "subject": "docs: record opening policy implementation completion"
+    },
+    {
+      "sha": "7675dcd020994cbaa360ae7db1bafe814a84c23a",
+      "subject": "fix: normalize trade-date market at Futu gateway boundary"
+    },
+    {
+      "sha": "cae15cc9bd3cfaba104552b18442de0764c98cd7",
+      "subject": "fix: harden opening candidate policy evidence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Aligned Sell Put and Covered Call opening candidate policy in the domain Candidate Engine with spot-bounded recall windows, whole-period net return anchoring, near-return strike preference, and contract-level decision evidence.",
+      "commits": [
+        "4170388ebf5568ec919bd7ecb73199820365b03b"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Bound opening capacity to physical accounts with same-currency cash and securities priority and explicit OpenD FX fallback, so capacity authority follows one per-account decision.",
+      "commits": [
+        "68d5a74c2d2ef0bea7dece99c186777118a65bb7"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Established OpenD earnings-calendar capability with run-shared, market-scoped coverage, treating empty calendars as authoritative absence rather than provider failure.",
+      "commits": [
+        "d30a9dcbe52b8a92440aa7062d32ee1093c4b6fb",
+        "22458f28698ed1536e9eeaa1440065d3aa402b56"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Normalized OpenD opening quote evidence and established term-matched realized volatility with explicit trade-date market mapping at the Futu gateway boundary.",
+      "commits": [
+        "8fa361eb803096ab2ded98c2da7df648b6283566",
+        "ef54a626936b098bc57363f65f3c0d9ba3ec39e8"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Sealed per-account opening candidate snapshots so Agent analysis, Daily Brief, and Position Advice consume one immutable decision record.",
+      "commits": [
+        "5a1f045d39dcb3107037f64289fb56b4c59ce34e"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Removed legacy opening candidate paths, event resolvers, and yfinance/Sina dependencies from the current opening flow, and added opening-policy shadow replay coverage.",
+      "commits": [
+        "10da8e636df7e210f7838706bb3313b5d5503d53",
+        "c0586d2e8d7a427349c8ba84f7b3c280351909f5"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Failed closed on unclassified opening shadow differences so unknown policy divergence blocks promotion instead of passing silently.",
+      "commits": [
+        "f21697770d87dc8c1a2f6ef0c672f62f31c193fb"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Hardened opening candidate policy evidence so sealed snapshots preserve resolved policy thresholds, capacity authority, and contract-level rejections instead of re-evaluating with defaults.",
+      "commits": [
+        "cae15cc9bd3cfaba104552b18442de0764c98cd7"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Normalized trade-date market at the Futu gateway boundary so historical K-line dates survive OpenD realized-volatility intake.",
+      "commits": [
+        "7675dcd020994cbaa360ae7db1bafe814a84c23a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "b4bcf2ade8e5396b3de76fe3a0e2c401091a1f8c",
+      "reason": "policy contract documentation, no runtime behavior change"
+    },
+    {
+      "commit": "6332fd434af827137d8ba826d03e1a408cb7e718",
+      "reason": "implementation plan approval documentation, no runtime behavior change"
+    },
+    {
+      "commit": "b2df949ce2d3428d06522859ca893bfb0215323c",
+      "reason": "implementation completion audit documentation, no runtime behavior change"
+    }
+  ]
+}

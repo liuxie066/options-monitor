@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.10.12 - 2026-08-07
+
+### Improvements
+- Aligned Sell Put and Covered Call opening candidate policy in the domain Candidate Engine with spot-bounded recall windows, whole-period net return anchoring, near-return strike preference, and contract-level decision evidence.
+- Bound opening capacity to physical accounts with same-currency cash and securities priority and explicit OpenD FX fallback, so capacity authority follows one per-account decision.
+- Established OpenD earnings-calendar capability with run-shared, market-scoped coverage, treating empty calendars as authoritative absence rather than provider failure.
+- Normalized OpenD opening quote evidence and established term-matched realized volatility with explicit trade-date market mapping at the Futu gateway boundary.
+- Sealed per-account opening candidate snapshots so Agent analysis, Daily Brief, and Position Advice consume one immutable decision record.
+- Removed legacy opening candidate paths, event resolvers, and yfinance/Sina dependencies from the current opening flow, and added opening-policy shadow replay coverage.
+
+### Bug Fixes
+- Failed closed on unclassified opening shadow differences so unknown policy divergence blocks promotion instead of passing silently.
+- Hardened opening candidate policy evidence so sealed snapshots preserve resolved policy thresholds, capacity authority, and contract-level rejections instead of re-evaluating with defaults.
+- Normalized trade-date market at the Futu gateway boundary so historical K-line dates survive OpenD realized-volatility intake.
+
 ## 1.10.11 - 2026-08-06
 
 ### Improvements
