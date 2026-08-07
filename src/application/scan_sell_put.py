@@ -43,9 +43,12 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "raw_spread",
     "price_tick",
     "sell_limit",
-    "quote_update_time",
-    "quote_observed_at_utc",
-    "quote_age_seconds",
+    "last_price_update_time",
+    "last_price_observed_at_utc",
+    "last_price_age_seconds",
+    "last_price_activity_status",
+    "snapshot_received_at_utc",
+    "snapshot_age_seconds",
     "quote_freshness_status",
     "open_interest",
     "volume",
@@ -105,18 +108,22 @@ def compute_metrics(
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    del now_utc
     try:
         metrics = calculate_opening_candidate_metrics(
             contract.to_gate_payload(),
             mode="put",
+            now_utc=now_utc,
         )
     except CandidateCalculationError:
         return None
     metrics.update(
         {
-            "quote_observed_at_utc": contract.quote_observed_at_utc,
-            "quote_age_seconds": contract.quote_age_seconds,
+            "last_price_update_time": contract.last_price_update_time,
+            "last_price_observed_at_utc": contract.last_price_observed_at_utc,
+            "last_price_age_seconds": contract.last_price_age_seconds,
+            "last_price_activity_status": contract.last_price_activity_status,
+            "snapshot_received_at_utc": contract.snapshot_received_at_utc,
+            "snapshot_age_seconds": contract.snapshot_age_seconds,
             "quote_freshness_status": contract.opening_contract_status,
         }
     )
@@ -129,9 +136,12 @@ def explain_metrics_rejection(
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    del now_utc
     try:
-        calculate_opening_candidate_metrics(contract.to_gate_payload(), mode="put")
+        calculate_opening_candidate_metrics(
+            contract.to_gate_payload(),
+            mode="put",
+            now_utc=now_utc,
+        )
     except CandidateCalculationError as exc:
         return exc.to_payload()
     return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}

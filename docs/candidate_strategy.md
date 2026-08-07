@@ -55,7 +55,13 @@
 - 市场状态只认 OpenD `market_state`。
 - 只有连续交易时段生成正式可参与候选；闭市返回 `market_closed`。
 - 标的 spot 只认同一 run 的 OpenD `last_price + update_time + market_state + sec_status`。
-- 标的 spot 与期权 bid/ask 在连续交易时段内都不得超过 5 分钟。
+- 标的 spot 在连续交易时段内不得超过 5 分钟；标的 `update_time` 是 OpenD 最新价更新时间。
+- 期权 snapshot 的 `update_time` 同样只是最新价更新时间，不能证明 bid/ask 何时变化；
+  它只作为最新价活跃度诊断，不再作为候选可用性门槛。
+- 期权候选的 5 分钟窗口约束的是 OM 取得 OpenD snapshot 到完成候选决策的时间
+  （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
+- 期权 bid/ask 的可用性由本次 snapshot 的盘口合法性（`bid > 0`、`ask >= bid`、
+  tick、spread、合约身份与状态）判定，不由 `update_time` 判定。
 - 不回退旧 required-data、CSV、收盘价或 `last` 作为 bid/ask 替代。
 - 市场状态、spot 或关键时间戳缺失时，在最小受影响范围内 `data_unavailable`。
 
@@ -436,7 +442,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | D01 | 正式市场数据只认 OpenD，不回退旧 CSV、last 或其他行情源 | §3.1 |
 | D02 | OpenD market_state 决定连续交易、闭市和不可用状态 | §3.1 |
 | D03 | spot 只认 live OpenD last_price 及同一份状态/时间/证券状态证据 | §3.1 |
-| D04 | spot 和期权报价在连续交易时段都使用 5 分钟新鲜度 | §3.1 |
+| D04 | 标的 spot 在连续交易时段使用 5 分钟最新价新鲜度；期权使用 OM 取得 snapshot 的 5 分钟取得新鲜度，期权 `update_time` 仅作活跃度诊断 | §3.1 |
 | D05 | mid、spread 和向上取整的卖出限价使用同一合约 snapshot 与 price tick | §3.2 |
 | D06 | 只接受 STANDARD、stock_owner 匹配、未停牌、普通股票交割合约 | §3.3 |
 | D07 | multiplier 必须 chain/snapshot 合约级一致，不默认 100 | §3.3 |

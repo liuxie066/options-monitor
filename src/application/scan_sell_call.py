@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -120,13 +121,19 @@ def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> Candid
     return CandidateContractInput.from_row(raw, mode="call")
 
 
-def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
+def compute_metrics(
+    contract: CandidateContractInput | pd.Series,
+    avg_cost: float,
+    *,
+    now_utc: datetime | None = None,
+) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
     try:
         metrics = calculate_opening_candidate_metrics(
             contract.to_gate_payload(),
             mode="call",
             avg_cost=avg_cost,
+            now_utc=now_utc,
         )
     except CandidateCalculationError:
         return None
@@ -136,29 +143,41 @@ def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: floa
     return metrics
 
 
-def explain_metrics_rejection(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
+def explain_metrics_rejection(
+    contract: CandidateContractInput | pd.Series,
+    avg_cost: float,
+    *,
+    now_utc: datetime | None = None,
+) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
     try:
         calculate_opening_candidate_metrics(
             contract.to_gate_payload(),
             mode="call",
             avg_cost=avg_cost,
+            now_utc=now_utc,
         )
     except CandidateCalculationError as exc:
         return exc.to_payload()
     return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
 
 
-def _make_compute_metrics(avg_cost: float) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
+def _make_compute_metrics(
+    avg_cost: float,
+    now_utc: datetime | None = None,
+) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
     def _compute(contract: CandidateContractInput) -> dict[str, Any] | None:
-        return compute_metrics(contract, avg_cost)
+        return compute_metrics(contract, avg_cost, now_utc=now_utc)
 
     return _compute
 
 
-def _make_explain_metrics_rejection(avg_cost: float) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
+def _make_explain_metrics_rejection(
+    avg_cost: float,
+    now_utc: datetime | None = None,
+) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
     def _explain(contract: CandidateContractInput) -> dict[str, Any] | None:
-        return explain_metrics_rejection(contract, avg_cost)
+        return explain_metrics_rejection(contract, avg_cost, now_utc=now_utc)
 
     return _explain
 
@@ -285,6 +304,7 @@ def run_sell_call_scan(
     calculation_decision_sink_fn: (
         Callable[[list[dict[str, Any]]], None] | None
     ) = None,
+    quote_freshness_now_utc: datetime | None = None,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
@@ -304,6 +324,7 @@ def run_sell_call_scan(
     )
     declared_can_sell = int(shares if shares_can_sell is None else shares_can_sell)
 
+    scan_now_utc = quote_freshness_now_utc or datetime.now(timezone.utc)
     return run_candidate_scan(
         config=CandidateScanConfig(
             mode="call",
@@ -325,7 +346,7 @@ def run_sell_call_scan(
             quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(
-            compute_metrics_fn=_make_compute_metrics(avg_cost),
+            compute_metrics_fn=_make_compute_metrics(avg_cost, now_utc=scan_now_utc),
             build_row_fn=_build_candidate_row_factory(
                 avg_cost=avg_cost,
                 shares=shares,
@@ -335,7 +356,7 @@ def run_sell_call_scan(
                 capacity_facts=capacity_facts,
             ),
             print_summary_fn=_print_summary,
-            metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost),
+            metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost, now_utc=scan_now_utc),
         ),
         reject_log_output=reject_log_output,
         calculation_decision_sink_fn=calculation_decision_sink_fn,

@@ -9,6 +9,16 @@ from src.application.opening_quote_evidence import (
     normalize_underlier_observation,
 )
 
+_RECEIPT = {
+    "snapshot_requested_at_utc": "2026-08-06T14:59:58+00:00",
+    "snapshot_received_at_utc": "2026-08-06T14:59:59+00:00",
+}
+
+_RECEIPT_HK = {
+    "snapshot_requested_at_utc": "2026-08-06T01:59:58+00:00",
+    "snapshot_received_at_utc": "2026-08-06T01:59:59+00:00",
+}
+
 
 @pytest.mark.parametrize(
     ("market", "code", "update_time"),
@@ -159,10 +169,13 @@ def test_option_observation_preserves_zero_optional_values_and_normalizes_iv_onl
         snapshot_row=_snapshot(),
         underlier_observation=_ready_underlier(),
         now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
     )
 
     assert observation.status == "ready"
     assert observation.reason_codes == ()
+    assert observation.last_price_activity_status == "recent"
+    assert observation.snapshot_age_seconds == 1.0
     assert observation.implied_volatility == 0.25
     assert observation.delta == -0.2
     assert observation.open_interest == 0
@@ -194,6 +207,7 @@ def test_option_observation_scopes_contract_failures(
         snapshot_row=_snapshot(**snapshot_overrides),
         underlier_observation=_ready_underlier(),
         now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
     )
 
     assert observation.status in {"ineligible", "data_unavailable"}
@@ -211,6 +225,7 @@ def test_option_observation_never_uses_last_as_bid_or_ask() -> None:
         snapshot_row=_snapshot(bid_price=None, ask_price=None, last_price=9.9),
         underlier_observation=_ready_underlier(),
         now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
     )
 
     assert observation.status == "data_unavailable"
@@ -263,6 +278,7 @@ def test_hk_provider_shape_uses_drvt_and_preserves_zero_values() -> None:
         },
         underlier_observation=underlier,
         now_utc=now,
+        **_RECEIPT_HK,
     )
 
     assert option.status == "ready"
@@ -272,3 +288,122 @@ def test_hk_provider_shape_uses_drvt_and_preserves_zero_values() -> None:
     assert option.delta == -0.1
     assert option.open_interest == 0
     assert option.volume == 0
+
+
+def test_option_observation_quiet_latest_price_stays_ready() -> None:
+    """A quiet HK option (last trade 09:30, decision 15:00) must not be gated
+    by latest-price age when bid/ask evidence is valid."""
+    now = datetime(2026, 8, 6, 7, 0, tzinfo=timezone.utc)  # 15:00 HK
+    underlier = normalize_underlier_observation(
+        code="HK.00700",
+        market="HK",
+        snapshot_row={
+            "code": "HK.00700",
+            "last_price": 550.0,
+            "update_time": "2026-08-06 14:59:00",
+            "sec_status": "NORMAL",
+            "suspension": False,
+        },
+        market_state_row={"code": "HK.00700", "market_state": "AFTERNOON"},
+        now_utc=now,
+    )
+    option = normalize_option_observation(
+        expected_owner="HK.00700",
+        market="HK",
+        currency="HKD",
+        chain_row={
+            "code": "HK.TCH260827P00500000",
+            "lot_size": 100,
+            "stock_type": "DRVT",
+            "stock_owner": "HK.00700",
+            "option_standard_type": "STANDARD",
+            "suspension": False,
+        },
+        snapshot_row={
+            "code": "HK.TCH260827P00500000",
+            "bid_price": 4.0,
+            "ask_price": 4.2,
+            "last_price": 4.1,
+            "update_time": "2026-08-06 09:30:00",  # 5.5h old latest price
+            "price_spread": 0.2,
+            "option_implied_volatility": 20.0,
+            "option_delta": -0.1,
+            "option_open_interest": 0,
+            "volume": 0,
+            "option_contract_size": 100,
+            "sec_status": "NORMAL",
+            "suspension": False,
+        },
+        underlier_observation=underlier,
+        snapshot_requested_at_utc="2026-08-06T06:59:58+00:00",
+        snapshot_received_at_utc="2026-08-06T06:59:59+00:00",
+        now_utc=now,
+    )
+
+    assert option.status == "ready"
+    assert option.last_price_activity_status == "quiet"
+    assert option.snapshot_age_seconds == 1.0
+
+
+def test_option_observation_missing_update_time_is_unknown_activity_not_unavailable() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(update_time=None),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+
+    assert observation.status == "ready"
+    assert observation.last_price_activity_status == "unknown"
+
+
+def test_option_observation_future_update_time_is_anomalous_activity() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(update_time="2026-08-06 15:30:00"),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+
+    assert observation.status == "ready"
+    assert observation.last_price_activity_status == "anomalous"
+
+
+def test_option_observation_stale_snapshot_receipt_is_unavailable() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(),
+        underlier_observation=_ready_underlier(),
+        snapshot_requested_at_utc="2026-08-06T14:50:00+00:00",
+        snapshot_received_at_utc="2026-08-06T14:50:01+00:00",  # 599s before decision
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert observation.status == "data_unavailable"
+    assert "option_snapshot_stale" in observation.reason_codes
+
+
+def test_option_observation_missing_snapshot_receipt_is_unavailable() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert observation.status == "data_unavailable"
+    assert "option_snapshot_receipt_missing" in observation.reason_codes

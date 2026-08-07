@@ -936,6 +936,8 @@ def _mark_snapshot_from_required_data(
 
 def _quote_observed_at(quote: dict[str, Any]) -> str | None:
     for key in (
+        "last_price_observed_at_utc",
+        "snapshot_received_at_utc",
         "quote_observed_at_utc",
         "quote_as_of_utc",
         "quote_timestamp_utc",

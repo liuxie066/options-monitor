@@ -151,6 +151,12 @@ def build_daily_brief_user_view(
         and _lower(item.get("evidence_state")) == "unavailable"
         and _lower(item.get("state")) == "observe"
     ]
+    partial_data_gaps = [
+        item
+        for item in brief.get("data_gaps") or []
+        if isinstance(item, Mapping)
+        and _lower(item.get("reason")) == "opening_candidate_strategy_partial_data"
+    ]
     for item in evidence_holds:
         symbol = _upper(item.get("symbol")) or "相关标的"
         strategy = _STRATEGY_LABELS.get(
@@ -178,7 +184,11 @@ def build_daily_brief_user_view(
             else (
                 "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
                 if evidence_holds
-                else "本轮暂无符合条件的候选。"
+                else (
+                    "本轮部分行情证据不可用，候选结果不完整。"
+                    if partial_data_gaps
+                    else "本轮暂无符合条件的候选。"
+                )
             )
         ),
         "positions": position_views,
@@ -1278,6 +1288,10 @@ def _strategy_data_gap_reminders(
         elif reason == "strategy_status_projection_mismatch":
             reminders.append(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
+            )
+        elif reason == "opening_candidate_strategy_partial_data":
+            reminders.append(
+                f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
             )
     return reminders
 

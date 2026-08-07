@@ -743,6 +743,8 @@ def fetch_symbol_request(
                 chain_row=chain_record,
                 snapshot_row=srow,
                 underlier_observation=underlier_observation,
+                snapshot_requested_at_utc=snapshot_result.requested_at_utc,
+                snapshot_received_at_utc=snapshot_result.received_at_utc,
             )
             last_price = option_observation.last_price
             bid = option_observation.bid
@@ -784,11 +786,13 @@ def fetch_symbol_request(
                 'delta': delta,
                 # contract multiplier (shares per contract)
                 'multiplier': multiplier,
-                'quote_update_time': option_observation.quote_update_time,
-                'bid_update_time': option_observation.quote_update_time,
-                'ask_update_time': option_observation.quote_update_time,
-                'quote_observed_at_utc': option_observation.quote_observed_at_utc,
-                'quote_age_seconds': option_observation.quote_age_seconds,
+                'last_price_update_time': option_observation.last_price_update_time,
+                'last_price_observed_at_utc': option_observation.last_price_observed_at_utc,
+                'last_price_age_seconds': option_observation.last_price_age_seconds,
+                'last_price_activity_status': option_observation.last_price_activity_status,
+                'snapshot_requested_at_utc': option_observation.snapshot_requested_at_utc,
+                'snapshot_received_at_utc': option_observation.snapshot_received_at_utc,
+                'snapshot_age_seconds': option_observation.snapshot_age_seconds,
                 'price_tick': option_observation.price_tick,
                 'option_standard_type': option_observation.option_standard_type,
                 'stock_owner': option_observation.stock_owner,
@@ -912,6 +916,8 @@ def fetch_symbol_request(
                 'option_codes': len(option_codes),
                 **_snapshot_completeness_meta(snapshot_result),
                 'snapshot_opend_call_count': int(snapshot_opend_call_count),
+                'snapshot_requested_at_utc': snapshot_result.requested_at_utc,
+                'snapshot_received_at_utc': snapshot_result.received_at_utc,
                 'snapshots_rows': int(len(snap_map)),
                 'snapshot_fallback_filled': int(snapshot_fallback_filled),
                 'snapshot_fallback_failed': int(snapshot_fallback_failed),
