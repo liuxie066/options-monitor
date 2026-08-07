@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.15 - 2026-08-07
+
+### Bug Fixes
+- Replaced update_time-based opening quote freshness with OM-recorded snapshot acquisition receipts and a decision-time 300s re-check, so illiquid HK option contracts whose update_time only reflects the last trade or order-book change are no longer fail-closed as stale; rejects now distinguish contract ineligibility, unavailable evidence, and policy rejection, and partial evidence degrades strategy scans to an explicit partial_data status that surfaces in the Daily Brief instead of silently dropping candidates.
+
 ## 1.10.14 - 2026-08-07
 
 ### Bug Fixes
