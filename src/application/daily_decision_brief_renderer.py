@@ -140,10 +140,13 @@ def build_daily_brief_user_view(
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
     funds = _fund_views(brief)
-    strategy_failure_labels = _strategy_failure_labels(brief)
-    if strategy_failure_labels:
-        reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
+    strategy_failure_items = _strategy_failure_items(brief)
+    reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
+    if strategy_failure_items and candidate_views:
+        candidate_omissions.append(
+            _strategy_failure_omission(strategy_failure_items)
+        )
     evidence_holds = [
         item
         for item in brief.get("actions") or []
@@ -179,8 +182,12 @@ def build_daily_brief_user_view(
         "candidates": candidate_views,
         "candidate_omissions": candidate_omissions,
         "candidate_empty_summary": (
-            "本轮候选结果不完整，部分策略扫描失败。"
-            if strategy_failure_labels
+            _candidate_empty_summary_for_failures(
+                strategy_failure_items,
+                partial_data=bool(partial_data_gaps),
+                evidence_holds=bool(evidence_holds),
+            )
+            if strategy_failure_items
             else (
                 "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
                 if evidence_holds
@@ -1245,13 +1252,65 @@ def _render_position_decision_details_card(
     return ["### 持仓决策依据", *rows] if rows else []
 
 
-def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:
-    failed = {
-        _lower(item.get("strategy_family"))
-        for item in brief.get("data_gaps") or []
-        if isinstance(item, Mapping) and _lower(item.get("reason")) == "strategy_step_failed"
-    }
-    return [label for family, label in _STRATEGY_LABELS.items() if family in failed]
+def _strategy_failure_items(brief: Mapping[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in brief.get("data_gaps") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if _lower(item.get("reason")) != "strategy_step_failed":
+            continue
+        family = _lower(item.get("strategy_family"))
+        if family not in _STRATEGY_LABELS:
+            continue
+        symbol = _upper(item.get("symbol"))
+        identity = (family, symbol)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        items.append({"family": family, "symbol": symbol})
+    return items
+
+
+def _strategy_failure_reminders(items: list[dict[str, str]]) -> list[str]:
+    reminders: list[str] = []
+    for item in items:
+        strategy = _STRATEGY_LABELS.get(item["family"], "候选")
+        symbol = item["symbol"] or "相关标的"
+        reminders.append(
+            f"{symbol} {strategy} 扫描失败，本轮无结果"
+        )
+    return reminders
+
+
+def _strategy_failure_subject(items: list[dict[str, str]]) -> str:
+    """Group failed symbols per strategy family, preserving first-seen order."""
+    grouped: dict[str, list[str]] = {}
+    for item in items:
+        symbol = item["symbol"] or "相关标的"
+        grouped.setdefault(item["family"], [])
+        if symbol not in grouped[item["family"]]:
+            grouped[item["family"]].append(symbol)
+    return "、".join(
+        f"{'、'.join(symbols)} {_STRATEGY_LABELS.get(family, '候选')}"
+        for family, symbols in grouped.items()
+    )
+
+
+def _strategy_failure_omission(items: list[dict[str, str]]) -> str:
+    return f"{_strategy_failure_subject(items)} 扫描失败，未纳入本轮候选"
+
+
+def _candidate_empty_summary_for_failures(
+    items: list[dict[str, str]],
+    *,
+    partial_data: bool = False,
+    evidence_holds: bool = False,
+) -> str:
+    subject = _strategy_failure_subject(items)
+    if partial_data or evidence_holds:
+        return f"本轮部分行情证据不可用；{subject} 扫描失败。"
+    return f"本轮暂无符合条件的候选；{subject} 扫描失败。"
 
 
 def _strategy_data_gap_reminders(
