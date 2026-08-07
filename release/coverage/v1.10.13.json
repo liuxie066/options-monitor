@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.13",
+  "base": {
+    "tag": "v1.10.12",
+    "commit": "d81b2f0aa237829b4831165770fbb00e7bca259b"
+  },
+  "reviewed_head": "0cd572328cc09491a3aa6365563cc299c04d5d03",
+  "commits": [
+    {
+      "sha": "92d6ca9ea18e8e1f4c67b77564d885309aa4e9b5",
+      "subject": "feat: manage Feishu credential service drift"
+    },
+    {
+      "sha": "0cd572328cc09491a3aa6365563cc299c04d5d03",
+      "subject": "Merge pull request #134 from liuxie066/agent/manage-feishu-agent-credential-service"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Brought the encrypted Feishu Agent credential materializer, consumer drop-ins, and oneshot execution health under the repository service profile and drift contract, so adopted hosts preserve the credential dependency across manual and automatic upgrades.",
+      "commits": [
+        "92d6ca9ea18e8e1f4c67b77564d885309aa4e9b5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0cd572328cc09491a3aa6365563cc299c04d5d03",
+      "reason": "Merge commit for PR #134; it contains no independent user-facing change beyond the mapped implementation commit."
+    }
+  ]
+}

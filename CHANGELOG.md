@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.13 - 2026-08-07
+
 ### Improvements
 - Brought the encrypted Feishu Agent credential materializer, consumer drop-ins, and oneshot execution health under the repository service profile and drift contract, so adopted hosts preserve the credential dependency across manual and automatic upgrades.
 
