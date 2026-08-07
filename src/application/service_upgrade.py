@@ -749,9 +749,21 @@ def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> lis
     env_file = str(profile.get("env_file") or "").strip()
     if env_file:
         command.extend(["--env-file", str(Path(env_file).expanduser())])
+    credential_env_file = _feishu_agent_credential_env_file(profile)
+    if credential_env_file:
+        command.extend(["--credential-env-file", credential_env_file])
     if _feishu_ws_check_needs_sudo_for_env_file(profile):
         return ["sudo", "-n", *command]
     return command
+
+
+def _feishu_agent_credential_env_file(profile: dict[str, Any]) -> str:
+    raw = profile.get("feishu_agent_credential")
+    credential = raw if isinstance(raw, dict) else {}
+    if not bool(credential.get("enabled")):
+        return ""
+    value = str(credential.get("runtime_env_file") or "").strip()
+    return str(Path(value).expanduser()) if value else ""
 
 
 def _wechat_clawbot_check_command(*, profile: dict[str, Any], repo_root: Path) -> list[str]:
@@ -787,11 +799,15 @@ def _wechat_clawbot_check_command(*, profile: dict[str, Any], repo_root: Path) -
 def _feishu_ws_check_needs_sudo_for_env_file(profile: dict[str, Any]) -> bool:
     if _is_root_process():
         return False
-    env_file = str(profile.get("env_file") or "").strip()
-    if not env_file:
+    env_files = [str(profile.get("env_file") or "").strip()]
+    credential_env_file = _feishu_agent_credential_env_file(profile)
+    if credential_env_file:
+        env_files.append(credential_env_file)
+    paths = [Path(value).expanduser() for value in env_files if value]
+    if not paths:
         return False
     try:
-        return not os.access(str(Path(env_file).expanduser()), os.R_OK)
+        return any(not os.access(str(path), os.R_OK) for path in paths)
     except OSError:
         return True
 
@@ -852,7 +868,11 @@ def _service_health_remediation(
     if any(item.get("check") == "feishu-ws-check" for item in failed_checks):
         env_file = str((profile or {}).get("env_file") or "").strip()
         if env_file:
-            remediation.append(f"manual_check: sudo -n ./om inbound feishu-ws --check --env-file {shlex.quote(env_file)}")
+            command = f"manual_check: sudo -n ./om inbound feishu-ws --check --env-file {shlex.quote(env_file)}"
+            credential_env_file = _feishu_agent_credential_env_file(profile or {})
+            if credential_env_file:
+                command += f" --credential-env-file {shlex.quote(credential_env_file)}"
+            remediation.append(command)
         else:
             remediation.append("manual_check: source the env file, then run ./om inbound feishu-ws --check")
     if any(item.get("check") == "wechat-clawbot-check" for item in failed_checks):

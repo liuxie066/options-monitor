@@ -4658,6 +4658,50 @@ def test_inbound_cli_feishu_ws_check_reports_redacted_config(capsys, monkeypatch
     assert "secret_1" not in json.dumps(payload, ensure_ascii=False)
 
 
+def test_inbound_cli_feishu_ws_check_merges_credential_env_file(tmp_path: Path, capsys, monkeypatch) -> None:
+    import src.interfaces.cli.main as cli
+
+    env_file = tmp_path / "options-monitor.env"
+    credential_env_file = tmp_path / "feishu-agent.env"
+    env_file.write_text(
+        "OM_FEISHU_BOT_APP_ID=app_1\nOM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1\n",
+        encoding="utf-8",
+    )
+    credential_env_file.write_text(
+        "OM_FEISHU_BOT_APP_SECRET=secret_credential\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "OM_FEISHU_BOT_APP_ID",
+        "OM_FEISHU_BOT_APP_SECRET",
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS",
+        "OM_ENV_FILE",
+    ):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setattr("src.application.inbound.feishu_ws.is_feishu_ws_sdk_available", lambda: True)
+
+    rc = cli.main(
+        [
+            "inbound",
+            "feishu-ws",
+            "--config-key",
+            "us",
+            "--env-file",
+            str(env_file),
+            "--credential-env-file",
+            str(credential_env_file),
+            "--check",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert payload["data"]["settings"]["app_id_configured"] is True
+    assert payload["data"]["settings"]["app_secret_configured"] is True
+    assert "secret_credential" not in json.dumps(payload, ensure_ascii=False)
+
+
 def test_inbound_cli_feishu_ws_rejects_secret_override_flags(capsys) -> None:
     import src.interfaces.cli.main as cli
 
