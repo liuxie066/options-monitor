@@ -234,6 +234,120 @@ def test_option_observation_never_uses_last_as_bid_or_ask() -> None:
     assert observation.last_price == 9.9
 
 
+def test_option_observation_explicit_zero_bid_is_ineligible_not_unavailable() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(bid_price=0.0),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+
+    assert observation.status == "ineligible"
+    assert observation.bid == 0.0
+    assert "option_no_current_bid" in observation.reason_codes
+    assert "option_bid_missing_or_invalid" not in observation.reason_codes
+
+
+def test_option_observation_zero_bid_does_not_mask_other_unavailable_evidence() -> None:
+    observation = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(bid_price=0.0, sec_status=None),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+
+    assert observation.status == "data_unavailable"
+    assert "option_sec_status_missing" in observation.reason_codes
+
+
+def test_option_observation_missing_or_negative_bid_is_data_unavailable() -> None:
+    missing = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(bid_price=None),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+    negative = normalize_option_observation(
+        expected_owner="US.NVDA",
+        market="US",
+        currency="USD",
+        chain_row=_chain(),
+        snapshot_row=_snapshot(bid_price=-1.0),
+        underlier_observation=_ready_underlier(),
+        now_utc=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+        **_RECEIPT,
+    )
+
+    assert missing.status == "data_unavailable"
+    assert "option_bid_missing_or_invalid" in missing.reason_codes
+    assert negative.status == "data_unavailable"
+    assert "option_bid_missing_or_invalid" in negative.reason_codes
+
+
+def test_hk_option_observation_explicit_zero_bid_is_ineligible() -> None:
+    now = datetime(2026, 8, 6, 2, 0, tzinfo=timezone.utc)
+    underlier = normalize_underlier_observation(
+        code="HK.00700",
+        market="HK",
+        snapshot_row={
+            "code": "HK.00700",
+            "last_price": 550.0,
+            "update_time": "2026-08-06 09:59:00",
+            "sec_status": "NORMAL",
+            "suspension": False,
+        },
+        market_state_row={"code": "HK.00700", "market_state": "MORNING"},
+        now_utc=now,
+    )
+    option = normalize_option_observation(
+        expected_owner="HK.00700",
+        market="HK",
+        currency="HKD",
+        chain_row={
+            "code": "HK.TCH260827P00500000",
+            "lot_size": 100,
+            "stock_type": "DRVT",
+            "stock_owner": "HK.00700",
+            "option_standard_type": "STANDARD",
+            "suspension": False,
+        },
+        snapshot_row={
+            "code": "HK.TCH260827P00500000",
+            "bid_price": 0.0,
+            "ask_price": 4.2,
+            "last_price": 4.1,
+            "update_time": "2026-08-06 09:59:00",
+            "price_spread": 0.2,
+            "option_implied_volatility": 20.0,
+            "option_delta": -0.1,
+            "option_open_interest": 0,
+            "volume": 0,
+            "option_contract_size": 100,
+            "sec_status": "NORMAL",
+            "suspension": False,
+        },
+        underlier_observation=underlier,
+        now_utc=now,
+        **_RECEIPT_HK,
+    )
+
+    assert option.status == "ineligible"
+    assert "option_no_current_bid" in option.reason_codes
+    assert "option_bid_missing_or_invalid" not in option.reason_codes
+
+
 def test_hk_provider_shape_uses_drvt_and_preserves_zero_values() -> None:
     now = datetime(2026, 8, 6, 2, 0, tzinfo=timezone.utc)
     underlier = normalize_underlier_observation(
