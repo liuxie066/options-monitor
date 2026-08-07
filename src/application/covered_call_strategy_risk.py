@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -65,6 +65,7 @@ def enrich_and_filter_covered_call_underwriting(
     sell_call_cfg: dict[str, Any],
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
+    decision_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> pd.DataFrame:
     if df_labeled is None or df_labeled.empty:
         return df_labeled
@@ -76,6 +77,7 @@ def enrich_and_filter_covered_call_underwriting(
     _ = portfolio_ctx
     out = df_labeled.copy()
     keep_mask: list[bool] = []
+    decision_records: list[dict[str, Any]] = []
 
     for idx, row in out.iterrows():
         row_payload = row.to_dict()
@@ -106,6 +108,16 @@ def enrich_and_filter_covered_call_underwriting(
         decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
+        opening_decision = dict(decision.get("opening_decision") or {})
+        normalized_input = dict(
+            opening_decision.get("normalized_input") or row_payload
+        )
+        decision_records.append(
+            {
+                "normalized_input": normalized_input,
+                "opening_decision": opening_decision,
+            }
+        )
         if decision["accepted"]:
             keep_mask.append(True)
             continue
@@ -114,6 +126,8 @@ def enrich_and_filter_covered_call_underwriting(
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty:
         filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="call", cfg=cfg))
+    if decision_sink_fn is not None:
+        decision_sink_fn(decision_records)
     return filtered
 
 

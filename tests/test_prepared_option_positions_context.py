@@ -105,7 +105,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         fx_calls.append([account for account, _config in configs])
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "opend_fx_market_snapshot",
+            "source": "opend_account_funds_conversion",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         }
 

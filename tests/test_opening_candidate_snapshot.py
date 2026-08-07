@@ -265,6 +265,7 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
                 "symbol": "NVDA",
                 "strategy_mode": "put",
                 "status": "completed",
+                "reason": "no_expirations",
             }
         ],
         final_candidates={"put": []},
@@ -282,6 +283,153 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
         / "state"
         / OPENING_CANDIDATE_SNAPSHOT_FILE
     ).is_file()
+    from src.application.agent_tools.candidate_filter_impl import (
+        candidate_filter_explain_tool,
+    )
+
+    data, warnings, _meta = candidate_filter_explain_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "run_id": "run-empty",
+            "account": "lx",
+            "symbol": "NVDA",
+            "function": "sell_put",
+        },
+        repo_base=lambda: tmp_path,
+        mask_path=lambda path: str(path) if path else None,
+    )
+    function = data["functions"][0]
+    assert warnings == []
+    assert function["status"] == "completed"
+    assert function["rejection_reason_counts"] == {}
+    assert function["events"][0]["rule"] == "no_expirations"
+    assert function["events"][0]["is_rejection"] is False
+
+
+def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.agent_tools.candidate_filter_impl import (
+        candidate_filter_explain_tool,
+    )
+
+    candidate = _candidate(
+        contract_symbol="NVDA260918P00090000",
+        period_return=0.01,
+    )
+    opening_decision = evaluate_opening_candidate_policy(candidate, mode="put")
+    assert opening_decision["accepted"] is False
+
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-rejected",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, "run-rejected", "lx"),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+            }
+        ],
+        final_candidates={"put": []},
+        candidate_evaluations={
+            "put": [
+                {
+                    "normalized_input": candidate,
+                    "opening_decision": opening_decision,
+                }
+            ],
+            "call": [],
+        },
+        sealed_at=NOW,
+    )
+
+    contract_scope = next(
+        row for row in payload["scope_results"] if row["scope"] == "contract"
+    )
+    assert contract_scope["status"] == "rejected"
+    assert contract_scope["reason_codes"] == ["return_annualized"]
+    assert contract_scope["rejects"][0]["metric_value"] == opening_decision[
+        "rejects"
+    ][0]["metric_value"]
+
+    data, warnings, _meta = candidate_filter_explain_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "run_id": "run-rejected",
+            "account": "lx",
+            "symbol": "NVDA",
+            "function": "sell_put",
+        },
+        repo_base=lambda: tmp_path,
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    function = data["functions"][0]
+    event = next(item for item in function["events"] if item["is_rejection"])
+    assert warnings == []
+    assert function["status"] == "rejected"
+    assert function["rejection_reason_counts"] == {"return_annualized": 1}
+    assert event["metric_value"] == opening_decision["rejects"][0]["metric_value"]
+    assert event["threshold"] == 0.10
+    assert event["message"] == "annualized net return below formal minimum or unavailable"
+
+
+def test_snapshot_reuses_resolved_policy_fields_instead_of_default_thresholds(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        contract_symbol="NVDA260918P00090000",
+        period_return=0.01,
+    )
+    candidate["annualized_net_return_on_cash_basis"] = 0.09
+    candidate["policy_min_annualized_return"] = 0.08
+    candidate["policy_min_net_premium_cny"] = 50.0
+    candidate["policy_min_iv_rv_ratio"] = 1.10
+    candidate["policy_min_iv_minus_rv"] = 0.05
+
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-custom-policy",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, "run-custom-policy", "lx"),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+            }
+        ],
+        final_candidates={"put": [candidate]},
+        sealed_at=NOW,
+    )
+
+    assert payload["opening_status"] == "candidates_found"
+    assert payload["candidate_decisions"][0]["opening_decision"]["accepted"] is True
 
 
 def test_market_closed_is_sealed_as_explicit_unavailable_state(

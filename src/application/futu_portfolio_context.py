@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
@@ -45,8 +44,7 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
-_OPEND_FX_CODES = ("FX.USDCNH", "FX.USDHKD")
-_OPEND_FX_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_OPEND_FX_DISPLAY_CURRENCIES = ("CNH", "USD", "HKD")
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -178,92 +176,53 @@ def _to_futu_acc_id(value: Any) -> int:
     return int(raw)
 
 
-def _positive_float(value: Any) -> float | None:
-    parsed = _to_float(value)
-    return parsed if parsed is not None and parsed > 0 else None
-
-
-def _opend_fx_mid(row: Mapping[str, Any]) -> tuple[float | None, str | None]:
-    bid = _positive_float(_pick(row, "bid_price", "bid"))
-    ask = _positive_float(_pick(row, "ask_price", "ask"))
-    if bid is not None and ask is not None and ask >= bid:
-        return (bid + ask) / 2.0, "bid_ask_mid"
-    last = _positive_float(_pick(row, "last_price", "price"))
-    return last, ("last_price" if last is not None else None)
-
-
-def _opend_fx_observed_at(row: Mapping[str, Any]) -> datetime | None:
-    timestamp = _positive_float(
-        _pick(row, "update_timestamp", "timestamp")
-    )
-    if timestamp is not None:
-        try:
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-    raw = str(_pick(row, "update_time", "data_time") or "").strip()
-    if not raw or raw.upper() == "N/A":
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_OPEND_FX_TIMEZONE)
-    return parsed.astimezone(timezone.utc)
-
-
 def build_opend_exchange_rate_observation(
-    snapshot_rows: list[dict[str, Any]],
+    balance_rows_by_currency: Mapping[str, list[dict[str, Any]]],
+    *,
+    observed_at_utc: str | None = None,
 ) -> dict[str, Any] | None:
-    """Project USDCNH and USDHKD snapshots into the strategy rate schema."""
+    """Derive OpenD's account conversion rates from one funds generation.
 
-    by_code = {
-        str(_pick(row, "code", "symbol") or "").strip().upper(): row
-        for row in snapshot_rows
-        if str(_pick(row, "code", "symbol") or "").strip()
-    }
-    usdcnh_row = by_code.get("FX.USDCNH")
-    usdhkd_row = by_code.get("FX.USDHKD")
-    if not isinstance(usdcnh_row, Mapping) or not isinstance(usdhkd_row, Mapping):
+    ``accinfo_query(currency=...)`` converts aggregate fund fields into the
+    requested display currency while leaving explicitly denominated cash
+    fields untouched.  Ratios of the same non-zero ``total_assets`` fact
+    therefore expose the conversion rates OpenD applied without introducing
+    a second market-data provider.
+    """
+
+    totals: dict[str, float] = {}
+    for currency in _OPEND_FX_DISPLAY_CURRENCIES:
+        rows = balance_rows_by_currency.get(currency)
+        if not isinstance(rows, list) or len(rows) != 1:
+            return None
+        row = rows[0]
+        if _normalize_currency(row.get("currency"), fallback="") != _normalize_currency(
+            currency,
+            fallback="",
+        ):
+            return None
+        total_assets = _to_float(row.get("total_assets"))
+        if total_assets is None or total_assets == 0:
+            return None
+        totals[currency] = total_assets
+    usdcny = totals["CNH"] / totals["USD"]
+    hkdcny = totals["CNH"] / totals["HKD"]
+    if usdcny <= 0 or hkdcny <= 0:
         return None
-    usdcnh, usdcnh_basis = _opend_fx_mid(usdcnh_row)
-    usdhkd, usdhkd_basis = _opend_fx_mid(usdhkd_row)
-    if usdcnh is None or usdhkd is None:
-        return None
-    observed = [
-        _opend_fx_observed_at(usdcnh_row),
-        _opend_fx_observed_at(usdhkd_row),
-    ]
-    timestamp = (
-        min(item for item in observed if item is not None).isoformat()
-        if all(item is not None for item in observed)
-        else None
-    )
-    payload: dict[str, Any] = {
+    return {
         "rates": {
-            # OpenD exposes the offshore RMB pair; strategy currency naming
-            # remains CNY for compatibility with account cash buckets.
-            "USDCNY": usdcnh,
-            "HKDCNY": usdcnh / usdhkd,
+            "USDCNY": usdcny,
+            "HKDCNY": hkdcny,
         },
         "source": OPEND_EXCHANGE_RATE_SOURCE,
-        "provider_pairs": ["FX.USDCNH", "FX.USDHKD"],
-        "price_basis": {
-            "FX.USDCNH": usdcnh_basis,
-            "FX.USDHKD": usdhkd_basis,
-        },
-        "provider_update_time_raw": {
-            code: str(_pick(row, "update_time", "data_time") or "") or None
-            for code, row in (
-                ("FX.USDCNH", usdcnh_row),
-                ("FX.USDHKD", usdhkd_row),
-            )
-        },
+        "timestamp": str(
+            observed_at_utc or datetime.now(timezone.utc).isoformat()
+        ),
+        "provider_method": "accinfo_query",
+        "provider_display_currencies": list(_OPEND_FX_DISPLAY_CURRENCIES),
+        "value_basis": "total_assets",
+        "timestamp_basis": "client_receive_time",
     }
-    if timestamp is not None:
-        payload["timestamp"] = timestamp
-    return payload
 
 
 def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:
@@ -442,10 +401,12 @@ def _query_rows_for_account_id(
     account_id: str,
     *,
     trd_env: str | None = None,
+    **query_kwargs: Any,
 ) -> list[dict[str, Any]]:
     method = getattr(gateway, method_name)
     try:
-        kwargs: dict[str, Any] = {"acc_id": _to_futu_acc_id(account_id)}
+        kwargs: dict[str, Any] = dict(query_kwargs)
+        kwargs["acc_id"] = _to_futu_acc_id(account_id)
         if trd_env:
             kwargs["trd_env"] = trd_env
         return _rows(method(**kwargs))
@@ -461,13 +422,50 @@ def _query_rows_for_account_ids(
     account_ids: set[str],
     *,
     trd_env: str | None = None,
+    **query_kwargs: Any,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for account_id in sorted(account_ids):
         rows.extend(
-            _query_rows_for_account_id(gateway, method_name, account_id, trd_env=trd_env)
+            _query_rows_for_account_id(
+                gateway,
+                method_name,
+                account_id,
+                trd_env=trd_env,
+                **query_kwargs,
+            )
         )
     return rows
+
+
+def _query_opend_exchange_rate_observation(
+    gateway: Any,
+    *,
+    account_ids: set[str],
+    trd_env: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    rows_by_currency = {
+        currency: _filter_rows_for_account_ids(
+            _query_rows_for_account_ids(
+                gateway,
+                "get_account_balance",
+                account_ids,
+                trd_env=trd_env,
+                currency=currency,
+            ),
+            account_ids,
+            trd_env=trd_env,
+        )
+        for currency in _OPEND_FX_DISPLAY_CURRENCIES
+    }
+    observed_at_utc = datetime.now(timezone.utc).isoformat()
+    return (
+        rows_by_currency["CNH"],
+        build_opend_exchange_rate_observation(
+            rows_by_currency,
+            observed_at_utc=observed_at_utc,
+        ),
+    )
 
 
 def build_futu_portfolio_context(
@@ -712,22 +710,16 @@ def fetch_futu_portfolio_context(
         is_option_chain_cache_enabled=False,
     )
     try:
-        balance_rows = _query_rows_for_account_ids(
-            gateway, "get_account_balance", account_ids, trd_env=trd_env
+        balance_rows, exchange_rate_observation = (
+            _query_opend_exchange_rate_observation(
+                gateway,
+                account_ids=account_ids,
+                trd_env=trd_env,
+            )
         )
         position_rows = _query_rows_for_account_ids(
             gateway, "get_positions", account_ids, trd_env=trd_env
         )
-        exchange_rate_observation = None
-        try:
-            ensure_quote_ready = getattr(gateway, "ensure_quote_ready", None)
-            if callable(ensure_quote_ready):
-                ensure_quote_ready()
-            exchange_rate_observation = build_opend_exchange_rate_observation(
-                _rows(gateway.get_snapshot(_OPEND_FX_CODES))
-            )
-        except Exception:
-            exchange_rate_observation = None
     finally:
         gateway.close()
 
@@ -748,3 +740,39 @@ def fetch_futu_portfolio_context(
         capacity_market=_runtime_market(cfg, fallback=base_currency),
         exchange_rate_observation=exchange_rate_observation,
     )
+
+
+def fetch_futu_exchange_rate_observation(
+    *,
+    cfg: Mapping[str, Any] | Any,
+    account: str | None,
+) -> dict[str, Any] | None:
+    """Read one OpenD account-funds conversion observation."""
+
+    if not account:
+        return None
+    settings = infer_futu_portfolio_settings(cfg, account=account)
+    host = settings.get("host")
+    port = settings.get("port")
+    if not host or not port:
+        return None
+    trd_env = _resolve_trd_env(settings.get("trd_env"))
+    account_ids = set(resolve_futu_account_ids(cfg, account=account))
+    if len(account_ids) != 1:
+        return None
+    gateway = build_ready_futu_broker_gateway(
+        host=str(host),
+        port=int(port),
+        expected_account_ids=account_ids,
+        trd_env=trd_env,
+        is_option_chain_cache_enabled=False,
+    )
+    try:
+        _balance_rows, observation = _query_opend_exchange_rate_observation(
+            gateway,
+            account_ids=account_ids,
+            trd_env=trd_env,
+        )
+        return observation
+    finally:
+        gateway.close()

@@ -5,7 +5,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -190,6 +190,9 @@ def run_sell_put_scan(
     strategy_profile: str | None = None,
     quiet: bool = False,
     quote_freshness_now_utc: datetime | None = None,
+    calculation_decision_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None,
 ) -> pd.DataFrame:
     """执行卖出看跌期权扫描并写出候选 CSV。"""
     # Kept in the public Python/CLI surface for compatibility only. Sell Put
@@ -235,6 +238,7 @@ def run_sell_put_scan(
             ),
         ),
         reject_log_output=reject_log_output,
+        calculation_decision_sink_fn=calculation_decision_sink_fn,
     )
 
 

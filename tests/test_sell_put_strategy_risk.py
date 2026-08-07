@@ -143,6 +143,47 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
     assert filtered.empty
 
 
+def test_sell_put_underwriting_emits_all_decisions_and_resolved_policy() -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    captured: list[dict] = []
+    filtered = enrich_and_filter_sell_put_underwriting(
+        df_labeled=pd.DataFrame(
+            [
+                _candidate(contract_symbol="ACCEPTED"),
+                _candidate(
+                    contract_symbol="REJECTED",
+                    annualized_net_return_on_cash_basis=0.09,
+                ),
+            ]
+        ),
+        symbol="NVDA",
+        sell_put_cfg={
+            "strategy": "insurance_underwriting",
+            "min_annualized_net_return": 0.10,
+        },
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(usd_per_cny=0.14)
+        ),
+        decision_sink_fn=captured.extend,
+    )
+
+    assert list(filtered["contract_symbol"]) == ["ACCEPTED"]
+    assert [
+        item["opening_decision"]["accepted"] for item in captured
+    ] == [True, False]
+    assert all(
+        item["normalized_input"]["policy_min_annualized_return"] == 0.10
+        for item in captured
+    )
+    rejected = captured[1]["opening_decision"]
+    assert rejected["rejects"][0]["reason"] == "return_annualized"
+
+
 def test_sell_put_underwriting_does_not_hard_reject_non_earnings_event() -> None:
     from src.application.sell_put_strategy_risk import (
         evaluate_sell_put_underwriting_row,

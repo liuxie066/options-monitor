@@ -14,7 +14,7 @@ def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
             {
                 "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "opend_fx_market_snapshot",
+                "source": "opend_account_funds_conversion",
             },
             ensure_ascii=False,
         ),
@@ -28,7 +28,7 @@ def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
 
     assert out is not None
     assert out["rates"] == {"USDCNY": 7.2, "HKDCNY": 0.92}
-    assert out["source"] == "opend_fx_market_snapshot"
+    assert out["source"] == "opend_account_funds_conversion"
 
 
 def test_get_rates_or_fetch_latest_does_not_fetch_when_cache_missing(
@@ -62,7 +62,7 @@ def test_get_rates_or_fetch_latest_rejects_stale_cache(tmp_path: Path) -> None:
                 "timestamp": (
                     datetime.now(timezone.utc) - timedelta(hours=25)
                 ).isoformat(),
-                "source": "opend_fx_market_snapshot",
+                "source": "opend_account_funds_conversion",
             },
             ensure_ascii=False,
         ),
@@ -88,13 +88,13 @@ def test_save_exchange_rate_observation_preserves_provider_timestamp(
         {
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
             "timestamp": observed_at,
-            "source": "opend_fx_market_snapshot",
+            "source": "opend_account_funds_conversion",
         },
     )
 
     saved = json.loads(cache_path.read_text(encoding="utf-8"))
     assert saved["timestamp"] == observed_at
-    assert saved["source"] == "opend_fx_market_snapshot"
+    assert saved["source"] == "opend_account_funds_conversion"
 
 
 def test_exchange_rate_observation_without_timestamp_is_stale() -> None:
@@ -104,7 +104,7 @@ def test_exchange_rate_observation_without_timestamp_is_stale() -> None:
         exchange_rate_observation_status(
             {
                 "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-                "source": "opend_fx_market_snapshot",
+                "source": "opend_account_funds_conversion",
             },
             max_age_hours=24,
         )
@@ -121,7 +121,7 @@ def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) ->
             {
                 "rates": {"USDCNY": 7.21},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "opend_fx_market_snapshot",
+                "source": "opend_account_funds_conversion",
             },
             ensure_ascii=False,
         ),
@@ -132,7 +132,7 @@ def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) ->
 
     assert out is not None
     assert out["rates"] == {"USDCNY": 7.21}
-    assert out["source"] == "opend_fx_market_snapshot"
+    assert out["source"] == "opend_account_funds_conversion"
 
 
 def test_exchange_rate_cache_rejects_non_opend_source(tmp_path: Path) -> None:

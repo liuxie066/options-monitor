@@ -104,6 +104,52 @@ def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> N
     assert filtered.empty
 
 
+def test_covered_call_underwriting_emits_all_decisions_and_resolved_policy() -> None:
+    from src.application.covered_call_strategy_risk import (
+        enrich_and_filter_covered_call_underwriting,
+    )
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    captured: list[dict] = []
+    filtered = enrich_and_filter_covered_call_underwriting(
+        df_labeled=pd.DataFrame(
+            [
+                _candidate(contract_symbol="ACCEPTED"),
+                _candidate(
+                    contract_symbol="REJECTED",
+                    annualized_net_premium_return=0.09,
+                ),
+            ]
+        ),
+        symbol="NVDA",
+        sell_call_cfg={
+            "strategy": "insurance_underwriting",
+            "min_annualized_net_premium_return": 0.10,
+        },
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(usd_per_cny=0.14)
+        ),
+        decision_sink_fn=captured.extend,
+    )
+
+    assert list(filtered["contract_symbol"]) == ["ACCEPTED"]
+    assert [
+        item["opening_decision"]["accepted"] for item in captured
+    ] == [True, False]
+    assert all(
+        item["normalized_input"]["policy_min_annualized_return"] == 0.10
+        for item in captured
+    )
+    assert all(
+        item["normalized_input"]["policy_min_strike"] == 120.0
+        for item in captured
+    )
+    assert captured[1]["opening_decision"]["rejects"][0]["reason"] == (
+        "return_annualized"
+    )
+
+
 def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

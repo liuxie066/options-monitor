@@ -278,6 +278,77 @@ def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
     assert seen == [cfg]
 
 
+def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
+
+    captured: list[dict] = []
+    observed_option_contexts: list[dict] = []
+    decision = {"opening_decision": {"accepted": False}}
+
+    def _process_symbol(*args, **kwargs):
+        observed_option_contexts.append(dict(kwargs["portfolio_ctx"]["option_ctx"]))
+        kwargs["candidate_decisions_sink_fn"]("put", [decision])
+        return [
+            {
+                "symbol": str(args[2]["symbol"]),
+                "strategy": "sell_put",
+                "candidate_count": 0,
+            }
+        ]
+
+    run_watchlist_pipeline(
+        py="python",
+        base=Path("."),
+        cfg={
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "sell_put": {"enabled": True},
+                    "sell_call": {"enabled": False},
+                }
+            ],
+            "templates": {},
+            "runtime": {},
+        },
+        report_dir=Path("."),
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=True,
+        symbols_arg=None,
+        log=lambda _: None,
+        want_fn=lambda _: True,
+        apply_profiles_fn=lambda item, _profiles: dict(item),
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=lambda **_kwargs: ({}, None, None, None),
+        build_symbols_summary_fn=lambda *_args, **_kwargs: None,
+        build_symbols_digest_fn=lambda *_args, **_kwargs: None,
+        position_advice_producer_run_id="run-1",
+        position_advice_candidate_capture_status_sink_fn=lambda _row: None,
+        opening_candidate_decisions_sink_fn=(
+            lambda _mode, rows: captured.extend(rows)
+        ),
+    )
+
+    assert captured == [decision]
+    assert observed_option_contexts == [
+        {
+            "context_status": "unavailable",
+            "locked_shares_status": "unavailable",
+            "locked_shares_unavailable_reason": (
+                "option_positions_context_unavailable"
+            ),
+            "locked_shares_by_symbol": {},
+            "locked_shares_unavailable_by_symbol": {},
+            "cash_secured_by_symbol_by_ccy": {},
+            "cash_secured_total_by_ccy": {},
+            "cash_secured_unavailable_by_symbol": {},
+        }
+    ]
+
+
 def test_watchlist_fetch_stage_preserves_strategy_config_but_skips_scan_output() -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
 

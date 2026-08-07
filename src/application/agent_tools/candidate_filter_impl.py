@@ -132,6 +132,7 @@ def _summarize_function(
     account: str,
 ) -> dict[str, Any]:
     reasons: list[str] = []
+    rejection_reasons: list[str] = []
     events: list[dict[str, Any]] = []
     for row in rows:
         row_reasons = list(row.get("reason_codes") or [])
@@ -142,7 +143,10 @@ def _summarize_function(
             {str(item) for item in row_reasons if str(item).strip()}
         )
         reasons.extend(normalized_reasons)
-        if normalized_reasons:
+        is_contract = row.get("scope") == "contract"
+        is_rejected_contract = is_contract and row.get("status") == "rejected"
+        if is_rejected_contract:
+            rejection_reasons.extend(normalized_reasons)
             for reason_code in normalized_reasons:
                 events.append(
                     _event(
@@ -152,7 +156,7 @@ def _summarize_function(
                         account=account,
                     )
                 )
-        else:
+        elif is_contract and row.get("status") == "accepted":
             events.append(
                 _event(
                     row,
@@ -161,12 +165,18 @@ def _summarize_function(
                     account=account,
                 )
             )
+        elif normalized_reasons:
+            for reason_code in normalized_reasons:
+                events.append(
+                    _event(
+                        row,
+                        reason_code,
+                        run_id=run_id,
+                        account=account,
+                    )
+                )
     reason_counts = Counter(reasons)
-    rejection_counts = Counter(
-        reason
-        for reason in reasons
-        if reason not in {"all_decisions_captured", "candidate_accepted"}
-    )
+    rejection_counts = Counter(rejection_reasons)
     return {
         "function": function_name,
         "status": _function_status(rows),
@@ -205,20 +215,36 @@ def _event(
     run_id: str | None,
     account: str,
 ) -> dict[str, Any]:
-    rejected = reason not in {"candidate_accepted", "all_decisions_captured"}
+    rejected = (
+        row.get("scope") == "contract"
+        and row.get("status") == "rejected"
+        and reason != "candidate_accepted"
+    )
+    reject_detail = next(
+        (
+            dict(item)
+            for item in row.get("rejects") or []
+            if isinstance(item, Mapping)
+            and str(item.get("reason") or "") == reason
+        ),
+        {},
+    )
     return {
         "run_id": run_id,
         "account": account,
         "status": "rejected" if rejected else str(row.get("status") or "accepted"),
-        "stage": "recorded_opening_decision",
+        "stage": reject_detail.get("stage") or "recorded_opening_decision",
         "rule": reason,
         "rule_label": candidate_rule_label(reason),
         "is_rejection": rejected,
-        "metric_value": None,
-        "threshold": None,
+        "metric_value": reject_detail.get("metric_value"),
+        "threshold": reject_detail.get("threshold"),
         "contract_symbol": row.get("contract_symbol"),
         "expiration": row.get("expiration"),
         "strike": row.get("strike"),
-        "message": reason,
+        "message": reject_detail.get("message") or reason,
+        "candidate_id": row.get("candidate_id"),
+        "decision_hash": row.get("decision_hash"),
+        "normalized_input_hash": row.get("normalized_input_hash"),
         "evidence_path": "state/opening_candidate_snapshot.json",
     }
