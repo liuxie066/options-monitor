@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping
 from src.infrastructure.io_utils import atomic_write_json
 
 
-OPEND_EXCHANGE_RATE_SOURCE = "opend_fx_market_snapshot"
+OPEND_EXCHANGE_RATE_SOURCE = "opend_account_funds_conversion"
 
 
 @dataclass(frozen=True)

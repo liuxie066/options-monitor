@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 918 (`src`: 491, `domain`: 76, `scripts`: 8, `tests`: 343)
-- Internal import edges: 5829 total, 2489 production/script edges excluding tests
+- Internal import edges: 5847 total, 2490 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|420| domain
+  application -->|422| domain
   application -->|4| domain_services
-  application -->|136| infrastructure
+  application -->|135| infrastructure
   application -->|43| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -45,10 +45,10 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2484| application
-  tests -->|438| domain
+  tests -->|2494| application
+  tests -->|440| domain
   tests -->|2| domain_services
-  tests -->|145| infrastructure
+  tests -->|150| infrastructure
   tests -->|212| interfaces
   tests -->|13| scripts
   tests -->|16| storage
@@ -58,9 +58,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 420 |
+| application | domain | 422 |
 | interfaces | application | 142 |
-| application | infrastructure | 136 |
+| application | infrastructure | 135 |
 | application | storage | 43 |
 | scripts | application | 12 |
 | domain_services | domain | 5 |
@@ -77,10 +77,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2484 |
-| tests | domain | 438 |
+| tests | application | 2494 |
+| tests | domain | 440 |
 | tests | interfaces | 212 |
-| tests | infrastructure | 145 |
+| tests | infrastructure | 150 |
 | tests | storage | 16 |
 | tests | scripts | 13 |
 | tests | domain_services | 2 |
@@ -93,13 +93,13 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 240 |
 | src.interfaces | src.application | 115 |
-| src.application | src.infrastructure | 100 |
+| src.application | src.infrastructure | 99 |
 | src.application.ledger | domain.domain | 49 |
 | src.application | domain.storage | 34 |
 | src.application.ledger | domain.domain.ledger | 32 |
 | src.application | src.application.ledger | 30 |
+| src.application | domain.domain.engine | 25 |
 | src.application.trades | domain.domain | 25 |
-| src.application | domain.domain.engine | 23 |
 | src.application.positions | src.application | 23 |
 | src.application.trades | src.application | 20 |
 | src.application.multi_tick | src.application | 18 |
@@ -186,7 +186,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.option_position_identity | 41 |
 | src.application.account_config | 40 |
 | domain.domain.decision_state_fingerprint | 27 |
-| domain.domain.engine | 25 |
+| domain.domain.engine | 26 |
 | domain.domain.trade_contract_identity | 25 |
 | src.application.shadow_replay.common | 25 |
 | src.application.settings | 24 |

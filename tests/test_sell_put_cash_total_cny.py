@@ -37,6 +37,19 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
             },
         },
     )
+    ledger_unavailable = sell_put_opening_capacity_inputs(
+        **common,
+        portfolio_ctx={
+            "portfolio_source_name": "futu",
+            "capacity_authority": {"status": "available"},
+            "cash_by_currency": {"USD": 20_000.0},
+            "option_ctx": {
+                "context_status": "unavailable",
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+    )
 
     assert unavailable["put_cash_capacity_available"] is False
     assert unavailable["put_cash_capacity_reason"] == (
@@ -48,6 +61,70 @@ def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> N
         "put_cash_capacity_available": True,
         "put_cash_capacity_reason": "cash_supported_by_same_currency",
     }
+    assert ledger_unavailable["put_cash_capacity_available"] is False
+    assert ledger_unavailable["put_cash_capacity_reason"] == (
+        "option_positions_cash_secured_context_unavailable"
+    )
+
+
+def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing() -> None:
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    candidate = {
+        "symbol": "NVDA",
+        "contract_symbol": "NVDA260918P00090000",
+        "expiration": "2026-09-18",
+        "strike": 90.0,
+        "spot": 100.0,
+        "multiplier": 100,
+        "currency": "USD",
+        "dte": 30,
+        "policy_min_dte": 7,
+        "policy_max_dte": 60,
+        "policy_max_strike": 100.0,
+        "annualized_net_return_on_cash_basis": 0.15,
+        "net_income_cny": 100.0,
+        "spread_ratio": 0.10,
+        "iv_rv_ratio": 1.20,
+        "iv_minus_rv": 0.10,
+        "earnings_evidence_status": "ready",
+        "earnings_has_event": False,
+    }
+    enriched = enrich_sell_put_candidates_with_cash(
+        df_labeled=pd.DataFrame([candidate]),
+        symbol="NVDA",
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 20_000.0},
+            "capacity_authority": {
+                "status": "available",
+                "futu_account_id": "12345",
+                "trd_env": "REAL",
+                "market": "US",
+            },
+            "option_ctx": {
+                "locked_shares_status": "unavailable",
+                "locked_shares_unavailable_reason": (
+                    "option_positions_context_unavailable"
+                ),
+                "locked_shares_by_symbol": {},
+                "locked_shares_unavailable_by_symbol": {},
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(usd_per_cny=1 / 7.2, cny_per_hkd=0.92)
+        ),
+    )
+
+    row = enriched.iloc[0]
+    decision = evaluate_opening_candidate_policy(row.to_dict(), mode="put")
+    assert row["max_new_contracts"] == 0
+    assert row["cash_secured_unavailable_reason"] == (
+        "option_positions_cash_secured_context_unavailable"
+    )
+    assert decision["accepted"] is False
+    assert decision["rejects"][0]["reason"] == "hard_capacity_put"
 
 
 def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: Path) -> None:

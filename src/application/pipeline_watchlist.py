@@ -239,6 +239,9 @@ def run_watchlist_pipeline(
     opening_final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
+    opening_candidate_decisions_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None,
     opening_runtime_context_sink_fn: (
         Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None
     ) = None,
@@ -364,10 +367,14 @@ def run_watchlist_pipeline(
             option_ctx
             if option_ctx is not None
             else {
+                "context_status": "unavailable",
                 "locked_shares_status": "unavailable",
                 "locked_shares_unavailable_reason": "option_positions_context_unavailable",
                 "locked_shares_by_symbol": {},
                 "locked_shares_unavailable_by_symbol": {},
+                "cash_secured_by_symbol_by_ccy": {},
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_unavailable_by_symbol": {},
             }
         )
 
@@ -432,6 +439,9 @@ def run_watchlist_pipeline(
                     ),
                     "final_candidates_sink_fn": (
                         opening_final_candidates_sink_fn
+                    ),
+                    "candidate_decisions_sink_fn": (
+                        opening_candidate_decisions_sink_fn
                     ),
                 }
                 if quote_snapshot_id:
@@ -574,6 +584,10 @@ def run_watchlist_pipeline_default(
         "put": [],
         "call": [],
     }
+    captured_candidate_decisions: dict[str, list[dict[str, Any]]] = {
+        "put": [],
+        "call": [],
+    }
     captured_runtime_context: dict[str, Any] = {}
     capture_lock = Lock()
 
@@ -587,6 +601,15 @@ def run_watchlist_pipeline_default(
     ) -> None:
         with capture_lock:
             captured_final_candidates.setdefault(str(mode), []).extend(
+                dict(item) for item in rows
+            )
+
+    def _capture_candidate_decisions(
+        mode: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        with capture_lock:
+            captured_candidate_decisions.setdefault(str(mode), []).extend(
                 dict(item) for item in rows
             )
 
@@ -649,6 +672,9 @@ def run_watchlist_pipeline_default(
         ),
         opening_final_candidates_sink_fn=(
             _capture_final_candidates if candidate_capture_enabled else None
+        ),
+        opening_candidate_decisions_sink_fn=(
+            _capture_candidate_decisions if candidate_capture_enabled else None
         ),
         opening_runtime_context_sink_fn=(
             _capture_runtime_context if candidate_capture_enabled else None
@@ -837,6 +863,7 @@ def run_watchlist_pipeline_default(
         dependencies=dependencies,
         scan_statuses=normalized_statuses,
         final_candidates=captured_final_candidates,
+        candidate_evaluations=captured_candidate_decisions,
         sealed_at=captured_at,
     )
     return result

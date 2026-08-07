@@ -282,6 +282,9 @@ def run_sell_call_scan(
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
     quiet: bool = False,
+    calculation_decision_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
@@ -335,6 +338,7 @@ def run_sell_call_scan(
             metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost),
         ),
         reject_log_output=reject_log_output,
+        calculation_decision_sink_fn=calculation_decision_sink_fn,
     )
 
 
