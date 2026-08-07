@@ -7,8 +7,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.service_deploy import (
+    DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE,
+    DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER,
+    DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE,
+    DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE,
     DEFAULT_ACCOUNTS,
     DEFAULT_MARKETS,
+    FEISHU_AGENT_CREDENTIAL_DROPIN,
+    FEISHU_AGENT_CREDENTIAL_SERVICE,
     load_service_profile,
     render_service_bundle,
     resolve_strategy_lab_recorder_endpoint_matches,
@@ -16,6 +22,7 @@ from src.application.service_deploy import (
 
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
+    FEISHU_AGENT_CREDENTIAL_SERVICE,
     "options-monitor-position-advice-promotion.timer",
     "options-monitor-projection-verify.timer",
 )
@@ -25,6 +32,9 @@ LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
 )
 LEGACY_STRATEGY_LAB_RECORDER_HOST = "127.0.0.1"
 LEGACY_STRATEGY_LAB_RECORDER_PORT = 11111
+LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH = Path(
+    "/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service"
+)
 
 
 def service_drift(
@@ -39,10 +49,10 @@ def service_drift(
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
 
-    Dry-run is the default. Confirmed apply writes missing or changed unit files,
-    repairs expected timer activation, retires extra managed units, and refreshes
-    the service profile. Long-running expected services are not enabled or
-    restarted here.
+    Dry-run is the default. Confirmed apply writes missing or changed unit files
+    and profile-owned support files, repairs expected timer and credential
+    activation, retires extra managed assets, and refreshes the service profile.
+    Long-running expected services are not enabled or restarted here.
     """
 
     initial = _load_profile_and_paths(
@@ -155,6 +165,50 @@ def _load_profile_and_paths(
     }
 
 
+def _effective_profile_with_legacy_feishu_credential(
+    profile: dict[str, Any],
+    *,
+    ctx: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if str(ctx.get("provider") or "").strip().lower() != "systemd":
+        return profile, []
+    if "feishu_agent_credential" in profile:
+        return profile, []
+
+    profile_services = set(_service_names_from_profile(profile))
+    inferred_from_profile = FEISHU_AGENT_CREDENTIAL_SERVICE in profile_services
+    unit_path = LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH
+    dropin_root = Path(ctx["systemd_unit_root"])
+    legacy_dropins = sorted(
+        path
+        for path in dropin_root.glob(
+            f"options-monitor-*.service.d/{FEISHU_AGENT_CREDENTIAL_DROPIN}"
+        )
+        if path.is_file()
+    ) if dropin_root.exists() else []
+    inferred_from_legacy = unit_path.is_file() and bool(legacy_dropins)
+    if not inferred_from_profile and not inferred_from_legacy:
+        return profile, []
+
+    effective = dict(profile)
+    effective["feishu_agent_credential"] = {
+        "enabled": True,
+        "service_name": FEISHU_AGENT_CREDENTIAL_SERVICE,
+        "helper_path": str(DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER),
+        "agent_store": str(DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE),
+        "holdings_store": str(DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE),
+        "runtime_env_file": str(DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE),
+    }
+    return effective, [
+        {
+            "code": "legacy_feishu_agent_credential_inferred",
+            "source": "profile_service" if inferred_from_profile else "installed_assets",
+            "unit_path": str(unit_path),
+            "dropin_count": len(legacy_dropins),
+        }
+    ]
+
+
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     profile = ctx["profile"]
     provider = str(ctx["provider"] or "").strip().lower()
@@ -188,18 +242,31 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "extra_profile_units": [],
             "extra_installed_units": [],
             "mismatched_units": [],
+            "expected_managed_files": [],
+            "installed_managed_files": [],
+            "missing_managed_files": [],
+            "extra_managed_files": [],
+            "mismatched_managed_files": [],
+            "mode_mismatched_managed_files": [],
             "activation_states": {},
             "active_states": {},
+            "execution_states": {},
             "activation_drift_units": [],
+            "execution_drift_units": [],
             "required_units": [],
             "missing_required_units": [],
             "profile_content_changed": False,
             "manual_actions": [],
             "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
         }
+    effective_profile, profile_compatibility_warnings = _effective_profile_with_legacy_feishu_credential(
+        profile,
+        ctx=ctx,
+    )
+    ctx["effective_profile"] = effective_profile
     try:
         bundle = _expected_bundle_from_profile(
-            profile,
+            effective_profile,
             provider=provider,
             repo_root=ctx["repo_root"],
             runtime_root=ctx["runtime_root"],
@@ -228,12 +295,20 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             },
         }
     compatibility_warnings_raw = bundle.get("compatibility_warnings")
-    compatibility_warnings = (
-        [dict(item) for item in compatibility_warnings_raw if isinstance(item, dict)]
-        if isinstance(compatibility_warnings_raw, list)
-        else []
-    )
+    compatibility_warnings = list(profile_compatibility_warnings)
+    if isinstance(compatibility_warnings_raw, list):
+        compatibility_warnings.extend(
+            dict(item)
+            for item in compatibility_warnings_raw
+            if isinstance(item, dict)
+        )
     expected_files = _expected_install_files(bundle, provider=provider)
+    expected_managed_files = _expected_managed_files(bundle, provider=provider)
+    installed_managed_files = _installed_managed_files(
+        provider=provider,
+        expected_files=expected_managed_files,
+        ctx=ctx,
+    )
     expected_services = _service_names_from_profile(_bundle_profile(bundle))
     profile_services = _service_names_from_profile(profile)
     installed_units = _installed_units(provider=provider, expected_files=expected_files, ctx=ctx)
@@ -241,7 +316,19 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     extra_profile_units = sorted(set(profile_services) - set(expected_services))
     missing_installed_units = sorted(set(expected_files) - set(installed_units))
     extra_installed_units = sorted(set(installed_units) - set(expected_files))
+    extra_managed_files = sorted(
+        set(installed_managed_files) - set(expected_managed_files)
+    )
     mismatched_units = _mismatched_units(provider=provider, expected_files=expected_files, ctx=ctx)
+    (
+        missing_managed_files,
+        mismatched_managed_files,
+        mode_mismatched_managed_files,
+    ) = _managed_file_status(
+        provider=provider,
+        expected_files=expected_managed_files,
+        ctx=ctx,
+    )
     activation_states = _activation_states(
         provider=provider,
         expected_files=expected_files,
@@ -254,11 +341,22 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         installed_units=installed_units,
         ctx=ctx,
     )
+    execution_states = _execution_states(
+        provider=provider,
+        expected_files=expected_files,
+        installed_units=installed_units,
+        ctx=ctx,
+    )
     activation_drift_units = sorted(
         name
         for name in set(activation_states) | set(active_states)
         if activation_states.get(name) in {"disabled", "masked"}
         or active_states.get(name) in {"inactive", "failed", "deactivating"}
+    )
+    execution_drift_units = sorted(
+        name
+        for name, state in execution_states.items()
+        if state != "success"
     )
     required_units = _required_units(provider, expected_services)
     missing_required_units = sorted(
@@ -272,7 +370,12 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
+        execution_drift_units=execution_drift_units,
         extra_installed_units=extra_installed_units,
+        extra_managed_files=extra_managed_files,
+        missing_managed_files=missing_managed_files,
+        mismatched_managed_files=mismatched_managed_files,
+        mode_mismatched_managed_files=mode_mismatched_managed_files,
         profile_path=ctx["profile_path"],
     )
     summary = _drift_summary(
@@ -282,8 +385,13 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         extra_profile_units=extra_profile_units,
         extra_installed_units=extra_installed_units,
+        extra_managed_files=extra_managed_files,
         mismatched_units=mismatched_units,
+        missing_managed_files=missing_managed_files,
+        mismatched_managed_files=mismatched_managed_files,
+        mode_mismatched_managed_files=mode_mismatched_managed_files,
         activation_drift_units=activation_drift_units,
+        execution_drift_units=execution_drift_units,
         profile_content_changed=profile_content_changed,
         compatibility_warning_count=len(compatibility_warnings),
     )
@@ -303,9 +411,17 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "extra_profile_units": extra_profile_units,
         "extra_installed_units": extra_installed_units,
         "mismatched_units": mismatched_units,
+        "expected_managed_files": sorted(expected_managed_files),
+        "installed_managed_files": installed_managed_files,
+        "missing_managed_files": missing_managed_files,
+        "extra_managed_files": extra_managed_files,
+        "mismatched_managed_files": mismatched_managed_files,
+        "mode_mismatched_managed_files": mode_mismatched_managed_files,
         "activation_states": activation_states,
         "active_states": active_states,
+        "execution_states": execution_states,
         "activation_drift_units": activation_drift_units,
+        "execution_drift_units": execution_drift_units,
         "required_units": required_units,
         "missing_required_units": missing_required_units,
         "profile_content_changed": profile_content_changed,
@@ -334,6 +450,12 @@ def _expected_bundle_from_profile(
     strategy_lab_recorder = strategy_lab_recorder_raw if isinstance(strategy_lab_recorder_raw, dict) else {}
     quality_monitoring_raw = profile.get("quality_monitoring")
     quality_monitoring = quality_monitoring_raw if isinstance(quality_monitoring_raw, dict) else {}
+    feishu_agent_credential_raw = profile.get("feishu_agent_credential")
+    feishu_agent_credential = (
+        feishu_agent_credential_raw
+        if isinstance(feishu_agent_credential_raw, dict)
+        else {}
+    )
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -368,6 +490,10 @@ def _expected_bundle_from_profile(
     include_quality_monitoring = bool(
         quality_monitoring.get("enabled")
         or any(name.startswith("options-monitor-quality-") for name in services)
+    )
+    include_feishu_agent_credential = bool(
+        feishu_agent_credential.get("enabled")
+        or FEISHU_AGENT_CREDENTIAL_SERVICE in services
     )
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
@@ -417,6 +543,23 @@ def _expected_bundle_from_profile(
         "strategy_lab_recorder_max_datasets": int(strategy_lab_recorder.get("max_datasets") or 5),
         "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
         "include_quality_monitoring": include_quality_monitoring,
+        "include_feishu_agent_credential": include_feishu_agent_credential,
+        "feishu_agent_credential_helper_path": (
+            feishu_agent_credential.get("helper_path")
+            or DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER
+        ),
+        "feishu_agent_credential_store": (
+            feishu_agent_credential.get("agent_store")
+            or DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE
+        ),
+        "feishu_holdings_credential_store": (
+            feishu_agent_credential.get("holdings_store")
+            or DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE
+        ),
+        "feishu_agent_credential_env_file": (
+            feishu_agent_credential.get("runtime_env_file")
+            or DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE
+        ),
         "include_content": True,
     }
     compatibility_warnings: list[dict[str, Any]] = []
@@ -523,6 +666,47 @@ def _expected_install_files(bundle: dict[str, Any], *, provider: str) -> dict[st
     return out
 
 
+def _expected_managed_files(bundle: dict[str, Any], *, provider: str) -> dict[str, dict[str, Any]]:
+    if provider != "systemd":
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for item in bundle.get("files", []):
+        if not isinstance(item, dict) or item.get("kind") not in {
+            "systemd_dropin",
+            "systemd_executable",
+        }:
+            continue
+        install_path = str(item.get("install_path") or "").strip()
+        if install_path:
+            out[install_path] = item
+    return out
+
+
+def _installed_managed_files(
+    *,
+    provider: str,
+    expected_files: dict[str, dict[str, Any]],
+    ctx: dict[str, Any],
+) -> list[str]:
+    if provider != "systemd":
+        return []
+    installed = {
+        key
+        for key, item in expected_files.items()
+        if _install_path(item, provider=provider, ctx=ctx).is_file()
+    }
+    root = Path(ctx["systemd_unit_root"])
+    if root.exists():
+        for path in root.glob(
+            f"options-monitor-*.service.d/{FEISHU_AGENT_CREDENTIAL_DROPIN}"
+        ):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            installed.add(str(Path("/etc/systemd/system") / relative))
+    return sorted(installed)
+
+
 def _service_name_for_file(item: dict[str, Any], *, provider: str) -> str:
     if provider == "systemd":
         return Path(str(item.get("install_path") or item.get("relative_path") or "")).name
@@ -597,8 +781,27 @@ def _installed_units(*, provider: str, expected_files: dict[str, dict[str, Any]]
 def _install_path(item: dict[str, Any], *, provider: str, ctx: dict[str, Any]) -> Path:
     raw = Path(str(item.get("install_path") or "")).expanduser()
     if provider == "systemd":
+        if item.get("kind") == "systemd_executable":
+            return raw
+        if item.get("kind") == "systemd_dropin":
+            live_root = Path("/etc/systemd/system")
+            try:
+                relative = raw.relative_to(live_root)
+            except ValueError:
+                return raw
+            return Path(ctx["systemd_unit_root"]) / relative
         return Path(ctx["systemd_unit_root"]) / raw.name
     return raw
+
+
+def _managed_path_from_key(key: str, *, ctx: dict[str, Any]) -> Path:
+    raw = Path(key).expanduser()
+    live_root = Path("/etc/systemd/system")
+    try:
+        relative = raw.relative_to(live_root)
+    except ValueError:
+        return raw
+    return Path(ctx["systemd_unit_root"]) / relative
 
 
 def _mismatched_units(*, provider: str, expected_files: dict[str, dict[str, Any]], ctx: dict[str, Any]) -> list[str]:
@@ -616,6 +819,39 @@ def _mismatched_units(*, provider: str, expected_files: dict[str, dict[str, Any]
     return sorted(out)
 
 
+def _managed_file_status(
+    *,
+    provider: str,
+    expected_files: dict[str, dict[str, Any]],
+    ctx: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    missing: list[str] = []
+    mismatched: list[str] = []
+    mode_mismatched: list[str] = []
+    for key, item in expected_files.items():
+        path = _install_path(item, provider=provider, ctx=ctx)
+        if not path.exists() or not path.is_file():
+            missing.append(key)
+            continue
+        try:
+            actual = path.read_text(encoding="utf-8")
+        except Exception:
+            mismatched.append(key)
+            continue
+        if actual != str(item.get("content") or ""):
+            mismatched.append(key)
+        expected_mode = item.get("mode")
+        if expected_mode is not None:
+            try:
+                actual_mode = path.stat().st_mode & 0o777
+            except OSError:
+                mode_mismatched.append(key)
+            else:
+                if actual_mode != int(expected_mode):
+                    mode_mismatched.append(key)
+    return sorted(missing), sorted(mismatched), sorted(mode_mismatched)
+
+
 def _activation_states(
     *,
     provider: str,
@@ -628,7 +864,10 @@ def _activation_states(
     installed = set(installed_units)
     states: dict[str, str] = {}
     for name in sorted(expected_files):
-        if not name.endswith(".timer") or name not in installed:
+        if (
+            not name.endswith(".timer")
+            and name != FEISHU_AGENT_CREDENTIAL_SERVICE
+        ) or name not in installed:
             continue
         result = _run_systemctl(ctx, ["is-enabled", name], run_cmd=ctx.get("run_cmd") or subprocess.run)
         stdout = str(result.get("stdout") or "").strip().lower()
@@ -675,6 +914,38 @@ def _active_states(
     return states
 
 
+def _execution_states(
+    *,
+    provider: str,
+    expected_files: dict[str, dict[str, Any]],
+    installed_units: list[str],
+    ctx: dict[str, Any],
+) -> dict[str, str]:
+    if provider != "systemd" or not _live_systemctl_enabled(ctx):
+        return {}
+    installed = set(installed_units)
+    if (
+        FEISHU_AGENT_CREDENTIAL_SERVICE not in expected_files
+        or FEISHU_AGENT_CREDENTIAL_SERVICE not in installed
+    ):
+        return {}
+    result = _run_systemctl(
+        ctx,
+        [
+            "show",
+            "--property=Result",
+            "--value",
+            FEISHU_AGENT_CREDENTIAL_SERVICE,
+        ],
+        run_cmd=ctx.get("run_cmd") or subprocess.run,
+    )
+    if not result.get("ok"):
+        return {FEISHU_AGENT_CREDENTIAL_SERVICE: "query_failed"}
+    state = str(result.get("stdout") or "").strip().lower().splitlines()
+    value = state[0].strip() if state else ""
+    return {FEISHU_AGENT_CREDENTIAL_SERVICE: value or "unknown"}
+
+
 def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) -> bool:
     expected = _bundle_profile(bundle)
     keys = (
@@ -695,6 +966,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "strategy_lab_recorder",
         "quality_monitoring",
         "position_advice_promotion",
+        "feishu_agent_credential",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
@@ -722,8 +994,13 @@ def _drift_summary(
     missing_installed_units: list[str],
     extra_profile_units: list[str],
     extra_installed_units: list[str],
+    extra_managed_files: list[str],
     mismatched_units: list[str],
+    missing_managed_files: list[str],
+    mismatched_managed_files: list[str],
+    mode_mismatched_managed_files: list[str],
     activation_drift_units: list[str],
+    execution_drift_units: list[str],
     profile_content_changed: bool,
     compatibility_warning_count: int = 0,
 ) -> dict[str, Any]:
@@ -734,15 +1011,28 @@ def _drift_summary(
             missing_installed_units,
             extra_profile_units,
             extra_installed_units,
+            extra_managed_files,
             mismatched_units,
+            missing_managed_files,
+            mismatched_managed_files,
+            mode_mismatched_managed_files,
             activation_drift_units,
+            execution_drift_units,
         )
         if values
     )
     if profile_content_changed:
         warning_count += 1
     warning_count += max(0, int(compatibility_warning_count))
-    error_count = int(bool(missing_required_units)) + int(bool(activation_drift_units))
+    error_count = (
+        int(bool(missing_required_units))
+        + int(bool(activation_drift_units))
+        + int(bool(missing_managed_files))
+        + int(bool(mismatched_managed_files))
+        + int(bool(mode_mismatched_managed_files))
+        + int(bool(extra_managed_files))
+        + int(bool(execution_drift_units))
+    )
     status = "error" if error_count else ("warn" if warning_count else "ok")
     return {
         "ok": status == "ok",
@@ -755,8 +1045,18 @@ def _drift_summary(
         "missing_installed_count": len(missing_installed_units),
         "extra_profile_count": len(extra_profile_units),
         "extra_installed_count": len(extra_installed_units),
+        "extra_managed_file_count": len(extra_managed_files),
         "mismatched_count": len(mismatched_units),
+        "managed_file_drift_count": (
+            len(missing_managed_files)
+            + len(mismatched_managed_files)
+            + len(mode_mismatched_managed_files)
+        ),
+        "missing_managed_file_count": len(missing_managed_files),
+        "mismatched_managed_file_count": len(mismatched_managed_files),
+        "mode_mismatched_managed_file_count": len(mode_mismatched_managed_files),
         "activation_drift_count": len(activation_drift_units),
+        "execution_drift_count": len(execution_drift_units),
         "profile_content_changed": bool(profile_content_changed),
     }
 
@@ -776,11 +1076,26 @@ def _manual_actions(
     missing_installed_units: list[str],
     mismatched_units: list[str],
     activation_drift_units: list[str],
+    execution_drift_units: list[str],
     extra_installed_units: list[str],
+    extra_managed_files: list[str],
+    missing_managed_files: list[str],
+    mismatched_managed_files: list[str],
+    mode_mismatched_managed_files: list[str],
     profile_path: Path,
 ) -> list[str]:
     actions: list[str] = []
-    if missing_installed_units or mismatched_units or activation_drift_units or extra_installed_units:
+    if (
+        missing_installed_units
+        or mismatched_units
+        or activation_drift_units
+        or execution_drift_units
+        or extra_installed_units
+        or extra_managed_files
+        or missing_managed_files
+        or mismatched_managed_files
+        or mode_mismatched_managed_files
+    ):
         actions.append(f"./om service drift --profile-path {profile_path} --confirm")
     if provider == "systemd":
         long_running = [
@@ -791,8 +1106,22 @@ def _manual_actions(
         ]
         actions.extend(f"manual_enable_long_running_service: sudo systemctl enable --now {name}" for name in long_running)
         actions.extend(f"manual_review_unit_content: sudo systemctl cat {name}" for name in mismatched_units)
-        actions.extend(f"manual_enable_timer: sudo systemctl enable --now {name}" for name in activation_drift_units)
+        actions.extend(
+            f"manual_enable_timer: sudo systemctl enable --now {name}"
+            for name in activation_drift_units
+            if name.endswith(".timer")
+        )
+        actions.extend(
+            f"manual_enable_service: sudo systemctl enable --now {name}"
+            for name in activation_drift_units
+            if not name.endswith(".timer")
+        )
+        actions.extend(f"manual_restart_failed_oneshot: sudo systemctl start {name}" for name in execution_drift_units)
         actions.extend(f"manual_retire_unit: sudo systemctl disable --now {name}" for name in extra_installed_units)
+        actions.extend(
+            f"manual_retire_managed_file: sudo rm -- {path}"
+            for path in extra_managed_files
+        )
     return actions
 
 
@@ -809,22 +1138,36 @@ def _apply_service_drift(
             "changed": False,
             "errors": [f"confirmed service drift apply is not implemented for provider: {provider}"],
             "written_units": [],
+            "written_managed_files": [],
+            "retired_managed_files": [],
             "enabled_timers": [],
+            "enabled_services": [],
+            "started_services": [],
             "restarted_timers": [],
             "retired_units": [],
             "profile_written": False,
         }
     bundle = _expected_bundle_from_profile(
-        ctx["profile"],
+        ctx.get("effective_profile") or ctx["profile"],
         provider=provider,
         repo_root=ctx["repo_root"],
         runtime_root=ctx["runtime_root"],
     )
     expected_files = _expected_install_files(bundle, provider=provider)
+    expected_managed_files = _expected_managed_files(bundle, provider=provider)
     missing = set(before.get("missing_installed_units") or [])
     mismatched = set(before.get("mismatched_units") or [])
     units_to_write = missing | mismatched
+    missing_managed = set(before.get("missing_managed_files") or [])
+    mismatched_managed = set(before.get("mismatched_managed_files") or [])
+    mode_mismatched_managed = set(before.get("mode_mismatched_managed_files") or [])
+    managed_files_to_write = (
+        missing_managed | mismatched_managed | mode_mismatched_managed
+    )
+    extra_managed = set(before.get("extra_managed_files") or [])
     written_units: list[str] = []
+    written_managed_files: list[str] = []
+    retired_managed_files: list[str] = []
     errors: list[str] = []
     for name in sorted(units_to_write):
         item = expected_files.get(name)
@@ -843,6 +1186,39 @@ def _apply_service_drift(
             continue
         written_units.append(name)
 
+    for key in sorted(managed_files_to_write):
+        item = expected_managed_files.get(key)
+        if not item:
+            continue
+        path = _install_path(item, provider=provider, ctx=ctx)
+        write_result = _write_text_with_sudo_fallback(
+            path,
+            str(item.get("content") or ""),
+            ctx=ctx,
+            run_cmd=run_cmd,
+            mode=(int(item["mode"]) if item.get("mode") is not None else None),
+        )
+        operations.append({**write_result, "managed_file": key})
+        if not write_result.get("ok"):
+            errors.append(
+                f"write {path}: "
+                f"{write_result.get('error') or write_result.get('stderr') or write_result.get('returncode')}"
+            )
+            continue
+        written_managed_files.append(key)
+
+    for key in sorted(extra_managed):
+        path = _managed_path_from_key(key, ctx=ctx)
+        delete_result = _delete_unit_with_sudo_fallback(path, run_cmd=run_cmd)
+        operations.append({**delete_result, "managed_file": key})
+        if not delete_result.get("ok"):
+            errors.append(
+                f"delete {path}: "
+                f"{delete_result.get('error') or delete_result.get('stderr') or delete_result.get('returncode')}"
+            )
+            continue
+        retired_managed_files.append(key)
+
     profile_written = False
     if before.get("profile_content_changed"):
         try:
@@ -856,12 +1232,23 @@ def _apply_service_drift(
             operations.append({"operation": "write_profile", "path": str(ctx["profile_path"]), "ok": True})
 
     enabled_timers: list[str] = []
+    enabled_services: list[str] = []
+    started_services: list[str] = []
     restarted_timers: list[str] = []
     retired_units: list[str] = []
     activation_drift = set(before.get("activation_drift_units") or [])
+    execution_drift = set(before.get("execution_drift_units") or [])
     extra_installed = set(before.get("extra_installed_units") or [])
     live_systemctl = _live_systemctl_enabled(ctx)
-    if written_units and live_systemctl:
+    systemd_definition_changed = bool(
+        written_units
+        or any(
+            expected_managed_files.get(key, {}).get("kind") == "systemd_dropin"
+            for key in written_managed_files
+        )
+        or bool(retired_managed_files)
+    )
+    if systemd_definition_changed and live_systemctl:
         result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
         operations.append(result)
         if not result.get("ok"):
@@ -878,14 +1265,48 @@ def _apply_service_drift(
     for name in sorted(
         item
         for item in missing | activation_drift
-        if live_systemctl and item.endswith(".timer")
+        if live_systemctl
+        and (
+            item.endswith(".timer")
+            or item == FEISHU_AGENT_CREDENTIAL_SERVICE
+        )
     ):
         result = _run_systemctl(ctx, ["enable", "--now", name], run_cmd=run_cmd)
         operations.append(result)
         if result.get("ok"):
-            enabled_timers.append(name)
+            if name.endswith(".timer"):
+                enabled_timers.append(name)
+            else:
+                enabled_services.append(name)
         else:
             errors.append(f"enable {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
+    credential_refresh_needed = bool(
+        FEISHU_AGENT_CREDENTIAL_SERVICE in mismatched
+        or FEISHU_AGENT_CREDENTIAL_SERVICE in execution_drift
+        or any(
+            expected_managed_files.get(key, {}).get("kind") == "systemd_executable"
+            for key in written_managed_files
+        )
+    )
+    if (
+        live_systemctl
+        and credential_refresh_needed
+        and FEISHU_AGENT_CREDENTIAL_SERVICE not in missing
+        and FEISHU_AGENT_CREDENTIAL_SERVICE not in activation_drift
+    ):
+        result = _run_systemctl(
+            ctx,
+            ["start", FEISHU_AGENT_CREDENTIAL_SERVICE],
+            run_cmd=run_cmd,
+        )
+        operations.append(result)
+        if result.get("ok"):
+            started_services.append(FEISHU_AGENT_CREDENTIAL_SERVICE)
+        else:
+            errors.append(
+                f"start {FEISHU_AGENT_CREDENTIAL_SERVICE}: "
+                f"{result.get('stderr') or result.get('stdout') or result.get('returncode')}"
+            )
     for name in sorted(
         item
         for item in mismatched
@@ -923,10 +1344,24 @@ def _apply_service_drift(
             errors.append(f"daemon-reload after retire: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
 
     return {
-        "changed": bool(written_units or profile_written or enabled_timers or restarted_timers or retired_units),
+        "changed": bool(
+            written_units
+            or written_managed_files
+            or retired_managed_files
+            or profile_written
+            or enabled_timers
+            or enabled_services
+            or started_services
+            or restarted_timers
+            or retired_units
+        ),
         "errors": errors,
         "written_units": written_units,
+        "written_managed_files": written_managed_files,
+        "retired_managed_files": retired_managed_files,
         "enabled_timers": enabled_timers,
+        "enabled_services": enabled_services,
+        "started_services": started_services,
         "restarted_timers": restarted_timers,
         "retired_units": retired_units,
         "profile_written": profile_written,
@@ -1025,10 +1460,13 @@ def _write_text_with_sudo_fallback(
     *,
     ctx: dict[str, Any],
     run_cmd: Callable[..., Any],
+    mode: int | None = None,
 ) -> dict[str, Any]:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        if mode is not None:
+            path.chmod(mode)
         return {"operation": "write_unit", "path": str(path), "ok": True, "sudo_fallback": False}
     except Exception as exc:
         first_error = f"{type(exc).__name__}: {exc}"
@@ -1054,6 +1492,18 @@ def _write_text_with_sudo_fallback(
                 "stderr": str(getattr(mkdir_proc, "stderr", "") or "")[-2000:],
             }
         write_proc = run_cmd(write_command, input=content, capture_output=True, text=True, timeout=60, check=False)
+        write_rc = int(getattr(write_proc, "returncode", 1))
+        chmod_proc = None
+        chmod_command = None
+        if write_rc == 0 and mode is not None:
+            chmod_command = ["sudo", "-n", "chmod", f"{mode:04o}", str(path)]
+            chmod_proc = run_cmd(
+                chmod_command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
     except Exception as exc:
         return {
             "operation": "write_unit",
@@ -1063,17 +1513,30 @@ def _write_text_with_sudo_fallback(
             "sudo_fallback": True,
             "sudo_command": write_command,
         }
-    write_rc = int(getattr(write_proc, "returncode", 1))
+    chmod_rc = int(getattr(chmod_proc, "returncode", 0)) if chmod_proc is not None else 0
+    ok = write_rc == 0 and chmod_rc == 0
+    if ok:
+        error = None
+    elif write_rc != 0:
+        error = first_error
+    else:
+        error = f"chmod failed: {path}"
     return {
         "operation": "write_unit",
         "path": str(path),
-        "ok": write_rc == 0,
-        "error": None if write_rc == 0 else first_error,
+        "ok": ok,
+        "error": error,
         "sudo_fallback": True,
-        "sudo_command": write_command,
-        "returncode": write_rc,
-        "stdout": str(getattr(write_proc, "stdout", "") or "")[-2000:],
-        "stderr": str(getattr(write_proc, "stderr", "") or "")[-2000:],
+        "sudo_command": chmod_command or write_command,
+        "returncode": chmod_rc if write_rc == 0 else write_rc,
+        "stdout": str(
+            getattr(chmod_proc if chmod_proc is not None else write_proc, "stdout", "")
+            or ""
+        )[-2000:],
+        "stderr": str(
+            getattr(chmod_proc if chmod_proc is not None else write_proc, "stderr", "")
+            or ""
+        )[-2000:],
     }
 
 
