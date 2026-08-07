@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.15",
+  "base": {
+    "tag": "v1.10.14",
+    "commit": "6ecb643ae1cef1dce92aaf04ee2cce8b05d97385"
+  },
+  "reviewed_head": "5f70e24d742c8250b2d23e6122b74eb7478d1902",
+  "commits": [
+    {
+      "sha": "5f70e24d742c8250b2d23e6122b74eb7478d1902",
+      "subject": "fix: replace update_time-based opening quote freshness with acquisition receipts"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Replaced update_time-based opening quote freshness with OM-recorded snapshot acquisition receipts and a decision-time 300s re-check, so illiquid HK option contracts whose update_time only reflects the last trade or order-book change are no longer fail-closed as stale; rejects now distinguish contract ineligibility, unavailable evidence, and policy rejection, and partial evidence degrades strategy scans to an explicit partial_data status that surfaces in the Daily Brief instead of silently dropping candidates.",
+      "commits": [
+        "5f70e24d742c8250b2d23e6122b74eb7478d1902"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
