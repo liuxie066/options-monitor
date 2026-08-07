@@ -105,3 +105,36 @@ def test_sell_put_scan_emits_calculation_reject_without_csv_authority() -> None:
         assert decision["rejects"][0]["metric_value"]["reason_code"] == (
             "option_multiplier_conflict"
         )
+
+
+def test_zero_bid_only_scope_projects_no_candidate_not_partial_data() -> None:
+    from src.application.candidate_scanning import evidence_summary_from_decisions
+    from src.application.sell_put_steps import _evidence_scan_status
+
+    decisions = [
+        {
+            "opening_decision": {
+                "accepted": False,
+                "rejects": [
+                    {
+                        "reason": "contract_ineligible",
+                        "metric_value": {
+                            "reason_codes": ["option_no_current_bid"],
+                            "status": "ineligible",
+                        },
+                    }
+                ],
+            }
+        }
+    ]
+    evidence = evidence_summary_from_decisions(
+        decisions=decisions,
+        accepted_count=0,
+    )
+
+    assert evidence["evidence_unavailable_count"] == 0
+    assert evidence["contract_ineligible_count"] == 1
+    assert _evidence_scan_status(
+        evidence=evidence,
+        candidate_count=0,
+    ) == ("completed", "no_candidate")

@@ -401,8 +401,17 @@ def normalize_option_observation(
             unavailable.append("option_multiplier_conflict")
         if price_tick is None or price_tick <= 0:
             unavailable.append("option_price_tick_missing_or_invalid")
-        if bid is None or bid <= 0:
+        if bid is None:
             unavailable.append("option_bid_missing_or_invalid")
+        elif bid < 0:
+            unavailable.append("option_bid_missing_or_invalid")
+        elif bid == 0:
+            # OpenD explicitly returning zero bid means the market currently
+            # has no executable buy side. With all other identity/quote/state
+            # evidence complete this is a valid ineligible state, not a
+            # missing-evidence failure. Missing, non-finite, or negative bid
+            # values still fail closed as data_unavailable.
+            ineligible.append("option_no_current_bid")
         if ask is None or ask <= 0 or (bid is not None and ask < bid):
             unavailable.append("option_ask_missing_or_invalid")
         if snapshot_received is None:
