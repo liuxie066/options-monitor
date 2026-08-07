@@ -37,6 +37,7 @@ STRATEGY_STATUSES = frozenset(
         "candidates_found",
         "no_candidate",
         "data_unavailable",
+        "partial_data",
         "not_applicable",
     }
 )
@@ -714,10 +715,29 @@ def _strategy_results(
         scoped = [item for item in statuses if item["strategy_mode"] == mode]
         counts = sum(1 for item in ranked if item["strategy_mode"] == mode)
         values = {str(item["status"]) for item in scoped}
+        reasons = {
+            str(item.get("reason") or "")
+            for item in scoped
+            if str(item.get("reason") or "")
+        }
         if values == {"not_applicable"}:
             status = "not_applicable"
-        elif values <= {"completed", "not_applicable"}:
+        elif values <= {"completed", "not_applicable"} and reasons <= {
+            "no_candidate",
+            "market_closed",
+            "no_expirations",
+            "no_contract_rows",
+            "",
+        }:
             status = "candidates_found" if counts else "no_candidate"
+        elif values <= {"completed", "not_applicable"} and reasons == {
+            "partial_data"
+        }:
+            status = "partial_data" if not counts else "candidates_found"
+        elif values <= {"completed", "not_applicable"}:
+            # Completed scopes that carry an evidence-availability reason other
+            # than a clean no-candidate must not collapse into a silent empty.
+            status = "candidates_found" if counts else "data_unavailable"
         else:
             status = "data_unavailable"
         out.append(
@@ -759,6 +779,8 @@ def _opening_status(
     }:
         return "partial_data"
     statuses = {str(item["strategy_status"]) for item in results}
+    if "partial_data" in statuses:
+        return "partial_data"
     if statuses & {"candidates_found", "no_candidate"} and "data_unavailable" in statuses:
         return "partial_data"
     if statuses <= {"data_unavailable", "not_applicable"}:

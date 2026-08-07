@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -70,6 +70,8 @@ class MarketSnapshotFetchResult:
     fallback_filled: int = 0
     fallback_failed: int = 0
     opend_call_count: int = 0
+    requested_at_utc: str | None = None
+    received_at_utc: str | None = None
 
     @property
     def requested_codes_count(self) -> int:
@@ -369,6 +371,8 @@ def fetch_option_snapshots(
 ) -> MarketSnapshotFetchResult:
     snap_map: dict[str, dict[str, Any]] = {}
     snapshot_errors: list[dict[str, Any]] = []
+    batch_requested_at: list[datetime] = []
+    batch_received_at: list[datetime] = []
     requested_code_order = tuple(dict.fromkeys(
         code
         for raw_code in option_codes
@@ -384,6 +388,7 @@ def fetch_option_snapshots(
 
     for start in range(0, len(requested_code_order), batch_size):
         batch = list(requested_code_order[start : start + batch_size])
+        batch_requested_at.append(datetime.now(timezone.utc))
         try:
             def _call_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_snapshot_call() -> Any:
@@ -419,6 +424,7 @@ def fetch_option_snapshots(
                 }
             )
             snap = None
+        batch_received_at.append(datetime.now(timezone.utc))
         if snap is None or snap.empty:
             continue
 
@@ -439,7 +445,13 @@ def fetch_option_snapshots(
     if requested_code_order and int(snapshot_fallback_max_codes) > 0:
         missing = [code for code in requested_code_order if code not in snap_map]
         if missing:
-            fallback_filled, fallback_failed, fallback_opend_calls = _fallback_fetch_missing_snapshots(
+            (
+                fallback_filled,
+                fallback_failed,
+                fallback_opend_calls,
+                fallback_requested_at,
+                fallback_received_at,
+            ) = _fallback_fetch_missing_snapshots(
                 missing_codes=missing,
                 gateway=gateway,
                 snapshot_limit=snapshot_limit,
@@ -461,6 +473,8 @@ def fetch_option_snapshots(
                 duplicate_codes=duplicate_codes,
             )
             opend_call_count += fallback_opend_calls
+            batch_requested_at.extend(fallback_requested_at)
+            batch_received_at.extend(fallback_received_at)
 
     returned_code_set = frozenset(returned_codes)
     missing_codes = frozenset(requested_codes.difference(snap_map))
@@ -507,6 +521,12 @@ def fetch_option_snapshots(
         fallback_filled=fallback_filled,
         fallback_failed=fallback_failed,
         opend_call_count=opend_call_count,
+        requested_at_utc=(
+            min(batch_requested_at).isoformat() if batch_requested_at else None
+        ),
+        received_at_utc=(
+            max(batch_received_at).isoformat() if batch_received_at else None
+        ),
     )
 
 
@@ -575,11 +595,13 @@ def _fallback_fetch_missing_snapshots(
     requested_codes: frozenset[str],
     returned_codes: set[str],
     duplicate_codes: set[str],
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, list[datetime], list[datetime]]:
     if not missing_codes or int(max_fallback_codes) <= 0:
-        return 0, 0, 0
+        return 0, 0, 0, [], []
 
     allowed = list(missing_codes[: int(max_fallback_codes)])
+    fallback_requested_at: list[datetime] = []
+    fallback_received_at: list[datetime] = []
     dropped = max(0, len(missing_codes) - len(allowed))
     failed_count = 0
     opend_call_count = 0
@@ -599,6 +621,7 @@ def _fallback_fetch_missing_snapshots(
     batch_size = max(1, int(fallback_batch_size))
     for start in range(0, len(allowed), batch_size):
         batch = allowed[start : start + batch_size]
+        fallback_requested_at.append(datetime.now(timezone.utc))
         try:
             def _call_fallback_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_fallback_snapshot_call() -> Any:
@@ -634,6 +657,7 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
+            fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
         if snap is None or snap.empty:
@@ -647,6 +671,7 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
+            fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
         records, keep = keep_snapshot_record_columns(snap, keep_columns)
@@ -661,7 +686,9 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
+            fallback_received_at.append(datetime.now(timezone.utc))
             continue
+        fallback_received_at.append(datetime.now(timezone.utc))
 
         batch_codes = set(batch)
         filled_before = len(batch_codes.intersection(snap_map))
@@ -676,7 +703,13 @@ def _fallback_fetch_missing_snapshots(
         filled_count += max(0, filled_after - filled_before)
         failed_count += max(0, len(batch_codes) - filled_after)
 
-    return filled_count, failed_count, opend_call_count
+    return (
+        filled_count,
+        failed_count,
+        opend_call_count,
+        fallback_requested_at,
+        fallback_received_at,
+    )
 
 
 def _append_opend_observation_error(

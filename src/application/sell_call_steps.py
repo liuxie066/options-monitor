@@ -25,6 +25,7 @@ from src.application.covered_call_strategy_risk import (
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
+from src.application.candidate_scanning import evidence_summary_from_decisions
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
 )
@@ -240,7 +241,35 @@ def run_sell_call_scan_and_summarize(
     if candidate_decisions_sink_fn is not None:
         candidate_decisions_sink_fn("call", candidate_decisions)
 
-    return summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
+    summary = summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
+    evidence = evidence_summary_from_decisions(
+        decisions=candidate_decisions,
+        accepted_count=len(df_cc),
+    )
+    summary["_evidence_summary"] = evidence
+    status, reason = _evidence_scan_status(
+        evidence=evidence,
+        candidate_count=len(df_cc),
+    )
+    summary["_strategy_status"] = status
+    summary["_strategy_reason"] = reason
+    return summary
+
+
+def _evidence_scan_status(
+    *,
+    evidence: dict[str, Any],
+    candidate_count: int,
+) -> tuple[str, str | None]:
+    if candidate_count > 0:
+        return "completed", None
+    unavailable = int(evidence.get("evidence_unavailable_count") or 0)
+    if unavailable == 0:
+        return "completed", "no_candidate"
+    evaluated = int(evidence.get("evaluated_contract_count") or 0)
+    if evaluated > 0 and unavailable < evaluated:
+        return "completed", "partial_data"
+    return "unavailable", "data_unavailable"
 
 
 def empty_sell_call_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

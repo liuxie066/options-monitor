@@ -70,7 +70,9 @@ def quote_rows_from_source_payloads(
     rows: list[dict[str, Any]] = []
     for raw in payloads:
         payload = dict(raw or {})
-        if payload.get("schema_version") == "required_data_quote_snapshot.v1":
+        if str(payload.get("schema_version") or "").startswith(
+            "required_data_quote_snapshot."
+        ):
             encoded = str(payload.get("raw_json_base64") or "")
             try:
                 decoded = base64.b64decode(encoded, validate=True)

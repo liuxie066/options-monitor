@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
@@ -35,6 +36,9 @@ CANDIDATE_STAGE_ORDER: tuple[str, ...] = (
 
 REJECT_INPUT_MISSING = "input_missing"
 REJECT_INPUT_INVALID = "input_invalid"
+REJECT_CONTRACT_INELIGIBLE = "contract_ineligible"
+REJECT_EVIDENCE_UNAVAILABLE = "evidence_unavailable"
+REJECT_POLICY_REJECTED = "policy_rejected"
 REJECT_HARD_DTE = "hard_dte"
 REJECT_HARD_STRIKE = "hard_strike"
 REJECT_HARD_CAPACITY_PUT = "hard_capacity_put"
@@ -56,6 +60,9 @@ REJECT_RISK_INSURANCE_UNDERWRITING = "risk_insurance_underwriting"
 CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_INPUT_MISSING,
     REJECT_INPUT_INVALID,
+    REJECT_CONTRACT_INELIGIBLE,
+    REJECT_EVIDENCE_UNAVAILABLE,
+    REJECT_POLICY_REJECTED,
     REJECT_HARD_DTE,
     REJECT_HARD_STRIKE,
     REJECT_HARD_CAPACITY_PUT,
@@ -111,6 +118,53 @@ class CandidateCalculationError(ValueError):
             "metric_value": self.metric_value,
             "threshold": self.threshold,
         }
+
+
+def _opening_not_ready_reason(status: str, reason_codes: set[str]) -> str:
+    """Classify a non-ready opening contract into the three reject families.
+
+    ``ineligible`` means the contract identity or state is provably not
+    applicable; ``data_unavailable`` means required evidence cannot be proven;
+    anything else (including market-closed observations) is treated as
+    evidence-unavailable rather than a policy rejection.
+    """
+
+    if status == "ineligible":
+        return REJECT_CONTRACT_INELIGIBLE
+    if status == "data_unavailable":
+        return REJECT_EVIDENCE_UNAVAILABLE
+    if status == "market_closed":
+        return REJECT_EVIDENCE_UNAVAILABLE
+    return REJECT_EVIDENCE_UNAVAILABLE if reason_codes else REJECT_CONTRACT_INELIGIBLE
+
+
+def _parse_decision_time(value: Any) -> datetime | None:
+    """Parse a UTC receipt timestamp recorded by OM.
+
+    Decision-time freshness evidence must carry an explicit timezone; naive
+    values are rejected rather than guessed against a market clock.
+    """
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _decision_now(value: Any) -> datetime:
+    parsed = _parse_decision_time(value) if value is not None else None
+    if parsed is not None:
+        return parsed
+    return datetime.now(timezone.utc)
 
 
 def normalize_strategy_mode(mode: Any) -> StrategyMode:
@@ -204,6 +258,8 @@ def calculate_opening_candidate_metrics(
     mode: StrategyMode | str,
     avg_cost: float | None = None,
     cny_per_currency_unit: float | None = None,
+    now_utc: Any = None,
+    max_snapshot_age_seconds: int = 300,
 ) -> dict[str, Any]:
     """Calculate the sole formal opening price, fee and return contract.
 
@@ -223,12 +279,18 @@ def calculate_opening_candidate_metrics(
         )
     opening_status = str(raw.get("opening_contract_status") or "").strip().lower()
     if opening_status != "ready":
+        reason_codes = raw.get("opening_contract_reason_codes")
+        code_set = (
+            {str(item) for item in reason_codes if item}
+            if isinstance(reason_codes, (list, tuple, set))
+            else set()
+        )
         raise CandidateCalculationError(
-            "opening_contract_not_ready",
+            _opening_not_ready_reason(opening_status, code_set),
             "normalized OpenD opening contract is not ready",
             metric_value={
                 "status": opening_status or None,
-                "reason_codes": raw.get("opening_contract_reason_codes"),
+                "reason_codes": reason_codes,
             },
             threshold="ready",
         )
@@ -242,6 +304,34 @@ def calculate_opening_candidate_metrics(
                 "reason_code": raw.get("underlier_observation_reason_code"),
             },
             threshold="ready",
+        )
+
+    # The 300-second acquisition-freshness window is owned by the decision
+    # moment, not the fetch moment: re-evaluate it here against the real
+    # decision clock instead of trusting the fetch-time ``ready`` snapshot.
+    snapshot_received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
+    if snapshot_received is None:
+        raise CandidateCalculationError(
+            "evidence_unavailable",
+            "OpenD option snapshot receipt timestamp is missing or invalid",
+            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
+            threshold="present UTC receipt",
+        )
+    decision_now = _decision_now(now_utc)
+    snapshot_age = (decision_now - snapshot_received).total_seconds()
+    if snapshot_age < 0:
+        raise CandidateCalculationError(
+            "evidence_unavailable",
+            "OpenD option snapshot receipt is in the future",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=">= 0",
+        )
+    if snapshot_age > int(max_snapshot_age_seconds):
+        raise CandidateCalculationError(
+            "evidence_unavailable",
+            "OpenD option snapshot is stale relative to the decision moment",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=int(max_snapshot_age_seconds),
         )
 
     option_type = str(raw.get("option_type") or "").strip().lower()

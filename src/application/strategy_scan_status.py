@@ -13,6 +13,7 @@ from src.infrastructure.io_utils import atomic_write_json
 STRATEGY_SCAN_STATUS_SCHEMA = "strategy_scan_status.v1"
 STRATEGY_SCAN_STATUS_INDEX_SCHEMA = "strategy_scan_status_index.v1"
 _TERMINAL = frozenset({"completed", "unavailable", "failed", "not_applicable"})
+_COMPLETED_REASONS = frozenset({"no_candidate", "partial_data", "market_closed"})
 
 
 class StrategyScanStatusError(RuntimeError):
@@ -120,6 +121,9 @@ def publish_strategy_scan_status(
     }
     if status_norm == "completed":
         payload["candidate_count"] = max(0, int(candidate_count or 0))
+        reason_norm = str(reason or "").strip()
+        if reason_norm in _COMPLETED_REASONS:
+            payload["reason"] = reason_norm
     else:
         payload["reason"] = str(reason).strip()
     if str(snapshot_id or "").strip():

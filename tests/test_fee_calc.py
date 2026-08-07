@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -40,6 +41,7 @@ def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignor
         "snapshot_multiplier": 100,
         "multiplier": 100,
         "opening_contract_status": "ready",
+        "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     row.update(overrides)
     return row
@@ -234,6 +236,7 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
             strike=90.0,
             spot=100.0,
             dte=14,
+            snapshot_received_at_utc="2026-04-01T14:59:00Z",
         )
     )
 

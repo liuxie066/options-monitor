@@ -10,7 +10,11 @@ from domain.domain.engine import (
     STAGE_INPUT_NORMALIZATION,
     build_candidate_decision,
 )
-from domain.domain.engine.candidate_engine import REJECT_INPUT_INVALID
+from domain.domain.engine.candidate_engine import (
+    REJECT_CONTRACT_INELIGIBLE,
+    REJECT_EVIDENCE_UNAVAILABLE,
+    REJECT_INPUT_INVALID,
+)
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 
@@ -137,6 +141,13 @@ def _calculation_decision_record(
         detail.get("rule") or "candidate_metrics_unavailable"
     )
     normalized_input = contract.to_gate_payload()
+    opening_status = str(
+        normalized_input.get("opening_contract_status") or ""
+    ).strip().lower()
+    if opening_status and opening_status != "ready":
+        reject_reason = specific_reason
+    else:
+        reject_reason = REJECT_INPUT_INVALID
     opening_decision = build_candidate_decision(
         mode=config.mode,
         symbol=contract.symbol,
@@ -145,7 +156,7 @@ def _calculation_decision_record(
         rejects=[
             {
                 "stage": STAGE_INPUT_NORMALIZATION,
-                "reason": REJECT_INPUT_INVALID,
+                "reason": reject_reason,
                 "message": str(
                     detail.get("message") or "candidate metrics unavailable"
                 ),
@@ -252,3 +263,72 @@ def run_candidate_scan(
     if calculation_decision_sink_fn is not None:
         calculation_decision_sink_fn(calculation_decisions)
     return out
+
+
+def evidence_summary_from_decisions(
+    *,
+    decisions: list[dict[str, Any]],
+    accepted_count: int,
+) -> dict[str, Any]:
+    """Aggregate per-contract opening evidence into scope-level counters.
+
+    Counters let the orchestration layer distinguish a genuine no-candidate
+    outcome from evidence that could not even be evaluated, instead of
+    projecting both as a normal zero-candidate scan.
+
+    Accepts the raw decision payloads captured by the decision sink (each has
+    an ``opening_decision`` mapping), so callers can compute the summary even
+    after pandas operations drop DataFrame attrs.
+    """
+
+    ineligible = 0
+    evidence_unavailable = 0
+    policy_rejected = 0
+    unavailable_by_reason: dict[str, int] = {}
+    for record in decisions:
+        if not isinstance(record, dict):
+            continue
+        decision = (
+            record.get("opening_decision")
+            if isinstance(record.get("opening_decision"), dict)
+            else record
+        )
+        rejects = (decision or {}).get("rejects") or []
+        reasons = [
+            str(item.get("reason") or "")
+            for item in rejects
+            if isinstance(item, dict)
+        ]
+        if bool((decision or {}).get("accepted")):
+            continue
+        if REJECT_EVIDENCE_UNAVAILABLE in reasons:
+            evidence_unavailable += 1
+            metric_values = [
+                item.get("metric_value")
+                for item in rejects
+                if isinstance(item, dict)
+                and str(item.get("reason") or "") == REJECT_EVIDENCE_UNAVAILABLE
+            ]
+            for value in metric_values:
+                code = None
+                if isinstance(value, dict):
+                    raw_codes = value.get("reason_codes")
+                    if isinstance(raw_codes, (list, tuple)) and raw_codes:
+                        code = str(raw_codes[0])
+                    elif value.get("reason_code"):
+                        code = str(value.get("reason_code"))
+                key = code or "evidence_unavailable"
+                unavailable_by_reason[key] = unavailable_by_reason.get(key, 0) + 1
+        elif REJECT_CONTRACT_INELIGIBLE in reasons:
+            ineligible += 1
+        else:
+            policy_rejected += 1
+    evaluated = len(decisions) + accepted_count
+    return {
+        "evaluated_contract_count": evaluated,
+        "accepted_count": accepted_count,
+        "contract_ineligible_count": ineligible,
+        "policy_rejected_count": policy_rejected,
+        "evidence_unavailable_count": evidence_unavailable,
+        "unavailable_by_reason": unavailable_by_reason,
+    }
