@@ -1,0 +1,42 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.16",
+  "base": {
+    "tag": "v1.10.15",
+    "commit": "a00a5d505e225a5c17cd53fa0d0de2c4c20c23a1"
+  },
+  "reviewed_head": "f80db7b745132e135d7195558cd141ad17840e72",
+  "commits": [
+    {
+      "sha": "dcd5b231b0a6bde0dce2933fea307abd7acdb393",
+      "subject": "fix: classify OpenD zero bid as ineligible opening state"
+    },
+    {
+      "sha": "2684c1a6a74259b9723ca7ba3121e124ab838954",
+      "subject": "Merge branch 'fix/opening-zero-bid-ineligible' into main"
+    },
+    {
+      "sha": "f80db7b745132e135d7195558cd141ad17840e72",
+      "subject": "chore: refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Classified OpenD zero-bid option snapshots as an ineligible market state when contract identity, quote, and state evidence are complete, so no-current-bid contracts no longer degrade opening scans to partial_data; missing or negative bid values still fail closed as data_unavailable.",
+      "commits": [
+        "dcd5b231b0a6bde0dce2933fea307abd7acdb393"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "2684c1a6a74259b9723ca7ba3121e124ab838954",
+      "reason": "Merge commit that brings the release feature branch into main; no user-facing change beyond the covered fix commit."
+    },
+    {
+      "commit": "f80db7b745132e135d7195558cd141ad17840e72",
+      "reason": "Generated dependency graph refresh required by release preflight; test import counts only."
+    }
+  ]
+}
