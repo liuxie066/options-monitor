@@ -30,6 +30,7 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None
                     "ask": 2.1,
                     "mid": 2.0,
                     "quote_update_time": "2026-04-17 10:00:00",
+                    "snapshot_received_at_utc": "2026-04-17T02:00:00Z",
                     "open_interest": 0,
                     "volume": 0,
                     "implied_volatility": 0.2,
@@ -93,6 +94,7 @@ def test_sell_put_scan_emits_calculation_reject_without_csv_authority() -> None:
             min_annualized_net_return=0,
             quiet=True,
             calculation_decision_sink_fn=captured.extend,
+            quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         )
 
         assert out.empty

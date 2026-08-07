@@ -412,7 +412,28 @@ def run_symbol_monitoring(
             }
         return {"source_outcome": None, "reason_code": None}
 
-    def _completed_scan_status(candidate_count: int) -> tuple[str, str | None]:
+    def _completed_scan_status(
+        candidate_count: int,
+        strategy_result: object = None,
+    ) -> tuple[str, str | None]:
+        # Prefer the evidence-driven projection attached by the strategy step
+        # over the legacy count-only inference.
+        rows = (
+            strategy_result
+            if isinstance(strategy_result, list)
+            else [strategy_result]
+        )
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("_strategy_status") or "").strip()
+            reason = item.get("_strategy_reason")
+            if status == "unavailable":
+                return "unavailable", (
+                    str(reason) if reason else "data_unavailable"
+                )
+            if status == "completed" and reason in {"partial_data", "no_candidate"}:
+                return "completed", str(reason)
         if candidate_count == 0 and quote_reason_code == "market_closed":
             return "unavailable", "market_closed"
         return "completed", None
@@ -479,7 +500,10 @@ def run_symbol_monitoring(
                 put_result,
             )
             put_candidate_count = _summary_candidate_count(put_result)
-            put_status, put_reason = _completed_scan_status(put_candidate_count)
+            put_status, put_reason = _completed_scan_status(
+                put_candidate_count,
+                strategy_result=put_result,
+            )
             _publish_status(
                 family="sell_put",
                 status=put_status,
@@ -624,7 +648,8 @@ def run_symbol_monitoring(
             call_candidate_count = _summary_candidate_count(call_result)
             if call_status == "completed":
                 call_status, closed_reason = _completed_scan_status(
-                    call_candidate_count
+                    call_candidate_count,
+                    strategy_result=call_result,
                 )
                 if closed_reason is not None:
                     call_reason = closed_reason

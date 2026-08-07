@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pandas as pd
 
 from conftest import phase2_opening_row
+
+_SCAN_NOW = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
 
 
 def _add_repo_to_syspath() -> Path:
@@ -173,6 +176,7 @@ def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() ->
             min_net_income=100,
             min_open_interest=10,
             quiet=True,
+            quote_freshness_now_utc=_SCAN_NOW,
         )
 
         assert list(out["contract_symbol"]) == ["A", "B", "C", "D", "F", "E"]
@@ -223,6 +227,7 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
         min_open_interest=1,
         min_volume=1,
         quiet=True,
+        quote_freshness_now_utc=_SCAN_NOW,
     )
 
     assert list(out["contract_symbol"]) == ["SMALL_CALL"]
@@ -312,6 +317,7 @@ def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy() -> None:
             min_net_income=100,
             min_open_interest=10,
             quiet=True,
+            quote_freshness_now_utc=_SCAN_NOW,
         )
 
         assert list(out["contract_symbol"]) == [

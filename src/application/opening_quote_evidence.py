@@ -10,7 +10,7 @@ from src.application.opend_normalize import normalize_iv
 
 
 OPENING_UNDERLIER_OBSERVATION_SCHEMA = "opening_underlier_observation.v1"
-OPENING_OPTION_OBSERVATION_SCHEMA = "opening_option_observation.v1"
+OPENING_OPTION_OBSERVATION_SCHEMA = "opening_option_observation.v2"
 OPENING_QUOTE_MAX_AGE_SECONDS = 300
 
 _MARKET_TIMEZONES = {
@@ -95,6 +95,28 @@ def _parse_opend_time(value: Any, *, market: str) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone_value)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_receipt_time(value: Any) -> datetime | None:
+    """Parse an OM-recorded UTC receipt timestamp.
+
+    Receipt timestamps are recorded by OM itself in UTC ISO form, so they must
+    carry an explicit timezone; naive values are rejected rather than guessed.
+    """
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = _text(value)
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return None
     return parsed.astimezone(timezone.utc)
 
 
@@ -218,9 +240,13 @@ class OpeningOptionObservation:
     bid: float | None
     ask: float | None
     last_price: float | None
-    quote_update_time: str | None
-    quote_observed_at_utc: str | None
-    quote_age_seconds: float | None
+    last_price_update_time: str | None
+    last_price_observed_at_utc: str | None
+    last_price_age_seconds: float | None
+    last_price_activity_status: str
+    snapshot_requested_at_utc: str | None
+    snapshot_received_at_utc: str | None
+    snapshot_age_seconds: float | None
     price_tick: float | None
     implied_volatility: float | None
     delta: float | None
@@ -250,6 +276,8 @@ def normalize_option_observation(
     chain_row: Mapping[str, Any],
     snapshot_row: Mapping[str, Any] | None,
     underlier_observation: OpeningUnderlierObservation,
+    snapshot_requested_at_utc: Any = None,
+    snapshot_received_at_utc: Any = None,
     now_utc: datetime | None = None,
     max_age_seconds: int = OPENING_QUOTE_MAX_AGE_SECONDS,
 ) -> OpeningOptionObservation:
@@ -274,10 +302,33 @@ def normalize_option_observation(
     ask = _finite_float(snapshot.get("ask_price", snapshot.get("ask")))
     last_price = _finite_float(snapshot.get("last_price"))
     raw_update_time = _text(snapshot.get("update_time")) or None
-    observed = _parse_opend_time(raw_update_time, market=_enum(market))
-    age_seconds = (
-        (_utc_now(now_utc) - observed).total_seconds()
-        if observed is not None
+    decision_at = _utc_now(now_utc)
+    last_price_observed = _parse_opend_time(raw_update_time, market=_enum(market))
+    last_price_age_seconds = (
+        (decision_at - last_price_observed).total_seconds()
+        if last_price_observed is not None
+        else None
+    )
+
+    # Latest-price activity is diagnostic only; it never gates candidate
+    # readiness. OpenD ``update_time`` is the latest-price update time and does
+    # not prove when bid/ask last changed.
+    if last_price_observed is None:
+        last_price_activity_status = "unknown"
+    elif last_price_age_seconds is not None and last_price_age_seconds < 0:
+        last_price_activity_status = "anomalous"
+    elif last_price_age_seconds is not None and last_price_age_seconds <= int(
+        max_age_seconds
+    ):
+        last_price_activity_status = "recent"
+    else:
+        last_price_activity_status = "quiet"
+
+    snapshot_requested = _parse_receipt_time(snapshot_requested_at_utc)
+    snapshot_received = _parse_receipt_time(snapshot_received_at_utc)
+    snapshot_age_seconds = (
+        (decision_at - snapshot_received).total_seconds()
+        if snapshot_received is not None
         else None
     )
     price_tick = _finite_float(snapshot.get("price_spread"))
@@ -354,12 +405,15 @@ def normalize_option_observation(
             unavailable.append("option_bid_missing_or_invalid")
         if ask is None or ask <= 0 or (bid is not None and ask < bid):
             unavailable.append("option_ask_missing_or_invalid")
-        if observed is None or age_seconds is None:
-            unavailable.append("option_quote_time_missing_or_invalid")
-        elif age_seconds < 0:
-            unavailable.append("option_quote_time_in_future")
-        elif age_seconds > int(max_age_seconds):
-            unavailable.append("option_quote_stale")
+        if snapshot_received is None:
+            unavailable.append("option_snapshot_receipt_missing")
+        elif snapshot_age_seconds is not None and snapshot_age_seconds < 0:
+            unavailable.append("option_snapshot_receipt_in_future")
+        elif (
+            snapshot_age_seconds is not None
+            and snapshot_age_seconds > int(max_age_seconds)
+        ):
+            unavailable.append("option_snapshot_stale")
         if unavailable:
             status = "data_unavailable"
             reason_codes = tuple(dict.fromkeys(unavailable + ineligible))
@@ -378,9 +432,25 @@ def normalize_option_observation(
         bid=bid,
         ask=ask,
         last_price=last_price,
-        quote_update_time=raw_update_time,
-        quote_observed_at_utc=(observed.isoformat() if observed is not None else None),
-        quote_age_seconds=(round(age_seconds, 3) if age_seconds is not None else None),
+        last_price_update_time=raw_update_time,
+        last_price_observed_at_utc=(
+            last_price_observed.isoformat() if last_price_observed is not None else None
+        ),
+        last_price_age_seconds=(
+            round(last_price_age_seconds, 3)
+            if last_price_age_seconds is not None
+            else None
+        ),
+        last_price_activity_status=last_price_activity_status,
+        snapshot_requested_at_utc=(
+            snapshot_requested.isoformat() if snapshot_requested is not None else None
+        ),
+        snapshot_received_at_utc=(
+            snapshot_received.isoformat() if snapshot_received is not None else None
+        ),
+        snapshot_age_seconds=(
+            round(snapshot_age_seconds, 3) if snapshot_age_seconds is not None else None
+        ),
         price_tick=price_tick,
         implied_volatility=implied_volatility,
         delta=delta,

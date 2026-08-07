@@ -286,7 +286,7 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
     assert rows[0]["dte"] == 11
     assert rows[0]["realized_volatility_estimate"] == 0.212
     assert rows[0]["market"] == "US"
-    assert rows[0]["quote_update_time"] == "2026-07-27 15:59:00"
+    assert rows[0]["last_price_update_time"] == "2026-07-27 15:59:00"
     from src.application.opend_symbol_outputs import save_outputs
 
     _raw_path, csv_path = save_outputs(
@@ -300,7 +300,7 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
 
     persisted = pd.read_csv(csv_path).iloc[0]
     assert persisted["market"] == "US"
-    assert persisted["quote_update_time"] == "2026-07-27 15:59:00"
+    assert persisted["last_price_update_time"] == "2026-07-27 15:59:00"
     assert meta["status"] == "ok"
     assert meta["source_outcome"] == "success_rows"
     assert meta["trading_date"] == "2026-07-27"

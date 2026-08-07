@@ -39,7 +39,7 @@ from src.application.close_advice_quote_cache import (
 )
 
 
-REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v1"
+REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v2"
 SUCCESS_EMPTY_REASON_CODES = frozenset(
     {"no_expirations", "no_contract_rows"}
 )
@@ -81,11 +81,13 @@ REQUIRED_DATA_COLUMNS = [
     "ask",
     "last_price",
     "mid",
-    "quote_update_time",
-    "bid_update_time",
-    "ask_update_time",
-    "quote_observed_at_utc",
-    "quote_age_seconds",
+    "last_price_update_time",
+    "last_price_observed_at_utc",
+    "last_price_age_seconds",
+    "last_price_activity_status",
+    "snapshot_requested_at_utc",
+    "snapshot_received_at_utc",
+    "snapshot_age_seconds",
     "price_tick",
     "volume",
     "open_interest",

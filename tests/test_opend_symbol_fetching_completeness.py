@@ -512,6 +512,8 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
             missing_codes=frozenset(),
             unexpected_codes=frozenset(),
             complete=True,
+            requested_at_utc=observed_now.isoformat(),
+            received_at_utc=observed_now.isoformat(),
         ),
     )
     underlier = OpeningUnderlierObservation(

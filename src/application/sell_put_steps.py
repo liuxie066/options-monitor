@@ -21,6 +21,7 @@ from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.report_labels import label_sell_put_candidates
 from src.application.report_summaries import summarize_sell_put
 from src.application.scan_sell_put import run_sell_put_scan
+from src.application.candidate_scanning import evidence_summary_from_decisions
 from src.application.sell_put_cash import (
     enrich_sell_put_candidates_with_cash,
 )
@@ -139,7 +140,44 @@ def run_sell_put_scan_and_summarize(
     if candidate_decisions_sink_fn is not None:
         candidate_decisions_sink_fn("put", candidate_decisions)
 
-    return [summarize_sell_put(df_sp_lab, symbol, symbol_cfg=symbol_cfg)]
+    summary = summarize_sell_put(df_sp_lab, symbol, symbol_cfg=symbol_cfg)
+    evidence = evidence_summary_from_decisions(
+        decisions=candidate_decisions,
+        accepted_count=len(df_sp_lab),
+    )
+    summary["_evidence_summary"] = evidence
+    status, reason = _evidence_scan_status(
+        evidence=evidence,
+        candidate_count=len(df_sp_lab),
+    )
+    summary["_strategy_status"] = status
+    summary["_strategy_reason"] = reason
+    return [summary]
+
+
+def _evidence_scan_status(
+    *,
+    evidence: dict[str, Any],
+    candidate_count: int,
+) -> tuple[str, str | None]:
+    """Project per-scope evidence coverage into a scan status.
+
+    A zero-candidate scope is only a genuine ``no_candidate`` when every
+    evaluated contract was either accepted or rejected by policy/ineligibility
+    with complete evidence. Any contract that could not even be evaluated
+    downgrades the scope to a data-availability status instead of a silent
+    empty result.
+    """
+
+    if candidate_count > 0:
+        return "completed", None
+    unavailable = int(evidence.get("evidence_unavailable_count") or 0)
+    if unavailable == 0:
+        return "completed", "no_candidate"
+    evaluated = int(evidence.get("evaluated_contract_count") or 0)
+    if evaluated > 0 and unavailable < evaluated:
+        return "completed", "partial_data"
+    return "unavailable", "data_unavailable"
 
 
 def empty_sell_put_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

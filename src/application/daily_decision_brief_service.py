@@ -727,9 +727,20 @@ def _load_opening_candidate_families(
     available: dict[str, bool] = {}
     for mode, family in (("put", "sell_put"), ("call", "covered_call")):
         status = str(result_by_mode.get(mode, {}).get("strategy_status") or "")
+        if status == "partial_data":
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "strategy_family": family,
+                    "severity": "warning",
+                    "actionable": False,
+                    "reason": "opening_candidate_strategy_partial_data",
+                }
+            )
         available[mode] = bool(rows_by_mode[mode]) or status in {
             "candidates_found",
             "no_candidate",
+            "partial_data",
         }
         if not available[mode]:
             data_gaps.append(
@@ -2420,6 +2431,18 @@ def _append_strategy_status_gaps(
             continue
         relevant.append(item)
         if status in {"completed", "not_applicable"}:
+            if _text(item.get("reason")) == "partial_data":
+                data_gaps.append(
+                    {
+                        "scope": "strategy",
+                        "market": market,
+                        "symbol": symbol,
+                        "strategy_family": family,
+                        "severity": "warning",
+                        "actionable": False,
+                        "reason": "opening_candidate_strategy_partial_data",
+                    }
+                )
             continue
         data_gaps.append(
             {

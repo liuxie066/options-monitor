@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from domain.domain.engine import (
@@ -41,6 +43,7 @@ def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # t
         "multiplier": 100,
         "opening_contract_status": "ready",
         "opening_contract_reason_codes": "",
+        "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
         "max_new_contracts": 1,
         "covered_contracts_available": 1,
     }
@@ -239,7 +242,71 @@ def test_market_closed_contract_fails_closed_before_candidate_calculation() -> N
             mode="put",
         )
 
-    assert exc_info.value.reason == "opening_contract_not_ready"
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+def test_ineligible_contract_is_contract_ineligible_not_input_invalid() -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                opening_contract_status="ineligible",
+                opening_contract_reason_codes=["option_non_standard"],
+            ),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == "contract_ineligible"
+
+
+def test_data_unavailable_contract_is_evidence_unavailable() -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                opening_contract_status="data_unavailable",
+                opening_contract_reason_codes=["option_snapshot_stale"],
+            ),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+def test_snapshot_stale_at_decision_moment_fails_closed() -> None:
+    """A snapshot fetched >300s before the decision moment must be rejected at
+    decision time even though the fetch-time observation was ready."""
+    stale_received = datetime(2026, 8, 6, 14, 50, 0, tzinfo=timezone.utc)
+    decision_now = datetime(2026, 8, 6, 15, 0, 1, tzinfo=timezone.utc)  # 601s later
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                snapshot_received_at_utc=stale_received.isoformat(),
+            ),
+            mode="put",
+            now_utc=decision_now,
+        )
+
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+def test_snapshot_missing_receipt_fails_closed_at_decision_moment() -> None:
+    row = _opening_row()
+    row.pop("snapshot_received_at_utc", None)
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(row, mode="put")
+
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+def test_fresh_snapshot_at_decision_moment_passes() -> None:
+    received = datetime(2026, 8, 6, 14, 59, 0, tzinfo=timezone.utc)
+    decision_now = datetime(2026, 8, 6, 15, 0, 0, tzinfo=timezone.utc)  # 60s later
+    metrics = calculate_opening_candidate_metrics(
+        _opening_row(snapshot_received_at_utc=received.isoformat()),
+        mode="put",
+        now_utc=decision_now,
+    )
+
+    assert metrics["raw_mid"] == pytest.approx(1.005)
 
 
 def test_offline_shadow_classifies_every_approved_policy_difference() -> None:

@@ -51,8 +51,13 @@ class CandidateContractInput:
     ask: float | None
     last_price: float | None
     mid: float | None
-    quote_observed_at_utc: str
-    quote_age_seconds: float | None
+    last_price_update_time: str
+    last_price_observed_at_utc: str
+    last_price_age_seconds: float | None
+    last_price_activity_status: str
+    snapshot_requested_at_utc: str
+    snapshot_received_at_utc: str
+    snapshot_age_seconds: float | None
     price_tick: float | None
     open_interest: float | None
     volume: float | None
@@ -73,7 +78,6 @@ class CandidateContractInput:
     chain_multiplier: float | None
     snapshot_multiplier: float | None
     multiplier: float | None
-    quote_update_time: str
     opening_contract_status: str
     opening_contract_reason_codes: str
 
@@ -100,8 +104,13 @@ class CandidateContractInput:
             ask=_as_float(row.get("ask")),
             last_price=_as_float(row.get("last_price")),
             mid=_as_float(row.get("mid")),
-            quote_observed_at_utc=str(row.get("quote_observed_at_utc") or "").strip(),
-            quote_age_seconds=_as_float(row.get("quote_age_seconds")),
+            last_price_update_time=str(row.get("last_price_update_time") or "").strip(),
+            last_price_observed_at_utc=str(row.get("last_price_observed_at_utc") or "").strip(),
+            last_price_age_seconds=_as_float(row.get("last_price_age_seconds")),
+            last_price_activity_status=str(row.get("last_price_activity_status") or "").strip(),
+            snapshot_requested_at_utc=str(row.get("snapshot_requested_at_utc") or "").strip(),
+            snapshot_received_at_utc=str(row.get("snapshot_received_at_utc") or "").strip(),
+            snapshot_age_seconds=_as_float(row.get("snapshot_age_seconds")),
             price_tick=_as_float(row.get("price_tick")),
             open_interest=_as_float(row.get("open_interest")),
             volume=_as_float(row.get("volume")),
@@ -122,7 +131,6 @@ class CandidateContractInput:
             chain_multiplier=_as_float(row.get("chain_multiplier")),
             snapshot_multiplier=_as_float(row.get("snapshot_multiplier")),
             multiplier=_as_float(row.get("multiplier")),
-            quote_update_time=str(row.get("quote_update_time") or "").strip(),
             opening_contract_status=str(row.get("opening_contract_status") or "").strip(),
             opening_contract_reason_codes=str(row.get("opening_contract_reason_codes") or "").strip(),
         )
@@ -148,8 +156,13 @@ class CandidateContractInput:
             "ask": self.ask,
             "last_price": self.last_price,
             "mid": self.mid,
-            "quote_observed_at_utc": self.quote_observed_at_utc,
-            "quote_age_seconds": self.quote_age_seconds,
+            "last_price_update_time": self.last_price_update_time,
+            "last_price_observed_at_utc": self.last_price_observed_at_utc,
+            "last_price_age_seconds": self.last_price_age_seconds,
+            "last_price_activity_status": self.last_price_activity_status,
+            "snapshot_requested_at_utc": self.snapshot_requested_at_utc,
+            "snapshot_received_at_utc": self.snapshot_received_at_utc,
+            "snapshot_age_seconds": self.snapshot_age_seconds,
             "price_tick": self.price_tick,
             "open_interest": self.open_interest,
             "volume": self.volume,
@@ -170,7 +183,6 @@ class CandidateContractInput:
             "chain_multiplier": self.chain_multiplier,
             "snapshot_multiplier": self.snapshot_multiplier,
             "multiplier": self.multiplier,
-            "quote_update_time": self.quote_update_time,
             "opening_contract_status": self.opening_contract_status,
             "opening_contract_reason_codes": self.opening_contract_reason_codes,
         }

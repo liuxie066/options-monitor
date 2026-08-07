@@ -26,6 +26,7 @@ def phase2_opening_row(row: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("quote_update_time", "2026-04-01 10:59:00")
     out.setdefault("quote_observed_at_utc", "2026-04-01T14:59:00Z")
     out.setdefault("quote_age_seconds", 60)
+    out.setdefault("snapshot_received_at_utc", "2026-04-01T14:59:00Z")
     out.setdefault("spot_update_time", "2026-04-01 10:59:00")
     out.setdefault("spot_observed_at_utc", "2026-04-01T14:59:00Z")
     out.setdefault("spot_age_seconds", 60)
