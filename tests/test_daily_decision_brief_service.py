@@ -2269,6 +2269,77 @@ def test_strategy_step_failure_preserves_other_candidates_and_warns_user(tmp_pat
     assert any(item.get("contract_symbol") == "NVDA_CALL_VALID" for item in brief["actions"])
     assert not any(item.get("contract_symbol") == "STALE_PUT" for item in brief["actions"])
     assert brief["candidates"]["sell_put"] == []
-    assert "Sell Put 扫描异常，本轮结果不完整" in message
+    assert "NVDA Sell Put 扫描失败，本轮无结果" in message
+    assert "补充｜NVDA Sell Put 扫描失败，未纳入本轮候选" in message
+    assert "本轮结果不完整" not in message
     assert "NVDA_CALL_VALID" not in message
     assert "Covered Call" in message
+
+
+def test_strategy_step_failure_reminders_list_each_failed_symbol(tmp_path: Path) -> None:
+    from src.application.strategy_scan_failures import append_strategy_scan_failure
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_call_row(contract="NVDA_CALL_VALID")]).to_csv(
+        account_dir / "nvda_sell_call_candidates.csv", index=False
+    )
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="SPCX",
+        strategy_family="sell_put",
+        error=RuntimeError("rv missing"),
+    )
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="XYZ",
+        strategy_family="sell_put",
+        error=RuntimeError("scanner crashed"),
+    )
+    # Duplicate rows for the same symbol+family collapse into one reminder.
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="SPCX",
+        strategy_family="sell_put",
+        error=RuntimeError("rv missing again"),
+    )
+
+    brief = _assemble(tmp_path)
+    message = render_fixed_report(brief)
+
+    assert message.count("SPCX Sell Put 扫描失败，本轮无结果") == 1
+    assert "XYZ Sell Put 扫描失败，本轮无结果" in message
+    assert "补充｜SPCX、XYZ Sell Put 扫描失败，未纳入本轮候选" in message
+    assert "本轮结果不完整" not in message
+
+
+def test_strategy_step_failure_empty_summary_points_to_reminders(tmp_path: Path) -> None:
+    from src.application.strategy_scan_failures import append_strategy_scan_failure
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view,
+    )
+
+    account_dir = _account_dir(tmp_path)
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="SPCX",
+        strategy_family="sell_put",
+        error=RuntimeError("rv missing"),
+    )
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="XYZ",
+        strategy_family="sell_put",
+        error=RuntimeError("scanner crashed"),
+    )
+
+    brief = _assemble(tmp_path)
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report")
+
+    assert (
+        view["candidate_empty_summary"]
+        == "本轮暂无符合条件的候选；SPCX、XYZ Sell Put 扫描失败。"
+    )
+    assert "SPCX Sell Put 扫描失败，本轮无结果" in view["reminders"]
+    assert "XYZ Sell Put 扫描失败，本轮无结果" in view["reminders"]
+    assert not any("本轮结果不完整" in item for item in view["reminders"])
