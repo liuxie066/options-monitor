@@ -802,6 +802,31 @@ def test_feishu_ws_settings_can_load_bot_config_from_env_file(tmp_path: Path) ->
     assert settings.allowed_senders == "feishu:ou_file"
 
 
+def test_feishu_ws_settings_overlays_explicit_credential_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    credential_env_file = tmp_path / "feishu-agent.env"
+    env_file.write_text(
+        "OM_FEISHU_BOT_APP_ID=bot_app_file\n"
+        "OM_FEISHU_BOT_APP_SECRET=stale_base_secret\n"
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_file\n",
+        encoding="utf-8",
+    )
+    credential_env_file.write_text(
+        "OM_FEISHU_BOT_APP_SECRET=bot_secret_credential\n",
+        encoding="utf-8",
+    )
+
+    settings = build_feishu_ws_settings(
+        environ={},
+        env_file=env_file,
+        credential_env_file=credential_env_file,
+    )
+
+    assert settings.app_id == "bot_app_file"
+    assert settings.app_secret == "bot_secret_credential"
+    assert settings.allowed_senders == "feishu:ou_file"
+
+
 def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
