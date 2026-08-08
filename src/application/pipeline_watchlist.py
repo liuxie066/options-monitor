@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.engine import select_best_yield_enhancement_per_symbol
 from src.application.config_profiles import deep_merge
 from src.application.config_sections import (
     resolve_templates_config,
@@ -884,7 +885,7 @@ def run_watchlist_pipeline_default(
     combo_statuses = [
         item
         for item in capture_statuses
-        if str(item.get("family") or "") == "combo_yield"
+        if str(item.get("strategy_mode") or "") == "combo_yield"
     ]
     if combo_statuses:
         combo_completed = any(
@@ -902,6 +903,9 @@ def run_watchlist_pipeline_default(
             combo_opening_status = "data_unavailable"
         else:
             combo_opening_status = "partial_data"
+        ranked_combo_pairs = select_best_yield_enhancement_per_symbol(
+            captured_combo_pairs
+        )
         seal_combo_yield_candidate_snapshot(
             base=base,
             run_id=account_run_id,
@@ -909,7 +913,7 @@ def run_watchlist_pipeline_default(
             market=str(authority.get("market") or ""),
             account_config_sha256=str(account_config_sha256 or ""),
             strategy_policy_sha256=strategy_policy_hash(cfg),
-            ranked_pairs=captured_combo_pairs,
+            ranked_pairs=ranked_combo_pairs,
             opening_status=combo_opening_status,
             sealed_at=captured_at,
         )

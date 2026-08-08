@@ -315,6 +315,7 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
     from src.application.combo_yield_candidate_snapshot import (
         seal_combo_yield_candidate_snapshot,
     )
+    from domain.domain.engine import select_best_yield_enhancement_per_symbol
 
     account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
     if not account_dir.is_dir():
@@ -340,6 +341,7 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
                 continue
             row.setdefault("candidate_pair_id", row.get("strategy_group_id") or "")
             pairs.append(row)
+    ranked_pairs = select_best_yield_enhancement_per_symbol(pairs)
     seal_combo_yield_candidate_snapshot(
         base=base,
         run_id="run-1",
@@ -347,7 +349,7 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
         market=market.lower(),
         account_config_sha256="a" * 64,
         strategy_policy_sha256="b" * 64,
-        ranked_pairs=pairs,
+        ranked_pairs=ranked_pairs,
     )
 
 
