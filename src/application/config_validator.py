@@ -36,6 +36,7 @@ from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_OBJECTIVES,
     YIELD_ENHANCEMENT_OUTPUT_MODES,
     YIELD_ENHANCEMENT_STRUCTURE_MODES,
+    YIELD_ENHANCEMENT_VARIANTS,
 )
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
@@ -201,6 +202,7 @@ YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
     'enabled',
     'structure_mode',
     'objective',
+    'variant',
     'output_mode',
     'min_combo_net_credit',
     'min_net_credit_annualized',
@@ -651,6 +653,10 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             die(f"{path}.structure_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_STRUCTURE_MODES))}")
     else:
         structure_mode = str(cfg.get('structure_mode') or 'same_expiry_pair').strip().lower()
+    if 'variant' in cfg and cfg.get('variant') is not None:
+        variant = str(cfg.get('variant') or '').strip().lower()
+        if variant not in YIELD_ENHANCEMENT_VARIANTS:
+            die(f"{path}.variant must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_VARIANTS))}")
     for key in ('min_expiry_gap_days', 'max_expiry_gap_days'):
         if cfg.get(key) is not None:
             validate_non_negative_integer(cfg.get(key), f'{path}.{key}')

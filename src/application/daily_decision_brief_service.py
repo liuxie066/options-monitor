@@ -72,6 +72,10 @@ from src.application.combo_yield_candidate_snapshot import (
     ComboYieldCandidateSnapshotError,
     load_combo_yield_candidate_snapshot,
 )
+from src.application.cc_lp_candidate_snapshot import (
+    CcLpCandidateSnapshotError,
+    load_cc_lp_candidate_snapshot,
+)
 
 
 _DEFAULT_MAX_CANDIDATES = 3
@@ -139,6 +143,14 @@ def assemble_daily_decision_brief(
         )
     )
     combo_rows, combo_available = _load_combo_yield_snapshot_family(
+        base=base_path,
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+    )
+    _cc_lp_rows, _cc_lp_available = _load_cc_lp_snapshot_family(
         base=base_path,
         run_id=run_id_norm,
         account=account_norm,
@@ -882,6 +894,67 @@ def _load_combo_yield_snapshot_family(
         }
     )
     return market_rows, True
+
+
+def _load_cc_lp_snapshot_family(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+    market: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Load CC+LP pairs from the sealed account-run snapshot (data source only, no render)."""
+
+    try:
+        snapshot = load_cc_lp_candidate_snapshot(
+            base=base,
+            run_id=run_id,
+            account=account,
+        )
+    except CcLpCandidateSnapshotError as exc:
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "variant": "cc_lp",
+                "reason": "cc_lp_snapshot_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return [], False
+    snapshot_market = str(snapshot.get("market") or "").strip().lower()
+    if snapshot_market and snapshot_market != str(market).strip().lower():
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "variant": "cc_lp",
+                "reason": "cc_lp_snapshot_market_mismatch",
+            }
+        )
+        return [], False
+    pairs = snapshot.get("ranked_pairs") or []
+    market_rows: list[dict[str, Any]] = []
+    for source_row, raw in enumerate(pairs, start=1):
+        row = _json_safe(dict(raw))
+        row_market = _row_market(row)
+        if row_market is not None and row_market != str(market).strip().upper():
+            continue
+        row["_source_path"] = "state/cc_lp_candidate_snapshot.json"
+        row["_source_row"] = source_row
+        market_rows.append(row)
+    source_artifacts.append(
+        {
+            "kind": "cc_lp_snapshot",
+            "path": "state/cc_lp_candidate_snapshot.json",
+            "row_count": len(market_rows),
+            "opening_status": snapshot.get("opening_status"),
+        }
+    )
+    return market_rows, True
+
 
 def _daily_brief_advice_authority(
     *,

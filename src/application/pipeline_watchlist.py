@@ -50,6 +50,9 @@ from src.application.opening_candidate_snapshot import (
 from src.application.combo_yield_candidate_snapshot import (
     seal_combo_yield_candidate_snapshot,
 )
+from src.application.cc_lp_candidate_snapshot import (
+    seal_cc_lp_candidate_snapshot,
+)
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
@@ -915,6 +918,38 @@ def run_watchlist_pipeline_default(
             strategy_policy_sha256=strategy_policy_hash(cfg),
             ranked_pairs=ranked_combo_pairs,
             opening_status=combo_opening_status,
+            sealed_at=captured_at,
+        )
+    cc_lp_statuses = [
+        item
+        for item in capture_statuses
+        if str(item.get("variant") or "").strip().lower() == "cc_lp"
+    ]
+    if cc_lp_statuses:
+        cc_lp_pairs = [
+            dict(item)
+            for item in captured_combo_pairs
+            if str(item.get("variant") or "").strip().lower() == "cc_lp"
+        ]
+        cc_lp_status: str | None = None
+        if not cc_lp_pairs:
+            cc_lp_status = (
+                "not_applicable"
+                if any(
+                    str(item.get("status") or "") == "not_applicable"
+                    for item in cc_lp_statuses
+                )
+                else "no_candidate"
+            )
+        seal_cc_lp_candidate_snapshot(
+            base=base,
+            run_id=account_run_id,
+            account=account,
+            market=str(authority.get("market") or ""),
+            account_config_sha256=str(account_config_sha256 or ""),
+            strategy_policy_sha256=strategy_policy_hash(cfg),
+            ranked_pairs=cc_lp_pairs,
+            opening_status=cc_lp_status,
             sealed_at=captured_at,
         )
     return result
