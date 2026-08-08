@@ -6,6 +6,8 @@
 >
 > 策略确认文档：[`combo-yield-policy-confirmation-20260808.md`](combo-yield-policy-confirmation-20260808.md)
 >
+> 状态：S1-S4 已实施并通过 code review 与 aggregate deepreview（`b1170cfc`）；待 push 与 draft PR。
+>
 > 基线：`main` 最新（1.10.17）
 
 ## 1. Goal / Motivation / Success Signal

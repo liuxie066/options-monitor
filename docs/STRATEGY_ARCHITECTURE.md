@@ -104,8 +104,8 @@ Participation Call：
 - 同 symbol、currency、multiplier。
 - Put 到期早于 Call；Put strike 低于 Call strike。
 - `put_net_credit > 0`，`call_total_cost > 0`。
-- 默认 `funding_mode=credit_or_even`：`combo_net_credit >= 0`。
-- 默认 `min_net_credit_retention=0.60`：至少保留 Funding Put 60% 的净权利金，即 Participation Call 最多使用 40%。
+- `min_net_credit_retention=0.60` 是唯一成本约束：至少保留 Funding Put 60% 的净权利金，即 Participation Call 最多使用 40%。
+- 已废弃 `funding_mode` 与 `max_call_cost_to_put_credit`（后者是 retention 的补数，统一由 retention 表达）。
 - 两腿基础流动性通过，费用按当前费用模型估算。
 
 费用与资金定义：
@@ -117,6 +117,8 @@ combo_net_credit = put_net_credit - call_total_cost
 net_credit_retention = combo_net_credit / put_net_credit
 call_cost_to_put_credit = call_total_cost / put_net_credit
 funding_ratio = put_net_credit / call_total_cost
+cash_required = put_strike * multiplier - combo_net_credit
+period_net_return = combo_net_credit / cash_required
 ```
 
 错期组合不计算或硬筛组合年化、同到期 breakeven、expected-move scenario、1.5σ/2.0σ payoff multiple。Put 与 Call 的风险期限不同，把它们压成单一到期日指标会制造错误精度。
@@ -126,25 +128,27 @@ funding_ratio = put_net_credit / call_total_cost
 同一 Funding Put 下先选一个 Participation Call：
 
 1. `funding_accepted` 优先
-2. `abs(call_delta)` 降序，直接最大化上行参与度
-3. `net_credit_retention` 降序
+2. `net_credit_retention` 降序（保留确定收益优先）
+3. `abs(call_delta)` 降序，上行参与度
 4. max(`put_spread_ratio`, `call_spread_ratio`) 升序
-5. `call_open_interest` 降序
-6. 较短 Call DTE 优先
+5. min(`put_open_interest`, `call_open_interest`) 降序
+6. 接货安全边际（`put_assignment_margin_pct` / `put_otm_pct`）降序
 7. Call 合约标识稳定排序
 
 每个标的先按 Sell Put 规则选择一张 Funding Put，再为它选择 Participation Call。不同标的进入通知前按以下顺序排列：
 
 1. `funding_accepted` 优先
-2. Funding Put `put_only_annualized_net_return` 降序
+2. Funding Put `put_only_period_net_return`（期间非年化净收益）降序
 3. Put 净接货折价降序
-4. `call_delta` 降序
-5. `net_credit_retention` 降序
+4. `net_credit_retention` 降序
+5. `call_delta` 降序
 6. 两腿最大 spread 升序
 7. min(`put_open_interest`, `call_open_interest`) 降序
 8. symbol、Put 合约、Call 合约稳定排序
 
 因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
+
+Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent、Daily Brief 与 Position Advice 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
 
 ### 候选身份、成交意图与回执
 

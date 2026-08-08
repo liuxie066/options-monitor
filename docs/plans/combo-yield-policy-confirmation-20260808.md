@@ -1,6 +1,6 @@
 # Combo Yield 策略确认（2026-08-08）
 
-> 状态：策略口径确认完成，待实施方案
+> 状态：策略口径确认完成，实施方案已完成（分支 `feat/combo-yield-policy-alignment`，S1-S4 + aggregate deepreview 通过）
 >
 > 日期：2026-08-08
 >
