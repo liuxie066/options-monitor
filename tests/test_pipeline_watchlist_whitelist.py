@@ -60,6 +60,67 @@ def test_watchlist_whitelist_filters_symbols() -> None:
     assert len(out) == 1
 
 
+def test_watchlist_combo_sink_receives_pairs(tmp_path: Path) -> None:
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
+
+    received: list[list[dict]] = []
+
+    def _apply_profiles(item: dict, profiles: dict) -> dict:
+        return dict(item)
+
+    def _process_symbol(*args, **kwargs):
+        sink = kwargs.get("combo_pairs_sink_fn")
+        if sink is not None:
+            sink([])
+        return [{'symbol': 'NVDA', 'strategy': 'combo_yield', 'candidate_count': 1}]
+
+    def _build_ctx(**kwargs):
+        return ({}, None, None, None)
+
+    def _noop(*args, **kwargs):
+        return None
+
+    def _combo_sink(rows: list[dict]) -> None:
+        received.append(list(rows))
+
+    cfg = {
+        'symbols': [
+            {'symbol': 'NVDA', 'sell_put': {'enabled': True}, 'sell_call': {'enabled': False}},
+        ],
+        'templates': {},
+        'runtime': {},
+        'portfolio': {'account': 'lx'},
+    }
+
+    run_watchlist_pipeline(
+        py='python',
+        base=tmp_path,
+        cfg=cfg,
+        report_dir=tmp_path / 'reports',
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=True,
+        symbols_arg='NVDA',
+        log=lambda _: None,
+        want_fn=lambda _: True,
+        apply_profiles_fn=_apply_profiles,
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=_build_ctx,
+        build_symbols_summary_fn=_noop,
+        build_symbols_digest_fn=_noop,
+        position_advice_producer_run_id='run-1',
+        position_advice_candidate_capture_status_sink_fn=_noop,
+        required_data_snapshot_manifest=tmp_path / 'required.json',
+        account_config_sha256='a' * 64,
+        combo_pairs_sink_fn=_combo_sink,
+    )
+
+    assert received == [[]]
+
+
 def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
 

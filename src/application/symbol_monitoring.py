@@ -60,6 +60,9 @@ class SymbolMonitoringInputs:
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
+    combo_pairs_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -568,6 +571,7 @@ def run_symbol_monitoring(
                 exchange_rate_converter=exchange_rate_converter,
                 portfolio_ctx=inputs.portfolio_ctx,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                combo_pairs_sink_fn=inputs.combo_pairs_sink_fn,
             )
             _append_summary_result(
                 summary_rows,
