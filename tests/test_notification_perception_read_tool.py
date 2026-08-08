@@ -172,11 +172,109 @@ def test_notification_perception_reader_rejects_paths_outside_repo_root(tmp_path
 def test_notification_perception_run_id_cannot_escape_runtime_root(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="under repo_root"):
+    with pytest.raises(ValueError, match="not a safe path component"):
         read_notification_perception_events(
             repo_root=tmp_path,
             run_id="../../outside",
         )
+
+
+def test_notification_perception_run_id_cannot_traverse_within_repo(
+    tmp_path: Path,
+) -> None:
+    # 横向穿越：目标仍在 repo root 内（旧 containment 放行），必须被安全组件校验拒绝，
+    # 且不读任何文件。
+    planted = tmp_path / "secrets" / "state" / "audit_events.jsonl"
+    planted.parent.mkdir(parents=True)
+    _append(planted, _row("planted", "notification_prepared", "c"))
+
+    with pytest.raises(ValueError, match="not a safe path component"):
+        read_notification_perception_events(
+            repo_root=tmp_path,
+            run_id="../secrets",
+        )
+
+
+def test_notification_perception_run_id_rejects_symlinked_output_runs(
+    tmp_path: Path,
+) -> None:
+    # output_runs 是指向仓库外目录的符号链接时，containment resolve 后会放行，
+    # 必须显式拒绝，且外部文件不被读取（与 position_advice_runner 先例一致）。
+    external = tmp_path / "external" / "output_runs"
+    run_state = external / "20260808T000000Z-abcdef" / "state"
+    run_state.mkdir(parents=True)
+    planted = run_state / "audit_events.jsonl"
+    _append(planted, _row("planted", "notification_prepared", "c"))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "output_runs").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must stay under output_runs"):
+        read_notification_perception_events(
+            repo_root=repo,
+            run_id="20260808T000000Z-abcdef",
+        )
+
+
+def test_notification_perception_run_id_rejects_symlinked_run_dir(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    run_state = external / "state"
+    run_state.mkdir(parents=True)
+    _append(run_state / "audit_events.jsonl", _row("planted", "notification_prepared", "c"))
+
+    repo = tmp_path / "repo"
+    (repo / "output_runs").mkdir(parents=True)
+    (repo / "output_runs" / "20260808T000000Z-abcdef").symlink_to(
+        external, target_is_directory=True
+    )
+
+    with pytest.raises(ValueError, match="must stay under output_runs"):
+        read_notification_perception_events(
+            repo_root=repo,
+            run_id="20260808T000000Z-abcdef",
+        )
+
+
+def test_notification_perception_shared_branch_rejects_symlinked_output_shared(
+    tmp_path: Path,
+) -> None:
+    # 默认 shared 分支：output_shared 为符号链接时同样拒绝，不跟随读取。
+    external = tmp_path / "external_shared" / "state"
+    external.mkdir(parents=True)
+    _append(external / "audit_events.jsonl", _row("planted", "notification_prepared", "c"))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "output_shared").symlink_to(tmp_path / "external_shared", target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must stay under output_shared"):
+        read_notification_perception_events(repo_root=repo)
+
+
+def test_notification_perception_rejects_symlinked_state_dir(tmp_path: Path) -> None:
+    # run/shared 两个分支的中间 state 目录为符号链接时同样显式拒绝（对齐先例逐组件姿态）。
+    external = tmp_path / "external_state"
+    external.mkdir()
+    _append(external / "audit_events.jsonl", _row("planted", "notification_prepared", "c"))
+
+    run_repo = tmp_path / "run_repo"
+    run_dir = run_repo / "output_runs" / "20260808T000000Z-abcdef"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state").symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError, match="must stay under output_runs"):
+        read_notification_perception_events(
+            repo_root=run_repo,
+            run_id="20260808T000000Z-abcdef",
+        )
+
+    shared_repo = tmp_path / "shared_repo"
+    (shared_repo / "output_shared").mkdir(parents=True)
+    (shared_repo / "output_shared" / "state").symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError, match="must stay under output_shared"):
+        read_notification_perception_events(repo_root=shared_repo)
 
 
 def _append(path: Path, payload: dict) -> None:
