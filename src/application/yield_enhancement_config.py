@@ -13,6 +13,7 @@ from src.application.strategy_policy import (
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair", "staggered_expiry_pair"}
+YIELD_ENHANCEMENT_VARIANTS: set[str] = {"sp_lc", "cc_lp"}
 DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS = 1
 DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS = 90
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
@@ -46,6 +47,7 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "structure_mode": "same_expiry_pair",
     "objective": "premium_funded_long_call",
+    "variant": "sp_lc",
     "output_mode": "separate",
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
@@ -215,6 +217,8 @@ def derive_yield_enhancement_policy(
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
     cfg["structure_mode"] = structure_mode
     cfg["enabled"] = bool(enabled)
+    variant = str(raw_cfg.get("variant") or cfg.get("variant") or "sp_lc").strip().lower()
+    cfg["variant"] = variant
     cfg["yield_enhancement_mode"] = mode
     cfg["derived_from_sell_put_strategy"] = combo_strategy
     # Combo Yield owns its Funding Put scan even when the standalone Sell Put
