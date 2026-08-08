@@ -131,7 +131,6 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
-        portfolio_ctx=None,
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row()]),
     )
@@ -157,7 +156,6 @@ def test_run_cc_lp_scan_skips_without_stock(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
-        portfolio_ctx=None,
         stock=None,
     )
     assert df.empty
@@ -176,7 +174,6 @@ def test_run_cc_lp_scan_rejects_retention_below_floor(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
-        portfolio_ctx=None,
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row(bid=4.0)]),
     )

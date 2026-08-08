@@ -33,6 +33,9 @@ class CcLpMetrics:
     gap_width_pct: float
     call_spread_ratio: float | None
     put_spread_ratio: float | None
+    # NOTE: CC+LP combo_spread_ratio is the SUM of the two legs' spread_ratio
+    # (diagnostic only), NOT the SP+LC convention (spread notional / net credit).
+    # Do not feed it into SP+LC-style max_combo_spread_ratio gates.
     combo_spread_ratio: float | None
 
 

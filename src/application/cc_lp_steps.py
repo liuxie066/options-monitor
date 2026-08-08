@@ -35,16 +35,6 @@ from src.infrastructure.io_utils import atomic_write_text
 
 CC_LP_FAMILY = "combo_yield"
 CC_LP_VARIANT = "cc_lp"
-CC_LP_STATUSES = frozenset(
-    {
-        "candidates_found",
-        "no_candidate",
-        "data_unavailable",
-        "not_applicable",
-        "market_closed",
-        "partial_data",
-    }
-)
 
 
 def _utc_now() -> datetime:
@@ -75,7 +65,6 @@ def run_cc_lp_scan(
     required_data_dir: Path,
     report_dir: Path,
     sell_call_cfg: dict[str, Any],
-    portfolio_ctx: dict[str, Any] | None,
     stock: dict[str, Any] | None = None,
     min_put_delta: float = CC_LP_DEFAULT_MIN_PUT_DELTA,
     max_put_delta: float = CC_LP_DEFAULT_MAX_PUT_DELTA,

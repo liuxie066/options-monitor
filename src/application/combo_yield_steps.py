@@ -578,7 +578,6 @@ def run_cc_lp_variant(
         required_data_dir=required_data_dir,
         report_dir=report_dir,
         sell_call_cfg=sell_call_cfg,
-        portfolio_ctx=portfolio_ctx,
         stock=stock,
         global_sell_call_liquidity=global_sell_call_liquidity,
         strategy_profile=policy.mode,
