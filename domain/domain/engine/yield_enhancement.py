@@ -287,7 +287,6 @@ def compute_yield_enhancement_funding_decision(
     call_buy_fee: float,
     combo_metrics: YieldEnhancementMetrics,
     min_combo_net_credit: float | None = None,
-    max_call_cost_to_put_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
     structure_mode: str = "same_expiry_pair",
@@ -331,11 +330,6 @@ def compute_yield_enhancement_funding_decision(
     if min_annualized_net_credit is not None:
         if annualized_net_credit_yield is None or annualized_net_credit_yield < min_annualized_net_credit:
             reject_reasons.append("annualized_net_credit_yield")
-
-    max_cost_ratio = _safe_float(max_call_cost_to_put_credit)
-    if max_cost_ratio is not None:
-        if call_cost_ratio is None or call_cost_ratio > max_cost_ratio:
-            reject_reasons.append("call_cost_to_put_credit")
 
     max_combo_spread = _safe_float(max_combo_spread_ratio)
     if max_combo_spread is not None:

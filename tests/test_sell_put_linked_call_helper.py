@@ -25,7 +25,6 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert income.enabled is True
     assert income.config["enabled"] is True
     assert income.config["min_net_credit_annualized"] == 0.08
-    assert income.config["max_call_cost_to_put_credit"] is None
     assert income.config["min_net_credit_retention"] == 0.60
     assert income.config["call"]["min_delta"] == 0.05
     assert income.config["call"]["max_delta"] == 0.20
@@ -35,7 +34,6 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert isolated.derived_from_sell_put_strategy == "insurance_underwriting"
     assert isolated.enabled is True
     assert isolated.config["min_net_credit_annualized"] == 0.08
-    assert isolated.config["max_call_cost_to_put_credit"] is None
     assert isolated.config["min_net_credit_retention"] == 0.60
     assert isolated.config["call"]["min_delta"] == 0.05
     assert isolated.config["call"]["max_delta"] == 0.20
@@ -278,12 +276,10 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
             "enabled": True,
             "min_dte": 20,
             "max_dte": 90,
-            "funding_mode": "credit_or_even",
             "call": {
                 "min_delta": 0.10,
                 "max_delta": 0.45,
             },
-            "max_call_cost_to_put_credit": 0.60,
             "min_net_credit_retention": 0.0,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -576,7 +572,6 @@ def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_p
         "enabled": True,
         "min_open_interest": 100,
         "min_volume": 5,
-        "max_call_cost_to_put_credit": 1.0,
         "min_net_credit_retention": 0.0,
     }
     sell_put_cfg = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60}
@@ -689,7 +684,7 @@ def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> 
     assert int(pairs.iloc[0]["dte"]) == 10
 
 
-def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path: Path) -> None:
+def test_yield_enhancement_retention_is_the_only_call_cost_constraint(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
     from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
@@ -707,9 +702,8 @@ def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path:
         {
             "yield_enhancement": {
                 "enabled": True,
-                "funding_mode": "max_debit",
-                "max_debit_native": 40.0,
                 "min_net_credit_annualized": None,
+                "min_net_credit_retention": 0.60,
                 "min_open_interest": 100,
                 "min_volume": 5,
                 "call": {"min_delta": 0.10, "max_delta": 0.45},
@@ -726,24 +720,20 @@ def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path:
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
-    assert len(pairs) == 1
-    row = pairs.iloc[0]
-    assert row["call_contract_symbol"] == "NVDA_C105_DEBIT"
-    assert float(row["net_debit"]) <= 40.0
-    assert float(row["call_cost_to_put_credit"]) > 1.0
+    assert pairs.empty
 
 
-def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path) -> None:
+def test_yield_enhancement_retention_allows_positive_credit_with_low_retention(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
     from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
     _write_single_call(
         tmp_path,
         dte=44,
-        contract_symbol="NVDA_C105_DEBIT",
+        contract_symbol="NVDA_C105_RETENTION",
         strike=105.0,
-        bid=3.19,
-        ask=3.20,
+        bid=2.54,
+        ask=2.55,
         implied_volatility=0.80,
         delta=0.45,
     )
@@ -751,10 +741,8 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
         {
             "yield_enhancement": {
                 "enabled": True,
-                "funding_mode": "max_debit",
-                "max_debit_native": 40.0,
                 "min_net_credit_annualized": None,
-                "max_call_cost_to_put_credit": 1.0,
+                "min_net_credit_retention": 0.10,
                 "min_open_interest": 100,
                 "min_volume": 5,
                 "call": {"min_delta": 0.10, "max_delta": 0.45},
@@ -770,7 +758,12 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
-    assert pairs.empty
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert row["call_contract_symbol"] == "NVDA_C105_RETENTION"
+    assert float(row["net_credit"]) > 0.0
+    assert float(row["net_credit_retention"]) >= 0.10
+    assert float(row["net_credit_retention"]) < 0.60
 
 
 def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_path: Path) -> None:
@@ -941,7 +934,6 @@ def test_staggered_expiry_policy_uses_full_put_premium_funding_defaults() -> Non
 
     assert policy.config["structure_mode"] == "staggered_expiry_pair"
     assert policy.config["min_combo_net_credit"] == 0.0
-    assert policy.config["max_call_cost_to_put_credit"] is None
     assert policy.config["min_net_credit_retention"] == 0.60
     assert policy.config["min_net_credit_annualized"] is None
     assert policy.config["min_expiry_gap_days"] == 1

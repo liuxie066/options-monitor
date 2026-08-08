@@ -20,7 +20,6 @@
       "combo_yield": {
         "enabled": true,
         "structure_mode": "staggered_expiry_pair",
-        "funding_mode": "credit_or_even",
         "min_combo_net_credit": 0,
         "min_net_credit_retention": 0.6,
         "min_expiry_gap_days": 30,
