@@ -891,6 +891,7 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
                 "call_open_interest": 500,
                 "put_assignment_margin_pct": 0.05,
                 "put_only_annualized_net_return": 0.14,
+                "put_only_period_net_return": 0.14,
                 "combo_spread_ratio": 0.15,
                 "annualized_net_credit_yield": 0.10,
                 "residual_premium_ratio": 0.82,
@@ -909,6 +910,7 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
                 "call_open_interest": 500,
                 "put_assignment_margin_pct": 0.10,
                 "put_only_annualized_net_return": 0.12,
+                "put_only_period_net_return": 0.12,
                 "combo_spread_ratio": 0.15,
                 "annualized_net_credit_yield": 0.10,
                 "residual_premium_ratio": 0.82,
@@ -920,8 +922,8 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
     baseline_order = shadow.dropna(subset=["baseline_rank"]).sort_values("baseline_rank")
     shadow_order = shadow.dropna(subset=["shadow_rank"]).sort_values("shadow_rank")
 
-    assert baseline_order["put_contract_symbol"].tolist() == ["NVDA_P95", "NVDA_P90"]
-    assert shadow_order["put_contract_symbol"].tolist() == ["NVDA_P90", "NVDA_P95"]
+    assert baseline_order["put_contract_symbol"].tolist() == ["NVDA_P90", "NVDA_P95"]
+    assert shadow_order["put_contract_symbol"].tolist() == ["NVDA_P95", "NVDA_P90"]
     assert shadow["rank_changed"].all()
 
 
@@ -1136,3 +1138,75 @@ def test_yield_enhancement_pair_write_error_is_not_swallowed(tmp_path: Path) -> 
             sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
             output_path=blocked_parent / "pairs.csv",
         )
+
+
+def test_yield_enhancement_rank_uses_retention_then_delta_not_premium_score() -> None:
+    from domain.domain.engine.yield_enhancement import (
+        rank_yield_enhancement_rows,
+        yield_enhancement_rank_key,
+    )
+
+    higher_premium_lower_retention = {
+        "funding_accepted": True,
+        "premium_funding_score": 5.0,
+        "net_credit_retention": 0.61,
+        "call_delta": 0.10,
+        "put_open_interest": 100,
+        "call_open_interest": 100,
+        "put_assignment_margin_pct": 0.10,
+        "combo_spread_ratio": 0.20,
+    }
+    lower_premium_higher_retention = {
+        "funding_accepted": True,
+        "premium_funding_score": 1.0,
+        "net_credit_retention": 0.80,
+        "call_delta": 0.10,
+        "put_open_interest": 100,
+        "call_open_interest": 100,
+        "put_assignment_margin_pct": 0.10,
+        "combo_spread_ratio": 0.20,
+    }
+
+    key_high = yield_enhancement_rank_key(higher_premium_lower_retention)
+    key_low = yield_enhancement_rank_key(lower_premium_higher_retention)
+    assert key_high > key_low
+
+    ranked = rank_yield_enhancement_rows(
+        [higher_premium_lower_retention, lower_premium_higher_retention]
+    )
+    assert ranked[0]["net_credit_retention"] == 0.80
+
+
+def test_yield_enhancement_staggered_rank_uses_period_put_return() -> None:
+    from domain.domain.engine.yield_enhancement import yield_enhancement_rank_key
+
+    low_period_high_annualized = {
+        "structure_mode": "staggered_expiry_pair",
+        "funding_accepted": True,
+        "put_only_annualized_net_return": 0.30,
+        "put_only_period_net_return": 0.05,
+        "net_credit_retention": 0.80,
+        "net_assignment_discount_pct": 0.10,
+        "call_delta": 0.30,
+        "put_open_interest": 100,
+        "call_open_interest": 100,
+        "put_spread_ratio": 0.20,
+        "call_spread_ratio": 0.20,
+    }
+    high_period_low_annualized = {
+        "structure_mode": "staggered_expiry_pair",
+        "funding_accepted": True,
+        "put_only_annualized_net_return": 0.05,
+        "put_only_period_net_return": 0.15,
+        "net_credit_retention": 0.80,
+        "net_assignment_discount_pct": 0.10,
+        "call_delta": 0.30,
+        "put_open_interest": 100,
+        "call_open_interest": 100,
+        "put_spread_ratio": 0.20,
+        "call_spread_ratio": 0.20,
+    }
+
+    key_low = yield_enhancement_rank_key(low_period_high_annualized)
+    key_high = yield_enhancement_rank_key(high_period_low_annualized)
+    assert key_low > key_high
