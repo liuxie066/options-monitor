@@ -1,0 +1,42 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.17",
+  "base": {
+    "tag": "v1.10.16",
+    "commit": "5a5964bf24113cbaa400d761a7f5c8e02fcb26ac"
+  },
+  "reviewed_head": "a057b29d184554297334bccd9f2882652a343473",
+  "commits": [
+    {
+      "sha": "b7d44683927688818175782cb61550e86c257b9d",
+      "subject": "fix: scope scan-failure brief wording to the failed symbol"
+    },
+    {
+      "sha": "df4368ce4436d82cb649cffc014ed1f9383c2c8f",
+      "subject": "Merge pull request #136 from liuxie066/fix/daily-brief-scan-failure-wording"
+    },
+    {
+      "sha": "a057b29d184554297334bccd9f2882652a343473",
+      "subject": "chore: release 1.10.17"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Scoped Daily Brief scan-failure wording to the failed symbol instead of the strategy family: reminders now list each failed symbol per strategy, the candidate section appends an omission line when other candidates remain, and the empty-candidate summary names the failed symbols, so a single-symbol failure no longer reads as a whole-strategy outage.",
+      "commits": [
+        "b7d44683927688818175782cb61550e86c257b9d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "df4368ce4436d82cb649cffc014ed1f9383c2c8f",
+      "reason": "Merge commit that brings the release feature branch into main; no user-facing change beyond the covered fix commit."
+    },
+    {
+      "commit": "a057b29d184554297334bccd9f2882652a343473",
+      "reason": "Release metadata commit (VERSION and CHANGELOG only); no runtime behavior change."
+    }
+  ]
+}
