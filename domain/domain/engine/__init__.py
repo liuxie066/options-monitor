@@ -45,6 +45,13 @@ from .candidate_engine import (
     select_best_candidate_per_symbol,
     validate_candidate_decision_payload,
 )
+from .cc_lp import (
+    CcLpMetrics,
+    cc_lp_rank_key,
+    compute_cc_lp_metrics,
+    rank_cc_lp_rows,
+    validate_cc_lp_pair,
+)
 from .yield_enhancement import (
     ComboYieldResearchPolicy,
     YieldEnhancementFundingDecision,
@@ -128,4 +135,9 @@ __all__ = [
     'select_best_yield_enhancement_per_symbol',
     'validate_yield_enhancement_pair',
     'yield_enhancement_rank_key',
+    'CcLpMetrics',
+    'cc_lp_rank_key',
+    'compute_cc_lp_metrics',
+    'rank_cc_lp_rows',
+    'validate_cc_lp_pair',
 ]

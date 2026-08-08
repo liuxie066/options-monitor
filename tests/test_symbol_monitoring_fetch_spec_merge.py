@@ -1037,6 +1037,89 @@ def test_combo_yield_runs_when_sell_put_is_disabled(monkeypatch, tmp_path: Path)
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
 
 
+def test_combo_yield_capture_status_carries_cc_lp_variant(monkeypatch, tmp_path: Path) -> None:
+    import src.application.symbol_monitoring as mod
+
+    capture_statuses: list[dict] = []
+
+    def _ensure_required_data_fn(**kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=_ensure_required_data_fn,
+        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put", "count": 0},
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put", "count": 0},
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call", "count": 0},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call", "count": 0},
+        run_combo_yield_scan_fn=lambda **kwargs: {
+            "strategy_family": "combo_yield",
+            "variant": "cc_lp",
+            "symbol": "NVDA",
+            "candidate_count": 0,
+            "status": "no_candidate",
+            "reason": "",
+        },
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
+            "strategy": "combo_yield",
+            "count": 0,
+        },
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
+    )
+    mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "sell_put": {"enabled": False},
+                "combo_yield": {"enabled": True, "variant": "cc_lp"},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+            candidate_capture_status_sink_fn=capture_statuses.append,
+        ),
+        deps=deps,
+    )
+    combo_statuses = [
+        item
+        for item in capture_statuses
+        if item.get("strategy_mode") == "combo_yield"
+    ]
+    assert len(combo_statuses) == 1
+    assert combo_statuses[0]["variant"] == "cc_lp"
+
+
 def test_combo_yield_runs_after_sell_put_failure_without_touching_historical_put_artifacts(monkeypatch, tmp_path: Path) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()

@@ -460,19 +460,21 @@ def run_symbol_monitoring(
         strategy_mode: str,
         status: str,
         reason: str | None,
+        variant: str | None = None,
     ) -> None:
         if inputs.candidate_capture_status_sink_fn is None:
             return
-        inputs.candidate_capture_status_sink_fn(
-            {
-                "symbol": symbol.upper(),
-                "strategy_mode": strategy_mode,
-                "status": status,
-                "reason": reason,
-                "quote_snapshot_id": resolved_quote_snapshot_id or None,
-                "quote_receipt_relpath": quote_receipt_relpath or None,
-            }
-        )
+        payload: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "strategy_mode": strategy_mode,
+            "status": status,
+            "reason": reason,
+            "quote_snapshot_id": resolved_quote_snapshot_id or None,
+            "quote_receipt_relpath": quote_receipt_relpath or None,
+        }
+        if variant:
+            payload["variant"] = variant
+        inputs.candidate_capture_status_sink_fn(payload)
 
     summary_rows: list[dict[str, Any]] = []
 
@@ -557,6 +559,9 @@ def run_symbol_monitoring(
 
     if want_yield_enhancement:
         try:
+            combo_variant = str(
+                (yield_enhancement_policy.config or {}).get("variant") or "sp_lc"
+            ).strip().lower()
             combo_result = deps.run_combo_yield_scan_fn(
                 base=inputs.base,
                 sym=symbol,
@@ -593,6 +598,7 @@ def run_symbol_monitoring(
                     combo_candidate_count,
                     None,
                 ),
+                variant=combo_variant,
             )
         except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
@@ -620,6 +626,7 @@ def run_symbol_monitoring(
                 strategy_mode="combo_yield",
                 status="failed",
                 reason="combo_yield_scan_failed",
+                variant=combo_variant,
             )
     elif not want_yield_enhancement:
         deps.materialize_empty_combo_yield_artifacts_fn(
