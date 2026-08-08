@@ -512,6 +512,7 @@ def run_combo_yield_for_symbol_and_summarize(
             required_data_dir=required_data_dir,
             report_dir=report_dir,
             portfolio_ctx=portfolio_ctx,
+            combo_pairs_sink_fn=combo_pairs_sink_fn,
         )
 
     materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
@@ -564,6 +565,7 @@ def run_cc_lp_variant(
     report_dir: Path,
     portfolio_ctx: dict[str, Any] | None,
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
+    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
@@ -582,12 +584,15 @@ def run_cc_lp_variant(
         strategy_profile=policy.mode,
     )
     if df.empty:
-        return summarize_cc_lp_result(
+        summary = summarize_cc_lp_result(
             df=df,
             symbol=symbol,
             status="no_candidate" if stock else "not_applicable",
             reason="" if stock else "stock_context_missing",
         )
+        return summary
+    if combo_pairs_sink_fn is not None:
+        combo_pairs_sink_fn([dict(item) for item in df.to_dict("records")])
     return summarize_cc_lp_result(
         df=df,
         symbol=symbol,
