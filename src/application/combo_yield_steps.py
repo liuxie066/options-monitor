@@ -21,6 +21,11 @@ from domain.domain.combo_candidate_evidence import build_combo_candidate_occurre
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain.symbol_identity import symbol_market
+from src.application.cc_lp_steps import (
+    CC_LP_FAMILY,
+    run_cc_lp_scan,
+    summarize_cc_lp_result,
+)
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -494,6 +499,21 @@ def run_combo_yield_for_symbol_and_summarize(
         materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
         return None
 
+    variant = str((policy.config or {}).get("variant") or "sp_lc").strip().lower()
+    if variant == "cc_lp":
+        return run_cc_lp_variant(
+            base=base,
+            sym=sym,
+            symbol=symbol,
+            symbol_lower=symbol_lower,
+            symbol_cfg=symbol_cfg,
+            yield_cfg=yield_cfg,
+            policy=policy,
+            required_data_dir=required_data_dir,
+            report_dir=report_dir,
+            portfolio_ctx=portfolio_ctx,
+        )
+
     materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     yield_window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
@@ -529,3 +549,47 @@ def run_combo_yield_for_symbol_and_summarize(
         combo_pairs_sink_fn=combo_pairs_sink_fn,
     )
     return summary
+
+
+def run_cc_lp_variant(
+    *,
+    base: Path,
+    sym: str,
+    symbol: str,
+    symbol_lower: str,
+    symbol_cfg: dict[str, Any],
+    yield_cfg: dict[str, Any],
+    policy: YieldEnhancementPolicy,
+    required_data_dir: Path,
+    report_dir: Path,
+    portfolio_ctx: dict[str, Any] | None,
+    run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
+) -> dict[str, Any] | None:
+    """Run the CC+LP variant of Combo Yield for one symbol."""
+
+    del base, sym, symbol_lower, yield_cfg
+    stock = (portfolio_ctx or {}).get("stock") if isinstance(portfolio_ctx, dict) else None
+    sell_call_cfg = dict(symbol_cfg.get("sell_call") or {})
+    global_sell_call_liquidity = symbol_cfg.get("_global_sell_call_liquidity") or {}
+    df = run_cc_lp_scan_fn(
+        symbol=symbol,
+        required_data_dir=required_data_dir,
+        report_dir=report_dir,
+        sell_call_cfg=sell_call_cfg,
+        portfolio_ctx=portfolio_ctx,
+        stock=stock,
+        global_sell_call_liquidity=global_sell_call_liquidity,
+        strategy_profile=policy.mode,
+    )
+    if df.empty:
+        return summarize_cc_lp_result(
+            df=df,
+            symbol=symbol,
+            status="no_candidate" if stock else "not_applicable",
+            reason="" if stock else "stock_context_missing",
+        )
+    return summarize_cc_lp_result(
+        df=df,
+        symbol=symbol,
+        status="candidates_found",
+    )
