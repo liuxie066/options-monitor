@@ -85,7 +85,7 @@ CC+LP 与 SP+LC 共享同一套"资金腿 + 反转腿 + 保留率 + sealed snaps
 
 - `domain/domain/engine/yield_enhancement.py`：新增 CC+LP 角色变体（`funding_call` / `reversal_put`），复用既有指标函数；
 - `src/application/yield_enhancement_config.py`：新增 `variant=cc_lp` 默认值/派生默认值；
-- `src/application/config_validator.py`：`objective` 增加 `premium_funded_long_put`；`variant` 枚举校验；
+- `src/application/config_validator.py`：新增 `variant` 枚举校验；`objective` 保持 `premium_funded_long_call` 不变（与 §7 契约一致）；
 - `src/application/combo_yield_steps.py` / `pipeline_symbol.py` / `pipeline_watchlist.py`：CC+LP 扫描接入与 snapshot 封存；
 - `src/application/daily_decision_brief_service.py`：消费 `cc_lp_candidate_snapshot.json`（如 Daily Brief 需要展示）；
 - `src/application/report_summaries.py`、`render_yield_enhancement_alerts.py`：CC+LP 汇总/告警字段（如需要）；
