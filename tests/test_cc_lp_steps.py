@@ -15,6 +15,7 @@ from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
 )
+from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
 def _write_required_data(tmp_path: Path, *, call_rows: list[dict], put_rows: list[dict]) -> Path:
@@ -53,17 +54,6 @@ def _call_row(**overrides) -> dict:
         "implied_volatility": 0.35,
         "spread": 0.2,
         "spread_ratio": 0.05,
-        "avg_cost": 90.0,
-        "shares_total": 100,
-        "shares_can_sell": 100,
-        "shares_eligible": 100,
-        "shares_locked": 0,
-        "shares_available_for_cover": 1,
-        "covered_contracts_available": 1,
-        "max_new_contracts": 1,
-        "is_fully_covered_available": True,
-        "net_income": 400.0,
-        "annualized_net_premium_return": 0.5,
     }
     row.update(overrides)
     return row
@@ -113,11 +103,34 @@ def _scan_call_row(**overrides) -> dict:
         "volume": 20.0,
         "delta": 0.30,
         "implied_volatility": 0.35,
+        "avg_cost": 90.0,
+        "net_income": 400.0,
+        "net_income_cny": 400.0,
+        "annualized_net_premium_return": 0.50,
+        "iv_rv_ratio": 1.3,
+        "iv_minus_rv": 0.1,
+        "event_source_status": "ok",
+        "event_status": "ready",
+        "earnings_evidence_status": "ready",
+        "event_flag": False,
+        "event_types": "",
+        "event_dates": "",
+        "shares_total": 100,
+        "shares_eligible": 100,
+        "shares_locked": 0,
+        "shares_available_for_cover": 1,
+        "covered_contracts_available": 1,
+        "max_new_contracts": 1,
+        "is_fully_covered_available": True,
         "spread": 0.2,
         "spread_ratio": 0.05,
     }
     row.update(overrides)
     return row
+
+
+def _converter() -> CurrencyConverter:
+    return CurrencyConverter(ExchangeRates(usd_per_cny=0.14))
 
 
 def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
@@ -131,6 +144,8 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=None,
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row()]),
     )
@@ -156,6 +171,8 @@ def test_run_cc_lp_scan_skips_without_stock(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=None,
         stock=None,
     )
     assert df.empty
@@ -174,8 +191,40 @@ def test_run_cc_lp_scan_rejects_retention_below_floor(tmp_path: Path) -> None:
         required_data_dir=required_data,
         report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=None,
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row(bid=4.0)]),
+    )
+    assert df.empty
+
+
+def test_run_cc_lp_scan_inherits_sell_call_underwriting_gate(tmp_path: Path) -> None:
+    # call with net_income below underwriting min (50) -> must be filtered out
+    call = _scan_call_row(
+        net_income=10.0,
+        net_income_cny=10.0,
+        annualized_net_premium_return=0.05,
+        avg_cost=90.0,
+    )
+    required_data = _write_required_data(
+        tmp_path,
+        call_rows=[_call_row()],
+        put_rows=[_put_row()],
+    )
+    df = run_cc_lp_scan(
+        symbol="NVDA",
+        required_data_dir=required_data,
+        report_dir=tmp_path,
+        sell_call_cfg={
+            "enabled": True,
+            "min_annualized_net_premium_return": 0.10,
+            "min_net_income": 50.0,
+        },
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=None,
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([call]),
     )
     assert df.empty
 
@@ -205,6 +254,7 @@ def test_run_cc_lp_variant_returns_summary(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         report_dir=tmp_path,
+        exchange_rate_converter=_converter(),
         portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
             [
@@ -250,6 +300,7 @@ def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         report_dir=tmp_path,
+        exchange_rate_converter=_converter(),
         portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
             [
@@ -296,6 +347,7 @@ def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         report_dir=tmp_path,
+        exchange_rate_converter=_converter(),
         portfolio_ctx=None,
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(),
     )
