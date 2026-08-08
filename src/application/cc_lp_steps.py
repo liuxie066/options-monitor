@@ -112,7 +112,11 @@ def run_cc_lp_scan(
         max_dte=window.max_dte,
         min_strike=effective_min_strike,
         max_strike=_optional_float(sell_call_cfg, "max_strike"),
-        min_annualized_net_return=0.0,
+        min_annualized_net_return=_optional_float(
+            sell_call_cfg, "min_annualized_net_premium_return"
+        )
+        or _optional_float(sell_call_cfg, "min_annualized_net_return")
+        or 0.0,
         min_strike_cost_multiplier=float(
             _optional_float(sell_call_cfg, "min_strike_cost_multiplier") or 1.02
         ),
