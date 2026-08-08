@@ -248,6 +248,9 @@ def run_combo_yield_scan_and_summarize(
         df_yield_put_universe["put_only_annualized_net_return"] = df_yield_put_universe.get(
             "annualized_net_return_on_cash_basis"
         )
+        df_yield_put_universe["put_only_period_net_return"] = df_yield_put_universe.get(
+            "period_net_return_on_cash_basis"
+        )
     df_yield_put_cash_filtered = df_yield_put_universe
     if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
         df_yield_put_cash_filtered = cash_filter_put_candidates_fn(

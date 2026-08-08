@@ -462,6 +462,8 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
         "funding_put_min_annualized_return",
         "put_only_annualized_net_return",
         "annualized_net_return_on_cash_basis",
+        "put_only_period_net_return",
+        "period_net_return_on_cash_basis",
         "short_vol_thesis_status",
         "short_vol_reason",
         "short_vol_mode",
