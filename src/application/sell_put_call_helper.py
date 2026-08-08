@@ -366,13 +366,7 @@ def _build_pair_row(
         "iv": put_leg.implied_volatility,
         "risk_label": risk.risk_label,
     }
-    funding_mode = str(enhancement_cfg.get("funding_mode") or "credit_or_even").strip().lower()
     min_combo_net_credit = _safe_float(enhancement_cfg.get("min_combo_net_credit"))
-    if funding_mode == "max_debit":
-        min_combo_net_credit = None
-    max_call_cost_to_put_credit = _safe_float(enhancement_cfg.get("max_call_cost_to_put_credit"))
-    if funding_mode == "max_debit" and not bool(enhancement_cfg.get("_max_call_cost_to_put_credit_explicit")):
-        max_call_cost_to_put_credit = None
     decision = compute_yield_enhancement_funding_decision(
         put_leg=put_leg,
         call_leg=call_leg,
@@ -383,7 +377,6 @@ def _build_pair_row(
         min_net_credit_annualized=(
             None if is_staggered else _safe_float(enhancement_cfg.get("min_net_credit_annualized"))
         ),
-        max_call_cost_to_put_credit=max_call_cost_to_put_credit,
         max_combo_spread_ratio=(
             None if is_staggered else _safe_float(enhancement_cfg.get("max_combo_spread_ratio"))
         ),
@@ -469,6 +462,8 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
         "funding_put_min_annualized_return",
         "put_only_annualized_net_return",
         "annualized_net_return_on_cash_basis",
+        "put_only_period_net_return",
+        "period_net_return_on_cash_basis",
         "short_vol_thesis_status",
         "short_vol_reason",
         "short_vol_mode",
@@ -562,8 +557,8 @@ _PAIR_DIAGNOSTIC_COLUMNS = (
     "call_payoff_multiple_at_1_5_sigma call_payoff_multiple_at_2_0_sigma funding_put_min_annualized_return "
     "put_only_annualized_net_return yield_enhancement_mode put_strategy_profile "
     "policy_call_min_delta policy_call_max_delta policy_call_min_strike policy_call_max_strike "
-    "policy_call_min_open_interest policy_call_min_volume policy_call_max_spread_ratio policy_funding_mode "
-    "policy_max_debit_native policy_min_net_credit_retention policy_min_net_credit_annualized "
+    "policy_call_min_open_interest policy_call_min_volume policy_call_max_spread_ratio "
+    "policy_min_net_credit_retention policy_min_net_credit_annualized "
     "policy_max_combo_spread_ratio"
 ).split()
 
@@ -773,8 +768,6 @@ def _load_yield_enhancement_call_legs_by_expiration(
 def _candidate_pair_reject_reasons(
     candidate: dict[str, Any],
     *,
-    funding_mode: str,
-    max_debit_native: float | None,
     min_net_credit_retention: float | None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
@@ -786,17 +779,6 @@ def _candidate_pair_reject_reasons(
         )
         if not reasons:
             reasons.append("funding_rejected")
-    if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
-        reasons.append("funding_mode_credit_or_even")
-    if str(candidate.get("structure_mode") or "").strip().lower() == "staggered_expiry_pair":
-        funding_ratio = _safe_float(candidate.get("funding_ratio"))
-        call_cost_ratio = _safe_float(candidate.get("call_cost_to_put_credit"))
-        if funding_ratio is None or funding_ratio < 1.0:
-            reasons.append("funding_ratio")
-        if call_cost_ratio is None or call_cost_ratio > 1.0:
-            reasons.append("call_cost_to_put_credit")
-    if funding_mode == "max_debit" and max_debit_native is not None and float(candidate["net_debit"]) > float(max_debit_native):
-        reasons.append("max_debit_native")
     net_credit_retention = _safe_float(candidate.get("net_credit_retention"))
     if min_net_credit_retention is not None and (
         net_credit_retention is None or net_credit_retention < float(min_net_credit_retention)
@@ -815,8 +797,6 @@ def _build_yield_enhancement_pair_rows(
     cfg: dict[str, Any],
     put_strategy_fields: dict[str, Any],
     policy_fields: dict[str, Any],
-    funding_mode: str,
-    max_debit_native: float | None,
     min_net_credit_retention: float | None,
     reject_counts: Counter[str],
     diagnostics: list[dict[str, Any]],
@@ -826,8 +806,6 @@ def _build_yield_enhancement_pair_rows(
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
     diagnostic_policy = {
-        "policy_funding_mode": funding_mode,
-        "policy_max_debit_native": max_debit_native,
         "policy_min_net_credit_retention": min_net_credit_retention,
         "policy_min_net_credit_annualized": _safe_float(cfg.get("min_net_credit_annualized")),
         "policy_max_combo_spread_ratio": _safe_float(cfg.get("max_combo_spread_ratio")),
@@ -955,8 +933,6 @@ def _build_yield_enhancement_pair_rows(
             candidate.update(_put_risk_fields(raw))
             pair_rejects = _candidate_pair_reject_reasons(
                 candidate,
-                funding_mode=funding_mode,
-                max_debit_native=max_debit_native,
                 min_net_credit_retention=min_net_credit_retention,
             )
             if pair_rejects:
@@ -1003,7 +979,6 @@ def find_sell_put_yield_enhancement_pairs(
         market=symbol_market(symbol),
     )
     cfg = policy.to_config()
-    cfg["_max_call_cost_to_put_credit_explicit"] = "max_call_cost_to_put_credit" in set(policy.explicit_fields)
     diagnostics: list[dict[str, Any]] = []
     if df.empty or not policy.enabled:
         pairs_df = _empty_pairs_df()
@@ -1034,13 +1009,7 @@ def find_sell_put_yield_enhancement_pairs(
     else:
         call_window = put_window
 
-    funding_mode = str(cfg.get("funding_mode") or "credit_or_even").strip().lower()
-    max_debit_native = _safe_float(cfg.get("max_debit_native"))
-    if max_debit_native is None:
-        max_debit_native = _safe_float(cfg.get("max_debit"))
     min_net_credit_retention = _safe_float(cfg.get("min_net_credit_retention"))
-    if funding_mode == "max_debit" and "min_net_credit_retention" not in set(policy.explicit_fields):
-        min_net_credit_retention = None
     min_combo_notional_floor = 1.0
 
     call_legs_by_expiration, reject_counts = _load_yield_enhancement_call_legs_by_expiration(
@@ -1062,8 +1031,6 @@ def find_sell_put_yield_enhancement_pairs(
         cfg=cfg,
         put_strategy_fields=put_strategy_fields,
         policy_fields=policy.to_fields(),
-        funding_mode=funding_mode,
-        max_debit_native=max_debit_native,
         min_net_credit_retention=min_net_credit_retention,
         reject_counts=reject_counts,
         diagnostics=diagnostics,
