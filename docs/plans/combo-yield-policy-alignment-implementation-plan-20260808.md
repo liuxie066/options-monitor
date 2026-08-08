@@ -153,9 +153,10 @@ Daily Brief 在 `daily_decision_brief_service.py:143` 用 `run_account_dir.glob(
 
 ### S1: put 扫描继承 Sell Put 硬门槛
 
-- `combo_yield_steps.py`：`min_net_income=0.0` → `_optional_float(yield_sp, "min_net_income") or DEFAULT_SELL_PUT_MIN_NET_INCOME`
-- 补充确认其他继承参数（`min_dte/max_dte/min_strike/max_strike/min_annualized_net_return/流动性`）已从 `yield_sp` 传入
-- 测试：构造 `min_net_income=50` 的 sell_put_cfg，断言 `run_put_scan_fn` 收到 50
+- **事实修正（implementation finding 6）**：Sell Put 主策略 `sell_put_steps.py:100` 的 scan 同样传 `min_net_income=0.0`，真实硬门槛在 underwriting 层（`enrich_and_filter_sell_put_underwriting`，默认 `min_net_income=50.0`）；Combo 已通过 `combo_yield_steps.py:267-272` 的 `underwriting_filter_put_candidates_fn(sell_put_cfg=yield_sp)` 调用同一 underwriting。因此 scan 层 `min_net_income=0.0` 与主策略一致，不是绕过。
+- S1 目标改为：**验证并测试 Combo put 腿经过与主策略相同的 underwriting 硬门槛（含 `min_net_income` 继承）**。
+- 实现：确认 `combo_yield_steps.py` 的 underwriting 调用传入完整 `yield_sp`（已继承 Sell Put 配置），必要时补充 `max_spread_ratio` 注入（与主策略 `sell_put_steps.py:114-118` 对齐）；scan 层保持 `0.0`。
+- 测试：构造含 `min_net_income=50` / `min_annualized_net_return` 的 `sell_put_cfg`，断言 Combo 的 underwriting 调用收到继承值；同一 put row 在主策略与 Combo 路径下 underwriting 决策一致。
 
 ### S2: 配置与计算路径简化
 
