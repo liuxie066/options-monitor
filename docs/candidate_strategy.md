@@ -509,7 +509,8 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 ## 13. 实施状态与上线边界
 
-`feat/opening-candidate-policy-alignment` 分支已按本合同完成源码实施和离线验证：
+`feat/opening-candidate-policy-alignment` 分支已按本合同完成源码实施和离线验证，
+并已合并 `main`、随 v1.10.17 发布：
 
 - 正式开仓候选使用 OpenD 报价、合约、市场状态、财报日历、QFQ 日线、
   交易日历和汇率证据；
@@ -524,5 +525,5 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
   Position Advice 候选 artifact 已退出当前开仓路径；历史读取只保留在明确的
   Close Advice、Combo Yield、research/archive/shadow 兼容边界。
 
-上述结论只证明该实施分支的源码状态。在合并 main、发布和受控远程升级分别获得授权并
-完成验证前，不得宣称生产环境已按本合同运行。
+上述结论证明当前 `main` 源码与 v1.10.17 发布产物已按本合同运行。受控远程升级是
+独立授权边界；在完成升级和运行时验证前，不得宣称生产环境已按本合同运行。

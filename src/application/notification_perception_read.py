@@ -83,18 +83,41 @@ def read_notification_perception_events(
 def _audit_paths(*, base: Path, run_id: str | None, audit_path: str | Path | None) -> list[Path]:
     if audit_path:
         return [_resolve_path(audit_path, base=base)]
-    text_run_id = str(run_id or "").strip()
-    if text_run_id:
+    if str(run_id or "").strip():
+        runs_root = base / "output_runs"
+        run_dir = runs_root / _safe_run_id(run_id)
+        # 与 position_advice_runner / opend_symbol_outputs 先例一致：
+        # containment 边界上的目录不允许是符号链接，避免经 resolve() 逃逸出仓。
+        state_dir = run_dir / "state"
+        if runs_root.is_symlink() or run_dir.is_symlink() or state_dir.is_symlink():
+            raise ValueError("audit path must stay under output_runs")
         return [
             _resolve_path(
-                Path("output_runs")
-                / text_run_id
-                / "state"
-                / "audit_events.jsonl",
+                state_dir / "audit_events.jsonl",
                 base=base,
+                containment=base / "output_runs",
             )
         ]
-    return [(base / "output_shared" / "state" / "audit_events.jsonl").resolve()]
+    shared_root = base / "output_shared"
+    shared_state = shared_root / "state"
+    if shared_root.is_symlink() or shared_state.is_symlink():
+        raise ValueError("audit path must stay under output_shared")
+    return [(shared_state / "audit_events.jsonl").resolve()]
+
+
+def _safe_run_id(value: str | None) -> str:
+    # run_id 作为单一路径组件校验；语义与 tick_run_workspace._identity_component 等价，
+    # 在此独立实现以避免 reader 依赖 tick 编排模块。
+    text = str(value or "").strip()
+    if (
+        not text
+        or text in {".", ".."}
+        or Path(text).name != text
+        or "/" in text
+        or "\\" in text
+    ):
+        raise ValueError("run_id is not a safe path component")
+    return text
 
 
 def _read_jsonl(
@@ -194,15 +217,18 @@ def _strip_sensitive(value: Any) -> Any:
     return value
 
 
-def _resolve_path(value: str | Path, *, base: Path) -> Path:
+def _resolve_path(value: str | Path, *, base: Path, containment: Path | None = None) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = (base / path).resolve()
     resolved = path.resolve()
+    root = (containment or base).resolve()
     try:
-        resolved.relative_to(base.resolve())
+        resolved.relative_to(root)
     except ValueError as exc:
-        raise ValueError("audit_path must be under repo_root") from exc
+        if containment is None:
+            raise ValueError("audit_path must be under repo_root") from exc
+        raise ValueError(f"audit path must stay under {root.name}") from exc
     return resolved
 
 
