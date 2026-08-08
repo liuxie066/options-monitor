@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.17 - 2026-08-08
+
+### Bug Fixes
+- Scoped Daily Brief scan-failure wording to the failed symbol instead of the strategy family: reminders now list each failed symbol per strategy, the candidate section appends an omission line when other candidates remain, and the empty-candidate summary names the failed symbols, so a single-symbol failure no longer reads as a whole-strategy outage.
+
 ## 1.10.16 - 2026-08-07
 
 ### Bug Fixes
