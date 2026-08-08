@@ -202,6 +202,7 @@ def run_combo_yield_scan_and_summarize(
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
+    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -247,6 +248,9 @@ def run_combo_yield_scan_and_summarize(
         df_yield_put_universe["funding_put_min_annualized_return"] = funding_put_min_annualized_return
         df_yield_put_universe["put_only_annualized_net_return"] = df_yield_put_universe.get(
             "annualized_net_return_on_cash_basis"
+        )
+        df_yield_put_universe["put_only_period_net_return"] = df_yield_put_universe.get(
+            "period_net_return_on_cash_basis"
         )
     df_yield_put_cash_filtered = df_yield_put_universe
     if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
@@ -392,6 +396,13 @@ def run_combo_yield_scan_and_summarize(
         candidates_path=result.candidates_path,
         alerts_path=result.alerts_path,
     )
+    if combo_pairs_sink_fn is not None:
+        combo_pairs_sink_fn(
+            [
+                dict(item)
+                for item in final_result.recommended_pairs.to_dict("records")
+            ]
+        )
 
     if not is_scheduled and final_result.separate_enabled:
         render_alerts_fn(
@@ -473,6 +484,7 @@ def run_combo_yield_for_symbol_and_summarize(
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
+    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
@@ -514,5 +526,6 @@ def run_combo_yield_for_symbol_and_summarize(
         top_n=top_n,
         is_scheduled=is_scheduled,
         cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
+        combo_pairs_sink_fn=combo_pairs_sink_fn,
     )
     return summary

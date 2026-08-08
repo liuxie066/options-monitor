@@ -60,6 +60,9 @@ class SymbolMonitoringInputs:
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
+    combo_pairs_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -568,6 +571,7 @@ def run_symbol_monitoring(
                 exchange_rate_converter=exchange_rate_converter,
                 portfolio_ctx=inputs.portfolio_ctx,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                combo_pairs_sink_fn=inputs.combo_pairs_sink_fn,
             )
             _append_summary_result(
                 summary_rows,
@@ -581,6 +585,14 @@ def run_symbol_monitoring(
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
                 **_completed_empty_evidence(combo_candidate_count),
+            )
+            _report_capture(
+                strategy_mode="combo_yield",
+                status="completed",
+                reason=_capture_reason(
+                    combo_candidate_count,
+                    None,
+                ),
             )
         except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
@@ -603,6 +615,11 @@ def run_symbol_monitoring(
                 reason="combo_yield_scan_failed",
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
+            )
+            _report_capture(
+                strategy_mode="combo_yield",
+                status="failed",
+                reason="combo_yield_scan_failed",
             )
     elif not want_yield_enhancement:
         deps.materialize_empty_combo_yield_artifacts_fn(

@@ -18,9 +18,6 @@ from domain.domain.close_advice import (
     safe_int,
     select_close_advice_notification_rows,
 )
-from domain.domain.engine import (
-    select_best_yield_enhancement_per_symbol,
-)
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
@@ -70,6 +67,10 @@ from src.application.opening_candidate_snapshot import (
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
     validate_opening_candidate_snapshot,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    ComboYieldCandidateSnapshotError,
+    load_combo_yield_candidate_snapshot,
 )
 
 
@@ -137,11 +138,11 @@ def assemble_daily_decision_brief(
             data_gaps=data_gaps,
         )
     )
-    combo_rows, combo_available = _load_candidate_family(
-        run_account_dir=run_account_dir,
+    combo_rows, combo_available = _load_combo_yield_snapshot_family(
+        base=base_path,
+        run_id=run_id_norm,
+        account=account_norm,
         market=market_norm,
-        family="combo_yield",
-        paths_to_try=sorted(run_account_dir.glob("*_combo_yield_candidates.csv")),
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
@@ -303,11 +304,7 @@ def assemble_daily_decision_brief(
 
     selected_puts = put_rows[:max_candidates]
     selected_calls = call_rows[:max_candidates]
-    ranked_combos = (
-        select_best_yield_enhancement_per_symbol(combo_rows)
-        if combo_rows
-        else []
-    )
+    ranked_combos = combo_rows
     selected_combos = ranked_combos[:max_candidates]
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
@@ -827,6 +824,64 @@ def _load_candidate_family(
         )
         rows.extend(market_rows)
     return rows, available
+
+
+def _load_combo_yield_snapshot_family(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+    market: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Load Combo Yield pairs from the sealed account-run snapshot."""
+
+    try:
+        snapshot = load_combo_yield_candidate_snapshot(
+            base=base,
+            run_id=run_id,
+            account=account,
+        )
+    except ComboYieldCandidateSnapshotError as exc:
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "reason": "combo_snapshot_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return [], False
+    snapshot_market = str(snapshot.get("market") or "").strip().lower()
+    if snapshot_market and snapshot_market != str(market).strip().lower():
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "reason": "combo_snapshot_market_mismatch",
+            }
+        )
+        return [], False
+    pairs = snapshot.get("ranked_pairs") or []
+    market_rows: list[dict[str, Any]] = []
+    for source_row, raw in enumerate(pairs, start=1):
+        row = _json_safe(dict(raw))
+        row_market = _row_market(row)
+        if row_market is not None and row_market != str(market).strip().upper():
+            continue
+        row["_source_path"] = "state/combo_yield_candidate_snapshot.json"
+        row["_source_row"] = source_row
+        market_rows.append(row)
+    source_artifacts.append(
+        {
+            "kind": "combo_yield_snapshot",
+            "path": "state/combo_yield_candidate_snapshot.json",
+            "row_count": len(market_rows),
+            "opening_status": snapshot.get("opening_status"),
+        }
+    )
+    return market_rows, True
 
 def _daily_brief_advice_authority(
     *,

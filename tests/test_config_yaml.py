@@ -293,7 +293,7 @@ markets:
       FUTU:
         combo_yield:
           enabled: true
-          max_call_cost_to_put_credit: 0.30
+          min_net_credit_retention: 0.70
           call:
             min_delta: 0.12
 """,
@@ -314,14 +314,12 @@ markets:
 
     defaulted = policies["NVDA"]
     assert defaulted.explicit_fields == ("enabled",)
-    assert defaulted.config["max_call_cost_to_put_credit"] is None
     assert defaulted.config["min_net_credit_retention"] == 0.60
     assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
 
     overridden = policies["FUTU"]
-    assert overridden.explicit_fields == ("enabled", "max_call_cost_to_put_credit", "call")
-    assert overridden.config["max_call_cost_to_put_credit"] == 0.30
-    assert overridden.config["min_net_credit_retention"] == 0.60
+    assert overridden.explicit_fields == ("enabled", "min_net_credit_retention", "call")
+    assert overridden.config["min_net_credit_retention"] == 0.70
     assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
 
 

@@ -12,7 +12,6 @@ from src.application.strategy_policy import (
 
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
-YIELD_ENHANCEMENT_FUNDING_MODES: set[str] = {"credit_or_even", "max_debit"}
 YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair", "staggered_expiry_pair"}
 DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS = 1
 DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS = 90
@@ -48,10 +47,8 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "structure_mode": "same_expiry_pair",
     "objective": "premium_funded_long_call",
     "output_mode": "separate",
-    "funding_mode": "credit_or_even",
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
-    "max_call_cost_to_put_credit": None,
     "min_net_credit_retention": 0.60,
     "min_open_interest": 100,
     "min_volume": 5,
@@ -64,10 +61,8 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
 }
 YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS: dict[str, dict[str, Any]] = {
     "staggered_expiry_pair": {
-        "funding_mode": "credit_or_even",
         "min_combo_net_credit": 0.0,
         "min_net_credit_annualized": None,
-        "max_call_cost_to_put_credit": None,
         "min_net_credit_retention": 0.60,
         "min_expiry_gap_days": DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS,
         "max_expiry_gap_days": DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS,
@@ -81,7 +76,6 @@ YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
     YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE: {
-        "funding_mode": "credit_or_even",
         "call": {
             "min_delta": 0.05,
             "max_delta": 0.20,
