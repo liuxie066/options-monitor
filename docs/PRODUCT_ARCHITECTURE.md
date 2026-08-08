@@ -45,7 +45,7 @@
 当前状态：
 
 - Sell Put / Covered Call 已完成本轮 `insurance_underwriting` 语义重构。
-- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`。默认 `same_expiry_pair` 保留既有逻辑；`staggered_expiry_pair` 的 Funding Put 复用完整 Sell Put underwriting 结果，再配对更晚到期、可由 Put 净收入覆盖成本的 Long Call。
+- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`。默认 `same_expiry_pair` 保留既有逻辑；`staggered_expiry_pair` 的 Funding Put 复用完整 Sell Put underwriting 结果，再配对更晚到期、可由 Put 净收入覆盖成本的 Long Call。成本约束统一为 `min_net_credit_retention`，排序以 retention 优先、跨标的以 Funding Put 期间非年化净收益主导；候选写入独立的 run/account 级 sealed snapshot，消费者从 CSV 切换为快照。
 
 标准生命周期：
 
@@ -60,7 +60,7 @@
 
 - 开仓机会监控只推荐候选，不记录真实成交，不修改持仓账本。
 - 排序用于推荐最优候选，不能替代硬风险阈值。
-- Combo Yield 使用独立的组合腿结构、组合资金关系和组合排序，不再作为 Sell Put overlay 扩展；错期模式不把不同期限的两腿压成单一组合年化或 scenario 指标。
+- Combo Yield 使用独立的组合腿结构、组合资金关系和组合排序，不再作为 Sell Put overlay 扩展；错期模式不把不同期限的两腿压成单一组合年化或 scenario 指标。正式排序唯一存在于 domain / seal 时，Daily Brief 只读快照结果。
 - 推荐身份 `candidate_pair_id` 与真实成交意图 `pair_intent_id` 分离；没有显式 intent 时只记录单腿，不猜测持仓关系。
 
 主要实现位置：
