@@ -1,0 +1,100 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.11.0",
+  "base": {
+    "tag": "v1.10.19",
+    "commit": "ff81238a826783971a558198a9309e2d9c865ad9"
+  },
+  "reviewed_head": "44c2d62f02bbd55100039e791a04b0052aa5b0c9",
+  "commits": [
+    {
+      "sha": "bbba1a05313554f7877c4d68aa2900052fd0e6ae",
+      "subject": "gateflow: accept plan for cc-lp-same-expiry"
+    },
+    {
+      "sha": "b03fe8b8ee671396988490a449174a9888f69a9a",
+      "subject": "gateflow: accept cc-lp-same-expiry slice1"
+    },
+    {
+      "sha": "bef53cb33883a9c3a573ec9ae2ce975f53f095e3",
+      "subject": "gateflow: accept cc-lp-same-expiry slice2"
+    },
+    {
+      "sha": "df02184d20be3ec9db60ecfda09a1cf215987731",
+      "subject": "gateflow: accept cc-lp-same-expiry slice3"
+    },
+    {
+      "sha": "069a3bc588090fdd97b3b3e2ce0526f356b268fb",
+      "subject": "gateflow: accept deepreview for cc-lp-same-expiry"
+    },
+    {
+      "sha": "4d4bd2b8f329ecaf19c5375e552ff4b25ed533e8",
+      "subject": "gateflow: accept PR review for cc-lp-same-expiry"
+    },
+    {
+      "sha": "12c9ae0cae4841f3638abb2373447cf30233de1c",
+      "subject": "gateflow: final closeout for cc-lp-same-expiry"
+    },
+    {
+      "sha": "5fac2e50e56b36b855f3edb2ba228fb25727ec3c",
+      "subject": "fix: Kimi verification findings for cc-lp-same-expiry"
+    },
+    {
+      "sha": "0d4ccdf3a89f6e722a3fea804f296db8c975e545",
+      "subject": "fix: inherit Sell Call underwriting gates in CC+LP funding leg"
+    },
+    {
+      "sha": "31159012da495cd16c9b33ecf502f4d924722fbf",
+      "subject": "Merge pull request #138 from liuxie066/feat/cc-lp-same-expiry"
+    },
+    {
+      "sha": "44c2d62f02bbd55100039e791a04b0052aa5b0c9",
+      "subject": "chore: regenerate dependency graph for 1.11.0"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added the CC+LP (Covered Call + Long Put, same-expiry) opening-candidate variant to the Combo Yield module, mirroring the SP+LC policy: Sell Call is the funding leg and independently scans with the full Sell Call hard gates (annualized net-premium floor, `max(min_strike, avg_cost*1.02)`, max strike, liquidity, expiry window, and underwriting gates including net income, IV/RV, and earnings coverage); Long Put is the reversal leg with delta 0.10-0.25; the combination requires `call_strike > put_strike`, `net_credit / call_net_credit >= 0.20`, and uses the held-stock current market value (`spot * multiplier`) as the return denominator without deducting net credit.",
+      "commits": [
+        "bbba1a05313554f7877c4d68aa2900052fd0e6ae",
+        "b03fe8b8ee671396988490a449174a9888f69a9a",
+        "5fac2e50e56b36b855f3edb2ba228fb25727ec3c",
+        "0d4ccdf3a89f6e722a3fea804f296db8c975e545",
+        "31159012da495cd16c9b33ecf502f4d924722fbf"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Ranked CC+LP candidates by retained net credit first, then reversal-put delta closeness to 0.12, then two-leg spread and liquidity; `combo_yield.variant=cc_lp` selects the variant (default `sp_lc` keeps the existing behavior unchanged).",
+      "commits": [
+        "bef53cb33883a9c3a573ec9ae2ce975f53f095e3"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Sealed per-account run CC+LP candidate decisions into an immutable `cc_lp_candidate_snapshot.v1` and loaded the snapshot into the Daily Brief data source (renderer unchanged).",
+      "commits": [
+        "df02184d20be3ec9db60ecfda09a1cf215987731"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "069a3bc588090fdd97b3b3e2ce0526f356b268fb",
+      "reason": "gateflow aggregate deepreview process artifact; covered by CC+LP notes"
+    },
+    {
+      "commit": "4d4bd2b8f329ecaf19c5375e552ff4b25ed533e8",
+      "reason": "gateflow PR review process artifact; covered by CC+LP notes"
+    },
+    {
+      "commit": "12c9ae0cae4841f3638abb2373447cf30233de1c",
+      "reason": "gateflow final closeout process artifact; covered by CC+LP notes"
+    },
+    {
+      "commit": "44c2d62f02bbd55100039e791a04b0052aa5b0c9",
+      "reason": "regenerated dependency graph for release; no user-facing note"
+    }
+  ]
+}
