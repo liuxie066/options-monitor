@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -119,6 +120,7 @@ def _assemble(
     from src.application.daily_decision_brief_service import assemble_daily_decision_brief
 
     _materialize_opening_snapshot_fixture(base, market=market)
+    _materialize_combo_snapshot_fixture(base, market=market)
     return assemble_daily_decision_brief(
         base=base,
         run_id="run-1",
@@ -306,6 +308,50 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
     snapshot_path = account_dir / "state" / "opening_candidate_snapshot.json"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+
+def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
+    """Translate legacy Combo CSV setup into the sealed Combo snapshot contract."""
+
+    from src.application.combo_yield_candidate_snapshot import (
+        seal_combo_yield_candidate_snapshot,
+    )
+    from domain.domain.engine import select_best_yield_enhancement_per_symbol
+
+    account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
+    if not account_dir.is_dir():
+        return
+    combo_paths = sorted(account_dir.glob("*_combo_yield_candidates.csv"))
+    if not combo_paths:
+        return
+    pairs: list[dict[str, Any]] = []
+    for path in combo_paths:
+        try:
+            raw = path.read_bytes()
+            if raw in {b"\n", b"\r\n"}:
+                frame = pd.DataFrame()
+            else:
+                frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for item in json.loads(frame.to_json(orient="records")):
+            row = dict(item)
+            symbol = str(row.get("symbol") or "").upper()
+            row_market = "HK" if symbol.endswith(".HK") else "US"
+            if row_market != market.upper():
+                continue
+            row.setdefault("candidate_pair_id", row.get("strategy_group_id") or "")
+            pairs.append(row)
+    ranked_pairs = select_best_yield_enhancement_per_symbol(pairs)
+    seal_combo_yield_candidate_snapshot(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        market=market.lower(),
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        ranked_pairs=ranked_pairs,
+    )
 
 
 def _put_row(

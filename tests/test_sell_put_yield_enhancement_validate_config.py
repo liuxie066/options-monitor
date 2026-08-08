@@ -34,7 +34,7 @@ def test_validate_config_accepts_minimal_sell_put_combo_yield_symbol() -> None:
     validate_config(cfg)
 
 
-def test_validate_config_rejects_invalid_sell_put_combo_yield_funding_mode() -> None:
+def test_validate_config_rejects_removed_combo_yield_funding_mode_fields() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -61,7 +61,39 @@ def test_validate_config_rejects_invalid_sell_put_combo_yield_funding_mode() -> 
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.combo_yield.funding_mode" in str(exc)
+        assert "NVDA.combo_yield" in str(exc)
+        assert "funding_mode" in str(exc)
+
+
+def test_validate_config_rejects_removed_combo_yield_cost_ratio_fields() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "combo_yield": {
+                    "enabled": True,
+                    "max_call_cost_to_put_credit": 0.4,
+                    "call": {"min_strike": 108, "max_strike": 120},
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.combo_yield" in str(exc)
+        assert "max_call_cost_to_put_credit" in str(exc)
 
 
 def test_validate_config_rejects_removed_combo_yield_optimizer_field() -> None:

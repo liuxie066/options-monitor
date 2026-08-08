@@ -874,6 +874,74 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
     assert captured_scan["sell_put_cfg"]["max_strike"] == 50
 
 
+def test_symbol_monitoring_reports_combo_capture_status(tmp_path: Path) -> None:
+    from src.application import symbol_monitoring as mod
+
+    captured_statuses: list[dict] = []
+    captured_required_data: dict = {}
+
+    def _apply_prefilters_fn(**kwargs):
+        return type(
+            "Prefilter",
+            (),
+            {
+                "want_put": False,
+                "want_call": False,
+                "sp": kwargs.get("sp") or {},
+                "cc": kwargs.get("cc") or {},
+                "stock": None,
+            },
+        )()
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=_apply_prefilters_fn,
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put disabled")),
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: {"strategy": "combo_yield"},
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
+    )
+
+    mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+                "sell_put": {"enabled": False},
+                "combo_yield": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx={"cash_by_currency": {"USD": 0}},
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+            position_advice_producer_run_id="run-1",
+            candidate_capture_status_sink_fn=captured_statuses.append,
+        ),
+        deps=deps,
+    )
+
+    combo_statuses = [
+        item
+        for item in captured_statuses
+        if str(item.get("strategy_mode") or "") == "combo_yield"
+    ]
+    assert combo_statuses
+    assert combo_statuses[0]["status"] == "completed"
+
+
 
 def _run_strategy_decoupling_case(
     monkeypatch,

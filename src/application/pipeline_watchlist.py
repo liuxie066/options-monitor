@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.engine import select_best_yield_enhancement_per_symbol
 from src.application.config_profiles import deep_merge
 from src.application.config_sections import (
     resolve_templates_config,
@@ -45,6 +46,9 @@ from src.application.opening_candidate_snapshot import (
     dependency_from_hash,
     seal_opening_candidate_snapshot,
     strategy_policy_hash,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    seal_combo_yield_candidate_snapshot,
 )
 
 LIQUIDITY_COMMON_FIELDS = (
@@ -241,6 +245,9 @@ def run_watchlist_pipeline(
     ) = None,
     opening_candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None,
+    combo_pairs_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
     ) = None,
     opening_runtime_context_sink_fn: (
         Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None
@@ -443,6 +450,7 @@ def run_watchlist_pipeline(
                     "candidate_decisions_sink_fn": (
                         opening_candidate_decisions_sink_fn
                     ),
+                    "combo_pairs_sink_fn": combo_pairs_sink_fn,
                 }
                 if quote_snapshot_id:
                     advice_scan_kwargs["quote_snapshot_id"] = quote_snapshot_id
@@ -588,6 +596,7 @@ def run_watchlist_pipeline_default(
         "put": [],
         "call": [],
     }
+    captured_combo_pairs: list[dict[str, Any]] = []
     captured_runtime_context: dict[str, Any] = {}
     capture_lock = Lock()
 
@@ -612,6 +621,10 @@ def run_watchlist_pipeline_default(
             captured_candidate_decisions.setdefault(str(mode), []).extend(
                 dict(item) for item in rows
             )
+
+    def _capture_combo_pairs(rows: list[dict[str, Any]]) -> None:
+        with capture_lock:
+            captured_combo_pairs.extend(dict(item) for item in rows)
 
     def _capture_runtime_context(
         portfolio_ctx: dict[str, Any] | None,
@@ -675,6 +688,9 @@ def run_watchlist_pipeline_default(
         ),
         opening_candidate_decisions_sink_fn=(
             _capture_candidate_decisions if candidate_capture_enabled else None
+        ),
+        combo_pairs_sink_fn=(
+            _capture_combo_pairs if candidate_capture_enabled else None
         ),
         opening_runtime_context_sink_fn=(
             _capture_runtime_context if candidate_capture_enabled else None
@@ -866,4 +882,39 @@ def run_watchlist_pipeline_default(
         candidate_evaluations=captured_candidate_decisions,
         sealed_at=captured_at,
     )
+    combo_statuses = [
+        item
+        for item in capture_statuses
+        if str(item.get("strategy_mode") or "") == "combo_yield"
+    ]
+    if combo_statuses:
+        combo_completed = any(
+            str(item.get("status") or "") == "completed"
+            for item in combo_statuses
+        )
+        combo_failed = any(
+            str(item.get("status") or "") == "failed"
+            for item in combo_statuses
+        )
+        combo_opening_status: str | None = None
+        if combo_completed and not combo_failed:
+            combo_opening_status = None  # derived from pairs
+        elif combo_failed and not combo_completed:
+            combo_opening_status = "data_unavailable"
+        else:
+            combo_opening_status = "partial_data"
+        ranked_combo_pairs = select_best_yield_enhancement_per_symbol(
+            captured_combo_pairs
+        )
+        seal_combo_yield_candidate_snapshot(
+            base=base,
+            run_id=account_run_id,
+            account=account,
+            market=str(authority.get("market") or ""),
+            account_config_sha256=str(account_config_sha256 or ""),
+            strategy_policy_sha256=strategy_policy_hash(cfg),
+            ranked_pairs=ranked_combo_pairs,
+            opening_status=combo_opening_status,
+            sealed_at=captured_at,
+        )
     return result

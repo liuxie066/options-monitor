@@ -28,7 +28,6 @@ from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
-    YIELD_ENHANCEMENT_FUNDING_MODES,
     YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
     YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
     YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
@@ -203,10 +202,8 @@ YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
     'structure_mode',
     'objective',
     'output_mode',
-    'funding_mode',
     'min_combo_net_credit',
     'min_net_credit_annualized',
-    'max_call_cost_to_put_credit',
     'min_net_credit_retention',
     'min_open_interest',
     'min_volume',
@@ -214,8 +211,6 @@ YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
     'max_combo_spread_ratio',
     'min_expiry_gap_days',
     'max_expiry_gap_days',
-    'max_debit',
-    'max_debit_native',
     'min_dte',
     'max_dte',
     'call',
@@ -597,6 +592,16 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
     _reject_unknown_keys(cfg, YIELD_ENHANCEMENT_ALLOWED_FIELDS, path)
+    removed_funding_keys = [
+        key
+        for key in ('funding_mode', 'max_call_cost_to_put_credit', 'max_debit', 'max_debit_native')
+        if key in cfg
+    ]
+    if removed_funding_keys:
+        die(
+            f"{path} has removed funding-mode fields: {', '.join(removed_funding_keys)}; "
+            "use min_net_credit_retention as the single call-cost constraint"
+        )
     if 'strategy' in cfg or 'strategy_profile' in cfg:
         die(f'{path}.strategy is not supported; combo_yield is isolated from sell_put.strategy')
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
@@ -668,19 +673,9 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     for key in (
         'min_combo_net_credit',
         'min_net_credit_annualized',
-        'max_call_cost_to_put_credit',
     ):
         _validate_optional_non_negative_number(cfg, key, path)
     _validate_optional_unit_interval_number(cfg, 'min_net_credit_retention', path)
-    if 'funding_mode' in cfg and cfg.get('funding_mode') is not None:
-        mode = str(cfg.get('funding_mode') or '').strip().lower()
-        if mode not in YIELD_ENHANCEMENT_FUNDING_MODES:
-            die(f"{path}.funding_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_FUNDING_MODES))}")
-    if str(cfg.get('funding_mode') or '').strip().lower() == 'max_debit':
-        if (cfg.get('max_debit') is None) and (cfg.get('max_debit_native') is None):
-            die(f"{path}.funding_mode=max_debit requires max_debit or max_debit_native")
-    _validate_optional_positive_number(cfg, 'max_debit', path)
-    _validate_optional_positive_number(cfg, 'max_debit_native', path)
     _validate_optional_dte_window(cfg, path)
 
     call_leg = cfg.get('call')

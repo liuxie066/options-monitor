@@ -287,7 +287,6 @@ def compute_yield_enhancement_funding_decision(
     call_buy_fee: float,
     combo_metrics: YieldEnhancementMetrics,
     min_combo_net_credit: float | None = None,
-    max_call_cost_to_put_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
     structure_mode: str = "same_expiry_pair",
@@ -331,11 +330,6 @@ def compute_yield_enhancement_funding_decision(
     if min_annualized_net_credit is not None:
         if annualized_net_credit_yield is None or annualized_net_credit_yield < min_annualized_net_credit:
             reject_reasons.append("annualized_net_credit_yield")
-
-    max_cost_ratio = _safe_float(max_call_cost_to_put_credit)
-    if max_cost_ratio is not None:
-        if call_cost_ratio is None or call_cost_ratio > max_cost_ratio:
-            reject_reasons.append("call_cost_to_put_credit")
 
     max_combo_spread = _safe_float(max_combo_spread_ratio)
     if max_combo_spread is not None:
@@ -420,9 +414,9 @@ def yield_enhancement_staggered_rank_key(row: dict[str, Any]) -> tuple[Any, ...]
         assignment_margin = _safe_float(row.get("put_assignment_margin_pct"))
     if assignment_margin is None:
         assignment_margin = f("put_otm_pct")
-    put_annualized_return = _safe_float(row.get("put_only_annualized_net_return"))
-    if put_annualized_return is None:
-        put_annualized_return = f("annualized_net_return_on_cash_basis", default=-1.0)
+    put_period_return = _safe_float(row.get("put_only_period_net_return"))
+    if put_period_return is None:
+        put_period_return = f("period_net_return_on_cash_basis", default=-1.0)
     raw_call_delta = _safe_float(row.get("call_delta"))
     call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
     max_leg_spread_ratio = max(
@@ -431,10 +425,10 @@ def yield_enhancement_staggered_rank_key(row: dict[str, Any]) -> tuple[Any, ...]
     )
     return (
         -1.0 if _funding_accepted(row) else 0.0,
-        -float(put_annualized_return),
+        -float(put_period_return),
+        -f("net_credit_retention", default=-1.0),
         -float(assignment_margin),
         -call_delta,
-        -f("net_credit_retention", default=-1.0),
         max_leg_spread_ratio,
         -min(f("put_open_interest"), f("call_open_interest")),
         str(row.get("symbol") or ""),
@@ -460,17 +454,16 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
         call_participation = max(0.0, 1.0 - max(f("call_otm_pct"), 0.0) / 0.20)
     return (
         -1.0 if funding_accepted else 0.0,
-        -f("premium_funding_score"),
         -f("net_credit_retention"),
-        f("call_cost_to_put_credit", default=999.0),
         -call_participation,
+        f("combo_spread_ratio", default=999.0),
+        -min(f("put_open_interest"), f("call_open_interest")),
         -assignment_margin,
         -f("annualized_net_credit_yield"),
-        f("combo_spread_ratio", default=999.0),
         -f("combo_net_credit"),
         f("upside_breakeven_pct_above_spot", default=999.0),
         -f("net_credit"),
-        -min(f("put_open_interest"), f("call_open_interest")),
+        f("call_cost_to_put_credit", default=999.0),
     )
 
 
@@ -807,14 +800,14 @@ def yield_enhancement_pair_shadow_rank_key(row: dict[str, Any]) -> tuple[Any, ..
     assignment_margin = f("put_assignment_margin_pct")
     if assignment_margin == 0.0:
         assignment_margin = f("put_otm_pct")
-    put_only_annualized_return = f("put_only_annualized_net_return", default=-1.0)
-    if put_only_annualized_return < 0:
-        put_only_annualized_return = f("annualized_net_return_on_cash_basis", default=-1.0)
+    put_only_period_return = f("put_only_period_net_return", default=-1.0)
+    if put_only_period_return < 0:
+        put_only_period_return = f("period_net_return_on_cash_basis", default=-1.0)
     raw_call_delta = _safe_float(row.get("call_delta"))
     call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
     return (
+        -put_only_period_return,
         -assignment_margin,
-        -put_only_annualized_return,
         -call_delta,
         -f("call_payoff_multiple_at_1_5_sigma", default=-1.0),
         -f("call_payoff_multiple_at_2_0_sigma", default=-1.0),
