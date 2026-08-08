@@ -1,0 +1,120 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.18",
+  "base": {
+    "tag": "v1.10.17",
+    "commit": "10b18e1c485e95cb6729a575d8f2a629fa75354a"
+  },
+  "reviewed_head": "c4a46af90c89b59f569a1b813326f882b4878ddc",
+  "commits": [
+    {
+      "sha": "29e7132d7cdcc27496dd9bba02dd2761084b12cd",
+      "subject": "chore: release 1.10.17"
+    },
+    {
+      "sha": "97ed8b4ff52471667585ab736627a0f23a5564e6",
+      "subject": "gateflow: accept plan for combo-yield-policy-alignment"
+    },
+    {
+      "sha": "14e2afa252ba835d8a347715047b30fc8fcc8bcf",
+      "subject": "gateflow: accept combo-yield-policy-alignment s1"
+    },
+    {
+      "sha": "5c623b7e77f7916145399f0bfb5c5b0358b552d4",
+      "subject": "gateflow: accept combo-yield-policy-alignment s2"
+    },
+    {
+      "sha": "56c2d401ddccbd51e31f6290e059c4ed4e1d832c",
+      "subject": "gateflow: accept combo-yield-policy-alignment s3"
+    },
+    {
+      "sha": "ed3689bb42a18ca9b5f7b55b0a9906b0f2028ca4",
+      "subject": "gateflow: accept combo-yield-policy-alignment s4"
+    },
+    {
+      "sha": "b1170cfcc6b7aef13cd0901455ae362c07858532",
+      "subject": "gateflow: accept deepreview for combo-yield-policy-alignment"
+    },
+    {
+      "sha": "6a689e1cd642211ff04e6e96d72d631ca267e926",
+      "subject": "docs: sync combo yield policy after implementation"
+    },
+    {
+      "sha": "0a1ddf5732fa01f3f99af9776fe32cdf5e6be1c7",
+      "subject": "gateflow: accept PR review for combo-yield-policy-alignment"
+    },
+    {
+      "sha": "6983049abb1757a7dc226b6ec289e57a12354d19",
+      "subject": "gateflow: record draft PR pass for combo-yield-policy-alignment"
+    },
+    {
+      "sha": "cc6f9e04c2fa94b1971c82df04ffcd8c9056246e",
+      "subject": "gateflow: final closeout for combo-yield-policy-alignment"
+    },
+    {
+      "sha": "c4a46af90c89b59f569a1b813326f882b4878ddc",
+      "subject": "Merge pull request #137 from liuxie066/feat/combo-yield-policy-alignment"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Aligned Combo Yield opening candidate policy with the confirmed Sell Put + Long Call definition: Funding Put reuses the complete Sell Put underwriting hard gates (including net-income thresholds), the combination cost constraint is unified to `min_net_credit_retention=0.60` as the single expression of \"at most 40% of put premium funds the call\", and cash required uses the net-premium basis (`put_strike * multiplier - combo_net_credit`). Removed `funding_mode`, `max_call_cost_to_put_credit`, `max_debit`, and `max_debit_native` configuration fields are now explicitly rejected by config validation instead of silently accepted.",
+      "commits": [
+        "14e2afa252ba835d8a347715047b30fc8fcc8bcf",
+        "5c623b7e77f7916145399f0bfb5c5b0358b552d4"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reordered Combo Yield selection by retained deterministic premium first (`net_credit_retention`), then call participation, spread, and liquidity; cross-symbol ranking now uses the Funding Put whole-period non-annualized net return instead of the annualized return.",
+      "commits": [
+        "56c2d401ddccbd51e31f6290e059c4ed4e1d832c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Sealed per-account run Combo Yield candidate decisions into an immutable `combo_yield_candidate_snapshot.v1` and switched Daily Brief consumption from CSV to the sealed snapshot, removing the consumer-side second ranking.",
+      "commits": [
+        "ed3689bb42a18ca9b5f7b55b0a9906b0f2028ca4"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made the run-level Combo Yield snapshot sealing actually trigger: symbol monitoring now reports combo capture status into the same status sink used by Sell Put and Covered Call, and the watchlist seals the snapshot based on that status instead of a never-populated family field.",
+      "commits": [
+        "b1170cfcc6b7aef13cd0901455ae362c07858532"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "29e7132d7cdcc27496dd9bba02dd2761084b12cd",
+      "reason": "Release metadata for the already-published v1.10.17; no runtime behavior change in this delta."
+    },
+    {
+      "commit": "97ed8b4ff52471667585ab736627a0f23a5564e6",
+      "reason": "Accepted plan artifact for the Combo Yield work unit; planning documentation only."
+    },
+    {
+      "commit": "6a689e1cd642211ff04e6e96d72d631ca267e926",
+      "reason": "Design documentation sync for the implemented Combo Yield policy; documentation only."
+    },
+    {
+      "commit": "0a1ddf5732fa01f3f99af9776fe32cdf5e6be1c7",
+      "reason": "Accepted PR review commit containing a test-only lint import fix and review artifact; no runtime behavior change."
+    },
+    {
+      "commit": "6983049abb1757a7dc226b6ec289e57a12354d19",
+      "reason": "Gateflow draft-PR-pass record; process artifact only."
+    },
+    {
+      "commit": "cc6f9e04c2fa94b1971c82df04ffcd8c9056246e",
+      "reason": "Gateflow final closeout record; process artifact only."
+    },
+    {
+      "commit": "c4a46af90c89b59f569a1b813326f882b4878ddc",
+      "reason": "Merge commit bringing the Combo Yield feature branch into main; covered by the release-note commits it contains."
+    }
+  ]
+}

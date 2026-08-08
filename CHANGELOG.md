@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.10.18 - 2026-08-08
+
+### Improvements
+- Aligned Combo Yield opening candidate policy with the confirmed Sell Put + Long Call definition: Funding Put reuses the complete Sell Put underwriting hard gates (including net-income thresholds), the combination cost constraint is unified to `min_net_credit_retention=0.60` as the single expression of "at most 40% of put premium funds the call", and cash required uses the net-premium basis (`put_strike * multiplier - combo_net_credit`). Removed `funding_mode`, `max_call_cost_to_put_credit`, `max_debit`, and `max_debit_native` configuration fields are now explicitly rejected by config validation instead of silently accepted.
+- Reordered Combo Yield selection by retained deterministic premium first (`net_credit_retention`), then call participation, spread, and liquidity; cross-symbol ranking now uses the Funding Put whole-period non-annualized net return instead of the annualized return.
+- Sealed per-account run Combo Yield candidate decisions into an immutable `combo_yield_candidate_snapshot.v1` and switched Daily Brief consumption from CSV to the sealed snapshot, removing the consumer-side second ranking.
+
+### Bug Fixes
+- Made the run-level Combo Yield snapshot sealing actually trigger: symbol monitoring now reports combo capture status into the same status sink used by Sell Put and Covered Call, and the watchlist seals the snapshot based on that status instead of a never-populated family field.
+
 ## 1.10.17 - 2026-08-08
 
 ### Bug Fixes
