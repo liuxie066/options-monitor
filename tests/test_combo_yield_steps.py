@@ -135,6 +135,38 @@ def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path)
     assert float(captured.iloc[0]["strike_safety_margin_pct"]) == 0.12
 
 
+def test_combo_yield_put_underwriting_inherits_sell_put_hard_gates(tmp_path: Path) -> None:
+    captured_underwriting: dict[str, object] = {}
+
+    def underwriting_gate(**kwargs):
+        captured_underwriting.update(kwargs)
+        return kwargs["df_labeled"].copy()
+
+    _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        yield_sp={
+            "strategy": "insurance_underwriting",
+            "min_annualized_net_return": 0.10,
+            "min_net_income": 50.0,
+            "min_strike": 90.0,
+            "max_strike": 105.0,
+            "max_spread_ratio": 0.40,
+        },
+        underwriting_filter_put_candidates_fn=underwriting_gate,
+    )
+
+    sell_put_cfg = captured_underwriting["sell_put_cfg"]
+    assert isinstance(sell_put_cfg, dict)
+    assert sell_put_cfg["strategy"] == "insurance_underwriting"
+    assert sell_put_cfg["min_net_income"] == 50.0
+    assert sell_put_cfg["min_annualized_net_return"] == 0.10
+    assert sell_put_cfg["min_strike"] == 90.0
+    assert sell_put_cfg["max_strike"] == 105.0
+    assert sell_put_cfg["max_spread_ratio"] == 0.40
+
+
 def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_disabled(
     tmp_path: Path,
     monkeypatch,
