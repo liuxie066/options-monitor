@@ -54,3 +54,22 @@
 ## Next Entry Point
 
 - 用户 merge PR #138 到 main 后，可继续：发布/升级（需独立授权）、或开展后续 work unit（CC+LC、CC+LP 错期、Daily Brief 展示、端到端封存测试）。
+
+## 附录：策略规则一致性核对（Kimi 验证后补查）
+
+| # | 已确认策略规则（文档） | 代码落实 | 状态 |
+|---|---|---|---|
+| 1 | Sell Call 资金腿 + Long Put 反转腿，同到期 | cc_lp.py validate/compute；cc_lp_steps 配对 | ✅ |
+| 2 | call_strike > put_strike（结构方向） | cc_lp.py:74-75 strike_order reject | ✅ |
+| 3 | Sell Call 独立扫描、继承全部硬门槛（收益、strike 含 avg_cost*1.02、max_strike、流动性、期限、underwriting） | cc_lp_steps：run_sell_call_scan + **enrich_and_filter_covered_call_underwriting（本轮补）** | ✅（补 underwriting 层） |
+| 4 | Long Put delta 0.10~0.25，fail closed | cc_lp.py:76-80 | ✅ |
+| 5 | 保留率 net_credit/call_net_credit ≥0.20，不允许净 debit | cc_lp.py:107-109 + cc_lp_steps 门槛 | ✅ |
+| 6 | 资金占用 = spot × multiplier（1 张合约覆盖股数），不扣净权利金 | cc_lp.py net_return / covered_notional；cc_lp_steps covered_notional=spot*multiplier | ✅ |
+| 7 | 排序保留率主键 + 反转腿 delta 趋近 0.12 次键 | cc_lp.py cc_lp_rank_key | ✅ |
+| 8 | 无 gap 硬门槛（gap_width_pct 仅诊断） | cc_lp.py 仅计算输出 | ✅ |
+| 9 | 无持仓 → not_applicable 跳过 | cc_lp_steps 空返回 + run_cc_lp_variant not_applicable | ✅ |
+| 10 | 候选写入独立 cc_lp_candidate_snapshot.v1 | cc_lp_candidate_snapshot.py + pipeline 封存（含 variant 透传修复） | ✅ |
+| 11 | Daily Brief 加载快照到数据源（不改 renderer） | daily_decision_brief_service._load_cc_lp_snapshot_family | ✅ |
+| 12 | variant 默认 sp_lc，objective 不动 | yield_enhancement_config + config_validator | ✅ |
+
+本轮修复：Sell Call 资金腿补跑 `enrich_and_filter_covered_call_underwriting`（继承 min_net_income、IV/RV、earnings 等 underwriting 硬门槛），并新增回归测试。

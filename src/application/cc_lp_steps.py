@@ -25,11 +25,15 @@ from domain.domain.sell_call_config import resolve_effective_sell_call_min_strik
 from domain.domain.symbol_identity import symbol_market
 from src.application.scan_sell_call import run_sell_call_scan
 from src.application.sell_call_steps import _optional_float
+from src.application.covered_call_strategy_risk import (
+    enrich_and_filter_covered_call_underwriting,
+)
 from src.application.sell_put_call_helper import (
     _call_leg_from_required_data,
     _put_leg_from_sell_put_row,
 )
 from src.application.strategy_policy import SELL_CALL_FAMILY
+from src.infrastructure.exchange_rates import CurrencyConverter
 from src.infrastructure.io_utils import atomic_write_text
 
 
@@ -65,6 +69,8 @@ def run_cc_lp_scan(
     required_data_dir: Path,
     report_dir: Path,
     sell_call_cfg: dict[str, Any],
+    exchange_rate_converter: CurrencyConverter,
+    portfolio_ctx: dict[str, Any] | None = None,
     stock: dict[str, Any] | None = None,
     min_put_delta: float = CC_LP_DEFAULT_MIN_PUT_DELTA,
     max_put_delta: float = CC_LP_DEFAULT_MAX_PUT_DELTA,
@@ -127,6 +133,18 @@ def run_cc_lp_scan(
         strategy_family=SELL_CALL_FAMILY,
         strategy_profile="cc_lp_funding_call",
         quiet=True,
+    )
+    if df_calls.empty:
+        return pd.DataFrame()
+    df_calls = enrich_and_filter_covered_call_underwriting(
+        df_labeled=df_calls,
+        symbol=symbol,
+        sell_call_cfg={
+            **sell_call_cfg,
+            "strategy": "insurance_underwriting",
+        },
+        portfolio_ctx=portfolio_ctx,
+        exchange_rate_converter=exchange_rate_converter,
     )
     if df_calls.empty:
         return pd.DataFrame()
