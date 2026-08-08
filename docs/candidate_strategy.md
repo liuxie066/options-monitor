@@ -527,3 +527,20 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 上述结论证明当前 `main` 源码与 v1.10.17 发布产物已按本合同运行。受控远程升级是
 独立授权边界；在完成升级和运行时验证前，不得宣称生产环境已按本合同运行。
+
+## 附：CC+LP（Covered Call + Long Put）变体
+
+CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp`），完整口径见
+[`docs/plans/cc-lp-same-expiry-policy-confirmation-20260808.md`](plans/cc-lp-same-expiry-policy-confirmation-20260808.md)：
+
+- 定位：Sell Call 资金腿（收权利金、承担被叫走风险）+ Long Put 看跌反转腿（表达转跌观点），
+  与 SP+LC 严格对称，不是保护/保险；
+- Sell Call 腿独立扫描，继承 Sell Call 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
+  无持仓上下文 → `not_applicable` 跳过；
+- Long Put 反转腿 delta 区间 0.10~0.25，目标 delta 0.12；
+- 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；
+- 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
+- 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；
+- 排序：保留率主键，次键反转腿 delta 趋近 0.12，再 spread/OI；
+- 候选写入独立 `cc_lp_candidate_snapshot.v1`，Daily Brief 加载快照到数据源（不渲染）；
+- 当前不启用（`combo_yield.variant` 默认 `sp_lc`），启用由运行时配置决定。
