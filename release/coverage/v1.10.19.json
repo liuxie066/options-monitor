@@ -1,0 +1,23 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.19",
+  "base": {
+    "tag": "v1.10.18",
+    "commit": "9f6d70c036c9e4890e9eb8f9a369c6149463ab2b"
+  },
+  "reviewed_head": "62f4a6baf573d6513f0700b977a6061be7c1611e",
+  "commits": [
+    {
+      "sha": "62f4a6baf573d6513f0700b977a6061be7c1611e",
+      "subject": "fix: harden notification_perception_read run_id path boundary"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Hardened the notification-perception read tool's path boundary: `run_id` is now validated as a single safe path component, run-scoped reads are contained under `output_runs` instead of the whole repo root, and symlinked `output_runs` / `output_shared` / run / `state` directories are explicitly rejected, closing path-traversal and symlink-escape reads outside the runtime boundary.",
+      "commits": ["62f4a6baf573d6513f0700b977a6061be7c1611e"]
+    }
+  ],
+  "no_release_note": []
+}

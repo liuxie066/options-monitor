@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.19 - 2026-08-08
+
+### Bug Fixes
+- Hardened the notification-perception read tool's path boundary: `run_id` is now validated as a single safe path component, run-scoped reads are contained under `output_runs` instead of the whole repo root, and symlinked `output_runs` / `output_shared` / run / `state` directories are explicitly rejected, closing path-traversal and symlink-escape reads outside the runtime boundary.
+
 ## 1.10.18 - 2026-08-08
 
 ### Improvements
