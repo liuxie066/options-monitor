@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.11.0 - 2026-08-08
+
+### New Features
+- Added the CC+LP (Covered Call + Long Put, same-expiry) opening-candidate variant to the Combo Yield module, mirroring the SP+LC policy: Sell Call is the funding leg and independently scans with the full Sell Call hard gates (annualized net-premium floor, `max(min_strike, avg_cost*1.02)`, max strike, liquidity, expiry window, and underwriting gates including net income, IV/RV, and earnings coverage); Long Put is the reversal leg with delta 0.10-0.25; the combination requires `call_strike > put_strike`, `net_credit / call_net_credit >= 0.20`, and uses the held-stock current market value (`spot * multiplier`) as the return denominator without deducting net credit.
+- Ranked CC+LP candidates by retained net credit first, then reversal-put delta closeness to 0.12, then two-leg spread and liquidity; `combo_yield.variant=cc_lp` selects the variant (default `sp_lc` keeps the existing behavior unchanged).
+- Sealed per-account run CC+LP candidate decisions into an immutable `cc_lp_candidate_snapshot.v1` and loaded the snapshot into the Daily Brief data source (renderer unchanged).
+
 ## 1.10.19 - 2026-08-08
 
 ### Bug Fixes
