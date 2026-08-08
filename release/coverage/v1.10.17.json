@@ -5,7 +5,7 @@
     "tag": "v1.10.16",
     "commit": "5a5964bf24113cbaa400d761a7f5c8e02fcb26ac"
   },
-  "reviewed_head": "a057b29d184554297334bccd9f2882652a343473",
+  "reviewed_head": "10b18e1c485e95cb6729a575d8f2a629fa75354a",
   "commits": [
     {
       "sha": "b7d44683927688818175782cb61550e86c257b9d",
@@ -18,6 +18,10 @@
     {
       "sha": "a057b29d184554297334bccd9f2882652a343473",
       "subject": "chore: release 1.10.17"
+    },
+    {
+      "sha": "10b18e1c485e95cb6729a575d8f2a629fa75354a",
+      "subject": "chore: add 1.10.17 release delta coverage and refresh dependency graph"
     }
   ],
   "release_notes": [
@@ -36,7 +40,11 @@
     },
     {
       "commit": "a057b29d184554297334bccd9f2882652a343473",
-      "reason": "Release metadata commit (VERSION and CHANGELOG only); no runtime behavior change."
+      "reason": "Superseded release metadata commit; the release workflow rejected it because the delta coverage manifest was not yet committed, and the release is rebuilt by the commit after reviewed_head."
+    },
+    {
+      "commit": "10b18e1c485e95cb6729a575d8f2a629fa75354a",
+      "reason": "Release delta coverage manifest and dependency graph refresh; process artifacts only, no runtime behavior change."
     }
   ]
 }
