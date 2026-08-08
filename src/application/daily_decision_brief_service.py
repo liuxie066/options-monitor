@@ -18,9 +18,6 @@ from domain.domain.close_advice import (
     safe_int,
     select_close_advice_notification_rows,
 )
-from domain.domain.engine import (
-    select_best_yield_enhancement_per_symbol,
-)
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
@@ -307,11 +304,7 @@ def assemble_daily_decision_brief(
 
     selected_puts = put_rows[:max_candidates]
     selected_calls = call_rows[:max_candidates]
-    ranked_combos = (
-        select_best_yield_enhancement_per_symbol(combo_rows)
-        if combo_rows
-        else []
-    )
+    ranked_combos = combo_rows
     selected_combos = ranked_combos[:max_candidates]
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {

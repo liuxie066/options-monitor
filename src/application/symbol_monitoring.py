@@ -586,6 +586,14 @@ def run_symbol_monitoring(
                 receipt_relpath=quote_receipt_relpath,
                 **_completed_empty_evidence(combo_candidate_count),
             )
+            _report_capture(
+                strategy_mode="combo_yield",
+                status="completed",
+                reason=_capture_reason(
+                    combo_candidate_count,
+                    None,
+                ),
+            )
         except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
             append_strategy_scan_failure(
@@ -607,6 +615,11 @@ def run_symbol_monitoring(
                 reason="combo_yield_scan_failed",
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
+            )
+            _report_capture(
+                strategy_mode="combo_yield",
+                status="failed",
+                reason="combo_yield_scan_failed",
             )
     elif not want_yield_enhancement:
         deps.materialize_empty_combo_yield_artifacts_fn(
