@@ -227,6 +227,53 @@ def test_run_cc_lp_variant_returns_summary(tmp_path: Path) -> None:
     assert summary["candidate_count"] == 1
 
 
+def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
+    required_data = _write_required_data(
+        tmp_path,
+        call_rows=[_call_row()],
+        put_rows=[_put_row()],
+    )
+    symbol_cfg = {
+        "symbol": "NVDA",
+        "combo_yield": {"enabled": True, "variant": "cc_lp"},
+        "sell_call": {"enabled": True},
+        "_global_sell_call_liquidity": {},
+    }
+    captured: list[dict] = []
+    summary = run_cc_lp_variant(
+        base=tmp_path,
+        sym="NVDA",
+        symbol="NVDA",
+        symbol_lower="nvda",
+        symbol_cfg=symbol_cfg,
+        yield_cfg=resolve_yield_enhancement_cfg(symbol_cfg),
+        policy=derive_yield_enhancement_policy(
+            resolve_yield_enhancement_cfg(symbol_cfg),
+            market="us",
+        ),
+        required_data_dir=required_data,
+        report_dir=tmp_path,
+        portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
+        run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
+            [
+                {
+                    "strategy_family": "combo_yield",
+                    "variant": "cc_lp",
+                    "symbol": "NVDA",
+                    "candidate_pair_id": "cc_lp:NVDA:C:P",
+                    "call_strike": 110.0,
+                    "put_strike": 90.0,
+                    "net_credit_retention": 0.30,
+                }
+            ]
+        ),
+        combo_pairs_sink_fn=captured.extend,
+    )
+    assert summary["status"] == "candidates_found"
+    assert len(captured) == 1
+    assert captured[0]["variant"] == "cc_lp"
+
+
 def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
     required_data = _write_required_data(
         tmp_path,

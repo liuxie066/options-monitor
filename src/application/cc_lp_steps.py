@@ -193,6 +193,9 @@ def run_cc_lp_scan(
                     "variant": CC_LP_VARIANT,
                     "strategy_profile": strategy_profile,
                     "market": symbol_market(symbol),
+                    "candidate_pair_id": (
+                        f"cc_lp:{symbol}:{call_leg.contract_symbol}:{put_leg.contract_symbol}"
+                    ),
                     "call_contract_symbol": call_leg.contract_symbol,
                     "call_strike": call_leg.strike,
                     "call_expiration": call_leg.expiration,
@@ -252,6 +255,7 @@ def summarize_cc_lp_result(
 
     return {
         "strategy_family": CC_LP_FAMILY,
+        "variant": CC_LP_VARIANT,
         "symbol": symbol,
         "candidate_count": int(len(df)),
         "status": status,
