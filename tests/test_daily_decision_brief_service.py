@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pandas as pd
 import pytest
