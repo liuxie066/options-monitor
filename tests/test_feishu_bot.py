@@ -769,7 +769,7 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
 
     assert daily_brief.startswith("# OM · 决策简报 · lx")
     assert "状态｜当前简报" in daily_brief
-    assert "\n## 候选\n\u200b\n**1｜" in daily_brief
+    assert "\n## Sell Put\n" in daily_brief
     assert all(section in compact_tick for section in ("## 候选", "## 持仓", "## 资金"))
     assert "合约｜2026-08-21 100 Put" in trade_receipt
     assert "## 可选批次" in trade_receipt

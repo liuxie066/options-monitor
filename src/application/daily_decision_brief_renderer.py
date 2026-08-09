@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.application.ai_decision_advice.render import render_family_advice_lines
+
 
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
@@ -205,6 +207,7 @@ def build_daily_brief_user_view(
         "funds": funds,
         "capacity": capacity,
         "reminders": reminders,
+        "ai_decision_advice": brief.get("ai_decision_advice"),
     }
     return view
 
@@ -476,21 +479,83 @@ def _render_user_view(
         lines.extend([_VISIBLE_BLANK_LINE, "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    candidate_heading = "新增候选" if projection == "candidate_alert" else "当前候选"
-    if projection == "legacy":
-        candidate_heading = "候选"
-    lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
-    if not candidates:
-        lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+    market = _upper(view.get("market"))
+    ai_section = view.get("ai_decision_advice")
+    ai_zero = (
+        ai_section.get("zero_candidate")
+        if isinstance(ai_section, Mapping) and isinstance(ai_section.get("zero_candidate"), Mapping)
+        else {}
+    )
+    ai_available_families = {
+        family
+        for family in ("sell_put", "covered_call")
+        if isinstance(ai_section, Mapping)
+        and str(ai_section.get("status") or "") != "not_applicable"
+        and not bool(ai_zero.get(family))
+    }
+    candidate_families = {str(item.get("family") or "") for item in candidates}
+    visible_families = candidate_families | ai_available_families
+    if projection == "candidate_alert":
+        lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 新增候选"])
+        if not candidates:
+            lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+        else:
+            for item in candidates:
+                lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+                for leg in item.get("legs") or []:
+                    lines.append(_flat_field_line(leg))
+                for detail in item.get("details") or []:
+                    lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
+            for note in view.get("candidate_omissions") or []:
+                lines.append(f"补充｜{note}")
+        # Candidate alerts carry only the affected strategy modules (design
+        # 15.1); AI 建议聚合在各自模块内，unavailable 如实展示不推迟提醒。
+        for family in ("sell_put", "covered_call"):
+            family_rows = [item for item in candidates if item.get("family") == family]
+            if not family_rows or family not in visible_families:
+                continue
+            advice_lines = _ai_advice_lines_for_family(view, family=family, market=market)
+            if advice_lines:
+                lines.extend([_VISIBLE_BLANK_LINE, *advice_lines])
     else:
-        for index, item in enumerate(candidates, start=1):
-            lines.extend([_VISIBLE_BLANK_LINE, f"**{index}｜{_flat_title(item['title'])}**"])
-            for leg in item.get("legs") or []:
-                lines.append(_flat_field_line(leg))
-            for detail in item.get("details") or []:
-                lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
+        candidate_heading = "当前候选"
+        if projection == "legacy":
+            candidate_heading = "候选"
+        omissions_by_family: dict[str, list[str]] = {family: [] for family in _STRATEGY_LABELS}
+        other_omissions: list[str] = []
         for note in view.get("candidate_omissions") or []:
+            matched = False
+            for family, label in _STRATEGY_LABELS.items():
+                if str(note).startswith(f"{label} "):
+                    omissions_by_family.setdefault(family, []).append(str(note)[len(label):].strip())
+                    matched = True
+                    break
+            if not matched:
+                other_omissions.append(str(note))
+        for family in ("sell_put", "covered_call", "combo_yield"):
+            family_rows = [item for item in candidates if item.get("family") == family]
+            if family not in visible_families:
+                continue
+            lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
+            advice_lines = _ai_advice_lines_for_family(view, family=family, market=market)
+            if advice_lines:
+                lines.extend(advice_lines)
+                lines.append(_VISIBLE_BLANK_LINE)
+            if family_rows:
+                lines.append("策略候选")
+                for item in family_rows:
+                    lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+                    for leg in item.get("legs") or []:
+                        lines.append(_flat_field_line(leg))
+                    for detail in item.get("details") or []:
+                        lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
+            for note in omissions_by_family.get(family) or []:
+                lines.append(f"补充｜{note}")
+        for note in other_omissions:
             lines.append(f"补充｜{note}")
+        if not candidates and not visible_families:
+            lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
+            lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
 
     position_rows = [
         item
@@ -601,28 +666,28 @@ def _render_user_view_card(
             )
         )
         if positions:
-            lines.extend(
-                [
-                    "",
-                    "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |",
-                    "|---|---|---:|---:|---:|",
-                    *[
-                        "| "
-                        + " | ".join(
-                            _table_cell(item.get(key) or "—")
-                            for key in (
-                                "holding",
-                                "status",
-                                "close_mid",
-                                "realized_if_close",
-                                "remaining_annualized",
-                            )
-                        )
-                        + " |"
-                        for item in positions
-                    ],
+            # design 15.5: itemized list, same visual form as candidates.
+            for index, item in enumerate(positions, start=1):
+                lines.extend(
+                    [
+                        "",
+                        f"**{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}**",
+                    ]
+                )
+                facts = [
+                    f"参考平仓价 {_table_cell(item.get('close_mid'))}"
+                    if item.get("close_mid") not in (None, "")
+                    else "",
+                    f"预计锁定损益 {_table_cell(item.get('realized_if_close'))}"
+                    if item.get("realized_if_close") not in (None, "")
+                    else "",
+                    f"剩余年化 {_table_cell(item.get('remaining_annualized'))}"
+                    if item.get("remaining_annualized") not in (None, "")
+                    else "",
                 ]
-            )
+                facts = [fact for fact in facts if fact]
+                if facts:
+                    lines.append("参考｜" + " · ".join(facts))
             decision_details = _render_position_decision_details_card(
                 positions
             )
@@ -736,6 +801,93 @@ def _candidate_detail_label(value: Any) -> str:
     return "指标"
 
 
+def _ai_referenced_candidate_ids(brief: Mapping[str, Any]) -> set[str]:
+    """Candidate ids referenced by AI decisions (design 15.6)."""
+
+    section = brief.get("ai_decision_advice")
+    if not isinstance(section, Mapping):
+        return set()
+    ids: set[str] = set()
+    rows = []
+    sell_put = section.get("sell_put")
+    if isinstance(sell_put, Mapping):
+        rows.append(sell_put)
+    for row in section.get("covered_call") or []:
+        if isinstance(row, Mapping):
+            rows.append(row)
+    for row in rows:
+        for key in ("baseline_candidate_id", "selected_candidate_id"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                ids.add(value)
+    return ids
+
+
+def _ai_candidate_fact_maps(
+    brief: Mapping[str, Any],
+    *,
+    market: str,
+) -> tuple[dict[str, str], dict[str, int]]:
+    """candidate_id -> (human contract label, strategy rank) for AI rendering."""
+
+    candidates = brief.get("candidates")
+    if isinstance(candidates, Mapping):
+        by_family: dict[str, list[Mapping[str, Any]]] = {}
+        for family in ("sell_put", "covered_call"):
+            by_family[family] = [
+                row for row in candidates.get(family) or [] if isinstance(row, Mapping)
+            ]
+    else:
+        # view-shaped input: flat candidate views carry `family`.
+        by_family = {"sell_put": [], "covered_call": []}
+        for row in candidates if isinstance(candidates, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            family = str(row.get("family") or "")
+            if family in by_family:
+                by_family[family].append(row)
+    source = by_family
+    contracts: dict[str, str] = {}
+    ranks: dict[str, int] = {}
+    for family in ("sell_put", "covered_call"):
+        for row in source.get(family) or []:
+            if not isinstance(row, Mapping):
+                continue
+            candidate_id = str(row.get("candidate_id") or "").strip()
+            if not candidate_id:
+                continue
+            symbol = _upper(row.get("symbol")) or "未知标的"
+            contract = _human_contract(
+                expiration=row.get("expiration"),
+                strike=row.get("strike"),
+                option_type=row.get("option_type"),
+                market=market,
+            )
+            contracts[candidate_id] = f"{symbol} {contract}".strip()
+            rank = _positive_rank(row.get("rank"), fallback=0)
+            if rank:
+                ranks[candidate_id] = rank
+    return contracts, ranks
+
+
+def _ai_advice_lines_for_family(
+    brief: Mapping[str, Any],
+    *,
+    family: str,
+    market: str,
+) -> list[str]:
+    section = brief.get("ai_decision_advice")
+    if not isinstance(section, Mapping):
+        return []
+    contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
+    return render_family_advice_lines(
+        section,
+        family=family,
+        candidate_contract_by_id=contracts,
+        candidate_rank_by_id=ranks,
+    )
+
+
 def _candidate_views(
     brief: Mapping[str, Any],
     *,
@@ -745,6 +897,7 @@ def _candidate_views(
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     changed_keys = _changed_candidate_keys(diff)
+    ai_referenced_ids = _ai_referenced_candidate_ids(brief)
     budget = _RenderBudget()
     out: list[dict[str, Any]] = []
     omissions: list[str] = []
@@ -754,15 +907,28 @@ def _candidate_views(
     for family in ("sell_put", "covered_call", "combo_yield"):
         rows = [item for item in source.get(family) or [] if isinstance(item, Mapping)]
         changed_rows = [row for row in rows if _candidate_row_keys(family, row) & changed_keys]
-        unchanged_rows = [row for row in rows if row not in changed_rows]
-        selected = budget.take([*changed_rows, *unchanged_rows], max(limit, len(changed_rows)))
+        # design 15.6: AI-referenced candidates must be shown even beyond the
+        # ordinary top-N budget, without changing their true strategy rank.
+        ai_rows = [
+            row
+            for row in rows
+            if row not in changed_rows
+            and str(row.get("candidate_id") or "") in ai_referenced_ids
+        ]
+        unchanged_rows = [
+            row for row in rows if row not in changed_rows and row not in ai_rows
+        ]
+        selected = budget.take(
+            [*changed_rows, *ai_rows, *unchanged_rows],
+            max(limit, len(changed_rows) + len(ai_rows)),
+        )
         selected_by_family[family] = selected
         omitted = len(rows) - len(selected)
         if omitted > 0:
-            omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个候选未展开")
+            omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个策略候选未展开")
         for position, row in enumerate(selected, start=1):
             rank = _positive_rank(row.get("rank"), fallback=position)
-            choice = "首选" if rank == 1 else f"备选 {rank}"
+            choice = f"策略排序 {rank}"
             symbol = _upper(row.get("symbol")) or "未知标的"
             if family == "combo_yield":
                 put_contract = _human_contract(
@@ -797,6 +963,7 @@ def _candidate_views(
                         "rank": rank,
                         "choice": choice,
                         "symbol": symbol,
+                        "candidate_id": str(row.get("candidate_id") or "") or None,
                         "title": f"{symbol} · 组合增强（{choice}）",
                         "legs": [put_leg, call_leg],
                         "details": [
@@ -833,6 +1000,7 @@ def _candidate_views(
                     "rank": rank,
                     "choice": choice,
                     "symbol": symbol,
+                    "candidate_id": str(row.get("candidate_id") or "") or None,
                     "title": (f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）"),
                     "details": [
                         *_candidate_metric_details(row, family=family, market=market),
@@ -866,6 +1034,17 @@ def _candidate_metric_details(
         ask_text = _money(ask, market=market) if ask is not None else "-"
         parts.append(f"Bid/Ask {bid_text}/{ask_text}")
 
+    # design 15.5: period (non-annualized) net return is the primary metric;
+    # the annualized value stays as an explicit "门槛年化" gate label.
+    period_key = {
+        "sell_put": "period_net_return_on_cash_basis",
+        "covered_call": "period_net_premium_return",
+    }.get(family)
+    period = _number(values.get(period_key)) if period_key else None
+    if period is None:
+        period = _number(values.get("period_net_return"))
+    if period is not None:
+        parts.append(f"持有期净收益 {_percent(period)}")
     annualized_key = {
         "sell_put": "annualized_net_return_on_cash_basis",
         "covered_call": "annualized_net_premium_return",
@@ -873,7 +1052,7 @@ def _candidate_metric_details(
     }.get(family)
     annualized = _number(values.get(annualized_key)) if annualized_key else None
     if annualized is not None:
-        parts.append(f"年化 {_percent(annualized)}")
+        parts.append(f"门槛年化 {_percent(annualized)}")
     delta = _number(values.get("delta"))
     if delta is not None:
         parts.append(f"Delta {delta:.2f}")

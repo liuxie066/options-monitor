@@ -10,7 +10,12 @@ def assert_mobile_flat_markdown(message: str, *, require_title: bool = True) -> 
     lines = str(message or "").splitlines()
     if require_title:
         assert sum(line.startswith("# ") for line in lines) == 1
-    assert not any(line.startswith("###") for line in lines)
+    # `### AI建议` is the sanctioned per-strategy submodule heading
+    # (docs/AI_DECISION_ADVICE_DESIGN.md 15.1); other ### remain disallowed.
+    assert not any(
+        line.startswith("###") and not line.startswith("### AI建议")
+        for line in lines
+    )
     assert not any(line.startswith(">") for line in lines)
     assert _NESTED_LIST_RE.search(message) is None
     assert not any(line.strip().startswith("|") and line.strip().endswith("|") for line in lines)
