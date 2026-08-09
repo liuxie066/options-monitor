@@ -24,6 +24,26 @@ SECRET_KEY_PARTS = (
     "webhook",
 )
 
+SENSITIVE_ID_KEYS = frozenset(
+    {
+        "account_id",
+        "app_id",
+        "chat_id",
+        "conversation_id",
+        "event_id",
+        "group_id",
+        "message_id",
+        "open_id",
+        "operator_id",
+        "recipient_id",
+        "sender_id",
+        "tenant_id",
+        "to_user_id",
+        "union_id",
+        "user_id",
+    }
+)
+
 WEBHOOK_RE = re.compile(r"https?://[^\s\"']*(?:webhook|hook|bot|token|key)[^\s\"']*", re.IGNORECASE)
 LONG_NUMBER_RE = re.compile(r"\b\d{10,}\b")
 BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
@@ -51,6 +71,13 @@ QUERY_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+PROVIDER_IDENTIFIER_RE = re.compile(
+    r"\b(?:cli|oc|om|on|ou|ox|tenant|union|wxid)_[A-Za-z0-9_-]{4,}\b",
+    re.IGNORECASE,
+)
+LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?P<path>/(?:Applications|Library|Users|Volumes|etc|home|opt|private|root|run|srv|tmp|var)/[^'\"\n,}\s]+)"
+)
 
 
 def redact_value(value: Any) -> Any:
@@ -70,6 +97,9 @@ def redact_dict(payload: dict[str, Any]) -> dict[str, Any]:
     for key, value in payload.items():
         key_text = str(key)
         key_lower = key_text.lower()
+        if key_lower in SENSITIVE_ID_KEYS:
+            out[key_text] = "***REDACTED_ID***"
+            continue
         if any(part in key_lower for part in SECRET_KEY_PARTS):
             out[key_text] = "***REDACTED***"
             continue
@@ -93,5 +123,14 @@ def redact_text(text: str) -> str:
         out,
     )
     out = JWT_RE.sub("***REDACTED_JWT***", out)
+    out = PROVIDER_IDENTIFIER_RE.sub("***REDACTED_ID***", out)
     out = LONG_NUMBER_RE.sub(lambda match: f"...{match.group(0)[-4:]}", out)
+    out = LOCAL_ABSOLUTE_PATH_RE.sub(_mask_local_path, out)
     return out
+
+
+def _mask_local_path(match: re.Match[str]) -> str:
+    raw = match.group("path").rstrip(".:;)")
+    suffix = match.group("path")[len(raw) :]
+    name = raw.rsplit("/", 1)[-1]
+    return (f".../{name}" if name else "...") + suffix

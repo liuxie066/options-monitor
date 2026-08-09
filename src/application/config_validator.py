@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from difflib import get_close_matches
 import math
+import os
 import sys
 from zoneinfo import ZoneInfo
 
@@ -136,6 +137,8 @@ NOTIFICATION_DAILY_BRIEF_KEYS = {
     'max_candidates_per_strategy',
     'max_rejection_reasons',
 }
+AI_DECISION_ADVICE_CONFIG_KEYS = {'enabled'}
+RETIRED_AI_ADVICE_CONFIG_KEYS = ('ai_interpretation', 'ai_strategy_advice')
 WATCHDOG_CONFIG_KEYS = {
     'retry_enabled',
     'retry_interval_sec',
@@ -319,6 +322,13 @@ def _validate_optional_bool(cfg: dict, key: str, path: str):
         return
     if not isinstance(cfg.get(key), bool):
         die(f'{path}.{key} must be a boolean')
+
+
+def _validate_ai_decision_advice_config(cfg: dict, *, path: str = 'ai_decision_advice') -> None:
+    _reject_unknown_keys(cfg, AI_DECISION_ADVICE_CONFIG_KEYS, path)
+    _validate_optional_bool(cfg, 'enabled', path)
+    if cfg.get('enabled') is True and not str(os.environ.get('DEEPSEEK_API_KEY') or '').strip():
+        die(f'{path}.enabled is true but DEEPSEEK_API_KEY is not set in the environment')
 
 
 def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_reason: str) -> None:
@@ -894,6 +904,12 @@ def validate_config(cfg: dict):
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
 
+    for retired_key in RETIRED_AI_ADVICE_CONFIG_KEYS:
+        if retired_key in cfg:
+            die(
+                f'{retired_key} is no longer supported; use ai_decision_advice.enabled'
+            )
+
     if 'accounts' in cfg:
         raw_accounts = cfg.get('accounts')
         try:
@@ -912,6 +928,12 @@ def validate_config(cfg: dict):
 
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
     _validate_watchdog_config(cfg.get('watchdog'))
+
+    ai_advice = cfg.get('ai_decision_advice') or {}
+    if ai_advice and not isinstance(ai_advice, dict):
+        die('ai_decision_advice must be an object')
+    if isinstance(ai_advice, dict):
+        _validate_ai_decision_advice_config(ai_advice)
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
     _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')

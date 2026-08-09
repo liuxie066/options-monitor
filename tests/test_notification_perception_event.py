@@ -25,14 +25,16 @@ def test_notification_perception_event_is_compressed_and_safe() -> None:
     serialized = json.dumps(event, ensure_ascii=False, sort_keys=True)
     assert event["schema_version"] == "om-notification-perception-event-v1"
     assert event["event_type"] == "assistant_perception"
-    assert event["conversation_scope"] == {"channel": "wechat", "conversation_id": "wechat:group_1"}
+    assert event["conversation_scope"]["channel"] == "wechat"
+    assert event["conversation_scope"]["conversation_ref"].startswith("conversation:sha256:")
+    assert "wechat:group_1" not in serialized
     assert event["safe_slots"]["run_id"] == ["run_1"]
     assert event["safe_slots"]["symbol"] == ["FUTU", "NVDA"]
     assert event["message_len_by_account"] == {"lx": len("secret notification body")}
     assert event["message_sha256_by_account"]["lx"]
     assert "secret notification body" not in serialized
     assert "webhook/token" not in serialized
-    assert event["target_masked"] == "[redacted_target]"
+    assert event["target_masked"].startswith("target:sha256:")
 
 
 def test_notification_perception_event_summarizes_no_account_branch() -> None:

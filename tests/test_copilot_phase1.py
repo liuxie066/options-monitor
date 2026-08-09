@@ -83,8 +83,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     manifest = build_scene_manifest(_contract(), "run_test")
 
     assert definition["scene"] == GENERAL_SCENE
-    assert definition["version"] == "v3"
-    assert manifest.scene_version == "v3"
+    assert definition["version"] == "v4"
+    assert manifest.scene_version == "v4"
     assert manifest.messages[0]["role"] == "system"
     assert manifest.messages[0]["content"] == definition["system_prompt"]
     runtime_context = json.loads(manifest.messages[1]["content"].splitlines()[-1])
@@ -220,6 +220,27 @@ def test_runtime_context_is_json_safe() -> None:
     context = json.loads(manifest.messages[1]["content"].splitlines()[-1])
     assert context["fixed_tool_scope"]["symbol"] == symbol
     assert context["fixed_tool_scope"]["config_key"] == "us"
+
+
+def test_host_only_tool_scope_is_fixed_but_never_rendered_to_model() -> None:
+    marker = "private-conversation-marker"
+    contract = replace(
+        _contract("检查范围"),
+        input={
+            **_contract("检查范围").input,
+            "authenticated_channel": "wechat",
+            "authenticated_sender_id": "private-sender-marker",
+            "authenticated_conversation_id": marker,
+        },
+    )
+
+    manifest = build_scene_manifest(contract, "run_host_only_scope")
+
+    assert manifest.fixed_tool_input["authenticated_channel"] == "wechat"
+    assert manifest.fixed_tool_input["authenticated_sender_id"] == "private-sender-marker"
+    assert manifest.fixed_tool_input["authenticated_conversation_id"] == marker
+    assert marker not in json.dumps(manifest.messages, ensure_ascii=False)
+    assert "private-sender-marker" not in json.dumps(manifest.messages, ensure_ascii=False)
 
 
 def test_prompt_fingerprint_changes_with_content_and_order(monkeypatch, tmp_path) -> None:
@@ -449,11 +470,119 @@ def test_option_performance_payload_does_not_infer_period_or_hide_invalid_scope(
         "option_performance_report",
         {"period": "mtd", "config_path": None},
     )
-    assert null_error is None
-    assert explicit_null is not None
-    assert explicit_null["config_path"] is None
-    with pytest.raises(AgentToolError, match="config_path"):
-        definition.validate_input(explicit_null)
+    assert explicit_null is None
+    assert null_error == (
+        "unsupported Copilot input fields for option_performance_report: config_path"
+    )
+
+
+@pytest.mark.parametrize(
+    "hidden_input",
+    ["log_file", "runs_root", "logs_root", "profile_path", "run_dir"],
+)
+def test_copilot_rejects_hidden_runtime_log_path_inputs(hidden_input: str) -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "runtime_logs",
+        {"kind": "service", hidden_input: "/private/secret.txt"},
+    )
+
+    assert payload is None
+    assert error == f"unsupported Copilot input fields for runtime_logs: {hidden_input}"
+
+
+def test_copilot_allows_host_owned_hidden_runtime_log_inputs() -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "runtime_logs",
+        {"kind": "service", "lines": 5},
+        fixed_input={"logs_root": "/var/lib/options-monitor/logs"},
+    )
+
+    assert error is None
+    assert payload is not None
+    assert payload["kind"] == "service"
+    assert payload["lines"] == 5
+    assert payload["logs_root"] == "/var/lib/options-monitor/logs"
+
+
+def test_copilot_tool_description_never_exposes_host_owned_paths() -> None:
+    descriptions = copilot_tools.tool_descriptions(
+        ("runtime_logs",),
+        static_payloads={
+            "runtime_logs": {
+                "kind": "service",
+                "logs_root": "/private/host-user/runtime/logs",
+            }
+        },
+    )
+
+    serialized = json.dumps(descriptions, ensure_ascii=False)
+    assert descriptions[0]["default_input"] == {"kind": "service", "lines": 50}
+    assert "logs_root" not in serialized
+    assert "/private/host-user" not in serialized
+
+
+def test_copilot_runtime_log_observation_uses_only_allowlisted_metadata() -> None:
+    observation = copilot_tools.compact_observation(
+        "runtime_logs",
+        {
+            "ok": True,
+            "data": {
+                "summary": {
+                    "ok": True,
+                    "kind": "service",
+                    "lines": 2,
+                    "file_count": 1,
+                    "existing_file_count": 1,
+                },
+                "files": [
+                    {
+                        "kind": "service",
+                        "exists": True,
+                        "size_bytes": 42,
+                        "tail_line_count": 2,
+                        "path": "/private/host-user/runtime/service.log",
+                        "tail": ["private operator message", "Authorization: Bearer live-private-token"],
+                    }
+                ],
+            },
+        },
+    )
+
+    serialized = json.dumps(observation, ensure_ascii=False)
+    assert observation["status"] == "complete"
+    assert "private operator message" not in serialized
+    assert "live-private-token" not in serialized
+    assert "/private/host-user" not in serialized
+    assert '"path"' not in serialized
+    assert '"tail"' not in serialized
+
+
+def test_copilot_binds_operation_diagnostics_to_host_authenticated_scope() -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "operation_timeline",
+        {"operation_id": "op_1", "limit": 2},
+        fixed_input={
+            "authenticated_channel": "wechat",
+            "authenticated_sender_id": "sender-a",
+            "authenticated_conversation_id": "conversation-a",
+        },
+    )
+
+    assert error is None
+    assert payload == {
+        "limit": 2,
+        "operation_id": "op_1",
+        "authenticated_channel": "wechat",
+        "authenticated_sender_id": "sender-a",
+        "authenticated_conversation_id": "conversation-a",
+    }
+    rejected, rejected_error = copilot_tools.build_tool_payload(
+        "operation_timeline",
+        {"sender_id": "sender-b"},
+        fixed_input={"authenticated_sender_id": "sender-a"},
+    )
+    assert rejected is None
+    assert rejected_error == "unsupported Copilot input fields for operation_timeline: sender_id"
 
 
 @pytest.mark.parametrize("marker", ["all", " ALL ", ":all", "__omit__"])
@@ -1655,7 +1784,7 @@ def test_scene_prepared_records_stable_prompt_and_projected_tool_fingerprints() 
     portfolio_payload = prepared_payload(with_portfolio)
     control_payload = prepared_payload(with_control)
 
-    assert base_payload["scene_version"] == "v3"
+    assert base_payload["scene_version"] == "v4"
     assert len(base_payload["compiled_prompt_sha256"]) == 64
     assert len(base_payload["tool_schema_sha256"]) == 64
     assert base_payload["compiled_prompt_sha256"] == portfolio_payload["compiled_prompt_sha256"]

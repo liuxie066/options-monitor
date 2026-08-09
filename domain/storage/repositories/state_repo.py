@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from domain.storage import paths
-from domain.storage.json_io import atomic_write_json as write_json
+from domain.storage.json_io import append_private_text
+from domain.storage.json_io import atomic_write_private_json as write_json
+from domain.storage.json_io import atomic_write_private_text
 from domain.storage.json_io import read_json
 from domain.storage.repositories import run_repo
 from domain.domain.intermediate_objects import SnapshotDTO
@@ -109,8 +111,7 @@ def write_shared_current_read_model(base: Path, name: str, payload: dict[str, An
 
 def write_account_state_json_text(base: Path, account: str, name: str, payload: dict[str, Any]) -> Path:
     out = (account_state_dir(base, account) / str(name)).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_private_text(out, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return out
 
 
@@ -128,24 +129,18 @@ def write_account_run_state(base: Path, run_id: str, account: str, name: str, pa
 
 def write_last_run_dir_pointer(base: Path, run_id: str) -> Path:
     p = (shared_state_dir(base) / "last_run_dir.txt").resolve()
-    p.write_text(str(run_repo.get_run_dir(base, run_id)) + "\n", encoding="utf-8")
+    atomic_write_private_text(p, str(run_repo.get_run_dir(base, run_id)) + "\n", encoding="utf-8")
     return p
 
 
 def append_run_audit_jsonl(base: Path, run_id: str, name: str, payload: dict[str, Any]) -> Path:
     out = (run_state_dir(base, run_id) / str(name)).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    return out
+    return append_private_text(out, json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def append_shared_audit_jsonl(base: Path, name: str, payload: dict[str, Any]) -> Path:
     out = (shared_state_dir(base) / str(name)).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    return out
+    return append_private_text(out, json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def normalize_audit_event(payload: dict[str, Any] | Any) -> dict[str, Any]:

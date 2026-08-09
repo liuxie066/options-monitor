@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 
@@ -50,6 +51,13 @@ def conversation_scope_from_notification_route(
     return {"channel": None, "conversation_id": None}
 
 
+def conversation_reference(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return "conversation:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _route_target_key(target: str) -> str:
     text = str(target or "").strip()
     if not text:
@@ -72,6 +80,7 @@ def _first_text(*values: Any) -> str:
 
 __all__ = [
     "conversation_scope_from_notification_route",
+    "conversation_reference",
     "normalize_conversation_scope",
     "wechat_window_conversation_id",
 ]

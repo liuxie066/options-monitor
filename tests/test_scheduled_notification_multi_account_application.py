@@ -51,6 +51,9 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
     assert send_calls == ["msg-lx", "msg-sy"]
     assert [e["action"] for e in audit_events] == ["send_start", "send_done", "send_start", "send_fail"]
     assert [e["status"] for e in audit_events if e["action"] in {"send_done", "send_fail"}] == ["ok", "unconfirmed"]
+    assert all(str(event.get("target") or "").startswith("target:sha256:") for event in audit_events)
+    assert "wechat:ops" not in repr(audit_events)
+    assert "messageId" not in repr(audit_events)
     assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "ok", "start", "error"]
 
 

@@ -138,6 +138,95 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
+    assert "UMask=0077" in tick
+    assert "UMask=0077" in intake
+
+
+def test_render_systemd_bundle_ai_evidence_collector_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    def _write_config(root: Path, *, enabled: bool) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        config_yaml = root / "config.yaml"
+        lines = [
+            "accounts:",
+            "  lx:",
+            "    type: futu",
+            "    futu:",
+            '      account_id: "REAL_12345678"',
+            "      host: 127.0.0.1",
+            "      port: 11111",
+            "markets:",
+            "  us:",
+            "    accounts: [lx]",
+            "    symbols: [NVDA]",
+        ]
+        if enabled:
+            lines.extend(["ai_decision_advice:", "  enabled: true"])
+        config_yaml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return config_yaml
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    enabled_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        config_yaml=_write_config(tmp_path / "enabled", enabled=True),
+    )
+    enabled_files = {item["relative_path"]: item for item in enabled_bundle["files"]}
+    service = enabled_files["systemd/options-monitor-ai-evidence-collector.service"]["content"]
+    timer = enabled_files["systemd/options-monitor-ai-evidence-collector.timer"]["content"]
+    assert str(repo / "om") + " ai-evidence-collector --config-key us" in service
+    assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in service
+    assert "OnUnitActiveSec=4h" in timer
+    assert "Persistent=true" in timer
+    assert "Unit=options-monitor-ai-evidence-collector.service" in timer
+
+    disabled_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        config_yaml=_write_config(tmp_path / "disabled", enabled=False),
+    )
+    disabled_paths = {item["relative_path"] for item in disabled_bundle["files"]}
+    assert "systemd/options-monitor-ai-evidence-collector.service" not in disabled_paths
+    assert "systemd/options-monitor-ai-evidence-collector.timer" not in disabled_paths
+
+
+def test_render_systemd_bundle_service_hardening() -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = Path("/tmp/om-svc-repo")
+    runtime = Path("/tmp/om-svc-runtime")
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files["systemd/options-monitor-tick-us.service"]["content"]
+    runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
+    verify = files["systemd/options-monitor-projection-verify.service"]["content"]
+    verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
+    intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
+    promotion = files["systemd/options-monitor-position-advice-promotion.service"]["content"]
+    promotion_timer = files["systemd/options-monitor-position-advice-promotion.timer"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
     assert "TimeoutStartSec=" not in tick
     assert "TimeoutStartSec=" not in runtime_status
     assert "TimeoutStartSec=" not in verify
@@ -226,6 +315,7 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
 
     assert unit["install_path"] == f"/etc/systemd/system/{FEISHU_AGENT_CREDENTIAL_SERVICE}"
     assert f"ExecStart={helper}" in unit["content"]
+    assert "UMask=0077" in unit["content"]
     assert f"--agent-store {agent_store}" in unit["content"]
     assert f"--holdings-store {holdings_store}" in unit["content"]
     assert f"--runtime-env-file {runtime_env}" in unit["content"]
@@ -397,7 +487,7 @@ def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path:
                     "lx": {
                         "type": "futu",
                         "futu": {
-                            "account_id": "281756479859383816",
+                            "account_id": "999000000000000001",
                             "host": "127.0.0.1",
                             "port": 11111,
                             "opend_root": str(opend_lx),
@@ -2902,6 +2992,8 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<key>Label</key>" in tick
+    assert "<key>Umask</key>" in tick
+    assert "<string>077</string>" in tick
     assert "<string>com.options-monitor.tick-hk</string>" in tick
     assert str(runtime / "logs" / "com.options-monitor.tick-hk.out.log") in tick
     assert "--market" in tick
@@ -5424,7 +5516,8 @@ def test_runtime_status_warns_when_required_service_timer_is_missing(monkeypatch
     assert out["ok"] is True
     assert out["data"]["summary"]["ok"] is False
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in out["data"]["summary"]["warning_codes"]
-    assert out["data"]["service_drift"]["missing_required_units"] == ["options-monitor-projection-verify.timer"]
+    assert out["data"]["service_drift"]["summary"]["missing_required_count"] == 1
+    assert "missing_required_units" not in out["data"]["service_drift"]
 
 
 def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:

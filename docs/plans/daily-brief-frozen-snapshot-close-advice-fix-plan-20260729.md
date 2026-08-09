@@ -377,7 +377,7 @@ _close_advice_position_requirements
 
 验收时必须证明：
 
-- `9992.HK`、`3690.HK`、`0700.HK` 临近到期持仓 expirations 在 seal 前已进入 plan；
+- `<synthetic-contract>`、`<synthetic-contract>`、`<synthetic-contract>` 临近到期持仓 expirations 在 seal 前已进入 plan；
 - account 顺序变化不改变 requirements content hash、fetch payload 或 plan ID；
 - 同一合约多账户/多 lot 且 binding 相同时只增加审计映射，不重复 OpenD chain call；
 - watchlist 外持仓、unsupported source 和 route conflict 均产生 typed planning error，不触发隐式默认 endpoint；
@@ -614,7 +614,7 @@ Release gate：S1 可以单独实现、测试、commit 供 review，但不得单
 
 构造：
 
-- `lx` 有需要 Close Advice 补覆盖的 `9992.HK`、`3690.HK`、`0700.HK` active positions；
+- `lx` 有需要 Close Advice 补覆盖的 `<synthetic-contract>`、`<synthetic-contract>`、`<synthetic-contract>` active positions；
 - `sy` 在 `lx` 之后执行 candidate scan；
 - frozen CSV 在 seal 时已有 receipt。
 

@@ -53,7 +53,7 @@ def _run_research_collect(
         run_futu_doctor,
         validate_runtime_config,
     )
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool
     from src.application.config_sections import resolve_watchlist_config
     from src.application.config_validator import validate_config
     from src.application.futu_portfolio_context import infer_futu_portfolio_settings
@@ -61,7 +61,7 @@ def _run_research_collect(
     from src.application.research.service import research_tool
 
     def _runtime_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        return runtime_status_tool(
+        return private_runtime_status_tool(
             payload,
             load_runtime_config=load_runtime_config,
             normalize_accounts=normalize_accounts,

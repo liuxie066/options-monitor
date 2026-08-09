@@ -1325,8 +1325,8 @@ def test_reconcile_does_not_complete_deal_from_numeric_target_lot_lineage(
         [
             {
                 "event_id": (
-                    "futu:lx:281756479859383816:495287541148725639:"
-                    f"close:lot_futu:lx:281756479859383816:{opening_deal_id}"
+                    "futu:lx:999000000000000001:495287541148725639:"
+                    f"close:lot_futu:lx:999000000000000001:{opening_deal_id}"
                 ),
                 "event_type": "close",
                 "account": "lx",

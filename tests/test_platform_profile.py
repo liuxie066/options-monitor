@@ -20,13 +20,13 @@ def test_linux_platform_profile_defaults() -> None:
 
 
 def test_macos_platform_profile_defaults() -> None:
-    profile = current_platform_profile(system="Darwin", home=Path("/Users/liuxie"))
+    profile = current_platform_profile(system="Darwin", home=Path("/Users/om"))
 
     assert profile.platform == "macos"
     assert profile.service_target == "launchd"
-    assert profile.default_install_prefix == Path("/Users/liuxie/apps/options-monitor")
-    assert profile.default_runtime_root == Path("/Users/liuxie/Library/Application Support/options-monitor")
-    assert profile.default_env_file == Path("/Users/liuxie/Library/Application Support/options-monitor/options-monitor.env")
+    assert profile.default_install_prefix == Path("/Users/om/apps/options-monitor")
+    assert profile.default_runtime_root == Path("/Users/om/Library/Application Support/options-monitor")
+    assert profile.default_env_file == Path("/Users/om/Library/Application Support/options-monitor/options-monitor.env")
     assert any("Python 3.12" in hint for hint in profile.prerequisite_hints)
 
 

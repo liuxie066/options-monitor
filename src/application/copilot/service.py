@@ -22,6 +22,17 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
     if request.execution_environment == "eval":
         raw_fixture = request.debug_overrides.get("fixture_id")
         fixture_id = str(raw_fixture).strip() if raw_fixture is not None else None
+    trusted_tool_scope = {
+        key: value
+        for key, value in request.trusted_tool_scope.items()
+        if key
+        in {
+            "authenticated_channel",
+            "authenticated_sender_id",
+            "authenticated_conversation_id",
+        }
+        and value not in (None, "")
+    }
     return ExecutionContract(
         contract_id=new_id("contract"),
         request_id=request.request_id,
@@ -35,6 +46,7 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
             "reference_year": int(reference_year),
             "messages": messages,
             "fixture_id": fixture_id,
+            **trusted_tool_scope,
         },
         policy={
             "read_only": True,
