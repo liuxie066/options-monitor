@@ -16,6 +16,8 @@ from src.application.llm_provider_registry import (
 )
 from src.application.config_primitives import dump_yaml
 from src.application.settings import build_effective_env
+from src.application.secret_store import SecretProvider, resolve_secret_status
+from src.infrastructure.secret_store.factory import build_secret_provider
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
 
@@ -31,6 +33,7 @@ class LlmModelProfile:
     model: str
     base_url: str
     api_key_env: str
+    credential_name: str
     confidence_min: float | None = None
     timeout_seconds: int | None = None
     max_output_tokens: int | None = None
@@ -42,6 +45,8 @@ class LlmModelProfile:
             "model": self.model,
             "api_key_env": self.api_key_env,
         }
+        if self.credential_name:
+            out["credential_name"] = self.credential_name
         if self.confidence_min is not None:
             out["confidence_min"] = float(self.confidence_min)
         if self.timeout_seconds is not None:
@@ -58,6 +63,7 @@ class LlmModelProfile:
             "model": self.model,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
+            "credential_name": self.credential_name,
             "confidence_min": self.confidence_min,
             "timeout_seconds": self.timeout_seconds,
             "max_output_tokens": self.max_output_tokens,
@@ -175,6 +181,7 @@ def parse_model_profile(name: str, raw_profile: Any, *, path: str = "assistant.m
         model=model,
         base_url=base_url,
         api_key_env=api_key_env,
+        credential_name=spec.credential_name if spec.requires_api_key else "",
         confidence_min=_optional_float(raw_profile.get("confidence_min"), path=f"{path}.confidence_min"),
         timeout_seconds=_optional_int(raw_profile.get("timeout_seconds"), path=f"{path}.timeout_seconds"),
         max_output_tokens=_optional_int(raw_profile.get("max_output_tokens"), path=f"{path}.max_output_tokens"),
@@ -187,6 +194,7 @@ def configured_model_profiles_payload(
     repo_root: str | Path,
     env_file: str | Path | None = None,
     include_local_env_file: bool = True,
+    secret_provider: SecretProvider | None = None,
 ) -> dict[str, Any]:
     assistant = config_doc.get("assistant")
     assistant_cfg = assistant if isinstance(assistant, dict) else {}
@@ -197,12 +205,17 @@ def configured_model_profiles_payload(
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
+    provider = secret_provider or build_secret_provider(environ=effective_env.values)
     items = [
         profile.public_payload(
             active=profile.name == active_model,
             api_key_configured=(
                 not provider_requires_api_key(profile.provider)
-                or bool(effective_env.get(profile.api_key_env))
+                or resolve_secret_status(
+                    profile.credential_name,
+                    provider=provider,
+                    legacy_env_name=profile.api_key_env,
+                ).configured
             ),
         )
         for profile in profiles.values()
@@ -366,12 +379,18 @@ def _reject_secret_material(raw_profile: dict[str, Any], *, path: str) -> None:
         if key_text in SECRET_KEYS:
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message=f"{path}.{key_text} must not store secret values; use api_key_env instead",
+                message=(
+                    f"{path}.{key_text} must not store secret values; provision the provider's "
+                    "fixed logical credential instead"
+                ),
             )
         if isinstance(value, str) and value.strip().startswith("sk-"):
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message=f"{path}.{key_text} looks like an API key; store it in an env file and reference api_key_env",
+                message=(
+                    f"{path}.{key_text} looks like an API key; provision the provider's fixed "
+                    "logical credential instead"
+                ),
             )
 
 

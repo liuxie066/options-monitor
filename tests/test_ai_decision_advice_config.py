@@ -32,12 +32,14 @@ def test_ai_decision_advice_accepts_enabled_with_api_key(monkeypatch: pytest.Mon
     validate_config(cfg)
 
 
-def test_ai_decision_advice_enabled_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ai_decision_advice_static_validation_does_not_read_runtime_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     cfg = _base_cfg()
     cfg["ai_decision_advice"] = {"enabled": True}
-    with pytest.raises(SystemExit, match="DEEPSEEK_API_KEY"):
-        validate_config(cfg)
+    validate_config(cfg)
+    assert resolve_api_key({"OM_SECRET_BACKEND": "env"}) is None
 
 
 def test_ai_decision_advice_rejects_unknown_keys(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -66,7 +66,7 @@ sudo mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks" "$RUNTIME/output_accou
 sudo chown -R "$DEPLOY_USER":"$DEPLOY_USER" "$RUNTIME"
 ```
 
-发布环境变量文件：
+发布普通环境设置文件（不填真实秘密）：
 
 ```bash
 sudo install -d -m 700 /etc/options-monitor
@@ -74,16 +74,17 @@ sudo test -f "$ENV_FILE" || sudo install -m 600 -o root -g root configs/examples
 sudoedit "$ENV_FILE"
 ```
 
-`$ENV_FILE` 必须保留在服务器本地，填入真实 Feishu 凭证和表引用，不通过 git 发布。
+`$ENV_FILE` 必须保留在服务器本地，只填写 App ID、表引用、路径和开关等普通设置，不通过 git 发布。真实秘密使用 [Secret Storage](SECRET_STORAGE.md) 的 systemd encrypted credential 流程。
 
-如果要通过同一个飞书 Bot 接收命令、自动回复和发送主动通知，还需要填入 Bot channel 相关值：
+如果要通过同一个飞书 Bot 接收命令、自动回复和发送主动通知，env-file 只填写非秘密标识：
 
 ```bash
 OM_FEISHU_BOT_APP_ID=cli_xxx
-OM_FEISHU_BOT_APP_SECRET=xxx
 OM_FEISHU_BOT_USER_OPEN_ID=ou_xxx
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_xxx
 ```
+
+Bot secret 使用 `./om secrets set feishu.bot.app_secret` 的隐藏输入单独 provision，不要粘贴到命令或 env-file。
 
 Feishu long-connection 的 reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下，不写入服务器 secret env file。使用 YAML authoring 时，先用 `./om config build-assistant --source yaml --config-yaml "$RUNTIME/config.yaml" --output "$RUNTIME/resolved/config.assistant.json"` 生成该文件；服务渲染会把它作为 `--assistant-config` 传给 Feishu WS。
 
@@ -103,12 +104,15 @@ cd "$REPO"
   --config-us "$RUNTIME/config.us.json" \
   --config-hk "$RUNTIME/config.hk.json" \
   --include-feishu-ws \
+  --include-secret-credentials \
   --output-dir /tmp/options-monitor-service
 ```
 
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
-如果 Linux 主机已通过 `systemd-creds` 预置了加密的 Feishu Agent 凭据，可以额外传入：
+推荐的 `--include-secret-credentials` 会为每个消费 unit 生成只包含所需 `LoadCredentialEncrypted=` 的 drop-in，不解密为共享 env 文件。它只渲染配置，不创建或修改真实凭据。
+
+以下 `--include-feishu-agent-credential` 是存量迁移兼容路径，不得与推荐开关同时使用：
 
 ```bash
 --include-feishu-agent-credential
@@ -180,7 +184,7 @@ cd "$REPO"
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.service`：执行 `./om ai-evidence-collector --config-key <market>...`；
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 4 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=4h`，`Persistent=true`）。
 
-Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；运行前必须在 service env（如 `--env-file` 指定的文件）中提供 `DEEPSEEK_API_KEY`。未开启 `ai_decision_advice.enabled` 时不渲染这两个 unit，默认关闭；显式开启代表同意按设计文档第 18 节的最小数据合同向 DeepSeek 传输数据。Provider 原始响应、搜索 query/call ID 不落盘。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
+Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；运行前必须 provision `llm.deepseek.api_key`，并由 collector unit 的 `LoadCredentialEncrypted=` 单独注入。未开启 `ai_decision_advice.enabled` 时不渲染这两个 unit，默认关闭；显式开启代表同意按设计文档第 18 节的最小数据合同向 DeepSeek 传输数据。Provider 原始响应、搜索 query/call ID 不落盘。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 

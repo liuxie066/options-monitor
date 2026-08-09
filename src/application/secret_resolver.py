@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from src.application.secret_store import (
+    FEISHU_BOT_APP_SECRET,
+    FEISHU_HOLDINGS_APP_SECRET,
+    SecretProvider,
+    resolve_secret,
+)
 from src.application.settings import build_effective_env
 
 
@@ -28,6 +34,23 @@ def _env(environ: Mapping[str, str] | None, name: str) -> str:
     return _text(env.get(name))
 
 
+def _secret(
+    logical_name: str,
+    *,
+    environ: Mapping[str, str] | None,
+    provider: SecretProvider | None,
+    legacy_env_name: str,
+) -> str:
+    return _text(
+        resolve_secret(
+            logical_name,
+            provider=provider,
+            environ=environ if provider is None else None,
+            legacy_env_name=legacy_env_name,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class FeishuHoldingsConfig:
     app_id: str
@@ -35,6 +58,7 @@ class FeishuHoldingsConfig:
     holdings_ref: str
     app_id_env: str
     app_secret_env: str
+    app_secret_credential_name: str
     holdings_env: str
 
     @property
@@ -47,7 +71,7 @@ class FeishuHoldingsConfig:
         if not self.app_id:
             missing.append(self.app_id_env)
         if not self.app_secret:
-            missing.append(self.app_secret_env)
+            missing.append(self.app_secret_credential_name)
         if "/" not in self.holdings_ref:
             missing.append(self.holdings_env)
         return tuple(missing)
@@ -57,6 +81,7 @@ class FeishuHoldingsConfig:
             "app_id_env": self.app_id_env,
             "app_id_configured": bool(self.app_id),
             "app_secret_env": self.app_secret_env,
+            "app_secret_credential_name": self.app_secret_credential_name,
             "app_secret_configured": bool(self.app_secret),
             "holdings_env": self.holdings_env,
             "holdings_configured": "/" in self.holdings_ref,
@@ -71,6 +96,7 @@ class FeishuBotConfig:
     allowed_open_ids: tuple[str, ...]
     app_id_env: str
     app_secret_env: str
+    app_secret_credential_name: str
     user_open_id_env: str
     allowed_open_ids_env: str
 
@@ -92,7 +118,7 @@ class FeishuBotConfig:
         if not self.app_id:
             missing.append(self.app_id_env)
         if not self.app_secret:
-            missing.append(self.app_secret_env)
+            missing.append(self.app_secret_credential_name)
         return tuple(missing)
 
     @property
@@ -117,6 +143,7 @@ class FeishuBotConfig:
             "app_id_env": self.app_id_env,
             "app_id_configured": bool(self.app_id),
             "app_secret_env": self.app_secret_env,
+            "app_secret_credential_name": self.app_secret_credential_name,
             "app_secret_configured": bool(self.app_secret),
             "user_open_id_env": self.user_open_id_env,
             "user_open_id_configured": bool(self.user_open_id),
@@ -129,6 +156,7 @@ def resolve_feishu_holdings_config(
     data_cfg: dict[str, Any] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    secret_provider: SecretProvider | None = None,
 ) -> FeishuHoldingsConfig:
     feishu_cfg = _dict(_dict(data_cfg).get("feishu"))
     tables = _dict(feishu_cfg.get("tables"))
@@ -137,10 +165,16 @@ def resolve_feishu_holdings_config(
     holdings_env = _text(tables.get("holdings_env") or feishu_cfg.get("holdings_env")) or DEFAULT_FEISHU_HOLDINGS_TABLE_ENV
     return FeishuHoldingsConfig(
         app_id=_env(environ, app_id_env),
-        app_secret=_env(environ, app_secret_env),
+        app_secret=_secret(
+            FEISHU_HOLDINGS_APP_SECRET,
+            environ=environ,
+            provider=secret_provider,
+            legacy_env_name=app_secret_env,
+        ),
         holdings_ref=_env(environ, holdings_env),
         app_id_env=app_id_env,
         app_secret_env=app_secret_env,
+        app_secret_credential_name=FEISHU_HOLDINGS_APP_SECRET,
         holdings_env=holdings_env,
     )
 
@@ -149,6 +183,7 @@ def resolve_feishu_bot_config(
     notifications: dict[str, Any] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    secret_provider: SecretProvider | None = None,
 ) -> FeishuBotConfig:
     del notifications
     app_id_env = DEFAULT_FEISHU_BOT_APP_ID_ENV
@@ -159,11 +194,17 @@ def resolve_feishu_bot_config(
     allowed_open_ids = _split_csv(_env(environ, allowed_open_ids_env)) or ((user_open_id,) if user_open_id else ())
     return FeishuBotConfig(
         app_id=_env(environ, app_id_env),
-        app_secret=_env(environ, app_secret_env),
+        app_secret=_secret(
+            FEISHU_BOT_APP_SECRET,
+            environ=environ,
+            provider=secret_provider,
+            legacy_env_name=app_secret_env,
+        ),
         user_open_id=user_open_id,
         allowed_open_ids=allowed_open_ids,
         app_id_env=app_id_env,
         app_secret_env=app_secret_env,
+        app_secret_credential_name=FEISHU_BOT_APP_SECRET,
         user_open_id_env=user_open_id_env,
         allowed_open_ids_env=allowed_open_ids_env,
     )
