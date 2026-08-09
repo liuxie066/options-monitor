@@ -49,7 +49,7 @@ def add_inbound_commands(subparsers: Any) -> None:
     inbound_ws.add_argument(
         "--credential-env-file",
         default=None,
-        help="additional credential env file for --check, loaded after --env-file",
+        help="deprecated compatibility credential env file for --check, loaded after --env-file",
     )
     inbound_ws.add_argument("--no-local-env-file", action="store_true")
     inbound_ws.add_argument("--no-reply", action="store_true")

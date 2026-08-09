@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.application.secret_store.registry import (
+    LLM_DEEPSEEK_API_KEY,
+    LLM_DEFAULT_API_KEY,
+    LLM_KIMI_API_KEY,
+    LLM_MOONSHOT_API_KEY,
+)
+
 
 @dataclass(frozen=True)
 class LlmProviderSpec:
@@ -11,6 +18,7 @@ class LlmProviderSpec:
     api_kind: str
     default_base_url: str
     default_api_key_env: str
+    credential_name: str
     recommended_models: tuple[str, ...]
     requires_api_key: bool = True
 
@@ -21,6 +29,7 @@ class LlmProviderSpec:
             "api_kind": self.api_kind,
             "default_base_url": self.default_base_url,
             "default_api_key_env": self.default_api_key_env,
+            "credential_name": self.credential_name,
             "recommended_models": list(self.recommended_models),
             "requires_api_key": self.requires_api_key,
             "supports_live_model_list": False,
@@ -34,6 +43,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         api_kind="responses",
         default_base_url="",
         default_api_key_env="OM_LLM_API_KEY",
+        credential_name=LLM_DEFAULT_API_KEY,
         recommended_models=("gpt-5.2",),
     ),
     "deepseek": LlmProviderSpec(
@@ -42,6 +52,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         api_kind="chat_completions",
         default_base_url="https://api.deepseek.com",
         default_api_key_env="DEEPSEEK_API_KEY",
+        credential_name=LLM_DEEPSEEK_API_KEY,
         recommended_models=("deepseek-chat", "deepseek-reasoner"),
     ),
     "kimi": LlmProviderSpec(
@@ -50,6 +61,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         api_kind="chat_completions",
         default_base_url="https://api.moonshot.ai/v1",
         default_api_key_env="MOONSHOT_API_KEY",
+        credential_name=LLM_MOONSHOT_API_KEY,
         recommended_models=("kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
     ),
     "kimi-code": LlmProviderSpec(
@@ -58,6 +70,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         api_kind="chat_completions",
         default_base_url="https://api.kimi.com/coding/v1",
         default_api_key_env="KIMI_API_KEY",
+        credential_name=LLM_KIMI_API_KEY,
         recommended_models=("kimi-for-coding",),
     ),
     "ollama": LlmProviderSpec(
@@ -66,6 +79,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         api_kind="chat_completions",
         default_base_url="http://127.0.0.1:11434/v1",
         default_api_key_env="",
+        credential_name="",
         recommended_models=("gpt-oss:20b",),
         requires_api_key=False,
     ),

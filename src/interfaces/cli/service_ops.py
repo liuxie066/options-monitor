@@ -35,7 +35,11 @@ def add_service_update_commands(subparsers: Any) -> None:
         required=True,
         help="YAML authoring source recorded in service.profile.json for update rebuilds",
     )
-    service_render.add_argument("--env-file", default=None, help="service env-file path for local secrets/env values")
+    service_render.add_argument(
+        "--env-file",
+        default=None,
+        help="service env-file path for ordinary settings; secret entries require the explicit env compatibility backend",
+    )
     service_render.add_argument(
         "--deploy-user",
         default=None,
@@ -86,7 +90,17 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_render.add_argument(
         "--include-feishu-agent-credential",
         action="store_true",
-        help="render the opt-in encrypted Feishu credential materializer and consumer drop-ins",
+        help="render the deprecated encrypted Feishu env materializer during migration only",
+    )
+    service_render.add_argument(
+        "--include-secret-credentials",
+        action="store_true",
+        help="render recommended per-unit systemd LoadCredentialEncrypted drop-ins",
+    )
+    service_render.add_argument(
+        "--secret-credential-store-root",
+        default="/etc/credstore.encrypted",
+        help="encrypted systemd credential store root",
     )
     service_render.add_argument(
         "--strategy-lab-recorder-source",
@@ -262,6 +276,8 @@ def handle_service_update_command(
             strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
             include_quality_monitoring=bool(args.include_quality_monitoring),
             include_feishu_agent_credential=bool(args.include_feishu_agent_credential),
+            include_secret_credentials=bool(args.include_secret_credentials),
+            secret_credential_store_root=args.secret_credential_store_root,
             include_content=(not bool(args.no_content)) or bool(args.output_dir),
         )
         if args.output_dir:

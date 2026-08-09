@@ -11,6 +11,7 @@ from typing import Any
 
 from src.application.quality.model import SCHEMA_VERSION
 from src.application.quality.service import OMQualityService
+from src.application.secret_store import QUALITY_READ_TOKEN, SecretProvider, resolve_secret
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -26,11 +27,20 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def _read_token() -> str:
-    return str(os.environ.get("OM_QUALITY_READ_TOKEN") or "").strip()
+def build_quality_handler(
+    service: OMQualityService,
+    *,
+    secret_provider: SecretProvider | None = None,
+) -> type[BaseHTTPRequestHandler]:
+    token = str(
+        resolve_secret(
+            QUALITY_READ_TOKEN,
+            provider=secret_provider,
+            legacy_env_name="OM_QUALITY_READ_TOKEN",
+        )
+        or ""
+    )
 
-
-def build_quality_handler(service: OMQualityService) -> type[BaseHTTPRequestHandler]:
     class QualityHandler(BaseHTTPRequestHandler):
         server_version = "OMQualityHTTP/1"
 
@@ -50,7 +60,6 @@ def build_quality_handler(service: OMQualityService) -> type[BaseHTTPRequestHand
             if self.path != "/quality/status":
                 self._error(404, "QUALITY_NOT_FOUND", "quality endpoint not found", request_id)
                 return
-            token = _read_token()
             supplied = self.headers.get("Authorization", "")
             expected = f"Bearer {token}" if token else ""
             if not expected or not hmac.compare_digest(supplied, expected):
@@ -126,6 +135,7 @@ def serve_quality_http(
     service: OMQualityService,
     host: str = "127.0.0.1",
     port: int = 8792,
+    secret_provider: SecretProvider | None = None,
 ) -> None:
     allow_remote = str(os.environ.get("OM_QUALITY_ALLOW_REMOTE_BIND") or "").strip().lower() in {
         "1",
@@ -135,9 +145,17 @@ def serve_quality_http(
     }
     if not _is_loopback(host) and not allow_remote:
         raise ValueError("quality endpoint refuses non-loopback bind without OM_QUALITY_ALLOW_REMOTE_BIND")
-    if not _read_token():
-        raise ValueError("OM_QUALITY_READ_TOKEN is required before serving /quality/status")
-    server = ThreadingHTTPServer((host, int(port)), build_quality_handler(service))
+    token = resolve_secret(
+        QUALITY_READ_TOKEN,
+        provider=secret_provider,
+        legacy_env_name="OM_QUALITY_READ_TOKEN",
+    )
+    if not token:
+        raise ValueError(f"{QUALITY_READ_TOKEN} is required before serving /quality/status")
+    server = ThreadingHTTPServer(
+        (host, int(port)),
+        build_quality_handler(service, secret_provider=secret_provider),
+    )
     server.serve_forever()
 
 

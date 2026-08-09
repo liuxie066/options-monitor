@@ -18,6 +18,15 @@ from src.application.config_yaml import (
     yaml_to_market_user_config,
 )
 from src.application.platform_profile import default_runtime_root_for_service_target
+from src.application.llm_provider_registry import provider_spec
+from src.application.secret_store import (
+    FEISHU_BOT_APP_SECRET,
+    FEISHU_HOLDINGS_APP_SECRET,
+    INBOUND_OPERATION_HMAC_KEY,
+    LLM_DEEPSEEK_API_KEY,
+    QUALITY_READ_TOKEN,
+    credential_spec,
+)
 from src.application.settings import build_effective_env
 
 
@@ -58,6 +67,8 @@ QUALITY_DAY_END_SYSTEMD_CALENDARS = {
 }
 FEISHU_AGENT_CREDENTIAL_SERVICE = "options-monitor-feishu-agent-credential.service"
 FEISHU_AGENT_CREDENTIAL_DROPIN = "zzzz-feishu-agent-credential.conf"
+SECRET_CREDENTIAL_DROPIN = "zzzz-secret-credentials.conf"
+DEFAULT_SECRET_CREDENTIAL_STORE_ROOT = Path("/etc/credstore.encrypted")
 DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER = Path(
     "/usr/local/libexec/options-monitor-materialize-feishu-agent-credential"
 )
@@ -726,6 +737,80 @@ def _render_systemd_service_asset(name: str, replacements: dict[str, str]) -> st
     return content
 
 
+def _assistant_llm_credential_name(*, repo_root: Path, config_yaml_path: Path | None) -> str | None:
+    if config_yaml_path is None:
+        return None
+    cfg, _meta = resolve_yaml_assistant_config(repo_root=repo_root, config_path=config_yaml_path)
+    assistant = cfg.get("assistant") if isinstance(cfg.get("assistant"), dict) else {}
+    llm = assistant.get("llm") if isinstance(assistant, dict) and isinstance(assistant.get("llm"), dict) else {}
+    spec = provider_spec(str(llm.get("provider") or ""))
+    return spec.credential_name if spec is not None and spec.requires_api_key else None
+
+
+def _systemd_secret_bindings(
+    *,
+    service_names: list[str],
+    ai_decision_advice_enabled: bool,
+    assistant_credential_name: str | None,
+) -> dict[str, tuple[str, ...]]:
+    available = set(service_names)
+    bindings: dict[str, list[str]] = {}
+
+    def bind(service_name: str, *logical_names: str | None) -> None:
+        if service_name not in available:
+            return
+        bucket = bindings.setdefault(service_name, [])
+        for logical_name in logical_names:
+            if logical_name and logical_name not in bucket:
+                bucket.append(logical_name)
+
+    for service_name in sorted(available):
+        if service_name.startswith("options-monitor-tick-") and service_name.endswith(".service"):
+            bind(service_name, FEISHU_HOLDINGS_APP_SECRET, FEISHU_BOT_APP_SECRET)
+            if ai_decision_advice_enabled:
+                bind(service_name, LLM_DEEPSEEK_API_KEY)
+        elif service_name.startswith("options-monitor-auto-close-") and service_name.endswith(".service"):
+            bind(service_name, FEISHU_BOT_APP_SECRET)
+
+    bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
+    bind("options-monitor-ai-evidence-collector.service", LLM_DEEPSEEK_API_KEY)
+    bind("options-monitor-quality-http.service", QUALITY_READ_TOKEN)
+    bind(
+        "options-monitor-feishu-ws.service",
+        FEISHU_BOT_APP_SECRET,
+        FEISHU_HOLDINGS_APP_SECRET,
+        INBOUND_OPERATION_HMAC_KEY,
+        assistant_credential_name,
+    )
+    bind(
+        "options-monitor-wechat-clawbot.service",
+        FEISHU_HOLDINGS_APP_SECRET,
+        INBOUND_OPERATION_HMAC_KEY,
+        assistant_credential_name,
+    )
+    return {name: tuple(values) for name, values in sorted(bindings.items()) if values}
+
+
+def _render_systemd_secret_dropin(
+    logical_names: tuple[str, ...],
+    *,
+    store_root: Path,
+) -> str:
+    directives: list[str] = []
+    for logical_name in logical_names:
+        spec = credential_spec(logical_name)
+        if spec is None:
+            raise ValueError(f"unknown logical credential in service binding: {logical_name}")
+        source = store_root / spec.systemd_credential_id
+        directives.append(
+            f"LoadCredentialEncrypted={spec.systemd_credential_id}:{_systemd_quote_arg(source)}"
+        )
+    return _render_systemd_service_asset(
+        "zzzz-secret-credentials.conf.in",
+        {"LOAD_CREDENTIALS": "\n".join(directives)},
+    )
+
+
 def _systemd_unit(
     *,
     description: str,
@@ -892,6 +977,7 @@ def build_service_profile(
     quality_monitoring: dict[str, Any] | None = None,
     position_advice_promotion: dict[str, Any] | None = None,
     feishu_agent_credential: dict[str, Any] | None = None,
+    secret_credentials: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
@@ -975,6 +1061,8 @@ def build_service_profile(
         )
     if feishu_agent_credential is not None:
         profile["feishu_agent_credential"] = dict(feishu_agent_credential)
+    if secret_credentials is not None:
+        profile["secret_credentials"] = dict(secret_credentials)
     return profile
 
 
@@ -1009,6 +1097,8 @@ def render_service_bundle(
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
     include_quality_monitoring: bool = False,
     include_feishu_agent_credential: bool = False,
+    include_secret_credentials: bool = False,
+    secret_credential_store_root: str | Path | None = None,
     feishu_agent_credential_helper_path: str | Path | None = None,
     feishu_agent_credential_store: str | Path | None = None,
     feishu_holdings_credential_store: str | Path | None = None,
@@ -1020,6 +1110,10 @@ def render_service_bundle(
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
         raise ValueError("Feishu Agent credential materialization is currently supported only for systemd")
+    if include_secret_credentials and target_key != "systemd":
+        raise ValueError("per-unit encrypted credentials are currently supported only for systemd")
+    if include_secret_credentials and include_feishu_agent_credential:
+        raise ValueError("per-unit encrypted credentials and the legacy Feishu env materializer are mutually exclusive")
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
@@ -1049,6 +1143,11 @@ def render_service_bundle(
         base=repo,
         default=DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE,
     )
+    secret_store_root = _resolve_path(
+        secret_credential_store_root,
+        base=repo,
+        default=DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
+    )
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
@@ -1077,6 +1176,17 @@ def render_service_bundle(
             "markets": market_values,
         }
         if config_yaml_path is not None
+        else None
+    )
+    ai_advice_enabled = _ai_decision_advice_enabled_from_authoring_config(
+        repo_root=repo,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+    )
+    assistant_credential_name = (
+        _assistant_llm_credential_name(repo_root=repo, config_yaml_path=config_yaml_path)
+        if include_feishu_ws or include_wechat_clawbot
         else None
     )
     explicit_opend_root = opend_root is not None and str(opend_root).strip() != ""
@@ -1154,6 +1264,7 @@ def render_service_bundle(
     files: list[RenderedServiceFile] = []
     service_names: list[str] = []
     credential_consumers: list[str] = []
+    secret_credential_bindings: dict[str, tuple[str, ...]] = {}
 
     def add(
         relative_path: str,
@@ -1452,12 +1563,7 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
-        if _ai_decision_advice_enabled_from_authoring_config(
-            repo_root=repo,
-            config_yaml_path=config_yaml_path,
-            config_by_market=config_by_market,
-            market_values=market_values,
-        ):
+        if ai_advice_enabled:
             collector_service = "options-monitor-ai-evidence-collector.service"
             collector_timer = "options-monitor-ai-evidence-collector.timer"
             collector_args = [
@@ -1914,6 +2020,20 @@ def render_service_bundle(
                 kind="systemd_service",
                 service_name=wechat_service,
             )
+
+        if include_secret_credentials:
+            secret_credential_bindings = _systemd_secret_bindings(
+                service_names=service_names,
+                ai_decision_advice_enabled=ai_advice_enabled,
+                assistant_credential_name=assistant_credential_name,
+            )
+            for consumer, logical_names in secret_credential_bindings.items():
+                add(
+                    f"systemd/{consumer}.d/{SECRET_CREDENTIAL_DROPIN}",
+                    _render_systemd_secret_dropin(logical_names, store_root=secret_store_root),
+                    install_path=f"/etc/systemd/system/{consumer}.d/{SECRET_CREDENTIAL_DROPIN}",
+                    kind="systemd_secret_dropin",
+                )
 
         if include_feishu_agent_credential:
             credential_consumers = sorted(
@@ -2448,7 +2568,7 @@ def render_service_bundle(
             "http": {
                 "host": "127.0.0.1",
                 "port": QUALITY_HTTP_PORT,
-                "token_env": "OM_QUALITY_READ_TOKEN",
+                "credential_name": QUALITY_READ_TOKEN,
             },
             "regular_refresh_interval": QUALITY_REFRESH_INTERVAL_SYSTEMD,
             "recheck_interval": QUALITY_RECHECK_INTERVAL_SYSTEMD,
@@ -2471,6 +2591,16 @@ def render_service_bundle(
             "runtime_env_file": str(credential_env_file),
             "consumer_services": credential_consumers,
         } if include_feishu_agent_credential else None,
+        secret_credentials={
+            "enabled": True,
+            "backend": "systemd",
+            "store_root": str(secret_store_root),
+            "service_credentials": {
+                service_name: list(logical_names)
+                for service_name, logical_names in secret_credential_bindings.items()
+            },
+            "legacy_env_materializer_enabled": False,
+        } if include_secret_credentials else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(

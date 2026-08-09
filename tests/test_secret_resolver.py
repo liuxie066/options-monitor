@@ -42,7 +42,11 @@ def test_feishu_holdings_resolver_ignores_plain_secret_values() -> None:
     resolved = resolve_feishu_holdings_config(cfg, environ={})
 
     assert resolved.ready is False
-    assert resolved.missing_fields == ("OM_FEISHU_APP_ID", "OM_FEISHU_APP_SECRET", "OM_FEISHU_HOLDINGS_TABLE")
+    assert resolved.missing_fields == (
+        "OM_FEISHU_APP_ID",
+        "feishu.holdings.app_secret",
+        "OM_FEISHU_HOLDINGS_TABLE",
+    )
 
 
 def test_feishu_bot_resolver_defaults_allowed_open_ids_to_user_open_id() -> None:
@@ -100,6 +104,6 @@ def test_feishu_bot_resolver_ignores_custom_env_name_config() -> None:
     assert resolved.allowed_open_ids == ()
     assert resolved.inbound_missing_fields == (
         "OM_FEISHU_BOT_APP_ID",
-        "OM_FEISHU_BOT_APP_SECRET",
+        "feishu.bot.app_secret",
         "OM_FEISHU_BOT_ALLOWED_OPEN_IDS",
     )

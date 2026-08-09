@@ -35,7 +35,7 @@ om setup check --no-local-env-file
 
 ## 2. 初始化配置
 
-推荐先维护 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`，secrets 和写入开关放 env-file。
+推荐先维护 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`。秘密放 Keychain/systemd credentials，普通设置和写入开关放 env-file。
 下面的本地示例以 repo root 为工作目录；installer 安装后可以先 `cd "$HOME/apps/options-monitor/current"`。生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，再显式传 `--config-yaml` / `--output`。
 
 ```bash
@@ -83,9 +83,9 @@ om support bundle --config-path runtime-config/config.us.json --output-dir suppo
 
 ---
 
-## 3. 配置 env-file
+## 3. 配置普通 env 与秘密存储
 
-真实凭证放 env-file，不放 runtime config。
+真实凭证不放 runtime config，也不默认放 env-file。macOS 使用 Keychain，Linux systemd 使用逐 unit encrypted credentials；完整逻辑名、CLI 和迁移流程见 [Secret Storage](SECRET_STORAGE.md)。
 
 本地手动运行默认路径：
 
@@ -105,15 +105,16 @@ Mac launchd 推荐路径：
 $HOME/Library/Application Support/options-monitor/options-monitor.env
 ```
 
-手动运行时，先复制示例，再按需填写：
+手动运行时，先复制普通设置示例；需要检查秘密时只看脱敏状态：
 
 ```bash
 mkdir -p .env
 cp -n configs/examples/options-monitor.env.example .env/options-monitor.env
 om settings doctor
+om secrets status
 ```
 
-长期服务使用的 env-file 应通过 `om settings doctor --env-file <path>` 单独检查。
+长期服务使用的 env-file 应通过 `om settings doctor --env-file <path>` 单独检查。只有限时兼容场景才显式选择 `OM_SECRET_BACKEND=env`。
 
 `settings doctor` 会脱敏显示来源和缺失项。
 

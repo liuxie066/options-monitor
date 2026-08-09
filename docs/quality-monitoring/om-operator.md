@@ -34,8 +34,12 @@ OpenD 原始响应。
 只读 HTTP：
 
 ```text
-OM_QUALITY_READ_TOKEN=<independent-token> ./om quality serve --host 127.0.0.1 --port 8792
+./om secrets set quality.read_token
+./om quality serve --host 127.0.0.1 --port 8792
 ```
+
+macOS 从 Keychain 读取；Linux systemd unit 通过 `LoadCredentialEncrypted=` 只注入
+`quality.read_token`。`OM_QUALITY_READ_TOKEN` 仅在显式 `OM_SECRET_BACKEND=env` 的限时兼容模式下生效。
 
 - `GET /health` 只证明 endpoint 进程可用；
 - `GET /quality/status` 需要独立 bearer token，只读取已发布 artifact；
@@ -73,7 +77,8 @@ systemd renderer 默认不改变现有部署。生产准备时显式加入：
   --config-yaml <config.yaml> \
   --runtime-root /var/lib/options-monitor \
   --env-file /etc/options-monitor/options-monitor.env \
-  --include-quality-monitoring
+  --include-quality-monitoring \
+  --include-secret-credentials
 ```
 
 该选项生成：

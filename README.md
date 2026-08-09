@@ -401,7 +401,8 @@ Feishu 有三种彼此独立的角色：
 ```text
 <deploy-home>/apps/options-monitor/current   # code/release
 /var/lib/options-monitor                    # runtime state
-/etc/options-monitor/options-monitor.env    # secrets/settings
+/etc/options-monitor/options-monitor.env    # ordinary process settings
+/etc/credstore.encrypted                    # encrypted systemd credentials
 ```
 
 服务文件先生成到临时目录供人工检查；`service render` 会写输出文件，但不会自动安装或启动服务：
@@ -419,7 +420,7 @@ om service render \
   --output-dir /tmp/options-monitor-service
 ```
 
-Linux 主机如果已预置 `systemd-creds` 加密的 Feishu Agent 凭据，可在 render 时显式加上 `--include-feishu-agent-credential`，将 credential oneshot、materializer helper 和消费服务 drop-in 纳入 service profile 与 drift；该开关不会创建或修改凭据。
+Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-secret-credentials`，按 unit 生成最小 `LoadCredentialEncrypted` drop-in；渲染不会创建或修改凭据。旧 `--include-feishu-agent-credential` 只用于存量共享 env materializer 迁移。完整契约见 [Secret Storage](docs/SECRET_STORAGE.md)。
 
 平台部署、升级、回滚和服务检查见 [DEPLOY.md](DEPLOY.md)、[Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md) 与 [RUNBOOK.md](RUNBOOK.md)。
 

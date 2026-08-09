@@ -71,10 +71,11 @@ python3.12 -m venv .venv
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ```
 
-如果你配置了本地 env-file，先跑 settings 诊断确认密钥来源和写入开关：
+如果你配置了本地 env-file，先跑 settings 诊断确认普通设置和写入开关，再用只显示状态的 secrets 诊断确认凭据：
 
 ```bash
 ./om settings doctor
+./om secrets status
 ```
 
 配置优先级和工具边界的完整解释，以根目录 `CONFIGURATION_GUIDE.md` 为准。
