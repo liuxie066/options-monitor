@@ -215,7 +215,9 @@ def run_decision_advice(
     clock = monotonic or time.monotonic
     deadline = clock() + float(budget_seconds)
     account_ref = secrets.token_urlsafe(12)
-    evidence_as_of = str(frozen.external_evidence.get("frozen_at") or "") or None
+    evidence_as_of = (
+        str(frozen.external_evidence.get("evidence_as_of") or "") or None
+    )
     bindings = frozen.input_bindings()
     flags = zero_candidate_flags(frozen.candidates)
     compiled = compiled_prompt or compile_prompt_pack(PROMPT_PACK_ADVICE)

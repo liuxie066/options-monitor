@@ -37,6 +37,7 @@ FACT_REGISTRY_SCHEMA = "ai_decision_advice_fact_registry.v1"
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,95}$")
 _SEMANTIC_HASH_OMITTED_KEYS = frozenset(
     {
+        "evidence_as_of",
         "frozen_at",
         "last_checked_at",
         "last_success_at",
@@ -337,6 +338,7 @@ def freeze_external_evidence(
             }
         )
     return {
+        "evidence_as_of": index.evidence_as_of,
         "frozen_at": index.frozen_at,
         "index_hash": index.index_hash(),
         "symbols": items,

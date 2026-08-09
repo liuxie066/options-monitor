@@ -72,6 +72,7 @@ def _frozen(
     }
     symbols = sorted({row["symbol"] for row in sell_put} | {row["symbol"] for row in covered_call})
     external = {
+        "evidence_as_of": "2026-08-09T11:00:00+00:00",
         "frozen_at": "2026-08-09T11:00:00+00:00",
         "index_hash": "ev-hash",
         "symbols": [

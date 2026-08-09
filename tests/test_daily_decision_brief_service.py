@@ -120,6 +120,95 @@ def test_brief_carries_ai_decision_advice_section(tmp_path: Path) -> None:
     assert brief.get("ai_decision_advice_evidence_index") == {}
 
 
+def test_advice_failure_does_not_block_daily_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    monkeypatch.setattr(
+        service,
+        "run_or_reuse_ai_decision_advice",
+        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError("slow")),
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["run_id"] == "run-1"
+    assert brief["ai_decision_advice"]["status"] == "unavailable"
+    assert (
+        brief["ai_decision_advice"]["unavailable_reason"]
+        == "advice_execution_failed"
+    )
+
+
+def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    _materialize_opening_snapshot_fixture(tmp_path, market="US")
+    snapshot = json.loads(
+        (account_dir / "state" / "opening_candidate_snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    portfolio = {"envelope": {"marker": "verified-pm"}}
+    option_context = {"marker": "verified-option"}
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        service,
+        "load_opening_candidate_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("explicit candidate snapshot must not be reread")
+        ),
+    )
+
+    def advice(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "not_applicable",
+            "unavailable_reason": None,
+            "evidence_as_of": None,
+            "sell_put": None,
+            "covered_call": None,
+            "zero_candidate": {
+                "sell_put": False,
+                "covered_call": False,
+            },
+            "reused": False,
+            "advice_record_id": None,
+        }
+
+    monkeypatch.setattr(service, "run_or_reuse_ai_decision_advice", advice)
+
+    brief = service.assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result=_result(),
+        pipeline_succeeded=True,
+        config=_config(),
+        now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+        opening_candidate_snapshot=snapshot,
+        prepared_portfolio_distribution=portfolio,
+        prepared_option_positions_context=option_context,
+    )
+
+    assert brief["candidates"]["sell_put"]
+    assert captured["candidate_snapshot"] is not None
+    assert captured["portfolio_distribution"] is portfolio
+    assert captured["option_positions_context"] is option_context
+
+
 def _assemble(
     base: Path,
     *,

@@ -14,6 +14,7 @@ from src.infrastructure.run_log import RunLogger
 from src.application.account_config import accounts_from_config
 from src.application.config_sections import resolve_watchlist_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
+from domain.domain.symbol_identity import canonical_symbol
 
 from src.application.multi_tick.opend_guard import (
     clear_opend_phone_verify_pending,
@@ -53,6 +54,18 @@ from src.application.tick_account_execution import (
 from src.application.tick_notification_flow import (
     TickNotificationRequest,
     run_tick_notification_flow,
+)
+from src.application.ai_decision_advice.config import (
+    ai_decision_advice_enabled,
+)
+from src.application.ai_decision_advice.identity import (
+    build_observation_set,
+    candidate_symbols_from_snapshot,
+    publish_observation_partition,
+)
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    load_opening_candidate_snapshot,
 )
 from src.application.tick_run_context import (
     build_tick_idempotency_context,
@@ -103,6 +116,152 @@ def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[
         if isinstance(item, dict) and item.get("should_run") is True:
             return True
     return False
+
+
+def _load_advice_candidate_snapshots(
+    *,
+    base: Path,
+    run_id: str,
+    accounts: list[str] | tuple[str, ...],
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    unavailable: dict[str, str] = {}
+    for raw_account in sorted(set(accounts)):
+        account = str(raw_account or "").strip().lower()
+        if not account:
+            continue
+        try:
+            snapshots[account] = load_opening_candidate_snapshot(
+                base=base,
+                run_id=run_id,
+                account=account,
+            )
+        except OpeningCandidateSnapshotError:
+            unavailable[account] = "candidate_snapshot_unavailable"
+    return snapshots, unavailable
+
+
+def _publish_ai_decision_observation_partitions(
+    *,
+    base: Path,
+    run_id: str,
+    markets: list[str] | tuple[str, ...],
+    config: dict[str, Any],
+    successful_accounts: list[str] | tuple[str, ...],
+    candidate_snapshots_by_account: dict[str, dict[str, Any]],
+    portfolio_distributions_by_account: dict[str, Any],
+    option_contexts_by_account: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    successful = {
+        str(account or "").strip().lower()
+        for account in successful_accounts
+        if str(account or "").strip()
+    }
+    accepted = successful & {
+        str(account or "").strip().lower()
+        for account in candidate_snapshots_by_account
+        if str(account or "").strip()
+    }
+    if not accepted:
+        # Replacement publication is permitted only after a successful Tick
+        # and an accepted same-run candidate seal. Retain the prior evidence
+        # observation generation on failed, skipped or incomplete runs.
+        return {}
+
+    candidate_snapshots_by_account = {
+        account: snapshot
+        for account, snapshot in candidate_snapshots_by_account.items()
+        if str(account or "").strip().lower() in accepted
+    }
+    portfolio_distributions_by_account = {
+        account: prepared
+        for account, prepared in portfolio_distributions_by_account.items()
+        if str(account or "").strip().lower() in accepted
+    }
+    option_contexts_by_account = {
+        account: context
+        for account, context in option_contexts_by_account.items()
+        if str(account or "").strip().lower() in accepted
+    }
+    scan_symbols = [
+        str(item.get("symbol") or item.get("code") or "")
+        for item in resolve_watchlist_config(config)
+        if isinstance(item, dict)
+    ]
+    stock_symbols: list[str] = []
+    for prepared in portfolio_distributions_by_account.values():
+        envelope = getattr(prepared, "envelope", None)
+        payload = (
+            envelope.get("payload")
+            if isinstance(envelope, dict)
+            else None
+        )
+        assets = payload.get("assets") if isinstance(payload, dict) else None
+        for item in assets if isinstance(assets, list) else ():
+            if (
+                isinstance(item, dict)
+                and str(item.get("normalized_type") or "").strip().lower()
+                == "stock"
+            ):
+                stock_symbols.append(str(item.get("code") or ""))
+
+    option_underlyings: list[str] = []
+    for context in option_contexts_by_account.values():
+        rows = context.get("open_positions_min")
+        for item in rows if isinstance(rows, list) else ():
+            if not isinstance(item, dict):
+                continue
+            try:
+                contracts_open = int(item.get("contracts_open") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                str(item.get("status") or "open").strip().lower()
+                != "open"
+                or contracts_open <= 0
+            ):
+                continue
+            symbol = canonical_symbol(item.get("symbol"))
+            if symbol:
+                option_underlyings.append(symbol)
+
+    candidate_symbols = [
+        symbol
+        for snapshot in candidate_snapshots_by_account.values()
+        for symbol in candidate_symbols_from_snapshot(snapshot)
+    ]
+    observed = build_observation_set(
+        scan_symbols=scan_symbols,
+        stock_holding_symbols=stock_symbols,
+        open_option_underlyings=option_underlyings,
+        recent_candidate_symbols=candidate_symbols,
+    )
+
+    results: dict[str, dict[str, Any]] = {}
+    for raw_market in dict.fromkeys(markets):
+        market = str(raw_market or "").strip().upper()
+        if not market:
+            continue
+        partition = [item for item in observed if item.market == market]
+        try:
+            publish_observation_partition(
+                base=base,
+                market=market,
+                observed=partition,
+                generation=run_id,
+                generated_at=utc_now(),
+            )
+        except Exception:
+            results[market] = {
+                "status": "unavailable",
+                "symbol_count": 0,
+            }
+            continue
+        results[market] = {
+            "status": "ready",
+            "symbol_count": len(partition),
+        }
+    return results
 
 
 def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
@@ -584,6 +743,46 @@ def main(argv: list[str] | None = None) -> int:
     )
     results.extend(account_execution.results)
 
+    advice_enabled = ai_decision_advice_enabled(base_cfg)
+    candidate_snapshots_by_account: dict[str, dict[str, Any]] | None = None
+    candidate_snapshot_unavailable_by_account: dict[str, str] | None = None
+    if advice_enabled:
+        (
+            candidate_snapshots_by_account,
+            candidate_snapshot_unavailable_by_account,
+        ) = _load_advice_candidate_snapshots(
+            base=base,
+            run_id=run_id,
+            accounts=tuple(account_execution.ran_pipeline_accounts),
+        )
+        observation_status = _publish_ai_decision_observation_partitions(
+            base=base,
+            run_id=run_id,
+            markets=tuple(markets_to_run),
+            config=base_cfg,
+            successful_accounts=tuple(
+                account_execution.ran_pipeline_accounts
+            ),
+            candidate_snapshots_by_account=candidate_snapshots_by_account,
+            portfolio_distributions_by_account=dict(
+                getattr(
+                    account_execution,
+                    "prepared_portfolio_distribution_by_account",
+                    {},
+                )
+                or {}
+            ),
+            option_contexts_by_account=dict(
+                getattr(
+                    account_execution,
+                    "prepared_option_positions_context_by_account",
+                    {},
+                )
+                or {}
+            ),
+        )
+        tick_metrics["ai_decision_observation"] = observation_status
+
     return run_tick_notification_flow(
         TickNotificationRequest(
             base=base,
@@ -610,6 +809,84 @@ def main(argv: list[str] | None = None) -> int:
             scheduled_scan_targets_by_account=account_execution.scheduled_scan_targets_by_account,
             commit_scan_targets_fn=commit_scan_targets,
             trigger_kind=trigger_kind,
+            opening_candidate_snapshot_by_account=(
+                candidate_snapshots_by_account
+            ),
+            opening_candidate_snapshot_unavailable_by_account=(
+                candidate_snapshot_unavailable_by_account
+            ),
+            prepared_portfolio_distribution_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_portfolio_distribution_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_portfolio_distribution_artifact_path_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_portfolio_distribution_artifact_path_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_portfolio_distribution_artifact_sha256_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_portfolio_distribution_artifact_sha256_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_portfolio_distribution_status_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_portfolio_distribution_status_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_option_positions_context_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_option_positions_context_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_option_positions_context_unavailable_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_option_positions_context_unavailable_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_option_positions_context_manifest_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_option_positions_context_manifest_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
+            prepared_option_positions_context_manifest_sha256_by_account=(
+                getattr(
+                    account_execution,
+                    "prepared_option_positions_context_manifest_sha256_by_account",
+                    None,
+                )
+                if advice_enabled
+                else None
+            ),
         )
     )
 
