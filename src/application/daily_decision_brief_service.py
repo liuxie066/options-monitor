@@ -1935,6 +1935,7 @@ def _candidate_view(
             },
         }
     return {
+        "candidate_id": _text(row.get("candidate_id")),
         "rank": rank,
         "symbol": _text(row.get("symbol")).upper(),
         "option_type": "put" if family == "sell_put" else "call",
@@ -2185,6 +2186,9 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
         "delta",
         "dte",
         "net_income",
+        "period_net_return",
+        "period_net_return_on_cash_basis",
+        "period_net_premium_return",
         "annualized_return",
         "annualized_net_return_on_cash_basis",
         "annualized_net_premium_return",
