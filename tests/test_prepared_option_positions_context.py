@@ -11,10 +11,33 @@ from src.application.ledger.repository import (
 )
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
+    cny_per_currency_rates_from_option_context,
     load_prepared_option_positions_context,
     prepare_option_positions_contexts,
 )
 from src.application.tick_run_workspace import publish_account_run_config
+
+
+def test_cny_per_currency_rates_requires_ready_prepared_fx_authority() -> None:
+    ready = {
+        "prepared_authority": {"fx_status": "ready"},
+        "exchange_rates": {
+            "rates": {"USDCNY": "7.2", "HKDCNY": 0.92}
+        },
+    }
+    unavailable = {
+        **ready,
+        "prepared_authority": {"fx_status": "unavailable"},
+    }
+
+    assert cny_per_currency_rates_from_option_context(ready) == {
+        "CNY": 1.0,
+        "USD": 7.2,
+        "HKD": 0.92,
+    }
+    assert cny_per_currency_rates_from_option_context(unavailable) == {
+        "CNY": 1.0
+    }
 
 
 def _authorities(
