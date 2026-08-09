@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+from urllib.parse import urlsplit
+
+from src.application.ai_decision_advice.collector import (
+    normalize_https_url,
+    sanitize_source_text,
+)
 
 
 _ACTION_LABELS = {
@@ -18,6 +24,7 @@ def render_family_advice_lines(
     candidate_contract_by_id: Mapping[str, str] | None = None,
     candidate_rank_by_id: Mapping[str, int] | None = None,
     evidence_by_ref: Mapping[str, Mapping[str, Any]] | None = None,
+    heading_level: int = 3,
 ) -> list[str]:
     """Render the per-strategy AI建议 block (design 15.1 / 15.2 / 15.3 / 15.4).
 
@@ -29,15 +36,15 @@ def render_family_advice_lines(
     if not isinstance(section, Mapping):
         return []
     status = str(section.get("status") or "").strip().lower()
-    if status == "not_applicable":
-        return []
-
     zero_candidate = section.get("zero_candidate")
     zero = bool(zero_candidate.get(family)) if isinstance(zero_candidate, Mapping) else False
-    lines: list[str] = ["### AI建议"]
+    heading_mark = "#" * max(1, min(int(heading_level), 6))
+    lines: list[str] = [f"{heading_mark} AI建议"]
     if zero:
         lines.append("本轮无可供 AI 评估的策略候选。")
         return lines
+    if status == "not_applicable":
+        return []
 
     if status == "unavailable":
         lines.append("AI建议未完成；以下仅展示策略原始排序，不代表已经完成综合判断。")
@@ -115,7 +122,7 @@ def _decision_conclusion(
     if action == "defer":
         return "本轮暂缓新开仓"
     if action == "needs_review":
-        return "现有证据冲突，需要人工判断"
+        return "信息不完整或有冲突，需要人工判断"
     return action
 
 
@@ -139,6 +146,13 @@ def _render_decision(
         return lines
     if action == "needs_review":
         lines.append(f"结论｜{conclusion}。")
+        reason = (
+            _review_gap_text(decision)
+            or _rationale_text(decision)
+            or "支持信息不完整。"
+        )
+        if reason:
+            lines.append(f"原因｜{reason}")
         lines.extend(_source_lines(decision, evidence_by_ref))
         return lines
     if action == "defer":
@@ -169,17 +183,37 @@ def _rationale_text(decision: Mapping[str, Any]) -> str:
     if not isinstance(rationale, Mapping):
         return ""
     parts = [
-        str(rationale.get("risk_mechanism") or "").strip(),
-        str(rationale.get("candidate_effect") or "").strip(),
-        str(rationale.get("decision_reason") or "").strip(),
+        sanitize_source_text(rationale.get("risk_mechanism"), fallback="")[:160],
+        sanitize_source_text(rationale.get("candidate_effect"), fallback="")[:160],
+        sanitize_source_text(rationale.get("decision_reason"), fallback="")[:160],
     ]
     parts = [part.rstrip("。") for part in parts if part]
     if not parts:
         return ""
-    # 15.3: risk mechanism; why it affects the candidate; why switch/defer —
-    # at most two sentences in the receipt.
-    text = "；".join(parts[:2])
+    # 15.3: risk mechanism; why it affects the candidate; why switch/defer.
+    # Keep the three short clauses in one sentence instead of dropping the
+    # final decision reason.
+    text = "；".join(parts)
     return text + "。"
+
+
+def _review_gap_text(decision: Mapping[str, Any]) -> str:
+    refs = decision.get("source_refs")
+    internal_refs = refs.get("internal_fact_refs") if isinstance(refs, Mapping) else []
+    labels: list[str] = []
+    prefixes = (
+        ("gap:portfolio:", "组合数据不完整"),
+        ("gap:option_positions:", "期权持仓数据不完整"),
+        ("gap:projection:", "候选风险计算不完整"),
+        ("gap:coverage:", "外部信息覆盖不完整"),
+    )
+    for ref in internal_refs or []:
+        text = str(ref or "")
+        for prefix, label in prefixes:
+            if text.startswith(prefix) and label not in labels:
+                labels.append(label)
+                break
+    return "；".join(labels) + "。" if labels else ""
 
 
 def _source_lines(
@@ -197,14 +231,24 @@ def _source_lines(
         if not isinstance(row, Mapping):
             continue
         source = row.get("source") if isinstance(row.get("source"), Mapping) else row
-        title = str(source.get("title") or "").strip()
-        publisher = str(source.get("publisher") or "").strip()
-        published = str(source.get("published_at") or "").strip()
-        url = str(source.get("url") or "").strip()
-        if not title or not url:
+        raw_title = str(source.get("title") or "").strip()
+        url = normalize_https_url(source.get("url"))
+        if not raw_title or not url:
             continue
+        title = sanitize_source_text(raw_title, fallback="来源信息")
+        publisher = sanitize_source_text(source.get("publisher"), fallback="")
+        published = sanitize_source_text(source.get("published_at"), fallback="")
+        domain = urlsplit(url).hostname or ""
         label = title
-        extras = [item for item in (publisher, published[:10] if published else "") if item]
+        extras = [
+            item
+            for item in (
+                publisher,
+                published[:10] if published else "",
+                domain,
+            )
+            if item
+        ]
         if extras:
             label += "（" + " · ".join(extras) + "）"
         out.append(f"来源｜{label} {url}")

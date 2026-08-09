@@ -236,6 +236,7 @@ def test_completed_run_uses_new_model_input_and_persists_private_record(tmp_path
     record = records[0]
     assert record["status"] == "completed"
     assert record["account_ref"] == "new-ref"
+    assert record["evidence_as_of"] == "2026-08-09T11:00:00+00:00"
     assert record["input_bindings"]["fact_registry_hash"] == "fact-hash"
     assert "raw_response" not in record
     assert record["model_response_audit"]["response_sha256"] == "a" * 64
@@ -519,6 +520,7 @@ def test_reuse_requires_semantic_bindings_and_creates_new_anonymous_ref(tmp_path
     records = read_advice_records(_record_path(tmp_path, "run-2"))
     assert records[0]["account_ref"] == "second-private-ref"
     assert records[0]["input_bindings"]["external_evidence_run_id"] == "er-2"
+    assert records[0]["evidence_as_of"] == "2026-08-09T11:00:00+00:00"
     assert records[0]["reuse_of_advice_id"] == first.advice_record_id
     assert "first-private-ref" not in json.dumps(records[0])
 

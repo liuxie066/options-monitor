@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from domain.domain.daily_decision_brief import (
     diff_daily_decision_briefs,
     normalize_daily_decision_brief,
@@ -136,6 +138,54 @@ def test_identical_actions_produce_no_changes():
     prev = _brief(revision=1, ai_section=_completed(sp_action="keep", cc=[_cc("NVDA", "defer")]))
     cur = _brief(revision=2, ai_section=_completed(sp_action="keep", cc=[_cc("NVDA", "defer")]))
     diff = diff_daily_decision_briefs(prev, cur)
+    assert diff["changes"] == []
+    assert diff["material"] is False
+
+
+def test_switch_selected_candidate_change_is_material():
+    previous = _completed(sp_action="switch")
+    current = deepcopy(previous)
+    previous["sell_put"]["selected_candidate_id"] = "put-2"
+    current["sell_put"]["selected_candidate_id"] = "put-3"
+
+    diff = diff_daily_decision_briefs(
+        _brief(revision=1, ai_section=previous),
+        _brief(revision=2, ai_section=current),
+    )
+
+    changes = [
+        item
+        for item in diff["changes"]
+        if item["change_type"] == "ai_decision_advice_selected_candidate_changed"
+    ]
+    assert changes == [
+        {
+            "change_type": "ai_decision_advice_selected_candidate_changed",
+            "priority": "P1",
+            "material": True,
+            "ai_advice_scope": "sell_put",
+            "before": "put-2",
+            "after": "put-3",
+        }
+    ]
+
+
+def test_copy_source_time_and_reuse_only_changes_are_not_material():
+    previous = _completed(sp_action="keep")
+    current = deepcopy(previous)
+    current["evidence_as_of"] = "2026-08-09T11:30:00+00:00"
+    current["reused"] = True
+    current["advice_record_id"] = "adv-2"
+    current["sell_put"]["rationale"] = {"risk_mechanism": "updated wording"}
+    current["sell_put"]["source_refs"] = {
+        "external_evidence_refs": ["evidence:new"]
+    }
+
+    diff = diff_daily_decision_briefs(
+        _brief(revision=1, ai_section=previous),
+        _brief(revision=2, ai_section=current),
+    )
+
     assert diff["changes"] == []
     assert diff["material"] is False
 

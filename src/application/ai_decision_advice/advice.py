@@ -243,6 +243,7 @@ def run_decision_advice(
         "account_ref": account_ref,
         "market": str(market or "").strip().upper(),
         "recorded_at": recorded_at,
+        "evidence_as_of": evidence_as_of,
         "input_bindings": dict(bindings),
         "versions": versions,
         "zero_candidate": dict(flags),
@@ -320,14 +321,17 @@ def run_decision_advice(
         prompt_fingerprint=prompt_fingerprint,
     )
     if prior is not None:
-        record = build_reuse_record(
-            prior,
-            advice_id=advice_id,
-            run_id=run_id,
-            account_ref=account_ref,
-            recorded_at=recorded_at,
-            bindings=bindings,
-        )
+        record = {
+            **build_reuse_record(
+                prior,
+                advice_id=advice_id,
+                run_id=run_id,
+                account_ref=account_ref,
+                recorded_at=recorded_at,
+                bindings=bindings,
+            ),
+            "evidence_as_of": evidence_as_of,
+        }
         persist(record)
         return result_for(record, reused=True)
 
