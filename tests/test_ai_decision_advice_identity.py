@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from src.application.ai_decision_advice.identity import (
+    PRIORITY_OPEN_OPTION,
+    PRIORITY_RECENT_CANDIDATE,
+    PRIORITY_SCAN_CONFIG,
+    PRIORITY_STOCK_HOLDING,
+    RefreshQueue,
+    build_observation_set,
+    build_symbol_identity_snapshot,
+    candidate_symbols_from_snapshot,
+    identity_by_symbol,
+    load_symbol_identity_snapshot,
+    open_option_underlyings_from_lots,
+    publish_symbol_identity_snapshot,
+    stock_symbols_from_portfolio_context,
+)
+
+
+def test_observation_set_union_dedup_and_priority() -> None:
+    observed = build_observation_set(
+        scan_symbols=["NVDA", "0700.HK", "AAPL"],
+        stock_holding_symbols=["AAPL"],
+        open_option_underlyings=["NVDA"],
+        recent_candidate_symbols=["AAPL"],
+    )
+    by_symbol = {item.symbol: item for item in observed}
+    assert set(by_symbol) == {"NVDA", "0700.HK", "AAPL"}
+    assert by_symbol["NVDA"].priority == PRIORITY_OPEN_OPTION
+    assert by_symbol["AAPL"].priority == PRIORITY_RECENT_CANDIDATE
+    assert by_symbol["0700.HK"].priority == PRIORITY_SCAN_CONFIG
+    assert "open_option" in by_symbol["NVDA"].sources
+    assert "scan_config" in by_symbol["NVDA"].sources
+
+
+def test_observation_set_drops_unknown_and_alias() -> None:
+    observed = build_observation_set(scan_symbols=["", "not a symbol ??"])
+    assert all(item.symbol for item in observed)
+
+
+def test_open_option_underlyings_from_lots() -> None:
+    lots = [
+        {"status": "open", "contracts_open": 1, "contract_key": {"underlying_symbol": "NVDA"}},
+        {"status": "open", "contracts_open": 0, "contract_key": {"underlying_symbol": "AAPL"}},
+        {"status": "close", "contracts_open": 0, "contract_key": {"underlying_symbol": "MSFT"}},
+    ]
+    assert open_option_underlyings_from_lots(lots) == ["NVDA"]
+
+
+def test_stock_symbols_from_portfolio_context() -> None:
+    ctx = {"stocks_by_symbol": {"NVDA": {"shares": 100}, "AAPL": {"shares": 50}}}
+    assert sorted(stock_symbols_from_portfolio_context(ctx)) == ["AAPL", "NVDA"]
+    assert stock_symbols_from_portfolio_context(None) == []
+    assert stock_symbols_from_portfolio_context({}) == []
+
+
+def test_candidate_symbols_from_snapshot() -> None:
+    snapshot = {
+        "ranked_candidates": [
+            {"candidate_id": "c1", "facts": {"symbol": "NVDA"}},
+            {"candidate_id": "c2", "facts": {"symbol": "AAPL"}},
+            {"candidate_id": "c3"},
+        ]
+    }
+    assert candidate_symbols_from_snapshot(snapshot) == ["NVDA", "AAPL"]
+    assert candidate_symbols_from_snapshot(None) == []
+
+
+def test_identity_snapshot_prefers_market_snapshot_names() -> None:
+    observed = build_observation_set(scan_symbols=["NVDA", "0700.HK"])
+    snapshot = build_symbol_identity_snapshot(
+        observed,
+        market_snapshot_provider=lambda market, symbols: (
+            {"US.NVDA": {"name": "NVIDIA Corp", "exchange_type": "NASDAQ"}} if market == "US" else {}
+        ),
+        basic_info_provider=lambda codes: [
+            {"code": "HK.00700", "name": "腾讯控股", "exchange_type": "HKEX"},
+        ],
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    rows = identity_by_symbol(snapshot)
+    assert rows["NVDA"]["name"] == "NVIDIA Corp"
+    assert rows["NVDA"]["exchange"] == "NASDAQ"
+    assert rows["NVDA"]["status"] == "resolved"
+    assert rows["0700.HK"]["status"] == "resolved"
+    assert rows["0700.HK"]["name"] == "腾讯控股"
+    assert snapshot["schema_version"] == "ai_decision_advice.symbol_identity_snapshot.v1"
+    assert len(snapshot["content_sha256"]) == 64
+
+
+def test_identity_ignores_rows_outside_requested_set() -> None:
+    observed = build_observation_set(scan_symbols=["NVDA"])
+    snapshot = build_symbol_identity_snapshot(
+        observed,
+        market_snapshot_provider=lambda market, symbols: {
+            "US.AAPL": {"name": "Apple"},
+        },
+        basic_info_provider=lambda codes: [
+            {"code": "US.MSFT", "name": "Microsoft"},
+        ],
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    rows = identity_by_symbol(snapshot)
+    assert rows["NVDA"]["status"] == "identity_unavailable"
+
+
+def test_identity_snapshot_fallback_to_basicinfo_then_unavailable() -> None:
+    observed = build_observation_set(scan_symbols=["NVDA", "AAPL"])
+    snapshot = build_symbol_identity_snapshot(
+        observed,
+        market_snapshot_provider=lambda market, symbols: {},
+        basic_info_provider=lambda codes: [
+            {"code": "US.NVDA", "name": "NVIDIA", "exchange_type": "NASDAQ"},
+        ],
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    rows = identity_by_symbol(snapshot)
+    assert rows["NVDA"]["status"] == "resolved"
+    assert rows["AAPL"]["status"] == "identity_unavailable"
+    assert rows["AAPL"]["name"] is None
+
+
+def test_publish_and_load_roundtrip(tmp_path: Path) -> None:
+    observed = build_observation_set(scan_symbols=["NVDA"])
+    payload = build_symbol_identity_snapshot(
+        observed,
+        market_snapshot_provider=lambda market, symbols: {"NVDA": {"name": "NVIDIA"}},
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    path = publish_symbol_identity_snapshot(base=tmp_path, payload=payload)
+    assert path.name == "symbol_identity_snapshot.json"
+    loaded = load_symbol_identity_snapshot(tmp_path)
+    assert loaded is not None
+    assert loaded["content_sha256"] == payload["content_sha256"]
+    assert identity_by_symbol(loaded)["NVDA"]["name"] == "NVIDIA"
+
+
+def test_publish_rewrites_same_content_deterministically(tmp_path: Path) -> None:
+    observed = build_observation_set(scan_symbols=["NVDA"])
+    payload = build_symbol_identity_snapshot(
+        observed,
+        market_snapshot_provider=lambda market, symbols: {"NVDA": {"name": "NVIDIA"}},
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    first = publish_symbol_identity_snapshot(base=tmp_path, payload=payload)
+    first_text = first.read_text(encoding="utf-8")
+    second = publish_symbol_identity_snapshot(base=tmp_path, payload=payload)
+    assert second.read_text(encoding="utf-8") == first_text
+    assert json.loads(first_text)["content_sha256"] == payload["content_sha256"]
+
+
+def test_load_missing_or_invalid_returns_none(tmp_path: Path) -> None:
+    assert load_symbol_identity_snapshot(tmp_path) is None
+    path = tmp_path / "output_shared" / "state" / "ai_decision_advice"
+    path.mkdir(parents=True)
+    (path / "symbol_identity_snapshot.json").write_text("not json", encoding="utf-8")
+    assert load_symbol_identity_snapshot(tmp_path) is None
+    (path / "symbol_identity_snapshot.json").write_text(json.dumps({"schema_version": "other"}), encoding="utf-8")
+    assert load_symbol_identity_snapshot(tmp_path) is None
+
+
+def test_refresh_queue_priority_and_starvation_order() -> None:
+    observed = build_observation_set(
+        scan_symbols=["MSFT", "GOOGL"],
+        stock_holding_symbols=["AAPL"],
+        open_option_underlyings=["NVDA"],
+    )
+    queue = RefreshQueue.build(
+        observed,
+        last_attempt_by_symbol={"NVDA": "2026-08-09T04:00:00+00:00"},
+    )
+    symbols = queue.symbols()
+    assert symbols[0] == "NVDA" or symbols[0] == "AAPL"
+    assert symbols.index("MSFT") < len(symbols)
+
+
+def test_refresh_queue_requeue_unfinished_to_tier_head() -> None:
+    observed = build_observation_set(scan_symbols=["MSFT", "GOOGL", "AAPL"])
+    queue = RefreshQueue.build(observed)
+    first_pass = queue.symbols()
+    assert first_pass == ["AAPL", "GOOGL", "MSFT"]
+    queue.requeue_unfinished(["MSFT"])
+    assert queue.symbols() == ["MSFT", "AAPL", "GOOGL"]
+
+
+def test_priority_constants_match_design_order() -> None:
+    assert PRIORITY_OPEN_OPTION < PRIORITY_RECENT_CANDIDATE
+    assert PRIORITY_RECENT_CANDIDATE < PRIORITY_STOCK_HOLDING
+    assert PRIORITY_STOCK_HOLDING < PRIORITY_SCAN_CONFIG
