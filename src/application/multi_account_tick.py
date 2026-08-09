@@ -576,6 +576,12 @@ def main(argv: list[str] | None = None) -> int:
     tick_metrics["prepared_portfolio_contexts"] = list(
         account_execution.prepared_context_metrics
     )
+    tick_metrics["prepared_portfolio_distributions"] = list(
+        account_execution.prepared_portfolio_distribution_metrics
+    )
+    tick_metrics["portfolio_management_distribution_read_count"] = (
+        account_execution.portfolio_management_distribution_read_count
+    )
     results.extend(account_execution.results)
 
     return run_tick_notification_flow(
