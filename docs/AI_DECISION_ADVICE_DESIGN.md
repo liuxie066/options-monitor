@@ -5,9 +5,10 @@
 > 权威范围：Sell Put / Covered Call 候选生成后的 AI 决策建议、外部证据采集、
 > Daily Brief 展示、运行审计和失败语义
 >
-> 实施状态：v1 基础能力已按 Gateflow S1–S8 落地；账户数据源、投影、证据观察集合、
-> 来源绑定与严格校验仍存在实现漂移，正在由
-> `docs/gateflow/ai-decision-advice-drift-remediation/` 对齐（2026-08-09）。代码边界：
+> 实施状态：v1 基础能力及 Gateflow drift remediation S1–S7 已完成本地实现与验证
+> （2026-08-10）；账户级 prepared 数据源、确定性投影、匿名观察集合、来源绑定、
+> 严格校验、回执和 Agent 读取面已对齐本合同。验证记录位于
+> `docs/gateflow/ai-decision-advice-drift-remediation/`。代码边界：
 > `src/application/ai_decision_advice/`（identity / evidence_store / collector /
 > contexts / projection / validation / advice / advice_store / orchestration /
 > render）、`src/infrastructure/deepseek_responses.py`、
@@ -1162,10 +1163,18 @@ v1 不新增 Agent 工具。既有 `daily_decision_brief_read` 的结构化结�
 Agent 可读取：
 
 - 正式动作和引用候选；
-- 四类输入 hash 与实际 cutoff；
+- 四类业务输入对应的五个完整性 hash（候选、PM 组合、期权持仓、事实注册表、外部
+  证据）、外部证据运行标识与实际 `evidence_as_of`；
 - 完整内部事实引用；
 - 外部证据和来源；
 - 运行、校验、复用和降级状态。
+
+读取时以 Daily Brief 中的 `advice_record_id`、run、账户、市场、状态、零候选标记、复用
+标记和证据截止时间，唯一匹配同一 run/account 的
+`state/ai_decision_advice.jsonl`。缺失、重复、结构损坏或身份不一致时，结构化结果明确
+返回 formal record unavailable，不从简报文案拼造正式 actions，也不读取其他 run 或账户
+补齐。正式结果只暴露白名单 bindings、actions、fact/evidence refs、validation、versions
+和 reuse 关系；不暴露真实 `account_ref`、usage、原始响应审计或 Prompt 正文。
 
 `candidate_rank_explain` 继续只解释 Candidate Engine 的确定性筛选和排序，不混入 AI
 观点。Agent 查询保持只读，不触发搜索、扫描、模型调用、通知或状态写入。

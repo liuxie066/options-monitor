@@ -199,7 +199,8 @@ Important runtime paths:
 | Default reports | `output_shared/reports/` |
 | OpenD cache | `cache/opend_option_chain/`, `cache/opend_option_expirations/` |
 | Audit logs | `audit/run_logs/` |
-| AI Decision Advice evidence | `output_shared/state/ai_decision_advice/` |
+| AI Decision Advice shared evidence | `output_shared/state/ai_decision_advice/` |
+| AI Decision Advice formal result | `output_runs/<run_id>/accounts/<account>/state/ai_decision_advice.jsonl` |
 
 For runtime questions, prefer `runtime_status` because it already knows how to summarize these paths and distinguish latest run from latest scanned run.
 
@@ -208,11 +209,26 @@ For runtime questions, prefer `runtime_status` because it already knows how to s
 AI Decision Advice 是两阶段 LLM 增强（设计：`docs/AI_DECISION_ADVICE_DESIGN.md`）：
 
 - Collector（managed systemd internal wrapper）：4 小时刷新外部证据，只用公开 symbol 身份
-  和 web_search；不写持仓/候选，也不提供 `./om` 手工刷新命令。产物在 `output_shared/state/ai_decision_advice/`
-  （`external_evidence.jsonl`、`symbol_identity_snapshot.json`、advice JSONL）。
+  和 web_search；不写持仓/候选，也不提供 `./om` 手工刷新命令。共享产物在
+  `output_shared/state/ai_decision_advice/`（`observation_set.json`、
+  `external_evidence.jsonl`、`symbol_identity_snapshot.json`）。观察集合由 Tick 从开放期权、
+  已接受 SP/CC 候选、可用 PM 资产和配置扫描标的生成，只发布匿名 market 分区；一个市场
+  的失败或更新不能删除其他市场分区。
 - Advice（tick 内自动运行）：冻结输入快照 + 无工具调用，产出 keep/switch/defer/
-  needs_review 建议，写入 Daily Brief 的 `ai_decision_advice` 区块，Agent 通过
-  `daily_decision_brief_read` 读取。
+  needs_review 建议。正式结果写入
+  `output_runs/<run_id>/accounts/<account>/state/ai_decision_advice.jsonl`，再投影到 Daily
+  Brief 的 `ai_decision_advice` 区块。
+- 组合分布是显式可选的 PM provider：`portfolio_distribution.provider` 默认 `none`，仅
+  `portfolio_management` 会按当前 OM 账户映射后单账户读取 PM，并发布同 run 的
+  `prepared_portfolio_distribution.v1.json`。PM 未安装、超时、账户不匹配或质量不足时，
+  Candidate Engine 和原监控回执继续运行；Advice 只接收明确 gap，动作最高为
+  `needs_review`，不得回退到 Futu/holdings 冒充组合分布。
+- 开放期权只消费 Tick 已验证的 prepared option-position authority；合法空列表与读取失败
+  严格区分，不直接重读 SQLite，也不使用 Futu、Feishu 或 legacy JSON fallback。
+- `daily_decision_brief_read` 以 run/account/market/advice id 唯一读取同一正式 JSONL，返回
+  白名单 actions、selected candidate、input bindings、fact/evidence refs、validation 与
+  reuse 状态；缺失或不匹配时明确 unavailable。查询本身不搜索、不调用模型、不重算、
+  不通知、不写状态。
 - 配置：`ai_decision_advice.enabled`（config.yaml passthrough，默认关闭）；
   显式开启即同意按设计文档第 18 节的最小数据合同向 DeepSeek 传输数据；
   API key 只从 `DEEPSEEK_API_KEY` 环境变量读取，禁止写入 YAML/JSONL/Prompt。
