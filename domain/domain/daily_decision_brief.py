@@ -249,9 +249,143 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "events": _mapping_list(src.get("events"), field="events"),
             "data_gaps": _mapping_list(src.get("data_gaps"), field="data_gaps"),
             "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
+            "ai_decision_advice": _normalize_ai_decision_advice(
+                src.get("ai_decision_advice")
+            ),
         }
     )
     return out
+
+
+_AI_DECISION_ADVICE_STATUSES = frozenset({"completed", "unavailable", "not_applicable"})
+_AI_DECISION_ADVICE_ACTIONS = frozenset({"keep", "switch", "defer", "needs_review"})
+
+
+def _normalize_ai_decision_advice(value: Any) -> dict[str, Any] | None:
+    """Normalize the optional AI Decision Advice section (design 14.1).
+
+    The section is absent (``None``) for briefs assembled before this feature
+    or when the module is disabled; when present, only the envelope status,
+    per-scope action state, and zero-candidate flags are normalized. Rationale
+    and source refs are rendering concerns and do not participate in diffs.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("ai_decision_advice must be an object")
+    status = str(value.get("status") or "").strip().lower()
+    if status not in _AI_DECISION_ADVICE_STATUSES:
+        raise ValueError(f"unsupported ai_decision_advice status: {status}")
+
+    def _decision(row: Any, *, family: str) -> dict[str, Any] | None:
+        if not isinstance(row, Mapping):
+            return None
+        action = row.get("action")
+        action = str(action).strip().lower() if action is not None else None
+        if action is not None and action not in _AI_DECISION_ADVICE_ACTIONS:
+            raise ValueError(f"unsupported ai_decision_advice action: {action}")
+        out = {
+            "action": action,
+            "baseline_candidate_id": row.get("baseline_candidate_id"),
+            "selected_candidate_id": row.get("selected_candidate_id"),
+        }
+        if family == "covered_call":
+            out["symbol"] = _upper(row.get("symbol"))
+        rationale = row.get("rationale")
+        out["rationale"] = dict(rationale) if isinstance(rationale, Mapping) else None
+        source_refs = row.get("source_refs")
+        out["source_refs"] = dict(source_refs) if isinstance(source_refs, Mapping) else None
+        return out
+
+    zero_candidate_raw = value.get("zero_candidate")
+    zero_candidate = (
+        {
+            "sell_put": bool(zero_candidate_raw.get("sell_put")),
+            "covered_call": bool(zero_candidate_raw.get("covered_call")),
+        }
+        if isinstance(zero_candidate_raw, Mapping)
+        else {"sell_put": False, "covered_call": False}
+    )
+    covered_call_rows = value.get("covered_call")
+    covered_call = (
+        [
+            row
+            for row in (_decision(item, family="covered_call") for item in covered_call_rows)
+            if row is not None
+        ]
+        if isinstance(covered_call_rows, list)
+        else None
+    )
+    return {
+        "status": status,
+        "unavailable_reason": (
+            str(value.get("unavailable_reason")).strip() or None
+            if value.get("unavailable_reason") is not None
+            else None
+        ),
+        "evidence_as_of": _iso_or_empty(value.get("evidence_as_of")) or None,
+        "sell_put": _decision(value.get("sell_put"), family="sell_put"),
+        "covered_call": covered_call,
+        "zero_candidate": zero_candidate,
+        "reused": bool(value.get("reused")),
+        "advice_record_id": (
+            str(value.get("advice_record_id")).strip() or None
+            if value.get("advice_record_id") is not None
+            else None
+        ),
+    }
+
+
+def _ai_decision_advice_action_map(section: Mapping[str, Any] | None) -> dict[str, str]:
+    """Scope -> action map for diffing (design 14.1).
+
+    Only ``completed`` sections contribute action state; ``unavailable`` and
+    ``not_applicable`` never generate material changes.
+    """
+
+    if not isinstance(section, Mapping) or section.get("status") != "completed":
+        return {}
+    out: dict[str, str] = {}
+    sell_put = section.get("sell_put")
+    if isinstance(sell_put, Mapping) and sell_put.get("action"):
+        out["sell_put"] = str(sell_put["action"])
+    for row in section.get("covered_call") or []:
+        if isinstance(row, Mapping) and row.get("action"):
+            symbol = _upper(row.get("symbol"))
+            out[f"covered_call:{symbol}"] = str(row["action"])
+    return out
+
+
+def _diff_ai_decision_advice(
+    prev: Mapping[str, Any],
+    cur: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Material action migrations between keep/switch/defer/needs_review.
+
+    ``unavailable`` appearance, disappearance, or reason changes are rendered
+    in receipts but never material (design 14.1).
+    """
+
+    prev_actions = _ai_decision_advice_action_map(prev.get("ai_decision_advice"))
+    cur_actions = _ai_decision_advice_action_map(cur.get("ai_decision_advice"))
+    changes: list[dict[str, Any]] = []
+    for scope in sorted(set(prev_actions) | set(cur_actions)):
+        before = prev_actions.get(scope)
+        after = cur_actions.get(scope)
+        if before is None or after is None or before == after:
+            continue
+        changes.append(
+            _change(
+                "ai_decision_advice_action_changed",
+                priority="P1",
+                material=True,
+                ai_advice_scope=scope,
+                before=before,
+                after=after,
+            )
+        )
+    return changes
 
 
 def reconcile_daily_decision_brief_evidence(
@@ -818,6 +952,7 @@ def diff_daily_decision_briefs(
                 )
             )
 
+    changes.extend(_diff_ai_decision_advice(prev, cur))
     changes.sort(key=_change_sort_key)
     material = any(bool(item.get("material")) for item in changes)
     canonical_changes = [_canonical_change(item) for item in changes]
