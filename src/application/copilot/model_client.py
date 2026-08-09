@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from dataclasses import replace
@@ -14,6 +13,7 @@ from src.application.llm_provider_registry import (
     provider_requires_api_key,
     require_provider_spec,
 )
+from src.application.secret_store import SecretProvider, resolve_secret
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.openai_responses import create_response
 
@@ -27,9 +27,16 @@ class CopilotModelSettings:
     model: str
     base_url: str = ""
     api_key_env: str = ""
+    credential_name: str = ""
     timeout_seconds: int = 90
     max_output_tokens: int = 2048
     max_attempts: int = 2
+
+    def __post_init__(self) -> None:
+        if not self.credential_name:
+            spec = require_provider_spec(self.provider)
+            if spec.requires_api_key:
+                object.__setattr__(self, "credential_name", spec.credential_name)
 
     @classmethod
     def from_config(cls, raw: dict[str, Any]) -> "CopilotModelSettings":
@@ -41,6 +48,7 @@ class CopilotModelSettings:
             model=str(cfg.get("model") or "").strip(),
             base_url=str(cfg.get("base_url") or spec.default_base_url).strip(),
             api_key_env=str(cfg.get("api_key_env") or spec.default_api_key_env).strip(),
+            credential_name=spec.credential_name,
             timeout_seconds=_bounded_int(cfg.get("timeout_seconds"), default=90, minimum=1, maximum=180),
             max_output_tokens=_bounded_int(cfg.get("max_output_tokens"), default=2048, minimum=256, maximum=8192),
             max_attempts=_bounded_int(cfg.get("max_attempts"), default=2, minimum=1, maximum=3),
@@ -51,15 +59,21 @@ def build_model_runner(
     settings: CopilotModelSettings,
     *,
     environ: dict[str, str] | None = None,
+    secret_provider: SecretProvider | None = None,
     create_response_fn: CreateResponseFn | None = None,
     create_chat_completion_fn: CreateResponseFn | None = None,
     sleep_fn: Callable[[float], None] | None = None,
 ) -> ModelRunner:
     if not settings.model.strip():
         raise ValueError("model is required")
-    api_key = _api_key_value(settings, environ=environ)
-    if provider_requires_api_key(settings.provider) and not api_key:
-        raise ValueError("api key env is not configured")
+    requires_api_key = provider_requires_api_key(settings.provider)
+    api_key = (
+        _api_key_value(settings, environ=environ, secret_provider=secret_provider)
+        if requires_api_key
+        else ""
+    )
+    if requires_api_key and not api_key:
+        raise ValueError("model credential is not configured")
 
     def _run(request: ModelRequest) -> ModelTurn:
         last_error: Exception | None = None
@@ -373,9 +387,21 @@ def _arguments(value: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, dict) else {"__invalid_arguments__": str(value or "")}
 
 
-def _api_key_value(settings: CopilotModelSettings, *, environ: dict[str, str] | None) -> str:
-    env = environ if environ is not None else os.environ
-    return str(env.get(settings.api_key_env) or "").strip()
+def _api_key_value(
+    settings: CopilotModelSettings,
+    *,
+    environ: dict[str, str] | None,
+    secret_provider: SecretProvider | None,
+) -> str:
+    return str(
+        resolve_secret(
+            settings.credential_name,
+            provider=secret_provider,
+            environ=environ,
+            legacy_env_name=settings.api_key_env,
+        )
+        or ""
+    )
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

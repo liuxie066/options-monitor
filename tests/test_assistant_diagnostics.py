@@ -102,7 +102,7 @@ def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
     assert out["summary"]["status"] == "ready"
     assert out["llm"]["api_key_configured"] is True
     checks = {item["name"]: item for item in out["checks"]}
-    assert checks["api_key_env"]["message"] == "provider does not require an API key environment variable"
+    assert checks["credential_name"]["message"] == "provider does not require a credential"
     assert checks["api_key"]["status"] == "ok"
     assert checks["api_key"]["message"] == "provider does not require an API key"
 
@@ -189,7 +189,7 @@ def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Pat
     assert out["llm"]["responses_url"] == "https://llm.example/v1/responses"
     assert out["llm"]["chat_completions_url"] is None
     assert out["llm"]["api_key_configured"] is True
-    assert out["llm"]["api_key_source"] == "env_file"
+    assert out["llm"]["api_key_source"] == "environment_compatibility"
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["api_key"]["value"]["configured"] is True
     assert checks["live_probe"]["status"] == "skipped"
@@ -227,7 +227,7 @@ def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
     assert out["llm"]["responses_url"] is None
     assert out["llm"]["chat_completions_url"] == "https://api.deepseek.com/chat/completions"
     assert out["llm"]["api_key_configured"] is True
-    assert out["llm"]["api_key_source"] == "env_file"
+    assert out["llm"]["api_key_source"] == "environment_compatibility"
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["provider"]["value"] == "deepseek"
     assert checks["base_url"]["value"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"

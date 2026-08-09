@@ -11,10 +11,12 @@ from src.application.service_deploy import (
     DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER,
     DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE,
     DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE,
+    DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
     DEFAULT_ACCOUNTS,
     DEFAULT_MARKETS,
     FEISHU_AGENT_CREDENTIAL_DROPIN,
     FEISHU_AGENT_CREDENTIAL_SERVICE,
+    SECRET_CREDENTIAL_DROPIN,
     load_service_profile,
     render_service_bundle,
     resolve_strategy_lab_recorder_endpoint_matches,
@@ -34,6 +36,9 @@ LEGACY_STRATEGY_LAB_RECORDER_HOST = "127.0.0.1"
 LEGACY_STRATEGY_LAB_RECORDER_PORT = 11111
 LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH = Path(
     "/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service"
+)
+SYSTEMD_MANAGED_DROPIN_KINDS = frozenset(
+    {"systemd_dropin", "systemd_secret_dropin"}
 )
 
 
@@ -456,6 +461,8 @@ def _expected_bundle_from_profile(
         if isinstance(feishu_agent_credential_raw, dict)
         else {}
     )
+    secret_credentials_raw = profile.get("secret_credentials")
+    secret_credentials = secret_credentials_raw if isinstance(secret_credentials_raw, dict) else {}
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -495,6 +502,7 @@ def _expected_bundle_from_profile(
         feishu_agent_credential.get("enabled")
         or FEISHU_AGENT_CREDENTIAL_SERVICE in services
     )
+    include_secret_credentials = bool(secret_credentials.get("enabled"))
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
     if include_feishu_ws and feishu_ws_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
@@ -544,6 +552,11 @@ def _expected_bundle_from_profile(
         "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
         "include_quality_monitoring": include_quality_monitoring,
         "include_feishu_agent_credential": include_feishu_agent_credential,
+        "include_secret_credentials": include_secret_credentials,
+        "secret_credential_store_root": (
+            secret_credentials.get("store_root")
+            or DEFAULT_SECRET_CREDENTIAL_STORE_ROOT
+        ),
         "feishu_agent_credential_helper_path": (
             feishu_agent_credential.get("helper_path")
             or DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER
@@ -672,7 +685,7 @@ def _expected_managed_files(bundle: dict[str, Any], *, provider: str) -> dict[st
     out: dict[str, dict[str, Any]] = {}
     for item in bundle.get("files", []):
         if not isinstance(item, dict) or item.get("kind") not in {
-            "systemd_dropin",
+            *SYSTEMD_MANAGED_DROPIN_KINDS,
             "systemd_executable",
         }:
             continue
@@ -697,13 +710,15 @@ def _installed_managed_files(
     }
     root = Path(ctx["systemd_unit_root"])
     if root.exists():
-        for path in root.glob(
-            f"options-monitor-*.service.d/{FEISHU_AGENT_CREDENTIAL_DROPIN}"
+        for dropin_name in (
+            FEISHU_AGENT_CREDENTIAL_DROPIN,
+            SECRET_CREDENTIAL_DROPIN,
         ):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(root)
-            installed.add(str(Path("/etc/systemd/system") / relative))
+            for path in root.glob(f"options-monitor-*.service.d/{dropin_name}"):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root)
+                installed.add(str(Path("/etc/systemd/system") / relative))
     return sorted(installed)
 
 
@@ -783,7 +798,7 @@ def _install_path(item: dict[str, Any], *, provider: str, ctx: dict[str, Any]) -
     if provider == "systemd":
         if item.get("kind") == "systemd_executable":
             return raw
-        if item.get("kind") == "systemd_dropin":
+        if item.get("kind") in SYSTEMD_MANAGED_DROPIN_KINDS:
             live_root = Path("/etc/systemd/system")
             try:
                 relative = raw.relative_to(live_root)
@@ -967,6 +982,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "quality_monitoring",
         "position_advice_promotion",
         "feishu_agent_credential",
+        "secret_credentials",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
@@ -1243,7 +1259,8 @@ def _apply_service_drift(
     systemd_definition_changed = bool(
         written_units
         or any(
-            expected_managed_files.get(key, {}).get("kind") == "systemd_dropin"
+            expected_managed_files.get(key, {}).get("kind")
+            in SYSTEMD_MANAGED_DROPIN_KINDS
             for key in written_managed_files
         )
         or bool(retired_managed_files)
