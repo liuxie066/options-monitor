@@ -1,0 +1,39 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.12.1",
+  "base": {
+    "tag": "v1.12.0",
+    "commit": "7784e8317c0e84865850fd2de9816977c8ee6a4c"
+  },
+  "reviewed_head": "dd19ed6cc249d4a531894708ff486089f13ec7b1",
+  "commits": [
+    {
+      "sha": "d12d8d3796030d0ca6737c4b688a426f35ff98b3",
+      "subject": "fix(security): provision macOS Keychain through PTY"
+    },
+    {
+      "sha": "a1cdc8f5dd95dba219d4c0f6f05bef548cc13aec",
+      "subject": "merge(pr): integrate #141 macOS Keychain secure input"
+    },
+    {
+      "sha": "dd19ed6cc249d4a531894708ff486089f13ec7b1",
+      "subject": "docs(security): refresh dependency graph for Keychain PTY"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed macOS Keychain provisioning to answer both native password prompts through a private PTY, preventing a successful `security` exit from storing an empty credential while keeping values out of argv, output, and temporary files.",
+      "commits": [
+        "d12d8d3796030d0ca6737c4b688a426f35ff98b3",
+        "a1cdc8f5dd95dba219d4c0f6f05bef548cc13aec"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "dd19ed6cc249d4a531894708ff486089f13ec7b1",
+      "reason": "Generated dependency-graph refresh for the mapped Keychain implementation; it adds no independent user-facing behavior."
+    }
+  ]
+}
