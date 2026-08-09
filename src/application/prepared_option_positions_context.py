@@ -534,6 +534,35 @@ def exchange_rate_scalars_from_option_context(
     return ((1.0 / usdcny) if usdcny else None, hkd_cny)
 
 
+def cny_per_currency_rates_from_option_context(
+    context: Mapping[str, Any],
+) -> dict[str, float]:
+    """Expose a prepared OpenD observation as CNY-per-currency rates.
+
+    This helper performs no cache or provider read. CNY can always be valued
+    directly; USD/HKD are returned only when the run-coherent prepared
+    authority marks its FX observation ready and the rate is positive.
+    """
+
+    prepared = context.get("prepared_authority")
+    authority = prepared if isinstance(prepared, Mapping) else {}
+    out = {"CNY": 1.0}
+    if str(authority.get("fx_status") or "").strip().lower() != "ready":
+        return out
+
+    raw_rates = context.get("exchange_rates")
+    rates = raw_rates if isinstance(raw_rates, Mapping) else {}
+    nested = rates.get("rates")
+    rates_map = nested if isinstance(nested, Mapping) else rates
+    usdcny = _positive_float(rates_map.get("USDCNY"))
+    hkd_cny = _positive_float(rates_map.get("HKDCNY"))
+    if usdcny is not None:
+        out["USD"] = usdcny
+    if hkd_cny is not None:
+        out["HKD"] = hkd_cny
+    return out
+
+
 def _publish_ready_context(
     *,
     base: Path,
@@ -732,6 +761,7 @@ __all__ = [
     "PREPARED_OPTION_POSITIONS_PAYLOAD_NAME",
     "PreparedOptionPositionsBatch",
     "PreparedOptionPositionsContextError",
+    "cny_per_currency_rates_from_option_context",
     "exchange_rate_scalars_from_option_context",
     "load_prepared_option_positions_context",
     "prepare_option_positions_contexts",
