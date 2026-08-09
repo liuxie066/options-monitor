@@ -47,6 +47,10 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 逻辑名、后端、是否改变和可能受影响的服务；不会自动重启服务。
 非交互 stdin、命令参数和管道输入都会被拒绝。
 
+macOS provider 会在私有控制终端中等待 `security` 的两次原生密码提示，再把已确认值从
+进程内存写入；值不会进入子进程 argv、stdout、stderr 或临时文件。写入成功仍需用脱敏
+`status` 和实际消费方回读验证，不能只信 `security` 的退出码。
+
 macOS 命令写入 Keychain。Linux 写入 `/etc/credstore.encrypted/<credential-id>`，必须用单独的
 root 授权运行，例如先确认目标，再执行 `sudo ./om secrets set <logical-name>`。不要把秘密放在
 命令参数、shell 变量或管道中。
