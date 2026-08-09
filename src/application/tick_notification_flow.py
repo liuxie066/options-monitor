@@ -49,6 +49,7 @@ from src.application.multi_tick_finalization import (
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
+    notification_target_reference,
     select_notification_delivery_adapter,
 )
 from src.application.position_advice_notification_authority import (
@@ -298,7 +299,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         "delivery_decision",
         run_id=request.run_id,
         status=("ok" if not notify_delivery.get("config_error") else "error"),
-        target=(str(target) if target else None),
+        target=notification_target_reference(target),
         extra={
             "reason": notify_delivery.get("reason"),
             "should_send": bool(notify_delivery.get("should_send")),

@@ -77,7 +77,7 @@ Publish the already-merged Python 3.12 runtime contract as the next patch releas
 
 ## Validation Plan
 
-Use explicit Python 3.12.13. A temporary ignored `.venv` link may point to the primary workspace runtime-dependency venv solely so existing subprocess tests can spawn `<repo>/.venv/bin/python`; run pytest/preflight through `OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12`, then remove the link. A temporary `config.yaml` symlink to the primary authoring file is allowed only for the read-only latest-code authority audit and must be removed immediately afterward; it must never be edited.
+Use explicit Python 3.12.13. A temporary ignored `.venv` link may point to the primary workspace runtime-dependency venv solely so existing subprocess tests can spawn `<repo>/.venv/bin/python`; run pytest/preflight through `OM_PYTHON=/Users/om/.pyenv/shims/python3.12`, then remove the link. A temporary `config.yaml` symlink to the primary authoring file is allowed only for the read-only latest-code authority audit and must be removed immediately afterward; it must never be edited.
 
 ### Remote drift/collision guard
 
@@ -97,27 +97,27 @@ Run from the clean release worktree with the primary runtime-config paths and ru
 ### Release and repository validation
 
 ```bash
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 \
-  /Users/liuxie/.pyenv/shims/python3.12 scripts/release_check.py \
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 \
+  /Users/om/.pyenv/shims/python3.12 scripts/release_check.py \
     --tag v1.2.413 \
     --render-notes-out /private/tmp/options-monitor-v1.2.413-release-notes.md
 
 grep -Fx '# options-monitor 1.2.413' /private/tmp/options-monitor-v1.2.413-release-notes.md
 ! grep -q '1.2.412' /private/tmp/options-monitor-v1.2.413-release-notes.md
 
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 \
-  /Users/liuxie/.pyenv/shims/python3.12 scripts/release_test_plan.py --mode full --base origin/main
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 \
+  /Users/om/.pyenv/shims/python3.12 scripts/release_test_plan.py --mode full --base origin/main
 
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 make release-preflight ARGS="--full"
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 make release-preflight ARGS="--full"
 
-/Users/liuxie/.pyenv/shims/python3.12 -m ruff check .
-/Users/liuxie/.pyenv/shims/python3.12 scripts/generate_dependency_graph.py --check
+/Users/om/.pyenv/shims/python3.12 -m ruff check .
+/Users/om/.pyenv/shims/python3.12 scripts/generate_dependency_graph.py --check
 git diff --check
 
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 ./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
-OM_PYTHON=/Users/liuxie/.pyenv/shims/python3.12 ./om config build --source yaml --market hk --config-yaml configs/examples/config.yaml.example --dry-run
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 ./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
+OM_PYTHON=/Users/om/.pyenv/shims/python3.12 ./om config build --source yaml --market hk --config-yaml configs/examples/config.yaml.example --dry-run
 ```
 
 After the accepted metadata commit, rerun release preflight with `--require-clean` before draft PR creation.

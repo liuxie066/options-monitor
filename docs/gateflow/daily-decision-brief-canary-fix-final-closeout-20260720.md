@@ -75,7 +75,7 @@ For both accounts, canonical revision JSON equaled the run-scoped brief, CLI and
 ## 5. v1.3.3 current-production Canary
 
 - Evidence directory: `/tmp/om-daily-brief-canary-20260720T052757Z-v133-prod`
-- Active release path at execution: `/home/liuxie/apps/releases/1.3.3`
+- Active release path at execution: `/home/om/apps/releases/1.3.3`
 - Runtime root: `/var/lib/options-monitor`
 - Run ID: `20260720T053303Z-595bab`
 - Market time: 2026-07-20 13:33 Asia/Hong_Kong

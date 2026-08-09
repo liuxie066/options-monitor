@@ -230,6 +230,7 @@ def handle_observability_command(
             kind=args.kind,
             lines=int(args.lines),
             log_file=args.log_file,
+            allow_explicit_file_outside_roots=True,
         )
         envelope = build_response(
             tool_name="logs",

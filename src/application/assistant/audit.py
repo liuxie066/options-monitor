@@ -11,14 +11,15 @@ from uuid import uuid4
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.settings import build_effective_env
+from src.infrastructure.private_storage import connect_private_sqlite, private_path
 
 
 def default_audit_db_path() -> Path:
     raw = str(build_effective_env().get("OM_INBOUND_AUDIT_DB") or "").strip()
     if raw:
         path = Path(raw).expanduser()
-        return path if path.is_absolute() else (repo_base() / path).resolve()
-    return (repo_base() / "output_shared" / "state" / "inbound_control.sqlite3").resolve()
+        return private_path(path if path.is_absolute() else repo_base() / path)
+    return private_path(repo_base() / "output_shared" / "state" / "inbound_control.sqlite3")
 
 
 def build_command_id(*, channel: str, sender_id: str, message_id: str | None, text: str) -> str:
@@ -37,7 +38,7 @@ def build_command_id(*, channel: str, sender_id: str, message_id: str | None, te
 
 class InboundAuditStore:
     def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path).expanduser().resolve() if path else default_audit_db_path()
+        self.path = private_path(path) if path else default_audit_db_path()
 
     def find_by_message(self, *, channel: str, message_id: str | None, command_id: str | None = None) -> dict[str, Any] | None:
         normalized_message_id = str(message_id or "").strip()
@@ -281,8 +282,7 @@ class InboundAuditStore:
 
 def connect_inbound_sqlite(path: Path) -> sqlite3.Connection:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(str(path))
+        return connect_private_sqlite(path)
     except (OSError, sqlite3.Error) as exc:
         raise inbound_sqlite_error(path, exc) from exc
 
@@ -295,7 +295,6 @@ def inbound_sqlite_error(path: Path, exc: BaseException) -> AgentToolError:
         details={
             "audit_db": mask_path(path),
             "error_type": type(exc).__name__,
-            "error": str(exc),
         },
     )
 

@@ -4,15 +4,20 @@ import base64
 import html
 import json
 import mimetypes
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from src.infrastructure.private_storage import (
+    atomic_write_private_bytes,
+    atomic_write_private_text,
+    ensure_private_directory,
+    private_path,
+)
 
 
 class WechatClawbotStateStore:
     def __init__(self, state_dir: Path) -> None:
-        self.state_dir = Path(state_dir).expanduser().resolve()
+        self.state_dir = private_path(state_dir)
         self.state_path = self.state_dir / "state.json"
         self.pending_login_path = self.state_dir / "pending_login.json"
         self.bindings_path = self.state_dir / "bindings.json"
@@ -46,11 +51,12 @@ class WechatClawbotStateStore:
         raw = str(content or "").strip()
         if not raw:
             return None
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.state_dir)
         if _looks_like_http_url(raw):
             target = self.state_dir / "login_qrcode.html"
             escaped_url = html.escape(raw, quote=True)
-            target.write_text(
+            atomic_write_private_text(
+                target,
                 (
                     "<!doctype html>\n"
                     "<html lang=\"zh-CN\">\n"
@@ -65,7 +71,6 @@ class WechatClawbotStateStore:
                     "</body>\n"
                     "</html>\n"
                 ),
-                encoding="utf-8",
             )
             return str(target)
         mime_type, payload = _extract_base64_payload(raw)
@@ -73,11 +78,11 @@ class WechatClawbotStateStore:
             binary = base64.b64decode(payload, validate=True)
         except Exception:
             target = self.state_dir / "login_qrcode.txt"
-            target.write_text(raw, encoding="utf-8")
+            atomic_write_private_text(target, raw)
             return str(target)
         extension = mimetypes.guess_extension(mime_type or "") if mime_type else None
         target = self.state_dir / f"login_qrcode{extension or _guess_binary_extension(binary)}"
-        target.write_bytes(binary)
+        atomic_write_private_bytes(target, binary)
         return str(target)
 
     def safe_bindings(self) -> dict[str, dict[str, Any]]:
@@ -102,33 +107,13 @@ class WechatClawbotStateStore:
         return payload
 
     def _write_json_object(self, path: Path, payload: dict[str, Any]) -> None:
-        _write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n")
-        try:
-            path.chmod(0o600)
-        except Exception:
-            pass
+        atomic_write_private_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n")
 
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return str(value)
-
-
-def _write_text_atomic(target: Path, content: str) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_path_str = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    temp_path = Path(temp_path_str)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
-            temp_file.write(content)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_path, target)
-    except Exception:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
-        raise
 
 
 def _looks_like_http_url(value: str | None) -> bool:

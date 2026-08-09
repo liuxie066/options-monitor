@@ -17,6 +17,29 @@ DEPRECATED_ENV_SETTINGS: dict[str, str] = {
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_NAME_PARTS = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY", "API_KEY")
+_PATH_ENV_NAMES = frozenset(
+    {
+        ENV_FILE_POINTER,
+        "OM_DATA_CONFIG",
+        "OM_INBOUND_AUDIT_DB",
+        "OM_OUTPUT_DIR",
+        "OM_RUNTIME_ROOT",
+    }
+)
+_PUBLIC_LITERAL_ENV_NAMES = frozenset(
+    {
+        *DEPRECATED_ENV_SETTINGS,
+        "OM_AGENT_ENABLE_WRITE_TOOLS",
+        "OM_INBOUND_CONFIRM_TTL_SECONDS",
+        "OM_INBOUND_MONITOR_RUN_ENABLED",
+        "OM_INBOUND_OPERATIONS_ENABLED",
+        "OM_INBOUND_REQUIRE_ALLOWLIST",
+        "OM_INBOUND_SYMBOL_WRITE_ENABLED",
+        "OM_INBOUND_TRADE_WRITE_ENABLED",
+        "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+    }
+)
+_PUBLIC_ENV_FILE = "<configured-env-file>"
 
 
 @dataclass(frozen=True)
@@ -25,7 +48,8 @@ class SettingSource:
     path: str | None = None
 
     def public_value(self) -> str:
-        return f"{self.source}:{self.path}" if self.path else self.source
+        # Source paths are machine-local metadata, not part of a public setting value.
+        return self.source
 
 
 @dataclass(frozen=True)
@@ -243,9 +267,9 @@ def inspect_effective_settings(
             "secret": _is_secret_name(key),
         }
     return {
-        "env_file": str(effective.env_file) if effective.env_file is not None else None,
+        "env_file": _PUBLIC_ENV_FILE if effective.env_file is not None else None,
         "env_file_loaded": effective.env_file_loaded,
-        "warnings": list(effective.warnings),
+        "warnings": _public_env_warnings(effective.warnings),
         "entries": entries,
     }
 
@@ -276,16 +300,16 @@ def diagnose_effective_settings(
             "env_file",
             "warn",
             "no env file is loaded; process environment is the only settings source",
-            {"default_local_env_file": str(DEFAULT_LOCAL_ENV_FILE)},
+            {"default_local_env_file": "<repo-local-env-file>"},
         )
     elif effective.env_file_loaded:
-        add("env_file", "ok", "env file loaded", str(effective.env_file))
+        add("env_file", "ok", "env file loaded", _PUBLIC_ENV_FILE)
     else:
-        add("env_file", "error", "env file was selected but could not be loaded", str(effective.env_file))
+        add("env_file", "error", "env file was selected but could not be loaded", _PUBLIC_ENV_FILE)
 
     for warning in effective.warnings:
         status = "error" if ("not found" in warning or "failed" in warning) else "warn"
-        add("env_file_warning", status, warning)
+        add("env_file_warning", status, _public_env_warning(warning))
 
     deprecated = [
         {"name": name, "hint": hint, "migration_target": _deprecated_env_migration_target(name)}
@@ -439,7 +463,7 @@ def diagnose_effective_settings(
             "error_count": error_count,
             "warning_count": warning_count,
         },
-        "env_file": str(effective.env_file) if effective.env_file is not None else None,
+        "env_file": _PUBLIC_ENV_FILE if effective.env_file is not None else None,
         "env_file_loaded": effective.env_file_loaded,
         "checks": checks,
     }
@@ -469,9 +493,9 @@ def explain_effective_setting(
         "value": _redacted_value(env_name, value),
         "source": source.public_value() if source else None,
         "secret": _is_secret_name(env_name),
-        "env_file": str(effective.env_file) if effective.env_file is not None else None,
+        "env_file": _PUBLIC_ENV_FILE if effective.env_file is not None else None,
         "env_file_loaded": effective.env_file_loaded,
-        "warnings": list(effective.warnings),
+        "warnings": _public_env_warnings(effective.warnings),
     }
 
 
@@ -571,6 +595,26 @@ def _redacted_value(name: str, value: str) -> str | None:
         return None
     if _is_secret_name(name):
         return "<redacted>"
-    if len(value) <= 12:
+    if str(name or "").upper() in _PATH_ENV_NAMES:
+        return "<configured-path>"
+    if str(name or "").upper() in _PUBLIC_LITERAL_ENV_NAMES:
         return value
-    return f"{value[:6]}...{value[-4:]}"
+    # Unknown env-backed values may be stable account, tenant, table, app, or
+    # recipient identifiers. Default to full masking instead of guessing from
+    # length or a provider-specific prefix.
+    return "<redacted>"
+
+
+def _public_env_warning(message: str) -> str:
+    normalized = str(message or "")
+    if normalized.startswith("env file not found:"):
+        return "env file not found"
+    if normalized.startswith("failed to read env file:"):
+        return "failed to read env file"
+    if normalized.startswith("failed to parse env file:"):
+        return "failed to parse env file"
+    return "env settings warning"
+
+
+def _public_env_warnings(messages: tuple[str, ...]) -> list[str]:
+    return [_public_env_warning(message) for message in messages]

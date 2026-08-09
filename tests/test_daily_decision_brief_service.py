@@ -108,6 +108,18 @@ def _result(*, ran_scan: bool = True, reason: str = "ok") -> AccountResult:
     return AccountResult("lx", ran_scan, True, reason, "legacy markdown must not be parsed")
 
 
+def test_brief_carries_ai_decision_advice_section(tmp_path: Path) -> None:
+    # Module not configured: the section is a deterministic not_applicable
+    # view, and the normalized brief exposes it for diffing/rendering.
+    brief = _assemble(tmp_path)
+    section = brief.get("ai_decision_advice")
+    assert isinstance(section, dict)
+    assert section["status"] == "not_applicable"
+    assert section["zero_candidate"] == {"sell_put": False, "covered_call": False}
+    assert "evidence_index" not in section
+    assert brief.get("ai_decision_advice_evidence_index") == {}
+
+
 def _assemble(
     base: Path,
     *,

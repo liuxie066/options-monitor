@@ -8,11 +8,12 @@ from typing import Any
 
 from src.application.assistant.audit import connect_inbound_sqlite, default_audit_db_path, inbound_sqlite_error, utc_now_iso
 from src.application.assistant.operation_signature import sign_operation_fields
+from src.infrastructure.private_storage import private_path
 
 
 class InboundOperationStore:
     def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path).expanduser().resolve() if path else default_audit_db_path()
+        self.path = private_path(path) if path else default_audit_db_path()
 
     def save_preview(
         self,

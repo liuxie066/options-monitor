@@ -48,6 +48,7 @@ RESOLVED_KEY = "_resolved"
 
 PASSTHROUGH_KEYS = {
     "alert_policy",
+    "ai_decision_advice",
     "close_advice",
     "notifications",
     "option_positions",
@@ -676,6 +677,11 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
 
     out = _copy_passthrough(raw_cfg, path="config.yaml")
     out = _deep_merge(out, _copy_passthrough(market_cfg, path=f"markets.{normalized_market}"))
+    # ai_decision_advice is a pure on/off section: system/user defaults must not
+    # resurrect an explicitly enabled section, so it is resolved only from
+    # authored config.yaml content (root then market override).
+    if "ai_decision_advice" not in raw_cfg and "ai_decision_advice" not in market_cfg:
+        out.pop("ai_decision_advice", None)
     if "trade_intake" in raw_cfg:
         out["trade_intake"] = _normalize_trade_intake_authoring(
             raw_cfg.get("trade_intake"),

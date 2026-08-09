@@ -241,7 +241,7 @@ SCENARIOS = (
             ModelTurn(
                 tool_calls=(
                     _call("option_positions_read", {"action": "events"}, "review_1"),
-                    _call("close_advice_read", {"status": "all"}, "review_2"),
+                    _call("close_advice_read", {"market_scope": "all"}, "review_2"),
                 )
             ),
             ModelTurn(

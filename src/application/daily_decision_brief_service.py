@@ -68,6 +68,9 @@ from src.application.opening_candidate_snapshot import (
     ranked_opening_candidates,
     validate_opening_candidate_snapshot,
 )
+from src.application.ai_decision_advice.orchestration import (
+    run_or_reuse_ai_decision_advice,
+)
 from src.application.combo_yield_candidate_snapshot import (
     ComboYieldCandidateSnapshotError,
     load_combo_yield_candidate_snapshot,
@@ -484,6 +487,20 @@ def assemble_daily_decision_brief(
         data_gaps=data_gaps,
         required=False,
     )
+    ai_decision_advice_view = _json_safe(
+        run_or_reuse_ai_decision_advice(
+            base=base_path,
+            run_id=run_id_norm,
+            account=account_norm,
+            market=market_norm,
+            config=config_map,
+            state_dir=state_dir,
+            now=effective_now,
+        )
+    )
+    ai_decision_advice_evidence_index = _json_safe(
+        ai_decision_advice_view.pop("evidence_index", None) or {}
+    )
     prefetch = _load_json_artifact(
         path=state_dir / "required_data_prefetch_summary.json",
         run_account_dir=run_account_dir,
@@ -620,6 +637,8 @@ def assemble_daily_decision_brief(
             "funds": funds,
             "candidates": candidate_payloads,
             "candidate_index": candidate_index,
+            "ai_decision_advice": ai_decision_advice_view,
+            "ai_decision_advice_evidence_index": ai_decision_advice_evidence_index,
             "rejections": _json_safe(rejections),
             "events": events,
             "data_gaps": deduped_data_gaps,
@@ -1920,6 +1939,7 @@ def _candidate_view(
             },
         }
     return {
+        "candidate_id": _text(row.get("candidate_id")),
         "rank": rank,
         "symbol": _text(row.get("symbol")).upper(),
         "option_type": "put" if family == "sell_put" else "call",
@@ -2170,6 +2190,9 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
         "delta",
         "dte",
         "net_income",
+        "period_net_return",
+        "period_net_return_on_cash_basis",
+        "period_net_premium_return",
         "annualized_return",
         "annualized_net_return_on_cash_basis",
         "annualized_net_premium_return",

@@ -12,7 +12,7 @@ from src.application.copilot.tools import available_read_tools
 
 GENERAL_SCENE = "om_chat"
 _SCENE_PATH = Path(__file__).with_name("om_chat.scene.json")
-_CONTEXT_AUTHORITIES = frozenset({"reference", "fixed_tool_scope"})
+_CONTEXT_AUTHORITIES = frozenset({"reference", "fixed_tool_scope", "host_only_tool_scope"})
 
 
 @lru_cache(maxsize=1)
@@ -173,6 +173,7 @@ def _runtime_context(
     context: dict[str, dict[str, Any]] = {
         "reference": {},
         "fixed_tool_scope": {},
+        "host_only_tool_scope": {},
     }
     for slot in context_slots:
         name = slot["name"]
@@ -180,8 +181,15 @@ def _runtime_context(
         if value in (None, ""):
             continue
         context[slot["authority"]][name] = value
-    populated = {authority: values for authority, values in context.items() if values}
-    fixed_tool_input = dict(context["fixed_tool_scope"])
+    populated = {
+        authority: values
+        for authority, values in context.items()
+        if values and authority != "host_only_tool_scope"
+    }
+    fixed_tool_input = {
+        **context["fixed_tool_scope"],
+        **context["host_only_tool_scope"],
+    }
     if not populated:
         return "", fixed_tool_input
     rendered = json.dumps(

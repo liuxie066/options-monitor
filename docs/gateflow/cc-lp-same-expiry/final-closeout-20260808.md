@@ -73,3 +73,21 @@
 | 12 | variant 默认 sp_lc，objective 不动 | yield_enhancement_config + config_validator | ✅ |
 
 本轮修复：Sell Call 资金腿补跑 `enrich_and_filter_covered_call_underwriting`（继承 min_net_income、IV/RV、earnings 等 underwriting 硬门槛），并新增回归测试。
+
+## 附录 2：发布与远端升级（2026-08-08）
+
+### Release v1.11.0
+
+- VERSION: 1.10.19 -> 1.11.0（CC+LP 为 New Features，按项目历史 minor bump）
+- CHANGELOG: `## 1.11.0 - 2026-08-08`，`### New Features` 3 条
+- delta coverage: release/coverage/v1.11.0.json（基线 v1.10.19，11 commits / 3 notes / 4 no-note）
+- 依赖图: 先提交 `44c2d62f`（release 前置，修复 release_check POST_REVIEW 约束），再提交 release `7255e0a0`
+- Release 工作流: run 31242226424 全绿
+- GitHub Release: v1.11.0, target 7255e0a0, assets: options-monitor-v1.11.0.tar.gz / om-agent-spec.json / VERSION
+
+### 远端升级 liuxie-incus
+
+- dry-run: audit_20260808T054411Z_7c4800e46e（write_applied=false）
+- apply: audit_20260808T054452Z_f2dfbcf1ec（write_applied=true, symlink_switched）
+- 后验: update verify ok；version current=1.11.0 latest=1.11.0 no_upgrade_available；6 核心服务 active + feishu-ws/wechat checks ok；failed_checks=[]
+- pre-existing: options-monitor-position-advice-promotion failed（8/7 21:15 UTC timeout，升级前已存在，非本升级引入）

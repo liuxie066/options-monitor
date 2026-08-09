@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -314,7 +315,7 @@ def test_build_opend_exchange_rate_observation_uses_account_funds_conversion() -
     from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
     from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
-    observed_at = "2026-08-07T00:00:00+00:00"
+    observed_at = datetime.now(timezone.utc).isoformat()
     observation = build_opend_exchange_rate_observation(
         {
             "CNH": [{"currency": "CNH", "total_assets": 7200.0}],

@@ -16,6 +16,7 @@ from domain.domain.performance.models import (
     parse_evidence_envelope,
     validate_evidence_facts,
 )
+from src.infrastructure.private_storage import connect_private_sqlite, private_path, secure_sqlite_artifacts
 
 _SCHEMA_COMPONENT = "option_performance_evidence"
 _SCHEMA_VERSION = 1
@@ -148,7 +149,7 @@ def migrate_evidence_schema(conn: sqlite3.Connection, *, migrated_at_ms: int) ->
 
 class PerformanceEvidenceSQLiteRepository:
     def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path).expanduser().resolve()
+        self.db_path = private_path(db_path)
 
     def schema_state(self) -> str:
         if not self.db_path.exists():
@@ -213,8 +214,7 @@ class PerformanceEvidenceSQLiteRepository:
                 envelope=envelope,
             )
 
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None)
+        conn = connect_private_sqlite(self.db_path, isolation_level=None)
         try:
             conn.execute("BEGIN IMMEDIATE")
             migrate_evidence_schema(conn, migrated_at_ms=int(migrated_at_ms))
@@ -241,6 +241,7 @@ class PerformanceEvidenceSQLiteRepository:
             raise
         finally:
             conn.close()
+            secure_sqlite_artifacts(self.db_path)
         return EvidenceImportResult(
             applied=True,
             schema_state_before=before.schema_state,

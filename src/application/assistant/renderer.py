@@ -1347,17 +1347,13 @@ def _render_logs(data: dict[str, Any]) -> str:
         entry = _dict(file_raw)
         lines.append(
             "- "
-            f"{_value(entry.get('path_display') or entry.get('path'))} "
+            f"{_value(entry.get('kind') or 'log')} "
             f"exists={_yes_no(entry.get('exists'))} "
             f"tail={_value(entry.get('tail_line_count'))}"
         )
-        error = str(entry.get("error") or "").strip()
+        error = str(entry.get("error_code") or "").strip()
         if error:
-            lines.append(f"  error: {error}")
-        tail = entry.get("tail")
-        if isinstance(tail, list) and tail:
-            for item in tail[-3:]:
-                lines.append("  " + str(item)[:220])
+            lines.append(f"  error_code: {error}")
     if len(files) > 3:
         lines.append(f"... 还有 {len(files) - 3} 个文件未展示。")
     return "\n".join(lines)

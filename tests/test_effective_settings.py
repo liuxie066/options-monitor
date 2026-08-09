@@ -35,7 +35,7 @@ def test_effective_env_file_overlays_process_env_with_source(tmp_path) -> None:
 
     assert effective.get("OM_FEISHU_BOT_APP_SECRET") == "from_file"
     assert effective.get("OM_FEISHU_BOT_APP_ID") == "cli_process"
-    assert effective.source_of("OM_FEISHU_BOT_APP_SECRET").public_value() == f"env_file:{env_file}"
+    assert effective.source_of("OM_FEISHU_BOT_APP_SECRET").public_value() == "env_file"
     assert effective.source_of("OM_FEISHU_BOT_APP_ID").public_value() == "process_env"
 
 
@@ -49,8 +49,10 @@ def test_settings_inspect_redacts_secret_values(tmp_path) -> None:
     out = inspect_effective_settings(environ={}, env_file=env_file)
 
     assert out["env_file_loaded"] is True
-    assert out["entries"]["OM_FEISHU_BOT_APP_ID"]["value"] == "cli_1"
+    assert out["entries"]["OM_FEISHU_BOT_APP_ID"]["value"] == "<redacted>"
     assert out["entries"]["OM_FEISHU_BOT_APP_SECRET"]["value"] == "<redacted>"
+    assert out["env_file"] == "<configured-env-file>"
+    assert str(env_file) not in json.dumps(out, ensure_ascii=False)
 
 
 def test_settings_explain_accepts_public_alias(tmp_path) -> None:
@@ -61,7 +63,10 @@ def test_settings_explain_accepts_public_alias(tmp_path) -> None:
 
     assert out["env_name"] == "OM_FEISHU_BOT_USER_OPEN_ID"
     assert out["configured"] is True
-    assert out["source"] == f"env_file:{env_file}"
+    assert out["source"] == "env_file"
+    assert out["value"] == "<redacted>"
+    assert out["env_file"] == "<configured-env-file>"
+    assert str(env_file) not in json.dumps(out, ensure_ascii=False)
 
 
 def test_settings_inspect_and_explain_cover_llm_api_key(tmp_path) -> None:
@@ -77,6 +82,32 @@ def test_settings_inspect_and_explain_cover_llm_api_key(tmp_path) -> None:
     assert explained["env_name"] == "OM_LLM_API_KEY"
     assert explained["configured"] is True
     assert explained["value"] == "<redacted>"
+
+
+def test_settings_explain_defaults_unknown_env_identifiers_to_full_masking(tmp_path) -> None:
+    env_file = tmp_path / "private-settings.env"
+    env_file.write_text('OM_CUSTOM_ACCOUNT_ID="customer-stable-id-12345"\n', encoding="utf-8")
+
+    explained = explain_effective_setting("OM_CUSTOM_ACCOUNT_ID", environ={}, env_file=env_file)
+    serialized = json.dumps(explained, ensure_ascii=False)
+
+    assert explained["configured"] is True
+    assert explained["value"] == "<redacted>"
+    assert explained["source"] == "env_file"
+    assert "customer-stable-id-12345" not in serialized
+    assert str(env_file) not in serialized
+
+
+def test_settings_public_diagnostics_do_not_echo_missing_env_file_path(tmp_path) -> None:
+    missing = tmp_path / "private-user" / "missing.env"
+
+    inspected = inspect_effective_settings(environ={}, env_file=missing)
+    diagnosed = diagnose_effective_settings(environ={}, env_file=missing)
+    serialized = json.dumps({"inspect": inspected, "doctor": diagnosed}, ensure_ascii=False)
+
+    assert inspected["warnings"] == ["env file not found"]
+    assert str(missing) not in serialized
+    assert "private-user" not in serialized
 
 
 def test_effective_env_loads_repo_local_env_file_when_enabled(tmp_path) -> None:

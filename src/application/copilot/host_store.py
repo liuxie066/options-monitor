@@ -17,14 +17,16 @@ from src.application.copilot.contracts import (
     utc_now_iso,
 )
 from src.application.copilot.event_store import public_progress_event
+from src.infrastructure.private_storage import connect_private_sqlite, private_path
 
 
 REPLY_DELIVERY_LEASE_SECONDS = 300
+REPLY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
 
 
 class CopilotHostStore:
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path).expanduser()
+        self.path = private_path(path)
 
     def session_messages(self, session_key: str) -> tuple[dict[str, Any], ...]:
         self._ensure_schema()
@@ -488,6 +490,17 @@ class CopilotHostStore:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
+            capability_cutoff = (
+                datetime.now(timezone.utc) - timedelta(seconds=REPLY_CAPABILITY_TTL_SECONDS)
+            ).isoformat()
+            conn.execute(
+                """
+                UPDATE copilot_reply_outbox
+                SET status = 'expired', payload_json = '{}', last_error = NULL, updated_at = ?
+                WHERE status IN ('pending', 'retryable_failed') AND created_at <= ?
+                """,
+                (utc_now_iso(), capability_cutoff),
+            )
             delivery_cutoff = (
                 datetime.fromisoformat(str(now).replace("Z", "+00:00"))
                 - timedelta(seconds=REPLY_DELIVERY_LEASE_SECONDS)
@@ -553,7 +566,7 @@ class CopilotHostStore:
             cursor = conn.execute(
                 """
                 UPDATE copilot_reply_outbox
-                SET status = 'delivered', delivered_at = ?, updated_at = ?, last_error = NULL
+                SET status = 'delivered', payload_json = '{}', delivered_at = ?, updated_at = ?, last_error = NULL
                 WHERE delivery_key = ? AND status = 'delivering'
                 """,
                 (now, now, str(delivery_key)),
@@ -575,13 +588,16 @@ class CopilotHostStore:
             cursor = conn.execute(
                 """
                 UPDATE copilot_reply_outbox
-                SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+                SET status = ?, next_attempt_at = ?,
+                    payload_json = CASE WHEN ? THEN payload_json ELSE '{}' END,
+                    last_error = ?, updated_at = ?
                 WHERE delivery_key = ? AND status = 'delivering'
                 """,
                 (
                     "retryable_failed" if retryable else "terminal_failed",
                     next_attempt.isoformat(),
-                    str(error)[:1000],
+                    1 if retryable else 0,
+                    "retryable_delivery_error" if retryable else "terminal_delivery_error",
                     now.isoformat(),
                     str(delivery_key),
                 ),
@@ -626,8 +642,7 @@ class CopilotHostStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(self.path, timeout=10)
+        return connect_private_sqlite(self.path, timeout=10)
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -698,6 +713,14 @@ class CopilotHostStore:
                 conn.execute("ALTER TABLE copilot_runs ADD COLUMN resume_attempts INTEGER NOT NULL DEFAULT 0")
             if "termination_reason" not in run_columns:
                 conn.execute("ALTER TABLE copilot_runs ADD COLUMN termination_reason TEXT")
+            conn.execute(
+                """
+                UPDATE copilot_reply_outbox
+                SET payload_json = '{}', last_error = NULL
+                WHERE status IN ('delivered', 'terminal_failed', 'expired')
+                  AND payload_json != '{}'
+                """
+            )
             if "metrics_json" not in run_columns:
                 conn.execute("ALTER TABLE copilot_runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'")
 

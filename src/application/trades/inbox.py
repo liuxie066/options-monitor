@@ -13,6 +13,7 @@ from src.application.ledger.api import (
     canonical_source_economic_payload,
     canonical_source_payload_hash,
 )
+from src.infrastructure.private_storage import connect_private_sqlite
 
 
 SETTLEMENT_ATTEMPT_MIN_LEASE_MS = 120_000
@@ -966,7 +967,7 @@ def require_trade_inbox_store_readable(path: str | Path) -> None:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=30)
+    conn = connect_private_sqlite(path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
