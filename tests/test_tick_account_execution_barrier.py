@@ -278,6 +278,97 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     assert len(set(summaries)) == 1
 
 
+def test_advice_option_authority_is_validated_once_and_handed_off(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    request.base_cfg["ai_decision_advice"] = {
+        "enabled": True,
+        "portfolio_distribution": {"provider": "none"},
+    }
+    load_calls: list[dict] = []
+    prepared_context = {
+        "prepared_authority": {
+            "run_id": request.run_id,
+            "account": "lx",
+        },
+        "filters": {"account": "lx", "broker": "futu"},
+        "context_status": "available",
+        "decision_snapshot_status": "trusted",
+        "open_positions_min": [],
+    }
+
+    def load_prepared(**kwargs):
+        load_calls.append(kwargs)
+        return prepared_context
+
+    def seal(**kwargs):
+        payload = {
+            "schema_version": "required_data_snapshot_manifest.v1",
+            "run_id": kwargs["run_id"],
+            "status": "complete",
+            "plan_id": "a" * 64,
+            "symbols": {},
+            "summary": {},
+        }
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_option_positions_context",
+        load_prepared,
+    )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_required_data",
+        lambda **_kwargs: {
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+            "symbols": [],
+            "results": {},
+        },
+    )
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", seal)
+    monkeypatch.setattr(
+        mod,
+        "run_one_account",
+        lambda *, request, **_kwargs: mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        ),
+    )
+
+    outcome = mod.run_tick_account_execution(request)
+
+    assert len(load_calls) == 1
+    assert load_calls[0]["expected_run_id"] == request.run_id
+    assert load_calls[0]["expected_account"] == "lx"
+    assert len(load_calls[0]["expected_manifest_sha256"]) == 64
+    assert (
+        outcome.prepared_option_positions_context_by_account["lx"]
+        is prepared_context
+    )
+    assert (
+        outcome.prepared_option_positions_context_unavailable_by_account
+        == {}
+    )
+
+
 def test_pm_distribution_is_prepared_once_then_recovered_without_refetch(
     monkeypatch,
     tmp_path: Path,

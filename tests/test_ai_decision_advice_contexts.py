@@ -622,6 +622,7 @@ def test_freeze_external_evidence_rewrites_refs_and_strips_private_fields() -> N
     out = freeze_external_evidence(_evidence_index(), symbols=["NVDA", "AAPL"])
     by_symbol = {row["symbol"]: row for row in out["symbols"]}
 
+    assert out["evidence_as_of"] == OBSERVED
     assert by_symbol["NVDA"]["coverage"] == "completed"
     assert by_symbol["NVDA"]["evidence"][0]["ref"].startswith("evidence:")
     assert by_symbol["AAPL"]["coverage"] == "no_evidence"
