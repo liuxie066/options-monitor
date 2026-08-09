@@ -333,8 +333,11 @@ def test_completed_run_flows_through_to_brief_view(tmp_path):
         for item in index["symbols"]
     ] == [{"symbol": "NVDA", "coverage": "no_evidence", "evidence": []}]
     # Privacy: no account label in model input; no NAV/totals keys.
-    text = json.dumps(captured["payload"], ensure_ascii=False)
-    assert "lx" not in text.replace('"account_ref"', "")
+    payload_without_anonymous_ref = dict(captured["payload"])
+    anonymous_ref = payload_without_anonymous_ref.pop("account_ref")
+    assert isinstance(anonymous_ref, str) and anonymous_ref
+    text = json.dumps(payload_without_anonymous_ref, ensure_ascii=False)
+    assert '"lx"' not in text
     assert "total_value" not in text
     assert '"quantity"' not in text
     assert '"shares"' not in text
