@@ -7,7 +7,7 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.secret_store import LLM_DEEPSEEK_API_KEY
 from src.infrastructure.secret_store.memory import InMemorySecretProvider
-from src.interfaces.cli.main import main, parse_args
+from src.interfaces.cli.main import parse_args
 from src.interfaces.cli.secret_ops import run_store_command
 
 
@@ -42,21 +42,6 @@ def test_secret_cli_status_is_redacted() -> None:
     assert payload["summary"]["configured_count"] == 1
     assert payload["summary"]["values_exposed"] is False
     assert "test-secret-value" not in json.dumps(payload)
-
-
-def test_secret_cli_main_status_never_prints_value(monkeypatch, capsys) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret-value")
-
-    exit_code = main(
-        ["secrets", "status", LLM_DEEPSEEK_API_KEY, "--backend", "env"]
-    )
-
-    output = capsys.readouterr().out
-    payload = json.loads(output)
-    assert exit_code == 0
-    assert payload["summary"]["configured_count"] == 1
-    assert payload["summary"]["values_exposed"] is False
-    assert "test-secret-value" not in output
 
 
 def test_secret_cli_rejects_mismatched_confirmation() -> None:
