@@ -22,7 +22,7 @@ from src.application.ai_decision_advice.evidence_store import (
     content_fingerprint,
 )
 from src.application.ai_decision_advice.projection import project_all_candidates
-from src.application.ledger.combo_membership import (
+from src.application.ledger.api import (
     validate_combo_group_membership,
 )
 from src.application.prepared_option_positions_context import (
