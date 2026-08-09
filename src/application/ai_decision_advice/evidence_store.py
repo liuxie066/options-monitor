@@ -12,6 +12,7 @@ from src.application.ai_decision_advice.config import (
     EXTERNAL_EVIDENCE_FILE,
     SHARED_STATE_DIRNAME,
 )
+from src.infrastructure.private_storage import append_private_text, open_private_text
 
 
 EVIDENCE_RECORD_KINDS = frozenset({"batch_audit", "symbol_evidence", "symbol_status"})
@@ -54,15 +55,13 @@ def append_evidence_records(
     rows = [dict(record) for record in records]
     if not rows:
         return 0
-    path = evidence_path(base)
-    path.parent.mkdir(parents=True, exist_ok=True)
     appended_at_text = _utc_iso(appended_at)
-    with path.open("a", encoding="utf-8") as fh:
-        for record in rows:
-            record.setdefault("evidence_run_id", evidence_run_id)
-            record.setdefault("appended_at", appended_at_text)
-            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-            fh.write("\n")
+    encoded_rows: list[str] = []
+    for record in rows:
+        record.setdefault("evidence_run_id", evidence_run_id)
+        record.setdefault("appended_at", appended_at_text)
+        encoded_rows.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
+    append_private_text(evidence_path(base), "\n".join(encoded_rows) + "\n")
     return len(rows)
 
 
@@ -71,7 +70,7 @@ def read_evidence_records(base: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
+    with open_private_text(path) as fh:
         for line in fh:
             text = line.strip()
             if not text:

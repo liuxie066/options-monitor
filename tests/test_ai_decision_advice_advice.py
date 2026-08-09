@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from datetime import datetime, timezone
 
 from src.application.ai_decision_advice.advice import (
@@ -115,7 +116,11 @@ def _runner_for(frozen: FrozenInputs, run_id: str, account: str, *, calls: list 
         if calls is not None:
             calls.append({"payload": payload, "timeout": timeout})
         text = _model_output(frozen, run_id=run_id, account_ref=_account_ref(run_id, account))
-        return ModelCallResult(raw_response={"echo": True}, output_text=text, usage={"total_tokens": 10})
+        return ModelCallResult(
+            output_text=text,
+            usage={"total_tokens": 10, "provider_private": "must-not-persist"},
+            response_sha256="a" * 64,
+        )
 
     return runner
 
@@ -151,7 +156,14 @@ def test_completed_run_persists_record(tmp_path):
     assert record["versions"]["model"]
     assert record["versions"]["prompt_fingerprint"]
     assert record["input_bindings"]["candidate_snapshot_hash"] == "c-hash"
-    assert record["raw_response"] == {"echo": True}
+    assert "raw_response" not in record
+    assert record["model_response_audit"]["response_sha256"] == "a" * 64
+    assert record["model_response_audit"]["output_char_count"] > 0
+    assert record["usage"] == {"total_tokens": 10}
+    assert "must-not-persist" not in json.dumps(record)
+    record_path = _record_path(tmp_path, "run-1", "lx")
+    assert stat.S_IMODE(record_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(record_path.parent.stat().st_mode) == 0o700
 
 
 def test_zero_candidate_short_circuits_without_model_call(tmp_path):
@@ -196,7 +208,7 @@ def test_invalid_output_then_successful_repair(tmp_path):
 
     def runner(instructions, payload, schema, timeout):
         calls.append(payload)
-        return ModelCallResult(raw_response={}, output_text=next(outputs), usage={})
+        return ModelCallResult(output_text=next(outputs), usage={})
 
     result = run_decision_advice(
         output_root=tmp_path,
@@ -218,7 +230,7 @@ def test_invalid_output_twice_is_unavailable(tmp_path):
     frozen = _frozen()
 
     def runner(instructions, payload, schema, timeout):
-        return ModelCallResult(raw_response={}, output_text="{broken", usage={})
+        return ModelCallResult(output_text="{broken", usage={})
 
     result = run_decision_advice(
         output_root=tmp_path,

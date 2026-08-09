@@ -114,15 +114,15 @@ class WechatClawbotServeSettings:
             state = {}
         return {
             "label": self.label,
-            "state_dir": str(store.state_dir),
+            "state_dir": mask_path(store.state_dir),
             "config_key": self.config_key,
-            "config_path": self.config_path,
-            "assistant_config_path": self.assistant_config_path,
+            "config_path": mask_path(self.config_path),
+            "assistant_config_path": mask_path(self.assistant_config_path),
             "audit_db": mask_path(self.audit_db),
             "allowed_senders_configured": bool(self.allowed_senders),
             "bot_token_configured": bool(str(state.get("bot_token") or "").strip()),
             "base_url_configured": bool(str(state.get("base_url") or "").strip()),
-            "connect_command_template": self.connect_command_template(),
+            "connect_command_template": "./om channel wechat-clawbot connect --label <label> --name <name>",
             "reply_enabled": bool(self.reply_enabled),
             "max_reply_chars": int(self.max_reply_chars),
             "poll_interval_sec": float(self.poll_interval_sec),
@@ -409,14 +409,14 @@ def poll_wechat_clawbot_once(
         typing_public = {key: value for key, value in typing_status.items() if key != "typing_ticket"}
         results.append(
             {
-                "message_id": message_id(message) or None,
-                "sender_id": message_user_id(message) or None,
+                "message_ref": _opaque_reference("message", message_id(message)),
+                "sender_ref": _opaque_reference("sender", message_user_id(message)),
                 "kind": data.get("kind") or "unknown",
                 "ok": bool(inbound.get("ok", False)),
-                "inbound": inbound,
-                "reply": reply_status,
-                "binding_refresh": binding_refresh,
-                "typing": typing_public,
+                "inbound": _public_inbound_summary(inbound),
+                "reply": _status_only(reply_status),
+                "binding_refresh": _status_only(binding_refresh),
+                "typing": _status_only(typing_public),
             }
         )
 
@@ -444,19 +444,17 @@ def poll_wechat_clawbot_once(
         ok=all_ok,
         data={
             "label": label,
-            "state_dir": str(store.state_dir),
             "update_count": len(messages),
             "processed_count": processed_count,
             "reply_count": reply_count,
-            "cursor_before": cursor_before,
-            "cursor_after": cursor_after or cursor_before,
+            "cursor_present": bool(cursor_after or cursor_before),
             "cursor_updated": cursor_updated,
-            "keepalive": keepalive_status,
-            "outbox_retry": outbox_retry,
+            "keepalive": _status_only(keepalive_status),
+            "outbox_retry": _status_only(outbox_retry),
             "results": results,
         },
         error=None if all_ok else {"code": "INBOUND_PROCESSING_FAILED", "message": "one or more WeChat ClawBot inbound messages failed"},
-        meta={"response_tail": json.dumps(response, ensure_ascii=False)[-500:]},
+        meta={"provider_response_code": _response_code(response)},
     )
 
 
@@ -482,7 +480,7 @@ def _resolve_binding_refresh_route(
             "target": None,
             "notifications": {"wechat_clawbot_state_dir": state_dir} if state_dir else {},
             "reason": "notification_route_unavailable",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
     notifications = route.get("notifications") if isinstance(route.get("notifications"), dict) else {}
     notifications = dict(notifications)
@@ -537,7 +535,7 @@ def _refresh_bound_context_from_reply(
             "attempted": False,
             "updated_count": 0,
             "reason": str(route.get("reason") or "notification_route_unavailable"),
-            **({"error": route.get("error")} if route.get("error") else {}),
+            **({"error_code": route.get("error_code")} if route.get("error_code") else {}),
         }
     try:
         return refresh_wechat_clawbot_binding_from_reply(
@@ -553,7 +551,7 @@ def _refresh_bound_context_from_reply(
             "attempted": True,
             "updated_count": 0,
             "reason": "refresh_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
 
 
@@ -573,7 +571,7 @@ def _refresh_bound_context_from_inbound(
             "attempted": False,
             "updated_count": 0,
             "reason": str(route.get("reason") or "notification_route_unavailable"),
-            **({"error": route.get("error")} if route.get("error") else {}),
+            **({"error_code": route.get("error_code")} if route.get("error_code") else {}),
         }
     try:
         return refresh_wechat_clawbot_binding_from_inbound_message(
@@ -588,7 +586,7 @@ def _refresh_bound_context_from_inbound(
             "attempted": True,
             "updated_count": 0,
             "reason": "refresh_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
 
 
@@ -663,7 +661,7 @@ def _maybe_keepalive_bound_context(
             binding_count=0,
             ok_count=0,
             failed_bindings=(),
-            error=f"{type(exc).__name__}: {exc}",
+            error=type(exc).__name__,
         )
 
     targets: list[tuple[str, str, str]] = []
@@ -686,10 +684,10 @@ def _maybe_keepalive_bound_context(
                 ok_count += 1
                 continue
             failures.append(name)
-            last_error = f"{name}: response={json.dumps(response, ensure_ascii=False)[-300:]}"
+            last_error = f"{name}: provider_response_code={_response_code(response)}"
         except Exception as exc:
             failures.append(name)
-            last_error = f"{name}: {type(exc).__name__}: {exc}"
+            last_error = f"{name}: {type(exc).__name__}"
 
     ok = not failures
     return _record_keepalive_state(
@@ -751,8 +749,61 @@ def _record_keepalive_state(
     if failed_bindings:
         out["failed_bindings"] = list(failed_bindings)
     if error:
-        out["error"] = error
+        out["error_code"] = error
     return out
+
+
+def _public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
+    data = _dict(inbound.get("data"))
+    error = _dict(inbound.get("error"))
+    result = _dict(data.get("inbound_result")) or _dict(data.get("result"))
+    result_data = _dict(result.get("data"))
+    control = _dict(result_data.get("control"))
+    decision = _dict(result_data.get("decision"))
+    assistant = _dict(_dict(result.get("meta")).get("assistant"))
+    return {
+        key: value
+        for key, value in {
+            "ok": bool(inbound.get("ok", False)),
+            "kind": data.get("kind"),
+            "status": data.get("status") or result.get("status"),
+            "intent_name": result.get("intent_name") or control.get("intent_name"),
+            "tool_name": result.get("tool_name") or control.get("tool_name"),
+            "route": result.get("render_route") or assistant.get("route"),
+            "decision_reason": decision.get("reason"),
+            "error_code": error.get("code"),
+        }.items()
+        if value is not None
+    }
+
+
+def _status_only(payload: Any) -> dict[str, Any]:
+    source = _dict(payload)
+    allowed = {
+        "attempted",
+        "ok",
+        "reason",
+        "error_code",
+        "provider_response_code",
+        "message_id",
+        "outbound_message_id",
+        "delivery_key",
+        "binding_count",
+        "ok_count",
+        "updated_count",
+        "last_attempt_at_utc",
+    }
+    out = {key: source.get(key) for key in allowed if source.get(key) is not None}
+    if isinstance(source.get("stop"), dict):
+        out["stop"] = _status_only(source["stop"])
+    return out
+
+
+def _opaque_reference(kind: str, value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return f"{kind}:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _maybe_start_typing(
@@ -783,7 +834,7 @@ def _maybe_start_typing(
             "attempted": True,
             "ok": False,
             "reason": "typing_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
     return {
         "attempted": True,
@@ -815,7 +866,7 @@ def _maybe_stop_typing(
             "attempted": True,
             "ok": False,
             "reason": "typing_cancel_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
     return {
         "attempted": True,
@@ -863,12 +914,12 @@ def _maybe_reply(
         )
     except Exception as exc:
         if outbox is not None and delivery_key:
-            outbox.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+            outbox.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
         return {
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
     outbound_message_id = _extract_message_id(api_response)
     ok = _response_success(api_response)
@@ -883,7 +934,7 @@ def _maybe_reply(
         "reason": decision.send_reason if ok else "reply_failed",
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
-        "api_response": api_response,
+        "provider_response_code": _response_code(api_response),
         **({"delivery_key": delivery_key} if delivery_key else {}),
     }
 
@@ -954,7 +1005,7 @@ def _retry_pending_wechat_reply(
         )
         ok = _response_success(api_response)
     except Exception as exc:
-        store.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+        store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
     if ok:
         store.mark_reply_delivered(delivery_key)
@@ -1003,11 +1054,9 @@ def _record_reply_receipt(
 
 def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]) -> dict[str, Any]:
     request = _dict(data.get("request"))
-    api_response = reply_status.get("api_response")
     outbound_message_id = _first_text(
         reply_status.get("outbound_message_id"),
         reply_status.get("message_id"),
-        _extract_message_id(api_response) if isinstance(api_response, dict) else None,
     )
     receipt: dict[str, Any] = {
         "schema_version": "wechat-clawbot-reply-receipt-v1",
@@ -1016,18 +1065,17 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
         "reason": _first_text(reply_status.get("reason")),
         "channel": _first_text(request.get("channel"), "wechat"),
         "provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
-        "sender_id": _first_text(request.get("sender_id")),
-        "inbound_message_id": _first_text(request.get("message_id")),
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
     }
     if outbound_message_id and bool(reply_status.get("ok")):
         receipt["delivery_confirmed"] = True
-    error = _first_text(reply_status.get("error"))
-    if error:
-        receipt["error"] = error
-    if isinstance(api_response, dict):
-        receipt["api_response"] = api_response
+    error_code = _first_text(reply_status.get("error_code"))
+    if error_code:
+        receipt["error_code"] = error_code
+    provider_response_code = reply_status.get("provider_response_code")
+    if isinstance(provider_response_code, int):
+        receipt["provider_response_code"] = provider_response_code
     return {key: value for key, value in receipt.items() if value is not None}
 
 
@@ -1073,6 +1121,16 @@ def _response_success(response: dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip().lstrip("-").isdigit():
             return int(value) == 0
     return False
+
+
+def _response_code(response: dict[str, Any]) -> int | None:
+    for key in ("ret", "errcode", "code"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+    return None
 
 
 def _extract_message_id(response: dict[str, Any]) -> str | None:

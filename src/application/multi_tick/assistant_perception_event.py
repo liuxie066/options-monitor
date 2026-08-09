@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
-from src.application.conversation_scope import conversation_scope_from_notification_route
+from src.application.conversation_scope import conversation_reference, conversation_scope_from_notification_route
 
 
 NOTIFICATION_PERCEPTION_EVENT_SCHEMA_VERSION = "om-notification-perception-event-v1"
@@ -76,7 +76,7 @@ def build_notification_perception_event(
                 key: value
                 for key, value in {
                     "channel": route_scope.get("channel"),
-                    "conversation_id": route_scope.get("conversation_id"),
+                    "conversation_ref": conversation_reference(route_scope.get("conversation_id")),
                 }.items()
                 if value
             },
@@ -115,12 +115,7 @@ def mask_notification_target(target: Any) -> str | None:
     text = str(target or "").strip()
     if not text:
         return None
-    lowered = text.lower()
-    if "http://" in lowered or "https://" in lowered or "token" in lowered or "webhook" in lowered:
-        return "[redacted_target]"
-    if len(text) <= 80:
-        return text
-    return text[:24] + "..." + text[-12:]
+    return "target:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _symbol_summary(candidates: list[Any]) -> dict[str, Any]:

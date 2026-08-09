@@ -71,15 +71,14 @@ def start_wechat_clawbot_qrcode(
         "qrcode_artifact_path": qrcode_artifact_path,
         "qrcode_artifact_open_command": qrcode_artifact_open_command,
         "created_at_utc": utc_now(),
-        "response_json": response,
     }
     store.save_pending_login(payload)
     return build_response(
         tool_name="wechat_clawbot.qrcode",
         ok=bool(qrcode),
-        data={k: v for k, v in payload.items() if k != "response_json"},
+        data=payload,
         warnings=[] if qrcode else ["qrcode not found in iLink response"],
-        error=None if qrcode else {"code": "UPSTREAM_RESPONSE_ERROR", "message": "qrcode not found in iLink response", "details": {"response": response}},
+        error=None if qrcode else {"code": "UPSTREAM_RESPONSE_ERROR", "message": "qrcode not found in iLink response"},
     )
 
 
@@ -113,7 +112,6 @@ def check_wechat_clawbot_qrcode(
             "get_updates_buf": extract_first_string(response, ("get_updates_buf", "getUpdatesBuf")),
             "login_status": status,
             "updated_at_utc": utc_now(),
-            "login_response_json": response,
         }
         store.save_state(state_payload)
     return build_response(
@@ -128,7 +126,7 @@ def check_wechat_clawbot_qrcode(
             "state_path": str(store.state_path) if ok else None,
         },
         warnings=[] if ok else ["QR login is not confirmed yet or token was not present in response"],
-        meta={"response_json": response},
+        meta={"token_present": ok},
     )
 
 

@@ -551,7 +551,7 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
 ) -> None:
     from src.infrastructure.futu_gateway import build_futu_gateway
 
-    account_id = "REDACTED_FUTU_ACCOUNT"
+    account_id = "999000000000000001"
 
     class Trade:
         def __init__(self) -> None:

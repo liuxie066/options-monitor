@@ -769,7 +769,7 @@ def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
                 "last_exit_code": 0,
-                "stdout_tail": "https://example.com/webhook/token for REDACTED_FUTU_ACCOUNT",
+                "stdout_tail": "https://example.com/webhook/token for 999000000000000001",
             },
         },
         runtime_status_tool_fn=_runtime_status,
@@ -793,7 +793,7 @@ def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     assert "Research Handoff" in data["handoff_markdown"]
     assert "Runtime Evidence" in data["handoff_markdown"]
     assert "webhook/token" not in bundle_json
-    assert "REDACTED_FUTU_ACCOUNT" not in bundle_json
+    assert "999000000000000001" not in bundle_json
     assert meta["outputs"]["written"] is False
 
 
@@ -862,11 +862,11 @@ def test_research_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> N
                     {
                         "name": "notification_credentials",
                         "status": "error",
-                        "message": "missing https://example.com/webhook/token for REDACTED_FUTU_ACCOUNT",
+                        "message": "missing https://example.com/webhook/token for 999000000000000001",
                     }
                 ],
             },
-            ["notification target REDACTED_FUTU_ACCOUNT is not ready"],
+            ["notification target 999000000000000001 is not ready"],
             {"config_path": str(tmp_path / "config.us.json")},
         )
 
@@ -895,10 +895,10 @@ def test_research_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> N
     assert snapshot["status"] == "fail"
     assert data["summary"]["healthcheck_status"] == "fail"
     assert "healthcheck_snapshot: notification target" in warnings[0]
-    assert "REDACTED_FUTU_ACCOUNT" not in warnings[0]
+    assert "999000000000000001" not in warnings[0]
     assert meta["healthcheck"]["included"] is True
     assert "webhook/token" not in snapshot_json
-    assert "REDACTED_FUTU_ACCOUNT" not in snapshot_json
+    assert "999000000000000001" not in snapshot_json
     assert "***REDACTED_URL***" in snapshot_json
 
 

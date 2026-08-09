@@ -34,12 +34,12 @@ def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: 
     sell_put = {"enabled": True, "min_dte": 7, "max_dte": 60, "max_strike": 45.0}
     account_contexts = {
         "lx": {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+            "cash_by_currency": {"CNY": 520000.0, "HKD": 18000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 120000.0, "USD": 500.0}},
         },
         "sy": {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+            "cash_by_currency": {"CNY": 910000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 260000.0, "USD": 1000.0}},
         },
     }
 

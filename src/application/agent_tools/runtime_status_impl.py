@@ -2034,7 +2034,7 @@ def _accounts_from_runtime(
     return normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
 
 
-def runtime_status_tool(
+def private_runtime_status_tool(
     payload: dict[str, Any],
     *,
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]],
@@ -2622,6 +2622,521 @@ def runtime_status_tool(
     return data, warnings, {"config_path": mask_path(config_path)}
 
 
+def runtime_status_tool(
+    payload: dict[str, Any],
+    *,
+    load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]],
+    normalize_accounts: Callable[..., list[str]],
+    accounts_from_config: Callable[[dict[str, Any]], list[str]],
+    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+    repo_base: Callable[[], Path],
+    mask_path: Callable[[Any], str | None],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    """Return the status-safe public projection of the private runtime collector."""
+
+    data, warnings, meta = private_runtime_status_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        read_json_object_or_empty=read_json_object_or_empty,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+    public_data = _status_safe_runtime_payload(data)
+    warning_codes = _string_list(public_data.get("summary", {}).get("warning_codes"))
+    public_warnings = [f"runtime_status:{code}" for code in warning_codes]
+    if warnings and not public_warnings:
+        public_warnings = ["runtime_status:WARNING"]
+    return public_data, public_warnings, meta
+
+
+def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
+    summary = _pick(
+        data.get("summary"),
+        {
+            "ok",
+            "warning_count",
+            "warning_codes",
+            "latest_status",
+            "freshness_status",
+            "notification_status",
+            "notification_reason",
+            "notification_send_attempted_count",
+            "notification_send_confirmed_count",
+            "notification_send_failed_count",
+            "account_count",
+            "prefetch_available",
+            "prefetch_bottleneck",
+            "latest_scanned_run_prefetch_available",
+            "latest_scanned_run_prefetch_bottleneck",
+            "ledger_status",
+            "ledger_fail_closed",
+            "ledger_trade_event_count",
+            "ledger_position_lot_count",
+            "projection_verify_ok",
+            "projection_verify_mode",
+            "service_upgrade_status",
+            "service_upgrade_historical_status",
+            "service_upgrade_target_version",
+            "service_upgrade_current_version",
+            "service_upgrade_runtime_failed",
+            "service_upgrade_reason",
+            "service_drift_status",
+            "assistant_enabled",
+            "assistant_copilot_enabled",
+            "assistant_copilot_portfolio_enabled",
+            "assistant_llm_enabled",
+            "assistant_llm_provider",
+            "assistant_latest_route",
+            "assistant_latest_intent",
+            "assistant_latest_llm_reason",
+            "wechat_clawbot_configured",
+            "wechat_clawbot_available",
+            "wechat_clawbot_allowed_senders_configured",
+            "wechat_clawbot_bot_token_configured",
+        },
+    )
+    latest_run = _dict(data.get("latest_run"))
+    latest_scanned_run = _dict(data.get("latest_scanned_run"))
+    summary["latest_run_id"] = _path_name(latest_run.get("path"))
+    summary["latest_scanned_run_id"] = _path_name(latest_scanned_run.get("path"))
+    latest_run_selection = _status_safe_run_selection(data.get("latest_run_selection"))
+    latest_scanned_run_selection = _status_safe_run_selection(data.get("latest_scanned_run_selection"))
+    if summary.get("latest_run_id"):
+        latest_run_selection["run_id"] = summary["latest_run_id"]
+    if summary.get("latest_scanned_run_id"):
+        latest_scanned_run_selection["run_id"] = summary["latest_scanned_run_id"]
+
+    projection_verify = _status_safe_file_info(data.get("projection_verify"))
+    if summary.get("projection_verify_ok") is not None:
+        projection_verify["ok"] = bool(summary["projection_verify_ok"])
+    if summary.get("projection_verify_mode") is not None:
+        projection_verify["mode"] = summary["projection_verify_mode"]
+
+    notification_diagnosis = _pick(
+        data.get("notification_diagnosis"),
+        {
+            "status",
+            "reason",
+            "trigger_observed",
+            "trigger_source",
+            "timeout_seconds",
+            "outer_delivery_mode",
+            "outer_announce_expected",
+            "scheduler_should_run_scan",
+            "scheduler_should_notify",
+            "scheduler_reason",
+            "no_send",
+            "account_messages_count",
+            "send_attempted_count",
+            "send_confirmed_count",
+            "send_failed_count",
+            "ambiguous_send_count",
+            "duplicate_risk_count",
+            "final_reason",
+        },
+    )
+    notification_route = _pick(
+        _dict(data.get("notification_diagnosis")).get("notification_route"),
+        {"channel", "provider", "configured", "target_configured"},
+    )
+    if notification_route:
+        notification_diagnosis["notification_route"] = notification_route
+
+    account_summary = _status_safe_account_summary(data.get("account_summary"))
+    return {
+        "schema_version": "runtime-status-public.v2",
+        "config": _pick(data.get("config"), {"accounts", "config_key"}),
+        "config_authority": _status_safe_config_authority(data.get("config_authority")),
+        "notification_authority": _dict(data.get("notification_authority")),
+        "ledger_store": _pick(
+            data.get("ledger_store"),
+            {
+                "db_exists",
+                "db_size_bytes",
+                "position_lot_count",
+                "trade_event_count",
+                "runtime_root_source",
+                "sqlite_path_source",
+            },
+        ),
+        "shared": _status_safe_shared(data.get("shared")),
+        "trade_intake": _status_safe_trade_intake(data.get("trade_intake")),
+        "option_positions_context": {
+            "last": _status_safe_file_info(_dict(data.get("option_positions_context")).get("last")),
+            "ledger": _pick(
+                _dict(data.get("option_positions_context")).get("ledger"),
+                {
+                    "available",
+                    "status",
+                    "reason",
+                    "read_model",
+                    "fail_closed",
+                    "source_record_count",
+                    "imported_event_count",
+                    "lot_count",
+                    "open_lot_count",
+                    "view_count",
+                },
+            ),
+        },
+        "projection_verify": projection_verify,
+        "service_upgrade": _status_safe_service_upgrade(data.get("service_upgrade")),
+        "service_drift": _status_safe_service_drift(data.get("service_drift")),
+        "accounts": _status_safe_accounts(data.get("accounts")),
+        "latest_run_selection": latest_run_selection,
+        "latest_run": _status_safe_run(latest_run),
+        "latest_scanned_run_selection": latest_scanned_run_selection,
+        "latest_scanned_run": _status_safe_run(latest_scanned_run),
+        "required_data_prefetch": _status_safe_prefetch(data.get("required_data_prefetch")),
+        "latest_scanned_run_required_data_prefetch": _status_safe_prefetch(
+            data.get("latest_scanned_run_required_data_prefetch")
+        ),
+        "trigger_context": _pick(
+            data.get("trigger_context"),
+            {"observed", "source", "delivery_mode", "announce_expected", "timeout_seconds"},
+        ),
+        "notification_diagnosis": notification_diagnosis,
+        "environment": _status_safe_environment(data.get("environment")),
+        "channel_status": _status_safe_channel_status(data.get("channel_status")),
+        "channel_health": _status_safe_channels(data.get("channel_health")),
+        "account_summary": account_summary,
+        "freshness": _pick(
+            data.get("freshness"),
+            {"status", "stale", "age_seconds", "max_age_minutes", "latest_mtime_utc"},
+        ),
+        "service_profile": _status_safe_service_profile(data.get("service_profile")),
+        "assistant_runtime": _status_safe_assistant_runtime(data.get("assistant_runtime")),
+        "summary": summary,
+    }
+
+
+def _pick(value: Any, fields: set[str]) -> dict[str, Any]:
+    source = _dict(value)
+    return {key: source.get(key) for key in fields if source.get(key) is not None}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _path_name(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return Path(text).name or None
+
+
+def _status_safe_file_info(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    out = _pick(
+        source,
+        {
+            "exists",
+            "is_file",
+            "size_bytes",
+            "mtime_utc",
+            "line_count",
+            "truncated",
+            "artifact_kind",
+            "primary_renderer",
+            "may_include",
+            "authority",
+            "delivery_evidence",
+            "deprecated_field",
+        },
+    )
+    if source.get("read_error"):
+        out["read_error"] = True
+    return out
+
+
+def _status_safe_shared(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    compatibility = _status_safe_file_info(source.get("compatibility_notification"))
+    return {
+        "last_run": _status_safe_file_info(source.get("last_run")),
+        "last_run_dir": _status_safe_file_info(source.get("last_run_dir")),
+        "compatibility_notification": compatibility,
+        "notification": {**compatibility, "deprecated_field": True},
+    }
+
+
+def _status_safe_trade_intake(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    summary = _dict(source.get("summary"))
+    safe_summary = {
+        key: item
+        for key, item in summary.items()
+        if (
+            key in {"listener_status", "listener_stage", "reconciliation_preview_available"}
+            or key.endswith("_count")
+            or key.endswith("_utc")
+        )
+        and "deal_id" not in key
+        and "receipt_key" not in key
+        and "error" not in key
+    }
+    sources = [item for item in source.get("sources") or [] if isinstance(item, dict)]
+    return {
+        **_pick(source, {"enabled", "mode"}),
+        "source_count": len(sources),
+        "enabled_source_count": sum(1 for item in sources if bool(item.get("enabled"))),
+        "summary": safe_summary,
+        "receipt": _pick(source.get("receipt"), {"enabled", "notify_applied", "notify_failed", "notify_unresolved"}),
+    }
+
+
+def _status_safe_service_upgrade(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    evaluation = _pick(
+        source.get("evaluation"),
+        {
+            "status",
+            "historical_status",
+            "target_version",
+            "current_version",
+            "runtime_failed",
+            "reason",
+            "failed_services",
+        },
+    )
+    return {
+        **_status_safe_file_info(source),
+        **evaluation,
+        "evaluation": evaluation,
+    }
+
+
+def _status_safe_service_drift(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    summary = _pick(source.get("summary"), {"ok", "status", "warning_count", "error_count"})
+    summary["missing_installed_count"] = len(source.get("missing_installed_units") or [])
+    summary["missing_required_count"] = len(source.get("missing_required_units") or [])
+    return {
+        **_pick(source, {"reason"}),
+        "summary": summary,
+    }
+
+
+def _status_safe_accounts(value: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for account, raw in _dict(value).items():
+        item = _dict(raw)
+        compatibility = _status_safe_file_info(item.get("compatibility_notification"))
+        out[str(account)] = {
+            "last_run": _status_safe_file_info(item.get("last_run")),
+            "option_positions_context": _status_safe_file_info(item.get("option_positions_context")),
+            "compatibility_notification": compatibility,
+            "notification": {**compatibility, "deprecated_field": True},
+        }
+    return out
+
+
+def _status_safe_run_selection(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        {"requested", "source", "found", "searched_count", "market_filter", "skipped_market_mismatch_count"},
+    )
+
+
+def _status_safe_run(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    accounts: dict[str, Any] = {}
+    for account, raw in _dict(source.get("accounts")).items():
+        item = _dict(raw)
+        compatibility = _status_safe_file_info(item.get("compatibility_notification"))
+        accounts[str(account)] = {
+            "last_run": _status_safe_file_info(item.get("last_run")),
+            "expired_position_maintenance": _status_safe_file_info(item.get("expired_position_maintenance")),
+            "auto_close_receipt": _pick(
+                item.get("auto_close_receipt"),
+                {"status", "delivery_confirmed", "attempt_count", "updated_at"},
+            ),
+            "compatibility_notification": compatibility,
+            "notification": {**compatibility, "deprecated_field": True},
+            "required_data_prefetch": _status_safe_file_info(item.get("required_data_prefetch")),
+        }
+    return {
+        "present": bool(source),
+        "run_id": _path_name(source.get("path")),
+        "state": {
+            "last_run": _status_safe_file_info(_dict(source.get("state")).get("last_run")),
+            "tick_metrics": _status_safe_file_info(_dict(source.get("state")).get("tick_metrics")),
+        },
+        "accounts": accounts,
+    }
+
+
+def _status_safe_prefetch(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    allowed = {
+        key
+        for key, item in source.items()
+        if isinstance(item, (int, float, bool)) or key in {"primary_bottleneck"}
+    }
+    return _pick(source, allowed)
+
+
+def _status_safe_environment(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    entries: dict[str, Any] = {}
+    for name, raw in _dict(source.get("entries")).items():
+        item = _dict(raw)
+        source_name = str(item.get("source") or "").split(":", 1)[0] or None
+        entries[str(name)] = {
+            "configured": bool(item.get("configured")),
+            "secret": bool(item.get("secret")),
+            "source_kind": source_name,
+        }
+    return {
+        "env_file_configured": bool(source.get("env_file")),
+        "env_file_loaded": bool(source.get("env_file_loaded")),
+        "entry_count": len(entries),
+        "entries": entries,
+        "warning_count": len(source.get("warnings") or []),
+    }
+
+
+def _status_safe_channels(value: Any) -> dict[str, Any]:
+    fields = {
+        "available",
+        "configured",
+        "credentials_configured",
+        "allowed_senders_configured",
+        "allowed_open_ids_count",
+        "bot_token_configured",
+        "binding_count",
+        "reply_enabled",
+        "max_reply_chars",
+        "poll_interval_sec",
+        "keepalive_interval_sec",
+        "timeout_sec",
+        "provider",
+    }
+    return {str(name): _pick(item, fields) for name, item in _dict(value).items() if isinstance(item, dict)}
+
+
+def _status_safe_channel_status(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    return {
+        "summary": _pick(source.get("summary"), {"available_channels", "configured_channels", "feishu_available"}),
+        "channels": _status_safe_channels(source.get("channels")),
+    }
+
+
+def _status_safe_account_summary(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    rows: dict[str, Any] = {}
+    row_fields = {
+        "last_run_exists",
+        "compatibility_notification_exists",
+        "notification_exists",
+        "last_status",
+        "last_run_mtime_utc",
+        "compatibility_notification_mtime_utc",
+        "notification_mtime_utc",
+    }
+    for account, item in _dict(source.get("accounts")).items():
+        rows[str(account)] = _pick(item, row_fields)
+    return {
+        **_pick(
+            source,
+            {
+                "account_count",
+                "accounts_with_last_run",
+                "accounts_with_compatibility_notification",
+                "accounts_with_notification",
+            },
+        ),
+        "accounts": rows,
+    }
+
+
+def _status_safe_service_profile(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    services = [item for item in source.get("services") or [] if isinstance(item, dict)]
+    statuses: dict[str, int] = {}
+    for item in services:
+        status = str(item.get("status") or item.get("active_state") or "unknown").strip().lower() or "unknown"
+        statuses[status] = statuses.get(status, 0) + 1
+    return {
+        **_pick(source, {"loaded"}),
+        "provider": source.get("provider") or source.get("service_provider"),
+        "service_count": len(services),
+        "status_counts": statuses,
+    }
+
+
+def _status_safe_assistant_runtime(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    config = _dict(source.get("config"))
+    llm = _dict(source.get("llm"))
+    audit = _dict(source.get("audit"))
+    latest = _dict(audit.get("latest"))
+    return {
+        "available": bool(source.get("available")),
+        "error_code": str(source.get("error") or "").split(":", 1)[0] or None,
+        "config": {
+            **_pick(config, {"loaded", "enabled", "context_window_messages", "default_market_scope"}),
+            "copilot": {
+                **_pick(config.get("copilot"), {"enabled"}),
+                "toolsets": _pick(_dict(config.get("copilot")).get("toolsets"), {"portfolio"}),
+            },
+        },
+        "llm": _pick(
+            llm,
+            {
+                "enabled",
+                "provider",
+                "model",
+                "confidence_min",
+                "timeout_seconds",
+                "max_output_tokens",
+                "api_key_configured",
+                "env_file_loaded",
+            },
+        ),
+        "audit": {
+            "exists": bool(audit.get("exists")),
+            "error_code": str(audit.get("error") or "").split(":", 1)[0] or None,
+            "latest": {
+                **_pick(
+                    latest,
+                    {
+                        "created_at",
+                        "parser",
+                        "intent_name",
+                        "tool_name",
+                        "decision",
+                        "result_ok",
+                        "error_code",
+                        "route",
+                        "mode",
+                        "llm_reason",
+                        "llm_attempted",
+                    },
+                ),
+                "context": _pick(latest.get("context"), {"provided", "recent_count", "pending_count"}),
+            },
+        },
+    }
+
+
+def _status_safe_config_authority(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    return {
+        **_pick(source, {"ok", "authoring_source", "market", "source_format", "required_source_format"}),
+        "identity": _pick(source.get("identity"), {"ok", "error_count"}),
+        "freshness": _pick(source.get("freshness"), {"ok", "error_count"}),
+        "source_count": len(source.get("sources") or []),
+    }
+
+
 __all__ = [
+    "private_runtime_status_tool",
     "runtime_status_tool",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -74,10 +75,52 @@ EVIDENCE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class ModelCallResult:
-    raw_response: dict[str, Any]
     output_text: str
     usage: dict[str, Any]
-    web_search_calls: tuple[dict[str, Any], ...] = ()
+    response_sha256: str | None = None
+    web_search_audit: dict[str, Any] = field(default_factory=dict)
+
+
+def model_response_audit(result: ModelCallResult) -> dict[str, Any]:
+    """Build content-free audit evidence for one provider response."""
+
+    output = str(result.output_text or "")
+    audit: dict[str, Any] = {
+        "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        "output_char_count": len(output),
+    }
+    response_hash = str(result.response_sha256 or "").strip().lower()
+    if len(response_hash) == 64 and all(char in "0123456789abcdef" for char in response_hash):
+        audit["response_sha256"] = response_hash
+    return audit
+
+
+def minimized_usage(usage: Mapping[str, Any] | None) -> dict[str, int]:
+    """Defend the persistence boundary even for injected model runners."""
+
+    source = usage if isinstance(usage, Mapping) else {}
+    result: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = source.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[key] = value
+    return result
+
+
+def minimized_web_search_audit(audit: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Allow only aggregate counts; discard IDs, queries, URLs, and provider text."""
+
+    source = audit if isinstance(audit, Mapping) else {}
+    raw_count = source.get("count")
+    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0 else 0
+    raw_statuses = source.get("status_counts")
+    status_counts: dict[str, int] = {}
+    if isinstance(raw_statuses, Mapping):
+        for status in ("completed", "failed", "in_progress", "unknown"):
+            value = raw_statuses.get(status)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                status_counts[status] = value
+    return {"count": count, "status_counts": status_counts}
 
 
 ModelRunner = Callable[[str, dict[str, Any], dict[str, Any] | None, int], ModelCallResult]
@@ -333,8 +376,9 @@ def _call_with_repair(
                 "symbols": list(batch_symbols),
                 "prompt": prompt_audit_payload(compiled_prompt),
                 "identity_snapshot_hash": identity_snapshot_hash,
-                "usage": dict(result.usage),
-                "web_search_calls": [dict(call) for call in result.web_search_calls],
+                "usage": minimized_usage(result.usage),
+                "model_response_audit": model_response_audit(result),
+                "web_search_audit": minimized_web_search_audit(result.web_search_audit),
                 "repair_attempted": attempt == 2,
             }
         ]

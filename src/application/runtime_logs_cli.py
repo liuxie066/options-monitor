@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +12,15 @@ from src.application.runtime_cli_format import as_list as _list
 from src.application.runtime_cli_format import display_path as _display_path
 from src.application.runtime_cli_format import display_value as _value
 from src.application.runtime_cli_format import resolve_runtime_cli_path as _resolve_path
-from src.application.runtime_cli_format import selected_run_dir as _selected_run_dir
 from src.application.runtime_cli_format import yes_no as _yes_no
 from src.application.runtime_runs_cli import resolve_runtime_runs_root
 
 
 SCHEMA_VERSION = "runtime_logs.v1"
+MAX_LOG_LINES = 200
+MAX_LOG_FILE_BYTES = 16 * 1024 * 1024
+MAX_LOG_TAIL_BYTES = 256 * 1024
+ALLOWED_LOG_SUFFIXES = frozenset({".json", ".jsonl", ".log", ".txt"})
 RUN_LOG_FILES = {
     "audit": "audit_events.jsonl",
     "tool": "tool_execution_audit.jsonl",
@@ -34,17 +39,22 @@ def collect_runtime_logs(
     kind: str = "all",
     lines: int = 50,
     log_file: str | Path | None = None,
+    allow_explicit_file_outside_roots: bool = False,
 ) -> dict[str, Any]:
     base = repo_root.resolve()
-    line_count = max(int(lines), 0)
+    requested_line_count = max(int(lines), 0)
+    line_count = min(requested_line_count, MAX_LOG_LINES)
     root = resolve_runtime_runs_root(base=base, runs_root=runs_root, profile_path=profile_path)
     service_logs_root = _resolve_logs_root(base=base, logs_root=logs_root, profile_path=profile_path)
-    selected_run = _selected_run_dir(root=root, base=base, run_id=run_id, run_dir=run_dir)
+    selected_run = _select_run_dir(root=root, base=base, run_id=run_id, run_dir=run_dir)
     requested_run = bool(str(run_id or "").strip() or str(run_dir or "").strip())
+    if selected_run is not None:
+        _validate_directory_path(selected_run, root=root)
 
     files: list[Path]
     if log_file:
-        files = [_resolve_path(log_file, base=base)]
+        explicit_file = _absolute_unresolved(log_file, base=base)
+        files = [explicit_file]
     elif kind == "service":
         files = _service_log_files(service_logs_root)
     else:
@@ -52,7 +62,13 @@ def collect_runtime_logs(
             selected_run = _latest_run_dir(root)
         files = _run_log_files(selected_run, kind=kind) if selected_run is not None else []
 
-    entries = [_log_entry(path, base=base, lines=line_count) for path in files]
+    allowed_roots = [root, service_logs_root]
+    if log_file and allow_explicit_file_outside_roots:
+        allowed_roots.append(files[0].parent)
+    entries = [
+        _log_entry(path, base=base, lines=line_count, allowed_roots=tuple(allowed_roots))
+        for path in files
+    ]
     ok = (not requested_run or (selected_run is not None and selected_run.exists())) and not (
         log_file and not entries[0].get("exists")
     )
@@ -67,6 +83,7 @@ def collect_runtime_logs(
             "ok": ok,
             "kind": kind,
             "lines": line_count,
+            "lines_capped": requested_line_count > line_count,
             "requested_run": requested_run,
             "requested_run_found": None if not requested_run else bool(selected_run is not None and selected_run.exists()),
             "file_count": len(entries),
@@ -141,7 +158,7 @@ def _load_profile(profile_path: str | Path | None, *, base: Path) -> dict[str, A
 def _latest_run_dir(root: Path) -> Path | None:
     if not root.exists() or not root.is_dir():
         return None
-    dirs = [item for item in root.iterdir() if item.is_dir()]
+    dirs = [item for item in root.iterdir() if item.is_dir() and not item.is_symlink()]
     if not dirs:
         return None
     return max(dirs, key=lambda item: (item.stat().st_mtime, item.name))
@@ -158,28 +175,44 @@ def _service_log_files(logs_root: Path) -> list[Path]:
     if not logs_root.exists() or not logs_root.is_dir():
         return []
     return sorted(
-        [item for item in logs_root.iterdir() if item.is_file() and item.suffix == ".log"],
+        [
+            item
+            for item in logs_root.iterdir()
+            if item.is_file() and not item.is_symlink() and item.suffix.lower() == ".log"
+        ],
         key=lambda item: (item.stat().st_mtime, item.name),
         reverse=True,
     )
 
 
-def _log_entry(path: Path, *, base: Path, lines: int) -> dict[str, Any]:
-    exists = path.exists() and path.is_file()
+def _log_entry(
+    path: Path,
+    *,
+    base: Path,
+    lines: int,
+    allowed_roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    safe_path = _validate_log_path(path, allowed_roots=allowed_roots)
+    exists = safe_path.exists() and safe_path.is_file()
+    size_bytes = safe_path.stat().st_size if exists else None
+    if size_bytes is not None and size_bytes > MAX_LOG_FILE_BYTES:
+        raise AgentToolError(code="POLICY_ERROR", message="log file exceeds the safe size limit")
     entry: dict[str, Any] = {
-        "path": str(path),
-        "path_display": _display_path(path, base=base),
+        "path": str(safe_path),
+        "path_display": _display_path(safe_path, base=base),
         "exists": exists,
-        "size_bytes": path.stat().st_size if exists else None,
+        "size_bytes": size_bytes,
         "tail_line_count": 0,
         "tail": [],
+        "tail_truncated": bool(size_bytes is not None and size_bytes > MAX_LOG_TAIL_BYTES),
     }
     if not exists:
         return entry
     try:
-        tail = _tail_lines(path, lines=lines)
-    except OSError as exc:
-        entry["error"] = f"{type(exc).__name__}: {exc}"
+        tail = _tail_lines(safe_path, lines=lines)
+    except OSError:
+        entry["error"] = "log file could not be read"
+        entry["error_code"] = "LOG_READ_FAILED"
         return entry
     entry["tail"] = tail
     entry["tail_line_count"] = len(tail)
@@ -189,8 +222,95 @@ def _log_entry(path: Path, *, base: Path, lines: int) -> dict[str, Any]:
 def _tail_lines(path: Path, *, lines: int) -> list[str]:
     if lines <= 0:
         return []
-    text = path.read_text(encoding="utf-8", errors="replace")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise AgentToolError(code="POLICY_ERROR", message="log target must be a regular file")
+        if info.st_size > MAX_LOG_FILE_BYTES:
+            raise AgentToolError(code="POLICY_ERROR", message="log file exceeds the safe size limit")
+        read_size = min(info.st_size, MAX_LOG_TAIL_BYTES)
+        os.lseek(fd, max(info.st_size - read_size, 0), os.SEEK_SET)
+        raw = os.read(fd, read_size)
+    finally:
+        os.close(fd)
+    text = raw.decode("utf-8", errors="replace")
     return text.splitlines()[-lines:]
+
+
+def _select_run_dir(
+    *,
+    root: Path,
+    base: Path,
+    run_id: str | None,
+    run_dir: str | Path | None,
+) -> Path | None:
+    raw_run_dir = str(run_dir or "").strip()
+    if raw_run_dir:
+        return _absolute_unresolved(raw_run_dir, base=base)
+    raw_run_id = str(run_id or "").strip()
+    if not raw_run_id:
+        return None
+    candidate = Path(raw_run_id)
+    if candidate.is_absolute() or candidate.name != raw_run_id or raw_run_id in {".", ".."}:
+        return None
+    return root / raw_run_id
+
+
+def _absolute_unresolved(value: str | Path, *, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return Path(os.path.abspath(path))
+
+
+def _validate_directory_path(path: Path, *, root: Path) -> Path:
+    return _validate_containment(path, allowed_roots=(root,), expected_file=False)
+
+
+def _validate_log_path(path: Path, *, allowed_roots: tuple[Path, ...]) -> Path:
+    if path.suffix.lower() not in ALLOWED_LOG_SUFFIXES:
+        raise AgentToolError(code="POLICY_ERROR", message="unsupported log file type")
+    return _validate_containment(path, allowed_roots=allowed_roots, expected_file=True)
+
+
+def _validate_containment(
+    path: Path,
+    *,
+    allowed_roots: tuple[Path, ...],
+    expected_file: bool,
+) -> Path:
+    candidate = _absolute_unresolved(path, base=Path.cwd())
+    for raw_root in allowed_roots:
+        root = raw_root.resolve()
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise AgentToolError(code="POLICY_ERROR", message="runtime log symlinks are not allowed")
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise AgentToolError(
+                code="POLICY_ERROR",
+                message="log file must remain within configured runtime log roots",
+            ) from exc
+        if resolved.exists():
+            if expected_file and not resolved.is_file():
+                raise AgentToolError(code="POLICY_ERROR", message="log target must be a regular file")
+            if not expected_file and not resolved.is_dir():
+                raise AgentToolError(code="POLICY_ERROR", message="run target must be a directory")
+        return resolved
+    raise AgentToolError(
+        code="POLICY_ERROR",
+        message="log file must be contained within configured runtime log roots",
+    )
 
 
 def _run_payload(run_dir: Path | None, *, base: Path) -> dict[str, Any] | None:

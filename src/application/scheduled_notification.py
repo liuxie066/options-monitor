@@ -20,6 +20,7 @@ from src.application.notification_delivery_adapter import (
     build_notification_idempotency_key,
     build_notification_transport_key,
     normalize_notification_delivery_result,
+    notification_target_reference,
 )
 from src.application.notification_shells import render_system_notice
 
@@ -370,13 +371,14 @@ def send_account_message_with_retry(
             "idempotency_key": idempotency_key,
             "transport_envelope": bool(transport_envelope),
         }
+        audit_target = notification_target_reference(target)
         audit_fn(
             "notify",
             "send_start",
             run_id=run_id,
             account=account,
             status="start",
-            target=str(target),
+            target=audit_target,
             extra=dict(start_record),
         )
 
@@ -417,8 +419,8 @@ def send_account_message_with_retry(
                 "upstream_message_id": upstream_message_id,
                 "command_ok": bool(send_tool_dto.get("command_ok")),
                 "delivery_confirmed": bool(ok),
-                "stdout_tail": send_tool_dto.get("stdout_tail"),
-                "stderr_tail": send_tool_dto.get("stderr_tail"),
+                "stdout_tail": "",
+                "stderr_tail": "",
                 "error_code": error_code,
                 "provider_response_code": provider_response_code,
                 "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
@@ -447,8 +449,8 @@ def send_account_message_with_retry(
                 "upstream_message_id": None,
                 "command_ok": False,
                 "delivery_confirmed": False,
-                "stdout_tail": _tail_text(getattr(exc, "stdout", None) or getattr(exc, "output", None)),
-                "stderr_tail": _tail_text(getattr(exc, "stderr", None)),
+                "stdout_tail": "",
+                "stderr_tail": "",
                 "error_code": error_code,
                 "provider_response_code": None,
                 "timeout_sec": getattr(exc, "timeout", None),
@@ -468,7 +470,7 @@ def send_account_message_with_retry(
                 "command_ok": False,
                 "delivery_confirmed": False,
                 "stdout_tail": "",
-                "stderr_tail": _tail_text(f"{type(exc).__name__}: {exc}"),
+                "stderr_tail": type(exc).__name__,
                 "error_code": error_code,
                 "provider_response_code": None,
                 "exception_type": type(exc).__name__,
@@ -503,7 +505,7 @@ def send_account_message_with_retry(
             run_id=run_id,
             account=account,
             status=("ok" if ok else ("unconfirmed" if error_code == "SEND_UNCONFIRMED" else "error")),
-            target=str(target),
+            target=audit_target,
             message_id=record.get("message_id"),
             confirmed=bool(record.get("delivery_confirmed")),
             error_code=error_code,

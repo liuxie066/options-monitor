@@ -8,8 +8,9 @@ from src.infrastructure.deepseek_responses import (
     create_deepseek_response,
     extract_output_text,
     extract_usage,
-    extract_web_search_calls,
+    response_fingerprint,
     resolve_deepseek_responses_url,
+    summarize_web_search_calls,
 )
 
 
@@ -90,18 +91,25 @@ def test_extract_output_text_and_usage() -> None:
                 ],
             },
         ],
-        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "provider_debug": "must-not-escape",
+        },
     }
     assert extract_output_text(response) == "{\"a\":1}"
     assert extract_usage(response) == {"input_tokens": 10, "output_tokens": 5}
-    calls = extract_web_search_calls(response)
-    assert calls == [{"type": "web_search_call", "id": "ws_1", "status": "completed"}]
+    assert summarize_web_search_calls(response) == {
+        "count": 1,
+        "status_counts": {"completed": 1},
+    }
+    assert len(response_fingerprint(response)) == 64
 
 
 def test_extract_helpers_tolerate_missing_fields() -> None:
     assert extract_output_text({}) == ""
     assert extract_usage({}) == {}
-    assert extract_web_search_calls({}) == []
+    assert summarize_web_search_calls({}) == {"count": 0, "status_counts": {}}
 
 
 def test_create_response_requires_key_and_model() -> None:
@@ -112,6 +120,7 @@ def test_create_response_requires_key_and_model() -> None:
 
 
 def test_error_type_is_distinct() -> None:
-    err = DeepSeekResponsesError("boom", http_status=500, response={"error": {"message": "boom"}})
+    err = DeepSeekResponsesError("boom", http_status=500, response_sha256="a" * 64)
     assert str(err) == "boom"
     assert err.http_status == 500
+    assert err.response_sha256 == "a" * 64

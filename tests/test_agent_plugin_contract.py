@@ -99,7 +99,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
-    assert operation_timeline["safe_default_input"] == {"limit": 10}
+    assert operation_timeline["safe_default_input"] == {}
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
@@ -419,7 +419,7 @@ def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) 
 
     logs = run_tool("runtime_logs", {"runs_root": str(runs_root), "kind": "all", "lines": 1})
     assert logs["ok"] is True
-    assert logs["data"]["schema_version"] == "runtime_logs.v1"
+    assert logs["data"]["schema_version"] == "runtime_logs-public.v2"
     assert logs["data"]["summary"]["lines"] == 1
 
 

@@ -77,6 +77,8 @@ assistant:
       timeout_seconds: 90
       max_output_tokens: 2048
 
+# Explicit opt-in: when true, the minimized data contract documented in
+# docs/AI_DECISION_ADVICE_DESIGN.md section 18 is sent to DeepSeek.
 ai_decision_advice:
   enabled: false
 

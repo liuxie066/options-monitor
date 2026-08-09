@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,10 @@ def test_wechat_clawbot_qrcode_writes_pending_login(tmp_path: Path) -> None:
     assert pending["qrcode"] == "qr_1"
     assert pending["qrcode_artifact_path"].endswith("login_qrcode.html")
     assert pending["qrcode_artifact_open_command"].endswith("login_qrcode.html'")
+    assert "response_json" not in pending
+    assert stat.S_IMODE((tmp_path / "wechat-state").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "wechat-state" / "pending_login.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "wechat-state" / "login_qrcode.html").stat().st_mode) == 0o600
 
 
 def test_wechat_clawbot_state_store_lists_safe_bindings(tmp_path: Path) -> None:
@@ -104,9 +109,14 @@ def test_wechat_clawbot_qr_status_persists_bot_token(tmp_path: Path) -> None:
 
     assert out["ok"] is True
     assert out["data"]["bound"] is True
+    assert out["meta"] == {"token_present": True}
+    assert "bot_1" not in json.dumps(out, ensure_ascii=False)
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["bot_token"] == "bot_1"
     assert state["get_updates_buf"] == "buf_1"
+    assert "login_response_json" not in state
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((state_dir / "state.json").stat().st_mode) == 0o600
 
 
 def test_wechat_clawbot_bind_persists_context_token(tmp_path: Path) -> None:
@@ -508,8 +518,7 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert replies[0]["context_token"] == "ctx_1"
     assert replies[0]["group_id"] == "group_1"
     assert str(replies[0]["text"]).strip()
-    inbound_result = out["data"]["results"][0]["inbound"]["data"]["inbound_result"]
-    assert inbound_result["meta"]["assistant"]["turn_result"]["response_text"] == replies[0]["text"]
+    assert out["data"]["results"][0]["inbound"]["ok"] is True
     assert typing_calls == [
         {"method": "get_config", "ilink_user_id": "user_1", "context_token": "ctx_1"},
         {"method": "send_typing", "ilink_user_id": "user_1", "typing_ticket": "typing_ticket_1", "status": 1},
@@ -520,7 +529,11 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert out["data"]["results"][0]["typing"]["stop"]["reason"] == "typing_cancelled"
     assert "typing_ticket" not in out["data"]["results"][0]["typing"]
     assert out["data"]["results"][0]["binding_refresh"]["reason"] == "refreshed_from_reply"
-    assert out["data"]["results"][0]["binding_refresh"]["updated_bindings"] == ["ops"]
+    public_serialized = json.dumps(out, ensure_ascii=False)
+    assert "user_1" not in public_serialized
+    assert "ctx_1" not in public_serialized
+    assert "msg_1" not in public_serialized
+    assert "typing_ticket_1" not in public_serialized
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["get_updates_buf"] == "buf_2"
     bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
@@ -542,12 +555,13 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert receipt["ok"] is True
     assert receipt["reason"] == "sent"
     assert receipt["provider"] == "wechat_clawbot"
-    assert receipt["sender_id"] == "user_1"
-    assert receipt["inbound_message_id"] == "msg_1"
     assert receipt["message_id"] == "reply_1"
     assert receipt["outbound_message_id"] == "reply_1"
     assert receipt["delivery_confirmed"] is True
-    assert receipt["api_response"] == {"ret": 0, "data": {"message_id": "reply_1"}}
+    assert receipt["provider_response_code"] == 0
+    assert "sender_id" not in receipt
+    assert "inbound_message_id" not in receipt
+    assert "api_response" not in receipt
 
 
 def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) -> None:
@@ -655,9 +669,10 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert receipt["ok"] is False
     assert receipt["reason"] == "reply_failed"
     assert receipt["provider"] == "wechat_clawbot"
-    assert receipt["inbound_message_id"] == "msg_1"
     assert "delivery_confirmed" not in receipt
-    assert receipt["api_response"] == {"ret": 91, "errmsg": "context expired"}
+    assert receipt["provider_response_code"] == 91
+    assert "inbound_message_id" not in receipt
+    assert "api_response" not in receipt
 
 
 def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> None:
@@ -792,7 +807,7 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
     receipt = stored["data"]["reply"]
     assert receipt["attempted"] is True
     assert receipt["ok"] is True
-    assert receipt["api_response"] == {}
+    assert "api_response" not in receipt
     assert "delivery_confirmed" not in receipt
 
 
@@ -819,7 +834,7 @@ def test_wechat_clawbot_poll_once_keepalives_bound_context_without_messages(tmp_
 
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
-            return {"ret": 0, "get_updates_buf": "buf_2", "msgs": []}
+            return {"ret": 0, "get_updates_buf": "buf_2", "msgs": [], "private": "provider-secret"}
 
         def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
             get_config_calls.append(dict(kwargs))
@@ -837,6 +852,8 @@ def test_wechat_clawbot_poll_once_keepalives_bound_context_without_messages(tmp_
     assert out["data"]["processed_count"] == 0
     assert out["data"]["keepalive"]["reason"] == "ok"
     assert out["data"]["keepalive"]["binding_count"] == 1
+    assert out["meta"] == {"provider_response_code": 0}
+    assert "provider-secret" not in json.dumps(out, ensure_ascii=False)
     assert get_config_calls == [{"ilink_user_id": "user_1", "context_token": "ctx_1"}]
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["get_updates_buf"] == "buf_2"

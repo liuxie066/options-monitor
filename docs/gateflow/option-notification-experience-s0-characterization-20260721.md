@@ -10,7 +10,7 @@
 ## Decisions and evidence
 
 1. 当前 systemd HK/US timer 均为市场当地时间工作日 `09..16:00/10:00`，保留 10 分钟唤醒可行。
-2. 当前 runtime `OM_RUNTIME_ROOT=/var/lib/options-monitor`，生产代码为 `/home/liuxie/apps/releases/1.4.0`。
+2. 当前 runtime `OM_RUNTIME_ROOT=/var/lib/options-monitor`，生产代码为 `/home/om/apps/releases/1.4.0`。
 3. 远端 87 个有 pipeline metrics 的 run、172 个账户样本：
    - min 2.174s；median 3.337s；P95 5.761s；P99 14.784s；max 32.090s；
    - 两账户并发，最近正常 HK 批次约 3.4–4.0s 完成；

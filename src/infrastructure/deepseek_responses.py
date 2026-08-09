@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import socket
 import urllib.error
 import urllib.request
@@ -18,7 +19,7 @@ HttpPostJsonFn = Callable[..., dict[str, Any]]
 class DeepSeekResponsesError(Exception):
     message: str
     http_status: int | None = None
-    response: dict[str, Any] | None = None
+    response_sha256: str | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -39,8 +40,9 @@ def create_deepseek_response(
 ) -> dict[str, Any]:
     """Call the DeepSeek Responses API with optional native web_search.
 
-    Returns the raw response payload. Callers use ``extract_output_text`` and
-    ``extract_usage``; raw payloads are persisted by the owning audit layer.
+    Returns the response payload to the immediate caller. Callers must extract
+    only the validated output and the minimized audit fields below; provider
+    response bodies are never an audit or persistence contract.
     """
 
     api_key_value = str(api_key or "").strip()
@@ -103,18 +105,47 @@ def extract_output_text(response: dict[str, Any]) -> str:
 
 
 def extract_usage(response: dict[str, Any]) -> dict[str, Any]:
+    """Return an allowlisted, numeric-only usage summary."""
+
     usage = response.get("usage")
-    return dict(usage) if isinstance(usage, dict) else {}
+    if not isinstance(usage, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[key] = value
+    return result
 
 
-def extract_web_search_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return native web_search_call audit records, if present."""
+def response_fingerprint(response: dict[str, Any]) -> str:
+    """Fingerprint a provider response without retaining its contents."""
 
-    calls: list[dict[str, Any]] = []
+    encoded = json.dumps(
+        response,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def summarize_web_search_calls(response: dict[str, Any]) -> dict[str, Any]:
+    """Return aggregate web-search telemetry without provider IDs or queries."""
+
+    count = 0
+    status_counts: dict[str, int] = {}
     for item in response.get("output") or []:
         if isinstance(item, dict) and item.get("type") == "web_search_call":
-            calls.append(dict(item))
-    return calls
+            count += 1
+            raw_status = str(item.get("status") or "").strip().lower()
+            status = raw_status if raw_status in {"completed", "failed", "in_progress"} else "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "count": count,
+        "status_counts": dict(sorted(status_counts.items())),
+    }
 
 
 def _post_json(
@@ -139,7 +170,7 @@ def _post_json(
                 raise DeepSeekResponsesError(
                     "invalid DeepSeek JSON response",
                     http_status=getattr(resp, "status", None),
-                    response={"body": body_text},
+                    response_sha256=hashlib.sha256(body_text.encode("utf-8")).hexdigest(),
                 )
             return parsed
     except urllib.error.HTTPError as exc:
@@ -148,15 +179,15 @@ def _post_json(
             body_text = _decode_body(exc.read())
         except Exception:
             body_text = ""
-        parsed = _try_parse_json(body_text)
-        response = parsed if isinstance(parsed, dict) else {"body": body_text}
-        message = _error_message(response) or f"DeepSeek API HTTP error {getattr(exc, 'code', None)}"
-        raise DeepSeekResponsesError(message, http_status=getattr(exc, "code", None), response=response) from exc
+        raise DeepSeekResponsesError(
+            f"DeepSeek API HTTP error {getattr(exc, 'code', None)}",
+            http_status=getattr(exc, "code", None),
+            response_sha256=hashlib.sha256(body_text.encode("utf-8")).hexdigest(),
+        ) from exc
     except (urllib.error.URLError, socket.timeout) as exc:
         raise DeepSeekResponsesError(
-            f"DeepSeek API network error: {type(exc).__name__}: {exc}",
+            f"DeepSeek API network error: {type(exc).__name__}",
             http_status=None,
-            response={"error_type": type(exc).__name__, "error": str(exc)},
         ) from exc
 
 
@@ -169,12 +200,3 @@ def _try_parse_json(text: str) -> Any:
         return json.loads(text)
     except Exception:
         return None
-
-
-def _error_message(response: dict[str, Any]) -> str | None:
-    error = response.get("error")
-    if isinstance(error, dict):
-        message = error.get("message")
-        if message:
-            return str(message)
-    return None

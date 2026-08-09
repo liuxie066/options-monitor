@@ -1948,12 +1948,12 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
 def _tcom_portfolio_context(account: str) -> dict[str, object]:
     if account == "lx":
         return {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+            "cash_by_currency": {"CNY": 520000.0, "HKD": 18000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 120000.0, "USD": 500.0}},
         }
     return {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+        "cash_by_currency": {"CNY": 910000.0},
+        "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 260000.0, "USD": 1000.0}},
     }
 
 

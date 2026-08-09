@@ -40,6 +40,9 @@ def run_channel_request(
             config_key=config_key,
             request_id=request_id,
             context_messages=(),
+            channel=channel,
+            sender_id=sender_id,
+            conversation_id=conversation_id,
         )
         return _request_not_ready(
             request,
@@ -55,6 +58,9 @@ def run_channel_request(
                 config_key=config_key,
                 request_id=request_id,
                 context_messages=(),
+                channel=channel,
+                sender_id=sender_id,
+                conversation_id=conversation_id,
             )
             return _request_not_ready(
                 request,
@@ -69,6 +75,9 @@ def run_channel_request(
                 session_messages(session_key, host_store=host_store),
                 control_context=control_context,
             ),
+            channel=channel,
+            sender_id=sender_id,
+            conversation_id=conversation_id,
         )
         try:
             prepared = prepare_contract(request, reference_year=year)
@@ -197,7 +206,13 @@ def _channel_request(
     config_key: str | None,
     request_id: str | None,
     context_messages: tuple[dict[str, str], ...],
+    channel: str | None,
+    sender_id: str | None,
+    conversation_id: str | None,
 ) -> CopilotRequest:
+    normalized_channel = str(channel or "").strip().lower()
+    normalized_sender = str(sender_id or "").strip()
+    normalized_conversation = str(conversation_id or "").strip()
     return CopilotRequest(
         request_id=request_id or new_id("req"),
         source_entry="channel",
@@ -205,6 +220,11 @@ def _channel_request(
         explicit_scope=CopilotScope(config_key=config_key),
         context_messages=tuple(dict(item) for item in context_messages),
         execution_environment="channel",
+        trusted_tool_scope={
+            "authenticated_channel": normalized_channel,
+            "authenticated_sender_id": normalized_sender,
+            "authenticated_conversation_id": normalized_conversation,
+        },
     )
 
 

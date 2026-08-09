@@ -82,7 +82,7 @@ The wording explicitly states:
 ## Validation
 
 ```text
-/Volumes/liuxie的硬盘/workspace/options-monitor/.venv/bin/ruff check \
+/Volumes/Workspace/workspace/options-monitor/.venv/bin/ruff check \
   domain/domain/performance/engine.py \
   src/application/agent_tools/positions.py \
   src/application/assistant/renderer.py \

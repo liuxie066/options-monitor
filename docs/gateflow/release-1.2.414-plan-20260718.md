@@ -20,7 +20,7 @@ Direct facts:
 
 - `origin/main@64d30729` contains merged PR #84 (release preflight acceleration) and PR #80 (cross-expiry attribution fail-closed fixes).
 - Top-level `VERSION` remains `1.2.413`; GitHub latest release is `v1.2.413`, so the merged fixes are not consumable by the release-only remote upgrader.
-- Remote `/home/liuxie/apps/options-monitor` is a symlink to release `1.2.413`.
+- Remote `/home/om/apps/options-monitor` is a symlink to release `1.2.413`.
 - Remote runtime root is `/var/lib/options-monitor`; `service.profile.json` records YAML-authoring US/HK configs and the five long-running services that require restart reconciliation.
 - Pre-upgrade `om update verify --no-check-latest` is green: config identity/freshness and all monitored services pass.
 
@@ -31,7 +31,7 @@ Direct facts:
 3. Full release preflight, dependency graph, Ruff, focused attribution/release tests, and complete pytest pass on Python 3.12.
 4. Release PR is reviewed, CI-green, merged, and the VERSION-driven workflow publishes tag/release `v1.2.414` from the release merge commit.
 5. Remote `update check` observes `v1.2.414`; dry-run `update apply` targets `1.2.414` without error.
-6. Confirmed remote upgrade succeeds, switches `/home/liuxie/apps/options-monitor` to `releases/1.2.414`, rebuilds/validates US/HK runtime configs, and reconciles configured services.
+6. Confirmed remote upgrade succeeds, switches `/home/om/apps/options-monitor` to `releases/1.2.414`, rebuilds/validates US/HK runtime configs, and reconciles configured services.
 7. Post-upgrade `update verify --no-check-latest` is green; remote VERSION and generated config versions are `1.2.414`; no service health check fails.
 
 ## Scope and Non-goals
@@ -45,7 +45,7 @@ Allowed release files:
 
 Allowed remote mutation after release publication:
 
-- guarded `om update apply --confirm` against `/home/liuxie/apps/options-monitor` and `/var/lib/options-monitor`;
+- guarded `om update apply --confirm` against `/home/om/apps/options-monitor` and `/var/lib/options-monitor`;
 - upgrade-owned materialization, runtime-config rebuild, symlink switch, and service restart/reconciliation.
 
 Non-goals:

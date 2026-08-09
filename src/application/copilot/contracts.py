@@ -62,6 +62,7 @@ class CopilotRequest:
     context_messages: tuple[dict[str, Any], ...] = ()
     execution_environment: str = "local"
     debug_overrides: dict[str, Any] = field(default_factory=dict)
+    trusted_tool_scope: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

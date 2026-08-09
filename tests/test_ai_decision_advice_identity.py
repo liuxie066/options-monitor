@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
+
+import pytest
 
 from src.application.ai_decision_advice.identity import (
     PRIORITY_OPEN_OPTION,
@@ -136,6 +139,8 @@ def test_publish_and_load_roundtrip(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded["content_sha256"] == payload["content_sha256"]
     assert identity_by_symbol(loaded)["NVDA"]["name"] == "NVIDIA"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_publish_rewrites_same_content_deterministically(tmp_path: Path) -> None:
@@ -158,8 +163,21 @@ def test_load_missing_or_invalid_returns_none(tmp_path: Path) -> None:
     path.mkdir(parents=True)
     (path / "symbol_identity_snapshot.json").write_text("not json", encoding="utf-8")
     assert load_symbol_identity_snapshot(tmp_path) is None
-    (path / "symbol_identity_snapshot.json").write_text(json.dumps({"schema_version": "other"}), encoding="utf-8")
+    (path / "symbol_identity_snapshot.json").write_text(
+        json.dumps({"schema_version": "other"}), encoding="utf-8"
+    )
     assert load_symbol_identity_snapshot(tmp_path) is None
+
+
+def test_publish_rejects_symlinked_identity_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "output_shared" / "state" / "ai_decision_advice"
+    path.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    (path / "symbol_identity_snapshot.json").symlink_to(outside)
+
+    with pytest.raises(OSError, match="symlink"):
+        publish_symbol_identity_snapshot(base=tmp_path, payload={"schema_version": "x"})
 
 
 def test_refresh_queue_priority_and_starvation_order() -> None:

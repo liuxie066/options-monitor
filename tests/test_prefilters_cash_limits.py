@@ -41,12 +41,12 @@ def test_apply_prefilters_keeps_sell_call_with_futu_portfolio_stock() -> None:
     "portfolio_ctx",
     [
         {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+            "cash_by_currency": {"CNY": 520000.0, "HKD": 18000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 120000.0, "USD": 500.0}},
         },
         {
-REDACTED_PRODUCTION_DATA
-REDACTED_PRODUCTION_DATA
+            "cash_by_currency": {"CNY": 910000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 260000.0, "USD": 1000.0}},
         },
         {"cash_by_currency": {"USD": 0.0}},
         None,

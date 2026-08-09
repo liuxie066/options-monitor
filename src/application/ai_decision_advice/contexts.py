@@ -195,7 +195,23 @@ def freeze_external_evidence(
             fingerprint = str(row.get("content_fingerprint") or "") or content_fingerprint(
                 row.get("url"), row.get("claim")
             )
-            evidence_rows.append({**row, "ref": str(row.get("ref") or "") or f"ev-{fingerprint[:12]}"})
+            source = row.get("source")
+            source_row = source if isinstance(source, Mapping) else {}
+            evidence_rows.append(
+                {
+                    "ref": str(row.get("ref") or "") or f"ev-{fingerprint[:12]}",
+                    "topic": row.get("topic"),
+                    "claim": row.get("claim"),
+                    "event_status": row.get("event_status"),
+                    "event_time": row.get("event_time"),
+                    "source": {
+                        "title": source_row.get("title"),
+                        "publisher": source_row.get("publisher"),
+                        "url": source_row.get("url") or row.get("url"),
+                        "published_at": source_row.get("published_at"),
+                    },
+                }
+            )
         items.append(
             {
                 "symbol": symbol,

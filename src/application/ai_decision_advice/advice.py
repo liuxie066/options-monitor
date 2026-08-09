@@ -16,7 +16,11 @@ from src.application.ai_decision_advice.advice_store import (
     find_reusable_completed,
     prompt_fingerprint_for,
 )
-from src.application.ai_decision_advice.collector import ModelCallResult
+from src.application.ai_decision_advice.collector import (
+    ModelCallResult,
+    minimized_usage,
+    model_response_audit,
+)
 from src.application.ai_decision_advice.config import (
     ADVICE_ACCOUNT_BUDGET_SECONDS,
     MODEL,
@@ -320,8 +324,8 @@ def run_decision_advice(
     model_input = build_advice_model_input(
         frozen, run_id=run_id, account_ref=account_ref, market=market
     )
-    raw_response: dict[str, Any] | None = None
-    usage: dict[str, Any] = {}
+    response_audit: dict[str, Any] = {}
+    usage: dict[str, int] = {}
     repair_attempted = False
     failure_reason: str | None = None
     validated = None
@@ -340,8 +344,8 @@ def run_decision_advice(
         except Exception as exc:  # provider/network failure -> unavailable
             failure_reason = f"provider_error:{type(exc).__name__}"
             break
-        raw_response = call.raw_response
-        usage = dict(call.usage or {})
+        response_audit = model_response_audit(call)
+        usage = minimized_usage(call.usage)
         try:
             parsed = json.loads(call.output_text or "null")
             candidate_result = validate_advice_payload(
@@ -380,7 +384,7 @@ def run_decision_advice(
             "decisions": {},
             "demotions": [],
             "repair_attempted": repair_attempted,
-            "raw_response": raw_response,
+            "model_response_audit": response_audit,
             "usage": usage,
         }
         persist(record)
@@ -394,7 +398,7 @@ def run_decision_advice(
         "decisions": validated.decisions,
         "demotions": validated.demotions,
         "repair_attempted": repair_attempted,
-        "raw_response": raw_response,
+        "model_response_audit": response_audit,
         "usage": usage,
     }
     persist(record)

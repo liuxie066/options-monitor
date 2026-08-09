@@ -350,7 +350,7 @@ def test_failed_read_only_run_resumes_with_recovered_observation(monkeypatch, tm
         for item in store.run_events(resumed.run_id)
         if item["type"] == "scene_prepared"
     )
-    assert resumed_scene["scene_version"] == "v3"
+    assert resumed_scene["scene_version"] == "v4"
     assert resumed_scene["compiled_prompt_sha256"] == failed_scene["compiled_prompt_sha256"]
     assert resumed_scene["tool_schema_sha256"] == failed_scene["tool_schema_sha256"]
 
@@ -514,7 +514,7 @@ def test_reply_outbox_is_idempotent_retryable_and_deliverable(tmp_path) -> None:
         channel="wechat",
         session_key="wechat:chat",
         run_id="run_1",
-        payload={"text": "结论"},
+        payload={"text": "结论", "context_token": "reusable-private-capability"},
     )
     second = store.enqueue_reply(
         delivery_key="wechat:command-1",
@@ -535,7 +535,28 @@ def test_reply_outbox_is_idempotent_retryable_and_deliverable(tmp_path) -> None:
     assert store.claim_reply(delivery_key="wechat:command-1", before="9999-01-01T00:00:00+00:00")
     assert store.mark_reply_delivered("wechat:command-1")
     assert store.claim_reply(delivery_key="wechat:command-1", before="9999-01-01T00:00:00+00:00") is None
-    assert store.list_replies()[0]["status"] == "delivered"
+    delivered = store.list_replies()[0]
+    assert delivered["status"] == "delivered"
+    assert delivered["payload_json"] == "{}"
+    assert "reusable-private-capability" not in str(delivered)
+
+
+def test_reply_outbox_scrubs_capability_after_terminal_failure(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    store.enqueue_reply(
+        delivery_key="wechat:terminal",
+        channel="wechat",
+        payload={"text": "结论", "context_token": "terminal-private-capability"},
+    )
+    assert store.claim_reply(delivery_key="wechat:terminal") is not None
+    assert store.mark_reply_failed("wechat:terminal", error="provider reflected a secret", retryable=False)
+
+    terminal = store.list_replies()[0]
+    assert terminal["status"] == "terminal_failed"
+    assert terminal["payload_json"] == "{}"
+    assert terminal["last_error"] == "terminal_delivery_error"
+    assert "terminal-private-capability" not in str(terminal)
+    assert "provider reflected a secret" not in str(terminal)
 
 
 def test_reply_outbox_recovers_expired_delivery_claim(tmp_path) -> None:

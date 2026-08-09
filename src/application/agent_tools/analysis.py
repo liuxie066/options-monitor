@@ -2358,7 +2358,12 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
 
 
 def _run_id_from_runtime_summary(summary: dict[str, Any]) -> str | None:
-    for key in ("latest_run_path", "latest_scanned_run_path"):
+    for key in (
+        "latest_run_id",
+        "latest_scanned_run_id",
+        "latest_run_path",
+        "latest_scanned_run_path",
+    ):
         text = str(summary.get(key) or "").strip()
         if text:
             return Path(text).name

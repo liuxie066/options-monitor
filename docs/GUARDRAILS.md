@@ -12,6 +12,8 @@ bash scripts/setup_git_hooks.sh
 Enabled checks:
 
 - Reject commits if repo path/name matches `options-monitor-prod`
+- Scan staged index content for high-confidence credentials, private data fingerprints, known personal email addresses, personal paths, and tracked runtime configs; findings are redacted
+- Reject a repository-effective Git author email already classified as private; use a GitHub `noreply` identity for public commits
 - Require the first commit-message line to match `<type>(<scope>): <subject>`
 - No trailer or co-author line is required by the hooks
 
@@ -21,6 +23,7 @@ Workflow: `.github/workflows/guardrails.yml`
 
 - Docs wording check: forbid treating `config.json` / `config.scheduled` / `config.market_*` as OM runtime entry
 - Runtime config tracking check: forbid committing root runtime configs such as `config.us.json` / `config.hk.json`; commit only templates under `configs/examples/`
+- Sensitive artifact check: reject high-confidence provider credentials, private keys, credentialed URLs, known private runtime/financial/email fingerprints, and literal personal home or mounted-volume paths without printing the blocked value
 - Lint: run `python -m ruff check .`
 - Minimal regression: run `tests/run_smoke.py`
 

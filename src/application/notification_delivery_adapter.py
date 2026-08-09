@@ -62,6 +62,15 @@ def build_notification_transport_key(logical_key: str) -> str:
     return "om-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
+def notification_target_reference(target: Any) -> str | None:
+    """Return a stable audit-safe reference without retaining the recipient identifier."""
+
+    value = str(target or "").strip()
+    if not value:
+        return None
+    return "target:sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def resolve_feishu_bot_send_target(
     *,
     notifications: dict[str, Any] | None = None,
@@ -151,11 +160,11 @@ def send_feishu_app_message(
             "ok": True,
             "http_status": 200,
             "request_path": request_path,
-            "response_json": response_json,
-            "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
+            "feishu_code": response_json.get("code") if isinstance(response_json.get("code"), int) else None,
+            "message_id": _feishu_message_id(response_json),
             "idempotency_key": idempotency_key,
             "effective_idempotency_key": effective_idempotency_key,
-            "http_attempts": http_attempts,
+            "http_attempts": _safe_http_attempts(http_attempts),
             "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
             "fallback_used": fallback_used,
         }
@@ -174,12 +183,10 @@ def send_feishu_app_message(
         return {
             "ok": False,
             "http_status": response.get("http_status"),
-            "feishu_code": response.get("feishu_code"),
+            "feishu_code": _first_int(response.get("feishu_code"), (response_json or {}).get("code")),
+            "message_id": _feishu_message_id(response_json or {}),
             "request_path": request_path,
-            "response_json": response_json,
-            "response_tail": body_text[-500:],
             "error_type": type(exc).__name__,
-            "error_message": str(exc),
             "local_error_code": response.get("local_error_code"),
             "request_body_bytes": response.get("request_body_bytes"),
             "request_body_budget_bytes": response.get("request_body_budget_bytes"),
@@ -187,7 +194,9 @@ def send_feishu_app_message(
             "normalized_markdown_sha256": response.get("normalized_markdown_sha256"),
             "idempotency_key": idempotency_key,
             "effective_idempotency_key": effective_idempotency_key,
-            "http_attempts": response_http_attempts if isinstance(response_http_attempts, list) else http_attempts,
+            "http_attempts": _safe_http_attempts(
+                response_http_attempts if isinstance(response_http_attempts, list) else http_attempts
+            ),
             "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
             "fallback_used": fallback_used,
         }
@@ -201,6 +210,40 @@ def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
     return exc.code is not None or (
         isinstance(http_status, int) and 400 <= http_status <= 499
     )
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _feishu_message_id(response: dict[str, Any]) -> str | None:
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    value = data.get("message_id")
+    return str(value) if value else None
+
+
+def _safe_http_attempts(value: Any) -> list[dict[str, Any]]:
+    allowed = {
+        "level",
+        "category",
+        "http_status",
+        "feishu_code",
+        "attempt",
+        "max_attempts",
+        "url_path",
+        "sleep_s",
+        "message_id",
+    }
+    if not isinstance(value, list):
+        return []
+    return [
+        {key: item.get(key) for key in allowed if item.get(key) is not None}
+        for item in value
+        if isinstance(item, dict)
+    ]
 
 
 def _http_attempts_have_ambiguous_send(
@@ -219,18 +262,16 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     response_json: dict[str, Any] = raw_response_json if isinstance(raw_response_json, dict) else {}
     raw_data = response_json.get("data")
     data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
-    message_id = data.get("message_id")
+    message_id = result.get("message_id") or data.get("message_id")
     http_status = result.get("http_status")
     feishu_code = response_json.get("code") if isinstance(response_json.get("code"), int) else None
     if feishu_code is None and isinstance(result.get("feishu_code"), int):
         feishu_code = result.get("feishu_code")
-    feishu_msg = str(response_json.get("msg") or result.get("error_message") or "").strip()
     local_error_code = str(result.get("local_error_code") or "").strip() or None
     request_path = str(result.get("request_path") or "/open-apis/im/v1/messages?receive_id_type=open_id")
-    response_tail = str(result.get("response_tail") or "")
     idempotency_key = str(result.get("idempotency_key") or "").strip() or None
     effective_idempotency_key = str(result.get("effective_idempotency_key") or "").strip() or None
-    http_attempts = result.get("http_attempts") if isinstance(result.get("http_attempts"), list) else []
+    http_attempts = _safe_http_attempts(result.get("http_attempts"))
     retry_attempt_count = max(0, len(http_attempts) - 1)
     ambiguous_send = _http_attempts_have_ambiguous_send(http_attempts)
     fallback_used = bool(result.get("fallback_used"))
@@ -265,12 +306,9 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
         parts = [
             f"http_status={http_status}",
             f"feishu_code={feishu_code}",
-            f"feishu_msg={feishu_msg or ''}",
             f"message_id={message_id}",
             f"request_path={request_path}",
         ]
-        if response_tail:
-            parts.append(f"response_tail={response_tail}")
         message = " ".join(parts)
 
     local_diagnostics = {
@@ -288,7 +326,7 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
         adapter="notify",
         tool_name="feishu_app_message_send",
         returncode=(0 if command_ok else 1),
-        stdout=response_tail,
+        stdout="",
         stderr="",
         ok=ok,
         message=message,
@@ -300,9 +338,7 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "http_status": http_status,
             "feishu_code": feishu_code,
             "provider_response_code": feishu_code,
-            "feishu_msg": feishu_msg,
             "request_path": request_path,
-            "response_tail": response_tail,
             "idempotency_key": idempotency_key,
             "effective_idempotency_key": effective_idempotency_key,
             "http_attempts": http_attempts,
@@ -355,13 +391,15 @@ def send_feishu_app_message_process(
         transport_envelope=transport_envelope,
     )
     normalized = normalize_feishu_app_send_output(send_result=send_result)
-    stdout = ""
-    if isinstance(send_result, dict):
-        response_json = send_result.get("response_json")
-        if isinstance(response_json, dict) and response_json:
-            stdout = json.dumps(response_json, ensure_ascii=False)
-        elif send_result.get("response_tail"):
-            stdout = str(send_result.get("response_tail") or "")
+    stdout = json.dumps(
+        {
+            "ok": bool(normalized.get("ok")),
+            "http_status": normalized.get("http_status"),
+            "provider_response_code": normalized.get("provider_response_code"),
+            "message_id": normalized.get("message_id"),
+        },
+        ensure_ascii=False,
+    )
     stderr = "" if bool(normalized.get("command_ok")) else str(normalized.get("message") or "")
     return SimpleNamespace(returncode=int(normalized.get("returncode") or 0), stdout=stdout, stderr=stderr, raw=send_result)
 

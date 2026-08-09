@@ -161,20 +161,27 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert replies[0]["content"]["body"]["elements"][0]["content"].startswith("期权收益统计完成")
     assert out["data"]["reply"]["outbound_message_id"] == "reply_1"
     assert out["data"]["reply"]["render"]["mode"] == "card_markdown_v2"
+    public_serialized = json.dumps(out, ensure_ascii=False)
+    assert "ou_1" not in public_serialized
+    assert "msg_1" not in public_serialized
+    assert "evt_1" not in public_serialized
+    assert "secret_1" not in public_serialized
 
     with sqlite3.connect(tmp_path / "audit.sqlite3") as conn:
         response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
     stored = json.loads(response_json)
     reply_receipt = stored["data"]["reply"]
     assert reply_receipt["schema_version"] == "feishu-reply-receipt-v1"
-    assert reply_receipt["inbound_message_id"] == "msg_1"
     assert reply_receipt["message_id"] == "reply_1"
     assert reply_receipt["outbound_message_id"] == "reply_1"
     assert reply_receipt["delivery_confirmed"] is True
     assert reply_receipt["render"]["mode"] == "card_markdown_v2"
     assert reply_receipt["render"]["fallback_used"] is False
     assert "source_sha256" in reply_receipt["render"]
-    assert reply_receipt["api_response"]["data"]["message_id"] == "reply_1"
+    assert reply_receipt["provider_response_code"] == 0
+    assert "inbound_message_id" not in reply_receipt
+    assert "sender_id" not in reply_receipt
+    assert "api_response" not in reply_receipt
 
 
 def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) -> None:
@@ -271,16 +278,8 @@ def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: P
     assert out["data"]["reply"]["render"]["markdown_table_detected"] is True
     record = CopilotHostStore(database).list_replies()[0]
     assert record["status"] == "delivered"
-    stored = json.loads(record["payload_json"])
-    assert stored["schema_version"] == "feishu-conversation-reply.v1"
-    assert stored["transport"]["content"] == replies[0]["content"]
-    assert stored["text"] == (
-        "拆解如下：\n\n"
-        "项目：卖出开仓权利金收入\n"
-        "CNY：¥13,266.88\n"
-        "原币：HKD +10,449；USD +471"
-    )
-    assert stored["render_meta"]["source_sha256"] == out["data"]["reply"]["render"]["source_sha256"]
+    assert record["payload_json"] == "{}"
+    assert markdown not in str(record)
 
 
 def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Path) -> None:
@@ -525,12 +524,11 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
         execute_tool_fn=_execute,
     )
 
-    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    inbound_result = out["data"]["inbound"]
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_path": str(tmp_path / "config.us.json")})]
-    assert inbound_result["data"]["control"]["intent_name"] == "runtime_status"
-    assert inbound_result["meta"]["assistant"]["route"] == "deterministic_control"
-    assert "llm" not in inbound_result["meta"]["assistant"]
+    assert inbound_result["intent_name"] == "runtime_status"
+    assert inbound_result["route"] == "deterministic_control"
 
 
 def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: Any, tmp_path: Path) -> None:
@@ -580,15 +578,15 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
         execute_tool_fn=_execute,
     )
 
-    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    inbound_result = out["data"]["inbound"]
     assert out["ok"] is True
     assert calls == []
     assert copilot_calls[0]["user_message"] == "分析 lx 6月的净现金流明细"
     assert replies
     assert replies[0]["msg_type"] == "interactive"
     assert replies[0]["content"]["body"]["elements"][0]["content"].startswith("结论：")
-    assert inbound_result["data"]["decision"]["reason"] == "copilot_freeform"
-    assert inbound_result["meta"]["assistant"]["route"] == "copilot"
+    assert inbound_result["decision_reason"] == "copilot_freeform"
+    assert inbound_result["route"] == "copilot"
 
 
 def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
@@ -648,12 +646,12 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
         execute_tool_fn=_execute,
     )
 
-    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    inbound_result = out["data"]["inbound"]
     assert out["ok"] is True
     assert replies
     assert replies[0]["msg_type"] == "interactive"
     assert replies[0]["content"]["body"]["elements"][0]["content"] == "结论：系统运行正常。"
-    assert inbound_result["meta"]["assistant"]["route"] == "copilot"
+    assert inbound_result["route"] == "copilot"
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:

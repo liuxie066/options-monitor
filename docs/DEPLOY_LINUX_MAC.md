@@ -180,13 +180,13 @@ cd "$REPO"
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.service`：执行 `./om ai-evidence-collector --config-key <market>...`；
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 4 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=4h`，`Persistent=true`）。
 
-Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；运行前必须在 service env（如 `--env-file` 指定的文件）中提供 `DEEPSEEK_API_KEY`。未开启 `ai_decision_advice.enabled` 时不渲染这两个 unit，默认关闭。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
+Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；运行前必须在 service env（如 `--env-file` 指定的文件）中提供 `DEEPSEEK_API_KEY`。未开启 `ai_decision_advice.enabled` 时不渲染这两个 unit，默认关闭；显式开启代表同意按设计文档第 18 节的最小数据合同向 DeepSeek 传输数据。Provider 原始响应、搜索 query/call ID 不落盘。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
 User=liuxie
-Environment="HOME=/home/liuxie"
+Environment="HOME=/home/om"
 Environment="OM_RUNTIME_ROOT=/var/lib/options-monitor"
 ```
 
