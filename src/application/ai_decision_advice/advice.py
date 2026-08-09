@@ -156,6 +156,16 @@ class AdviceRunResult:
             "advice_record_id": self.advice_record_id,
         }
 
+    def to_evidence_index_view(self, frozen: FrozenInputs | None = None) -> dict[str, Any] | None:
+        """Frozen external evidence rows for receipt source rendering (15.4)."""
+
+        if frozen is None:
+            return None
+        return {
+            "frozen_at": frozen.external_evidence.get("frozen_at"),
+            "symbols": frozen.external_evidence.get("symbols"),
+        }
+
 
 def build_advice_model_input(
     frozen: FrozenInputs,

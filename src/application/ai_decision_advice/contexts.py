@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
-from src.application.ai_decision_advice.evidence_store import EvidenceIndex
+from src.application.ai_decision_advice.evidence_store import (
+    EvidenceIndex,
+    content_fingerprint,
+)
 
 
 @dataclass(frozen=True)
@@ -187,13 +190,19 @@ def freeze_external_evidence(
         if view is None:
             items.append({"symbol": symbol, "coverage": "no_evidence", "evidence": []})
             continue
+        evidence_rows = []
+        for row in view.evidence:
+            fingerprint = str(row.get("content_fingerprint") or "") or content_fingerprint(
+                row.get("url"), row.get("claim")
+            )
+            evidence_rows.append({**row, "ref": str(row.get("ref") or "") or f"ev-{fingerprint[:12]}"})
         items.append(
             {
                 "symbol": symbol,
                 "coverage": view.coverage,
                 "unavailable_reason": view.unavailable_reason,
                 "last_checked_at": view.last_checked_at,
-                "evidence": [dict(row) for row in view.evidence],
+                "evidence": evidence_rows,
             }
         )
     return {
