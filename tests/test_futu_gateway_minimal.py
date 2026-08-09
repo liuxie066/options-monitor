@@ -27,6 +27,9 @@ def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
         def get_snapshot(self, **kwargs):
             return {"backend_host": self.backend.host, "codes": kwargs.get("code_list") or []}
 
+        def get_stock_basicinfo(self, **kwargs):
+            return kwargs
+
     gw = build_futu_gateway(
         host="127.0.0.9",
         port=11119,
@@ -40,6 +43,49 @@ def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
     assert gw.port == 11119
     assert data["backend_host"] == "127.0.0.9"
     assert data["codes"] == ["US.NVDA", "US.TSLA"]
+    basic = gw.get_stock_basicinfo(market="US", codes=["US.NVDA"])
+    assert basic == {
+        "market": "US",
+        "stock_type": "STOCK",
+        "code_list": ["US.NVDA"],
+    }
+
+
+def test_futu_api_client_stock_basicinfo_unwraps_quote_result() -> None:
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_stock_basicinfo(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return 0, [{"code": "US.NVDA", "name": "NVIDIA"}]
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    backend = FakeBackend()
+    client = _FutuAPIClient(backend, is_option_chain_cache_enabled=False)
+
+    rows = client.get_stock_basicinfo(
+        market="US",
+        stock_type="STOCK",
+        code_list=["US.NVDA"],
+    )
+
+    assert rows == [{"code": "US.NVDA", "name": "NVIDIA"}]
+    assert backend.quote.calls == [
+        {
+            "market": "US",
+            "stock_type": "STOCK",
+            "code_list": ["US.NVDA"],
+        }
+    ]
 
 
 def test_get_trading_days_normalizes_market_label() -> None:

@@ -219,13 +219,6 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.symbols import main as run_symbols_cli
 
         return int(run_symbols_cli(actual_argv[1:]))
-    if actual_argv and actual_argv[0] == "ai-evidence-collector":
-        from src.interfaces.cli.ai_evidence_collector import (
-            main as run_ai_evidence_collector_cli,
-        )
-
-        return int(run_ai_evidence_collector_cli(actual_argv[1:]))
-
     args = parse_args(actual_argv)
     _bootstrap_runtime_env_from_args(args)
     try:

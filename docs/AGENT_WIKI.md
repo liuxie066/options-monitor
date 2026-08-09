@@ -207,8 +207,8 @@ For runtime questions, prefer `runtime_status` because it already knows how to s
 
 AI Decision Advice 是两阶段 LLM 增强（设计：`docs/AI_DECISION_ADVICE_DESIGN.md`）：
 
-- Collector（`om ai-evidence-collector`）：4 小时刷新外部证据，只用公开 symbol 身份
-  和 web_search；不写持仓/候选。产物在 `output_shared/state/ai_decision_advice/`
+- Collector（managed systemd internal wrapper）：4 小时刷新外部证据，只用公开 symbol 身份
+  和 web_search；不写持仓/候选，也不提供 `./om` 手工刷新命令。产物在 `output_shared/state/ai_decision_advice/`
   （`external_evidence.jsonl`、`symbol_identity_snapshot.json`、advice JSONL）。
 - Advice（tick 内自动运行）：冻结输入快照 + 无工具调用，产出 keep/switch/defer/
   needs_review 建议，写入 Daily Brief 的 `ai_decision_advice` 区块，Agent 通过
