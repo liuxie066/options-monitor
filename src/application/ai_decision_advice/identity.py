@@ -12,6 +12,7 @@ from src.application.ai_decision_advice.config import (
     SHARED_STATE_DIRNAME,
     SYMBOL_IDENTITY_SNAPSHOT_FILE,
 )
+from src.infrastructure.private_storage import atomic_write_private_text, open_private_text
 
 
 SYMBOL_IDENTITY_SNAPSHOT_SCHEMA = "ai_decision_advice.symbol_identity_snapshot.v1"
@@ -288,11 +289,8 @@ def publish_symbol_identity_snapshot(*, base: Path, payload: Mapping[str, Any]) 
     """Atomically publish the identity snapshot (docs/AI_DECISION_ADVICE_DESIGN.md 5.2)."""
 
     path = snapshot_path(base)
-    path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(encoded, encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_private_text(path, encoded)
     return path
 
 
@@ -301,7 +299,8 @@ def load_symbol_identity_snapshot(base: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with open_private_text(path) as handle:
+            payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):

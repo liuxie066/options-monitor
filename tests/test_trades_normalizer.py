@@ -166,7 +166,7 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
     deal = normalize_trade_deal(
         {
             "deal_id": "deal-4",
-            "futu_account_id": "281756479859383816",
+            "futu_account_id": "999000000000000001",
             "code": "HK.POP260528P150000",
             "stock_name": "泡泡玛特",
             "trd_side": "SELL_SHORT",
@@ -174,7 +174,7 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
             "price": 6.3,
             "create_time": "2026-04-28 10:15:56",
         },
-        futu_account_mapping={"281756479859383816": "lx"},
+        futu_account_mapping={"999000000000000001": "lx"},
     )
 
     assert deal.internal_account == "lx"
@@ -191,7 +191,7 @@ def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
     deal = normalize_trade_deal(
         {
             "deal_id": "deal-5",
-            "futu_account_id": "281756479859383816",
+            "futu_account_id": "999000000000000001",
             "code": "HK.POP260528P150000",
             "owner_stock_code": "HK.09992",
             "trd_side": "SELL_SHORT",
@@ -199,7 +199,7 @@ def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
             "price": 6.3,
             "create_time": "2026-04-28 10:15:56",
         },
-        futu_account_mapping={"281756479859383816": "lx"},
+        futu_account_mapping={"999000000000000001": "lx"},
     )
 
     assert deal.symbol == "9992.HK"
@@ -211,14 +211,14 @@ def test_normalize_trade_deal_falls_back_to_option_code_root_alias_for_symbol() 
     deal = normalize_trade_deal(
         {
             "deal_id": "deal-6",
-            "futu_account_id": "281756479859383816",
+            "futu_account_id": "999000000000000001",
             "code": "HK.POP260528P150000",
             "trd_side": "SELL_SHORT",
             "qty": 1,
             "price": 6.3,
             "create_time": "2026-04-28 10:15:56",
         },
-        futu_account_mapping={"281756479859383816": "lx"},
+        futu_account_mapping={"999000000000000001": "lx"},
     )
 
     assert deal.symbol == "9992.HK"

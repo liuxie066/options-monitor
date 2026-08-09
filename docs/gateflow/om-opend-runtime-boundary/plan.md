@@ -14,7 +14,7 @@ Close the two production Options Monitor failures with the smallest end-to-end r
 - The production profile resolves `runtime_root=/var/lib/options-monitor`, but Strategy Lab passes the release repository root into `run_strategy_lab_update()` and ultimately into `execute_required_data_opend()`.
 - Production has two limiter files:
   - `/var/lib/options-monitor/output_shared/state/opend_option_chain_limiter.json` with configured `max_calls=9`;
-  - `/home/liuxie/apps/releases/1.8.2/output_shared/state/opend_option_chain_limiter.json` with Strategy Lab's default `max_calls=10`.
+  - `/home/om/apps/releases/1.8.2/output_shared/state/opend_option_chain_limiter.json` with Strategy Lab's default `max_calls=10`.
 - The production market configs declare `runtime.opend_rate_limits.option_chain.max_calls=9`, `window_sec=30`, and `max_wait_sec=600`.
 - The generated Position Advice promotion and Strategy Lab sample units are `Type=oneshot` but contain `RuntimeMaxSec=600`; systemd reports that this setting is ignored for one-shot services.
 - A current read-only Position Advice promotion refresh succeeds on v1.8.2 and isolates incompatible legacy plans. Its recorded failed unit state predates the current code and needs a post-upgrade controlled run, not another business-rule change.

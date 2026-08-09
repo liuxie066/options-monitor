@@ -61,7 +61,7 @@ Added tests proving:
 ## Validation
 
 ```text
-/Volumes/liuxie的硬盘/workspace/options-monitor/.venv/bin/ruff check \
+/Volumes/Workspace/workspace/options-monitor/.venv/bin/ruff check \
   src/application/agent_tools/base.py \
   src/application/agent_tools/positions.py \
   src/application/copilot/tools.py \

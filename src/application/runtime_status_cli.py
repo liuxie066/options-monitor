@@ -188,17 +188,14 @@ def _overall_status(
 
 def _config_line(config: dict[str, Any]) -> str:
     accounts = _csv(config.get("accounts"))
-    return (
-        f"config: key={_value(config.get('config_key'))} "
-        f"path={_value(config.get('config_path'))} accounts={accounts}"
-    )
+    return f"config: key={_value(config.get('config_key'))} accounts={accounts}"
 
 
 def _run_line(label: str, selection: dict[str, Any], latest_status: Any) -> str:
     parts = [
         f"{label}:",
         f"found={_yes_no(selection.get('found'))}",
-        f"path={_value(selection.get('path'))}",
+        f"run_id={_value(selection.get('run_id'))}",
     ]
     if latest_status is not None:
         parts.append(f"status={latest_status}")
@@ -258,8 +255,7 @@ def _ledger_line(*, summary: dict[str, Any], ledger: dict[str, Any]) -> str:
         f"status={_value(summary.get('ledger_status'))} "
         f"fail_closed={_yes_no(summary.get('ledger_fail_closed'))} "
         f"events={_value(trade_events)} "
-        f"lots={_value(lots)} "
-        f"sqlite={_value(summary.get('ledger_sqlite_path') or ledger.get('sqlite_path'))}"
+        f"lots={_value(lots)}"
     )
 
 
@@ -323,7 +319,7 @@ def _prefetch_line(label: str, prefetch: dict[str, Any]) -> str:
 
 
 def _service_line(service: dict[str, Any]) -> str:
-    latest = _dict(service.get("latest") or service.get("json"))
+    latest = _dict(service.get("evaluation") or service.get("latest") or service.get("json"))
     status = latest.get("status") if latest else service.get("status")
     target = latest.get("target_version") if latest else service.get("target_version")
     return f"service: upgrade={_value(status)} target={_value(target)}"
@@ -335,7 +331,7 @@ def _service_drift_line(drift: dict[str, Any]) -> str:
         "service drift: "
         f"status={_value(summary.get('status'))} "
         f"missing={_int_value(summary.get('missing_installed_count'))} "
-        f"required_missing={_csv(summary.get('missing_required_units'))}"
+        f"required_missing={_int_value(summary.get('missing_required_count'))}"
     )
 
 
@@ -344,10 +340,10 @@ def _environment_line(environment: dict[str, Any]) -> str:
     configured_count = sum(1 for item in entries.values() if _dict(item).get("configured"))
     return (
         "environment: "
-        f"env_file={_value(environment.get('env_file'))} "
+        f"env_file_configured={_yes_no(environment.get('env_file_configured'))} "
         f"loaded={_yes_no(environment.get('env_file_loaded'))} "
         f"configured_keys={configured_count} "
-        f"warnings={len(_list(environment.get('warnings')))}"
+        f"warnings={_int_value(environment.get('warning_count'))}"
     )
 
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from src.application.ai_decision_advice.evidence_store import (
     COVERAGE_COMPLETED,
@@ -55,6 +58,19 @@ def test_append_and_read_roundtrip(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["evidence_run_id"] == "run-1"
     assert rows[0]["appended_at"] == "2026-08-09T00:00:01+00:00"
+    assert stat.S_IMODE(evidence_path(tmp_path).stat().st_mode) == 0o600
+    assert stat.S_IMODE(evidence_path(tmp_path).parent.stat().st_mode) == 0o700
+
+
+def test_read_rejects_symlinked_evidence_log(tmp_path: Path) -> None:
+    path = evidence_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text('{"kind":"symbol_status"}\n', encoding="utf-8")
+    path.symlink_to(outside)
+
+    with pytest.raises(OSError, match="symlink"):
+        read_evidence_records(tmp_path)
 
 
 def test_read_tolerates_bad_lines(tmp_path: Path) -> None:

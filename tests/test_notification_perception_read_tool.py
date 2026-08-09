@@ -25,7 +25,9 @@ def test_notification_perception_read_filters_by_conversation_and_kind(tmp_path:
 
     assert data["summary"]["total_count"] == 1
     assert data["events"][0]["event_kind"] == "notification_prepared"
-    assert data["events"][0]["conversation_scope"]["conversation_id"] == "wechat:group_1"
+    assert data["summary"]["conversation_ref"].startswith("conversation:sha256:")
+    assert data["events"][0]["conversation_scope"] == {"channel": "wechat"}
+    assert "wechat:group_1" not in json.dumps(data, ensure_ascii=False)
 
 
 def test_notification_perception_read_can_read_run_scoped_audit(tmp_path: Path) -> None:

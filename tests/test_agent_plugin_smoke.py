@@ -66,6 +66,21 @@ def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
     }
 
 
+def _execute_private_runtime_status(payload: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the trusted collector in tests that verify its detailed diagnosis."""
+
+    from src.application.agent_tools.diagnostics import _private_runtime_status_tool
+
+    data, warnings, meta = _private_runtime_status_tool(payload)
+    return {
+        "tool_name": "runtime_status.private",
+        "ok": True,
+        "data": data,
+        "warnings": warnings,
+        "meta": meta,
+    }
+
+
 def _write_manage_symbols_generation(tmp_path: Path, *, market: str = "us") -> tuple[Path, Path]:
     from src.application.config_yaml import build_yaml_runtime_config_file
 
@@ -114,7 +129,7 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
         "user1": {
             "type": "futu",
             "futu": {
-                "account_id": "281756479859383816",
+                "account_id": "999000000000000001",
                 "host": "127.0.0.1",
                 "port": 11111,
             },
@@ -128,7 +143,7 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
         "mode": "dry-run",
         "account_mapping": {
             "futu": {
-                "281756479859383816": "user1",
+                "999000000000000001": "user1",
             }
         },
     }
@@ -1756,8 +1771,7 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_path": str(cfg_path),
             "state_dir": str(state_dir),
@@ -1820,6 +1834,8 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     account_summary = out["data"]["account_summary"]
     assert account_summary["accounts"]["user1"]["compatibility_notification_exists"] is True
     assert account_summary["accounts"]["user1"]["notification_exists"] is True
+
+
     assert account_summary["accounts_with_compatibility_notification"] == 1
     assert account_summary["accounts_with_notification"] == 1
     assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
@@ -1846,6 +1862,110 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     assert "option_positions_feishu_sync_receipt_status" not in out["data"]["summary"]
 
 
+def test_runtime_status_public_projection_omits_private_runtime_payloads(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import mask_path
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.assistant.audit import InboundAuditStore
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["notifications"] = {"channel": "feishu", "target": "ou_A9x7PrivateRecipient"}
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    assistant_path = tmp_path / "resolved" / "config.assistant.json"
+    assistant_path.parent.mkdir(parents=True)
+    assistant_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "llm": {
+                        "provider": "openai",
+                        "model": "private-model-name",
+                        "base_url": "https://private-user:private-password@private.example/v1",
+                        "api_key_env": "PRIVATE_MODEL_API_KEY",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    audit_db = tmp_path / "inbound.sqlite3"
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "command-private-marker",
+            "channel": "feishu",
+            "sender_id": "ou_A9x7PrivateSender",
+            "conversation_id": "oc_B8y6PrivateConversation",
+            "message_id": "om_C7z5PrivateMessage",
+            "raw_text": "private portfolio question marker",
+            "response": {"data": {"position": "PRIVATE-HOLDING-MARKER"}},
+        }
+    )
+
+    shared_state = tmp_path / "output_shared" / "state"
+    reports = tmp_path / "output_shared" / "reports"
+    runs = tmp_path / "output_runs"
+    run_dir = runs / "run-public-safe"
+    (run_dir / "state").mkdir(parents=True)
+    reports.mkdir(parents=True)
+    shared_state.mkdir(parents=True)
+    (shared_state / "last_run.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sender_id": "ou_A9x7PrivateSender",
+                "positions": [{"symbol": "PRIVATE-HOLDING-MARKER", "balance": 123456.78}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (shared_state / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    (reports / "symbols_notification.txt").write_text("private notification text marker\n", encoding="utf-8")
+    (run_dir / "state" / "tick_metrics.json").write_text(
+        json.dumps({"ran_scan": True, "message_id": "om_C7z5PrivateMessage"}),
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = runtime_status_tool(
+        {
+            "config_path": str(cfg_path),
+            "assistant_config_path": str(assistant_path),
+            "wechat_clawbot": {"audit_db": str(audit_db)},
+            "shared_state_dir": str(shared_state),
+            "state_dir": str(shared_state),
+            "report_dir": str(reports),
+            "runs_root": str(runs),
+            "accounts_root": str(tmp_path / "output_accounts"),
+        },
+        load_runtime_config=lambda **_kwargs: (cfg_path, cfg),
+        normalize_accounts=lambda value, fallback=(): list(value or fallback),
+        accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+        read_json_object_or_empty=lambda path: json.loads(path.read_text(encoding="utf-8")) if path.exists() else {},
+        repo_base=lambda: tmp_path,
+        mask_path=mask_path,
+    )
+
+    serialized = json.dumps({"data": data, "warnings": warnings, "meta": meta}, ensure_ascii=False)
+    for marker in (
+        str(tmp_path),
+        "ou_A9x7PrivateSender",
+        "ou_A9x7PrivateRecipient",
+        "oc_B8y6PrivateConversation",
+        "om_C7z5PrivateMessage",
+        "private portfolio question marker",
+        "private notification text marker",
+        "PRIVATE-HOLDING-MARKER",
+        "private-password",
+        "private.example",
+        "PRIVATE_MODEL_API_KEY",
+    ):
+        assert marker not in serialized
+    assert data["schema_version"] == "runtime-status-public.v2"
+    assert data["summary"]["latest_run_id"] == "run-public-safe"
+    assert data["latest_run"]["run_id"] == "run-public-safe"
+
+
 def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
@@ -1857,7 +1977,7 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
         "lx": {
             "type": "futu",
             "futu": {
-                "account_id": "281756479859383816",
+                "account_id": "999000000000000001",
                 "host": "127.0.0.1",
                 "port": 11111,
             },
@@ -1936,8 +2056,7 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
     )
     (state_dir / "trade_intake" / "sy" / "audit.jsonl").write_text('{"phase":"sy"}\n', encoding="utf-8")
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_path": str(cfg_path),
             "state_dir": str(state_dir),
@@ -1977,8 +2096,7 @@ def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
     ]
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_path": str(cfg_path),
             "state_dir": str(tmp_path / "state"),
@@ -2013,8 +2131,7 @@ def test_runtime_status_reports_config_authority_for_legacy_runtime_config(tmp_p
     ]
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_path": str(cfg_path),
             "state_dir": str(tmp_path / "state"),
@@ -2082,7 +2199,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
 
 
 def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool
 
     def _read_json(path: Path) -> dict[str, Any]:
         try:
@@ -2091,7 +2208,7 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    return runtime_status_tool(
+    return private_runtime_status_tool(
         {"config_path": str(cfg_path)},
         load_runtime_config=lambda **_kwargs: (cfg_path, cfg),
         normalize_accounts=lambda value, fallback=(): list(value or fallback),
@@ -2404,7 +2521,7 @@ def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) ->
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool as runtime_status_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -2472,7 +2589,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
 
 
 def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp_path: Path) -> None:
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool as runtime_status_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -2530,7 +2647,7 @@ def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp
 
 
 def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_ambiguous(tmp_path: Path) -> None:
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool as runtime_status_tool
 
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(
@@ -2571,7 +2688,7 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
 
 
 def test_runtime_status_service_profile_resolves_config_key_to_profile_config_path(tmp_path: Path) -> None:
-    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool as runtime_status_tool
 
     us_path = tmp_path / "config.us.json"
     hk_path = tmp_path / "config.hk.json"
@@ -2801,7 +2918,7 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
         "accounts_root": str(accounts_root),
         "runs_root": str(runs_root),
     }
-    out = run_tool("runtime_status", payload)
+    out = _execute_private_runtime_status(payload)
 
     assert out["ok"] is True
     assert out["warnings"] == []
@@ -2825,14 +2942,14 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
     assert scanned_prefetch["accounts"]["user1"]["force_refresh"] is True
     assert scanned_prefetch["accounts"]["user1"]["opend_calls_reported"] is False
 
-    out_by_id = run_tool("runtime_status", {**payload, "run_id": "run-scan"})
+    out_by_id = _execute_private_runtime_status({**payload, "run_id": "run-scan"})
     assert out_by_id["ok"] is True
     assert out_by_id["data"]["latest_run_selection"]["source"] == "run_id"
     assert out_by_id["data"]["latest_run_selection"]["found"] is True
     assert out_by_id["data"]["latest_run"]["path"].endswith("run-scan")
     assert out_by_id["data"]["required_data_prefetch"]["available"] is True
 
-    out_by_dir = run_tool("runtime_status", {**payload, "run_dir": str(run_scan)})
+    out_by_dir = _execute_private_runtime_status({**payload, "run_dir": str(run_scan)})
     assert out_by_dir["ok"] is True
     assert out_by_dir["data"]["latest_run_selection"]["source"] == "run_dir"
     assert out_by_dir["data"]["latest_run_selection"]["found"] is True
@@ -2881,8 +2998,7 @@ def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path
     os.utime(run_us, (1_000_000, 1_000_000))
     os.utime(run_hk, (2_000_000, 2_000_000))
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_key": "us",
             "config_path": str(cfg_path),
@@ -2932,8 +3048,7 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
     write_json(run_skip / "accounts" / "user1" / "state" / "last_run.json", {"status": "skipped", "ran_scan": False})
     (shared_state_dir / "last_run_dir.txt").write_text(str(run_skip), encoding="utf-8")
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_key": "us",
             "config_path": str(cfg_path),
@@ -2979,8 +3094,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     write_json(latest_run / "state" / "audit_events.json", {"status": "ok"})
     (shared_state_dir / "last_run_dir.txt").write_text(str(latest_run), encoding="utf-8")
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_key": "us",
             "config_path": str(cfg_path),
@@ -3040,8 +3154,7 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
         },
     )
 
-    out = run_tool(
-        "runtime_status",
+    out = _execute_private_runtime_status(
         {
             "config_key": "us",
             "config_path": str(cfg_path),
@@ -3102,7 +3215,7 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path:
         encoding="utf-8",
     )
 
-    out = run_tool("runtime_status", {"profile_path": str(profile_path)})
+    out = _execute_private_runtime_status({"profile_path": str(profile_path)})
 
     assert out["ok"] is True
     assert out["warnings"] == ["Outer delivery.mode is none; the task runner will not announce run output."]
@@ -3152,30 +3265,105 @@ def test_runtime_runs_agent_tool_lists_and_selects_runs(tmp_path: Path) -> None:
     assert selected["data"]["selected_run"]["run_id"] == "run-1"
 
 
-def test_runtime_logs_agent_tool_tails_run_audit_and_file(tmp_path: Path) -> None:
+def test_runtime_logs_agent_tool_returns_content_free_bounded_metadata(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     runs_root = tmp_path / "output_runs"
     audit = runs_root / "run-1" / "state" / "audit_events.jsonl"
     audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text('{"message":"first"}\n{"message":"second"}\n', encoding="utf-8")
-    service_log = tmp_path / "service.log"
-    service_log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    audit.write_text('{"message":"private-first"}\n{"message":"private-second"}\n', encoding="utf-8")
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir()
+    service_log = logs_root / "service.log"
+    service_log.write_text("private-one\nprivate-two\nprivate-three\n", encoding="utf-8")
 
     audit_out = run_tool(
         "runtime_logs",
         {"runs_root": str(runs_root), "run_id": "run-1", "kind": "audit", "lines": 1},
     )
-    file_out = run_tool("runtime_logs", {"log_file": str(service_log), "lines": 2})
+    file_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(service_log), "lines": 2},
+    )
 
     assert audit_out["ok"] is True
-    assert audit_out["data"]["schema_version"] == "runtime_logs.v1"
+    assert audit_out["data"]["schema_version"] == "runtime_logs-public.v2"
     assert audit_out["data"]["summary"]["requested_run_found"] is True
-    assert audit_out["data"]["files"][0]["path"].endswith("audit_events.jsonl")
-    assert audit_out["data"]["files"][0]["tail"] == ['{"message":"second"}']
+    assert audit_out["data"]["files"][0]["kind"] == "audit"
+    assert audit_out["data"]["files"][0]["tail_line_count"] == 1
+    assert "path" not in audit_out["data"]["files"][0]
+    assert "tail" not in audit_out["data"]["files"][0]
+    assert "private-second" not in json.dumps(audit_out, ensure_ascii=False)
     assert audit_out["meta"]["runs_root"] == ".../output_runs"
     assert file_out["ok"] is True
-    assert file_out["data"]["files"][0]["tail"] == ["two", "three"]
+    assert file_out["data"]["files"][0]["kind"] == "service"
+    assert file_out["data"]["files"][0]["tail_line_count"] == 2
+    assert "private-three" not in json.dumps(file_out, ensure_ascii=False)
+
+
+def test_runtime_logs_agent_tool_rejects_outside_root_and_symlink(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir()
+    outside = tmp_path / "private.log"
+    outside.write_text("private-value\n", encoding="utf-8")
+
+    outside_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(outside), "lines": 1},
+    )
+    assert outside_out["ok"] is False
+    assert outside_out["error"]["code"] == "POLICY_ERROR"
+    assert str(outside) not in json.dumps(outside_out, ensure_ascii=False)
+
+    linked = logs_root / "linked.log"
+    linked.symlink_to(outside)
+    linked_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(linked), "lines": 1},
+    )
+    assert linked_out["ok"] is False
+    assert linked_out["error"]["code"] == "POLICY_ERROR"
+    assert "private-value" not in json.dumps(linked_out, ensure_ascii=False)
+
+
+def test_runtime_logs_agent_tool_caps_lines_type_and_file_size(monkeypatch, tmp_path: Path) -> None:
+    import src.application.runtime_logs_cli as runtime_logs_cli
+    from src.application.tool_execution import execute_tool as run_tool
+
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir()
+    bounded = logs_root / "bounded.log"
+    bounded.write_text("\n".join(f"line-{index}" for index in range(250)) + "\n", encoding="utf-8")
+
+    bounded_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(bounded), "lines": 10_000},
+    )
+    assert bounded_out["ok"] is True
+    assert bounded_out["data"]["summary"]["lines"] == 200
+    assert bounded_out["data"]["summary"]["lines_capped"] is True
+    assert bounded_out["data"]["files"][0]["tail_line_count"] == 200
+
+    unsupported = logs_root / "credentials.env"
+    unsupported.write_text("private-value\n", encoding="utf-8")
+    unsupported_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(unsupported), "lines": 1},
+    )
+    assert unsupported_out["ok"] is False
+    assert unsupported_out["error"]["code"] == "POLICY_ERROR"
+
+    monkeypatch.setattr(runtime_logs_cli, "MAX_LOG_FILE_BYTES", 8)
+    oversized = logs_root / "oversized.log"
+    oversized.write_text("more-than-eight-bytes", encoding="utf-8")
+    oversized_out = run_tool(
+        "runtime_logs",
+        {"logs_root": str(logs_root), "log_file": str(oversized), "lines": 1},
+    )
+    assert oversized_out["ok"] is False
+    assert oversized_out["error"]["code"] == "POLICY_ERROR"
 
 
 def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:

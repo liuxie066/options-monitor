@@ -219,13 +219,13 @@ Release test plans use `./.venv/bin/python` rather than `python3`. This is a dis
 Focused:
 
 ```bash
-/Users/liuxie/.pyenv/shims/python3.12 -m pytest \
+/Users/om/.pyenv/shims/python3.12 -m pytest \
   tests/test_python_runtime_contract.py \
   tests/test_refactor_entrypoints.py \
   tests/test_install_script.py \
   tests/test_release_test_plan.py -q
 
-/Users/liuxie/.pyenv/shims/python3.12 -m pytest tests/test_service_deploy.py -q
+/Users/om/.pyenv/shims/python3.12 -m pytest tests/test_service_deploy.py -q
 ```
 
 Static/tooling:
@@ -233,8 +233,8 @@ Static/tooling:
 ```bash
 bash -n om om-agent scripts/python_runtime.sh scripts/install.sh scripts/install_agent_plugin.sh scripts/release_preflight.sh
 ruff check .
-/Users/liuxie/.pyenv/shims/python3.12 -m compileall -q domain src scripts
-/Users/liuxie/.pyenv/shims/python3.12 scripts/generate_dependency_graph.py --check
+/Users/om/.pyenv/shims/python3.12 -m compileall -q domain src scripts
+/Users/om/.pyenv/shims/python3.12 scripts/generate_dependency_graph.py --check
 git diff --check
 ```
 
@@ -260,7 +260,7 @@ Operational dry-runs:
 Final:
 
 ```bash
-/Users/liuxie/.pyenv/shims/python3.12 -m pytest -q
+/Users/om/.pyenv/shims/python3.12 -m pytest -q
 ```
 
 ## Docs Decision

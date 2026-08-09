@@ -35,7 +35,8 @@ from src.infrastructure.deepseek_responses import (
     create_deepseek_response,
     extract_output_text,
     extract_usage,
-    extract_web_search_calls,
+    response_fingerprint,
+    summarize_web_search_calls,
 )
 
 
@@ -58,10 +59,10 @@ def _evidence_model_runner(api_key: str):
             timeout=max(1, int(timeout)),
         )
         return ModelCallResult(
-            raw_response=response,
             output_text=extract_output_text(response),
             usage=extract_usage(response),
-            web_search_calls=tuple(extract_web_search_calls(response)),
+            response_sha256=response_fingerprint(response),
+            web_search_audit=summarize_web_search_calls(response),
         )
 
     return runner
@@ -117,8 +118,8 @@ def run_collector(
 
     result: dict[str, Any] = {
         "status": "dry_run",
-        "observed_symbols": queue.symbols(),
-        "cutoffs": cutoffs,
+        "observation_count": len(queue.symbols()),
+        "cutoff_count": len(cutoffs),
     }
     if dry_run:
         return result
@@ -134,7 +135,20 @@ def run_collector(
         evidence_run_id=f"ev-{now.strftime('%Y%m%dT%H%M%SZ')}",
         now=now,
     )
-    result.update({"status": "completed", "summary": summary.to_dict()})
+    result.update(
+        {
+            "status": "completed",
+            "summary": {
+                "budget_seconds": summary.budget_seconds,
+                "budget_exhausted": summary.budget_exhausted,
+                "completed_count": len(summary.completed_symbols),
+                "failed_count": len(summary.failed_symbols),
+                "unfinished_count": len(summary.unfinished_symbols),
+                "repair_attempts": summary.repair_attempts,
+                "records_appended": summary.records_appended,
+            },
+        }
+    )
     return result
 
 
@@ -163,7 +177,16 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=bool(args.dry_run),
         )
     except Exception as exc:  # collector failure must surface but not crash timer
-        print(json.dumps({"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": "collector_error",
+                    "error_type": type(exc).__name__,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result.get("status") in {"completed", "skipped", "dry_run"} else 1

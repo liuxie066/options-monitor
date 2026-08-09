@@ -624,13 +624,13 @@ output_shared/state/ai_decision_advice/external_evidence.jsonl
 
 同一个 JSONL 保存：
 
-- batch 原始 Responses / `web_search_call` 审计记录；
+- batch 的响应/输出内容 hash、白名单 token usage 和 `web_search_call` 聚合计数；
 - 按标的规范化的语义证据记录；
 - 查询、cutoff、来源、状态、内容 hash 和身份绑定；
 - 失败和部分成功状态。
 
-batch 原始响应只保存一次，标的记录通过 `evidence_run_id` 引用，避免跨标的复制大块响应。
-不额外抓取或归档完整网页正文。
+Provider 原始响应、搜索 query/call ID 和完整网页正文均不落盘。标的记录通过
+`evidence_run_id` 关联同批次的内容无关审计摘要。
 
 “最新标的证据”只是从追加日志推导的可重建索引或缓存，不是第二真源。不得再维护 SQLite、
 CSV 或另一份可独立修改的 latest 数据。
@@ -649,7 +649,7 @@ output_runs/<run_id>/accounts/<account>/state/ai_decision_advice.jsonl
 - 候选、组合、开放期权和语义证据 hash；
 - evidence run 与实际 cutoff；
 - Prompt、Schema、模型和代码版本；
-- 原始模型响应、验证结果、接纳或降级后的正式动作；
+- 模型响应/输出内容 hash、白名单 usage、验证结果、接纳或降级后的正式动作；
 - 如复用旧建议，记录 `reuse_of_advice_id` 和新的证据覆盖绑定。
 
 Daily Brief 与 Agent 必须读取这同一份正式结果。v1 不新增 DB、CSV 或第二份历史结果库。
@@ -904,6 +904,8 @@ ai_decision_advice:
 规则：
 
 - 一个开关同时控制 External Evidence Collector 和 AI Decision Advice；
+- 默认值为 `false`；把它显式改为 `true` 即表示操作者同意按第 18 节最小数据合同向
+  DeepSeek 传输数据；
 - 不保留 `ai_interpretation`、`ai_strategy_advice` 等旧字段或兼容别名；
 - 不提供每账户开关；
 - 模型、4 小时间隔、5 分钟搜索预算、批大小、并发和 30 秒 Advice 预算均为 v1 固定合同；
@@ -936,7 +938,9 @@ AI Decision Advice：
 - token、cookie、authorization、webhook 或 API key；
 - 任何个人身份信息。
 
-原始 Responses 审计落盘前同样执行密钥和私密字段检查。
+Provider 原始 Responses 不落盘；只记录响应/输出内容 hash、输出长度、白名单 token
+usage 和搜索状态聚合计数。JSONL 与身份快照目录使用 `0700`，文件使用 `0600`，并拒绝
+最终路径符号链接。
 
 ## 19. 运行状态与可观测性
 

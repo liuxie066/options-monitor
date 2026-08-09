@@ -49,10 +49,15 @@ def _identity_snapshot(symbols: list[str], unavailable: set[str] | None = None) 
 
 def _runner(output: dict) -> ModelCallResult:
     return ModelCallResult(
-        raw_response={"output": []},
         output_text=json.dumps(output),
         usage={"input_tokens": 1, "output_tokens": 2},
-        web_search_calls=({"type": "web_search_call", "id": "ws1"},),
+        response_sha256="b" * 64,
+        web_search_audit={
+            "count": 1,
+            "status_counts": {"completed": 1},
+            "provider_call_id": "must-not-persist",
+            "query": "must-not-persist",
+        },
     )
 
 
@@ -165,7 +170,13 @@ def test_collector_success_appends_records(tmp_path: Path) -> None:
     assert kinds.count("symbol_evidence") == 1
     audit = [row for row in records if row["kind"] == "batch_audit"][0]
     assert audit["identity_snapshot_hash"] == snapshot["content_sha256"]
-    assert audit["web_search_calls"][0]["id"] == "ws1"
+    assert "web_search_calls" not in audit
+    assert audit["web_search_audit"] == {
+        "count": 1,
+        "status_counts": {"completed": 1},
+    }
+    assert audit["model_response_audit"]["response_sha256"] == "b" * 64
+    assert "must-not-persist" not in json.dumps(audit)
     assert audit["prompt"]["compiled_sha256"] == prompt.compiled_sha256
 
 
@@ -206,7 +217,7 @@ def test_collector_repair_once_then_success(tmp_path: Path) -> None:
     def runner(instructions, payload, schema, timeout):
         attempts.append(1)
         if len(attempts) == 1:
-            return ModelCallResult(raw_response={}, output_text="not json", usage={})
+            return ModelCallResult(output_text="not json", usage={})
         return _runner(_ok_output(["NVDA"]))
 
     summary = run_evidence_collector(
@@ -230,7 +241,7 @@ def test_collector_repair_still_invalid_marks_failed(tmp_path: Path) -> None:
     prompt = compile_prompt_pack(PROMPT_PACK_EVIDENCE)
 
     def runner(instructions, payload, schema, timeout):
-        return ModelCallResult(raw_response={}, output_text="still bad", usage={})
+        return ModelCallResult(output_text="still bad", usage={})
 
     summary = run_evidence_collector(
         base=tmp_path,

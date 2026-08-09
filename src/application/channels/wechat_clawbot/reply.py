@@ -60,7 +60,7 @@ def reply_wechat_clawbot_text(
         "outbound_message_id": outbound_message_id,
         "idempotency_key": idempotency_key_text or None,
         "client_id": client_id,
-        "api_response": api_response,
+        "provider_response_code": _response_code(api_response),
     }
     if ok:
         _save_outbound_receipt(store=store, idempotency_key=idempotency_key_text, receipt=receipt)
@@ -117,7 +117,7 @@ def _save_outbound_receipt(*, store: WechatClawbotStateStore, idempotency_key: s
         payload["receipts"] = receipts
         store.save_outbound_receipts(payload)
     except Exception as exc:
-        receipt["receipt_store_warning"] = f"{type(exc).__name__}: {exc}"
+        receipt["receipt_store_warning_code"] = type(exc).__name__
 
 
 def _idempotent_client_id(idempotency_key: str) -> str | None:
@@ -139,6 +139,16 @@ def _response_success(response: dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip().lstrip("-").isdigit():
             return int(value) == 0
     return False
+
+
+def _response_code(response: dict[str, Any]) -> int | None:
+    for key in ("ret", "errcode", "code"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+    return None
 
 
 def _extract_message_id(response: dict[str, Any]) -> str | None:

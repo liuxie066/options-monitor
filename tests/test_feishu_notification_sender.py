@@ -87,7 +87,9 @@ def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
     assert out["returncode"] == 1
     assert out["http_status"] == 500
     assert out["feishu_code"] == 999
-    assert out["feishu_msg"] == "oops"
+    assert "feishu_msg" not in out
+    assert "response_tail" not in out
+    assert "oops-tail" not in repr(out)
     assert "request_path=/open-apis/im/v1/messages?receive_id_type=open_id" in str(out["message"])
 
 
@@ -111,7 +113,9 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert out["feishu_code"] == 230001
     assert out["provider_response_code"] == 230001
     assert out["error_code"] == "FEISHU_PROVIDER_REJECTED"
-    assert out["feishu_msg"] == "denied"
+    assert "feishu_msg" not in out
+    assert "response_tail" not in out
+    assert "denied-tail" not in repr(out)
 
 
 def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
@@ -333,8 +337,11 @@ def test_send_wechat_clawbot_message_retries_ret_minus_2_without_context_token(t
     assert send_result["provider_response_code"] == 0
     assert send_result["context_token_fallback_attempted"] is True
     assert send_result["context_token_fallback_response_code"] == 0
-    assert send_result["initial_response_json"] == {"ret": -2, "errcode": 0}
-    assert send_result["fallback_response_json"] == {"ret": 0, "data": {"message_id": "msg_2"}}
+    assert send_result["initial_response_code"] == -2
+    assert "initial_response_json" not in send_result
+    assert "fallback_response_json" not in send_result
+    assert "response_json" not in send_result
+    assert "response_tail" not in send_result
     assert normalized["delivery_confirmed"] is True
     assert normalized["context_token_fallback_attempted"] is True
     assert normalized["context_token_fallback_response_code"] == 0
@@ -466,7 +473,34 @@ def test_wechat_clawbot_business_failure_with_local_receipt_is_not_confirmed() -
     assert out["upstream_message_id"] is None
     assert out["local_receipt_id"] == "om-local-1"
     assert out["provider_response_code"] == -2
-    assert "ret" in out["message"]
+    assert "provider_response_code=-2" in out["message"]
+    assert "response_json" not in out
+    assert "response_tail" not in out
+
+
+def test_notification_normalizers_do_not_expose_raw_provider_payloads() -> None:
+    from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
+
+    provider_secret = "provider-secret-must-not-survive"
+    feishu = normalize_feishu_app_send_output(
+        send_result={
+            "http_status": 500,
+            "response_json": {"code": 999, "msg": provider_secret, "private": provider_secret},
+            "response_tail": provider_secret,
+        }
+    )
+    wechat = normalize_wechat_clawbot_send_output(
+        send_result={
+            "ok": False,
+            "http_status": 200,
+            "response_json": {"ret": -2, "token": provider_secret},
+            "response_tail": provider_secret,
+        }
+    )
+
+    assert provider_secret not in repr(feishu)
+    assert provider_secret not in repr(wechat)
 
 
 def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Path) -> None:

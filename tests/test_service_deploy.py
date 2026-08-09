@@ -138,6 +138,8 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
+    assert "UMask=0077" in tick
+    assert "UMask=0077" in intake
 
 
 def test_render_systemd_bundle_ai_evidence_collector_opt_in(tmp_path: Path) -> None:
@@ -308,6 +310,7 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
 
     assert unit["install_path"] == f"/etc/systemd/system/{FEISHU_AGENT_CREDENTIAL_SERVICE}"
     assert f"ExecStart={helper}" in unit["content"]
+    assert "UMask=0077" in unit["content"]
     assert f"--agent-store {agent_store}" in unit["content"]
     assert f"--holdings-store {holdings_store}" in unit["content"]
     assert f"--runtime-env-file {runtime_env}" in unit["content"]
@@ -479,7 +482,7 @@ def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path:
                     "lx": {
                         "type": "futu",
                         "futu": {
-                            "account_id": "281756479859383816",
+                            "account_id": "999000000000000001",
                             "host": "127.0.0.1",
                             "port": 11111,
                             "opend_root": str(opend_lx),
@@ -2984,6 +2987,8 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<key>Label</key>" in tick
+    assert "<key>Umask</key>" in tick
+    assert "<string>077</string>" in tick
     assert "<string>com.options-monitor.tick-hk</string>" in tick
     assert str(runtime / "logs" / "com.options-monitor.tick-hk.out.log") in tick
     assert "--market" in tick
@@ -5506,7 +5511,8 @@ def test_runtime_status_warns_when_required_service_timer_is_missing(monkeypatch
     assert out["ok"] is True
     assert out["data"]["summary"]["ok"] is False
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in out["data"]["summary"]["warning_codes"]
-    assert out["data"]["service_drift"]["missing_required_units"] == ["options-monitor-projection-verify.timer"]
+    assert out["data"]["service_drift"]["summary"]["missing_required_count"] == 1
+    assert "missing_required_units" not in out["data"]["service_drift"]
 
 
 def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:

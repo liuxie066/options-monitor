@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names, pure_read_toolsets
 from src.application.copilot.contracts import safe_error_code
+from src.application.research.redaction import redact_value
 from src.application.tool_execution import execute_tool
 
 
@@ -45,7 +46,15 @@ def build_tool_payload(
         explicit_payload.update(static)
     properties = definition.input_json_schema().get("properties")
     fields = set(properties) if isinstance(properties, dict) else set()
-    for name in fields:
+    copilot_properties = _copilot_input_schema(definition).get("properties")
+    explicit_fields = set(copilot_properties) if isinstance(copilot_properties, dict) else set()
+    unsupported_fields = sorted(str(name) for name in explicit_input if name not in explicit_fields)
+    if unsupported_fields:
+        return None, (
+            f"unsupported Copilot input fields for {tool_name}: "
+            + ", ".join(unsupported_fields)
+        )
+    for name in explicit_fields:
         if name not in explicit_input:
             continue
         value = explicit_input.get(name)
@@ -92,19 +101,27 @@ def tool_descriptions(
         definition = get_tool_definition(name)
         if definition is None or not definition.is_pure_read():
             continue
-        default_input = {
+        resolution_input = {
             key: value
             for key, value in definition.safe_default_input.items()
             if value is not None
         }
-        default_input.update(dict((static_payloads or {}).get(name) or {}))
-        output_contract = definition.resolve_output_contract(default_input)
+        resolution_input.update(dict((static_payloads or {}).get(name) or {}))
+        copilot_schema = _copilot_input_schema(definition)
+        visible_properties = copilot_schema.get("properties")
+        visible_fields = set(visible_properties) if isinstance(visible_properties, dict) else set()
+        default_input = {
+            key: value
+            for key, value in resolution_input.items()
+            if key in visible_fields
+        }
+        output_contract = definition.resolve_output_contract(resolution_input)
         descriptions.append(
             {
                 "name": definition.name,
                 "description": _agent_description(definition.description, output_contract),
-                "input_schema": _copilot_input_schema(definition),
-                "default_input": default_input,
+                "input_schema": copilot_schema,
+                "default_input": redact_value(default_input),
                 "examples": [dict(item) for item in definition.examples[:3]],
                 "capabilities": list(definition.capabilities),
                 "output_contract": output_contract,
@@ -131,7 +148,7 @@ def compact_observation(
     if not ok or error:
         safe_error = _safe_error(error)
         code = str((safe_error or {}).get("code") or "TOOL_ERROR")
-        return {
+        return redact_value({
             "tool_name": tool_name,
             "ok": False,
             "status": "failed",
@@ -146,7 +163,7 @@ def compact_observation(
             ),
             **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
             **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
-        }
+        })
     model_missing_fields = output_contract.get("model_missing_data_fields")
     has_model_missing_surface = bool(model_missing_fields) and any(
         _values_at_path(data, str(path).split("."))
@@ -161,7 +178,7 @@ def compact_observation(
     row_count = _row_count(data, output_contract)
     scope = _scope(data)
     coverage = _coverage(data)
-    return {
+    return redact_value({
         "tool_name": tool_name,
         "ok": True,
         "status": "partial" if missing_data or warnings else ("not_found" if row_count == 0 else "complete"),
@@ -174,7 +191,7 @@ def compact_observation(
         **({"missing_data": missing_data} if missing_data else {}),
         **({"warnings": warnings} if warnings else {}),
         "result_contract": _compact_output_contract(output_contract),
-    }
+    })
 
 
 def _copilot_input_schema(definition) -> dict[str, Any]:
@@ -195,6 +212,7 @@ def _copilot_input_schema(definition) -> dict[str, Any]:
         if (allowed is None or name in allowed) and not _is_hidden_copilot_input(name)
     }
     schema["properties"] = visible
+    schema["additionalProperties"] = False
     required = [name for name in schema.get("required") or [] if name in visible]
     if required:
         schema["required"] = required
