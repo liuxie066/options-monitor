@@ -270,6 +270,32 @@ def _first_yaml_runtime_config(*, repo_root: Path, config_yaml_path: Path, marke
     return {}
 
 
+def _ai_decision_advice_enabled_from_authoring_config(
+    *,
+    repo_root: Path,
+    config_yaml_path: Path | None,
+    config_by_market: dict[str, Path],
+    market_values: list[str],
+) -> bool:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.ai_decision_advice.config import ai_decision_advice_enabled
+
+    if config_yaml_path is not None and config_yaml_path.exists():
+        try:
+            config = _first_yaml_runtime_config(
+                repo_root=repo_root,
+                config_yaml_path=config_yaml_path,
+                market_values=market_values,
+            )
+        except AgentToolError:
+            # The collector unit is an optional add-on; a partial authoring
+            # config must not fail the whole service bundle render.
+            config = _first_existing_config(config_by_market, market_values)
+    else:
+        config = _first_existing_config(config_by_market, market_values)
+    return ai_decision_advice_enabled(config)
+
+
 def _opend_service_plans_from_authoring_config(
     *,
     repo_root: Path,
@@ -1422,6 +1448,46 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
+        if _ai_decision_advice_enabled_from_authoring_config(
+            repo_root=repo,
+            config_yaml_path=config_yaml_path,
+            config_by_market=config_by_market,
+            market_values=market_values,
+        ):
+            collector_service = "options-monitor-ai-evidence-collector.service"
+            collector_timer = "options-monitor-ai-evidence-collector.timer"
+            collector_args = [
+                om,
+                "ai-evidence-collector",
+                *[arg for market in market_values for arg in ("--config-key", market)],
+            ]
+            add(
+                f"systemd/{collector_service}",
+                _systemd_unit(
+                    description="Options Monitor AI Decision Advice external evidence collector",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=collector_args,
+                    timeout_start_sec=600,
+                ),
+                install_path=f"/etc/systemd/system/{collector_service}",
+                kind="systemd_service",
+                service_name=collector_service,
+            )
+            add(
+                f"systemd/{collector_timer}",
+                _systemd_timer(
+                    description="Options Monitor AI Decision Advice external evidence collector timer",
+                    unit_name=collector_service,
+                    interval="4h",
+                ),
+                install_path=f"/etc/systemd/system/{collector_timer}",
+                kind="systemd_timer",
+                service_name=collector_timer,
+            )
         if include_quality_monitoring:
             quality_config_args = [
                 arg

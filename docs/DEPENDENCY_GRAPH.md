@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 950 (`src`: 508, `domain`: 76, `scripts`: 8, `tests`: 358)
-- Internal import edges: 5962 total, 2546 production/script edges excluding tests
+- Python files scanned: 952 (`src`: 509, `domain`: 76, `scripts`: 8, `tests`: 359)
+- Internal import edges: 5983 total, 2558 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -39,17 +39,17 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|4| application
   infrastructure -->|2| domain
-  interfaces -->|142| application
+  interfaces -->|149| application
   interfaces -->|2| domain
-  interfaces -->|1| infrastructure
+  interfaces -->|2| infrastructure
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2544| application
+  tests -->|2551| application
   tests -->|445| domain
   tests -->|2| domain_services
   tests -->|152| infrastructure
-  tests -->|214| interfaces
+  tests -->|216| interfaces
   tests -->|13| scripts
   tests -->|16| storage
 ```
@@ -59,7 +59,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 434 |
-| interfaces | application | 142 |
+| interfaces | application | 149 |
 | application | infrastructure | 138 |
 | application | storage | 43 |
 | scripts | application | 12 |
@@ -67,9 +67,9 @@ flowchart LR
 | application | domain_services | 4 |
 | infrastructure | application | 4 |
 | infrastructure | domain | 2 |
+| interfaces | infrastructure | 2 |
 | interfaces | domain | 2 |
 | domain_services | storage | 2 |
-| interfaces | infrastructure | 1 |
 | storage | domain | 1 |
 | scripts | infrastructure | 1 |
 
@@ -77,9 +77,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2544 |
+| tests | application | 2551 |
 | tests | domain | 445 |
-| tests | interfaces | 214 |
+| tests | interfaces | 216 |
 | tests | infrastructure | 152 |
 | tests | storage | 16 |
 | tests | scripts | 13 |
@@ -92,7 +92,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 250 |
-| src.interfaces | src.application | 115 |
+| src.interfaces | src.application | 122 |
 | src.application | src.infrastructure | 102 |
 | src.application.ledger | domain.domain | 49 |
 | src.application | domain.storage | 34 |
@@ -141,6 +141,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.research | 2 |
 | src.application.trades | src.application.positions | 2 |
 | src.infrastructure | domain.domain | 2 |
+| src.interfaces | src.infrastructure | 2 |
 | domain.domain.engine | domain.domain | 2 |
 | domain.services | domain.storage | 2 |
 | src.application.inbound | domain.domain | 1 |
@@ -150,7 +151,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.research | domain.domain.engine | 1 |
 | src.application.research | src.application.ledger | 1 |
 | src.application.research | src.application.settings | 1 |
-| src.application.setup | src.application.settings | 1 |
 
 ## Boundary Checks
 
@@ -177,9 +177,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 94 |
+| src.application.agent_tool_contracts | 95 |
 | domain.domain.symbol_identity | 73 |
-| src.application.agent_tool_config | 57 |
+| src.application.agent_tool_config | 58 |
 | src.infrastructure.io_utils | 57 |
 | src.application.ledger.api | 56 |
 | domain.domain.ledger.position_fields | 43 |
@@ -198,7 +198,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.trades.auto_intake | 30 |
-| src.interfaces.cli.main | 27 |
+| src.interfaces.cli.main | 28 |
 | src.application.agent_tools.analysis | 26 |
 | src.application.close_advice_runner | 26 |
 | src.interfaces.cli.option_positions | 26 |
