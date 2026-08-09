@@ -18,6 +18,10 @@ API_VERSION = "portfolio.api.v1"
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 VALUATION_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 VALUATION_EVIDENCE_SCHEMA = "portfolio.valuation_evidence.v1"
+# Current portfolio.api.v1 producer semantics: distribution ``value`` is
+# derived from market_value_cny. The vendored OpenAPI intentionally does not
+# claim a row-level unit yet; S2 pins and validates this consumer contract.
+DISTRIBUTION_VALUATION_CURRENCY = "CNY"
 _FRESHNESS_STATUSES = frozenset(
     {"fresh", "stale", "unknown", "unavailable"}
 )
@@ -159,6 +163,31 @@ class PortfolioManagementClient:
             CAPITAL_FACTS_PATH,
             query={"account": account, "period": period, "as_of_month": as_of_month},
             timeout=30.0,
+        )
+
+    def read_distribution(
+        self,
+        *,
+        account: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Read one account's ungrouped asset distribution for Advice."""
+
+        requested_account = _normalized_single_account(account)
+        result = self._request(
+            "GET",
+            _VIEW_PATHS["distribution"],
+            query={
+                "account": requested_account,
+                "by_asset": "true",
+                "include_value": "true",
+                "group_cash": "false",
+            },
+            timeout=timeout,
+        )
+        return validate_distribution_response(
+            result,
+            requested_account=requested_account,
         )
 
     def read_valuation_evidence(
@@ -319,6 +348,84 @@ def _normalized_accounts(accounts: list[str]) -> list[str]:
     return normalized
 
 
+def _normalized_single_account(account: str) -> str:
+    normalized = str(account or "").strip()
+    if not normalized:
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution account is missing"
+        )
+    if normalized.lower() == "all" or "," in normalized:
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution requires exactly one account"
+        )
+    return normalized
+
+
+def validate_distribution_response(
+    result: Mapping[str, Any],
+    *,
+    requested_account: str,
+) -> dict[str, Any]:
+    """Validate the single-account distribution response envelope.
+
+    Row-level financial semantics remain owned by the prepared-distribution
+    application boundary. This validator fixes the wire scope, freshness and
+    array shapes so S2 never has to guess whether the response was requested
+    for one account.
+    """
+
+    item = dict(result)
+    required = {
+        "success",
+        "accounts",
+        "freshness",
+        "retrieved_at_utc",
+        "by_asset",
+    }
+    missing = sorted(required - set(item))
+    if missing:
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution response missing required fields: "
+            + ",".join(missing)
+        )
+    if item.get("success") is not True:
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution response did not confirm success=true"
+        )
+
+    account = _normalized_single_account(requested_account)
+    response_accounts = item.get("accounts")
+    if (
+        not isinstance(response_accounts, list)
+        or len(response_accounts) != 1
+        or not isinstance(response_accounts[0], str)
+        or response_accounts[0] != account
+    ):
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution account scope mismatch"
+        )
+
+    _require_timestamp(
+        item.get("retrieved_at_utc"),
+        "portfolio distribution retrieved_at_utc",
+    )
+    freshness = _validate_freshness(item.get("freshness"))
+    _require_timestamp(
+        freshness.get("observed_at_utc"),
+        "portfolio distribution freshness observed_at_utc",
+    )
+    if not isinstance(item.get("by_asset"), list):
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution by_asset must be an array"
+        )
+    if "errors" in item and not isinstance(item.get("errors"), list):
+        raise PortfolioManagementProtocolError(
+            "portfolio distribution errors must be an array"
+        )
+    item["freshness"] = freshness
+    return item
+
+
 def _validate_valuation_evidence_response(
     result: Mapping[str, Any],
     *,
@@ -456,12 +563,14 @@ def _validate_freshness(value: Any) -> dict[str, Any]:
             "portfolio freshness evidence is missing"
         )
     item = dict(value)
-    status = str(item.get("status") or "").strip().lower()
-    trust = str(item.get("trust_status") or "").strip().lower()
+    status = item.get("status")
+    trust = item.get("trust_status")
     dataset_ids = item.get("dataset_ids")
     reason_codes = item.get("reason_codes")
     if (
-        status not in _FRESHNESS_STATUSES
+        not isinstance(status, str)
+        or status not in _FRESHNESS_STATUSES
+        or not isinstance(trust, str)
         or trust not in _TRUST_STATUSES
         or not isinstance(dataset_ids, list)
         or not isinstance(reason_codes, list)
