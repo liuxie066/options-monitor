@@ -278,6 +278,353 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     assert len(set(summaries)) == 1
 
 
+def test_pm_distribution_is_prepared_once_then_recovered_without_refetch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from src.application import tick_account_execution as mod
+    from src.application.prepared_portfolio_distribution import (
+        prepare_portfolio_distributions as prepare_real,
+    )
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    request.base_cfg.update(
+        {
+            "accounts": ["lx"],
+            "account_settings": {
+                "lx": {"holdings_account": "PM LX"}
+            },
+            "ai_decision_advice": {
+                "enabled": True,
+                "portfolio_distribution": {
+                    "provider": "portfolio_management"
+                },
+            },
+        }
+    )
+    pm_calls: list[tuple[str, float]] = []
+
+    class _PMClient:
+        def read_distribution(self, *, account: str, timeout: float):
+            pm_calls.append((account, timeout))
+            return {
+                "success": True,
+                "accounts": [account],
+                "freshness": {
+                    "status": "fresh",
+                    "trust_status": "trusted",
+                    "observed_at_utc": "2026-08-09T11:59:00Z",
+                    "dataset_ids": ["pm.holdings"],
+                    "reason_codes": [],
+                },
+                "retrieved_at_utc": "2026-08-09T12:00:00Z",
+                "by_asset": [
+                    {
+                        "code": "NVDA",
+                        "normalized_type": "stock",
+                        "currency": "USD",
+                        "quantity": 10,
+                        "value": 1000,
+                        "accounts": {account: 10},
+                        "breakdown": [{"account": account}],
+                    }
+                ],
+                "errors": [],
+            }
+
+    def _prepare_distributions(**kwargs):
+        return prepare_real(
+            **kwargs,
+            client_factory=_PMClient,
+        )
+
+    snapshot_manifest = {
+        "schema_version": "required_data_snapshot_manifest.v1",
+        "run_id": request.run_id,
+        "status": "complete",
+        "plan_id": "a" * 64,
+        "symbols": {},
+        "summary": {},
+    }
+
+    def _prefetch(**_kwargs):
+        return {
+            "errors": 0,
+            "symbols": [],
+            "results": {},
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+        }
+
+    def _seal(**kwargs):
+        atomic_write_json(kwargs["manifest_path"], snapshot_manifest)
+        return snapshot_manifest
+
+    account_requests = []
+
+    def _run_one_account(*, request, **_kwargs):
+        account_requests.append(request)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(
+        mod,
+        "prepare_portfolio_distributions",
+        _prepare_distributions,
+    )
+    monkeypatch.setattr(mod, "prefetch_required_data", _prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    initial = mod.run_tick_account_execution(request)
+    initial_distribution = (
+        initial.prepared_portfolio_distribution_by_account["lx"]
+    )
+    assert initial_distribution.status == "ready"
+    assert initial.portfolio_management_distribution_read_count == 1
+    assert pm_calls == [("PM LX", 1.0)]
+    assert initial.prepared_portfolio_distribution_metrics == (
+        {
+            "account": "lx",
+            "provider": "portfolio_management",
+            "status": "ready",
+            "reason": "ready",
+            "artifact_sha256": initial_distribution.artifact_sha256,
+        },
+    )
+
+    monkeypatch.setattr(
+        mod,
+        "prepare_portfolio_distributions",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery must not call PM preparation")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_required_data_snapshot_manifest",
+        lambda **_kwargs: (
+            snapshot_manifest,
+            request.shared_required.resolve(),
+        ),
+    )
+    recovered = mod.run_tick_account_execution(
+        replace(request, prefetch_done=True)
+    )
+    recovered_distribution = (
+        recovered.prepared_portfolio_distribution_by_account["lx"]
+    )
+
+    assert pm_calls == [("PM LX", 1.0)]
+    assert recovered.portfolio_management_distribution_read_count == 0
+    assert recovered_distribution.status == "ready"
+    assert recovered_distribution.artifact_sha256 == (
+        initial_distribution.artifact_sha256
+    )
+    assert recovered_distribution.envelope == initial_distribution.envelope
+    assert len(account_requests) == 2
+
+
+def test_pm_transport_failure_is_soft_and_scan_still_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.prepared_portfolio_distribution import (
+        prepare_portfolio_distributions as prepare_real,
+    )
+    from src.infrastructure.io_utils import atomic_write_json
+    from src.infrastructure.portfolio_management_client import (
+        PortfolioManagementTransportError,
+    )
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    request.base_cfg.update(
+        {
+            "accounts": ["lx"],
+            "ai_decision_advice": {
+                "enabled": True,
+                "portfolio_distribution": {
+                    "provider": "portfolio_management"
+                },
+            },
+        }
+    )
+    pm_calls = 0
+
+    class _FailingPMClient:
+        def read_distribution(self, **_kwargs):
+            nonlocal pm_calls
+            pm_calls += 1
+            raise PortfolioManagementTransportError("connection refused")
+
+    def _prepare_distributions(**kwargs):
+        return prepare_real(
+            **kwargs,
+            client_factory=_FailingPMClient,
+        )
+
+    def _seal(**kwargs):
+        payload = {
+            "schema_version": "required_data_snapshot_manifest.v1",
+            "run_id": kwargs["run_id"],
+            "status": "complete",
+            "plan_id": "a" * 64,
+            "symbols": {},
+            "summary": {},
+        }
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    account_requests = []
+
+    def _run_one_account(*, request, **_kwargs):
+        account_requests.append(request)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(
+        mod,
+        "prepare_portfolio_distributions",
+        _prepare_distributions,
+    )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_required_data",
+        lambda **_kwargs: {
+            "errors": 0,
+            "symbols": [],
+            "results": {},
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+        },
+    )
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    prepared = outcome.prepared_portfolio_distribution_by_account["lx"]
+    assert pm_calls == 1
+    assert outcome.portfolio_management_distribution_read_count == 1
+    assert prepared.status == "unavailable"
+    assert prepared.reason == "pm_transport_error"
+    assert [item.acct for item in account_requests] == ["lx"]
+    assert outcome.ran_pipeline_accounts == ["lx"]
+
+
+def test_pm_recovery_corrupt_artifact_is_soft_and_never_refetches(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from src.application import tick_account_execution as mod
+    from src.application.prepared_portfolio_distribution import (
+        PREPARED_PORTFOLIO_DISTRIBUTION_NAME,
+    )
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = replace(
+        _request(
+            tmp_path,
+            accounts=["lx"],
+            workers=1,
+            force=False,
+        ),
+        prefetch_done=True,
+    )
+    state_dir = request.run_dir / "state"
+    state_dir.mkdir(parents=True)
+    snapshot_path = state_dir / "required_data_snapshot_manifest.json"
+    snapshot = {
+        "schema_version": "required_data_snapshot_manifest.v1",
+        "run_id": request.run_id,
+        "status": "complete",
+        "plan_id": "a" * 64,
+        "symbols": {},
+        "summary": {},
+    }
+    atomic_write_json(snapshot_path, snapshot)
+    account_state = request.run_dir / "accounts" / "lx" / "state"
+    account_state.mkdir(parents=True)
+    atomic_write_json(
+        account_state / "prepared_option_positions_context.v1.json",
+        {
+            "schema_version": "prepared_option_positions_context.v1",
+            "run_id": request.run_id,
+            "account": "lx",
+            "status": "ready",
+        },
+    )
+    (account_state / PREPARED_PORTFOLIO_DISTRIBUTION_NAME).write_text(
+        "{not-json\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_required_data_snapshot_manifest",
+        lambda **_kwargs: (snapshot, request.shared_required.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prepare_portfolio_distributions",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery must never fetch PM")
+        ),
+    )
+
+    account_requests = []
+
+    def _run_one_account(*, request, **_kwargs):
+        account_requests.append(request)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    prepared = outcome.prepared_portfolio_distribution_by_account["lx"]
+    assert outcome.portfolio_management_distribution_read_count == 0
+    assert prepared.status == "unavailable"
+    assert prepared.reason == "recovery_artifact_unavailable"
+    assert prepared.artifact_path is None
+    assert len(account_requests) == 1
+    assert outcome.ran_pipeline_accounts == ["lx"]
+
+
 def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch(
     monkeypatch,
     tmp_path: Path,
@@ -594,6 +941,12 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         account_requests[0].prepared_option_positions_context_manifest
         == option_manifest_path.resolve()
     )
+    missing_distribution = (
+        outcome.prepared_portfolio_distribution_by_account["lx"]
+    )
+    assert outcome.portfolio_management_distribution_read_count == 0
+    assert missing_distribution.status == "unavailable"
+    assert missing_distribution.reason == "recovery_artifact_unavailable"
 
 
 @pytest.mark.parametrize(
