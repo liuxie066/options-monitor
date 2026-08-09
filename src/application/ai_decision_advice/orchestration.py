@@ -26,6 +26,7 @@ from src.infrastructure.deepseek_responses import (
     create_deepseek_response,
     extract_output_text,
     extract_usage,
+    response_fingerprint,
 )
 
 
@@ -105,9 +106,9 @@ def _build_model_runner(api_key: str) -> Callable[[str, dict, dict | None, int],
             timeout=max(1, int(timeout)),
         )
         return ModelCallResult(
-            raw_response=response,
             output_text=extract_output_text(response),
             usage=extract_usage(response),
+            response_sha256=response_fingerprint(response),
         )
 
     return runner

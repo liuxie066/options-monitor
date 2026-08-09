@@ -47,7 +47,7 @@ def _init_minimal_config(*, cfg_path: Path, data_cfg_path: Path, market: str = "
     return init_local_config(
         repo_root=Path(__file__).resolve().parents[1],
         market=market,
-        futu_acc_id="281756479859383816",
+        futu_acc_id="999000000000000001",
         config_path=cfg_path,
         data_config_path=data_cfg_path,
         symbols=symbols or (["NVDA"] if market == "us" else ["0700.HK"]),
@@ -66,7 +66,7 @@ def _init_yaml_authoring_config(*, output_dir: Path) -> tuple[Path, Path]:
         output_config_yaml_path=config_yaml_path,
         runtime_output_dir=output_dir,
         markets=["us", "hk"],
-        futu_acc_id="281756479859383816",
+        futu_acc_id="999000000000000001",
         account_label="user1",
         external_holdings_account=None,
         us_symbols=["NVDA"],
@@ -262,7 +262,8 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
         )
         support_payload = json.loads(support_proc.stdout)
         assert support_payload["tool_name"] == "support.bundle"
-        assert Path(support_payload["data"]["bundle_path"]).exists()
+        assert (outside / "support" / support_payload["data"]["bundle_name"]).exists()
+        assert "bundle_path" not in support_payload["data"]
 
         spec_proc = subprocess.run(
             ["om-agent", "spec"],
@@ -299,7 +300,7 @@ def test_support_bundle_cli_writes_redacted_bundle() -> None:
         )
         payload = json.loads(p.stdout)
         assert payload["tool_name"] == "support.bundle"
-        bundle_path = Path(payload["data"]["bundle_path"])
+        bundle_path = out_dir / payload["data"]["bundle_name"]
         assert bundle_path.exists()
         bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
         assert bundle["schema_version"] == "support_bundle.v1"

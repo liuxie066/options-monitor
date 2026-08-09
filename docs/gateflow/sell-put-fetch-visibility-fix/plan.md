@@ -45,18 +45,9 @@ The fetch layer must answer “which configured market contracts are visible?”
 - `domain/domain/risk_capacity.py` owns the final fail-closed eligibility decision.
 - `src/application/prefilters.py` currently violates those boundaries by deriving a second, native-currency-only Put strike cap before required-data planning.
 
-### Production-shaped evidence
+### Synthetic regression evidence
 
-The read-only production snapshot for `lx` in run `20260722T140036Z-add5f4` contains:
-
-- cash: HKD `666787.5`, USD `10177.48`;
-- existing secured cash: HKD `386500`, USD `8000`;
-- total secured CNY: `388092.51161900006`;
-- USDCNY: `6.7711`; HKDCNY: `0.863968206`;
-- free total capacity: approximately CNY `256903.42`;
-- TCOM 35P/40P one-contract requirements: approximately CNY `23698.85` and `27084.40`.
-
-Therefore those contracts are supported by the existing `total_cny` policy once they become visible. No collateral-policy change is required for this observed defect.
+A proportion-preserving synthetic two-currency fixture covers free cash, secured cash, FX conversion, and two one-contract requirements. Both synthetic contracts are supported by the existing `total_cny` policy once they become visible. No collateral-policy change is required for this defect.
 
 ## Contract and state decisions
 

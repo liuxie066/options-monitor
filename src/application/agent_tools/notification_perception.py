@@ -45,6 +45,14 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
 def _notification_perception_read_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    authenticated_conversation = str(payload.get("authenticated_conversation_id") or "").strip()
+    explicit_conversation = str(payload.get("conversation_id") or "").strip()
+    if authenticated_conversation and explicit_conversation and authenticated_conversation != explicit_conversation:
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="notification perception scope cannot override the authenticated conversation",
+        )
+    conversation_id = authenticated_conversation or explicit_conversation or None
     runtime_resolution = resolve_runtime_root(
         repo_root=repo_base(),
         runtime_root=payload.get("runtime_root"),
@@ -52,7 +60,7 @@ def _notification_perception_read_tool(
     data = read_notification_perception_events(
         repo_root=runtime_resolution.runtime_root,
         run_id=payload.get("run_id"),
-        conversation_id=payload.get("conversation_id"),
+        conversation_id=conversation_id,
         event_kind=payload.get("event_kind"),
         limit=int(payload.get("limit") or 10),
     )
@@ -65,7 +73,7 @@ def _notification_perception_read_tool(
     }
     data["scope"] = {
         "run_id": summary.get("run_id"),
-        "conversation_id": summary.get("conversation_id"),
+        "conversation_ref": summary.get("conversation_ref"),
         "event_kind": summary.get("event_kind"),
     }
     data["coverage"] = {
@@ -114,6 +122,7 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
     input_schema={
         "run_id": "optional output_runs id; omitted reads output_shared/state/audit_events.jsonl",
         "conversation_id": "optional assistant conversation scope such as wechat:<chat_key>",
+        "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "event_kind": "optional event kind filter",
         "limit": "optional number of events to return; defaults to 10",
         "runtime_root": (
@@ -132,7 +141,6 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
     output_contract=_OUTPUT_CONTRACT,
     copilot_input_fields=(
         "run_id",
-        "conversation_id",
         "event_kind",
         "limit",
         "runtime_root",

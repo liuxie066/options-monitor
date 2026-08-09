@@ -757,6 +757,7 @@ def _systemd_unit(
         "",
         "[Service]",
         f"Type={service_type}",
+        "UMask=0077",
         f"WorkingDirectory={_systemd_quote_arg(working_directory or repo_root)}",
     ])
     if deploy_user:
@@ -850,6 +851,7 @@ def _launchd_plist(
         environment["OM_ENV_FILE"] = str(env_file)
     payload: dict[str, Any] = {
         "Label": label,
+        "Umask": "077",
         "ProgramArguments": program_args,
         "WorkingDirectory": str(working_directory or repo_root),
         "EnvironmentVariables": environment,

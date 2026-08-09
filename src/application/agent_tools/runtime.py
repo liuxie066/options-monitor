@@ -7,7 +7,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import version_check_tool, version_update_tool
 from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.version_check import check_version_update
-from src.application.runtime_logs_cli import collect_runtime_logs
+from src.application.runtime_logs_cli import RUN_LOG_FILES, collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
@@ -108,7 +108,7 @@ _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
-    "schema_version": "runtime_logs.output.v1",
+    "schema_version": "runtime_logs.output.v2",
     "source_label": "OM 本地 runtime logs",
     "primary_rows": "files",
     "fact_fields": [
@@ -116,13 +116,31 @@ _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
         "summary.lines",
         "summary.existing_file_count",
         "selected_run.run_id",
-        "files[].path",
+        "files[].kind",
         "files[].exists",
+        "files[].size_bytes",
         "files[].tail_line_count",
-        "files[].error",
+        "files[].tail_truncated",
+        "files[].error_code",
     ],
-    "missing_data_fields": ["summary.requested_run_found", "files[].exists", "files[].error"],
+    "missing_data_fields": ["summary.requested_run_found", "files[].exists", "files[].error_code"],
     "model_preview_fields": ["summary", "selected_run", "files"],
+    "model_value_fields": [
+        "summary.kind",
+        "summary.lines",
+        "summary.lines_capped",
+        "summary.requested_run_found",
+        "summary.file_count",
+        "summary.existing_file_count",
+        "selected_run.run_id",
+        "selected_run.exists",
+        "files[].kind",
+        "files[].exists",
+        "files[].size_bytes",
+        "files[].tail_line_count",
+        "files[].tail_truncated",
+        "files[].error_code",
+    ],
 }
 
 
@@ -222,10 +240,60 @@ def _runtime_logs_tool(
         lines=int(payload.get("lines") or 50),
         log_file=payload.get("log_file"),
     )
-    return data, [], {
+    return _public_runtime_logs(data), [], {
         "runs_root": mask_path(data.get("runs_root")),
         "logs_root": mask_path(data.get("logs_root")),
     }
+
+
+def _public_runtime_logs(data: dict[str, Any]) -> dict[str, Any]:
+    raw_summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    raw_selected = data.get("selected_run") if isinstance(data.get("selected_run"), dict) else {}
+    raw_files = data.get("files") if isinstance(data.get("files"), list) else []
+    files: list[dict[str, Any]] = []
+    for raw_item in raw_files:
+        item = raw_item if isinstance(raw_item, dict) else {}
+        files.append(
+            {
+                "kind": _public_log_kind(item.get("path")),
+                "exists": bool(item.get("exists")),
+                "size_bytes": item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else None,
+                "tail_line_count": int(item.get("tail_line_count") or 0),
+                "tail_truncated": bool(item.get("tail_truncated")),
+                **(
+                    {"error_code": str(item.get("error_code"))}
+                    if item.get("error_code")
+                    else {}
+                ),
+            }
+        )
+    selected_run = None
+    if raw_selected:
+        selected_run = {
+            "run_id": str(raw_selected.get("run_id") or ""),
+            "exists": bool(raw_selected.get("exists")),
+        }
+    return {
+        "schema_version": "runtime_logs-public.v2",
+        "summary": {
+            "ok": bool(raw_summary.get("ok")),
+            "kind": str(raw_summary.get("kind") or "all"),
+            "lines": int(raw_summary.get("lines") or 0),
+            "lines_capped": bool(raw_summary.get("lines_capped")),
+            "requested_run": bool(raw_summary.get("requested_run")),
+            "requested_run_found": raw_summary.get("requested_run_found"),
+            "file_count": len(files),
+            "existing_file_count": sum(1 for item in files if item["exists"]),
+        },
+        "selected_run": selected_run,
+        "files": files,
+    }
+
+
+def _public_log_kind(value: Any) -> str:
+    name = str(value or "").rsplit("/", 1)[-1]
+    by_name = {filename: kind for kind, filename in RUN_LOG_FILES.items()}
+    return by_name.get(name, "service")
 
 
 def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replacement: str) -> None:
@@ -322,11 +390,11 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
 RUNTIME_LOGS_TOOL = build_agent_tool(
     name="runtime_logs",
     description=(
-        "Read detailed audit or service log tails for a known runtime failure. Use after runtime_status or "
-        "runtime_runs identifies the relevant component or run."
+        "Read bounded, content-free audit or service log metadata for a known runtime failure. Use after "
+        "runtime_status or runtime_runs identifies the relevant component or run."
     ),
     requires=("runtime_artifacts",),
-    capabilities=("logs", "audit_tail", "read_only", "runtime_artifacts"),
+    capabilities=("logs", "read_only", "runtime_artifacts"),
     input_schema={
         "runs_root": "optional run history root; defaults to output_runs",
         "logs_root": "optional service log root; defaults to logs or profile runtime_root/logs",

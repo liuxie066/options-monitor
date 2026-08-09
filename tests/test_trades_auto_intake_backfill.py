@@ -514,8 +514,8 @@ def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
         [
             {
                 "event_id": (
-                    "futu:lx:281756479859383816:"
-                    f"{closing_deal_id}:close:lot_futu:lx:281756479859383816:{opening_deal_id}"
+                    "futu:lx:999000000000000001:"
+                    f"{closing_deal_id}:close:lot_futu:lx:999000000000000001:{opening_deal_id}"
                 ),
                 "event_type": "close",
                 "raw_payload": {"source_deal_id": closing_deal_id},

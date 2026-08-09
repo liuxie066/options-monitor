@@ -29,5 +29,7 @@ you already have and include `[security]` in the subject.
 ## Secrets handling expectations
 
 - Never commit `app_secret`, API tokens, or runtime secrets to the repo.
+- Use a GitHub `noreply` author identity for public commits; the guardrail blocks known personal email fingerprints without storing or printing the original address.
 - Prefer repo-local / external secret files outside source control, or use `OM_DATA_CONFIG` when an explicit data-config override is needed.
+- Sensitive runtime directories must be `0700`; sensitive files and SQLite artifacts must be `0600`.
 - Public tool responses must not expose secrets, full filesystem paths, or raw broker account IDs.

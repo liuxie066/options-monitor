@@ -149,7 +149,18 @@ def test_freeze_external_evidence(tmp_path: Path) -> None:
                 "symbol": "NVDA",
                 "url": "https://x",
                 "claim": "c",
+                "topic": "regulatory",
+                "event_status": "developing",
+                "source": {
+                    "title": "public title",
+                    "publisher": "public publisher",
+                    "url": "https://x",
+                    "published_at": None,
+                    "provider_private": "must-not-leave-store",
+                },
                 "content_fingerprint": content_fingerprint("https://x", "c"),
+                "account_id": "must-not-leave-store",
+                "local_path": "/private/must-not-leave-store",
             },
             {
                 "kind": "symbol_status",
@@ -174,6 +185,10 @@ def test_freeze_external_evidence(tmp_path: Path) -> None:
     assert len(by_symbol["NVDA"]["evidence"]) == 1
     assert by_symbol["AAPL"]["coverage"] == "no_evidence"
     assert out["index_hash"]
+    serialized = str(out)
+    assert "must-not-leave-store" not in serialized
+    assert "account_id" not in serialized
+    assert "local_path" not in serialized
 
 
 def test_build_frozen_inputs_hashes(tmp_path: Path) -> None:

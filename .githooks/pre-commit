@@ -8,3 +8,9 @@ if [[ "$repo_name" == *"options-monitor-prod"* ]] || [[ "$repo_root" == *"/optio
   echo "[guardrails] blocked: commits are forbidden in prod repo: $repo_root" >&2
   exit 1
 fi
+
+python3 "$repo_root/scripts/guardrails_check.py" \
+  --staged \
+  --check-doc-wording \
+  --check-runtime-config-tracking \
+  --check-sensitive-artifacts

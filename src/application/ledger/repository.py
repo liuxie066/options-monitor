@@ -13,6 +13,11 @@ from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
+from src.infrastructure.private_storage import (
+    connect_private_sqlite,
+    private_path,
+    secure_sqlite_artifacts,
+)
 
 
 class OptionPositionsReadRepo(Protocol):
@@ -329,19 +334,19 @@ def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection
 
 class SQLiteOptionPositionsRepository:
     def __init__(self, db_path: Path):
-        self.db_path = Path(db_path).resolve()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = private_path(db_path)
         self.data_config_path: Path | None = None
         self.bootstrap_status = "not_started"
         self.bootstrap_message: str | None = None
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_private_sqlite(self.db_path)
         initialize_ledger_connection(conn)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        secure_sqlite_artifacts(self.db_path)
         return conn
 
     @contextmanager
@@ -358,6 +363,7 @@ class SQLiteOptionPositionsRepository:
         finally:
             if owned:
                 conn.close()
+                secure_sqlite_artifacts(self.db_path)
 
     def _table_exists(self, name: str, *, conn: sqlite3.Connection | None = None) -> bool:
         with self._optional_conn(conn) as active_conn:

@@ -39,6 +39,43 @@ def test_run_collector_skips_when_disabled(tmp_path: Path, monkeypatch: pytest.M
     assert result == {"status": "skipped", "reason": "ai_decision_advice_disabled"}
 
 
+def test_evidence_runner_reduces_provider_response_to_safe_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "must-not-persist",
+                "query": "must-not-persist",
+                "status": "completed",
+            },
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"results":[]}'}],
+            },
+        ],
+        "provider_private": "must-not-persist",
+    }
+    monkeypatch.setattr(
+        ai_evidence_collector,
+        "create_deepseek_response",
+        lambda **kwargs: response,
+    )
+
+    result = ai_evidence_collector._evidence_model_runner("not-a-real-key")(
+        "instructions", {}, None, 1
+    )
+
+    assert result.output_text == '{"results":[]}'
+    assert result.web_search_audit == {
+        "count": 1,
+        "status_counts": {"completed": 1},
+    }
+    assert not hasattr(result, "raw_response")
+    assert "must-not-persist" not in repr(result)
+
+
 def test_run_collector_fails_without_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_dir = _write_config(tmp_path, enabled=True)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -70,8 +107,9 @@ def test_run_collector_dry_run_plans_without_model_calls(tmp_path: Path, monkeyp
         dry_run=True,
     )
     assert result["status"] == "dry_run"
-    assert result["observed_symbols"] == ["NVDA"]
-    assert "NVDA" in result["cutoffs"]
+    assert result["observation_count"] == 1
+    assert result["cutoff_count"] == 1
+    assert "NVDA" not in json.dumps(result)
 
 
 def test_main_returns_nonzero_on_config_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -83,4 +121,6 @@ def test_main_returns_nonzero_on_config_error(tmp_path: Path, monkeypatch: pytes
     assert exit_code == 1
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "failed"
-    assert "FileNotFoundError" in out["reason"]
+    assert out["reason"] == "collector_error"
+    assert out["error_type"] == "FileNotFoundError"
+    assert "missing config" not in json.dumps(out)

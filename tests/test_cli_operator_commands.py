@@ -173,7 +173,10 @@ def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) ->
             "schema_version": "1.0",
             "tool_name": "support.bundle",
             "ok": True,
-            "data": {"bundle_path": "/tmp/options-monitor-support.json"},
+            "data": {
+                "bundle_name": "options-monitor-support.json",
+                "bundle_path_public": ".../options-monitor-support.json",
+            },
             "warnings": [],
             "error": None,
             "meta": {},
@@ -656,9 +659,11 @@ def test_top_level_status_prints_human_summary(monkeypatch, capsys) -> None:
     assert calls == [("runtime_status", {"config_key": "us", "accounts": ["lx", "sy"], "run_id": "run-1"})]
     assert "options-monitor status" in out
     assert "overall: OK freshness=fresh warnings=0 latest_status=ok" in out
-    assert "config: key=us path=.../config.us.json accounts=lx, sy" in out
+    assert "config: key=us accounts=lx, sy" in out
+    assert "config.us.json" not in out
     assert "notifications: status=sent reason=confirmed route=wechat_clawbot/wechat_clawbot target=yes sent=1 confirmed=1 failed=0" in out
-    assert "ledger: status=ok fail_closed=no events=3 lots=2 sqlite=output_shared/state/option_positions.sqlite3" in out
+    assert "ledger: status=ok fail_closed=no events=3 lots=2" in out
+    assert "option_positions.sqlite3" not in out
 
 
 def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path) -> None:

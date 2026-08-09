@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.application.ai_decision_advice.collector import ModelCallResult
 from src.application.ai_decision_advice.orchestration import (
+    _build_model_runner,
     run_or_reuse_ai_decision_advice,
 )
 
@@ -52,9 +53,9 @@ def _state_dir(tmp_path: Path, run_id: str = "run-1", account: str = "lx") -> Pa
 def _runner(output: dict):
     def run(instructions, payload, schema, timeout):
         return ModelCallResult(
-            raw_response={"ok": True},
             output_text=json.dumps(output, ensure_ascii=False),
             usage={},
+            response_sha256="c" * 64,
         )
 
     return run
@@ -111,6 +112,31 @@ def test_disabled_config_is_not_applicable_without_model(tmp_path):
     assert calls == []
 
 
+def test_provider_runner_does_not_retain_raw_response(monkeypatch):
+    response = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"safe":true}'}],
+            }
+        ],
+        "usage": {"total_tokens": 7, "debug": "must-not-persist"},
+        "provider_private": "must-not-persist",
+    }
+    monkeypatch.setattr(
+        "src.application.ai_decision_advice.orchestration.create_deepseek_response",
+        lambda **kwargs: response,
+    )
+
+    result = _build_model_runner("not-a-real-key")("instructions", {}, None, 1)
+
+    assert result.output_text == '{"safe":true}'
+    assert result.usage == {"total_tokens": 7}
+    assert len(result.response_sha256 or "") == 64
+    assert not hasattr(result, "raw_response")
+    assert "must-not-persist" not in repr(result)
+
+
 def test_missing_candidate_snapshot_is_unavailable(tmp_path):
     state_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "state"
     state_dir.mkdir(parents=True)
@@ -142,9 +168,9 @@ def test_completed_run_flows_through_to_brief_view(tmp_path):
             account_ref=payload["account_ref"],
         )
         return ModelCallResult(
-            raw_response={"ok": True},
             output_text=json.dumps(output, ensure_ascii=False),
             usage={},
+            response_sha256="c" * 64,
         )
 
     view = run_or_reuse_ai_decision_advice(
@@ -181,9 +207,9 @@ def test_second_run_reuses_without_model_call(tmp_path):
             account_ref=payload["account_ref"],
         )
         return ModelCallResult(
-            raw_response={"ok": True},
             output_text=json.dumps(output, ensure_ascii=False),
             usage={},
+            response_sha256="c" * 64,
         )
 
     kwargs = dict(

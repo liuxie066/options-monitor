@@ -281,12 +281,19 @@ def handle_feishu_ws_event(
         ok=bool(inbound.get("ok", False)) and bool(reply_status.get("ok", True)),
         data={
             "event": _event_summary(payload),
-            "inbound": inbound,
-            "reaction": reaction_status,
-            "reply": reply_status,
-            "outbox_retry": outbox_retry,
+            "inbound": _public_inbound_summary(inbound),
+            "reaction": _status_only(reaction_status),
+            "reply": _status_only(reply_status),
+            "outbox_retry": _status_only(outbox_retry),
         },
-        error=inbound.get("error") if not bool(inbound.get("ok", False)) else None,
+        error=(
+            {
+                "code": str(_dict(inbound.get("error")).get("code") or "INBOUND_PROCESSING_FAILED"),
+                "message": "Feishu inbound processing failed",
+            }
+            if not bool(inbound.get("ok", False))
+            else None
+        ),
     )
 
 
@@ -678,17 +685,17 @@ def _maybe_react(
             "attempted": True,
             "ok": False,
             "reason": "reaction_failed",
-            "message_id": message_id,
+            "message_ref": _opaque_reference("message", message_id),
             "emoji_type": emoji_type,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
         }
     return {
         "attempted": True,
         "ok": True,
         "reason": "sent",
-        "message_id": message_id,
+        "message_ref": _opaque_reference("message", message_id),
         "emoji_type": emoji_type,
-        "api_response": api_response,
+        "provider_response_code": _reply_api_code(api_response),
     }
 
 
@@ -759,7 +766,7 @@ def _maybe_reply(
                 "ok": False,
                 "reason": "reply_payload_invalid",
                 "delivery_key": delivery_key,
-                "error": f"{type(exc).__name__}: {exc}",
+                "error_code": type(exc).__name__,
             }
     try:
         delivery = _deliver_feishu_reply(
@@ -780,7 +787,7 @@ def _maybe_reply(
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": type(exc).__name__,
             "render": _reply_render_status(
                 envelope,
                 uuid=delivery_key or command_id,
@@ -799,7 +806,7 @@ def _maybe_reply(
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
-            "api_response": api_response,
+            "provider_response_code": _reply_api_code(api_response),
             "render": _reply_render_status(
                 envelope,
                 uuid=delivery_key or command_id,
@@ -814,9 +821,9 @@ def _maybe_reply(
         "attempted": True,
         "ok": True,
         "reason": decision.send_reason,
-        "message_id": message_id,
+        "message_ref": _opaque_reference("message", message_id),
         "outbound_message_id": outbound_message_id,
-        "api_response": api_response,
+        "provider_response_code": _reply_api_code(api_response),
         "render": _reply_render_status(
             envelope,
             uuid=delivery_key or command_id,
@@ -1054,8 +1061,7 @@ def _record_reply_receipt(
 
 def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]) -> dict[str, Any]:
     request = _dict(data.get("request"))
-    api_response = reply_status.get("api_response")
-    outbound_message_id = _first_text(reply_status.get("outbound_message_id"), _reply_api_message_id(api_response))
+    outbound_message_id = _first_text(reply_status.get("outbound_message_id"))
     receipt: dict[str, Any] = {
         "schema_version": "feishu-reply-receipt-v1",
         "attempted": bool(reply_status.get("attempted")),
@@ -1063,21 +1069,20 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
         "reason": _first_text(reply_status.get("reason")),
         "channel": _first_text(request.get("channel"), "feishu"),
         "provider": FEISHU_APP_NOTIFICATION_PROVIDER,
-        "sender_id": _first_text(request.get("sender_id")),
-        "inbound_message_id": _first_text(reply_status.get("message_id"), request.get("message_id")),
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
     }
     if outbound_message_id and bool(reply_status.get("ok")):
         receipt["delivery_confirmed"] = True
-    error = _first_text(reply_status.get("error"))
-    if error:
-        receipt["error"] = error
+    error_code = _first_text(reply_status.get("error_code"))
+    if error_code:
+        receipt["error_code"] = error_code
     render = _dict(reply_status.get("render"))
     if render:
         receipt["render"] = render
-    if isinstance(api_response, dict):
-        receipt["api_response"] = api_response
+    provider_response_code = reply_status.get("provider_response_code")
+    if isinstance(provider_response_code, int):
+        receipt["provider_response_code"] = provider_response_code
     return {key: value for key, value in receipt.items() if value is not None}
 
 
@@ -1107,6 +1112,15 @@ def _reply_api_success(api_response: Any) -> bool:
     return not isinstance(code, int) or code == 0
 
 
+def _reply_api_code(api_response: Any) -> int | None:
+    code = _dict(api_response).get("code")
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str) and code.strip().lstrip("-").isdigit():
+        return int(code)
+    return None
+
+
 def _duration_ms(started: float, finished: float) -> int:
     return max(0, int(round((float(finished) - float(started)) * 1000)))
 
@@ -1130,10 +1144,71 @@ def _event_summary(payload: dict[str, Any]) -> dict[str, Any]:
     event = _dict(payload.get("event"))
     message = _dict(event.get("message"))
     return {
-        "event_id": _first_text(header.get("event_id")),
+        "event_ref": _opaque_reference("event", _first_text(header.get("event_id"), message.get("message_id"))),
         "event_type": _first_text(header.get("event_type"), event.get("type")),
-        "message_id": _first_text(message.get("message_id")),
     }
+
+
+def _public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
+    data = _dict(inbound.get("data"))
+    error = _dict(inbound.get("error"))
+    result = _dict(data.get("inbound_result")) or _dict(data.get("result"))
+    result_data = _dict(result.get("data"))
+    control = _dict(result_data.get("control"))
+    decision = _dict(result_data.get("decision"))
+    assistant = _dict(_dict(result.get("meta")).get("assistant"))
+    return {
+        key: value
+        for key, value in {
+            "ok": bool(inbound.get("ok", False)),
+            "kind": data.get("kind"),
+            "status": data.get("status") or result.get("status"),
+            "intent_name": result.get("intent_name") or control.get("intent_name"),
+            "tool_name": result.get("tool_name") or control.get("tool_name"),
+            "route": result.get("render_route") or assistant.get("route"),
+            "decision_reason": decision.get("reason"),
+            "error_code": error.get("code"),
+        }.items()
+        if value is not None
+    }
+
+
+def _status_only(payload: Any) -> dict[str, Any]:
+    source = _dict(payload)
+    allowed = {
+        "attempted",
+        "ok",
+        "reason",
+        "error_code",
+        "provider_response_code",
+        "message_ref",
+        "outbound_message_id",
+        "delivery_key",
+        "emoji_type",
+    }
+    out = {key: source.get(key) for key in allowed if source.get(key) is not None}
+    render = _dict(source.get("render"))
+    if render:
+        render_fields = {
+            "mode",
+            "renderer_version",
+            "card_schema",
+            "request_body_bytes",
+            "source_sha256",
+            "rendered_sha256",
+            "markdown_table_detected",
+            "truncated",
+            "fallback_used",
+        }
+        out["render"] = {key: render.get(key) for key in render_fields if render.get(key) is not None}
+    return out
+
+
+def _opaque_reference(kind: str, value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return f"{kind}:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _dict(value: Any) -> dict[str, Any]:

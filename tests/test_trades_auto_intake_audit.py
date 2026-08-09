@@ -480,7 +480,7 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
 def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> None:
     deal = NormalizedTradeDeal(
         broker="富途",
-        futu_account_id="281756479859383816",
+        futu_account_id="999000000000000001",
         internal_account=None,
         deal_id="deal-2",
         order_id="order-2",
@@ -496,8 +496,8 @@ def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> Non
         expiration_ymd="2026-04-29",
         currency="HKD",
         trade_time_ms=1000,
-        raw_payload={"deal_id": "deal-2", "trade_acc_id": "281756479859383816"},
-        visible_account_fields={"trade_acc_id": "281756479859383816"},
+        raw_payload={"deal_id": "deal-2", "trade_acc_id": "999000000000000001"},
+        visible_account_fields={"trade_acc_id": "999000000000000001"},
         account_mapping_keys=["999999999999999999"],
     )
 
@@ -507,19 +507,19 @@ def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> Non
         result={
             "status": "unresolved",
             "action": None,
-            "reason": "missing_account_mapping:futu_account_id=281756479859383816",
+            "reason": "missing_account_mapping:futu_account_id=999000000000000001",
             "deal_id": "deal-2",
             "account": None,
             "operations": [],
             "diagnostics": {
-                "futu_account_id": "281756479859383816",
-                "visible_account_fields": {"trade_acc_id": "281756479859383816"},
+                "futu_account_id": "999000000000000001",
+                "visible_account_fields": {"trade_acc_id": "999000000000000001"},
                 "account_mapping_keys": ["999999999999999999"],
             },
         },
     )
 
-    assert event["futu_account_id"] == "281756479859383816"
+    assert event["futu_account_id"] == "999000000000000001"
     assert event["diagnostics"]["account_mapping_keys"] == ["999999999999999999"]
 
 

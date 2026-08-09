@@ -12,6 +12,7 @@ from src.application.ai_decision_advice.config import (
 )
 from src.application.ai_decision_advice.prompts import CompiledPromptPack
 from src.application.ai_decision_advice.validation import SCHEMA_NAME
+from src.infrastructure.private_storage import append_private_text, open_private_text
 
 
 ADVICE_RECORD_KIND = "advice_record"
@@ -43,7 +44,7 @@ def read_advice_records(path: Path) -> list[dict[str, Any]]:
     if not Path(path).exists():
         return []
     rows: list[dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as fh:
+    with open_private_text(path) as fh:
         for line in fh:
             text = line.strip()
             if not text:
@@ -58,11 +59,8 @@ def read_advice_records(path: Path) -> list[dict[str, Any]]:
 
 
 def append_advice_record(path: Path, record: Mapping[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(dict(record), ensure_ascii=False, sort_keys=True))
-        fh.write("\n")
+    encoded = json.dumps(dict(record), ensure_ascii=False, sort_keys=True) + "\n"
+    append_private_text(path, encoded)
 
 
 def prompt_fingerprint_for(compiled: CompiledPromptPack) -> str:
@@ -150,6 +148,7 @@ def build_reuse_record(
         }
     )
     record.pop("raw_response", None)
+    record.pop("model_response_audit", None)
     record.pop("usage", None)
     return record
 
