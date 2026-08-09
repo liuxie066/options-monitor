@@ -14,7 +14,7 @@ def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run
         "generated_at_utc": "2026-07-19T13:40:00+00:00",
         "data_as_of_utc": "2026-07-19T13:39:00+00:00",
         "valid_until_utc": valid_until,
-        "status": "ready",
+        "status": "completed",
         "actionability": "live_actionable",
         "strategy_summary": "test",
         "actions": [],
@@ -62,6 +62,40 @@ def test_read_view_supports_latest_day_revision_and_effective_planning_only(tmp_
     assert latest["brief"]["actionability"] == "live_actionable"
 
 
+def test_read_view_passes_ai_decision_advice_section_through(tmp_path: Path) -> None:
+    from src.application.agent_tools.daily_brief import read_daily_brief_view
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+
+    advice = {
+        "status": "completed",
+        "unavailable_reason": None,
+        "evidence_as_of": "2026-07-19T12:00:00+00:00",
+        "sell_put": {
+            "scope_id": "sell_put",
+            "action": "keep",
+            "summary": "保持首选候选。",
+            "candidate_ids": ["run-tool:put:NVDA:100:2026-08-21"],
+        },
+        "covered_call": None,
+        "zero_candidate": False,
+        "reused": False,
+        "advice_record_id": "adv-20260719T134000Z",
+    }
+    brief = _brief()
+    brief["ai_decision_advice"] = advice
+    prepare_daily_decision_brief(base=tmp_path, brief=brief)
+
+    view = read_daily_brief_view(
+        base=tmp_path,
+        account="lx",
+        market="us",
+        now_utc=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+    )
+    assert view["available"] is True
+    assert view["brief"]["ai_decision_advice"]["sell_put"]["action"] == "keep"
+    assert view["brief"]["ai_decision_advice"]["advice_record_id"] == "adv-20260719T134000Z"
+
+
 def test_read_view_reports_unavailable_and_revision_requires_date(tmp_path: Path) -> None:
     from src.application.agent_tools.daily_brief import read_daily_brief_view
 
@@ -97,7 +131,7 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
     assert data["available"] is True
     assert data["brief"]["revision"] == 0
     assert data["coverage"] == {
-        "status": "ready",
+        "status": "completed",
         "reason": "ok",
         "action_count": 0,
         "position_count": 0,

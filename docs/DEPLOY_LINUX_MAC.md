@@ -173,6 +173,15 @@ cd "$REPO"
 
 如果 OpenD 由外部服务管理，不传 `--include-opend` 即可；渲染出的采样命令仍包含所选账户的显式 host/port，但不会伪造 systemd 依赖。部署前必须单独确认该端点可用。recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in 和账户绑定；service drift 会按绑定账户从 canonical config 重新解析端点，因此配置变化会显示为 drift。不传 recorder 开关则默认不启用。
 
+### AI Decision Advice 外部证据 Collector
+
+当 `config.yaml` 中 `ai_decision_advice.enabled: true` 时，`service render` 会自动额外渲染：
+
+- `/etc/systemd/system/options-monitor-ai-evidence-collector.service`：执行 `./om ai-evidence-collector --config-key <market>...`；
+- `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 4 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=4h`，`Persistent=true`）。
+
+Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；运行前必须在 service env（如 `--env-file` 指定的文件）中提供 `DEEPSEEK_API_KEY`。未开启 `ai_decision_advice.enabled` 时不渲染这两个 unit，默认关闭。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
+
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
