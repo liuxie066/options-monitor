@@ -619,7 +619,7 @@ def test_validate_config_rejects_retired_feishu_callback_keys() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "Feishu inbound uses long-connection Bot env settings" in str(exc)
+        assert "feishu.bot.app_secret logical credential" in str(exc)
 
 
 def test_validate_config_accepts_default_off_daily_brief() -> None:

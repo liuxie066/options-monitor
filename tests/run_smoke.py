@@ -142,6 +142,10 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
 
         env = os.environ.copy()
         env["PATH"] = os.pathsep.join([str(bin_dir), env.get("PATH", "")])
+        # This smoke process runs outside pytest's backend-isolation fixture and
+        # outside a systemd unit, so select the explicit compatibility backend.
+        # Production Linux remains fail-closed without CREDENTIALS_DIRECTORY.
+        env["OM_SECRET_BACKEND"] = "env"
 
         om_wrapper = (bin_dir / "om").read_text(encoding="utf-8")
         om_agent_wrapper = (bin_dir / "om-agent").read_text(encoding="utf-8")

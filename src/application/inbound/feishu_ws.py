@@ -37,9 +37,9 @@ from src.application.copilot.host_store import CopilotHostStore
 from src.application.inbound.feishu import prepare_feishu_ack_target
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
-    DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
     resolve_feishu_bot_config,
 )
+from src.application.secret_store import FEISHU_BOT_APP_SECRET
 from src.application.settings import build_effective_env
 from src.infrastructure.feishu_bitable import (
     FeishuAuthError,
@@ -101,7 +101,10 @@ class FeishuWsSettings:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing Feishu app credentials for long-connection inbound",
-                hint=f"Set {DEFAULT_FEISHU_BOT_APP_ID_ENV}/{DEFAULT_FEISHU_BOT_APP_SECRET_ENV}.",
+                hint=(
+                    f"Set {DEFAULT_FEISHU_BOT_APP_ID_ENV} and provision "
+                    f"{FEISHU_BOT_APP_SECRET}."
+                ),
             )
 
     def redacted_status(self, *, sdk_available: bool | None = None) -> dict[str, Any]:
