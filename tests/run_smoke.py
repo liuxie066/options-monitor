@@ -182,7 +182,9 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
         settings_payload = json.loads(settings_proc.stdout)
         assert settings_payload["tool_name"] == "settings.doctor"
         assert settings_payload["ok"] is True
-        assert Path(settings_payload["data"]["env_file"]).resolve() == env_file.resolve()
+        assert settings_payload["data"]["env_file"] == "<configured-env-file>"
+        assert settings_payload["data"]["env_file_loaded"] is True
+        assert str(env_file.resolve()) not in settings_proc.stdout
 
         config_yaml = outside / "config.yaml"
         runtime_configs = outside / "runtime-config"
