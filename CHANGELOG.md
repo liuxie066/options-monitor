@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.12.1 - 2026-08-10
+
 ### Bug Fixes
 - Fixed macOS Keychain provisioning to answer both native password prompts through a private PTY, preventing a successful `security` exit from storing an empty credential while keeping values out of argv, output, and temporary files.
 
