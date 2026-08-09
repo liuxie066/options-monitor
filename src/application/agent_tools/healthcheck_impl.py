@@ -194,7 +194,7 @@ def run_healthcheck_tool(
                 {
                     "name": "notification_credentials",
                     "status": "error",
-                    "message": "Feishu bot send configuration missing from environment",
+                    "message": "Feishu bot send configuration is incomplete",
                     "value": bot_cfg.redacted_status(),
                 }
             )
@@ -217,7 +217,7 @@ def run_healthcheck_tool(
                 {
                     "name": "notification_credentials",
                     "status": "ok",
-                    "message": "Feishu bot send configuration is configured from environment",
+                    "message": "Feishu bot send configuration is configured",
                     "value": bot_cfg.redacted_status(),
                 }
             )
@@ -365,10 +365,12 @@ def run_healthcheck_tool(
 
         if not feishu_ready:
             mapping_errors.append(
-                f"{account}: external_holdings requires {feishu_holdings.app_id_env}/{feishu_holdings.app_secret_env}"
+                f"{account}: external_holdings requires "
+                f"{feishu_holdings.app_id_env}/{feishu_holdings.app_secret_credential_name}"
             )
             primary_errors.append(
-                f"{account}: external_holdings requires {feishu_holdings.app_id_env}/{feishu_holdings.app_secret_env}"
+                f"{account}: external_holdings requires "
+                f"{feishu_holdings.app_id_env}/{feishu_holdings.app_secret_credential_name}"
             )
         if "/" not in feishu_holdings.holdings_ref:
             mapping_errors.append(f"{account}: external_holdings requires {feishu_holdings.holdings_env}")

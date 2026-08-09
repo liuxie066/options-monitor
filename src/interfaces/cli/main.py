@@ -86,6 +86,7 @@ from src.interfaces.cli.scheduler_ops import (
     query_sell_put_cash,
     run_scheduler,
 )
+from src.interfaces.cli.secret_ops import add_secret_commands, handle_secret_command
 from src.interfaces.cli.service_ops import (
     add_service_update_commands,
     handle_service_update_command,
@@ -139,6 +140,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_config_commands(sub)
 
     add_settings_commands(sub)
+
+    add_secret_commands(sub)
 
     sub.add_parser("version", help="check latest released version from git tags")
 
@@ -313,6 +316,9 @@ def main(argv: list[str] | None = None) -> int:
                 diagnose_effective_settings_fn=diagnose_effective_settings,
                 explain_effective_setting_fn=explain_effective_setting,
             ))
+
+        if args.command == "secrets":
+            return _print(handle_secret_command(args))
 
         if args.command == "version":
             sys.stdout.write(_dumps(check_version_update()))

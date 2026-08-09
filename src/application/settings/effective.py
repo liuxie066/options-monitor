@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.application.secret_store.registry import legacy_secret_env_names
+
 
 DEFAULT_LOCAL_ENV_FILE = Path(".env/options-monitor.env")
 ENV_FILE_POINTER = "OM_ENV_FILE"
@@ -17,6 +19,7 @@ DEPRECATED_ENV_SETTINGS: dict[str, str] = {
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_NAME_PARTS = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY", "API_KEY")
+_REGISTERED_SECRET_ENV_NAMES = legacy_secret_env_names()
 _PATH_ENV_NAMES = frozenset(
     {
         ENV_FILE_POINTER,
@@ -74,12 +77,14 @@ def bootstrap_process_env(
     env_file: str | Path | None = None,
     include_local_env_file: bool = True,
 ) -> EffectiveEnv:
-    """Load the effective env-file into os.environ for real CLI processes.
+    """Load ordinary env-file settings into ``os.environ`` for CLI processes.
 
     Unit tests usually call CLI main functions with an explicit argv list, so the
     CLI entrypoints call this only for process invocations. That keeps local
-    ignored secrets from leaking into deterministic tests while making terminal
-    usage behave like the deployed service.
+    ignored settings from leaking into deterministic tests while making terminal
+    usage behave like the deployed service. Secret-looking names are loaded only
+    when the compatibility backend is explicitly selected with
+    ``OM_SECRET_BACKEND=env``; secure backends never silently ingest them.
     """
     effective = build_effective_env(
         repo_root=repo_root,
@@ -87,8 +92,11 @@ def bootstrap_process_env(
         include_local_env_file=include_local_env_file,
     )
     if effective.env_file_loaded:
+        env_secret_compatibility = effective.get("OM_SECRET_BACKEND").strip().lower() == "env"
         for key, source in effective.sources.items():
             if source.source == "env_file":
+                if _is_secret_name(key) and not env_secret_compatibility:
+                    continue
                 os.environ[key] = effective.values[key]
         if effective.env_file is not None:
             os.environ[ENV_FILE_POINTER] = str(effective.env_file)
@@ -230,6 +238,9 @@ def inspect_effective_settings(
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
+    from src.application.secret_store import inspect_secret_credentials
+
+    secret_credentials = inspect_secret_credentials(environ=effective.values)
     keys = [
         "OM_RUNTIME_ROOT",
         "OM_DATA_CONFIG",
@@ -257,20 +268,32 @@ def inspect_effective_settings(
         "KIMI_API_KEY",
     ]
     entries: dict[str, dict[str, Any]] = {}
+    secret_summary = secret_credentials.get("summary") if isinstance(secret_credentials, dict) else {}
+    secret_backend = secret_summary.get("backend") if isinstance(secret_summary, dict) else None
     for key in keys:
         value = effective.get(key)
         source = effective.source_of(key)
+        secret_name = _is_secret_name(key)
+        active_env_secret = not secret_name or secret_backend == "env"
         entries[key] = {
-            "configured": bool(value),
+            "configured": bool(value) and active_env_secret,
+            **({"legacy_env_configured": bool(value)} if secret_name else {}),
             "value": _redacted_value(key, value),
-            "source": source.public_value() if source else None,
-            "secret": _is_secret_name(key),
+            "source": (
+                source.public_value()
+                if source and active_env_secret
+                else "ignored_legacy_env"
+                if source
+                else None
+            ),
+            "secret": secret_name,
         }
     return {
         "env_file": _PUBLIC_ENV_FILE if effective.env_file is not None else None,
         "env_file_loaded": effective.env_file_loaded,
         "warnings": _public_env_warnings(effective.warnings),
         "entries": entries,
+        "secret_credentials": secret_credentials,
     }
 
 
@@ -287,6 +310,9 @@ def diagnose_effective_settings(
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
+    from src.application.secret_store import FEISHU_BOT_APP_SECRET, inspect_secret_credentials
+
+    secret_credentials = inspect_secret_credentials(environ=effective.values)
     checks: list[dict[str, Any]] = []
 
     def add(name: str, status: str, message: str, value: Any | None = None) -> None:
@@ -306,6 +332,24 @@ def diagnose_effective_settings(
         add("env_file", "ok", "env file loaded", _PUBLIC_ENV_FILE)
     else:
         add("env_file", "error", "env file was selected but could not be loaded", _PUBLIC_ENV_FILE)
+
+    secret_summary = secret_credentials.get("summary") if isinstance(secret_credentials, dict) else {}
+    secret_summary = secret_summary if isinstance(secret_summary, dict) else {}
+    add(
+        "secret_backend",
+        "ok" if secret_summary.get("ok") else "error",
+        (
+            f"secret backend {secret_summary.get('backend')} is available"
+            if secret_summary.get("ok")
+            else str(secret_summary.get("error") or "secret backend is unavailable")
+        ),
+        {
+            "backend": secret_summary.get("backend"),
+            "configured_count": secret_summary.get("configured_count", 0),
+            "values_exposed": False,
+            "warnings": list(secret_summary.get("warnings") or []),
+        },
+    )
 
     for warning in effective.warnings:
         status = "error" if ("not found" in warning or "failed" in warning) else "warn"
@@ -350,7 +394,13 @@ def diagnose_effective_settings(
         add("duplicate_env_keys", "ok", "no duplicate env keys found")
 
     bot_app_id = effective.get("OM_FEISHU_BOT_APP_ID")
-    bot_app_secret = effective.get("OM_FEISHU_BOT_APP_SECRET")
+    secret_items = secret_credentials.get("credentials") if isinstance(secret_credentials, dict) else []
+    bot_secret_configured = any(
+        isinstance(item, dict)
+        and item.get("logical_name") == FEISHU_BOT_APP_SECRET
+        and bool(item.get("configured"))
+        for item in (secret_items if isinstance(secret_items, list) else [])
+    )
     bot_user_open_id = effective.get("OM_FEISHU_BOT_USER_OPEN_ID")
     bot_allowed = _split_csv(effective.get("OM_FEISHU_BOT_ALLOWED_OPEN_IDS")) or (
         [bot_user_open_id] if bot_user_open_id else []
@@ -359,7 +409,7 @@ def diagnose_effective_settings(
         name
         for name, value in (
             ("OM_FEISHU_BOT_APP_ID", bot_app_id),
-            ("OM_FEISHU_BOT_APP_SECRET", bot_app_secret),
+            (FEISHU_BOT_APP_SECRET, bot_secret_configured),
         )
         if not value
     ]
@@ -486,6 +536,54 @@ def explain_effective_setting(
     )
     value = effective.get(env_name)
     source = effective.source_of(env_name)
+    if _is_secret_name(env_name):
+        from src.application.secret_store import credential_specs, inspect_secret_credentials
+
+        spec = next(
+            (
+                candidate
+                for candidate in credential_specs()
+                if env_name in candidate.legacy_env_names
+            ),
+            None,
+        )
+        if spec is not None:
+            secret_credentials = inspect_secret_credentials(
+                environ=effective.values,
+                specs=(spec,),
+            )
+            summary = secret_credentials.get("summary")
+            summary = summary if isinstance(summary, dict) else {}
+            credential_items = secret_credentials.get("credentials")
+            credential_items = (
+                credential_items if isinstance(credential_items, list) else []
+            )
+            credential = (
+                credential_items[0]
+                if credential_items and isinstance(credential_items[0], dict)
+                else {}
+            )
+            backend = str(summary.get("backend") or "") or None
+            configured = bool(credential.get("configured"))
+            return {
+                "key": key,
+                "env_name": env_name,
+                "credential_name": spec.logical_name,
+                "configured": configured,
+                "legacy_env_configured": bool(value),
+                "value": "<redacted>" if configured or value else None,
+                "source": (
+                    source.public_value()
+                    if backend == "env" and source is not None
+                    else credential.get("source")
+                ),
+                "secret_backend": backend,
+                **({"credential_error": summary.get("error")} if summary.get("error") else {}),
+                "secret": True,
+                "env_file": _PUBLIC_ENV_FILE if effective.env_file is not None else None,
+                "env_file_loaded": effective.env_file_loaded,
+                "warnings": _public_env_warnings(effective.warnings),
+            }
     return {
         "key": key,
         "env_name": env_name,
@@ -587,7 +685,9 @@ def _truthy(value: str) -> bool:
 
 def _is_secret_name(name: str) -> bool:
     upper = str(name or "").upper()
-    return any(part in upper for part in _SECRET_NAME_PARTS)
+    return upper in _REGISTERED_SECRET_ENV_NAMES or any(
+        part in upper for part in _SECRET_NAME_PARTS
+    )
 
 
 def _redacted_value(name: str, value: str) -> str | None:
