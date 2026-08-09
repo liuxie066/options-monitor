@@ -81,6 +81,8 @@ assistant:
 # docs/AI_DECISION_ADVICE_DESIGN.md section 18 is sent to DeepSeek.
 ai_decision_advice:
   enabled: false
+  portfolio_distribution:
+    provider: none  # none | portfolio_management
 
 inbound:
   feishu_ws:
