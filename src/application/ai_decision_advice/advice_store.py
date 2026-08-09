@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,18 +12,15 @@ from src.application.ai_decision_advice.config import (
     PROVIDER,
 )
 from src.application.ai_decision_advice.prompts import CompiledPromptPack
-from src.application.ai_decision_advice.validation import SCHEMA_NAME
+from src.application.ai_decision_advice.validation import (
+    INPUT_BINDING_KEYS,
+    SCHEMA_NAME,
+    SEMANTIC_INPUT_BINDING_KEYS,
+)
 from src.infrastructure.private_storage import append_private_text, open_private_text
 
 
 ADVICE_RECORD_KIND = "advice_record"
-
-REUSE_INPUT_KEYS = (
-    "candidate_snapshot_hash",
-    "portfolio_context_hash",
-    "option_positions_hash",
-    "external_evidence_hash",
-)
 
 
 def advice_records_path(run_dir: Path, account: str) -> Path:
@@ -64,23 +62,23 @@ def append_advice_record(path: Path, record: Mapping[str, Any]) -> None:
 
 
 def prompt_fingerprint_for(compiled: CompiledPromptPack) -> str:
-    return hashlib.sha256(
-        f"{compiled.version}:{compiled.compiled_sha256}".encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(f"{compiled.version}:{compiled.compiled_sha256}".encode("utf-8")).hexdigest()
 
 
 def bindings_match(record: Mapping[str, Any], bindings: Mapping[str, Any]) -> bool:
     """Reuse predicate (docs 13.2).
 
-    All four semantic input hashes must be equal. ``external_evidence_run_id``
-    and ``last_checked_at``-only updates do not invalidate reuse; the frozen
-    index hash already incorporates coverage state and semantic content.
+    All five semantic input hashes and the binding shape must be equal.
+    ``external_evidence_run_id`` may change after a successful no-change
+    refresh; the semantic evidence and fact-registry hashes decide reuse.
     """
 
     record_bindings = record.get("input_bindings")
     if not isinstance(record_bindings, Mapping):
         return False
-    return all(record_bindings.get(key) == bindings.get(key) for key in REUSE_INPUT_KEYS)
+    if set(record_bindings) != set(INPUT_BINDING_KEYS) or set(bindings) != set(INPUT_BINDING_KEYS):
+        return False
+    return all(record_bindings.get(key) == bindings.get(key) for key in SEMANTIC_INPUT_BINDING_KEYS)
 
 
 def versions_match(
@@ -133,28 +131,29 @@ def build_reuse_record(
     recorded_at: str,
     bindings: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Copy a completed record into the current run with a reuse binding."""
+    """Rebuild a completed record under a new run-local anonymous ref."""
 
-    record = dict(prior)
-    record.update(
-        {
-            "advice_id": advice_id,
-            "run_id": run_id,
-            "account_ref": account_ref,
-            "recorded_at": recorded_at,
-            "reused": True,
-            "reuse_of_advice_id": prior.get("advice_id"),
-            "input_bindings": dict(bindings),
-        }
-    )
-    record.pop("raw_response", None)
-    record.pop("model_response_audit", None)
-    record.pop("usage", None)
-    return record
+    return {
+        "kind": ADVICE_RECORD_KIND,
+        "schema": prior.get("schema"),
+        "advice_id": advice_id,
+        "run_id": run_id,
+        "account_ref": account_ref,
+        "market": prior.get("market"),
+        "recorded_at": recorded_at,
+        "input_bindings": dict(bindings),
+        "versions": deepcopy(prior.get("versions")),
+        "zero_candidate": deepcopy(prior.get("zero_candidate")),
+        "status": "completed",
+        "unavailable_reason": None,
+        "reused": True,
+        "reuse_of_advice_id": prior.get("advice_id"),
+        "decisions": deepcopy(prior.get("decisions") or {}),
+        "demotions": deepcopy(prior.get("demotions") or []),
+        "repair_attempted": False,
+    }
 
 
 def advice_id_for(run_id: str, account_ref: str, recorded_at: str) -> str:
-    digest = hashlib.sha256(
-        f"{run_id}:{account_ref}:{recorded_at}".encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{run_id}:{account_ref}:{recorded_at}".encode("utf-8")).hexdigest()[:16]
     return f"adv-{digest}"
