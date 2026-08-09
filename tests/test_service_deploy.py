@@ -138,6 +138,88 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
+
+
+def test_render_systemd_bundle_ai_evidence_collector_opt_in(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    def _write_config(root: Path, *, enabled: bool) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        config_yaml = root / "config.yaml"
+        lines = [
+            "accounts:",
+            "  lx:",
+            "    type: futu",
+            "    futu:",
+            '      account_id: "REAL_12345678"',
+            "      host: 127.0.0.1",
+            "      port: 11111",
+            "markets:",
+            "  us:",
+            "    accounts: [lx]",
+            "    symbols: [NVDA]",
+        ]
+        if enabled:
+            lines.extend(["ai_decision_advice:", "  enabled: true"])
+        config_yaml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return config_yaml
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    enabled_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        config_yaml=_write_config(tmp_path / "enabled", enabled=True),
+    )
+    enabled_files = {item["relative_path"]: item for item in enabled_bundle["files"]}
+    service = enabled_files["systemd/options-monitor-ai-evidence-collector.service"]["content"]
+    timer = enabled_files["systemd/options-monitor-ai-evidence-collector.timer"]["content"]
+    assert str(repo / "om") + " ai-evidence-collector --config-key us" in service
+    assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in service
+    assert "OnUnitActiveSec=4h" in timer
+    assert "Persistent=true" in timer
+    assert "Unit=options-monitor-ai-evidence-collector.service" in timer
+
+    disabled_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        config_yaml=_write_config(tmp_path / "disabled", enabled=False),
+    )
+    disabled_paths = {item["relative_path"] for item in disabled_bundle["files"]}
+    assert "systemd/options-monitor-ai-evidence-collector.service" not in disabled_paths
+    assert "systemd/options-monitor-ai-evidence-collector.timer" not in disabled_paths
+
+
+def test_render_systemd_bundle_service_hardening() -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = Path("/tmp/om-svc-repo")
+    runtime = Path("/tmp/om-svc-runtime")
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files["systemd/options-monitor-tick-us.service"]["content"]
+    runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
+    verify = files["systemd/options-monitor-projection-verify.service"]["content"]
+    verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
+    intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
+    promotion = files["systemd/options-monitor-position-advice-promotion.service"]["content"]
+    promotion_timer = files["systemd/options-monitor-position-advice-promotion.timer"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
     assert "TimeoutStartSec=" not in tick
     assert "TimeoutStartSec=" not in runtime_status
     assert "TimeoutStartSec=" not in verify

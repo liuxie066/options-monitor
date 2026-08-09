@@ -5,7 +5,14 @@
 > 权威范围：Sell Put / Covered Call 候选生成后的 AI 决策建议、外部证据采集、
 > Daily Brief 展示、运行审计和失败语义
 >
-> 实施状态：本文是后续实施与验收依据，不表示当前代码已经具备这些能力
+> 实施状态：v1 已按 Gateflow S1–S8 落地（2026-08-09）。代码边界：
+> `src/application/ai_decision_advice/`（identity / evidence_store / collector /
+> contexts / projection / validation / advice / advice_store / orchestration /
+> render）、`src/infrastructure/deepseek_responses.py`、
+> `src/interfaces/cli/ai_evidence_collector.py`；brief 集成在
+> `src/application/daily_decision_brief_service.py` 与
+> `domain/domain/daily_decision_brief.py`；systemd collector unit 由
+> `src/application/service_deploy.py` 在 `ai_decision_advice.enabled` 时渲染。
 
 AI Decision Advice 是固定工作流中的建议层。它把策略候选、组合分布、开放期权
 持仓和可靠外部证据放在同一个冻结上下文中，为当前一轮 Sell Put / Covered Call
@@ -338,7 +345,6 @@ output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json
 只发送与决策有关的匿名化分布：
 
 - 标的和币种权重；
-- 关键集中度；
 - 现金和货币基金沿用现有正式资金口径；
 - 每个候选新增一张后的确定性分布变化。
 
@@ -918,7 +924,7 @@ AI Decision Advice：
 
 - 匿名 `account_ref`；
 - 候选 ID、合约和必要指标；
-- 组合的 symbol/industry/currency 权重和集中度；
+- 组合的 symbol/currency 权重和集中度；
 - 开放期权的 symbol/side/type/strike/expiry/contracts 与结构关系；
 - 已规范化外部证据。
 
