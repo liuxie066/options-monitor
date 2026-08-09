@@ -36,6 +36,7 @@ from src.application.prepared_portfolio_context import (
 from src.application.prepared_option_positions_context import (
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PreparedOptionPositionsBatch,
+    load_prepared_option_positions_context,
     prepare_option_positions_contexts,
 )
 from src.application.prepared_portfolio_distribution import (
@@ -193,10 +194,31 @@ class TickAccountExecutionOutcome:
     prepared_portfolio_distribution_by_account: dict[
         str, PreparedPortfolioDistribution
     ] = field(default_factory=dict)
+    prepared_portfolio_distribution_artifact_path_by_account: dict[
+        str, Path | None
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_artifact_sha256_by_account: dict[
+        str, str | None
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_status_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
     prepared_portfolio_distribution_metrics: tuple[
         dict[str, Any], ...
     ] = ()
     portfolio_management_distribution_read_count: int = 0
+    prepared_option_positions_context_by_account: dict[
+        str, dict[str, Any]
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_unavailable_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_manifest_by_account: dict[
+        str, Path
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_manifest_sha256_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
 
 
 def _build_close_advice_barrier_plan(
@@ -417,6 +439,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         str, list[dict[str, Any]]
     ] = {}
     prepared_option_unavailable_by_account: dict[str, str] = {}
+    prepared_option_positions_context_by_account: dict[
+        str, dict[str, Any]
+    ] = {}
+    prepared_option_positions_context_unavailable_by_account: dict[
+        str, str
+    ] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -1008,6 +1036,46 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             snapshot_status = "unavailable"
             prefetch_done = False
 
+    for account in sorted(set(scanning_accounts)):
+        config = account_configs.get(account)
+        authority = account_config_authorities.get(account)
+        if (
+            not isinstance(config, Mapping)
+            or authority is None
+            or not ai_decision_advice_enabled(config)
+        ):
+            continue
+        manifest_path = prepared_option_manifest_paths.get(account)
+        manifest_sha256 = prepared_option_manifest_sha256_by_account.get(
+            account
+        )
+        if manifest_path is None or not manifest_sha256:
+            prepared_option_positions_context_unavailable_by_account[
+                account
+            ] = prepared_option_unavailable_by_account.get(
+                account,
+                "prepared_option_context_unavailable",
+            )
+            continue
+        try:
+            prepared_option_positions_context_by_account[account] = (
+                load_prepared_option_positions_context(
+                    manifest_path=manifest_path,
+                    expected_base=request.base,
+                    expected_run_id=request.run_id,
+                    expected_account=account,
+                    expected_account_config_sha256=(
+                        authority.account_config_sha256
+                    ),
+                    expected_manifest_sha256=manifest_sha256,
+                    expected_runtime_config=config,
+                )
+            )
+        except Exception:
+            prepared_option_positions_context_unavailable_by_account[
+                account
+            ] = "prepared_option_context_invalid"
+
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip().lower()
         try:
@@ -1163,11 +1231,41 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         prepared_portfolio_distribution_by_account=(
             prepared_portfolio_distribution_by_account
         ),
+        prepared_portfolio_distribution_artifact_path_by_account={
+            account: prepared.artifact_path
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
+        prepared_portfolio_distribution_artifact_sha256_by_account={
+            account: prepared.artifact_sha256
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
+        prepared_portfolio_distribution_status_by_account={
+            account: prepared.status
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
         prepared_portfolio_distribution_metrics=tuple(
             prepared_portfolio_distribution_metrics
         ),
         portfolio_management_distribution_read_count=(
             portfolio_management_distribution_read_count
+        ),
+        prepared_option_positions_context_by_account=(
+            prepared_option_positions_context_by_account
+        ),
+        prepared_option_positions_context_unavailable_by_account=(
+            prepared_option_positions_context_unavailable_by_account
+        ),
+        prepared_option_positions_context_manifest_by_account=(
+            prepared_option_manifest_paths
+        ),
+        prepared_option_positions_context_manifest_sha256_by_account=(
+            prepared_option_manifest_sha256_by_account
         ),
     )
 

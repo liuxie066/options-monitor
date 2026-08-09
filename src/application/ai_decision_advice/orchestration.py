@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from domain.domain.symbol_identity import canonical_symbol
 from src.application.ai_decision_advice.advice import (
     AdviceRunResult,
     run_decision_advice,
@@ -17,10 +18,24 @@ from src.application.ai_decision_advice.config import (
     resolve_api_key,
 )
 from src.application.ai_decision_advice.contexts import build_frozen_inputs
-from src.application.ai_decision_advice.evidence_store import freeze_evidence_index
+from src.application.ai_decision_advice.evidence_store import (
+    EvidenceIndex,
+    freeze_evidence_index,
+)
+from src.application.ai_decision_advice.identity import (
+    identity_semantic_hash_by_symbol,
+    load_symbol_identity_snapshot,
+)
 from src.application.ai_decision_advice.prompts import (
     PROMPT_PACK_ADVICE,
     compile_prompt_pack,
+)
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    validate_opening_candidate_snapshot,
+)
+from src.application.prepared_portfolio_distribution import (
+    PreparedPortfolioDistribution,
 )
 from src.infrastructure.deepseek_responses import (
     create_deepseek_response,
@@ -37,51 +52,6 @@ def unavailable_brief_view(reason: str) -> dict[str, Any]:
         status="unavailable",
         unavailable_reason=reason,
     ).to_brief_view()
-
-
-def load_json_artifact(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _portfolio_from_context(context: Mapping[str, Any]) -> dict[str, Any]:
-    """Adapt the prepared portfolio context to the advice freeze input."""
-
-    stocks = context.get("stocks_by_symbol")
-    if isinstance(stocks, Mapping):
-        return dict(context)
-    rows = context.get("stocks") or context.get("holdings")
-    if isinstance(rows, list):
-        by_symbol: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            symbol = str(row.get("symbol") or row.get("code") or "").strip()
-            if not symbol:
-                continue
-            shares = row.get("shares")
-            if shares is None:
-                shares = row.get("quantity", row.get("qty"))
-            by_symbol[symbol] = {
-                "shares": shares,
-                "currency": row.get("currency"),
-            }
-        return {
-            "stocks_by_symbol": by_symbol,
-            "cash_by_currency": context.get("cash_by_currency"),
-        }
-    return {}
-
-
-def _option_lots_from_context(context: Mapping[str, Any]) -> list[dict[str, Any]]:
-    for key in ("position_lots", "lots", "open_positions"):
-        rows = context.get(key)
-        if isinstance(rows, list):
-            return [dict(row) for row in rows if isinstance(row, Mapping)]
-    return []
 
 
 def _build_model_runner(api_key: str) -> Callable[[str, dict, dict | None, int], ModelCallResult]:
@@ -121,7 +91,16 @@ def run_or_reuse_ai_decision_advice(
     account: str,
     market: str,
     config: Mapping[str, Any] | None,
-    state_dir: Path,
+    candidate_snapshot: Mapping[str, Any] | None,
+    portfolio_distribution: (
+        PreparedPortfolioDistribution | Mapping[str, Any] | None
+    ),
+    option_positions_context: Mapping[str, Any] | None,
+    candidate_unavailable_reason: str = "candidate_snapshot_missing",
+    portfolio_unavailable_reason: str = "portfolio_unavailable",
+    option_positions_unavailable_reason: str = (
+        "option_positions_unavailable"
+    ),
     budget_seconds: int = ADVICE_ACCOUNT_BUDGET_SECONDS,
     model_runner: Callable[[str, dict, dict | None, int], ModelCallResult] | None = None,
     now: datetime | None = None,
@@ -137,47 +116,247 @@ def run_or_reuse_ai_decision_advice(
     if not ai_decision_advice_enabled(cfg):
         return AdviceRunResult(status="not_applicable").to_brief_view()
 
-    state_dir = Path(state_dir)
-    snapshot = load_json_artifact(state_dir / "opening_candidate_snapshot.json")
-    if not snapshot:
-        return unavailable_brief_view("candidate_snapshot_missing")
-
-    portfolio_raw = load_json_artifact(state_dir / "portfolio_context.json")
-    option_raw = load_json_artifact(state_dir / "option_positions_context.json")
-    context_complete = bool(portfolio_raw) and bool(option_raw)
-
     effective_now = now or datetime.now(timezone.utc)
-    evidence_index = freeze_evidence_index(base, now=effective_now)
-    frozen = build_frozen_inputs(
-        snapshot=snapshot,
-        portfolio_context=_portfolio_from_context(portfolio_raw),
-        position_lots=_option_lots_from_context(option_raw),
-        evidence_index=evidence_index,
-        market=market,
-        evidence_run_id=str(evidence_index.frozen_at or "") or None,
-    )
+    snapshot = dict(candidate_snapshot or {})
+    if not snapshot:
+        return unavailable_brief_view(candidate_unavailable_reason)
+    try:
+        validate_opening_candidate_snapshot(
+            snapshot,
+            expected_run_id=str(run_id).strip(),
+            expected_account=str(account).strip().lower(),
+        )
+        if str(snapshot.get("market") or "").strip().upper() != str(
+            market
+        ).strip().upper():
+            raise OpeningCandidateSnapshotError(
+                "opening candidate snapshot market mismatch"
+            )
+        _require_advice_evaluable_candidate_snapshot(snapshot)
+        relevant_symbols = _relevant_symbols(
+            candidate_snapshot=snapshot,
+            portfolio_distribution=portfolio_distribution,
+            option_positions_context=option_positions_context,
+        )
+        identity_hashes = identity_semantic_hash_by_symbol(
+            load_symbol_identity_snapshot(Path(base))
+        )
+        # A symbol without a frozen identity must not accidentally consume
+        # evidence produced for an unknown or previous identity generation.
+        identity_bindings = {
+            symbol: identity_hashes.get(symbol, "0" * 64)
+            for symbol in relevant_symbols
+        }
+        evidence_index = (
+            freeze_evidence_index(
+                Path(base),
+                symbols=relevant_symbols,
+                now=effective_now,
+                identity_hash_by_symbol=identity_bindings,
+            )
+            if relevant_symbols
+            else EvidenceIndex(
+                frozen_at=effective_now.astimezone(timezone.utc).isoformat(),
+            )
+        )
+        frozen = build_frozen_inputs(
+            snapshot=snapshot,
+            portfolio_distribution=portfolio_distribution,
+            option_positions_context=option_positions_context,
+            evidence_index=evidence_index,
+            market=market,
+            evidence_run_id=str(evidence_index.frozen_at or "") or None,
+            portfolio_unavailable_reason=portfolio_unavailable_reason,
+            option_positions_unavailable_reason=(
+                option_positions_unavailable_reason
+            ),
+        )
+    except Exception:
+        return unavailable_brief_view("advice_input_unavailable")
 
-    runner = model_runner
-    if runner is None:
-        api_key = resolve_api_key()
-        if api_key:
-            runner = _build_model_runner(api_key)
-
-    result = run_decision_advice(
-        output_root=Path(base),
-        run_id=run_id,
-        account=account,
-        market=market,
-        frozen=frozen,
-        model_runner=runner,
-        budget_seconds=budget_seconds,
-        context_complete=context_complete,
-        now=effective_now,
-        monotonic=monotonic,
-        compiled_prompt=compile_prompt_pack(PROMPT_PACK_ADVICE),
-    )
+    try:
+        runner = model_runner
+        has_candidates = bool(
+            frozen.candidates.get("sell_put")
+            or frozen.candidates.get("covered_call")
+        )
+        if runner is None and has_candidates:
+            api_key = resolve_api_key()
+            if api_key:
+                runner = _build_model_runner(api_key)
+        result = run_decision_advice(
+            output_root=Path(base),
+            run_id=run_id,
+            account=account,
+            market=market,
+            frozen=frozen,
+            model_runner=runner,
+            budget_seconds=budget_seconds,
+            now=effective_now,
+            monotonic=monotonic,
+            compiled_prompt=compile_prompt_pack(PROMPT_PACK_ADVICE),
+        )
+    except Exception:
+        return unavailable_brief_view("advice_execution_failed")
     view = result.to_brief_view()
     evidence_index_view = result.to_evidence_index_view(frozen)
     if evidence_index_view is not None:
         view["evidence_index"] = evidence_index_view
     return view
+
+
+def _require_advice_evaluable_candidate_snapshot(
+    snapshot: Mapping[str, Any],
+) -> None:
+    """Accept only complete Candidate Engine outcomes for Advice.
+
+    An empty family is a legal zero candidate only when Candidate Engine
+    explicitly sealed it as ``no_candidate``. Market closure, unavailable or
+    partial strategy data must not collapse into a synthetic zero-candidate
+    Advice result.
+    """
+
+    ranked = snapshot.get("ranked_candidates")
+    results = snapshot.get("strategy_results")
+    if not isinstance(ranked, list) or not isinstance(results, list):
+        raise OpeningCandidateSnapshotError(
+            "opening candidate snapshot collections are invalid"
+        )
+
+    counts = {"put": 0, "call": 0}
+    for item in ranked:
+        if not isinstance(item, Mapping):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate snapshot row is invalid"
+            )
+        mode = str(item.get("strategy_mode") or "").strip().lower()
+        if mode not in counts:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate snapshot strategy mode is unsupported"
+            )
+        counts[mode] += 1
+
+    statuses = {
+        str(item.get("strategy_mode") or "").strip().lower(): str(
+            item.get("strategy_status") or ""
+        ).strip().lower()
+        for item in results
+        if isinstance(item, Mapping)
+    }
+    if set(statuses) != set(counts):
+        raise OpeningCandidateSnapshotError(
+            "opening candidate snapshot advice strategies are incomplete"
+        )
+    for mode, count in counts.items():
+        expected = "candidates_found" if count else "no_candidate"
+        if statuses[mode] != expected:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate snapshot is not advice-evaluable"
+            )
+
+    expected_opening = (
+        "candidates_found" if any(counts.values()) else "no_candidate"
+    )
+    if str(snapshot.get("opening_status") or "").strip().lower() != (
+        expected_opening
+    ):
+        raise OpeningCandidateSnapshotError(
+            "opening candidate snapshot is not advice-evaluable"
+        )
+
+
+def _relevant_symbols(
+    *,
+    candidate_snapshot: Mapping[str, Any],
+    portfolio_distribution: (
+        PreparedPortfolioDistribution | Mapping[str, Any] | None
+    ),
+    option_positions_context: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    symbols: set[str] = set()
+    for item in candidate_snapshot.get("ranked_candidates") or []:
+        facts = item.get("facts") if isinstance(item, Mapping) else None
+        if isinstance(facts, Mapping):
+            _add_symbol(symbols, facts.get("symbol"))
+
+    envelope: Mapping[str, Any] | None = None
+    if isinstance(portfolio_distribution, PreparedPortfolioDistribution):
+        envelope = portfolio_distribution.envelope
+    elif isinstance(portfolio_distribution, Mapping):
+        nested = portfolio_distribution.get("envelope")
+        envelope = nested if isinstance(nested, Mapping) else portfolio_distribution
+    portfolio_authority = (
+        envelope.get("authority") if isinstance(envelope, Mapping) else None
+    )
+    portfolio_status = (
+        str(portfolio_authority.get("status") or "").strip().lower()
+        if isinstance(portfolio_authority, Mapping)
+        else ""
+    )
+    payload = (
+        envelope.get("payload")
+        if isinstance(envelope, Mapping)
+        and _authority_matches_snapshot(portfolio_authority, candidate_snapshot)
+        and portfolio_status in {"ready", "degraded"}
+        else None
+    )
+    assets = payload.get("assets") if isinstance(payload, Mapping) else None
+    for item in assets if isinstance(assets, list) else ():
+        if (
+            isinstance(item, Mapping)
+            and str(item.get("normalized_type") or "").strip().lower()
+            == "stock"
+        ):
+            _add_symbol(symbols, item.get("code"))
+
+    option_authority = (
+        option_positions_context.get("prepared_authority")
+        if isinstance(option_positions_context, Mapping)
+        else None
+    )
+    option_filters = (
+        option_positions_context.get("filters")
+        if isinstance(option_positions_context, Mapping)
+        else None
+    )
+    rows = (
+        option_positions_context.get("open_positions_min")
+        if isinstance(option_positions_context, Mapping)
+        and _authority_matches_snapshot(option_authority, candidate_snapshot)
+        and isinstance(option_filters, Mapping)
+        and str(option_filters.get("account") or "").strip().lower()
+        == str(candidate_snapshot.get("account") or "").strip().lower()
+        and str(option_positions_context.get("context_status") or "")
+        == "available"
+        and str(
+            option_positions_context.get("decision_snapshot_status") or ""
+        )
+        == "trusted"
+        else None
+    )
+    for item in rows if isinstance(rows, list) else ():
+        if isinstance(item, Mapping):
+            _add_symbol(symbols, item.get("symbol"))
+    return tuple(sorted(symbols))
+
+
+def _add_symbol(symbols: set[str], raw_symbol: object) -> None:
+    symbol = canonical_symbol(raw_symbol)
+    if symbol:
+        symbols.add(symbol)
+
+
+def _authority_matches_snapshot(
+    authority: object,
+    snapshot: Mapping[str, Any],
+) -> bool:
+    if not isinstance(authority, Mapping):
+        return False
+    return bool(
+        str(authority.get("run_id") or "")
+        == str(snapshot.get("run_id") or "")
+        and str(authority.get("account") or "").strip().lower()
+        == str(snapshot.get("account") or "").strip().lower()
+        and str(authority.get("account_config_sha256") or "")
+        == str(snapshot.get("account_config_sha256") or "")
+    )
