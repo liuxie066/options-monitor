@@ -23,6 +23,7 @@ class ScopeSpec:
     baseline_candidate_id: str
     allowed_candidate_ids: frozenset[str]
     symbol_evidence_complete: bool
+    allowed_evidence_refs: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -46,9 +47,21 @@ def derive_scopes(
     """
 
     coverage_by_symbol: dict[str, str] = {}
+    refs_by_symbol: dict[str, frozenset[str]] = {}
     for row in external_evidence.get("symbols") or []:
         if isinstance(row, Mapping):
             coverage_by_symbol[str(row.get("symbol") or "")] = str(row.get("coverage") or "")
+            refs_by_symbol[str(row.get("symbol") or "")] = frozenset(
+                str(item.get("ref") or "")
+                for item in (row.get("evidence") or [])
+                if isinstance(item, Mapping) and str(item.get("ref") or "").strip()
+            )
+
+    def refs(rows: list[Mapping[str, Any]]) -> frozenset[str]:
+        out: set[str] = set()
+        for row in rows:
+            out |= refs_by_symbol.get(str(row.get("symbol") or ""), frozenset())
+        return frozenset(out)
 
     def complete(rows: list[Mapping[str, Any]]) -> bool:
         return all(
@@ -66,6 +79,7 @@ def derive_scopes(
             baseline_candidate_id=str(sell_put_rows[0].get("candidate_id") or ""),
             allowed_candidate_ids=frozenset(str(row.get("candidate_id") or "") for row in sell_put_rows),
             symbol_evidence_complete=complete(sell_put_rows),
+            allowed_evidence_refs=refs(sell_put_rows),
         )
     by_symbol: dict[str, list[Mapping[str, Any]]] = {}
     for row in candidates.get("covered_call") or []:
@@ -79,6 +93,7 @@ def derive_scopes(
             baseline_candidate_id=str(rows[0].get("candidate_id") or ""),
             allowed_candidate_ids=frozenset(str(row.get("candidate_id") or "") for row in rows),
             symbol_evidence_complete=complete(rows),
+            allowed_evidence_refs=refs(rows),
         )
     return scopes
 
@@ -218,6 +233,13 @@ def _validate_decision(
             # Rejected/unknown candidate id or Covered Call cross-symbol switch:
             # the same-underlying scope defines the allowed pool.
             return demote("switch_out_of_pool")
+    unresolved_refs = [
+        ref for ref in source_refs["external_evidence_refs"] if ref not in spec.allowed_evidence_refs
+    ]
+    if unresolved_refs:
+        # Evidence refs must resolve to the frozen evidence view for this
+        # scope; unresolvable refs cannot be audited (design 15.4).
+        return demote("unresolved_evidence_refs")
     if not context_complete and action != "needs_review":
         # Missing portfolio / option-position context caps every scope at
         # needs_review (docs 9.7).

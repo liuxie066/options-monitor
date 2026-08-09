@@ -116,6 +116,8 @@ def test_brief_carries_ai_decision_advice_section(tmp_path: Path) -> None:
     assert isinstance(section, dict)
     assert section["status"] == "not_applicable"
     assert section["zero_candidate"] == {"sell_put": False, "covered_call": False}
+    assert "evidence_index" not in section
+    assert brief.get("ai_decision_advice_evidence_index") == {}
 
 
 def _assemble(

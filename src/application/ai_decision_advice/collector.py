@@ -341,21 +341,23 @@ def _call_with_repair(
         for symbol in batch_symbols:
             evidence_rows = validated["results"].get(symbol, [])
             for item in evidence_rows:
+                fingerprint = content_fingerprint(
+                    item["source"].get("url"), item["claim"]
+                )
                 records.append(
                     {
                         "kind": "symbol_evidence",
                         "symbol": symbol,
                         "evidence_run_id": evidence_run_id,
                         "identity_snapshot_hash": identity_snapshot_hash,
+                        "ref": f"ev-{fingerprint[:12]}",
                         "topic": item["topic"],
                         "claim": item["claim"],
                         "event_status": item["event_status"],
                         "event_time": item.get("event_time"),
                         "source": dict(item["source"]),
                         "url": item["source"].get("url"),
-                        "content_fingerprint": content_fingerprint(
-                            item["source"].get("url"), item["claim"]
-                        ),
+                        "content_fingerprint": fingerprint,
                     }
                 )
             records.append(

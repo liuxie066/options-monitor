@@ -161,6 +161,12 @@ def test_completed_run_flows_through_to_brief_view(tmp_path):
     assert view["sell_put"]["action"] == "defer"
     assert view["zero_candidate"] == {"sell_put": False, "covered_call": True}
     assert view["covered_call"] is None
+    # Frozen evidence index travels with the view for receipt source rendering.
+    index = view["evidence_index"]
+    assert index["frozen_at"] == NOW.isoformat()
+    assert index["symbols"] == [
+        {"symbol": "NVDA", "coverage": "no_evidence", "evidence": []}
+    ]
     # Privacy: no account label in model input; no NAV/totals keys.
     text = json.dumps(captured["payload"], ensure_ascii=False)
     assert "lx" not in text.replace('"account_ref"', "")

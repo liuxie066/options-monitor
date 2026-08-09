@@ -498,6 +498,9 @@ def assemble_daily_decision_brief(
             now=effective_now,
         )
     )
+    ai_decision_advice_evidence_index = _json_safe(
+        ai_decision_advice_view.pop("evidence_index", None) or {}
+    )
     prefetch = _load_json_artifact(
         path=state_dir / "required_data_prefetch_summary.json",
         run_account_dir=run_account_dir,
@@ -635,6 +638,7 @@ def assemble_daily_decision_brief(
             "candidates": candidate_payloads,
             "candidate_index": candidate_index,
             "ai_decision_advice": ai_decision_advice_view,
+            "ai_decision_advice_evidence_index": ai_decision_advice_evidence_index,
             "rejections": _json_safe(rejections),
             "events": events,
             "data_gaps": deduped_data_gaps,

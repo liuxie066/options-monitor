@@ -252,6 +252,10 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "ai_decision_advice": _normalize_ai_decision_advice(
                 src.get("ai_decision_advice")
             ),
+            "ai_decision_advice_evidence_index": _mapping(
+                src.get("ai_decision_advice_evidence_index"),
+                field="ai_decision_advice_evidence_index",
+            ),
         }
     )
     return out

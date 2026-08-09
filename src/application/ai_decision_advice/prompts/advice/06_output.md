@@ -13,3 +13,6 @@
    internal_fact_refs 和 external_evidence_refs。
 5. switch / defer 必须在 rationale 与 refs 中给出可核验的事实引用；keep
    引用支持维持判断的覆盖事实。
+6. external_evidence_refs 只能逐字引用输入 external_evidence 中证据行的
+   ref 字段（形如 ev-xxxxxxxxxxxx）；不得编造、改写或推断 ref。没有可引用
+   证据时输出空数组。

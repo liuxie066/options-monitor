@@ -116,7 +116,6 @@ class EvidenceIndex:
             symbol: {
                 "coverage": view.coverage,
                 "semantic_hash": view.semantic_hash,
-                "last_success_at": view.last_success_at,
             }
             for symbol, view in sorted(self.views.items())
         }

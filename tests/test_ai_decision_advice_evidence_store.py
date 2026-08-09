@@ -172,6 +172,28 @@ def test_index_hash_changes_with_semantics_not_checked_time(tmp_path: Path) -> N
     assert first.index_hash() == second.index_hash()
 
 
+def test_index_hash_stable_when_only_last_success_refreshes(tmp_path: Path) -> None:
+    """checked-at-only collector refresh must not invalidate reuse (docs 13.2)."""
+
+    first_checked = "2026-08-09T04:00:00+00:00"
+    second_checked = "2026-08-09T08:00:00+00:00"
+    append_evidence_records(
+        base=tmp_path,
+        records=[_evidence("NVDA", "https://a", "claim", appended=first_checked), _status("NVDA", checked=first_checked)],
+        evidence_run_id="run-1",
+        appended_at=first_checked,
+    )
+    first = freeze_evidence_index(tmp_path, symbols=["NVDA"], now=datetime(2026, 8, 9, 9, tzinfo=timezone.utc))
+    append_evidence_records(
+        base=tmp_path,
+        records=[_status("NVDA", checked=second_checked)],
+        evidence_run_id="run-2",
+        appended_at=second_checked,
+    )
+    second = freeze_evidence_index(tmp_path, symbols=["NVDA"], now=datetime(2026, 8, 9, 9, tzinfo=timezone.utc))
+    assert first.index_hash() == second.index_hash()
+
+
 def test_content_fingerprint_stable() -> None:
     assert content_fingerprint("u", "c") == content_fingerprint("u", "c")
     assert content_fingerprint("u", "c") != content_fingerprint("u", "c2")

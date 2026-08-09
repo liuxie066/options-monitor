@@ -108,6 +108,59 @@ def test_derive_scopes_evidence_incomplete_when_any_symbol_not_completed():
 def test_zero_candidate_flags():
     flags = zero_candidate_flags({"sell_put": [], "covered_call": []})
     assert flags == {"sell_put": True, "covered_call": True}
+
+
+def _evidence_with_refs() -> dict:
+    evidence = _evidence()
+    for row in evidence["symbols"]:
+        if row["symbol"] == "NVDA":
+            row["evidence"] = [
+                {"ref": "ev-aaa111bbb222", "url": "https://a", "claim": "c"},
+            ]
+        if row["symbol"] == "AAPL":
+            row["evidence"] = [
+                {"ref": "ev-ccc333ddd444", "url": "https://b", "claim": "c2"},
+            ]
+    return evidence
+
+
+def test_derive_scopes_collects_allowed_evidence_refs():
+    scopes = derive_scopes(_candidates(), _evidence_with_refs())
+    assert scopes["sell_put"].allowed_evidence_refs == frozenset(
+        {"ev-aaa111bbb222", "ev-ccc333ddd444"}
+    )
+    assert scopes["covered_call:NVDA"].allowed_evidence_refs == frozenset(
+        {"ev-aaa111bbb222"}
+    )
+    assert scopes["covered_call:TSLA"].allowed_evidence_refs == frozenset()
+
+
+def test_unresolvable_evidence_ref_demotes_to_needs_review():
+    scopes = derive_scopes(_candidates(), _evidence_with_refs())
+    result = _validate(
+        _payload([_decision(external_evidence_refs=["ev-fabricated"])]),
+        scopes=scopes,
+    )
+    assert result.decisions["sell_put"]["action"] == "needs_review"
+    assert result.demotions[0]["reason"] == "unresolved_evidence_refs"
+
+
+def test_resolvable_evidence_ref_is_kept():
+    scopes = derive_scopes(_candidates(), _evidence_with_refs())
+    result = _validate(
+        _payload(
+            [
+                _decision(
+                    action="switch",
+                    selected_candidate_id="put-2",
+                    external_evidence_refs=["ev-ccc333ddd444"],
+                )
+            ]
+        ),
+        scopes=scopes,
+    )
+    assert result.decisions["sell_put"]["action"] == "switch"
+    assert result.demotions == []
     flags = zero_candidate_flags(_candidates())
     assert flags == {"sell_put": False, "covered_call": False}
 
