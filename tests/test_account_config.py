@@ -173,11 +173,11 @@ def test_build_account_config_view_exposes_futu_runtime_plan() -> None:
                 "type": "futu",
                 "trade_intake_enabled": False,
                 "futu": {
-                    "account_id": "281756479859383816",
+                    "account_id": "999000000000000001",
                     "host": "127.0.0.1",
                     "port": "11111",
                     "telnet_port": "22222",
-                    "opend_root": "/home/liuxie/apps/futu-opend-lx/current",
+                    "opend_root": "/home/om/apps/futu-opend-lx/current",
                     "trd_env": "REAL",
                 },
             }
@@ -193,15 +193,15 @@ def test_build_account_config_view_exposes_futu_runtime_plan() -> None:
 
     out = build_account_config_view(cfg, account="lx")
 
-    assert out.futu_acc_ids == ["281756479859383816"]
+    assert out.futu_acc_ids == ["999000000000000001"]
     assert out.runtime_plan.portfolio_source == "futu"
     assert out.runtime_plan.trade_source == "api"
     assert out.runtime_plan.trade_intake_enabled is False
-    assert out.runtime_plan.futu_account_id == "281756479859383816"
+    assert out.runtime_plan.futu_account_id == "999000000000000001"
     assert out.runtime_plan.futu_host == "127.0.0.1"
     assert out.runtime_plan.futu_port == 11111
     assert out.runtime_plan.futu_telnet_port == 22222
-    assert out.runtime_plan.futu_opend_root == "/home/liuxie/apps/futu-opend-lx/current"
+    assert out.runtime_plan.futu_opend_root == "/home/om/apps/futu-opend-lx/current"
     assert out.runtime_plan.futu_trd_env == "REAL"
 
 

@@ -952,19 +952,27 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
         "operation_id": operation_id,
         "operation_resolution": "permission_response",
     }
-    timeline_out = run_tool("operation_timeline", {"audit_db": str(audit_db), "operation_id": operation_id})
+    timeline_out = run_tool(
+        "operation_timeline",
+        {
+            "audit_db": str(audit_db),
+            "operation_id": operation_id,
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:ou_1",
+        },
+    )
     assert timeline_out["ok"] is True
     assert timeline_out["data"]["schema_version"] == "operation-timeline-v1"
     assert timeline_out["data"]["timeline_count"] == 1
     timeline = timeline_out["data"]["timelines"][0]
     identity = timeline["identity"]
-    assert identity["command_id"] == operation_id
     assert identity["operation_id"] == operation_id
-    assert identity["inbound_message_id"] == "msg_open_preview"
-    assert identity["channel"] == "feishu"
-    assert identity["sender_id"] == "ou_1"
-    assert identity["ledger_event_id"]
-    assert identity["record_id"]
+    assert set(identity) == {"operation_id"}
+    serialized_timeline = json.dumps(timeline_out["data"], ensure_ascii=False)
+    assert "ou_1" not in serialized_timeline
+    assert "msg_open_preview" not in serialized_timeline
+    assert "记录开仓 sy NVDA" not in serialized_timeline
     assert timeline["operation"]["status"] == "applied"
     assert timeline["action_lifecycle"]["schema_version"] == "om-agent-action-lifecycle-v1"
     assert timeline["action_lifecycle"]["status"] == "applied"
@@ -978,6 +986,20 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "receipt_not_observed" in timeline["warnings"]
     assert "phase=verify" in timeline_out["data"]["response_text"]
     assert "verify=verified_applied" in timeline_out["data"]["response_text"]
+
+    cross_scope = run_tool(
+        "operation_timeline",
+        {
+            "authenticated_channel": "feishu",
+            "authenticated_sender_id": "ou_1",
+            "authenticated_conversation_id": "feishu:ou_1",
+            "sender_id": "ou_other",
+            "conversation_id": "feishu:ou_other",
+            "operation_id": operation_id,
+        },
+    )
+    assert cross_scope["ok"] is False
+    assert cross_scope["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_incomplete_manual_open_does_not_create_pending_operation(
@@ -1007,6 +1029,71 @@ def test_incomplete_manual_open_does_not_create_pending_operation(
     assert out["ok"] is False
     assert out["error"]["code"] in {"INPUT_ERROR", "NEEDS_CLARIFICATION"}
     assert InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1") == []
+
+
+def test_operation_timeline_isolated_to_authenticated_sender_and_conversation(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+    for suffix in ("a", "b"):
+        store.record_result(
+            {
+                "command_id": f"operation-{suffix}",
+                "channel": "feishu",
+                "sender_id": f"sender-{suffix}",
+                "conversation_id": f"conversation-{suffix}",
+                "message_id": f"message-{suffix}",
+                "raw_text": f"private-command-{suffix}",
+                "parser": "rule",
+                "intent_name": "manual_trade_open",
+                "tool_name": "inbound.manual_trade",
+                "control": {"safety_class": "write_preview", "requires_confirmation": True},
+                "decision": "executed",
+                "result_ok": True,
+                "response": {
+                    "ok": True,
+                    "data": {
+                        "operation_id": f"operation-{suffix}",
+                        "operation_type": "manual_open",
+                        "status": "previewed",
+                        "response_text": f"private-response-{suffix}",
+                        "payload": {"symbol": f"PRIVATE-{suffix}"},
+                    },
+                },
+            }
+        )
+
+    out = run_tool(
+        "operation_timeline",
+        {
+            "audit_db": str(audit_db),
+            "authenticated_channel": "feishu",
+            "authenticated_sender_id": "sender-a",
+            "authenticated_conversation_id": "conversation-a",
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["timeline_count"] == 1
+    serialized = json.dumps(out["data"], ensure_ascii=False)
+    assert "operation-a" in serialized
+    for private_marker in (
+        "operation-b",
+        "sender-a",
+        "sender-b",
+        "conversation-a",
+        "conversation-b",
+        "message-a",
+        "message-b",
+        "private-command-a",
+        "private-command-b",
+        "private-response-a",
+        "private-response-b",
+        "PRIVATE-a",
+        "PRIVATE-b",
+    ):
+        assert private_marker not in serialized
 
 
 def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -4007,10 +4094,9 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
                 "selected_run": {"run_id": "run-1"},
                 "files": [
                     {
-                        "path_display": "output_runs/run-1/state/audit_events.jsonl",
+                        "kind": "audit",
                         "exists": True,
                         "tail_line_count": 2,
-                        "tail": ['{"phase":"start"}', '{"phase":"done"}'],
                     }
                 ],
             },
@@ -4021,7 +4107,8 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
     assert "run-1 success 2026-05-20T01:00:00+00:00 scan=yes sent=no accounts=sy reason=market_closed" in runs_text
     assert "日志查询：1/1 个文件，kind=audit，lines=50" in logs_text
     assert "run：run-1" in logs_text
-    assert '{"phase":"done"}' in logs_text
+    assert "audit exists=yes tail=2" in logs_text
+    assert '"phase"' not in logs_text
 
 
 def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:

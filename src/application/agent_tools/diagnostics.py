@@ -9,7 +9,7 @@ from src.application.account_config import list_account_config_views
 from src.application.ledger.api import open_position_ledger as load_option_positions_repo
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tools.runtime_helpers import mask_account_id
-from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.account_config import normalize_accounts
 from src.application.account_config import resolve_account_broker_binding_sets
 from src.application.futu_quote_routing import resolve_futu_quote_route
@@ -95,10 +95,10 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "shared.compatibility_notification.authority",
         "shared.compatibility_notification.delivery_evidence",
         "account_summary.accounts_with_compatibility_notification",
-        "latest_run.path",
-        "latest_scanned_run.path",
+        "summary.latest_run_id",
+        "summary.latest_scanned_run_id",
     ],
-    "freshness_fields": ["freshness.status", "freshness.latest_run_age_minutes", "freshness.max_run_age_minutes"],
+    "freshness_fields": ["freshness.status", "freshness.age_seconds", "freshness.max_age_minutes"],
     "missing_data_fields": [
         "summary.latest_status",
         "summary.ledger_status",
@@ -163,24 +163,170 @@ def _runtime_status_tool(
     )
 
 
+def _private_runtime_status_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    """Collect full local status for trusted in-process operational checks only."""
+
+    from src.application.agent_tools.runtime_status_impl import private_runtime_status_tool
+
+    return private_runtime_status_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        read_json_object_or_empty=read_json_object_or_empty,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
 def _operation_timeline_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline, format_operation_timeline
+
+    channel, sender_id, conversation_id = _diagnostic_identity_scope(payload)
 
     data = collect_operation_timeline(
         audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
-        channel=payload.get("channel"),
-        sender_id=payload.get("sender_id"),
-        conversation_id=payload.get("conversation_id"),
+        channel=channel,
+        sender_id=sender_id,
+        conversation_id=conversation_id,
         operation_id=payload.get("operation_id"),
         operation_types=payload.get("operation_types"),
         statuses=payload.get("statuses"),
         limit=int(payload.get("limit") or 10),
         audit_scan_limit=payload.get("audit_scan_limit"),
     )
+    data = _status_safe_operation_timeline(
+        data,
+        channel=channel,
+        format_timeline=format_operation_timeline,
+    )
     warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
     return data, warnings, {"audit_db": data.get("audit_db")}
+
+
+def _diagnostic_identity_scope(payload: dict[str, Any]) -> tuple[str, str, str]:
+    authenticated = {
+        "channel": str(payload.get("authenticated_channel") or "").strip().lower(),
+        "sender_id": str(payload.get("authenticated_sender_id") or "").strip(),
+        "conversation_id": str(payload.get("authenticated_conversation_id") or "").strip(),
+    }
+    explicit = {
+        "channel": str(payload.get("channel") or "").strip().lower(),
+        "sender_id": str(payload.get("sender_id") or "").strip(),
+        "conversation_id": str(payload.get("conversation_id") or "").strip(),
+    }
+    if any(authenticated.values()):
+        if not all(authenticated.values()):
+            raise AgentToolError(
+                code="POLICY_ERROR",
+                message="authenticated diagnostic scope is incomplete",
+            )
+        mismatches = [
+            key
+            for key, value in explicit.items()
+            if value and value != authenticated[key]
+        ]
+        if mismatches:
+            raise AgentToolError(
+                code="PERMISSION_DENIED",
+                message="diagnostic scope cannot override the authenticated conversation",
+            )
+        resolved = authenticated
+    else:
+        resolved = explicit
+    if not all(resolved.values()):
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="operation_timeline requires channel, sender_id, and conversation_id scope",
+            hint="Pass the complete operator conversation scope; unscoped forensic reads are not available from this tool.",
+        )
+    return resolved["channel"], resolved["sender_id"], resolved["conversation_id"]
+
+
+def _status_safe_operation_timeline(
+    data: dict[str, Any],
+    *,
+    channel: str,
+    format_timeline: Any,
+) -> dict[str, Any]:
+    timelines: list[dict[str, Any]] = []
+    safe_operation_fields = {
+        "operation_id",
+        "operation_type",
+        "status",
+        "current_version",
+        "target_version",
+        "release_tag",
+        "release_status",
+        "created_at",
+        "expires_at",
+        "confirmed_at",
+        "applied_at",
+        "cancelled_at",
+        "source",
+    }
+    for raw in data.get("timelines") or []:
+        if not isinstance(raw, dict):
+            continue
+        identity = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
+        operation = raw.get("operation") if isinstance(raw.get("operation"), dict) else {}
+        audit = raw.get("audit") if isinstance(raw.get("audit"), dict) else {}
+        receipt = raw.get("receipt") if isinstance(raw.get("receipt"), dict) else {}
+        ledger = raw.get("ledger") if isinstance(raw.get("ledger"), dict) else {}
+        outcome = raw.get("outcome") if isinstance(raw.get("outcome"), dict) else {}
+        lifecycle = raw.get("action_lifecycle") if isinstance(raw.get("action_lifecycle"), dict) else {}
+        timelines.append(
+            {
+                "schema_version": raw.get("schema_version"),
+                "identity": {"operation_id": identity.get("operation_id")},
+                "operation": {
+                    key: operation.get(key)
+                    for key in safe_operation_fields
+                    if operation.get(key) is not None
+                },
+                "action_lifecycle": dict(lifecycle),
+                "audit": {
+                    "related_count": int(audit.get("related_count") or 0),
+                    "apply_count": int(audit.get("apply_count") or 0),
+                },
+                "ledger": {"present": bool(ledger.get("present"))},
+                "receipt": {
+                    key: receipt.get(key)
+                    for key in ("status", "delivery_confirmed", "error_code")
+                    if receipt.get(key) is not None
+                },
+                "outcome": {
+                    "status": outcome.get("status"),
+                    "ok": bool(outcome.get("ok")),
+                    "warnings": list(outcome.get("warnings") or []),
+                },
+                "warnings": list(raw.get("warnings") or []),
+            }
+        )
+    warnings = [str(item) for item in data.get("warnings") or [] if str(item).strip()]
+    filters = {
+        "channel": channel,
+        "operation_id": (data.get("filters") or {}).get("operation_id") if isinstance(data.get("filters"), dict) else None,
+        "operation_types": (data.get("filters") or {}).get("operation_types") if isinstance(data.get("filters"), dict) else None,
+        "statuses": (data.get("filters") or {}).get("statuses") if isinstance(data.get("filters"), dict) else None,
+        "limit": (data.get("filters") or {}).get("limit") if isinstance(data.get("filters"), dict) else None,
+    }
+    filters = {key: value for key, value in filters.items() if value not in (None, "", [])}
+    return {
+        "schema_version": data.get("schema_version"),
+        "audit_db": data.get("audit_db"),
+        "audit_db_exists": bool(data.get("audit_db_exists")),
+        "scope": {"channel": channel, "authenticated_conversation": True},
+        "filters": filters,
+        "timeline_count": len(timelines),
+        "timelines": timelines,
+        "warnings": warnings,
+        "response_text": format_timeline(timelines, filters=filters, warnings=warnings),
+    }
 
 
 HEALTHCHECK_TOOL = build_agent_tool(
@@ -215,7 +361,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     name="runtime_status",
     description=(
         "Summarize current overall runtime health from existing artifacts. Use first for current status questions; "
-        "use runtime_runs for historical run selection and runtime_logs for detailed failure text."
+        "use runtime_runs for historical run selection and runtime_logs for bounded, content-free log metadata."
     ),
     requires=("runtime_config",),
     capabilities=("status", "read_only"),
@@ -277,6 +423,9 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
         "channel": "optional channel filter such as feishu",
         "sender_id": "optional operator sender id filter",
         "conversation_id": "optional conversation filter",
+        "authenticated_channel": "host-injected authenticated channel scope",
+        "authenticated_sender_id": "host-injected authenticated sender scope",
+        "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "operation_id": "optional exact pending operation id",
         "operation_types": "optional list[str] such as manual_open/manual_close",
         "statuses": "optional list[str] of operation statuses; defaults to operator lifecycle statuses",
@@ -285,14 +434,20 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
     },
     handler=_operation_timeline_tool,
     pure_read=True,
-    safe_default_input={"limit": 10},
+    safe_default_input={},
     examples=(
-        {"input": {"limit": 10}},
-        {"input": {"channel": "feishu", "sender_id": "ou_1", "operation_types": ["manual_open"], "limit": 10}},
+        {
+            "input": {
+                "channel": "feishu",
+                "sender_id": "operator-reference",
+                "conversation_id": "conversation-reference",
+                "limit": 10,
+            }
+        },
     ),
     output_contract=_OPERATION_TIMELINE_OUTPUT_CONTRACT,
     copilot_input_fields=(
-        "channel", "sender_id", "conversation_id", "operation_id", "operation_types", "statuses", "limit"
+        "operation_id", "operation_types", "statuses", "limit"
     ),
 )
 

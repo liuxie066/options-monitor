@@ -32,14 +32,14 @@ def test_trade_event_contract_canonicalizes_option_code_root_alias(monkeypatch: 
     deal = normalize_trade_deal(
         {
             "deal_id": "deal-contract-1",
-            "futu_account_id": "281756479859383816",
+            "futu_account_id": "999000000000000001",
             "code": "HK.POP260528P150000",
             "trd_side": "SELL_SHORT",
             "qty": 1,
             "price": 6.3,
             "create_time": "2026-04-28 10:15:56",
         },
-        futu_account_mapping={"281756479859383816": "lx"},
+        futu_account_mapping={"999000000000000001": "lx"},
     )
 
     assert deal.symbol == "9992.HK"

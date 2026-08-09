@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_registry import pure_read_tool_names, pure_read_toolsets
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.llm_provider_registry import (
@@ -71,13 +72,13 @@ def check_assistant_llm(
         },
         "config": {
             "config_kind": "assistant",
-            "config_path": str(path),
+            "config_path": mask_path(path),
             "loaded": bool(cfg),
         },
         "env": {
-            "env_file": str(effective_env.env_file) if effective_env.env_file is not None else None,
+            "env_file": mask_path(effective_env.env_file) if effective_env.env_file is not None else None,
             "env_file_loaded": bool(effective_env.env_file_loaded),
-            "warnings": list(effective_env.warnings),
+            "warnings": ["env settings warning" for _item in effective_env.warnings],
         },
         "llm": {
             **settings.public_payload(),

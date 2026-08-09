@@ -8,6 +8,7 @@ from src.application.multi_tick.assistant_perception_event import (
     NOTIFICATION_PERCEPTION_EVENT_SCHEMA_VERSION,
     NOTIFICATION_PERCEPTION_EVENT_TYPE,
 )
+from src.application.conversation_scope import conversation_reference
 
 
 NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION = "notification_perception_read.v1"
@@ -68,7 +69,7 @@ def read_notification_perception_events(
             "returned_count": len(events),
             "limit": max_rows,
             "run_id": str(run_id or "").strip() or None,
-            "conversation_id": str(conversation_id or "").strip() or None,
+            "conversation_ref": conversation_reference(conversation_id),
             "event_kind": str(event_kind or "").strip() or None,
             "malformed_count": malformed_count,
             "unreadable_count": unreadable_count,
@@ -182,7 +183,9 @@ def _matches_event(row: dict[str, Any], *, conversation_id: str | None, event_ki
     wanted_conversation = str(conversation_id or "").strip()
     if wanted_conversation:
         scope = extra.get("conversation_scope") if isinstance(extra.get("conversation_scope"), dict) else {}
-        if str(scope.get("conversation_id") or "").strip() != wanted_conversation:
+        stored_ref = str(scope.get("conversation_ref") or "").strip()
+        legacy_id = str(scope.get("conversation_id") or "").strip()
+        if stored_ref != conversation_reference(wanted_conversation) and legacy_id != wanted_conversation:
             return False
     wanted_kind = str(event_kind or "").strip()
     if wanted_kind and str(extra.get("event_kind") or row.get("action") or "").strip() != wanted_kind:
@@ -208,7 +211,19 @@ def _strip_sensitive(value: Any) -> Any:
         out: dict[str, Any] = {}
         for key, item in value.items():
             text_key = str(key).lower()
-            if text_key in {"target", "webhook", "token", "secret", "raw_message", "message_text"}:
+            if text_key in {
+                "target",
+                "webhook",
+                "token",
+                "secret",
+                "raw_message",
+                "message_text",
+                "sender_id",
+                "conversation_id",
+                "to_user_id",
+                "group_id",
+                "chat_key",
+            }:
                 continue
             out[key] = _strip_sensitive(item)
         return out

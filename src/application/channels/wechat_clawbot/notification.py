@@ -128,16 +128,13 @@ def send_wechat_clawbot_message(
         "ok": ok,
         "http_status": 200,
         "request_path": "/ilink/bot/sendmessage",
-        "response_json": response_json,
-        "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
         "message_id": message_id,
         "provider_response_code": _response_code(response_json),
         "context_token_fallback_attempted": fallback_response_json is not None,
         "context_token_fallback_response_code": (
             None if fallback_response_json is None else _response_code(fallback_response_json)
         ),
-        "initial_response_json": (None if fallback_response_json is None else initial_response_json),
-        "fallback_response_json": fallback_response_json,
+        "initial_response_code": (None if fallback_response_json is None else _response_code(initial_response_json)),
         "local_receipt_id": local_receipt_id,
         "idempotency_key": idempotency_key,
         "binding_label": binding.label,
@@ -154,27 +151,28 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
     upstream_message_id = _extract_message_id(response_json) or result.get("message_id")
     local_receipt_id = result.get("local_receipt_id")
     message_id = upstream_message_id or local_receipt_id
-    provider_response_code = _response_code(response_json)
+    provider_response_code = result.get("provider_response_code")
+    if not isinstance(provider_response_code, int):
+        provider_response_code = _response_code(response_json)
     delivery_confirmed = bool(command_ok and business_ok and message_id)
-    response_tail = str(result.get("response_tail") or "")
     if delivery_confirmed:
         message = f"message_id={message_id}"
     elif command_ok and business_ok:
         message = (
             "wechat_clawbot send returned success but upstream message_id is missing "
-            f"response_tail={response_tail}"
+            f"provider_response_code={provider_response_code}"
         ).strip()
     else:
         message = (
             "wechat_clawbot send failed "
             f"http_status={result.get('http_status')} "
-            f"response_tail={response_tail}"
+            f"provider_response_code={provider_response_code}"
         ).strip()
     return normalize_subprocess_adapter_payload(
         adapter="notify",
         tool_name="wechat_clawbot_message_send",
         returncode=(0 if command_ok else 1),
-        stdout=response_tail,
+        stdout="",
         stderr="" if command_ok else message,
         ok=delivery_confirmed,
         message=message,
@@ -185,8 +183,6 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
             "upstream_message_id": (None if upstream_message_id is None else str(upstream_message_id)),
             "http_status": result.get("http_status"),
             "provider_response_code": provider_response_code,
-            "response_json": response_json,
-            "response_tail": response_tail,
             "idempotency_key": result.get("idempotency_key"),
             "local_receipt_id": local_receipt_id,
             "binding_label": result.get("binding_label"),
@@ -215,6 +211,14 @@ def send_wechat_clawbot_message_process(
         idempotency_key=idempotency_key,
     )
     normalized = normalize_wechat_clawbot_send_output(send_result=send_result)
-    stdout = json.dumps(send_result.get("response_json") or {}, ensure_ascii=False)
+    stdout = json.dumps(
+        {
+            "ok": bool(normalized.get("ok")),
+            "http_status": normalized.get("http_status"),
+            "provider_response_code": normalized.get("provider_response_code"),
+            "message_id": normalized.get("message_id"),
+        },
+        ensure_ascii=False,
+    )
     stderr = "" if bool(normalized.get("command_ok")) else str(normalized.get("message") or "")
     return SimpleNamespace(returncode=int(normalized.get("returncode") or 0), stdout=stdout, stderr=stderr, raw=send_result)

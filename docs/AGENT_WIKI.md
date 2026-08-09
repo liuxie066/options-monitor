@@ -199,8 +199,27 @@ Important runtime paths:
 | Default reports | `output_shared/reports/` |
 | OpenD cache | `cache/opend_option_chain/`, `cache/opend_option_expirations/` |
 | Audit logs | `audit/run_logs/` |
+| AI Decision Advice evidence | `output_shared/state/ai_decision_advice/` |
 
 For runtime questions, prefer `runtime_status` because it already knows how to summarize these paths and distinguish latest run from latest scanned run.
+
+### AI Decision Advice
+
+AI Decision Advice 是两阶段 LLM 增强（设计：`docs/AI_DECISION_ADVICE_DESIGN.md`）：
+
+- Collector（`om ai-evidence-collector`）：4 小时刷新外部证据，只用公开 symbol 身份
+  和 web_search；不写持仓/候选。产物在 `output_shared/state/ai_decision_advice/`
+  （`external_evidence.jsonl`、`symbol_identity_snapshot.json`、advice JSONL）。
+- Advice（tick 内自动运行）：冻结输入快照 + 无工具调用，产出 keep/switch/defer/
+  needs_review 建议，写入 Daily Brief 的 `ai_decision_advice` 区块，Agent 通过
+  `daily_decision_brief_read` 读取。
+- 配置：`ai_decision_advice.enabled`（config.yaml passthrough，默认关闭）；
+  显式开启即同意按设计文档第 18 节的最小数据合同向 DeepSeek 传输数据；
+  API key 只从 `DEEPSEEK_API_KEY` 环境变量读取，禁止写入 YAML/JSONL/Prompt。
+- Provider 原始响应、搜索 query/call ID 不落盘；只保存内容 hash、白名单 usage、
+  搜索状态聚合和验证后的业务结果，相关状态文件为 `0600`、目录为 `0700`。
+- systemd：`render_service_bundle` 在配置开启时额外渲染
+  `options-monitor-ai-evidence-collector.service/.timer`（4 小时间隔）。
 
 ## 6. Module Ownership
 

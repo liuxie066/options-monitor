@@ -62,7 +62,7 @@ def summarize_effective_env(
     return {
         "env_file": mask_path(effective.env_file) if effective.env_file is not None else None,
         "env_file_loaded": bool(effective.env_file_loaded),
-        "warnings": list(effective.warnings),
+        "warnings": ["env settings warning" for _item in effective.warnings],
         "entries": entries,
     }
 

@@ -7,17 +7,9 @@
 - Production files: none.
 - Test files: `tests/test_candidate_filter_trace.py`, `tests/test_pipeline_fetch_read_model_boundary.py`.
 
-## Production-shaped cash result
+## Synthetic cash fixture result
 
-The sanitized lx fixture uses cash HKD `666787.5` / USD `10177.48`, secured cash HKD `386500` / USD `8000`, secured total CNY `388092.51161900006`, USDCNY `6.7711`, and HKDCNY `0.863968206`.
-
-TCOM 35P and 40P rows pass through the real `_enrich_and_filter_sell_put_cash()` boundary:
-
-- 35P required CNY: `23698.85`; accepted with `basis="total_cny"`.
-- 40P required CNY: `27084.40`; accepted with `basis="total_cny"`.
-- Both rows remain in the returned frame and no `cash_reserve` trace file is created.
-- An insufficient total-CNY fixture is rejected with `total_cny_cash_insufficient`.
-- A missing portfolio/cash basis is rejected with `cash_basis_missing`.
+A proportion-preserving synthetic two-currency fixture passes through the real `_enrich_and_filter_sell_put_cash()` boundary. Two synthetic Put rows are accepted with `basis="total_cny"`, remain in the returned frame, and create no `cash_reserve` trace. Separate synthetic fixtures still prove `total_cny_cash_insufficient` and `cash_basis_missing` fail closed.
 
 ## Shared-run result
 

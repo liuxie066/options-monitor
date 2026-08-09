@@ -17,11 +17,14 @@ from src.application.runtime_paths import resolve_runtime_root
 from src.application.setup import run_setup_check
 from src.application.settings import diagnose_effective_settings
 from src.application.tool_execution import execute_tool
+from src.infrastructure.private_storage import atomic_write_private_text
 
 
 SCHEMA_VERSION = "support_bundle.v1"
 PATH_KEY_PARTS = ("path", "dir", "root", "file", "sqlite", "db", "executable")
-LOCAL_ABSOLUTE_PATH_RE = re.compile(r"(?P<path>/(?:Users|Volumes|private|var|tmp)/[^'\"\n,}]+)")
+LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?P<path>/(?:Users|Volumes|home|opt|private|root|run|srv|tmp|var)/[^'\"\n,}\s]+)"
+)
 
 
 def collect_support_bundle(
@@ -100,7 +103,7 @@ def collect_support_bundle(
     )
     return {
         "summary": summary,
-        "bundle_path": str(destination),
+        "bundle_name": destination.name,
         "bundle_path_public": mask_path(destination),
         "schema_version": SCHEMA_VERSION,
         "redacted": True,
@@ -219,7 +222,7 @@ def _capture(fn: Callable[[], Any]) -> Any:
             "status": "error",
             "error": {
                 "type": type(exc).__name__,
-                "message": str(exc),
+                "message": "diagnostic section failed",
             },
         }
 
@@ -332,11 +335,9 @@ def _write_bundle(
     else:
         runtime = resolve_runtime_root(repo_root=repo_root, runtime_root=runtime_root)
         directory = runtime.runtime_root / "support"
-    directory.mkdir(parents=True, exist_ok=True)
     stamp = generated_at.strftime("%Y%m%dT%H%M%SZ")
     path = directory / f"options-monitor-support-{stamp}.json"
-    path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path.resolve()
+    return atomic_write_private_text(path, json.dumps(bundle, ensure_ascii=False, indent=2) + "\n")
 
 
 def _read_text(path: Path) -> str | None:
