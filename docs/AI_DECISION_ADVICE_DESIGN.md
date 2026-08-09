@@ -185,6 +185,24 @@ Pi SDK 的当前 DeepSeek provider 仍以 OpenAI-compatible Chat Completions 为
 单条证据身份含糊时忽略该证据；整个标的身份无法建立时，该标记为
 `identity_unavailable`，不能形成 `keep`。
 
+### 5.2 身份快照持久化
+
+冻结后的身份快照唯一真源：
+
+```text
+output_shared/state/ai_decision_advice/symbol_identity_snapshot.json
+```
+
+规则：
+
+- 原子写整份快照；内容含每个标的的 canonical code、市场、交易所、完整公司
+  名称、合法别名和 `observed_at`（UTC），以及整份内容 hash；
+- 快照在观察集合或 OpenD 身份数据变化时重建；重建是确定性的，与进程生命
+  周期无关；
+- 每条外部证据记录携带其生成时的身份快照 hash，保证“先冻结身份再搜索”
+  可审计；
+- 不维护第二份手工或可独立修改的身份数据库。
+
 ## 6. 外部证据采集合同
 
 ### 6.1 调度与预算
@@ -195,6 +213,9 @@ Pi SDK 的当前 DeepSeek provider 仍以 OpenAI-compatible Chat Completions 为
 - 每批最多 5 个标的；
 - 同时最多运行 2 个批次；
 - 不提供用户手动刷新入口或 Agent 搜索工具。
+
+所有刷新时间、过期判断和全量核对基准一律使用 UTC，并以证据记录中持久化
+的 `last_success_at` 为准，不随进程重启或本地时区变化漂移。
 
 搜索优先级固定为：
 
@@ -316,12 +337,15 @@ output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json
 
 只发送与决策有关的匿名化分布：
 
-- 标的、行业和币种权重；
+- 标的和币种权重；
 - 关键集中度；
 - 现金和货币基金沿用现有正式资金口径；
 - 每个候选新增一张后的确定性分布变化。
 
 不发送总 NAV、总资产绝对值、历史成本、真实账户名称或 broker account id。
+
+v1 不包含行业维度：当前组合数据与 OpenD 身份接口都没有可靠行业数据源，
+行业集中度留待有正式数据真源后再扩展，不从网页搜索推断。
 
 ### 7.3 开放期权持仓
 
@@ -357,7 +381,7 @@ Advice 运行开始时，从追加日志冻结一份当轮证据索引视图（�
 
 代码必须先为每个候选计算当前状态和新增一张后的变化：
 
-- 标的、行业和币种集中度；
+- 标的和币种集中度；
 - Sell Put 指派后的持股分布和现金担保影响；
 - Covered Call 被叫走后的持仓分布；
 - 同标的已有 Put/Call 的方向叠加；
@@ -401,7 +425,7 @@ Sell Put 与 Covered Call 的收益率不得直接比较。
 外部资讯不是改选或暂缓的必要条件。以下任一情况有充分输入证据时，可以支持
 `switch` 或 `defer`：
 
-- 新增一张会明显加重标的、行业、币种或到期日集中度；
+- 新增一张会明显加重标的、币种或到期日集中度；
 - 与现有期权持仓形成明显的同向风险叠加；
 - 可靠事件显著改变 Sell Put 指派风险或 Covered Call 被叫走机会成本；
 - 多项因素单独不严重，但组合后形成明确风险。
@@ -432,7 +456,7 @@ Covered Call 标的的下行消息可以作为持股风险报告，但不能仅�
 1. 每个候选先按新增一张评估；
 2. Sell Put 保留一个暂定建议；Covered Call 每个标的最多保留一个暂定建议；
 3. 把全部 `keep / switch` 组成假设同时执行的一张合约组合；
-4. 再检查整体标的、行业、币种、到期日和既有期权叠加；
+4. 再检查整体标的、币种、到期日和既有期权叠加；
 5. 联合风险明显增加时，把部分建议改为 `defer`。
 
 这里只协调风险，不跨策略比较收益，也不推荐数量。
@@ -637,7 +661,10 @@ AI Decision Advice 覆盖：
 新增候选提醒本身属于正常监控回执，可以承载 `unavailable` 状态：Advice 超时或
 失败时不阻断、不推迟候选提醒，提醒按既有节奏发出并如实显示 AI建议未完成。
 
-每个账户 Advice 总等待预算为 30 秒。超时或失败不能阻断 Candidate Engine 的原始回执。
+每个账户 Advice 总等待预算为 30 秒，对固定简报和新增候选提醒两条路径一致：
+两条路径都当轮运行或复用 Advice，超时或失败即 `unavailable`，不能阻断
+Candidate Engine 的原始回执，也不推迟提醒发送。复用条件（13.2）在两条
+路径相同。
 
 ### 13.2 复用条件
 
@@ -675,6 +702,18 @@ AI Decision Advice 跟随现有监控回执，不建立独立通知工作流。
    必须如实显示。
 
 输入未变化时复用 Advice，不能因为模型措辞随机变化制造通知噪声。
+
+### 14.1 diff 实现合同
+
+AI Decision Advice 的动作状态进入 Daily Brief 的规范化结构
+（`normalize_daily_decision_brief`），作为独立 `ai_decision_advice` 段，按
+策略记录当前动作。既有 `diff_daily_decision_briefs`
+（`domain/domain/daily_decision_brief.py`）扩展比较该段：
+
+- `keep / switch / defer / needs_review` 之间的任意迁移均为 material 变化；
+- `unavailable` 的出现、消失或原因变化不产生 material diff（只在回执中如实
+  显示）；
+- diff 逻辑留在 domain 层，application 层不得平行实现 AI 变化检测。
 
 ## 15. Daily Brief 用户合同
 
