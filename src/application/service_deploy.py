@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
 from src.application.account_config import AccountRuntimePlan, build_account_runtime_plan
-from src.application.config_yaml import resolve_yaml_assistant_config, resolve_yaml_runtime_config
+from src.application.config_yaml import (
+    load_yaml_config_file,
+    resolve_yaml_assistant_config,
+    resolve_yaml_runtime_config,
+    yaml_to_market_user_config,
+)
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.settings import build_effective_env
 
@@ -282,11 +287,8 @@ def _ai_decision_advice_enabled_from_authoring_config(
 
     if config_yaml_path is not None and config_yaml_path.exists():
         try:
-            config = _first_yaml_runtime_config(
-                repo_root=repo_root,
-                config_yaml_path=config_yaml_path,
-                market_values=market_values,
-            )
+            raw_config = load_yaml_config_file(config_yaml_path)
+            config = yaml_to_market_user_config(raw_config, market=market_values[0])
         except AgentToolError:
             # The collector unit is an optional add-on; a partial authoring
             # config must not fail the whole service bundle render.

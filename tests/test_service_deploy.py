@@ -142,8 +142,13 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "UMask=0077" in intake
 
 
-def test_render_systemd_bundle_ai_evidence_collector_opt_in(tmp_path: Path) -> None:
+def test_render_systemd_bundle_ai_evidence_collector_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from src.application.service_deploy import render_service_bundle
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     def _write_config(root: Path, *, enabled: bool) -> Path:
         root.mkdir(parents=True, exist_ok=True)
