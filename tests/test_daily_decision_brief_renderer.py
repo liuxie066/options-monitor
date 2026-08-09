@@ -1245,6 +1245,53 @@ def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> No
     assert "Covered Call｜本轮无可供 AI 评估的策略候选" not in message
 
 
+def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
+    brief["ai_decision_advice"] = {
+        "status": "completed",
+        "unavailable_reason": None,
+        "evidence_as_of": "2026-07-20T13:00:00+00:00",
+        "sell_put": {
+            "action": "defer",
+            "baseline_candidate_id": "put-rank2",
+            "selected_candidate_id": None,
+            "rationale": {"risk_mechanism": "监管风险上升"},
+            "source_refs": {"external_evidence_refs": ["ev-aaa111bbb222"]},
+        },
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": True},
+        "reused": False,
+        "advice_record_id": "adv-1",
+    }
+    brief["ai_decision_advice_evidence_index"] = {
+        "frozen_at": "2026-07-20T13:00:00+00:00",
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "coverage": "completed",
+                "evidence": [
+                    {
+                        "ref": "ev-aaa111bbb222",
+                        "source": {
+                            "title": "监管新规征求意见",
+                            "publisher": "监管机构",
+                            "published_at": "2026-07-19",
+                            "url": "https://example.gov/rule",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+    assert "### AI建议" in message
+    assert "来源｜监管新规征求意见（监管机构 · 2026-07-19） https://example.gov/rule" in message
+
+
 def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_table() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
 

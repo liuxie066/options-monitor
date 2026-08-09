@@ -175,4 +175,8 @@ def run_or_reuse_ai_decision_advice(
         monotonic=monotonic,
         compiled_prompt=compile_prompt_pack(PROMPT_PACK_ADVICE),
     )
-    return result.to_brief_view()
+    view = result.to_brief_view()
+    evidence_index_view = result.to_evidence_index_view(frozen)
+    if evidence_index_view is not None:
+        view["evidence_index"] = evidence_index_view
+    return view

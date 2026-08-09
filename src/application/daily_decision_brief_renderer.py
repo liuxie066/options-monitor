@@ -208,6 +208,7 @@ def build_daily_brief_user_view(
         "capacity": capacity,
         "reminders": reminders,
         "ai_decision_advice": brief.get("ai_decision_advice"),
+        "ai_decision_advice_evidence_index": brief.get("ai_decision_advice_evidence_index"),
     }
     return view
 
@@ -880,12 +881,32 @@ def _ai_advice_lines_for_family(
     if not isinstance(section, Mapping):
         return []
     contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
+    evidence_by_ref = _ai_evidence_ref_map(brief)
     return render_family_advice_lines(
         section,
         family=family,
         candidate_contract_by_id=contracts,
         candidate_rank_by_id=ranks,
+        evidence_by_ref=evidence_by_ref,
     )
+
+
+def _ai_evidence_ref_map(brief: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Resolve frozen external evidence refs for AI advice source lines (15.4)."""
+
+    view = brief.get("ai_decision_advice_evidence_index")
+    symbols = view.get("symbols") if isinstance(view, Mapping) else None
+    out: dict[str, Mapping[str, Any]] = {}
+    for symbol_row in symbols or []:
+        if not isinstance(symbol_row, Mapping):
+            continue
+        for row in symbol_row.get("evidence") or []:
+            if not isinstance(row, Mapping):
+                continue
+            ref = str(row.get("ref") or "")
+            if ref:
+                out[ref] = row
+    return out
 
 
 def _candidate_views(
