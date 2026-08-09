@@ -3,7 +3,7 @@
 - Gate: `fix`
 - Work unit: `ai-decision-advice`
 - Review artifact: `docs/reviews/code-review-20260809-144701.md`
-- Status: `fix complete; pending aggregate re-review`
+- Status: `fix complete; aggregate re-review accepted`
 
 ## Finding decisions and fixes
 
