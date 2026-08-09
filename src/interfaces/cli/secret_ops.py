@@ -29,7 +29,7 @@ def _stdin_is_tty() -> bool:
 
 def add_secret_commands(subparsers: Any) -> None:
     parser = subparsers.add_parser("secrets", help="inspect and provision logical credentials without printing values")
-    commands = parser.add_subparsers(dest="secrets_command", required=True)
+    commands = parser.add_subparsers(dest="store_action", required=True)
 
     status = commands.add_parser("status", help="show redacted credential readiness")
     status.add_argument("logical_names", nargs="*")
@@ -49,7 +49,7 @@ def add_secret_commands(subparsers: Any) -> None:
     delete.add_argument("--confirm", action="store_true")
 
 
-def handle_secret_command(
+def run_store_command(
     args: argparse.Namespace,
     *,
     provider_factory: Callable[..., SecretProvider] = build_secret_provider,
@@ -58,7 +58,7 @@ def handle_secret_command(
     input_is_tty: Callable[[], bool] = _stdin_is_tty,
 ) -> dict[str, Any]:
     try:
-        if args.secrets_command == "status":
+        if args.store_action == "status":
             return _status_payload(
                 args,
                 provider_factory=provider_factory,
@@ -70,7 +70,7 @@ def handle_secret_command(
             backend=args.backend,
             store_root=Path(args.store_root),
         )
-        if args.secrets_command in {"set", "rotate"}:
+        if args.store_action in {"set", "rotate"}:
             if not input_is_tty():
                 raise AgentToolError(
                     code="INPUT_ERROR",
@@ -80,15 +80,15 @@ def handle_secret_command(
             confirmation = prompt_fn(f"Confirm {spec.logical_name}: ")
             if value != confirmation:
                 raise AgentToolError(code="INPUT_ERROR", message="credential confirmation does not match")
-            provisioner.set(spec.logical_name, value, replace=args.secrets_command == "rotate")
+            provisioner.set(spec.logical_name, value, replace=args.store_action == "rotate")
             return _mutation_payload(
-                action=args.secrets_command,
+                action=args.store_action,
                 logical_name=spec.logical_name,
                 backend=provisioner.backend_name,
                 changed=True,
             )
 
-        if args.secrets_command == "delete":
+        if args.store_action == "delete":
             if not bool(args.confirm):
                 raise AgentToolError(
                     code="CONFIRMATION_REQUIRED",
@@ -106,7 +106,7 @@ def handle_secret_command(
     except (SecretError, ValueError) as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
-    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported secrets command: {args.secrets_command}")
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported secrets command: {args.store_action}")
 
 
 def _status_payload(
@@ -167,4 +167,4 @@ def _require_cli_spec(logical_name: str):
         ) from exc
 
 
-__all__ = ["add_secret_commands", "handle_secret_command"]
+__all__ = ["add_secret_commands", "run_store_command"]
