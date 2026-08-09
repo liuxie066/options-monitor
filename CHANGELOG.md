@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.12.0 - 2026-08-10
+
+### New Features
+- Added optional AI Decision Advice that assembles sealed and redacted candidate evidence, calls configured LLM providers through an advisory-only boundary, validates and provenance-seals results, supports deterministic reuse, and renders advice in the Daily Brief without changing Candidate Engine decisions or gaining trade, write, or notification authority.
+- Added typed logical-credential storage with macOS Login Keychain and Linux systemd encrypted credentials, hidden interactive provisioning, redacted status and settings diagnostics, managed service credential wiring, and an explicit deprecated environment backend for migration.
+
+### Improvements
+- Hardened public and model-facing projections, path-scoped diagnostics, private file and SQLite permissions, provider-evidence retention, and repository guardrails against broker, financial, path, email, and credential-shaped data leakage.
+
 ## 1.11.0 - 2026-08-08
 
 ### New Features
