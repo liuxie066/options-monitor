@@ -1,0 +1,143 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.12.0",
+  "base": {
+    "tag": "v1.11.0",
+    "commit": "7255e0a0c288b986bd7aa1b51b8322ef652aa887"
+  },
+  "reviewed_head": "e72a916716f57eeb99ff6475726f63c4441c4592",
+  "commits": [
+    {
+      "sha": "2a7c19ee18faef3951414a03d7657b93afcf783f",
+      "subject": "docs: AI Decision Advice design contract and cc-lp closeout appendix"
+    },
+    {
+      "sha": "fe08c5665b8a9c8f5457e17c2059dc6bee4c271b",
+      "subject": "docs: add deterministic boundaries to AI Decision Advice design"
+    },
+    {
+      "sha": "2da6ed9c1acdb465eec08e080a53979ada19eaa3",
+      "subject": "gateflow: accept plan for ai-decision-advice"
+    },
+    {
+      "sha": "e6512b1935c3131a00dbda42de53696d4456e2a6",
+      "subject": "gateflow: accept ai-decision-advice S1"
+    },
+    {
+      "sha": "dff3dbc590249c2de79ec73653765b523f4090a8",
+      "subject": "gateflow: accept ai-decision-advice S2"
+    },
+    {
+      "sha": "b4b11509d7edafd9040a0962937d0d1c08038a65",
+      "subject": "gateflow: accept ai-decision-advice S4"
+    },
+    {
+      "sha": "55c7ca7fda16cfc7beb4f744aee9b94fe4b4b62e",
+      "subject": "gateflow: accept ai-decision-advice S3"
+    },
+    {
+      "sha": "d18cf6aa98cf8101833dd19f95c4b54e507aff9b",
+      "subject": "gateflow: accept ai-decision-advice S5"
+    },
+    {
+      "sha": "eacb7ce2a4ea6f14a84aaec37ed45bbfa2855e57",
+      "subject": "gateflow: accept ai-decision-advice S6"
+    },
+    {
+      "sha": "b7a32317296317b53283962b08e858ef5b2a452c",
+      "subject": "gateflow: accept ai-decision-advice S7"
+    },
+    {
+      "sha": "9913795a4a77d65f23725bf5ea1b4eb6ace256c3",
+      "subject": "gateflow: accept ai-decision-advice S8"
+    },
+    {
+      "sha": "0a1189d096560c6632d7945acc5803b8aa4f9df7",
+      "subject": "fix: ai-decision-advice aggregate review — evidence refs render and reuse hash contract"
+    },
+    {
+      "sha": "7d37e69749095d4c7b50a0971c3132e96f282416",
+      "subject": "gateflow: accept ai-decision-advice aggregate deepreview"
+    },
+    {
+      "sha": "da7e4c39eb84ea390c6d321a5370e359f9675b95",
+      "subject": "fix(security): harden privacy boundaries and storage"
+    },
+    {
+      "sha": "22d8ac9dffe3ae3d01ddb7f43e956df7197c5d25",
+      "subject": "test(ci): align smoke check with redacted env paths"
+    },
+    {
+      "sha": "437505a31d6c63f71ffa4b43cf87d80775cf607f",
+      "subject": "fix(ci): decouple AI service rendering from runtime key"
+    },
+    {
+      "sha": "0f6b5e2ce7e96c9f832df0fa45c546438c88b5d5",
+      "subject": "merge(pr): integrate #139 AI decision advice and privacy hardening"
+    },
+    {
+      "sha": "5c52758517d609f5022d6bbec7d652a5ebeb56be",
+      "subject": "feat(security): add cross-platform secret storage"
+    },
+    {
+      "sha": "3e3d0b2588c405d147a1708d375175216dc87e48",
+      "subject": "test(security): isolate smoke secret backend"
+    },
+    {
+      "sha": "e70c7c44b3ae63e72a9c621477ec657ef4f7c4e6",
+      "subject": "fix(security): keep credential metadata explicitly public"
+    },
+    {
+      "sha": "8bba58cca6a8ffdf771fef4a890810d07d4abc69",
+      "subject": "test(security): avoid synthetic CodeQL taint"
+    },
+    {
+      "sha": "e72a916716f57eeb99ff6475726f63c4441c4592",
+      "subject": "merge(pr): integrate #140 cross-platform secret storage"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added optional AI Decision Advice that assembles sealed and redacted candidate evidence, calls configured LLM providers through an advisory-only boundary, validates and provenance-seals results, supports deterministic reuse, and renders advice in the Daily Brief without changing Candidate Engine decisions or gaining trade, write, or notification authority.",
+      "commits": [
+        "2a7c19ee18faef3951414a03d7657b93afcf783f",
+        "fe08c5665b8a9c8f5457e17c2059dc6bee4c271b",
+        "2da6ed9c1acdb465eec08e080a53979ada19eaa3",
+        "e6512b1935c3131a00dbda42de53696d4456e2a6",
+        "dff3dbc590249c2de79ec73653765b523f4090a8",
+        "b4b11509d7edafd9040a0962937d0d1c08038a65",
+        "55c7ca7fda16cfc7beb4f744aee9b94fe4b4b62e",
+        "d18cf6aa98cf8101833dd19f95c4b54e507aff9b",
+        "eacb7ce2a4ea6f14a84aaec37ed45bbfa2855e57",
+        "b7a32317296317b53283962b08e858ef5b2a452c",
+        "9913795a4a77d65f23725bf5ea1b4eb6ace256c3",
+        "0a1189d096560c6632d7945acc5803b8aa4f9df7",
+        "7d37e69749095d4c7b50a0971c3132e96f282416",
+        "437505a31d6c63f71ffa4b43cf87d80775cf607f",
+        "0f6b5e2ce7e96c9f832df0fa45c546438c88b5d5"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added typed logical-credential storage with macOS Login Keychain and Linux systemd encrypted credentials, hidden interactive provisioning, redacted status and settings diagnostics, managed service credential wiring, and an explicit deprecated environment backend for migration.",
+      "commits": [
+        "5c52758517d609f5022d6bbec7d652a5ebeb56be",
+        "3e3d0b2588c405d147a1708d375175216dc87e48",
+        "e70c7c44b3ae63e72a9c621477ec657ef4f7c4e6",
+        "8bba58cca6a8ffdf771fef4a890810d07d4abc69",
+        "e72a916716f57eeb99ff6475726f63c4441c4592"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Hardened public and model-facing projections, path-scoped diagnostics, private file and SQLite permissions, provider-evidence retention, and repository guardrails against broker, financial, path, email, and credential-shaped data leakage.",
+      "commits": [
+        "da7e4c39eb84ea390c6d321a5370e359f9675b95",
+        "22d8ac9dffe3ae3d01ddb7f43e956df7197c5d25",
+        "0f6b5e2ce7e96c9f832df0fa45c546438c88b5d5"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
