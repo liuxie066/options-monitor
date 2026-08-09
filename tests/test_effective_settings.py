@@ -12,6 +12,58 @@ from src.application.settings import (
 )
 
 
+def test_bootstrap_skips_secret_values_unless_env_backend_is_explicit(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "OM_SECRET_BACKEND=auto\nOM_RUNTIME_ROOT=/tmp/runtime-safe\nDEEPSEEK_API_KEY=test-secret\n",
+        encoding="utf-8",
+    )
+    for key in ("DEEPSEEK_API_KEY", "OM_RUNTIME_ROOT", "OM_ENV_FILE"):
+        monkeypatch.setenv(key, "__pytest_cleanup_sentinel__")
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("OM_SECRET_BACKEND", os.environ["OM_SECRET_BACKEND"])
+
+    bootstrap_process_env(env_file=env_file, include_local_env_file=False)
+
+    assert os.environ["OM_RUNTIME_ROOT"] == "/tmp/runtime-safe"
+    assert "DEEPSEEK_API_KEY" not in os.environ
+
+
+def test_bootstrap_loads_legacy_secret_only_for_explicit_env_backend(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "OM_SECRET_BACKEND=env\nDEEPSEEK_API_KEY=test-secret\n",
+        encoding="utf-8",
+    )
+    for key in ("DEEPSEEK_API_KEY", "OM_ENV_FILE"):
+        monkeypatch.setenv(key, "__pytest_cleanup_sentinel__")
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("OM_SECRET_BACKEND", os.environ["OM_SECRET_BACKEND"])
+
+    bootstrap_process_env(env_file=env_file, include_local_env_file=False)
+
+    assert os.environ["DEEPSEEK_API_KEY"] == "test-secret"
+
+
+def test_bootstrap_skips_registered_hmac_secret_with_secure_backend(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "OM_SECRET_BACKEND=auto\n"
+        "OM_INBOUND_OPERATION_HMAC_KEY=test-hmac-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OM_INBOUND_OPERATION_HMAC_KEY", raising=False)
+    monkeypatch.setenv("OM_ENV_FILE", "__pytest_cleanup_sentinel__")
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    bootstrap_process_env(env_file=env_file, include_local_env_file=False)
+
+    assert "OM_INBOUND_OPERATION_HMAC_KEY" not in os.environ
+
+
 def test_effective_env_file_overlays_process_env_with_source(tmp_path) -> None:
     env_file = tmp_path / "options-monitor.env"
     env_file.write_text(

@@ -1462,6 +1462,11 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
     assert preview["ok"] is True
     monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "different-operation-hmac-key")
+    # Runtime credentials are startup snapshots. Simulate the explicit service
+    # restart required for a rotation to become visible to the confirmer.
+    from src.application.secret_store import reset_default_secret_provider
+
+    reset_default_secret_provider()
 
     confirmed = handle_assistant_request(
         AssistantRequest(

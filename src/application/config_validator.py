@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from difflib import get_close_matches
 import math
-import os
 import sys
 from zoneinfo import ZoneInfo
 
@@ -24,7 +23,7 @@ from src.application.account_config import (
     parse_lossless_integer,
 )
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
-from src.application.llm_provider_registry import provider_requires_api_key, supported_llm_providers
+from src.application.llm_provider_registry import supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
@@ -327,8 +326,6 @@ def _validate_optional_bool(cfg: dict, key: str, path: str):
 def _validate_ai_decision_advice_config(cfg: dict, *, path: str = 'ai_decision_advice') -> None:
     _reject_unknown_keys(cfg, AI_DECISION_ADVICE_CONFIG_KEYS, path)
     _validate_optional_bool(cfg, 'enabled', path)
-    if cfg.get('enabled') is True and not str(os.environ.get('DEEPSEEK_API_KEY') or '').strip():
-        die(f'{path}.enabled is true but DEEPSEEK_API_KEY is not set in the environment')
 
 
 def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_reason: str) -> None:
@@ -359,8 +356,6 @@ def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_re
             die(f'{path}.provider is required when {required_reason}')
         if not str(llm_cfg.get('model') or '').strip():
             die(f'{path}.model is required when {required_reason}')
-        if provider_requires_api_key(llm_provider) and not str(llm_cfg.get('api_key_env') or '').strip():
-            die(f'{path}.api_key_env is required when {required_reason}')
 
 
 def _validate_inbound_config(cfg: dict) -> None:
@@ -819,7 +814,10 @@ def _validate_no_inline_secrets_or_retired_callback_cfg(value, path: str = '') -
             child_path = f'{path}.{key_text}' if path else key_text
             key_lower = key_text.lower()
             if key_lower in RETIRED_FEISHU_CALLBACK_KEYS and item not in (None, '', {}, []):
-                die(f'{child_path} is no longer supported; Feishu inbound uses long-connection Bot env settings')
+                die(
+                    f'{child_path} is no longer supported; Feishu inbound uses long-connection '
+                    'Bot settings and the feishu.bot.app_secret logical credential'
+                )
             is_secret_key = (
                 key_lower in INLINE_SECRET_CONFIG_KEYS
                 or key_lower.endswith(INLINE_SECRET_CONFIG_SUFFIXES)
@@ -830,7 +828,10 @@ def _validate_no_inline_secrets_or_retired_callback_cfg(value, path: str = '') -
                 and isinstance(item, str)
                 and item.strip()
             ):
-                die(f'{child_path} must not contain inline secret material; store it in the env file instead')
+                die(
+                    f'{child_path} must not contain inline secret material; provision the '
+                    'corresponding logical credential instead'
+                )
             _validate_no_inline_secrets_or_retired_callback_cfg(item, child_path)
     elif isinstance(value, list):
         for index, item in enumerate(value):
