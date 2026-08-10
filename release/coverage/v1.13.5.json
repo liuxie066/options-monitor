@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.5",
+  "base": {
+    "tag": "v1.13.4",
+    "commit": "184d572e2536e14e40c230b32f49eff2008ada9a"
+  },
+  "reviewed_head": "1edd42eb4ef8c1b24252546ae9f20f8ba36a1f55",
+  "commits": [
+    {
+      "sha": "b3f6c2470a7637de7bbe8f19f5c5d666a83f8217",
+      "subject": "fix(notify): preserve historical daily brief digests"
+    },
+    {
+      "sha": "1edd42eb4ef8c1b24252546ae9f20f8ba36a1f55",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored scheduled Daily Brief delivery after the AI Decision Advice rollout by preserving pre-existing confirmed Brief digests when their frozen revisions predate the new optional advice fields; unrelated digest mismatches still fail closed.",
+      "commits": [
+        "b3f6c2470a7637de7bbe8f19f5c5d666a83f8217"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1edd42eb4ef8c1b24252546ae9f20f8ba36a1f55",
+      "reason": "Generated dependency graph refresh for the mapped Daily Brief digest compatibility fix; it adds no independent runtime behavior."
+    }
+  ]
+}

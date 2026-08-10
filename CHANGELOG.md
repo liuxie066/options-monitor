@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.5 - 2026-08-10
+
+### Bug Fixes
+- Restored scheduled Daily Brief delivery after the AI Decision Advice rollout by preserving pre-existing confirmed Brief digests when their frozen revisions predate the new optional advice fields; unrelated digest mismatches still fail closed.
+
 ## 1.13.4 - 2026-08-10
 
 ### Bug Fixes
