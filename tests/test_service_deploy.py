@@ -386,6 +386,7 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
 
 def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
+    from src.application.secret_store import legacy_secret_env_names
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -413,6 +414,9 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
     assert f"om-feishu-bot-app-secret:{store}/om-feishu-bot-app-secret" in tick
     assert "om-quality-read-token" not in tick
     assert "om-inbound-operation-hmac-key" not in tick
+    assert (
+        "UnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names()))
+    ) in tick
 
     quality = files[
         "systemd/options-monitor-quality-http.service.d/zzzz-secret-credentials.conf"
@@ -432,9 +436,153 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
         item["relative_path"].endswith("options-monitor-materialize-feishu-agent-credential")
         for item in bundle["files"]
     )
+    assert not any(
+        item["relative_path"].endswith(
+            "options-monitor-materialize-service-credentials"
+        )
+        for item in bundle["files"]
+    )
     assert profile["secret_credentials"]["backend"] == "systemd"
+    assert profile["secret_credentials"]["delivery"] == "load-credential-encrypted"
     assert profile["secret_credentials"]["legacy_env_materializer_enabled"] is False
     assert "options-monitor-opend.service" not in profile["secret_credentials"]["service_credentials"]
+
+
+def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: Path) -> None:
+    from src.application.service_deploy import (
+        DEFAULT_SECRET_CREDENTIAL_HELPER,
+        DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT,
+        render_service_bundle,
+    )
+    from src.application.secret_store import legacy_secret_env_names
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = tmp_path / "credstore.encrypted"
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["us"],
+        include_opend=True,
+        include_feishu_ws=True,
+        include_quality_monitoring=True,
+        include_secret_credentials=True,
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=store,
+        deploy_user="liuxie",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    helper = files[
+        "systemd/libexec/options-monitor-materialize-service-credentials"
+    ]
+    assert helper["install_path"] == str(DEFAULT_SECRET_CREDENTIAL_HELPER)
+    assert helper["mode"] == 0o755
+    assert helper["owner_uid"] == 0
+    assert helper["owner_gid"] == 0
+    assert "systemd-creds" in helper["content"]
+    assert "print(secret" not in helper["content"]
+
+    tick = files[
+        "systemd/options-monitor-tick-us.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    tick_directory = DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT / "options-monitor-tick-us.service"
+    assert "LoadCredential=\n" in tick
+    assert "LoadCredentialEncrypted=\n" in tick
+    assert 'Environment="OM_SECRET_BACKEND=systemd"' in tick
+    assert f'Environment="CREDENTIALS_DIRECTORY={tick_directory}"' in tick
+    assert f"ExecStartPre=+{DEFAULT_SECRET_CREDENTIAL_HELPER} materialize" in tick
+    assert "--unit options-monitor-tick-us.service" in tick
+    assert "--deploy-user liuxie" in tick
+    assert "--credential-id om-feishu-holdings-app-secret" in tick
+    assert "--credential-id om-feishu-bot-app-secret" in tick
+    assert "om-quality-read-token" not in tick
+    assert f"ExecStopPost=+{DEFAULT_SECRET_CREDENTIAL_HELPER} cleanup" in tick
+    assert "EnvironmentFile=" not in tick
+    assert "OM_SECRET_BACKEND=env" not in tick
+    assert (
+        "UnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names()))
+    ) in tick
+
+    quality = files[
+        "systemd/options-monitor-quality-http.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert "--credential-id om-quality-read-token" in quality
+    assert "om-feishu-bot-app-secret" not in quality
+
+    secret_profile = profile["secret_credentials"]
+    assert secret_profile["backend"] == "systemd"
+    assert secret_profile["delivery"] == "runtime-files"
+    assert secret_profile["helper_path"] == str(DEFAULT_SECRET_CREDENTIAL_HELPER)
+    assert secret_profile["runtime_root"] == str(DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT)
+    assert secret_profile["legacy_env_materializer_enabled"] is False
+
+
+def test_render_rejects_unknown_secret_credential_delivery(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    with pytest.raises(ValueError, match="secret credential delivery"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=tmp_path,
+            markets=["us"],
+            include_secret_credentials=True,
+            secret_credential_delivery="automatic-fallback",
+        )
+
+
+@pytest.mark.parametrize(
+    ("deploy_user", "store_root", "error"),
+    (
+        (
+            "liuxie\nExecStartPre=+/tmp/injected",
+            "/etc/credstore.encrypted",
+            "deploy user",
+        ),
+        (
+            "liuxie",
+            "/etc/credstore.encrypted\nExecStartPre=+/tmp/injected",
+            "control characters",
+        ),
+        ("liuxie", "/etc/credstore.%n", "systemd expansion"),
+        ("liuxie", "/etc/$CREDENTIAL_STORE", "systemd expansion"),
+    ),
+)
+def test_render_runtime_credentials_rejects_systemd_exec_injection_inputs(
+    tmp_path: Path,
+    deploy_user: str,
+    store_root: str,
+    error: str,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    with pytest.raises(ValueError, match=error):
+        render_service_bundle(
+            target="systemd",
+            repo_root=tmp_path,
+            markets=["us"],
+            include_secret_credentials=True,
+            secret_credential_delivery="runtime-files",
+            secret_credential_store_root=store_root,
+            deploy_user=deploy_user,
+        )
+
+
+def test_render_native_credentials_rejects_systemd_store_expansion(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    with pytest.raises(ValueError, match="systemd expansion"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=tmp_path,
+            markets=["us"],
+            include_secret_credentials=True,
+            secret_credential_delivery="load-credential-encrypted",
+            secret_credential_store_root="/etc/credstore.%n",
+        )
 
 
 def test_render_rejects_mixed_legacy_and_per_unit_secret_modes(tmp_path: Path) -> None:
@@ -938,6 +1086,8 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
         repo_root=repo,
         runtime_root=runtime,
         systemd_unit_root=systemd_root,
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
     )
     assert secret_keys
     assert all(key in before["missing_managed_files"] for key in secret_keys)
@@ -947,6 +1097,8 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
         runtime_root=runtime,
         systemd_unit_root=systemd_root,
         confirm=True,
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
     )
     assert installed["missing_managed_files"] == []
     assert installed["mismatched_managed_files"] == []
@@ -1009,6 +1161,91 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
     assert retired["applied"]["retired_managed_files"] == [stale_key]
     assert not stale_dropin.exists()
     assert profile["secret_credentials"]["enabled"] is True
+
+
+def test_service_drift_manages_runtime_credential_helper_and_dropins(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_deploy as service_deploy_module
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    helper_path = tmp_path / "libexec" / "options-monitor-materialize-service-credentials"
+    repo.mkdir()
+    runtime.mkdir()
+    monkeypatch.setattr(
+        service_deploy_module,
+        "DEFAULT_SECRET_CREDENTIAL_HELPER",
+        helper_path,
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_secret_credentials=True,
+        secret_credential_delivery="runtime-files",
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    (runtime / "service.profile.json").write_text(
+        files["service.profile.json"]["content"],
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    before = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+    )
+    assert str(helper_path) in before["missing_managed_files"]
+    assert before["missing_managed_files"]
+
+    installed = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+    )
+    assert installed["missing_managed_files"] == []
+    assert installed["mismatched_managed_files"] == []
+    assert installed["mode_mismatched_managed_files"] == []
+    assert helper_path.is_file()
+    assert helper_path.stat().st_mode & 0o777 == 0o755
+    assert "systemd-creds" in helper_path.read_text(encoding="utf-8")
+
+    unsafe_owner = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        managed_root_uid=os.getuid() + 1,
+        managed_root_gid=os.getgid(),
+    )
+    assert str(helper_path) in unsafe_owner["mode_mismatched_managed_files"]
+
+    helper_copy = tmp_path / "credential-helper-copy"
+    helper_copy.write_text(helper_path.read_text(encoding="utf-8"), encoding="utf-8")
+    helper_copy.chmod(0o755)
+    helper_path.unlink()
+    helper_path.symlink_to(helper_copy)
+    symlinked = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+    )
+    assert str(helper_path) in symlinked["mode_mismatched_managed_files"]
 
 
 def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
@@ -1457,6 +1694,124 @@ def test_service_drift_sudo_fallback_applies_managed_file_mode(
     assert target.read_text(encoding="utf-8") == "#!/bin/sh\n"
     assert target.stat().st_mode & 0o777 == 0o755
     assert ["sudo", "-n", "chmod", "0755", str(target)] in calls
+
+
+def test_service_drift_privileged_executable_uses_root_owned_install(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    target = tmp_path / "protected" / "credential-helper"
+    expected_uid = os.getuid()
+    expected_gid = os.getgid()
+    monkeypatch.setattr(
+        service_drift_module.os,
+        "geteuid",
+        lambda: expected_uid + 1,
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[:4] == ["sudo", "-n", "install", "-d"]:
+            Path(command[-1]).mkdir(parents=True, exist_ok=True)
+        elif command[:3] == ["sudo", "-n", "install"] and "/dev/stdin" in command:
+            target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+            target.chmod(int(command[command.index("-m") + 1], 8))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/usr/bin/python3\n",
+        ctx={"provider": "systemd"},
+        run_cmd=_run_cmd,
+        mode=0o755,
+        owner_uid=expected_uid,
+        owner_gid=expected_gid,
+    )
+
+    assert out["ok"] is True
+    assert out["sudo_fallback"] is True
+    assert target.read_text(encoding="utf-8") == "#!/usr/bin/python3\n"
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert [
+        "sudo",
+        "-n",
+        "install",
+        "-o",
+        str(expected_uid),
+        "-g",
+        str(expected_gid),
+        "-m",
+        "0755",
+        "/dev/stdin",
+        str(target),
+    ] in calls
+
+
+def test_service_drift_privileged_executable_rejects_symlink_target(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    outside = tmp_path / "outside"
+    outside.write_text("must remain\n", encoding="utf-8")
+    target = tmp_path / "credential-helper"
+    target.symlink_to(outside)
+    calls: list[list[str]] = []
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/usr/bin/python3\n",
+        ctx={"provider": "systemd"},
+        run_cmd=lambda command, **_kwargs: calls.append(list(command)),
+        mode=0o755,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+
+    assert out["ok"] is False
+    assert "symbolic link" in out["error"]
+    assert calls == []
+    assert outside.read_text(encoding="utf-8") == "must remain\n"
+
+
+def test_service_drift_privileged_executable_fails_if_install_did_not_publish(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    expected_uid = os.getuid()
+    target = tmp_path / "missing" / "credential-helper"
+    monkeypatch.setattr(
+        service_drift_module.os,
+        "geteuid",
+        lambda: expected_uid + 1,
+    )
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/usr/bin/python3\n",
+        ctx={"provider": "systemd"},
+        run_cmd=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="ok\n",
+            stderr="",
+        ),
+        mode=0o755,
+        owner_uid=expected_uid,
+        owner_gid=os.getgid(),
+    )
+
+    assert out["ok"] is False
+    assert out["returncode"] == 1
+    assert "ownership verification failed" in out["error"]
 
 
 def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declares_it(tmp_path: Path) -> None:
@@ -5811,6 +6166,51 @@ def test_cli_service_render_can_include_feishu_agent_credential(
     ).is_file()
 
 
+def test_cli_service_render_can_select_runtime_file_secret_delivery(
+    capsys,
+    tmp_path: Path,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    output_dir = tmp_path / "rendered"
+    rc = main([
+        "service",
+        "render",
+        "--target",
+        "systemd",
+        "--repo-root",
+        str(tmp_path / "repo"),
+        "--runtime-root",
+        str(tmp_path / "runtime"),
+        "--markets",
+        "us",
+        "--config-yaml",
+        str(tmp_path / "runtime" / "config.yaml"),
+        "--include-secret-credentials",
+        "--secret-credential-delivery",
+        "runtime-files",
+        "--output-dir",
+        str(output_dir),
+        "--no-content",
+    ])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    profile = json.loads(
+        (output_dir / "service.profile.json").read_text(encoding="utf-8")
+    )
+    assert profile["secret_credentials"]["delivery"] == "runtime-files"
+    helper = (
+        output_dir
+        / "systemd"
+        / "libexec"
+        / "options-monitor-materialize-service-credentials"
+    )
+    assert helper.is_file()
+    assert helper.stat().st_mode & 0o777 == 0o755
+
+
 def test_cli_service_drift_reports_missing_units(monkeypatch, capsys, tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.interfaces.cli.main import main
@@ -6352,4 +6752,461 @@ def test_cli_run_trade_intake_delegates_runtime_root(monkeypatch, tmp_path: Path
             "deal-1",
             "--dry-run",
         ]
+    ]
+
+
+def _install_complete_systemd_bundle(bundle: dict, systemd_root: Path) -> None:
+    systemd_root.mkdir(parents=True, exist_ok=True)
+    live_root = Path("/etc/systemd/system")
+    for item in bundle["files"]:
+        kind = str(item.get("kind") or "")
+        if kind in {"systemd_service", "systemd_timer"}:
+            path = systemd_root / Path(item["install_path"]).name
+        elif kind in {"systemd_dropin", "systemd_secret_dropin"}:
+            path = systemd_root / Path(item["install_path"]).relative_to(live_root)
+        elif kind == "systemd_executable":
+            path = Path(item["install_path"])
+        else:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item["content"], encoding="utf-8")
+        if item.get("mode") is not None:
+            path.chmod(int(item["mode"]))
+
+
+def _legacy_credential_migration_fixture(monkeypatch, tmp_path: Path) -> dict[str, object]:
+    import src.application.service_deploy as service_deploy_module
+    import src.application.service_drift as service_drift_module
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    libexec = tmp_path / "libexec"
+    legacy_helper = libexec / "options-monitor-materialize-feishu-agent-credential"
+    target_helper = libexec / "options-monitor-materialize-service-credentials"
+    legacy_env = tmp_path / "run" / "options-monitor-feishu-agent.env"
+    repo.mkdir()
+    runtime.mkdir()
+    monkeypatch.setattr(
+        service_deploy_module,
+        "DEFAULT_SECRET_CREDENTIAL_HELPER",
+        target_helper,
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_SECRET_CREDENTIAL_HELPER",
+        target_helper,
+    )
+    bundle = service_deploy_module.render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_quality_monitoring=True,
+        include_feishu_agent_credential=True,
+        feishu_agent_credential_helper_path=legacy_helper,
+        feishu_agent_credential_env_file=legacy_env,
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    (runtime / "service.profile.json").write_text(
+        files["service.profile.json"]["content"],
+        encoding="utf-8",
+    )
+    _install_complete_systemd_bundle(bundle, systemd_root)
+    legacy_env.parent.mkdir(parents=True, exist_ok=True)
+    legacy_env.write_text("OM_FEISHU_BOT_APP_SECRET=not-a-real-secret\n", encoding="utf-8")
+    compat = (
+        systemd_root
+        / "options-monitor-quality-http.service.d"
+        / service_drift_module.SECRET_BACKEND_COMPAT_DROPIN
+    )
+    compat.parent.mkdir(parents=True, exist_ok=True)
+    compat.write_text(
+        "[Service]\nLoadCredential=\nLoadCredentialEncrypted=\n"
+        "Environment=OM_SECRET_BACKEND=env\n",
+        encoding="utf-8",
+    )
+    return {
+        "repo": repo,
+        "runtime": runtime,
+        "systemd_root": systemd_root,
+        "legacy_helper": legacy_helper,
+        "target_helper": target_helper,
+        "legacy_env": legacy_env,
+        "compat": compat,
+        "store": tmp_path / "credstore.encrypted",
+    }
+
+
+def _credential_migration_runner(
+    calls: list[list[str]],
+    *,
+    decrypt_ok: bool = True,
+    restart_failures: list[int] | None = None,
+):  # type: ignore[no-untyped-def]
+    failures = restart_failures if restart_failures is not None else []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[:2] == ["/usr/bin/findmnt", "--noheadings"]:
+            return subprocess.CompletedProcess(command, 0, stdout="tmpfs\n", stderr="")
+        if "/usr/bin/systemd-creds" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0 if decrypt_ok else 1,
+                stdout="must-not-be-captured",
+                stderr="must-not-be-captured",
+            )
+        if "is-enabled" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+        if "--property=Result" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
+        if "restart" in command and command[-1].endswith(".service") and failures:
+            failures[0] -= 1
+            if failures[0] >= 0:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="failed")
+            failures.clear()
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    return _run_cmd
+
+
+def test_service_credential_migration_dry_run_is_read_only(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_drift import migrate_service_credentials
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+    profile_before = (fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8")
+
+    out = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls),
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "dry_run"
+    assert out["changed"] is False
+    assert out["values_exposed"] is False
+    assert out["secret_credential_delivery"] == "runtime-files"
+    assert out["credential_ids"]
+    assert (fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8") == profile_before
+    assert fixture["legacy_env"].is_file()
+    assert fixture["legacy_helper"].is_file()
+    assert not fixture["target_helper"].exists()
+    assert not any("systemd-creds" in part for command in calls for part in command)
+    assert not list(fixture["runtime"].glob("service.profile.json.pre-credential-migration-*.bak"))
+
+
+def test_service_credential_migration_preflight_failure_changes_nothing(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_drift import migrate_service_credentials
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+    profile_before = (fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8")
+
+    out = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls, decrypt_ok=False),
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "blocked"
+    assert out["reason"] == "encrypted_credential_preflight_failed"
+    assert out["preflight"]["values_exposed"] is False
+    assert (fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8") == profile_before
+    assert fixture["legacy_env"].is_file()
+    assert fixture["legacy_helper"].is_file()
+    assert not fixture["target_helper"].exists()
+    assert "must-not-be-captured" not in json.dumps(out)
+
+
+def test_service_credential_migration_retires_legacy_env_after_verified_restart(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import FEISHU_AGENT_CREDENTIAL_SERVICE
+    from src.application.service_drift import migrate_service_credentials
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+
+    out = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls),
+    )
+
+    profile = json.loads((fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8"))
+    assert out["ok"] is True
+    assert out["status"] == "migrated"
+    assert out["post_restart_drift"]["summary"]["status"] == "ok"
+    assert out["final_drift"]["summary"]["status"] == "ok"
+    assert out["restart"]["restarted"]
+    assert profile["secret_credentials"]["delivery"] == "runtime-files"
+    assert "feishu_agent_credential" not in profile
+    assert not fixture["legacy_env"].exists()
+    assert not fixture["legacy_helper"].exists()
+    assert not fixture["compat"].exists()
+    assert fixture["target_helper"].is_file()
+    assert not (fixture["systemd_root"] / FEISHU_AGENT_CREDENTIAL_SERVICE).exists()
+    assert list(fixture["runtime"].glob("service.profile.json.pre-credential-migration-*.bak"))
+    assert "must-not-be-captured" not in json.dumps(out)
+
+
+def test_service_credential_migration_restart_failure_restores_legacy_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import FEISHU_AGENT_CREDENTIAL_SERVICE
+    from src.application.service_drift import migrate_service_credentials
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+
+    out = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls, restart_failures=[1]),
+    )
+
+    profile = json.loads((fixture["runtime"] / "service.profile.json").read_text(encoding="utf-8"))
+    assert out["ok"] is False
+    assert out["status"] == "rolled_back"
+    assert out["reason"] == "credential_consumer_restart_failed"
+    assert out["rollback"]["ok"] is True
+    assert profile["feishu_agent_credential"]["enabled"] is True
+    assert "secret_credentials" not in profile
+    assert fixture["legacy_env"].is_file()
+    assert fixture["legacy_helper"].is_file()
+    assert not fixture["target_helper"].exists()
+    assert (fixture["systemd_root"] / FEISHU_AGENT_CREDENTIAL_SERVICE).is_file()
+    legacy_dropins = list(fixture["systemd_root"].glob("options-monitor-*.service.d/zzzz-feishu-agent-credential.conf"))
+    assert legacy_dropins
+    assert all("Environment=OM_SECRET_BACKEND=env" in path.read_text(encoding="utf-8") for path in legacy_dropins)
+
+
+def test_service_credential_migration_verifies_target_drift_before_legacy_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import copy
+
+    import src.application.service_drift as service_drift_module
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    real_service_drift = service_drift_module.service_drift
+    drift_calls = 0
+
+    def _service_drift_with_post_restart_failure(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal drift_calls
+        drift_calls += 1
+        result = real_service_drift(**kwargs)
+        if drift_calls == 4:
+            result = copy.deepcopy(result)
+            result["summary"]["ok"] = False
+            result["summary"]["status"] = "error"
+        return result
+
+    monkeypatch.setattr(
+        service_drift_module,
+        "service_drift",
+        _service_drift_with_post_restart_failure,
+    )
+    calls: list[list[str]] = []
+
+    out = service_drift_module.migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls),
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "rolled_back"
+    assert out["reason"] == "post_restart_target_drift_failed"
+    assert out["rollback"]["ok"] is True
+    assert fixture["legacy_env"].is_file()
+    assert fixture["legacy_helper"].is_file()
+    assert not fixture["target_helper"].exists()
+
+
+def test_service_credential_migration_restart_failure_restores_inferred_legacy_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_deploy import FEISHU_AGENT_CREDENTIAL_SERVICE
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    profile_path = fixture["runtime"] / "service.profile.json"
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile.pop("feishu_agent_credential")
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] != FEISHU_AGENT_CREDENTIAL_SERVICE
+    ]
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(
+        service_drift_module,
+        "LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH",
+        fixture["systemd_root"] / FEISHU_AGENT_CREDENTIAL_SERVICE,
+    )
+    monkeypatch.setattr(
+        service_drift_module,
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER",
+        fixture["legacy_helper"],
+    )
+    calls: list[list[str]] = []
+
+    out = service_drift_module.migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls, restart_failures=[1]),
+    )
+
+    restored = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert out["status"] == "rolled_back"
+    assert out["rollback"]["ok"] is True
+    assert restored["feishu_agent_credential"]["enabled"] is True
+    assert {item["name"] for item in restored["services"]} >= {
+        FEISHU_AGENT_CREDENTIAL_SERVICE,
+    }
+    assert (fixture["systemd_root"] / FEISHU_AGENT_CREDENTIAL_SERVICE).is_file()
+    assert fixture["legacy_helper"].is_file()
+    assert fixture["legacy_env"].is_file()
+
+
+def test_service_credential_migration_blocks_cross_delivery_transition(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.service_drift import migrate_service_credentials
+
+    fixture = _legacy_credential_migration_fixture(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+    first = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="runtime-files",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls),
+    )
+    assert first["status"] == "migrated"
+    profile_path = fixture["runtime"] / "service.profile.json"
+    profile_before = profile_path.read_text(encoding="utf-8")
+    backup_count = len(
+        list(fixture["runtime"].glob("service.profile.json.pre-credential-migration-*.bak"))
+    )
+    calls.clear()
+
+    out = migrate_service_credentials(
+        repo_root=fixture["repo"],
+        runtime_root=fixture["runtime"],
+        secret_credential_delivery="load-credential-encrypted",
+        secret_credential_store_root=fixture["store"],
+        confirm=True,
+        systemd_unit_root=fixture["systemd_root"],
+        managed_root_uid=os.getuid(),
+        managed_root_gid=os.getgid(),
+        run_cmd=_credential_migration_runner(calls),
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "blocked"
+    assert out["reason"] == "existing_secure_delivery_transition_not_supported"
+    assert out["current_secret_credential_delivery"] == "runtime-files"
+    assert profile_path.read_text(encoding="utf-8") == profile_before
+    assert fixture["target_helper"].is_file()
+    assert len(
+        list(fixture["runtime"].glob("service.profile.json.pre-credential-migration-*.bak"))
+    ) == backup_count
+    assert not any("systemd-creds" in part for command in calls for part in command)
+
+
+def test_cli_service_credentials_migrate_passes_explicit_delivery(tmp_path: Path) -> None:
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    args = parse_args(
+        [
+            "service",
+            "credentials-migrate",
+            "--repo-root",
+            str(tmp_path / "repo"),
+            "--runtime-root",
+            str(tmp_path / "runtime"),
+            "--secret-credential-delivery",
+            "runtime-files",
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def _migrate(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return {"ok": True, "status": "dry_run", "changed": False}
+
+    out = handle_service_update_command(
+        args,
+        migrate_service_credentials_fn=_migrate,
+    )
+
+    assert out["ok"] is True
+    assert out["tool_name"] == "service.credentials-migrate"
+    assert out["data"]["dry_run"] is True
+    assert out["data"]["write_applied"] is False
+    assert calls == [
+        {
+            "repo_root": str(tmp_path / "repo"),
+            "runtime_root": str(tmp_path / "runtime"),
+            "profile_path": None,
+            "secret_credential_delivery": "runtime-files",
+            "secret_credential_store_root": None,
+            "confirm": False,
+        }
     ]

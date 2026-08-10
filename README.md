@@ -420,7 +420,7 @@ om service render \
   --output-dir /tmp/options-monitor-service
 ```
 
-Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-secret-credentials`，按 unit 生成最小 `LoadCredentialEncrypted` drop-in；渲染不会创建或修改凭据。旧 `--include-feishu-agent-credential` 只用于存量共享 env materializer 迁移。完整契约见 [Secret Storage](docs/SECRET_STORAGE.md)。
+Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-secret-credentials`，按 unit 生成最小凭据注入；默认使用 `LoadCredentialEncrypted`，受限 Incus/LXC 可显式选择 `--secret-credential-delivery runtime-files`，两者都不使用 secret env。渲染不会创建或修改凭据。旧 `--include-feishu-agent-credential` 只用于存量共享 env materializer；用 `om service credentials-migrate` 做默认 dry-run 的受控迁移。完整契约见 [Secret Storage](docs/SECRET_STORAGE.md)。
 
 平台部署、升级、回滚和服务检查见 [DEPLOY.md](DEPLOY.md)、[Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md) 与 [RUNBOOK.md](RUNBOOK.md)。
 

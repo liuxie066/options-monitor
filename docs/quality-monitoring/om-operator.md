@@ -38,8 +38,10 @@ OpenD 原始响应。
 ./om quality serve --host 127.0.0.1 --port 8792
 ```
 
-macOS 从 Keychain 读取；Linux systemd unit 通过 `LoadCredentialEncrypted=` 只注入
-`quality.read_token`。`OM_QUALITY_READ_TOKEN` 仅在显式 `OM_SECRET_BACKEND=env` 的限时兼容模式下生效。
+macOS 从 Keychain 读取；Linux systemd unit 通过选定的逐 unit credential delivery 模式只注入
+`quality.read_token`。默认为 `LoadCredentialEncrypted=`；受限容器可显式使用
+`--secret-credential-delivery runtime-files`。`OM_QUALITY_READ_TOKEN` 仅在显式
+`OM_SECRET_BACKEND=env` 的限时兼容模式下生效。
 
 - `GET /health` 只证明 endpoint 进程可用；
 - `GET /quality/status` 需要独立 bearer token，只读取已发布 artifact；
