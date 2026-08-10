@@ -56,7 +56,7 @@ def build_secret_provider(
             selected = "systemd"
         elif os_name == "linux":
             raise SecretBackendUnavailable(
-                "no secure Linux runtime credential context is available; configure per-unit LoadCredentialEncrypted "
+                "no secure Linux runtime credential context is available; configure an explicit per-unit credential delivery mode "
                 "or explicitly select OM_SECRET_BACKEND=env for temporary compatibility"
             )
         else:
