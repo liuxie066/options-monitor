@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.13.6 - 2026-08-10
+
+### Bug Fixes
+- Preserved pre-existing inactive, disabled, or masked timer states during upgrades when activation-state preservation is requested, preventing intentionally paused schedules from being re-enabled by service reconciliation or rollback.
+- Defined broker portfolio `avg_cost` strictly as OpenD `average_cost` without current-price or diluted-cost fallback, and treated shared-config Covered Call symbols absent from an account's holdings as a legal no-candidate result while keeping missing or corrupt portfolio evidence fail-closed.
+
 ## 1.13.5 - 2026-08-10
 
 ### Bug Fixes
