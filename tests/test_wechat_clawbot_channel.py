@@ -1703,3 +1703,40 @@ def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) 
         ["systemctl", "is-active", "options-monitor-wechat-clawbot.service"],
         ["systemctl", "is-enabled", "options-monitor-wechat-clawbot.service"],
     ]
+
+
+def test_channel_status_checks_secret_metadata_without_reading_value(tmp_path: Path) -> None:
+    from src.application.channels.status import build_channel_status
+    from src.application.secret_store import SecretStatus, use_secret_provider
+
+    class MetadataOnlyProvider:
+        backend_name = "test"
+
+        def get(self, logical_name: str, *, legacy_env_name: str | None = None) -> str | None:
+            del logical_name, legacy_env_name
+            raise AssertionError("diagnostics must not read secret values")
+
+        def status(self, logical_name: str, *, legacy_env_name: str | None = None) -> SecretStatus:
+            del legacy_env_name
+            return SecretStatus(
+                logical_name=logical_name,
+                configured=True,
+                backend=self.backend_name,
+                source="test_metadata",
+            )
+
+    with use_secret_provider(MetadataOnlyProvider()):
+        out = build_channel_status(
+            base=tmp_path,
+            runtime_root=tmp_path,
+            payload={"feishu_ws": {"enabled": True}},
+            environ={
+                "OM_FEISHU_BOT_APP_ID": "cli_1",
+                "OM_FEISHU_BOT_USER_OPEN_ID": "ou_1",
+            },
+        )
+
+    health = out["channels"]["feishu"]
+    assert health["credentials_configured"] is True
+    assert health["allowed_senders_configured"] is True
+    assert health["available"] is True

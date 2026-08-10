@@ -10,7 +10,13 @@ from typing import Any, Callable, Mapping
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import build_response, mask_path as default_mask_path
 from src.application.assistant.audit import default_audit_db_path
-from src.application.secret_resolver import resolve_feishu_bot_config
+from src.application.secret_resolver import (
+    DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV,
+    DEFAULT_FEISHU_BOT_APP_ID_ENV,
+    DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
+    DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV,
+)
+from src.application.secret_store import FEISHU_BOT_APP_SECRET, SecretError, resolve_secret_status
 from src.application.service_deploy import service_status_from_profile
 
 
@@ -115,7 +121,26 @@ def _feishu_channel_health(
     assistant_config_path, _assistant_config_explicit = _assistant_config_path_from_payload(payload)
     cfg, config_error = _load_assistant_config(assistant_config_path, base=base)
     inbound = _dict(_dict(cfg.get("inbound")).get("feishu_ws"))
-    bot_cfg = resolve_feishu_bot_config(environ=environ)
+    app_id_configured = bool(_first_text(environ.get(DEFAULT_FEISHU_BOT_APP_ID_ENV)))
+    user_open_id = _first_text(environ.get(DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV))
+    allowed_open_ids = _split_csv(
+        _first_text(environ.get(DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV))
+    ) or ((user_open_id,) if user_open_id else ())
+    credential_status = None
+    credential_error = None
+    try:
+        credential_status = resolve_secret_status(
+            FEISHU_BOT_APP_SECRET,
+            environ=environ,
+            legacy_env_name=DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
+        )
+    except (SecretError, ValueError) as exc:
+        credential_error = f"{type(exc).__name__}: {exc}"
+    credentials_ready = bool(
+        app_id_configured
+        and credential_status is not None
+        and credential_status.configured
+    )
     audit_db = _first_text(profile.get("audit_db"), payload.get("audit_db"), payload.get("inbound_audit_db"), environ.get("OM_INBOUND_AUDIT_DB"))
     audit_path = _resolve_path(audit_db, base=base) if audit_db else default_audit_db_path()
     service = _channel_service_status(
@@ -124,19 +149,19 @@ def _feishu_channel_health(
         status_checked=service_status_checked,
     )
     service_present = bool(service.get("present"))
-    allowed_senders_configured = bool(bot_cfg.allowed_open_ids)
+    allowed_senders_configured = bool(allowed_open_ids)
     configured = bool(
         profile.get("enabled")
         or inbound
         or service_present
-        or bot_cfg.credentials_ready
+        or credentials_ready
         or allowed_senders_configured
         or audit_path.exists()
     )
     out: dict[str, Any] = {
         "configured": configured,
         "provider": FEISHU_APP_NOTIFICATION_PROVIDER,
-        "available": configured and bot_cfg.credentials_ready and allowed_senders_configured,
+        "available": configured and credentials_ready and allowed_senders_configured,
         "profile_enabled": bool(profile.get("enabled")),
         "service_present": service_present,
         "service_status_checked": service_status_checked,
@@ -147,14 +172,16 @@ def _feishu_channel_health(
         "assistant_config_loaded": bool(cfg),
         "audit_db": mask_path(audit_path),
         "audit_db_exists": audit_path.exists(),
-        "credentials_configured": bool(bot_cfg.credentials_ready),
+        "credentials_configured": credentials_ready,
         "allowed_senders_configured": allowed_senders_configured,
-        "allowed_open_ids_count": len(bot_cfg.allowed_open_ids),
+        "allowed_open_ids_count": len(allowed_open_ids),
         "reply_enabled": _config_bool_or_default(inbound.get("reply_enabled"), default=True),
         "max_reply_chars": _int_or_default(inbound.get("max_reply_chars"), default=3500),
     }
     if config_error:
         out["config_error"] = config_error
+    if credential_error:
+        out["credential_error"] = credential_error
     if service_status_error:
         out["service_status_error"] = service_status_error
     return out
@@ -463,6 +490,15 @@ def _first_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _split_csv(value: Any) -> tuple[str, ...]:
+    out: list[str] = []
+    for raw in str(value or "").split(","):
+        item = raw.strip()
+        if item and item not in out:
+            out.append(item)
+    return tuple(out)
 
 
 def _config_bool_or_default(value: Any, *, default: bool) -> bool:
