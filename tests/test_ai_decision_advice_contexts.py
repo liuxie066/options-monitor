@@ -18,7 +18,11 @@ from src.application.ai_decision_advice.evidence_store import (
     EvidenceIndex,
     SymbolEvidenceView,
 )
+from src.application.prepared_option_positions_context import (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+)
 from src.application.prepared_portfolio_distribution import (
+    PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
     PreparedPortfolioDistribution,
 )
 
@@ -146,11 +150,16 @@ def _portfolio(
     return PreparedPortfolioDistribution(
         envelope={
             "authority": {
+                "schema_version": PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
                 "run_id": run_id,
                 "account": account,
+                "mapped_pm_account": account,
+                "provider": "portfolio_management",
                 "account_config_sha256": CONFIG_HASH,
                 "status": status,
                 "reason": reason,
+                "fetched_at_utc": "2026-08-09T12:00:00+00:00",
+                "validation": {"status": "passed"},
             },
             "payload": payload,
             "integrity": {},
@@ -204,10 +213,12 @@ def _option_context(
     observed_at: str = OBSERVED,
 ) -> dict:
     return {
+        "context_source": "prepared",
         "context_status": "available",
         "decision_snapshot_status": "trusted",
         "filters": {"account": account, "broker": "futu"},
         "prepared_authority": {
+            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
             "run_id": run_id,
             "account": account,
             "account_config_sha256": CONFIG_HASH,
@@ -418,6 +429,66 @@ def test_cross_account_portfolio_is_rejected_without_foreign_rows() -> None:
     ]
 
 
+def test_available_portfolio_requires_prepared_pm_source_authority() -> None:
+    invalid: list[tuple[PreparedPortfolioDistribution, str]] = []
+
+    missing_schema = _portfolio()
+    missing_schema.envelope["authority"].pop("schema_version")
+    invalid.append(
+        (missing_schema, "portfolio_prepared_schema_invalid")
+    )
+
+    wrong_provider = _portfolio()
+    wrong_provider.envelope["authority"]["provider"] = "futu"
+    invalid.append((wrong_provider, "portfolio_provider_invalid"))
+
+    missing_mapping = _portfolio()
+    missing_mapping.envelope["authority"]["mapped_pm_account"] = ""
+    invalid.append((missing_mapping, "portfolio_mapped_account_missing"))
+
+    failed_validation = _portfolio()
+    failed_validation.envelope["authority"]["validation"] = {
+        "status": "failed"
+    }
+    invalid.append((failed_validation, "portfolio_validation_invalid"))
+
+    for prepared, reason in invalid:
+        out = freeze_portfolio_distribution(
+            prepared,
+            expected_run_id="run-1",
+            expected_account="lx",
+            expected_account_config_sha256=CONFIG_HASH,
+        )
+        assert out["status"] == "unavailable"
+        assert out["asset_weights"] == {}
+        assert out["gaps"] == [f"portfolio_unavailable:{reason}"]
+
+
+def test_formal_unavailable_portfolio_preserves_soft_dependency_reason() -> None:
+    prepared = _portfolio(
+        status="unavailable",
+        reason="provider_none",
+        assets=[],
+    )
+    prepared.envelope["authority"].update(
+        {
+            "provider": "none",
+            "mapped_pm_account": "",
+            "validation": {"status": "not_applicable"},
+        }
+    )
+
+    out = freeze_portfolio_distribution(
+        prepared,
+        expected_run_id="run-1",
+        expected_account="lx",
+        expected_account_config_sha256=CONFIG_HASH,
+    )
+
+    assert out["status"] == "unavailable"
+    assert out["gaps"] == ["portfolio_unavailable:provider_none"]
+
+
 def test_option_positions_aggregate_all_but_detail_candidate_symbols_only() -> None:
     rows = [
         _position("put-1", contracts=1),
@@ -521,6 +592,29 @@ def test_cross_account_option_context_is_rejected_not_emptied() -> None:
     assert out["status"] == "unavailable"
     assert out["summary"]["total_open_contracts"] is None
     assert "NVDA" not in str(out)
+
+
+def test_option_positions_require_prepared_source_authority() -> None:
+    missing_schema = _option_context(rows=[_position("put-1")])
+    missing_schema["prepared_authority"].pop("schema_version")
+    legacy_source = _option_context(rows=[_position("put-1")])
+    legacy_source["context_source"] = "legacy"
+
+    for context, reason in (
+        (missing_schema, "option_prepared_schema_invalid"),
+        (legacy_source, "option_source_invalid"),
+    ):
+        out = freeze_option_positions(
+            context,
+            candidate_symbols=["NVDA"],
+            expected_run_id="run-1",
+            expected_account="lx",
+            expected_account_config_sha256=CONFIG_HASH,
+        )
+        assert out["status"] == "unavailable"
+        assert out["summary"]["total_open_contracts"] is None
+        assert out["candidate_contracts"] == []
+        assert out["gaps"] == [f"option_positions_unavailable:{reason}"]
 
 
 def test_only_valid_identity_produces_simplified_combo_structure() -> None:
