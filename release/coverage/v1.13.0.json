@@ -1,0 +1,126 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.0",
+  "base": {
+    "tag": "v1.12.1",
+    "commit": "feff5e50f160db81e81b4bd2db2ff45e432290a7"
+  },
+  "reviewed_head": "9fadfdee566af414e4edc141178ef32ca1ffe1e9",
+  "commits": [
+    {
+      "sha": "fa5f09aa41465ec71fa8df5362101380e0812594",
+      "subject": "docs(gateflow): accept plan for ai-decision-advice-drift-remediation"
+    },
+    {
+      "sha": "1ca4987d571ff3e9ca36c037cccfa2430b40404a",
+      "subject": "feat(ai-advice): accept drift remediation S1"
+    },
+    {
+      "sha": "77f1bbd9ecb7aadb657487476d037ad4ad3449c2",
+      "subject": "feat(ai-advice): accept drift remediation S2"
+    },
+    {
+      "sha": "8320cabe3a95590faf2b47135e11b07df883211e",
+      "subject": "feat(ai-advice): accept drift remediation S3"
+    },
+    {
+      "sha": "9b6941beaeb5520fde7dabc38e11ad18c227a48c",
+      "subject": "feat(ai-advice): accept drift remediation S4"
+    },
+    {
+      "sha": "ae175d4a524e15a2bca248b62da149dd34450529",
+      "subject": "feat(ai-advice): accept drift remediation S5"
+    },
+    {
+      "sha": "640870c5104d698ca54376034ddb96d7f9f0c206",
+      "subject": "feat(ai-advice): accept drift remediation S6"
+    },
+    {
+      "sha": "5df680c4e3759549cf89bc82c8279880185564b0",
+      "subject": "feat(ai-advice): accept drift remediation S7"
+    },
+    {
+      "sha": "fef77c1c1635a09b34fe928a1d58e66d0fd89988",
+      "subject": "fix(ai-advice): close drift remediation aggregate"
+    },
+    {
+      "sha": "066b55dd728fbd2a4968ffda47e01c30832d3556",
+      "subject": "refine(ai-advice): position account-level advisor"
+    },
+    {
+      "sha": "f1522ccd2b2ec431c66c340c8915a46a99d850f8",
+      "subject": "merge(ai-advice): integrate main security updates"
+    },
+    {
+      "sha": "a6ec2f28ee429fd8187c50266d3c3d8c6a71d73d",
+      "subject": "merge(ai-advice): integrate drift remediation"
+    },
+    {
+      "sha": "9fadfdee566af414e4edc141178ef32ca1ffe1e9",
+      "subject": "fix(release): allow canonical release commit subject"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Completed the account-scoped AI Decision Advice workflow for Sell Put and Covered Call: each run now prepares an explicitly configured portfolio-management distribution, authoritative open-option context, deterministic one-contract projections, frozen external evidence, and strict `keep` / `switch` / `defer` / `needs_review` advice for the existing Daily Brief and Agent read surface.",
+      "commits": [
+        "1ca4987d571ff3e9ca36c037cccfa2430b40404a",
+        "77f1bbd9ecb7aadb657487476d037ad4ad3449c2",
+        "8320cabe3a95590faf2b47135e11b07df883211e",
+        "9b6941beaeb5520fde7dabc38e11ad18c227a48c",
+        "640870c5104d698ca54376034ddb96d7f9f0c206",
+        "5df680c4e3759549cf89bc82c8279880185564b0",
+        "a6ec2f28ee429fd8187c50266d3c3d8c6a71d73d"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added the managed external-evidence pipeline with anonymous market observation sets, audited native web-search coverage, bounded concurrent refresh, immutable evidence snapshots, and fail-closed handling for new symbols or incomplete searches.",
+      "commits": [
+        "ae175d4a524e15a2bca248b62da149dd34450529",
+        "640870c5104d698ca54376034ddb96d7f9f0c206"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Hardened model privacy and auditability with random account references, exact run/account/source bindings, a deterministic fact registry, strict evidence references and action ceilings, and an account-level options decision-advisor role that cannot generate candidates, alter strategy rules, execute trades, or replace the user's decision.",
+      "commits": [
+        "8320cabe3a95590faf2b47135e11b07df883211e",
+        "9b6941beaeb5520fde7dabc38e11ad18c227a48c",
+        "ae175d4a524e15a2bca248b62da149dd34450529",
+        "640870c5104d698ca54376034ddb96d7f9f0c206",
+        "066b55dd728fbd2a4968ffda47e01c30832d3556"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Removed legacy and inferred Advice data paths, froze evidence at Advice start, preserved legal zero-candidate runs without a model call, and made material advice transitions, Daily Brief rendering, reuse, and Agent reads consume the same validated recommendation instead of drifting across retries or notifications.",
+      "commits": [
+        "640870c5104d698ca54376034ddb96d7f9f0c206",
+        "5df680c4e3759549cf89bc82c8279880185564b0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Aligned the commit-message guardrail with the canonical `chore: release <version>` subject required by delta coverage, so validated release metadata commits no longer require bypassing repository hooks.",
+      "commits": [
+        "9fadfdee566af414e4edc141178ef32ca1ffe1e9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fa5f09aa41465ec71fa8df5362101380e0812594",
+      "reason": "Gateflow planning and review documentation only; it introduced no independent runtime or user-facing behavior."
+    },
+    {
+      "commit": "fef77c1c1635a09b34fe928a1d58e66d0fd89988",
+      "reason": "Aggregate closeout repaired an internal import boundary and refreshed generated review evidence without changing the listed user-visible Advice behavior."
+    },
+    {
+      "commit": "f1522ccd2b2ec431c66c340c8915a46a99d850f8",
+      "reason": "Integration merge combined the already released v1.12.1 security baseline with the mapped Advice changes and added no separate user-facing capability."
+    }
+  ]
+}

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.13.0 - 2026-08-10
+
+### New Features
+- Completed the account-scoped AI Decision Advice workflow for Sell Put and Covered Call: each run now prepares an explicitly configured portfolio-management distribution, authoritative open-option context, deterministic one-contract projections, frozen external evidence, and strict `keep` / `switch` / `defer` / `needs_review` advice for the existing Daily Brief and Agent read surface.
+- Added the managed external-evidence pipeline with anonymous market observation sets, audited native web-search coverage, bounded concurrent refresh, immutable evidence snapshots, and fail-closed handling for new symbols or incomplete searches.
+
+### Improvements
+- Hardened model privacy and auditability with random account references, exact run/account/source bindings, a deterministic fact registry, strict evidence references and action ceilings, and an account-level options decision-advisor role that cannot generate candidates, alter strategy rules, execute trades, or replace the user's decision.
+
+### Bug Fixes
+- Removed legacy and inferred Advice data paths, froze evidence at Advice start, preserved legal zero-candidate runs without a model call, and made material advice transitions, Daily Brief rendering, reuse, and Agent reads consume the same validated recommendation instead of drifting across retries or notifications.
+- Aligned the commit-message guardrail with the canonical `chore: release <version>` subject required by delta coverage, so validated release metadata commits no longer require bypassing repository hooks.
+
 ## 1.12.1 - 2026-08-10
 
 ### Bug Fixes
