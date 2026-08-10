@@ -13,7 +13,11 @@ from src.application.ai_decision_advice.orchestration import (
     _build_model_runner,
     run_or_reuse_ai_decision_advice,
 )
+from src.application.prepared_option_positions_context import (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+)
 from src.application.prepared_portfolio_distribution import (
+    PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
     PreparedPortfolioDistribution,
 )
 
@@ -115,11 +119,16 @@ def _portfolio(
     return PreparedPortfolioDistribution(
         envelope={
             "authority": {
+                "schema_version": PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
                 "run_id": run_id,
                 "account": account,
+                "mapped_pm_account": account,
+                "provider": "portfolio_management",
                 "account_config_sha256": CONFIG_HASH,
                 "status": "ready",
                 "reason": "portfolio_ready",
+                "fetched_at_utc": NOW.isoformat(),
+                "validation": {"status": "passed"},
             },
             "payload": {
                 "observed_at_utc": NOW.isoformat(),
@@ -153,10 +162,12 @@ def _option_context(
     account: str = "lx",
 ) -> dict:
     return {
+        "context_source": "prepared",
         "context_status": "available",
         "decision_snapshot_status": "trusted",
         "filters": {"account": account, "broker": "futu"},
         "prepared_authority": {
+            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
             "run_id": run_id,
             "account": account,
             "account_config_sha256": CONFIG_HASH,
@@ -341,6 +352,77 @@ def test_completed_run_flows_through_to_brief_view(tmp_path):
     assert "total_value" not in text
     assert '"quantity"' not in text
     assert '"shares"' not in text
+
+
+def test_rejected_context_sources_cannot_change_external_evidence_identity(
+    tmp_path,
+) -> None:
+    invalid_portfolio = _portfolio()
+    invalid_portfolio.envelope["authority"]["provider"] = "futu"
+    invalid_portfolio.envelope["payload"]["assets"].append(
+        {
+            "code": "AAPL",
+            "normalized_type": "stock",
+            "currency": "USD",
+            "quantity": 100,
+            "value": 200_000,
+        }
+    )
+    invalid_options = _option_context()
+    invalid_options["context_source"] = "legacy"
+    invalid_options["open_positions_min"] = [{"symbol": "MSFT"}]
+
+    def capture(
+        *,
+        base,
+        portfolio_distribution,
+        option_positions_context,
+    ) -> dict:
+        captured: dict = {}
+
+        def runner(instructions, payload, schema, timeout):
+            captured["payload"] = payload
+            output = _model_output(
+                payload["input_bindings"],
+                run_id=payload["run_id"],
+                account_ref=payload["account_ref"],
+            )
+            return ModelCallResult(
+                output_text=json.dumps(output, ensure_ascii=False),
+                usage={},
+                response_sha256="c" * 64,
+            )
+
+        view = run_or_reuse_ai_decision_advice(
+            base=base,
+            run_id="run-1",
+            account="lx",
+            market="US",
+            config={"ai_decision_advice": {"enabled": True}},
+            candidate_snapshot=_snapshot(),
+            portfolio_distribution=portfolio_distribution,
+            option_positions_context=option_positions_context,
+            model_runner=runner,
+            now=NOW,
+        )
+        assert view["status"] == "completed"
+        return captured["payload"]["external_evidence"]
+
+    invalid_external = capture(
+        base=tmp_path / "invalid",
+        portfolio_distribution=invalid_portfolio,
+        option_positions_context=invalid_options,
+    )
+    unavailable_external = capture(
+        base=tmp_path / "unavailable",
+        portfolio_distribution=None,
+        option_positions_context=None,
+    )
+
+    assert invalid_external == unavailable_external
+    assert [
+        item["symbol"] for item in invalid_external["symbols"]
+    ] == ["NVDA"]
 
 
 def test_second_run_reuses_without_model_call(tmp_path):

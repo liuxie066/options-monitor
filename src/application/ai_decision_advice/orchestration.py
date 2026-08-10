@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from domain.domain.symbol_identity import canonical_symbol
 from src.application.ai_decision_advice.advice import (
     AdviceRunResult,
     run_decision_advice,
@@ -17,7 +16,10 @@ from src.application.ai_decision_advice.config import (
     ai_decision_advice_enabled,
     resolve_api_key,
 )
-from src.application.ai_decision_advice.contexts import build_frozen_inputs
+from src.application.ai_decision_advice.contexts import (
+    build_frozen_inputs,
+    verified_relevant_symbols,
+)
 from src.application.ai_decision_advice.evidence_store import (
     EvidenceIndex,
     freeze_evidence_index,
@@ -133,10 +135,11 @@ def run_or_reuse_ai_decision_advice(
                 "opening candidate snapshot market mismatch"
             )
         _require_advice_evaluable_candidate_snapshot(snapshot)
-        relevant_symbols = _relevant_symbols(
-            candidate_snapshot=snapshot,
+        relevant_symbols = verified_relevant_symbols(
+            snapshot=snapshot,
             portfolio_distribution=portfolio_distribution,
             option_positions_context=option_positions_context,
+            market=market,
         )
         identity_hashes = identity_semantic_hash_by_symbol(
             load_symbol_identity_snapshot(Path(base))
@@ -263,100 +266,3 @@ def _require_advice_evaluable_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "opening candidate snapshot is not advice-evaluable"
         )
-
-
-def _relevant_symbols(
-    *,
-    candidate_snapshot: Mapping[str, Any],
-    portfolio_distribution: (
-        PreparedPortfolioDistribution | Mapping[str, Any] | None
-    ),
-    option_positions_context: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
-    symbols: set[str] = set()
-    for item in candidate_snapshot.get("ranked_candidates") or []:
-        facts = item.get("facts") if isinstance(item, Mapping) else None
-        if isinstance(facts, Mapping):
-            _add_symbol(symbols, facts.get("symbol"))
-
-    envelope: Mapping[str, Any] | None = None
-    if isinstance(portfolio_distribution, PreparedPortfolioDistribution):
-        envelope = portfolio_distribution.envelope
-    elif isinstance(portfolio_distribution, Mapping):
-        nested = portfolio_distribution.get("envelope")
-        envelope = nested if isinstance(nested, Mapping) else portfolio_distribution
-    portfolio_authority = (
-        envelope.get("authority") if isinstance(envelope, Mapping) else None
-    )
-    portfolio_status = (
-        str(portfolio_authority.get("status") or "").strip().lower()
-        if isinstance(portfolio_authority, Mapping)
-        else ""
-    )
-    payload = (
-        envelope.get("payload")
-        if isinstance(envelope, Mapping)
-        and _authority_matches_snapshot(portfolio_authority, candidate_snapshot)
-        and portfolio_status in {"ready", "degraded"}
-        else None
-    )
-    assets = payload.get("assets") if isinstance(payload, Mapping) else None
-    for item in assets if isinstance(assets, list) else ():
-        if (
-            isinstance(item, Mapping)
-            and str(item.get("normalized_type") or "").strip().lower()
-            == "stock"
-        ):
-            _add_symbol(symbols, item.get("code"))
-
-    option_authority = (
-        option_positions_context.get("prepared_authority")
-        if isinstance(option_positions_context, Mapping)
-        else None
-    )
-    option_filters = (
-        option_positions_context.get("filters")
-        if isinstance(option_positions_context, Mapping)
-        else None
-    )
-    rows = (
-        option_positions_context.get("open_positions_min")
-        if isinstance(option_positions_context, Mapping)
-        and _authority_matches_snapshot(option_authority, candidate_snapshot)
-        and isinstance(option_filters, Mapping)
-        and str(option_filters.get("account") or "").strip().lower()
-        == str(candidate_snapshot.get("account") or "").strip().lower()
-        and str(option_positions_context.get("context_status") or "")
-        == "available"
-        and str(
-            option_positions_context.get("decision_snapshot_status") or ""
-        )
-        == "trusted"
-        else None
-    )
-    for item in rows if isinstance(rows, list) else ():
-        if isinstance(item, Mapping):
-            _add_symbol(symbols, item.get("symbol"))
-    return tuple(sorted(symbols))
-
-
-def _add_symbol(symbols: set[str], raw_symbol: object) -> None:
-    symbol = canonical_symbol(raw_symbol)
-    if symbol:
-        symbols.add(symbol)
-
-
-def _authority_matches_snapshot(
-    authority: object,
-    snapshot: Mapping[str, Any],
-) -> bool:
-    if not isinstance(authority, Mapping):
-        return False
-    return bool(
-        str(authority.get("run_id") or "")
-        == str(snapshot.get("run_id") or "")
-        and str(authority.get("account") or "").strip().lower()
-        == str(snapshot.get("account") or "").strip().lower()
-        and str(authority.get("account_config_sha256") or "")
-        == str(snapshot.get("account_config_sha256") or "")
-    )

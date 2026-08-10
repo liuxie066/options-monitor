@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from src.application.ai_decision_advice.contexts import build_frozen_inputs
+from src.application.ai_decision_advice.evidence_store import EvidenceIndex
+
 
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 
@@ -227,6 +230,100 @@ def test_fresh_trusted_distribution_is_account_bound_and_rederived(
     assert "total_value" not in authority
     assert "brokers" not in payload["assets"][0]
     assert "accounts" not in payload["assets"][0]
+
+
+def test_futu_operational_source_keeps_pm_as_advice_distribution_authority(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, float]] = []
+    config = _config("lx", holdings_account="PM LX")
+    config["portfolio"]["source"] = "futu"
+    response = _receipt("PM LX")
+    response["by_asset"][0]["value"] = 600_000.0
+    response["by_asset"][0]["breakdown"][0]["value"] = 600_000.0
+    response["by_asset"][1]["quantity"] = 400_000
+    response["by_asset"][1]["value"] = 400_000.0
+    response["by_asset"][1]["accounts"] = {"PM LX": 400_000}
+    response["by_asset"][1]["breakdown"][0].update(
+        quantity=400_000,
+        value=400_000.0,
+    )
+
+    batch, authorities = _prepare(
+        tmp_path,
+        configs={"lx": config},
+        responses={"PM LX": response},
+        calls=calls,
+    )
+    snapshot = {
+        "run_id": "run-1",
+        "account": "lx",
+        "account_config_sha256": authorities[
+            "lx"
+        ].account_config_sha256,
+        "ranked_candidates": [
+            {
+                "candidate_id": "sp-pm-denominator",
+                "strategy_mode": "put",
+                "rank": 1,
+                "facts": {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "strike": 100,
+                    "expiration": "2099-09-18",
+                    "multiplier": 100,
+                    "currency": "USD",
+                },
+            }
+        ],
+    }
+    original_snapshot = deepcopy(snapshot)
+    from src.application.prepared_option_positions_context import (
+        PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+    )
+
+    option_context = {
+        "context_source": "prepared",
+        "context_status": "available",
+        "decision_snapshot_status": "trusted",
+        "filters": {"account": "lx", "broker": "futu"},
+        "prepared_authority": {
+            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+            "run_id": "run-1",
+            "account": "lx",
+            "account_config_sha256": authorities[
+                "lx"
+            ].account_config_sha256,
+            "source_observed_at": NOW.isoformat(),
+            "fx_status": "ready",
+        },
+        "exchange_rates": {"rates": {"USDCNY": 7.2}},
+        "open_positions_min": [],
+        "decision_state_snapshot": {},
+    }
+
+    frozen = build_frozen_inputs(
+        snapshot=snapshot,
+        portfolio_distribution=batch.by_account["lx"],
+        option_positions_context=option_context,
+        evidence_index=EvidenceIndex(frozen_at=NOW.isoformat()),
+        market="US",
+    )
+
+    assert config["portfolio"]["source"] == "futu"
+    assert calls == [("PM LX", 7.0)]
+    assert batch.by_account["lx"].provider == "portfolio_management"
+    assert batch.by_account["lx"].envelope["authority"][
+        "mapped_pm_account"
+    ] == "PM LX"
+    assert frozen.portfolio_distribution["asset_weights"] == {
+        "NVDA": 0.6,
+        "USD-MMF": 0.4,
+    }
+    assert frozen.projections["sp-pm-denominator"][
+        "assignment_exposure_ratio"
+    ] == 0.072
+    assert snapshot == original_snapshot
 
 
 def test_fresh_trusted_empty_distribution_is_ready_zero(tmp_path: Path) -> None:
