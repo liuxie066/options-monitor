@@ -1528,4 +1528,5 @@ __all__ = [
     "freeze_option_positions",
     "freeze_portfolio",
     "freeze_portfolio_distribution",
+    "verified_relevant_symbols",
 ]
