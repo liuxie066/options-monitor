@@ -18,8 +18,9 @@
    `holdings_account` 映射后单账户读取的 portfolio-management distribution；
 3. 开放期权只使用 OM SQLite ledger 对当前 OM 账户生成的 prepared projection；共享
    SQLite 文件不意味着共享逻辑持仓；
-4. 每张确定性投影只拼接同一 run、同一 OM 账户的候选、PM 分布和 prepared option
-   context；Sell Put 总市值分母、Covered Call 持股分母来自 PM，已有期权叠加来自 ledger；
+4. 每张 AI Advice 确定性投影只拼接同一 run、同一 OM 账户的候选、PM 分布和 prepared
+   option context；其 Sell Put 总市值分母、Covered Call 持股分母来自 PM，已有期权叠加来自 ledger；
+   Candidate Engine 原策略的分母仍按账户配置从 Futu 或 holdings 运营上下文取得；
 5. PM、期权或 binding 不完整时显式失败关闭，不使用 Futu、默认账户、其他账户或 legacy
    文件补齐，但 Candidate Engine 和原始监控回执继续运行。
 

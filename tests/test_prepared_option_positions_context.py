@@ -6,6 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.option_position_lots import OpenPositionCommand
+from src.application.ai_decision_advice.contexts import build_frozen_inputs
+from src.application.ai_decision_advice.evidence_store import EvidenceIndex
+from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
 )
@@ -16,6 +20,9 @@ from src.application.prepared_option_positions_context import (
     prepare_option_positions_contexts,
 )
 from src.application.tick_run_workspace import publish_account_run_config
+
+
+NOW = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
 
 
 def test_cny_per_currency_rates_requires_ready_prepared_fx_authority() -> None:
@@ -72,6 +79,123 @@ def _authorities(
         for account, authority in authorities.items()
     }
     return retained, authorities
+
+
+def _candidate_snapshot(
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    mode: str,
+    symbol: str,
+    strike: float,
+    expiry: str,
+) -> dict:
+    return {
+        "run_id": run_id,
+        "account": account,
+        "account_config_sha256": account_config_sha256,
+        "ranked_candidates": [
+            {
+                "candidate_id": f"{account}-{mode}",
+                "strategy_mode": mode,
+                "rank": 1,
+                "facts": {
+                    "symbol": symbol,
+                    "option_type": mode,
+                    "strike": strike,
+                    "expiration": expiry,
+                    "multiplier": 100,
+                    "currency": "USD",
+                },
+            }
+        ],
+    }
+
+
+def _prepared_portfolio(
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    symbol: str,
+    shares: int,
+    total_value: float,
+) -> dict:
+    from src.application.prepared_portfolio_distribution import (
+        PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
+    )
+
+    return {
+        "authority": {
+            "schema_version": PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
+            "run_id": run_id,
+            "account": account,
+            "mapped_pm_account": f"PM {account.upper()}",
+            "provider": "portfolio_management",
+            "account_config_sha256": account_config_sha256,
+            "status": "ready",
+            "reason": "portfolio_ready",
+            "fetched_at_utc": NOW.isoformat(),
+            "validation": {"status": "passed"},
+        },
+        "payload": {
+            "observed_at_utc": NOW.isoformat(),
+            "retrieved_at_utc": NOW.isoformat(),
+            "freshness_status": "fresh",
+            "trust_status": "trusted",
+            "dataset_ids": ["pm.holdings", "pm.prices"],
+            "reason_codes": [],
+            "valuation_currency": "CNY",
+            "assets": [
+                {
+                    "code": symbol,
+                    "normalized_type": "stock",
+                    "currency": "USD",
+                    "quantity": float(shares),
+                    "value": total_value,
+                }
+            ],
+            "derived": {
+                "total_value": total_value,
+                "asset_weights": {symbol: 1.0},
+                "currency_weights": {"USD": 1.0},
+                "cash_and_mmf_weight": 0.0,
+            },
+        },
+        "integrity": {},
+    }
+
+
+def _open_position(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    strike: float,
+    expiry: str,
+    opened_at_ms: int,
+) -> None:
+    persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            side=side,
+            contracts=contracts,
+            currency="USD",
+            strike=strike,
+            multiplier=100,
+            expiration_ymd=expiry,
+            premium_per_share=2.0,
+            opened_at_ms=opened_at_ms,
+        ),
+    )
 
 
 def test_repository_reads_multi_account_generation_once(
@@ -214,3 +338,254 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
             expected_manifest_sha256=lx_manifest["manifest_sha256"],
             expected_runtime_config=configs["lx"],
         )
+
+
+def test_one_ledger_freezes_account_isolated_option_contexts_and_projections(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import prepared_option_positions_context as mod
+
+    run_id = "run-account-isolated-options"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    ledger_path = (
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_path.parent.mkdir(parents=True)
+    repo = SQLiteOptionPositionsRepository(ledger_path)
+    _open_position(
+        repo,
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=2,
+        strike=95,
+        expiry="2099-09-18",
+        opened_at_ms=1_000,
+    )
+    _open_position(
+        repo,
+        account="sy",
+        symbol="AAPL",
+        option_type="call",
+        side="short",
+        contracts=3,
+        strike=210,
+        expiry="2099-09-23",
+        opened_at_ms=2_000,
+    )
+
+    monkeypatch.setattr(
+        mod,
+        "fetch_opend_exchange_rate_observation",
+        lambda _configs: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "opend_account_funds_conversion",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+
+    batch = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+    )
+
+    assert batch.ledger_read_count == 1
+    assert batch.fx_observation_count == 1
+    assert batch.unavailable_by_account == {}
+    loaded = {
+        account: load_prepared_option_positions_context(
+            manifest_path=Path(batch.manifests[account]["manifest_path"]),
+            expected_base=tmp_path,
+            expected_run_id=run_id,
+            expected_account=account,
+            expected_account_config_sha256=authorities[
+                account
+            ].account_config_sha256,
+            expected_manifest_sha256=batch.manifests[account][
+                "manifest_sha256"
+            ],
+            expected_runtime_config=configs[account],
+        )
+        for account in ("lx", "sy")
+    }
+
+    assert {
+        row["account"] for row in loaded["lx"]["open_positions_min"]
+    } == {"lx"}
+    assert {
+        row["account"] for row in loaded["sy"]["open_positions_min"]
+    } == {"sy"}
+    assert sum(
+        row["contracts_open"]
+        for row in loaded["lx"]["open_positions_min"]
+    ) == 2
+    assert sum(
+        row["contracts_open"]
+        for row in loaded["sy"]["open_positions_min"]
+    ) == 3
+    assert loaded["lx"]["prepared_authority"][
+        "ledger_generation_sha256"
+    ] == loaded["sy"]["prepared_authority"][
+        "ledger_generation_sha256"
+    ]
+
+    snapshots = {
+        "lx": _candidate_snapshot(
+            run_id=run_id,
+            account="lx",
+            account_config_sha256=authorities[
+                "lx"
+            ].account_config_sha256,
+            mode="put",
+            symbol="NVDA",
+            strike=95,
+            expiry="2099-09-18",
+        ),
+        "sy": _candidate_snapshot(
+            run_id=run_id,
+            account="sy",
+            account_config_sha256=authorities[
+                "sy"
+            ].account_config_sha256,
+            mode="call",
+            symbol="AAPL",
+            strike=210,
+            expiry="2099-09-23",
+        ),
+    }
+    portfolios = {
+        "lx": _prepared_portfolio(
+            run_id=run_id,
+            account="lx",
+            account_config_sha256=authorities[
+                "lx"
+            ].account_config_sha256,
+            symbol="NVDA",
+            shares=200,
+            total_value=100_000,
+        ),
+        "sy": _prepared_portfolio(
+            run_id=run_id,
+            account="sy",
+            account_config_sha256=authorities[
+                "sy"
+            ].account_config_sha256,
+            symbol="AAPL",
+            shares=400,
+            total_value=200_000,
+        ),
+    }
+    frozen = {
+        account: build_frozen_inputs(
+            snapshot=snapshots[account],
+            portfolio_distribution=portfolios[account],
+            option_positions_context=loaded[account],
+            evidence_index=EvidenceIndex(frozen_at=NOW.isoformat()),
+            market="US",
+        )
+        for account in ("lx", "sy")
+    }
+
+    assert frozen["lx"].option_positions["summary"][
+        "total_open_contracts"
+    ] == 2
+    assert frozen["sy"].option_positions["summary"][
+        "total_open_contracts"
+    ] == 3
+    assert frozen["lx"].option_positions["candidate_contracts"] == [
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "strike": 95.0,
+            "expiry": "2099-09-18",
+            "multiplier": 100.0,
+            "contracts": 2,
+        }
+    ]
+    assert frozen["sy"].option_positions["candidate_contracts"] == [
+        {
+            "symbol": "AAPL",
+            "option_type": "call",
+            "side": "short",
+            "strike": 210.0,
+            "expiry": "2099-09-23",
+            "multiplier": 100.0,
+            "contracts": 3,
+        }
+    ]
+    assert frozen["lx"].projections["lx-put"][
+        "assignment_exposure_ratio"
+    ] == 0.684
+    assert frozen["lx"].projections["lx-put"][
+        "same_obligation_current_contracts"
+    ] == 2
+    assert frozen["lx"].projections["lx-put"][
+        "exact_expiry_current_contracts"
+    ] == 2
+    assert frozen["lx"].projections["lx-put"][
+        "near_expiry_7d_current_contracts"
+    ] == 0
+    assert frozen["sy"].projections["sy-call"][
+        "call_away_fraction"
+    ] == 0.25
+    assert frozen["sy"].projections["sy-call"][
+        "same_obligation_current_contracts"
+    ] == 3
+    assert frozen["sy"].projections["sy-call"][
+        "exact_expiry_current_contracts"
+    ] == 3
+    assert frozen["sy"].projections["sy-call"][
+        "near_expiry_7d_current_contracts"
+    ] == 0
+    assert [
+        row["symbol"] for row in frozen["lx"].external_evidence["symbols"]
+    ] == ["NVDA"]
+    assert [
+        row["symbol"] for row in frozen["sy"].external_evidence["symbols"]
+    ] == ["AAPL"]
+
+    lx_manifest = batch.manifests["lx"]
+    with pytest.raises(
+        PreparedOptionPositionsContextError,
+        match="account config hash mismatch",
+    ):
+        load_prepared_option_positions_context(
+            manifest_path=Path(lx_manifest["manifest_path"]),
+            expected_base=tmp_path,
+            expected_run_id=run_id,
+            expected_account="lx",
+            expected_account_config_sha256="f" * 64,
+            expected_manifest_sha256=lx_manifest["manifest_sha256"],
+            expected_runtime_config=configs["lx"],
+        )
+
+    sy_after_lx_rejection = load_prepared_option_positions_context(
+        manifest_path=Path(batch.manifests["sy"]["manifest_path"]),
+        expected_base=tmp_path,
+        expected_run_id=run_id,
+        expected_account="sy",
+        expected_account_config_sha256=authorities[
+            "sy"
+        ].account_config_sha256,
+        expected_manifest_sha256=batch.manifests["sy"]["manifest_sha256"],
+        expected_runtime_config=configs["sy"],
+    )
+    assert sum(
+        row["contracts_open"]
+        for row in sy_after_lx_rejection["open_positions_min"]
+    ) == 3
