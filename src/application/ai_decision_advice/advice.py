@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +34,7 @@ from src.application.ai_decision_advice.prompts import (
     prompt_audit_payload,
 )
 from src.application.ai_decision_advice.validation import (
+    INPUT_BINDING_KEYS,
     SCHEMA_NAME,
     derive_scopes,
     validate_advice_payload,
@@ -55,17 +56,12 @@ ADVICE_OUTPUT_SCHEMA: dict[str, Any] = {
         "input_bindings": {
             "type": "object",
             "additionalProperties": False,
-            "required": [
-                "candidate_snapshot_hash",
-                "portfolio_context_hash",
-                "option_positions_hash",
-                "external_evidence_hash",
-                "external_evidence_run_id",
-            ],
+            "required": list(INPUT_BINDING_KEYS),
             "properties": {
                 "candidate_snapshot_hash": {"type": "string"},
-                "portfolio_context_hash": {"type": "string"},
+                "portfolio_distribution_hash": {"type": "string"},
                 "option_positions_hash": {"type": "string"},
+                "fact_registry_hash": {"type": "string"},
                 "external_evidence_hash": {"type": "string"},
                 "external_evidence_run_id": {"type": ["string", "null"]},
             },
@@ -142,9 +138,7 @@ class AdviceRunResult:
     evidence_as_of: str | None = None
     sell_put: dict[str, Any] | None = None
     covered_call: list[dict[str, Any]] | None = None
-    zero_candidate: dict[str, bool] = field(
-        default_factory=lambda: {"sell_put": False, "covered_call": False}
-    )
+    zero_candidate: dict[str, bool] = field(default_factory=lambda: {"sell_put": False, "covered_call": False})
     reused: bool = False
     advice_record_id: str | None = None
 
@@ -186,8 +180,10 @@ def build_advice_model_input(
         "market": str(market or "").strip().upper(),
         "input_bindings": frozen.input_bindings(),
         "candidates": frozen.candidates,
-        "portfolio": frozen.portfolio,
+        "portfolio_distribution": frozen.portfolio_distribution,
         "option_positions": frozen.option_positions,
+        "projections": frozen.projections,
+        "fact_registry": frozen.fact_registry,
         "external_evidence": frozen.external_evidence,
     }
 
@@ -201,7 +197,6 @@ def run_decision_advice(
     frozen: FrozenInputs,
     model_runner: AdviceModelRunner | None,
     budget_seconds: int = ADVICE_ACCOUNT_BUDGET_SECONDS,
-    context_complete: bool = True,
     now: datetime | None = None,
     monotonic: Callable[[], float] | None = None,
     compiled_prompt: CompiledPromptPack | None = None,
@@ -219,13 +214,12 @@ def run_decision_advice(
     recorded_at = (now or datetime.now(timezone.utc)).isoformat()
     clock = monotonic or time.monotonic
     deadline = clock() + float(budget_seconds)
-    account_ref = hashlib.sha256(
-        f"{run_id}:{account}".encode("utf-8")
-    ).hexdigest()[:12]
-    evidence_as_of = str(frozen.external_evidence.get("frozen_at") or "") or None
+    account_ref = secrets.token_urlsafe(12)
+    evidence_as_of = (
+        str(frozen.external_evidence.get("evidence_as_of") or "") or None
+    )
     bindings = frozen.input_bindings()
     flags = zero_candidate_flags(frozen.candidates)
-    scopes = derive_scopes(frozen.candidates, frozen.external_evidence)
     compiled = compiled_prompt or compile_prompt_pack(PROMPT_PACK_ADVICE)
     prompt_fingerprint = prompt_fingerprint_for(compiled)
     versions = {
@@ -249,6 +243,7 @@ def run_decision_advice(
         "account_ref": account_ref,
         "market": str(market or "").strip().upper(),
         "recorded_at": recorded_at,
+        "evidence_as_of": evidence_as_of,
         "input_bindings": dict(bindings),
         "versions": versions,
         "zero_candidate": dict(flags),
@@ -259,11 +254,7 @@ def run_decision_advice(
         # None = legal zero candidates (docs 9.8); an empty covered_call list
         # means the family had no candidates while sell_put may still exist.
         sell_put = None if flags["sell_put"] else decisions.get("sell_put")
-        covered_call = [
-            decisions[key]
-            for key in sorted(decisions)
-            if str(key).startswith("covered_call:")
-        ]
+        covered_call = [decisions[key] for key in sorted(decisions) if str(key).startswith("covered_call:")]
         if flags["covered_call"]:
             covered_call = None
         return AdviceRunResult(
@@ -277,13 +268,45 @@ def run_decision_advice(
             advice_record_id=str(record.get("advice_id") or "") or None,
         )
 
-    if not scopes:
+    if flags == {"sell_put": True, "covered_call": True}:
         # Legal zero candidates: no model call, no action, deterministic
         # display only (docs 9.8).
         record = {
             **base_record,
             "status": "not_applicable",
             "unavailable_reason": "zero_candidate",
+            "reused": False,
+            "decisions": {},
+            "demotions": [],
+        }
+        persist(record)
+        return result_for(record, reused=False)
+
+    new_binding_values = (
+        frozen.portfolio_distribution_hash,
+        frozen.fact_registry_hash,
+    )
+    if set(bindings) != set(INPUT_BINDING_KEYS) or any(
+        not isinstance(value, str) or not value.strip() for value in new_binding_values
+    ):
+        record = {
+            **base_record,
+            "status": "unavailable",
+            "unavailable_reason": "input_bindings_invalid",
+            "reused": False,
+            "decisions": {},
+            "demotions": [],
+        }
+        persist(record)
+        return result_for(record, reused=False)
+
+    try:
+        scopes = derive_scopes(frozen.candidates, frozen.fact_registry)
+    except ValueError:
+        record = {
+            **base_record,
+            "status": "unavailable",
+            "unavailable_reason": "fact_registry_invalid",
             "reused": False,
             "decisions": {},
             "demotions": [],
@@ -298,14 +321,17 @@ def run_decision_advice(
         prompt_fingerprint=prompt_fingerprint,
     )
     if prior is not None:
-        record = build_reuse_record(
-            prior,
-            advice_id=advice_id,
-            run_id=run_id,
-            account_ref=account_ref,
-            recorded_at=recorded_at,
-            bindings=bindings,
-        )
+        record = {
+            **build_reuse_record(
+                prior,
+                advice_id=advice_id,
+                run_id=run_id,
+                account_ref=account_ref,
+                recorded_at=recorded_at,
+                bindings=bindings,
+            ),
+            "evidence_as_of": evidence_as_of,
+        }
         persist(record)
         return result_for(record, reused=True)
 
@@ -321,9 +347,7 @@ def run_decision_advice(
         persist(record)
         return result_for(record, reused=False)
 
-    model_input = build_advice_model_input(
-        frozen, run_id=run_id, account_ref=account_ref, market=market
-    )
+    model_input = build_advice_model_input(frozen, run_id=run_id, account_ref=account_ref, market=market)
     response_audit: dict[str, Any] = {}
     usage: dict[str, int] = {}
     repair_attempted = False
@@ -331,9 +355,11 @@ def run_decision_advice(
     validated = None
     for attempt in (1, 2):
         remaining = deadline - clock()
-        if remaining <= 0:
+        if remaining < 1:
             failure_reason = "timeout"
             break
+        if attempt == 2:
+            repair_attempted = True
         try:
             call = model_runner(
                 compiled.prompt,
@@ -355,19 +381,17 @@ def run_decision_advice(
                 account_ref=account_ref,
                 market=market,
                 input_bindings=bindings,
-                context_complete=context_complete,
             )
-        except (json.JSONDecodeError, ValueError) as exc:
-            failure_reason = f"invalid_output:{type(exc).__name__}"
+        except json.JSONDecodeError:
+            failure_reason = "invalid_output"
             candidate_result = None
         if candidate_result is not None and candidate_result.status != "unavailable":
             validated = candidate_result
             break
         failure_reason = (candidate_result.error if candidate_result else failure_reason) or "invalid_output"
-        if attempt == 1 and clock() < deadline:
+        if attempt == 1:
             # One in-budget structure repair: resubmit with the error noted in
             # the data input; still no heuristic parsing (docs 10).
-            repair_attempted = True
             model_input = {
                 **model_input,
                 "previous_output_error": failure_reason,

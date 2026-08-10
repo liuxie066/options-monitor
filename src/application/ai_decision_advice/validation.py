@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from src.application.ai_decision_advice.contexts import FACT_REGISTRY_SCHEMA
 from src.application.ai_decision_advice.evidence_store import COVERAGE_COMPLETED
 
 
@@ -10,20 +11,64 @@ SCHEMA_NAME = "ai_decision_advice.v1"
 
 ACTIONS = frozenset({"keep", "switch", "defer", "needs_review"})
 
-_RATIONALE_KEYS = ("risk_mechanism", "candidate_effect", "decision_reason")
+INPUT_BINDING_KEYS = (
+    "candidate_snapshot_hash",
+    "portfolio_distribution_hash",
+    "option_positions_hash",
+    "fact_registry_hash",
+    "external_evidence_hash",
+    "external_evidence_run_id",
+)
+
+SEMANTIC_INPUT_BINDING_KEYS = tuple(key for key in INPUT_BINDING_KEYS if key != "external_evidence_run_id")
+
+_TOP_LEVEL_KEYS = frozenset({"schema", "run_id", "account_ref", "market", "input_bindings", "strategies"})
+_STRATEGY_KEYS = frozenset({"strategy_family", "status", "decisions"})
+_DECISION_KEYS = frozenset(
+    {
+        "scope_symbol",
+        "baseline_candidate_id",
+        "action",
+        "selected_candidate_id",
+        "rationale",
+        "internal_fact_refs",
+        "external_evidence_refs",
+    }
+)
+_RATIONALE_KEYS = frozenset({"risk_mechanism", "candidate_effect", "decision_reason"})
+_INTERNAL_KINDS = frozenset({"candidate", "projection", "portfolio", "position", "coverage", "gap"})
+_FACT_SUPPORT_CLASS = {
+    "candidate": "candidate",
+    "projection": "risk",
+    "portfolio": "risk",
+    "position": "risk",
+    "coverage": "coverage",
+    "evidence": "external_risk",
+    "gap": "gap",
+}
 
 
 @dataclass(frozen=True)
 class ScopeSpec:
-    """One decision scope derived from the frozen candidate snapshot."""
+    """One exact decision scope derived from candidates and frozen facts."""
 
     scope_key: str
     strategy_family: str
     symbol: str | None
     baseline_candidate_id: str
     allowed_candidate_ids: frozenset[str]
-    symbol_evidence_complete: bool
-    allowed_evidence_refs: frozenset[str] = frozenset()
+    candidate_fact_refs: Mapping[str, str]
+    projection_fact_refs: Mapping[str, str]
+    required_coverage_refs: frozenset[str]
+    allowed_internal_refs: frozenset[str]
+    allowed_external_refs: frozenset[str]
+    usable_external_refs: frozenset[str]
+    risk_internal_refs: frozenset[str]
+    gap_refs: frozenset[str]
+    portfolio_complete: bool
+    option_positions_complete: bool
+    projection_complete: bool
+    coverage_complete: bool
 
 
 @dataclass
@@ -36,64 +81,156 @@ class ValidationResult:
 
 def derive_scopes(
     candidates: Mapping[str, Any],
-    external_evidence: Mapping[str, Any],
+    fact_registry: Mapping[str, Any],
 ) -> dict[str, ScopeSpec]:
-    """Derive decision scopes and allowed candidate pools (docs 9.2).
+    """Derive the exact SP/CC scopes and their auditable fact boundaries.
 
-    Sell Put: one scope over the shared-cash pool. Covered Call: one scope per
-    underlying symbol. Baselines are the Candidate Engine rank-1 candidates.
-    ``symbol_evidence_complete`` is True when every symbol in the scope pool has
-    completed evidence coverage.
+    The fact registry is structural input, not model opinion. Invalid or
+    incomplete registry membership raises ``ValueError`` so the account run
+    can fail closed before a model action is accepted.
     """
 
-    coverage_by_symbol: dict[str, str] = {}
-    refs_by_symbol: dict[str, frozenset[str]] = {}
-    for row in external_evidence.get("symbols") or []:
-        if isinstance(row, Mapping):
-            coverage_by_symbol[str(row.get("symbol") or "")] = str(row.get("coverage") or "")
-            refs_by_symbol[str(row.get("symbol") or "")] = frozenset(
-                str(item.get("ref") or "")
-                for item in (row.get("evidence") or [])
-                if isinstance(item, Mapping) and str(item.get("ref") or "").strip()
-            )
+    rows_by_scope: dict[str, list[Mapping[str, Any]]] = {}
+    candidate_scope: dict[str, str] = {}
+    candidate_family: dict[str, str] = {}
+    candidate_symbol: dict[str, str] = {}
 
-    def refs(rows: list[Mapping[str, Any]]) -> frozenset[str]:
-        out: set[str] = set()
+    for family in ("sell_put", "covered_call"):
+        rows = candidates.get(family)
+        if not isinstance(rows, list):
+            raise ValueError(f"candidate family {family} must be an array")
         for row in rows:
-            out |= refs_by_symbol.get(str(row.get("symbol") or ""), frozenset())
-        return frozenset(out)
+            if not isinstance(row, Mapping):
+                raise ValueError(f"candidate family {family} row is invalid")
+            candidate_id = _required_text(row.get("candidate_id"), "candidate_id")
+            symbol = _required_text(row.get("symbol"), "candidate symbol")
+            if candidate_id in candidate_scope:
+                raise ValueError("candidate identity is duplicated")
+            scope_key = "sell_put" if family == "sell_put" else f"covered_call:{symbol}"
+            candidate_scope[candidate_id] = scope_key
+            candidate_family[candidate_id] = family
+            candidate_symbol[candidate_id] = symbol
+            rows_by_scope.setdefault(scope_key, []).append(row)
 
-    def complete(rows: list[Mapping[str, Any]]) -> bool:
-        return all(
-            coverage_by_symbol.get(str(row.get("symbol") or "")) == COVERAGE_COMPLETED
-            for row in rows
+    facts = _index_fact_registry(
+        fact_registry,
+        expected_scopes=frozenset(rows_by_scope),
+    )
+    expected_candidate_refs = {f"candidate:{candidate_id}" for candidate_id in candidate_scope}
+    expected_projection_refs = {f"projection:{candidate_id}" for candidate_id in candidate_scope}
+    if {ref for ref, fact in facts.items() if fact["kind"] == "candidate"} != expected_candidate_refs:
+        raise ValueError("candidate fact membership mismatch")
+    if {ref for ref, fact in facts.items() if fact["kind"] == "projection"} != expected_projection_refs:
+        raise ValueError("projection fact membership mismatch")
+
+    for candidate_id, scope_key in candidate_scope.items():
+        candidate_ref = f"candidate:{candidate_id}"
+        candidate_fact = facts[candidate_ref]
+        expected_row = next(row for row in rows_by_scope[scope_key] if str(row.get("candidate_id")) == candidate_id)
+        if candidate_fact["scope"] != scope_key or candidate_fact["data"] != dict(expected_row):
+            raise ValueError(f"candidate fact mismatch: {candidate_id}")
+
+        projection_ref = f"projection:{candidate_id}"
+        projection_fact = facts[projection_ref]
+        projection = projection_fact["data"]
+        expected_mode = "put" if candidate_family[candidate_id] == "sell_put" else "call"
+        if (
+            projection_fact["scope"] != scope_key
+            or projection.get("candidate_id") != candidate_id
+            or projection.get("strategy_mode") != expected_mode
+            or projection.get("symbol") != candidate_symbol[candidate_id]
+        ):
+            raise ValueError(f"projection fact mismatch: {candidate_id}")
+
+    portfolio_fact = facts.get("portfolio:distribution")
+    if portfolio_fact is None or portfolio_fact["kind"] != "portfolio":
+        raise ValueError("portfolio distribution fact is missing")
+    if any(fact["kind"] == "portfolio" and ref != "portfolio:distribution" for ref, fact in facts.items()):
+        raise ValueError("portfolio fact membership mismatch")
+
+    position_summary = facts.get("position:summary")
+    if position_summary is None or position_summary["kind"] != "position":
+        raise ValueError("position summary fact is missing")
+
+    coverage_facts = {ref: fact for ref, fact in facts.items() if fact["kind"] == "coverage"}
+    coverage_by_symbol: dict[str, tuple[str, str]] = {}
+    for ref, fact in coverage_facts.items():
+        symbol = _required_text(fact["data"].get("symbol"), "coverage symbol")
+        if ref != f"coverage:{symbol}" or symbol in coverage_by_symbol:
+            raise ValueError("coverage fact identity mismatch")
+        coverage_by_symbol[symbol] = (
+            ref,
+            str(fact["data"].get("coverage") or ""),
         )
+    missing_candidate_coverage = set(candidate_symbol.values()) - set(coverage_by_symbol)
+    if missing_candidate_coverage:
+        raise ValueError("candidate coverage fact is missing")
+
+    evidence_refs_by_symbol: dict[str, set[str]] = {}
+    for ref, fact in facts.items():
+        if fact["kind"] != "evidence":
+            continue
+        symbol = _required_text(fact["data"].get("symbol"), "evidence symbol")
+        if symbol not in coverage_by_symbol:
+            raise ValueError("evidence fact has no coverage fact")
+        evidence_refs_by_symbol.setdefault(symbol, set()).add(ref)
+
+    gap_facts = {ref: fact for ref, fact in facts.items() if fact["kind"] == "gap"}
+    portfolio_complete = _portfolio_is_complete(portfolio_fact["data"])
+    option_positions_complete = _option_positions_are_complete(position_summary["data"], gap_facts)
+    all_coverage_refs = frozenset(coverage_facts)
+    coverage_complete = all(status == COVERAGE_COMPLETED for _, status in coverage_by_symbol.values())
+    account_internal_refs = {
+        ref for ref, fact in facts.items() if fact["kind"] in {"portfolio", "position", "coverage"}
+    }
+    account_risk_refs = {ref for ref, fact in facts.items() if fact["kind"] in {"portfolio", "position"}}
 
     scopes: dict[str, ScopeSpec] = {}
-    sell_put_rows = [row for row in candidates.get("sell_put") or [] if isinstance(row, Mapping)]
-    if sell_put_rows:
-        scopes["sell_put"] = ScopeSpec(
-            scope_key="sell_put",
-            strategy_family="sell_put",
-            symbol=None,
-            baseline_candidate_id=str(sell_put_rows[0].get("candidate_id") or ""),
-            allowed_candidate_ids=frozenset(str(row.get("candidate_id") or "") for row in sell_put_rows),
-            symbol_evidence_complete=complete(sell_put_rows),
-            allowed_evidence_refs=refs(sell_put_rows),
+    for scope_key, rows in sorted(rows_by_scope.items()):
+        family = "sell_put" if scope_key == "sell_put" else "covered_call"
+        symbol = None if family == "sell_put" else scope_key.split(":", 1)[1]
+        candidate_ids = tuple(str(row["candidate_id"]) for row in rows)
+        candidate_refs = {candidate_id: f"candidate:{candidate_id}" for candidate_id in candidate_ids}
+        projection_refs = {candidate_id: f"projection:{candidate_id}" for candidate_id in candidate_ids}
+        scoped_gap_refs = {ref for ref, fact in gap_facts.items() if fact["scope"] in {"account", scope_key}}
+        scope_symbols = (
+            {candidate_symbol[candidate_id] for candidate_id in candidate_ids}
+            if family == "sell_put"
+            else {str(symbol)}
         )
-    by_symbol: dict[str, list[Mapping[str, Any]]] = {}
-    for row in candidates.get("covered_call") or []:
-        if isinstance(row, Mapping):
-            by_symbol.setdefault(str(row.get("symbol") or ""), []).append(row)
-    for symbol, rows in sorted(by_symbol.items()):
-        scopes[f"covered_call:{symbol}"] = ScopeSpec(
-            scope_key=f"covered_call:{symbol}",
-            strategy_family="covered_call",
+        allowed_external_refs = {
+            ref
+            for candidate_scope_symbol in scope_symbols
+            for ref in evidence_refs_by_symbol.get(candidate_scope_symbol, set())
+        }
+        usable_external_refs = {
+            ref
+            for ref in allowed_external_refs
+            if coverage_by_symbol[str(facts[ref]["data"]["symbol"])][1] == COVERAGE_COMPLETED
+        }
+        scope_projection_refs = set(projection_refs.values())
+        projection_complete = all(_projection_is_complete(facts[ref]["data"]) for ref in scope_projection_refs)
+        allowed_internal_refs = (
+            set(candidate_refs.values()) | scope_projection_refs | account_internal_refs | scoped_gap_refs
+        )
+        scopes[scope_key] = ScopeSpec(
+            scope_key=scope_key,
+            strategy_family=family,
             symbol=symbol,
-            baseline_candidate_id=str(rows[0].get("candidate_id") or ""),
-            allowed_candidate_ids=frozenset(str(row.get("candidate_id") or "") for row in rows),
-            symbol_evidence_complete=complete(rows),
-            allowed_evidence_refs=refs(rows),
+            baseline_candidate_id=candidate_ids[0],
+            allowed_candidate_ids=frozenset(candidate_ids),
+            candidate_fact_refs=candidate_refs,
+            projection_fact_refs=projection_refs,
+            required_coverage_refs=all_coverage_refs,
+            allowed_internal_refs=frozenset(allowed_internal_refs),
+            allowed_external_refs=frozenset(allowed_external_refs),
+            usable_external_refs=frozenset(usable_external_refs),
+            risk_internal_refs=frozenset(account_risk_refs | scope_projection_refs),
+            gap_refs=frozenset(scoped_gap_refs),
+            portfolio_complete=portfolio_complete,
+            option_positions_complete=option_positions_complete,
+            projection_complete=projection_complete,
+            coverage_complete=coverage_complete,
         )
     return scopes
 
@@ -113,166 +250,351 @@ def validate_advice_payload(
     account_ref: str,
     market: str,
     input_bindings: Mapping[str, Any],
-    context_complete: bool,
 ) -> ValidationResult:
-    """Validate the model output and apply demotion rules (docs 9.7, 10).
-
-    Structural or binding mismatches fail the whole output (``unavailable``;
-    at most one in-budget structure repair is attempted by the caller).
-    Semantic problems demote individual decisions to ``needs_review`` or
-    ``defer`` instead of fabricating actions.
-    """
+    """Validate structure, exact scope cardinality and fact-supported actions."""
 
     if not isinstance(payload, dict):
-        return ValidationResult(status="unavailable", error="output must be a JSON object")
-    if str(payload.get("schema") or "") != SCHEMA_NAME:
-        return ValidationResult(status="unavailable", error=f"schema must be {SCHEMA_NAME}")
-    if str(payload.get("run_id") or "") != str(run_id):
-        return ValidationResult(status="unavailable", error="run_id mismatch")
-    if str(payload.get("account_ref") or "") != str(account_ref):
-        return ValidationResult(status="unavailable", error="account_ref mismatch")
-    if str(payload.get("market") or "").strip().upper() != str(market).strip().upper():
-        return ValidationResult(status="unavailable", error="market mismatch")
+        return _unavailable("output must be a JSON object")
+    if set(payload) != _TOP_LEVEL_KEYS:
+        return _unavailable("output top-level fields mismatch")
+    if payload.get("schema") != SCHEMA_NAME:
+        return _unavailable(f"schema must be {SCHEMA_NAME}")
+    if payload.get("run_id") != run_id:
+        return _unavailable("run_id mismatch")
+    if payload.get("account_ref") != account_ref:
+        return _unavailable("account_ref mismatch")
+    if not isinstance(payload.get("market"), str) or (
+        str(payload["market"]).strip().upper() != str(market).strip().upper()
+    ):
+        return _unavailable("market mismatch")
+
+    if set(input_bindings) != set(INPUT_BINDING_KEYS):
+        return _unavailable("frozen input_bindings fields mismatch")
     payload_bindings = payload.get("input_bindings")
     if not isinstance(payload_bindings, Mapping):
-        return ValidationResult(status="unavailable", error="input_bindings must be an object")
-    for key, expected in input_bindings.items():
-        if expected is None:
-            continue
-        if payload_bindings.get(key) != expected:
-            return ValidationResult(status="unavailable", error=f"input_bindings.{key} mismatch")
+        return _unavailable("input_bindings must be an object")
+    if set(payload_bindings) != set(INPUT_BINDING_KEYS):
+        return _unavailable("input_bindings fields mismatch")
+    for key in INPUT_BINDING_KEYS:
+        if payload_bindings.get(key) != input_bindings.get(key):
+            return _unavailable(f"input_bindings.{key} mismatch")
+
     strategies = payload.get("strategies")
     if not isinstance(strategies, list):
-        return ValidationResult(status="unavailable", error="strategies must be an array")
+        return _unavailable("strategies must be an array")
+    expected_families = {spec.strategy_family for spec in scopes.values()}
+    if len(strategies) != len(expected_families):
+        return _unavailable("incomplete_output")
 
-    result = ValidationResult(status="completed", decisions={})
+    raw_decisions: dict[str, Mapping[str, Any]] = {}
+    seen_families: set[str] = set()
     for strategy in strategies:
-        if not isinstance(strategy, dict):
-            return ValidationResult(status="unavailable", error="each strategy must be an object")
-        family = str(strategy.get("strategy_family") or "")
-        if family not in {"sell_put", "covered_call"}:
-            return ValidationResult(status="unavailable", error=f"unknown strategy_family: {family!r}")
+        if not isinstance(strategy, dict) or set(strategy) != _STRATEGY_KEYS:
+            return _unavailable("strategy structure mismatch")
+        family = strategy.get("strategy_family")
+        if not isinstance(family, str) or family not in {"sell_put", "covered_call"}:
+            return _unavailable("incomplete_output")
+        if family in seen_families or family not in expected_families:
+            return _unavailable("incomplete_output")
+        seen_families.add(family)
+        if strategy.get("status") != "completed":
+            return _unavailable("strategy status must be completed")
         decisions = strategy.get("decisions")
         if not isinstance(decisions, list):
-            return ValidationResult(status="unavailable", error="decisions must be an array")
+            return _unavailable("decisions must be an array")
         for decision in decisions:
-            if not isinstance(decision, dict):
-                return ValidationResult(status="unavailable", error="each decision must be an object")
+            structural_error = _decision_structure_error(decision)
+            if structural_error is not None:
+                return _unavailable(structural_error)
             scope_key = _scope_key_for(family, decision)
-            if scope_key in result.decisions:
-                return ValidationResult(
-                    status="unavailable", error=f"duplicate decision for scope: {scope_key}"
-                )
-            result.decisions[scope_key] = _validate_decision(
-                decision,
-                scope_key=scope_key,
-                scopes=scopes,
-                context_complete=context_complete,
-                demotions=result.demotions,
-            )
+            if scope_key is None or scope_key in raw_decisions:
+                return _unavailable("incomplete_output")
+            raw_decisions[scope_key] = decision
+
+    if seen_families != expected_families or set(raw_decisions) != set(scopes):
+        return _unavailable("incomplete_output")
+
+    result = ValidationResult(status="completed", decisions={})
+    for scope_key in sorted(scopes):
+        result.decisions[scope_key] = _validate_decision(
+            raw_decisions[scope_key],
+            spec=scopes[scope_key],
+            demotions=result.demotions,
+        )
     return result
 
 
-def _scope_key_for(family: str, decision: Mapping[str, Any]) -> str:
-    if family == "sell_put":
-        return "sell_put"
+def _index_fact_registry(
+    fact_registry: Mapping[str, Any],
+    *,
+    expected_scopes: frozenset[str],
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(fact_registry, Mapping) or set(fact_registry) != {
+        "schema_version",
+        "facts",
+    }:
+        raise ValueError("fact registry structure is invalid")
+    if fact_registry.get("schema_version") != FACT_REGISTRY_SCHEMA:
+        raise ValueError("fact registry schema mismatch")
+    raw_facts = fact_registry.get("facts")
+    if not isinstance(raw_facts, list):
+        raise ValueError("fact registry facts must be an array")
+
+    facts: dict[str, dict[str, Any]] = {}
+    allowed_scopes = {"account", *expected_scopes}
+    for raw in raw_facts:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "id",
+            "kind",
+            "scope",
+            "support_class",
+            "data",
+        }:
+            raise ValueError("fact registry row is invalid")
+        fact_id = _required_text(raw.get("id"), "fact id")
+        kind = _required_text(raw.get("kind"), "fact kind")
+        scope = _required_text(raw.get("scope"), "fact scope")
+        support_class = _required_text(raw.get("support_class"), "fact support class")
+        data = raw.get("data")
+        if fact_id in facts:
+            raise ValueError("fact registry identity is duplicated")
+        if kind not in _FACT_SUPPORT_CLASS or fact_id.split(":", 1)[0] != kind:
+            raise ValueError(f"fact kind/prefix mismatch: {fact_id}")
+        if support_class != _FACT_SUPPORT_CLASS[kind]:
+            raise ValueError(f"fact support class mismatch: {fact_id}")
+        if scope not in allowed_scopes or not isinstance(data, Mapping):
+            raise ValueError(f"fact scope/data mismatch: {fact_id}")
+        if kind in {"portfolio", "position", "coverage", "evidence"} and scope != "account":
+            raise ValueError(f"account fact scope mismatch: {fact_id}")
+        facts[fact_id] = {
+            "id": fact_id,
+            "kind": kind,
+            "scope": scope,
+            "support_class": support_class,
+            "data": dict(data),
+        }
+    return facts
+
+
+def _portfolio_is_complete(data: Mapping[str, Any]) -> bool:
+    quality = data.get("quality")
+    return (
+        data.get("status") == "ready"
+        and isinstance(quality, Mapping)
+        and quality.get("freshness_status") == "fresh"
+        and quality.get("trust_status") == "trusted"
+        and not _has_gaps(data.get("gaps"))
+    )
+
+
+def _option_positions_are_complete(
+    summary: Mapping[str, Any],
+    gap_facts: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    count = summary.get("total_open_contracts")
+    has_option_gap = any(fact["data"].get("source") == "option_positions" for fact in gap_facts.values())
+    return isinstance(count, int) and not isinstance(count, bool) and count >= 0 and not has_option_gap
+
+
+def _projection_is_complete(data: Mapping[str, Any]) -> bool:
+    return (
+        data.get("calculation_complete") is True
+        and data.get("scope_ceiling") is None
+        and not _has_gaps(data.get("gaps"))
+    )
+
+
+def _has_gaps(value: Any) -> bool:
+    return not isinstance(value, list) or bool(value)
+
+
+def _decision_structure_error(decision: Any) -> str | None:
+    if not isinstance(decision, dict) or set(decision) != _DECISION_KEYS:
+        return "decision structure mismatch"
+    if not isinstance(decision.get("baseline_candidate_id"), str) or not decision.get("baseline_candidate_id"):
+        return "baseline_candidate_id must be a non-empty string"
+    if not isinstance(decision.get("action"), str) or not decision.get("action"):
+        return "action must be a non-empty string"
+    selected = decision.get("selected_candidate_id")
+    if selected is not None and (not isinstance(selected, str) or not selected):
+        return "selected_candidate_id must be a string or null"
+    rationale = decision.get("rationale")
+    if not isinstance(rationale, Mapping) or set(rationale) != _RATIONALE_KEYS:
+        return "rationale structure mismatch"
+    if any(not isinstance(rationale.get(key), str) for key in _RATIONALE_KEYS):
+        return "rationale values must be strings"
+    for key in ("internal_fact_refs", "external_evidence_refs"):
+        refs = decision.get(key)
+        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref for ref in refs):
+            return f"{key} must contain non-empty strings"
+    return None
+
+
+def _scope_key_for(family: str, decision: Mapping[str, Any]) -> str | None:
     symbol = decision.get("scope_symbol")
-    return f"covered_call:{symbol or ''}"
+    if family == "sell_put":
+        return "sell_put" if symbol is None else None
+    if not isinstance(symbol, str) or not symbol:
+        return None
+    return f"covered_call:{symbol}"
 
 
 def _validate_decision(
     decision: Mapping[str, Any],
     *,
-    scope_key: str,
-    scopes: Mapping[str, ScopeSpec],
-    context_complete: bool,
+    spec: ScopeSpec,
     demotions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    spec = scopes.get(scope_key)
-    baseline = str(decision.get("baseline_candidate_id") or "")
-    selected_raw = decision.get("selected_candidate_id")
-    selected = str(selected_raw) if selected_raw is not None else None
-    action = str(decision.get("action") or "")
-
-    rationale_raw = decision.get("rationale")
-    rationale = (
-        {key: str(rationale_raw.get(key) or "") for key in _RATIONALE_KEYS}
-        if isinstance(rationale_raw, Mapping)
-        else {key: "" for key in _RATIONALE_KEYS}
-    )
-    source_refs = {
-        "internal_fact_refs": _string_list(decision.get("internal_fact_refs")),
-        "external_evidence_refs": _string_list(decision.get("external_evidence_refs")),
+    action = str(decision["action"])
+    baseline = str(decision["baseline_candidate_id"])
+    selected = decision.get("selected_candidate_id")
+    rationale = {
+        key: str(decision["rationale"][key]) for key in ("risk_mechanism", "candidate_effect", "decision_reason")
     }
+    internal_refs = list(decision["internal_fact_refs"])
+    external_refs = list(decision["external_evidence_refs"])
+    valid_internal_refs = _unique_refs(ref for ref in internal_refs if ref in spec.allowed_internal_refs)
+    valid_external_refs = _unique_refs(ref for ref in external_refs if ref in spec.allowed_external_refs)
 
-    def demote(reason: str, to_action: str = "needs_review") -> dict[str, Any]:
+    def demote(reason: str) -> dict[str, Any]:
         demotions.append(
-            {"scope": scope_key, "from_action": action, "to_action": to_action, "reason": reason}
+            {
+                "scope": spec.scope_key,
+                "from_action": action,
+                "to_action": "needs_review",
+                "reason": reason,
+            }
         )
-        return _decision_row(spec, to_action, baseline, None, rationale, source_refs, scope_key)
+        refs = list(valid_internal_refs)
+        if not any(ref in spec.gap_refs for ref in refs) and spec.gap_refs:
+            refs.append(sorted(spec.gap_refs)[0])
+        return _decision_row(
+            spec,
+            "needs_review",
+            None,
+            rationale,
+            {
+                "internal_fact_refs": refs,
+                "external_evidence_refs": valid_external_refs,
+            },
+        )
 
-    if spec is None:
-        return demote("unknown_scope")
+    if action not in ACTIONS:
+        return demote("unsupported_action")
     if baseline != spec.baseline_candidate_id:
         return demote("baseline_mismatch")
     if selected is not None and selected not in spec.allowed_candidate_ids:
-        # Candidate ids are strategy-bound: a Covered Call scope must never
-        # reference a Sell Put candidate (and vice versa), even as an
-        # already-demoted artifact (docs 9.2).
         return demote("switch_out_of_pool" if action == "switch" else "selected_out_of_strategy_pool")
-    if action not in ACTIONS:
-        return demote("unsupported_action")
-    if action == "keep" and selected != baseline:
-        return demote("keep_selected_mismatch")
-    if action in {"defer", "needs_review"} and selected is not None:
-        return demote("selected_forbidden_for_action")
-    if action == "switch":
-        if not selected:
+    if len(internal_refs) != len(set(internal_refs)) or len(external_refs) != len(set(external_refs)):
+        return demote("duplicate_fact_refs")
+    if any(ref.split(":", 1)[0] not in _INTERNAL_KINDS for ref in internal_refs):
+        return demote("invalid_internal_fact_ref_prefix")
+    if any(not ref.startswith("evidence:") for ref in external_refs):
+        return demote("invalid_external_evidence_ref_prefix")
+    if any(ref not in spec.allowed_internal_refs for ref in internal_refs):
+        return demote("unresolved_or_out_of_scope_internal_fact_ref")
+    if any(ref not in spec.allowed_external_refs for ref in external_refs):
+        return demote("unresolved_or_out_of_scope_external_evidence_ref")
+    if any(not value.strip() for value in rationale.values()):
+        return demote("rationale_incomplete")
+
+    if action == "keep":
+        if selected != baseline:
+            return demote("keep_selected_mismatch")
+    elif action == "switch":
+        if selected is None:
             return demote("switch_missing_selected")
-        if selected not in spec.allowed_candidate_ids:
-            # Rejected/unknown candidate id or Covered Call cross-symbol switch:
-            # the same-underlying scope defines the allowed pool.
-            return demote("switch_out_of_pool")
-    unresolved_refs = [
-        ref for ref in source_refs["external_evidence_refs"] if ref not in spec.allowed_evidence_refs
-    ]
-    if unresolved_refs:
-        # Evidence refs must resolve to the frozen evidence view for this
-        # scope; unresolvable refs cannot be audited (design 15.4).
-        return demote("unresolved_evidence_refs")
-    if not context_complete and action != "needs_review":
-        # Missing portfolio / option-position context caps every scope at
-        # needs_review (docs 9.7).
-        return demote("context_missing")
-    if action == "keep" and not spec.symbol_evidence_complete:
-        # Evidence incomplete (stale / no_evidence / identity_unavailable):
-        # keep is never allowed; rendered as defer pending evidence.
-        return demote("evidence_incomplete", to_action="defer")
-    return _decision_row(spec, action, baseline, selected, rationale, source_refs, scope_key)
+        if selected == baseline:
+            return demote("switch_same_as_baseline")
+    elif selected is not None:
+        return demote("selected_forbidden_for_action")
+
+    quality_reason = _quality_ceiling_reason(spec, action)
+    if quality_reason is not None and action != "needs_review":
+        return demote(quality_reason)
+
+    internal_set = set(valid_internal_refs)
+    external_set = set(valid_external_refs)
+    usable_external = external_set & set(spec.usable_external_refs)
+    if action == "keep":
+        required = {
+            spec.candidate_fact_refs[baseline],
+            spec.projection_fact_refs[baseline],
+            *spec.required_coverage_refs,
+        }
+        if not required <= internal_set:
+            return demote("keep_missing_required_fact_refs")
+    elif action == "switch":
+        assert isinstance(selected, str)
+        required_candidates = {
+            spec.candidate_fact_refs[baseline],
+            spec.candidate_fact_refs[selected],
+        }
+        has_risk = bool((internal_set & set(spec.risk_internal_refs)) or usable_external)
+        if not required_candidates <= internal_set or not has_risk:
+            return demote("switch_missing_fact_support")
+    elif action == "defer":
+        has_risk = bool((internal_set & set(spec.risk_internal_refs)) or usable_external)
+        if not has_risk:
+            return demote("defer_missing_fact_support")
+    else:
+        risk_refs = internal_set & set(spec.risk_internal_refs)
+        has_gap_or_conflict = bool((internal_set & set(spec.gap_refs)) or usable_external or len(risk_refs) >= 2)
+        if not has_gap_or_conflict:
+            return demote("needs_review_missing_gap_or_conflict")
+
+    return _decision_row(
+        spec,
+        action,
+        selected if isinstance(selected, str) else None,
+        rationale,
+        {
+            "internal_fact_refs": valid_internal_refs,
+            "external_evidence_refs": valid_external_refs,
+        },
+    )
+
+
+def _quality_ceiling_reason(spec: ScopeSpec, action: str) -> str | None:
+    if not spec.portfolio_complete:
+        return "portfolio_context_incomplete"
+    if not spec.option_positions_complete:
+        return "option_positions_context_incomplete"
+    if not spec.projection_complete:
+        return "projection_incomplete"
+    if action == "keep" and not spec.coverage_complete:
+        return "evidence_coverage_incomplete"
+    return None
 
 
 def _decision_row(
-    spec: ScopeSpec | None,
+    spec: ScopeSpec,
     action: str,
-    baseline: str,
     selected: str | None,
     rationale: dict[str, str],
     source_refs: dict[str, list[str]],
-    scope_key: str,
 ) -> dict[str, Any]:
     return {
-        "scope": scope_key,
-        "strategy_family": spec.strategy_family if spec else scope_key.split(":", 1)[0],
-        "symbol": spec.symbol if spec else None,
+        "scope": spec.scope_key,
+        "strategy_family": spec.strategy_family,
+        "symbol": spec.symbol,
         "action": action,
-        "baseline_candidate_id": baseline or None,
+        "baseline_candidate_id": spec.baseline_candidate_id,
         "selected_candidate_id": selected if action in {"keep", "switch"} else None,
         "rationale": rationale,
         "source_refs": source_refs,
     }
 
 
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item or "").strip()]
+def _unique_refs(refs: Any) -> list[str]:
+    return list(dict.fromkeys(refs))
+
+
+def _required_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} is missing")
+    return value
+
+
+def _unavailable(error: str) -> ValidationResult:
+    return ValidationResult(status="unavailable", error=error)

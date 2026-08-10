@@ -28,6 +28,82 @@ def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run
     }
 
 
+def _formal_advice_fixture(*, advice_id: str = "adv-fixture") -> tuple[dict, dict]:
+    bindings = {
+        "candidate_snapshot_hash": "a" * 64,
+        "portfolio_distribution_hash": "b" * 64,
+        "option_positions_hash": "c" * 64,
+        "fact_registry_hash": "d" * 64,
+        "external_evidence_hash": "e" * 64,
+        "external_evidence_run_id": "2026-07-19T12:00:00+00:00",
+    }
+    rationale = {
+        "risk_mechanism": "没有新增风险信号",
+        "candidate_effect": "当前候选排序不变",
+        "decision_reason": "维持原始首选",
+    }
+    refs = {
+        "internal_fact_refs": ["candidate:put-1", "projection:put-1"],
+        "external_evidence_refs": [],
+    }
+    decision = {
+        "scope": "sell_put",
+        "strategy_family": "sell_put",
+        "symbol": None,
+        "action": "keep",
+        "baseline_candidate_id": "put-1",
+        "selected_candidate_id": "put-1",
+        "rationale": rationale,
+        "source_refs": refs,
+    }
+    record = {
+        "kind": "advice_record",
+        "schema": "ai_decision_advice.v1",
+        "advice_id": advice_id,
+        "run_id": "run-tool",
+        "account_ref": "private-account-ref",
+        "market": "US",
+        "recorded_at": "2026-07-19T13:40:00+00:00",
+        "evidence_as_of": "2026-07-19T12:00:00+00:00",
+        "input_bindings": bindings,
+        "versions": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "schema_name": "ai_decision_advice.v1",
+            "prompt_fingerprint": "f" * 64,
+        },
+        "status": "completed",
+        "unavailable_reason": None,
+        "zero_candidate": {"sell_put": False, "covered_call": True},
+        "reused": False,
+        "decisions": {"sell_put": decision},
+        "demotions": [],
+        "repair_attempted": False,
+    }
+    brief = {
+        "account": "lx",
+        "market": "US",
+        "run_id": "run-tool",
+        "ai_decision_advice": {
+            "status": "completed",
+            "unavailable_reason": None,
+            "evidence_as_of": "2026-07-19T12:00:00+00:00",
+            "sell_put": {
+                "action": "keep",
+                "baseline_candidate_id": "put-1",
+                "selected_candidate_id": "put-1",
+                "rationale": rationale,
+                "source_refs": refs,
+            },
+            "covered_call": [],
+            "zero_candidate": {"sell_put": False, "covered_call": True},
+            "reused": False,
+            "advice_record_id": advice_id,
+        },
+    }
+    return record, brief
+
+
 def test_read_view_supports_latest_day_revision_and_effective_planning_only(tmp_path: Path) -> None:
     from src.application.agent_tools.daily_brief import read_daily_brief_view
     from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
@@ -94,6 +170,319 @@ def test_read_view_passes_ai_decision_advice_section_through(tmp_path: Path) -> 
     assert view["available"] is True
     assert view["brief"]["ai_decision_advice"]["sell_put"]["action"] == "keep"
     assert view["brief"]["ai_decision_advice"]["advice_record_id"] == "adv-20260719T134000Z"
+    assert view["brief"]["ai_decision_advice"]["formal_record"] == {
+        "available": False,
+        "reason": "formal_record_unavailable",
+    }
+
+
+def test_read_view_returns_formal_advice_bindings_actions_and_refs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.ai_decision_advice.advice as advice_mod
+    import src.application.ai_decision_advice.orchestration as orchestration_mod
+    import src.infrastructure.deepseek_responses as deepseek_mod
+    from src.application.agent_tools.daily_brief import read_daily_brief_view
+    from src.application.ai_decision_advice.advice_store import (
+        advice_records_path,
+        append_advice_record,
+    )
+    from src.application.daily_decision_brief_repository import (
+        prepare_daily_decision_brief,
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("read-only Agent query must not run model or search")
+
+    monkeypatch.setattr(advice_mod, "run_decision_advice", forbidden)
+    monkeypatch.setattr(orchestration_mod, "run_decision_advice", forbidden)
+    monkeypatch.setattr(deepseek_mod, "create_deepseek_response", forbidden)
+
+    advice_id = "adv-formal-1"
+    bindings = {
+        "candidate_snapshot_hash": "a" * 64,
+        "portfolio_distribution_hash": "b" * 64,
+        "option_positions_hash": "c" * 64,
+        "fact_registry_hash": "d" * 64,
+        "external_evidence_hash": "e" * 64,
+        "external_evidence_run_id": "2026-07-19T12:00:00+00:00",
+    }
+    decision = {
+        "scope": "sell_put",
+        "strategy_family": "sell_put",
+        "symbol": None,
+        "action": "switch",
+        "baseline_candidate_id": "put-1",
+        "selected_candidate_id": "put-2",
+        "rationale": {
+            "risk_mechanism": "监管风险上升",
+            "candidate_effect": "当前首选受影响",
+            "decision_reason": "改选到期更晚的候选",
+        },
+        "source_refs": {
+            "internal_fact_refs": ["candidate:put-2", "portfolio:distribution"],
+            "external_evidence_refs": ["evidence:rule-1"],
+        },
+    }
+    record = {
+        "kind": "advice_record",
+        "schema": "ai_decision_advice.v1",
+        "advice_id": advice_id,
+        "run_id": "run-tool",
+        "account_ref": "acct-secret-ref",
+        "market": "US",
+        "recorded_at": "2026-07-19T13:40:00+00:00",
+        "evidence_as_of": "2026-07-19T12:00:00+00:00",
+        "input_bindings": bindings,
+        "versions": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "schema_name": "ai_decision_advice.v1",
+            "prompt_fingerprint": "f" * 64,
+            "prompt": {"internal": "must not leak"},
+        },
+        "status": "completed",
+        "zero_candidate": {"sell_put": False, "covered_call": True},
+        "reused": True,
+        "reuse_of_advice_id": "adv-prior",
+        "decisions": {"sell_put": decision},
+        "demotions": [],
+        "repair_attempted": True,
+        "usage": {"input_tokens": 999},
+        "model_response_audit": {"response_sha256": "secret"},
+    }
+    append_advice_record(
+        advice_records_path(tmp_path / "output_runs" / "run-tool", "lx"),
+        record,
+    )
+    brief = _brief()
+    brief["ai_decision_advice"] = {
+        "status": "completed",
+        "unavailable_reason": None,
+        "evidence_as_of": "2026-07-19T12:00:00+00:00",
+        "sell_put": {
+            "action": "switch",
+            "baseline_candidate_id": "put-1",
+            "selected_candidate_id": "put-2",
+            "rationale": decision["rationale"],
+            "source_refs": decision["source_refs"],
+        },
+        "covered_call": [],
+        "zero_candidate": {"sell_put": False, "covered_call": True},
+        "reused": True,
+        "advice_record_id": advice_id,
+    }
+    brief["ai_decision_advice_evidence_index"] = {
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "evidence": [
+                    {
+                        "ref": "evidence:rule-1",
+                        "source": {
+                            "title": "监管规则变化",
+                            "publisher": "监管机构",
+                            "url": "https://example.gov/rule",
+                            "published_at": "2026-07-19",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    prepare_daily_decision_brief(base=tmp_path, brief=brief)
+
+    view = read_daily_brief_view(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        now_utc=datetime(2026, 7, 19, 14, 0, tzinfo=timezone.utc),
+    )
+
+    formal = view["brief"]["ai_decision_advice"]
+    assert formal["formal_record"] == {
+        "available": True,
+        "reason": "ok",
+        "advice_id": advice_id,
+        "recorded_at": "2026-07-19T13:40:00+00:00",
+        "evidence_as_of": "2026-07-19T12:00:00+00:00",
+    }
+    assert formal["input_bindings"] == bindings
+    assert formal["actions"][0]["action"] == "switch"
+    assert formal["actions"][0]["selected_candidate_id"] == "put-2"
+    assert formal["actions"][0]["internal_fact_refs"] == [
+        "candidate:put-2",
+        "portfolio:distribution",
+    ]
+    assert formal["actions"][0]["external_evidence_refs"] == [
+        "evidence:rule-1"
+    ]
+    assert formal["validation"]["repair_attempted"] is True
+    assert formal["reuse_of_advice_id"] == "adv-prior"
+    assert formal["versions"] == {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "schema_name": "ai_decision_advice.v1",
+        "prompt_fingerprint": "f" * 64,
+    }
+    rendered = str(view)
+    assert "acct-secret-ref" not in rendered
+    assert "input_tokens" not in rendered
+    assert "response_sha256" not in rendered
+    assert "must not leak" not in rendered
+
+
+def test_formal_advice_fails_closed_when_decision_projection_differs(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.daily_brief import (
+        _with_formal_ai_decision_advice,
+    )
+    from src.application.ai_decision_advice.advice_store import (
+        advice_records_path,
+        append_advice_record,
+    )
+
+    record, brief = _formal_advice_fixture(advice_id="adv-mismatch")
+    decision = record["decisions"]["sell_put"]
+    decision["action"] = "switch"
+    decision["selected_candidate_id"] = "put-2"
+    append_advice_record(
+        advice_records_path(tmp_path / "output_runs" / "run-tool", "lx"),
+        record,
+    )
+
+    result = _with_formal_ai_decision_advice(base=tmp_path, brief=brief)
+
+    advice = result["ai_decision_advice"]
+    assert advice["formal_record"] == {
+        "available": False,
+        "reason": "formal_record_identity_mismatch",
+    }
+    assert advice["actions"] == []
+
+
+def test_formal_advice_rejects_duplicate_advice_id_before_identity_filter(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.daily_brief import (
+        _with_formal_ai_decision_advice,
+    )
+    from src.application.ai_decision_advice.advice_store import (
+        advice_records_path,
+        append_advice_record,
+    )
+
+    record, brief = _formal_advice_fixture(advice_id="adv-duplicate")
+    path = advice_records_path(tmp_path / "output_runs" / "run-tool", "lx")
+    append_advice_record(path, record)
+    append_advice_record(path, {**record, "market": "HK"})
+
+    result = _with_formal_ai_decision_advice(base=tmp_path, brief=brief)
+
+    advice = result["ai_decision_advice"]
+    assert advice["formal_record"] == {
+        "available": False,
+        "reason": "formal_record_ambiguous",
+    }
+    assert advice["actions"] == []
+
+
+def test_formal_advice_rejects_malformed_demotion_instead_of_hiding_it(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.daily_brief import (
+        _with_formal_ai_decision_advice,
+    )
+    from src.application.ai_decision_advice.advice_store import (
+        advice_records_path,
+        append_advice_record,
+    )
+
+    record, brief = _formal_advice_fixture(advice_id="adv-invalid-demotion")
+    record["demotions"] = [
+        {
+            "scope": "sell_put",
+            "from_action": "keep",
+            "to_action": "switch",
+            "reason": "invalid-transition",
+        }
+    ]
+    append_advice_record(
+        advice_records_path(tmp_path / "output_runs" / "run-tool", "lx"),
+        record,
+    )
+
+    result = _with_formal_ai_decision_advice(base=tmp_path, brief=brief)
+
+    assert result["ai_decision_advice"]["formal_record"] == {
+        "available": False,
+        "reason": "formal_record_invalid",
+    }
+
+
+def test_formal_advice_matches_covered_call_scope_and_selected_candidate(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.daily_brief import (
+        _with_formal_ai_decision_advice,
+    )
+    from src.application.ai_decision_advice.advice_store import (
+        advice_records_path,
+        append_advice_record,
+    )
+
+    record, brief = _formal_advice_fixture(advice_id="adv-covered-call")
+    rationale = record["decisions"]["sell_put"]["rationale"]
+    refs = record["decisions"]["sell_put"]["source_refs"]
+    covered_call = {
+        "scope": "covered_call:AAPL",
+        "strategy_family": "covered_call",
+        "symbol": "AAPL",
+        "action": "switch",
+        "baseline_candidate_id": "call-1",
+        "selected_candidate_id": "call-2",
+        "rationale": rationale,
+        "source_refs": refs,
+    }
+    record["zero_candidate"] = {"sell_put": True, "covered_call": False}
+    record["decisions"] = {"covered_call:AAPL": covered_call}
+    section = brief["ai_decision_advice"]
+    section["zero_candidate"] = {"sell_put": True, "covered_call": False}
+    section["sell_put"] = None
+    section["covered_call"] = [
+        {
+            "symbol": "AAPL",
+            "action": "switch",
+            "baseline_candidate_id": "call-1",
+            "selected_candidate_id": "call-2",
+            "rationale": rationale,
+            "source_refs": refs,
+        }
+    ]
+    append_advice_record(
+        advice_records_path(tmp_path / "output_runs" / "run-tool", "lx"),
+        record,
+    )
+
+    result = _with_formal_ai_decision_advice(base=tmp_path, brief=brief)
+
+    advice = result["ai_decision_advice"]
+    assert advice["formal_record"]["available"] is True
+    assert advice["actions"] == [
+        {
+            "scope": "covered_call:AAPL",
+            "strategy_family": "covered_call",
+            "symbol": "AAPL",
+            "action": "switch",
+            "baseline_candidate_id": "call-1",
+            "selected_candidate_id": "call-2",
+            "rationale": rationale,
+            "internal_fact_refs": refs["internal_fact_refs"],
+            "external_evidence_refs": refs["external_evidence_refs"],
+        }
+    ]
 
 
 def test_read_view_reports_unavailable_and_revision_requires_date(tmp_path: Path) -> None:

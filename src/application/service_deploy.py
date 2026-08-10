@@ -1567,8 +1567,9 @@ def render_service_bundle(
             collector_service = "options-monitor-ai-evidence-collector.service"
             collector_timer = "options-monitor-ai-evidence-collector.timer"
             collector_args = [
-                om,
-                "ai-evidence-collector",
+                str(repo / ".venv" / "bin" / "python"),
+                "-m",
+                "src.interfaces.cli.ai_evidence_collector",
                 *[arg for market in market_values for arg in ("--config-key", market)],
             ]
             add(

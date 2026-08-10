@@ -5,6 +5,15 @@ from typing import Any, Mapping
 from src.application.secret_store import LLM_DEEPSEEK_API_KEY, SecretProvider, resolve_secret
 
 CONFIG_KEY = "ai_decision_advice"
+PORTFOLIO_DISTRIBUTION_KEY = "portfolio_distribution"
+PORTFOLIO_DISTRIBUTION_PROVIDER_NONE = "none"
+PORTFOLIO_DISTRIBUTION_PROVIDER_PM = "portfolio_management"
+PORTFOLIO_DISTRIBUTION_PROVIDERS = frozenset(
+    {
+        PORTFOLIO_DISTRIBUTION_PROVIDER_NONE,
+        PORTFOLIO_DISTRIBUTION_PROVIDER_PM,
+    }
+)
 
 # v1 fixed contract (docs/AI_DECISION_ADVICE_DESIGN.md sections 4, 6, 13, 17).
 PROVIDER = "deepseek"
@@ -34,6 +43,31 @@ def ai_decision_advice_enabled(cfg: Mapping[str, Any] | None) -> bool:
     if not isinstance(section, Mapping):
         return False
     return bool(section.get("enabled"))
+
+
+def portfolio_distribution_provider(
+    cfg: Mapping[str, Any] | None,
+) -> str:
+    """Return the validated opt-in provider, failing closed to ``none``."""
+
+    section = (cfg or {}).get(CONFIG_KEY)
+    if not isinstance(section, Mapping):
+        return PORTFOLIO_DISTRIBUTION_PROVIDER_NONE
+    distribution = section.get(PORTFOLIO_DISTRIBUTION_KEY)
+    if distribution is None:
+        return PORTFOLIO_DISTRIBUTION_PROVIDER_NONE
+    if not isinstance(distribution, Mapping):
+        return PORTFOLIO_DISTRIBUTION_PROVIDER_NONE
+    provider = distribution.get(
+        "provider",
+        PORTFOLIO_DISTRIBUTION_PROVIDER_NONE,
+    )
+    if (
+        not isinstance(provider, str)
+        or provider not in PORTFOLIO_DISTRIBUTION_PROVIDERS
+    ):
+        return PORTFOLIO_DISTRIBUTION_PROVIDER_NONE
+    return provider
 
 
 def resolve_api_key(

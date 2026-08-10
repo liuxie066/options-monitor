@@ -341,8 +341,10 @@ def _normalize_ai_decision_advice(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _ai_decision_advice_action_map(section: Mapping[str, Any] | None) -> dict[str, str]:
-    """Scope -> action map for diffing (design 14.1).
+def _ai_decision_advice_state_map(
+    section: Mapping[str, Any] | None,
+) -> dict[str, tuple[str, str | None]]:
+    """Scope -> (action, selected candidate) map for diffing (design 14.1).
 
     Only ``completed`` sections contribute action state; ``unavailable`` and
     ``not_applicable`` never generate material changes.
@@ -350,14 +352,20 @@ def _ai_decision_advice_action_map(section: Mapping[str, Any] | None) -> dict[st
 
     if not isinstance(section, Mapping) or section.get("status") != "completed":
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str | None]] = {}
     sell_put = section.get("sell_put")
     if isinstance(sell_put, Mapping) and sell_put.get("action"):
-        out["sell_put"] = str(sell_put["action"])
+        out["sell_put"] = (
+            str(sell_put["action"]),
+            str(sell_put.get("selected_candidate_id") or "").strip() or None,
+        )
     for row in section.get("covered_call") or []:
         if isinstance(row, Mapping) and row.get("action"):
             symbol = _upper(row.get("symbol"))
-            out[f"covered_call:{symbol}"] = str(row["action"])
+            out[f"covered_call:{symbol}"] = (
+                str(row["action"]),
+                str(row.get("selected_candidate_id") or "").strip() or None,
+            )
     return out
 
 
@@ -371,24 +379,42 @@ def _diff_ai_decision_advice(
     in receipts but never material (design 14.1).
     """
 
-    prev_actions = _ai_decision_advice_action_map(prev.get("ai_decision_advice"))
-    cur_actions = _ai_decision_advice_action_map(cur.get("ai_decision_advice"))
+    prev_states = _ai_decision_advice_state_map(prev.get("ai_decision_advice"))
+    cur_states = _ai_decision_advice_state_map(cur.get("ai_decision_advice"))
     changes: list[dict[str, Any]] = []
-    for scope in sorted(set(prev_actions) | set(cur_actions)):
-        before = prev_actions.get(scope)
-        after = cur_actions.get(scope)
-        if before is None or after is None or before == after:
+    for scope in sorted(set(prev_states) | set(cur_states)):
+        before = prev_states.get(scope)
+        after = cur_states.get(scope)
+        if before is None or after is None:
             continue
-        changes.append(
-            _change(
-                "ai_decision_advice_action_changed",
-                priority="P1",
-                material=True,
-                ai_advice_scope=scope,
-                before=before,
-                after=after,
+        before_action, before_selected = before
+        after_action, after_selected = after
+        if before_action != after_action:
+            changes.append(
+                _change(
+                    "ai_decision_advice_action_changed",
+                    priority="P1",
+                    material=True,
+                    ai_advice_scope=scope,
+                    before=before_action,
+                    after=after_action,
+                )
             )
-        )
+            continue
+        if (
+            before_action == "switch"
+            and before_selected != after_selected
+        ):
+            changes.append(
+                _change(
+                    "ai_decision_advice_selected_candidate_changed",
+                    priority="P1",
+                    material=True,
+                    ai_advice_scope=scope,
+                    before=before_selected,
+                    after=after_selected,
+                )
+            )
     return changes
 
 
