@@ -20,7 +20,11 @@ from src.application.runtime_config_freshness import (
     check_runtime_config_freshness,
     check_runtime_config_identity,
 )
-from src.application.service_drift import service_drift
+from src.application.service_drift import (
+    SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
+    SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+    service_drift,
+)
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
     "ANTHROPIC_API_KEY",
@@ -903,6 +907,92 @@ def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[st
     for item in service_reconcile.get("manual_actions") or []:
         out.append(str(item))
     return out
+
+
+def _capture_preserved_timer_activation_states(
+    *,
+    repo_root: Path,
+    runtime_root: Path,
+    profile: dict[str, Any],
+    run_cmd: Callable[..., Any],
+) -> dict[str, dict[str, str]]:
+    observed = service_drift(
+        repo_root=repo_root,
+        runtime_root=runtime_root,
+        profile_path=runtime_root / "service.profile.json",
+        profile=profile,
+        confirm=False,
+        run_cmd=run_cmd,
+    )
+    if observed.get("checked") is False or observed.get("supported") is False:
+        reason = str(observed.get("reason") or "service drift status unavailable")
+        raise ServiceTransitionError(
+            f"could not capture timer activation state: {reason}",
+            status="service_activation_snapshot_failed",
+            remediation=[
+                "manual_check_timer_state: verify systemctl is-enabled and "
+                "systemctl is-active for the managed timers"
+            ],
+        )
+    activation_states_raw = observed.get("activation_states")
+    activation_states = (
+        activation_states_raw if isinstance(activation_states_raw, dict) else {}
+    )
+    active_states_raw = observed.get("active_states")
+    active_states = active_states_raw if isinstance(active_states_raw, dict) else {}
+    expected_services_raw = observed.get("expected_services")
+    expected_services = (
+        {str(item) for item in expected_services_raw}
+        if isinstance(expected_services_raw, list)
+        else set()
+    )
+    installed_units_raw = observed.get("installed_units")
+    installed_units = (
+        {str(item) for item in installed_units_raw}
+        if isinstance(installed_units_raw, list)
+        else set()
+    )
+    timer_names = {
+        str(name)
+        for name in set(activation_states) | set(active_states)
+        if str(name).endswith(".timer")
+    }
+    timer_names.update(
+        name
+        for name in expected_services & installed_units
+        if name.endswith(".timer")
+    )
+    snapshot: dict[str, dict[str, str]] = {}
+    unknown_timer_states: list[str] = []
+    for name in sorted(timer_names):
+        activation_state = str(activation_states.get(name) or "").strip().lower()
+        active_state = str(active_states.get(name) or "").strip().lower()
+        paused_by_activation = activation_state in {"disabled", "masked"}
+        paused_by_activity = active_state == "inactive"
+        if not paused_by_activation and not paused_by_activity:
+            if active_state in {"", "unknown"}:
+                unknown_timer_states.append(name)
+            continue
+        snapshot[str(name)] = {
+            key: value
+            for key, value in (
+                ("activation_state", activation_state),
+                ("active_state", active_state),
+            )
+            if value not in {"", "unknown"}
+        }
+    if unknown_timer_states:
+        raise ServiceTransitionError(
+            "could not determine whether managed timers were active before the "
+            "release switch: " + ", ".join(unknown_timer_states),
+            status="service_activation_snapshot_failed",
+            remediation=[
+                "manual_check_timer_state: "
+                f"systemctl is-enabled {name}; systemctl is-active {name}"
+                for name in unknown_timer_states
+            ],
+        )
+    return snapshot
 
 
 def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, str]]:
@@ -2084,6 +2174,8 @@ def _compensate_service_transition(
     previous_profile: dict[str, Any],
     config_commit: dict[str, Any],
     restart_services: bool,
+    activation_policy: str,
+    preserved_activation_states: dict[str, dict[str, str]],
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -2117,6 +2209,8 @@ def _compensate_service_transition(
                 profile_path=runtime_root / "service.profile.json",
                 profile=previous_profile,
                 confirm=True,
+                activation_policy=activation_policy,
+                preserved_activation_states=preserved_activation_states,
                 run_cmd=run_cmd,
             )
         except Exception as exc:
@@ -2174,6 +2268,7 @@ def service_upgrade(
     auto: bool = False,
     allow_major: bool = False,
     restart_services: bool = True,
+    preserve_activation_state: bool = False,
     cleanup_after_upgrade: bool = False,
     cleanup_keep_releases: int = 2,
     run_cmd: Callable[..., Any] = subprocess.run,
@@ -2185,6 +2280,11 @@ def service_upgrade(
     cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
     current_version = _read_version(repo)
     repo_root_is_symlink = repo_link.is_symlink()
+    activation_policy = (
+        SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING
+        if preserve_activation_state
+        else SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE
+    )
     check = service_upgrade_check(
         repo_root=repo,
         runtime_root=runtime,
@@ -2212,6 +2312,8 @@ def service_upgrade(
         "auto": bool(auto),
         "confirmed": bool(confirm),
         "allow_major": bool(allow_major),
+        "activation_policy": activation_policy,
+        "preserve_activation_state": bool(preserve_activation_state),
         "cleanup_after_upgrade": bool(cleanup_after_upgrade),
         "cleanup_keep_releases": max(2, int(cleanup_keep_releases or 2)),
         "updated_at": utc_now_iso(now_fn),
@@ -2266,6 +2368,11 @@ def service_upgrade(
         f"validate {target_dir}",
         f"switch {repo_link} -> {target_dir}",
         "reconcile service drift from current release",
+        (
+            "preserve pre-existing paused timer activation state"
+            if preserve_activation_state
+            else "repair expected timer activation drift"
+        ),
         "restart long-running services" if restart_services else "skip service restart",
     ]
     if cleanup_after_upgrade:
@@ -2310,6 +2417,7 @@ def service_upgrade(
     compensation: dict[str, Any] = {}
     restarted: list[str] = []
     pre_upgrade_profile = _load_service_profile(runtime)
+    preserved_activation_states: dict[str, dict[str, str]] = {}
     try:
         with _UpgradeLock(lock_path):
             releases.mkdir(parents=True, exist_ok=True)
@@ -2383,6 +2491,28 @@ def service_upgrade(
                 run_cmd=run_cmd,
                 operations=operations,
             )
+            if preserve_activation_state and pre_upgrade_profile:
+                preserved_activation_states = (
+                    _capture_preserved_timer_activation_states(
+                        repo_root=repo_link,
+                        runtime_root=runtime,
+                        profile=pre_upgrade_profile,
+                        run_cmd=run_cmd,
+                    )
+                )
+                status_base["preserved_activation_units"] = sorted(
+                    preserved_activation_states
+                )
+                operations.append(
+                    {
+                        "operation": "capture_service_activation_state",
+                        "activation_policy": activation_policy,
+                        "preserved_activation_units": sorted(
+                            preserved_activation_states
+                        ),
+                        "ok": True,
+                    }
+                )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -2402,6 +2532,8 @@ def service_upgrade(
                     profile_path=runtime / "service.profile.json",
                     profile=pre_upgrade_profile,
                     confirm=True,
+                    activation_policy=activation_policy,
+                    preserved_activation_states=preserved_activation_states,
                     run_cmd=run_cmd,
                 )
                 if _service_reconcile_failed(service_reconcile):
@@ -2441,6 +2573,8 @@ def service_upgrade(
                 previous_profile=pre_upgrade_profile,
                 config_commit=runtime_config_commit,
                 restart_services=restart_services,
+                activation_policy=activation_policy,
+                preserved_activation_states=preserved_activation_states,
                 run_cmd=run_cmd,
                 operations=operations,
             )
@@ -2482,6 +2616,8 @@ def service_upgrade(
                 previous_profile=pre_upgrade_profile,
                 config_commit=runtime_config_commit,
                 restart_services=restart_services,
+                activation_policy=activation_policy,
+                preserved_activation_states=preserved_activation_states,
                 run_cmd=run_cmd,
                 operations=operations,
             )
@@ -2602,6 +2738,7 @@ def service_rollback(
     to_version: str | None = None,
     confirm: bool = False,
     restart_services: bool = True,
+    preserve_activation_state: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
@@ -2611,6 +2748,11 @@ def service_rollback(
     status = load_upgrade_status(runtime_root=runtime) or {}
     current_version = _read_version(repo)
     repo_root_is_symlink = repo_link.is_symlink()
+    activation_policy = (
+        SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING
+        if preserve_activation_state
+        else SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE
+    )
     target = _version_text(to_version or str(status.get("current_version") or ""))
     operations: list[dict[str, Any]] = []
     status_base = {
@@ -2624,6 +2766,8 @@ def service_rollback(
         "repo_root_is_symlink": repo_root_is_symlink,
         "repo_root_resolution": repo_root_resolution,
         "confirmed": bool(confirm),
+        "activation_policy": activation_policy,
+        "preserve_activation_state": bool(preserve_activation_state),
         "updated_at": utc_now_iso(now_fn),
     }
     if not target:
@@ -2655,6 +2799,11 @@ def service_rollback(
                 f"switch {repo_link} -> {target_dir}",
                 "commit the staged runtime config bundle",
                 "reconcile service drift for the rollback release",
+                (
+                    "preserve pre-existing paused timer activation state"
+                    if preserve_activation_state
+                    else "repair expected timer activation drift"
+                ),
                 "restart and health-check long-running services" if restart_services else "skip service restart",
             ],
             "operations": operations,
@@ -2669,6 +2818,7 @@ def service_rollback(
     compensation: dict[str, Any] = {}
     restarted: list[str] = []
     previous_profile = _load_service_profile(runtime)
+    preserved_activation_states: dict[str, dict[str, str]] = {}
     try:
         with _UpgradeLock(runtime / "locks" / "upgrade.lock"):
             runtime_config_prepare = _prepare_runtime_configs_for_release(
@@ -2679,6 +2829,28 @@ def service_rollback(
                 run_cmd=run_cmd,
                 operations=operations,
             )
+            if preserve_activation_state and previous_profile:
+                preserved_activation_states = (
+                    _capture_preserved_timer_activation_states(
+                        repo_root=repo_link,
+                        runtime_root=runtime,
+                        profile=previous_profile,
+                        run_cmd=run_cmd,
+                    )
+                )
+                status_base["preserved_activation_units"] = sorted(
+                    preserved_activation_states
+                )
+                operations.append(
+                    {
+                        "operation": "capture_service_activation_state",
+                        "activation_policy": activation_policy,
+                        "preserved_activation_units": sorted(
+                            preserved_activation_states
+                        ),
+                        "ok": True,
+                    }
+                )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -2698,6 +2870,8 @@ def service_rollback(
                     profile_path=runtime / "service.profile.json",
                     profile=previous_profile,
                     confirm=True,
+                    activation_policy=activation_policy,
+                    preserved_activation_states=preserved_activation_states,
                     run_cmd=run_cmd,
                 )
                 if _service_reconcile_failed(service_reconcile):
@@ -2741,6 +2915,8 @@ def service_rollback(
                 previous_profile=previous_profile,
                 config_commit=runtime_config_commit,
                 restart_services=restart_services,
+                activation_policy=activation_policy,
+                preserved_activation_states=preserved_activation_states,
                 run_cmd=run_cmd,
                 operations=operations,
             )

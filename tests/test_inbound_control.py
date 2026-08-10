@@ -1796,6 +1796,25 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert f"确认：/confirm trade {trade_id}" in pending_two["data"]["response_text"]
 
 
+def test_inbound_upgrade_defaults_forward_activation_preservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.assistant.upgrade_operations import _upgrade_defaults
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    args = _upgrade_defaults(
+        {
+            "no_restart_services": True,
+            "preserve_activation_state": True,
+        }
+    )
+
+    assert args["restart_services"] is False
+    assert args["preserve_activation_state"] is True
+
+
 def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from src.application.assistant import upgrade_operations
 
@@ -1912,6 +1931,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert replies[-1]["uuid"] == f"{operation_id}:upgrade-final"
     assert calls[-1]["confirm"] is True
     assert calls[-1]["auto"] is True
+    assert calls[-1]["preserve_activation_state"] is False
     assert calls[-1]["target_version"] == "1.2.111"
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
 

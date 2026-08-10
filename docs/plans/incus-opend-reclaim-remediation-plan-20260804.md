@@ -239,7 +239,7 @@ This gate requires separate release/upgrade and production-service authorization
 
 ### Apply sequence
 
-1. Use the controlled upgrade path with `--no-restart-services`. Do not run the normal all-service restart path.
+1. Use the controlled upgrade path with `--no-restart-services --preserve-activation-state`. Do not run the normal all-service restart path or allow drift reconciliation to reactivate a timer paused by this rollout.
 2. Allow the controlled drift reconciliation to install the explicit sampler unit/profile and reload affected timers.
 3. Verify the installed sampler command and dependency fields before any manual service restart.
 4. Restart only the separately approved non-OpenD long-running services that must load the new Python release. Build the allowlist from the profile, remove every service containing `opend`, show it in the change receipt, and execute it sequentially. Treat `options-monitor-trade-intake.service` as its own business-write-capable reactivation boundary: do not restart it merely because it appears in the non-OpenD allowlist.
@@ -256,9 +256,9 @@ This gate requires separate release/upgrade and production-service authorization
 
 ### Rollback
 
-Stop the sample timer before restoring the old unit so a persistent timer cannot race the rollback. Use the controlled previous-release rollback with service restarts disabled, restore the prior generated unit/profile through the control plane, and restart only the same separately authorized non-OpenD allowlist. Require both OpenD PIDs to remain unchanged. Because the old sampler can activate both OpenDs, leave its sample timer stopped after rollback until the operator explicitly accepts that known risk or a replacement is ready.
+Stop the sample timer before restoring the old unit so a persistent timer cannot race the rollback. Use the controlled previous-release rollback with `--no-restart-services --preserve-activation-state`, restore the prior generated unit/profile through the control plane, and restart only the same separately authorized non-OpenD allowlist. Require both OpenD PIDs to remain unchanged. Because the old sampler can activate both OpenDs, leave its sample timer stopped after rollback until the operator explicitly accepts that known risk or a replacement is ready.
 
-Until Gate D passes, record a production runbook hold: upgrades must use `--no-restart-services`; an all-service restart or container reboot is not covered by Gate C.
+Until Gate D passes, record a production runbook hold: upgrades must use `--no-restart-services --preserve-activation-state`; an all-service restart or container reboot is not covered by Gate C.
 
 ## 8. Gate D — host-authorized Incus memory experiment
 

@@ -299,6 +299,17 @@ VERSION="$(cat VERSION)"
 
 切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
 
+`--no-restart-services` 只跳过长期 service 的 restart 和后续 health check，不会关闭 timer activation drift 修复。维护窗口如果已经显式暂停某个 timer，应同时传 `--preserve-activation-state`。升级器会在切换 symlink 前快照既有 systemd timer；原本 inactive、disabled 或 masked 的 timer 可以更新 unit/profile 并执行 `daemon-reload`，但不会执行 `enable --now`、`start`、`restart` 或 `unmask`。相同快照也用于升级失败补偿和显式 rollback；新增 timer 没有旧运行态，仍按 release 期望状态安装和激活。
+
+```bash
+./om update apply \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --no-restart-services \
+  --preserve-activation-state \
+  --confirm
+```
+
 存量主机如果仍使用 `/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service`，首次升级到包含 repository-owned credential 资产的 release 后，必须用新 release 显式执行一次 `service drift` dry-run 和 `--confirm`。原因是升级进程由旧 release 启动，无法在同一次切换中可靠使用尚未加载的新 reconcile 逻辑。收编后 profile 会保留 `feishu_agent_credential` opt-in，后续手动升级、自动升级和回滚都按同一契约 reconcile。在旧 release 回滚窗口结束前保留 `/usr/lib` legacy unit，不由 drift 自动删除。
 
 当 profile 已收编 Feishu Agent credential 时，升级后 Feishu WS 健康检查会在 `sudo` 进程内显式合并 profile 的基础 `env_file` 和 `feishu_agent_credential.runtime_env_file`。命令行只传文件路径，不传或输出明文凭据；这避免 `sudo` 清理父进程环境后出现假性 `missing Feishu app credentials`。

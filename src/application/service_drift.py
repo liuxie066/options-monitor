@@ -48,6 +48,43 @@ SYSTEMD_MANAGED_DROPIN_KINDS = frozenset(
     {"systemd_dropin", "systemd_secret_dropin"}
 )
 SECRET_BACKEND_COMPAT_DROPIN = "zzzzz-secret-backend-compat.conf"
+SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE = "ensure-active"
+SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING = "preserve-existing"
+SERVICE_ACTIVATION_POLICIES = frozenset(
+    {
+        SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
+        SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+    }
+)
+
+
+def normalize_service_activation_policy(value: str | None) -> str:
+    policy = str(value or SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE).strip().lower()
+    if policy not in SERVICE_ACTIVATION_POLICIES:
+        raise ValueError(
+            "service_activation_policy_invalid: expected one of "
+            f"{sorted(SERVICE_ACTIVATION_POLICIES)}, got {value!r}"
+        )
+    return policy
+
+
+def _normalize_preserved_activation_states(
+    value: dict[str, Any] | None,
+) -> dict[str, dict[str, str]]:
+    raw_states = value if isinstance(value, dict) else {}
+    out: dict[str, dict[str, str]] = {}
+    for raw_name, raw_state in raw_states.items():
+        name = str(raw_name or "").strip()
+        if not name.endswith(".timer") or not isinstance(raw_state, dict):
+            continue
+        state = {
+            key: str(raw_state.get(key) or "").strip().lower()
+            for key in ("activation_state", "active_state")
+            if str(raw_state.get(key) or "").strip()
+        }
+        if state:
+            out[name] = state
+    return dict(sorted(out.items()))
 
 
 def service_drift(
@@ -60,6 +97,8 @@ def service_drift(
     systemd_unit_root: str | Path | None = None,
     managed_root_uid: int = 0,
     managed_root_gid: int = 0,
+    activation_policy: str = SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
+    preserved_activation_states: dict[str, Any] | None = None,
     run_cmd: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
@@ -67,9 +106,14 @@ def service_drift(
     Dry-run is the default. Confirmed apply writes missing or changed unit files
     and profile-owned support files, repairs expected timer and credential
     activation, retires extra managed assets, and refreshes the service profile.
-    Long-running expected services are not enabled or restarted here.
+    Long-running expected services are not enabled or restarted here. Upgrade
+    orchestration may explicitly preserve the activation state of pre-existing
+    systemd timers; direct drift repair remains strict by default.
     """
 
+    normalized_activation_policy = normalize_service_activation_policy(
+        activation_policy
+    )
     initial = _load_profile_and_paths(
         repo_root=repo_root,
         runtime_root=runtime_root,
@@ -82,6 +126,10 @@ def service_drift(
     command_runner = run_cmd or subprocess.run
     initial["run_cmd"] = command_runner
     initial["run_cmd_injected"] = run_cmd is not None
+    initial["activation_policy"] = normalized_activation_policy
+    initial["preserved_activation_states"] = _normalize_preserved_activation_states(
+        preserved_activation_states
+    )
     before = _build_drift(initial)
     operations: list[dict[str, Any]] = []
     apply_errors: list[str] = []
@@ -1112,6 +1160,49 @@ def _effective_profile_with_legacy_feishu_credential(
     ]
 
 
+def _activation_preservation_status(
+    *,
+    ctx: dict[str, Any],
+    expected_files: dict[str, dict[str, Any]],
+    activation_states: dict[str, str],
+    active_states: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    if (
+        ctx.get("activation_policy")
+        != SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING
+    ):
+        return [], []
+    snapshot = _normalize_preserved_activation_states(
+        ctx.get("preserved_activation_states")
+    )
+    preserved: list[str] = []
+    conflicts: list[str] = []
+    for name, expected_state in snapshot.items():
+        if name not in expected_files:
+            continue
+        expected_activation = str(
+            expected_state.get("activation_state") or ""
+        ).strip()
+        expected_active = str(expected_state.get("active_state") or "").strip()
+        if (
+            expected_activation not in {"disabled", "masked"}
+            and expected_active != "inactive"
+        ):
+            continue
+        preserved.append(name)
+        current_activation = activation_states.get(name)
+        current_active = active_states.get(name)
+        if current_activation is None and current_active is None:
+            continue
+        if (
+            expected_activation and current_activation != expected_activation
+        ) or (
+            expected_active and current_active != expected_active
+        ):
+            conflicts.append(name)
+    return sorted(preserved), sorted(conflicts)
+
+
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     profile = ctx["profile"]
     persisted_profile = ctx.get("profile_on_disk")
@@ -1127,6 +1218,10 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "profile_path": str(ctx["profile_path"]),
             "repo_root": str(ctx["repo_root"]),
             "runtime_root": str(ctx["runtime_root"]),
+            "activation_policy": ctx.get("activation_policy"),
+            "preserved_activation_states": ctx.get(
+                "preserved_activation_states", {}
+            ),
             "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
         }
 
@@ -1157,11 +1252,18 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "activation_states": {},
             "active_states": {},
             "execution_states": {},
+            "observed_activation_drift_units": [],
             "activation_drift_units": [],
+            "preserved_activation_units": [],
+            "activation_preservation_conflicts": [],
             "execution_drift_units": [],
             "required_units": [],
             "missing_required_units": [],
             "profile_content_changed": False,
+            "activation_policy": ctx.get("activation_policy"),
+            "preserved_activation_states": ctx.get(
+                "preserved_activation_states", {}
+            ),
             "manual_actions": [],
             "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
         }
@@ -1191,6 +1293,14 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "repo_root": str(ctx["repo_root"]),
             "runtime_root": str(ctx["runtime_root"]),
             "systemd_unit_root": str(ctx["systemd_unit_root"]) if provider == "systemd" else None,
+            "activation_policy": ctx.get("activation_policy"),
+            "preserved_activation_states": ctx.get(
+                "preserved_activation_states", {}
+            ),
+            "observed_activation_drift_units": [],
+            "activation_drift_units": [],
+            "preserved_activation_units": [],
+            "activation_preservation_conflicts": [],
             "compatibility_warnings": [],
             "summary": {
                 "ok": False,
@@ -1253,11 +1363,23 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         installed_units=installed_units,
         ctx=ctx,
     )
-    activation_drift_units = sorted(
+    observed_activation_drift_units = sorted(
         name
         for name in set(activation_states) | set(active_states)
         if activation_states.get(name) in {"disabled", "masked"}
         or active_states.get(name) in {"inactive", "failed", "deactivating"}
+    )
+    (
+        preserved_activation_units,
+        activation_preservation_conflicts,
+    ) = _activation_preservation_status(
+        ctx=ctx,
+        expected_files=expected_files,
+        activation_states=activation_states,
+        active_states=active_states,
+    )
+    activation_drift_units = sorted(
+        set(observed_activation_drift_units) - set(preserved_activation_units)
     )
     execution_drift_units = sorted(
         name
@@ -1276,6 +1398,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
+        activation_preservation_conflicts=activation_preservation_conflicts,
         execution_drift_units=execution_drift_units,
         extra_installed_units=extra_installed_units,
         extra_managed_files=extra_managed_files,
@@ -1297,6 +1420,8 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         mismatched_managed_files=mismatched_managed_files,
         mode_mismatched_managed_files=mode_mismatched_managed_files,
         activation_drift_units=activation_drift_units,
+        preserved_activation_units=preserved_activation_units,
+        activation_preservation_conflicts=activation_preservation_conflicts,
         execution_drift_units=execution_drift_units,
         profile_content_changed=profile_content_changed,
         compatibility_warning_count=len(compatibility_warnings),
@@ -1326,11 +1451,18 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "activation_states": activation_states,
         "active_states": active_states,
         "execution_states": execution_states,
+        "observed_activation_drift_units": observed_activation_drift_units,
         "activation_drift_units": activation_drift_units,
+        "preserved_activation_units": preserved_activation_units,
+        "activation_preservation_conflicts": activation_preservation_conflicts,
         "execution_drift_units": execution_drift_units,
         "required_units": required_units,
         "missing_required_units": missing_required_units,
         "profile_content_changed": profile_content_changed,
+        "activation_policy": ctx.get("activation_policy"),
+        "preserved_activation_states": ctx.get(
+            "preserved_activation_states", {}
+        ),
         "compatibility_warnings": compatibility_warnings,
         "manual_actions": manual_actions,
         "summary": summary,
@@ -1946,6 +2078,8 @@ def _drift_summary(
     mismatched_managed_files: list[str],
     mode_mismatched_managed_files: list[str],
     activation_drift_units: list[str],
+    preserved_activation_units: list[str],
+    activation_preservation_conflicts: list[str],
     execution_drift_units: list[str],
     profile_content_changed: bool,
     compatibility_warning_count: int = 0,
@@ -1963,6 +2097,7 @@ def _drift_summary(
             mismatched_managed_files,
             mode_mismatched_managed_files,
             activation_drift_units,
+            preserved_activation_units,
             execution_drift_units,
         )
         if values
@@ -1973,6 +2108,7 @@ def _drift_summary(
     error_count = (
         int(bool(missing_required_units))
         + int(bool(activation_drift_units))
+        + int(bool(activation_preservation_conflicts))
         + int(bool(missing_managed_files))
         + int(bool(mismatched_managed_files))
         + int(bool(mode_mismatched_managed_files))
@@ -2002,6 +2138,10 @@ def _drift_summary(
         "mismatched_managed_file_count": len(mismatched_managed_files),
         "mode_mismatched_managed_file_count": len(mode_mismatched_managed_files),
         "activation_drift_count": len(activation_drift_units),
+        "preserved_activation_count": len(preserved_activation_units),
+        "activation_preservation_conflict_count": len(
+            activation_preservation_conflicts
+        ),
         "execution_drift_count": len(execution_drift_units),
         "profile_content_changed": bool(profile_content_changed),
     }
@@ -2022,6 +2162,7 @@ def _manual_actions(
     missing_installed_units: list[str],
     mismatched_units: list[str],
     activation_drift_units: list[str],
+    activation_preservation_conflicts: list[str],
     execution_drift_units: list[str],
     extra_installed_units: list[str],
     extra_managed_files: list[str],
@@ -2035,6 +2176,7 @@ def _manual_actions(
         missing_installed_units
         or mismatched_units
         or activation_drift_units
+        or activation_preservation_conflicts
         or execution_drift_units
         or extra_installed_units
         or extra_managed_files
@@ -2061,6 +2203,11 @@ def _manual_actions(
             f"manual_enable_service: sudo systemctl enable --now {name}"
             for name in activation_drift_units
             if not name.endswith(".timer")
+        )
+        actions.extend(
+            "manual_review_preserved_activation_state: "
+            f"systemctl is-enabled {name}; systemctl is-active {name}"
+            for name in activation_preservation_conflicts
         )
         actions.extend(f"manual_restart_failed_oneshot: sudo systemctl start {name}" for name in execution_drift_units)
         actions.extend(f"manual_retire_unit: sudo systemctl disable --now {name}" for name in extra_installed_units)
@@ -2192,8 +2339,12 @@ def _apply_service_drift(
     enabled_services: list[str] = []
     started_services: list[str] = []
     restarted_timers: list[str] = []
+    deferred_restart_units: list[str] = []
     retired_units: list[str] = []
     activation_drift = set(before.get("activation_drift_units") or [])
+    preserved_activation = set(
+        before.get("preserved_activation_units") or []
+    )
     execution_drift = set(before.get("execution_drift_units") or [])
     extra_installed = set(before.get("extra_installed_units") or [])
     live_systemctl = _live_systemctl_enabled(ctx)
@@ -2223,7 +2374,8 @@ def _apply_service_drift(
     for name in sorted(
         item
         for item in missing | activation_drift
-        if live_systemctl
+        if item not in preserved_activation
+        and live_systemctl
         and (
             item.endswith(".timer")
             or item == FEISHU_AGENT_CREDENTIAL_SERVICE
@@ -2268,7 +2420,10 @@ def _apply_service_drift(
     for name in sorted(
         item
         for item in mismatched
-        if live_systemctl and item.endswith(".timer") and item in written_units
+        if live_systemctl
+        and item.endswith(".timer")
+        and item in written_units
+        and item not in preserved_activation
     ):
         result = _run_systemctl(ctx, ["restart", name], run_cmd=run_cmd)
         operations.append(result)
@@ -2276,6 +2431,9 @@ def _apply_service_drift(
             restarted_timers.append(name)
         else:
             errors.append(f"restart {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
+    deferred_restart_units = sorted(
+        preserved_activation & mismatched & set(written_units)
+    )
     retired_paths_changed = False
     for name in sorted(extra_installed):
         if live_systemctl:
@@ -2321,6 +2479,8 @@ def _apply_service_drift(
         "enabled_services": enabled_services,
         "started_services": started_services,
         "restarted_timers": restarted_timers,
+        "preserved_activation_units": sorted(preserved_activation),
+        "deferred_restart_units": deferred_restart_units,
         "retired_units": retired_units,
         "profile_written": profile_written,
     }

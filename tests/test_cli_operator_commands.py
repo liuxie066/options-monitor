@@ -1586,6 +1586,8 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
         str(runtime),
         "--target-version",
         "1.2.70",
+        "--no-restart-services",
+        "--preserve-activation-state",
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.apply"
 
@@ -1598,6 +1600,8 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
         str(runtime),
         "--to-version",
         "1.2.69",
+        "--no-restart-services",
+        "--preserve-activation-state",
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.rollback"
 
@@ -1617,9 +1621,13 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert calls[2][1]["runtime_root"] == str(runtime)
     assert calls[2][1]["target_version"] == "1.2.70"
     assert calls[2][1]["confirm"] is False
+    assert calls[2][1]["restart_services"] is False
+    assert calls[2][1]["preserve_activation_state"] is True
     assert calls[3][0] == "rollback"
     assert calls[3][1]["to_version"] == "1.2.69"
     assert calls[3][1]["confirm"] is False
+    assert calls[3][1]["restart_services"] is False
+    assert calls[3][1]["preserve_activation_state"] is True
 
 
 def test_service_upgrade_compat_commands_are_removed(capsys) -> None:

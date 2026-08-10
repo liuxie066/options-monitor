@@ -226,7 +226,22 @@ def add_service_update_commands(subparsers: Any) -> None:
     update_apply.add_argument("--allow-major", action="store_true")
     update_apply.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
     update_apply.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    update_apply.add_argument("--no-restart-services", action="store_true")
+    update_apply.add_argument(
+        "--no-restart-services",
+        action="store_true",
+        help=(
+            "skip long-running service restart and health checks; timer drift "
+            "is still repaired unless --preserve-activation-state is set"
+        ),
+    )
+    update_apply.add_argument(
+        "--preserve-activation-state",
+        action="store_true",
+        help=(
+            "preserve pre-existing inactive, disabled, or masked systemd timers "
+            "during service reconcile"
+        ),
+    )
     update_apply.add_argument(
         "--cleanup-after-upgrade",
         action="store_true",
@@ -240,7 +255,22 @@ def add_service_update_commands(subparsers: Any) -> None:
     update_rollback.add_argument("--to-version", default=None)
     update_rollback.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
     update_rollback.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    update_rollback.add_argument("--no-restart-services", action="store_true")
+    update_rollback.add_argument(
+        "--no-restart-services",
+        action="store_true",
+        help=(
+            "skip long-running service restart and health checks; timer drift "
+            "is still repaired unless --preserve-activation-state is set"
+        ),
+    )
+    update_rollback.add_argument(
+        "--preserve-activation-state",
+        action="store_true",
+        help=(
+            "preserve pre-existing inactive, disabled, or masked systemd timers "
+            "during service reconcile"
+        ),
+    )
 
 
 def _confirmed(args: argparse.Namespace) -> bool:
@@ -440,6 +470,7 @@ def handle_service_update_command(
             auto=bool(args.auto),
             allow_major=bool(args.allow_major),
             restart_services=not bool(args.no_restart_services),
+            preserve_activation_state=bool(args.preserve_activation_state),
             cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
             cleanup_keep_releases=args.cleanup_keep_releases,
         )
@@ -455,6 +486,7 @@ def handle_service_update_command(
             to_version=args.to_version,
             confirm=confirmed,
             restart_services=not bool(args.no_restart_services),
+            preserve_activation_state=bool(args.preserve_activation_state),
         )
         data = _service_write_contract(data, confirmed=confirmed, rollback_hint="./om update apply --confirm")
         return build_response(tool_name="update.rollback", ok=bool(data.get("ok")), data=data)
