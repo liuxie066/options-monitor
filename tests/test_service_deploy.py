@@ -1963,6 +1963,112 @@ def test_service_drift_repairs_enabled_but_inactive_expected_timer(tmp_path: Pat
     assert ["systemctl", "enable", "--now", target] in calls
 
 
+def test_service_drift_preserves_paused_timer_while_updating_definition(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import (
+        SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+        service_drift,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    target = "options-monitor-tick-hk.timer"
+    other_inactive = "options-monitor-projection-verify.timer"
+    expected_target_content = next(
+        item["content"]
+        for item in bundle["files"]
+        if Path(str(item.get("install_path") or "")).name == target
+    )
+    target_path = systemd_root / target
+    target_path.write_text("stale timer definition\n", encoding="utf-8")
+    active_states = {target: "inactive", other_inactive: "inactive"}
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[-2:] in (
+            ["is-enabled", target],
+            ["is-enabled", other_inactive],
+        ):
+            return subprocess.CompletedProcess(
+                command, 0, stdout="enabled\n", stderr=""
+            )
+        if len(command) >= 2 and command[-2] == "is-active" and command[-1] in active_states:
+            state = active_states[command[-1]]
+            return subprocess.CompletedProcess(
+                command,
+                0 if state == "active" else 3,
+                stdout=f"{state}\n",
+                stderr="",
+            )
+        if command[-3:] == ["enable", "--now", other_inactive]:
+            active_states[other_inactive] = "active"
+        if len(command) >= 2 and command[-2] == "is-active":
+            return subprocess.CompletedProcess(
+                command, 0, stdout="active\n", stderr=""
+            )
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(
+                command, 0, stdout="success\n", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            command, 0, stdout="enabled\n", stderr=""
+        )
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        activation_policy=SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+        preserved_activation_states={
+            target: {
+                "activation_state": "enabled",
+                "active_state": "inactive",
+            }
+        },
+        run_cmd=_run_cmd,
+    )
+
+    assert out["before"]["observed_activation_drift_units"] == sorted(
+        [other_inactive, target]
+    )
+    assert out["before"]["activation_drift_units"] == [other_inactive]
+    assert out["before"]["preserved_activation_units"] == [target]
+    assert out["active_states"][target] == "inactive"
+    assert out["activation_drift_units"] == []
+    assert out["preserved_activation_units"] == [target]
+    assert out["summary"]["status"] == "warn"
+    assert out["applied"]["deferred_restart_units"] == [target]
+    assert target_path.read_text(encoding="utf-8") == expected_target_content
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", other_inactive] in calls
+    assert ["systemctl", "enable", "--now", target] not in calls
+    assert ["systemctl", "start", target] not in calls
+    assert ["systemctl", "restart", target] not in calls
+    assert ["systemctl", "unmask", target] not in calls
+
+
 def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
@@ -3707,6 +3813,208 @@ def test_service_status_from_profile_can_check_systemd_enabled_state() -> None:
         ["systemctl", "is-active", "options-monitor-wechat-clawbot.service"],
         ["systemctl", "is-enabled", "options-monitor-wechat-clawbot.service"],
     ]
+
+
+def test_upgrade_activation_snapshot_captures_only_preexisting_paused_timers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    observed_calls: list[dict[str, object]] = []
+
+    def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
+        observed_calls.append(dict(kwargs))
+        return {
+            "activation_states": {
+                "options-monitor-tick-hk.timer": "enabled",
+                "options-monitor-tick-us.timer": "enabled",
+                "options-monitor-quality-refresh.timer": "disabled",
+                "options-monitor-feishu-agent-credential.service": "disabled",
+            },
+            "active_states": {
+                "options-monitor-tick-hk.timer": "inactive",
+                "options-monitor-tick-us.timer": "active",
+                "options-monitor-quality-refresh.timer": "unknown",
+            },
+        }
+
+    monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
+
+    snapshot = service_upgrade_module._capture_preserved_timer_activation_states(
+        repo_root=tmp_path / "current",
+        runtime_root=tmp_path / "runtime",
+        profile={"service_provider": "systemd"},
+        run_cmd=lambda *_args, **_kwargs: None,
+    )
+
+    assert snapshot == {
+        "options-monitor-quality-refresh.timer": {
+            "activation_state": "disabled",
+        },
+        "options-monitor-tick-hk.timer": {
+            "activation_state": "enabled",
+            "active_state": "inactive",
+        },
+    }
+    assert observed_calls[0]["confirm"] is False
+
+
+def test_upgrade_activation_snapshot_fails_closed_when_timer_state_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    target = "options-monitor-tick-hk.timer"
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "service_drift",
+        lambda **_kwargs: {
+            "checked": True,
+            "supported": True,
+            "expected_services": [target],
+            "installed_units": [target],
+            "activation_states": {target: "enabled"},
+            "active_states": {target: "unknown"},
+        },
+    )
+
+    with pytest.raises(
+        service_upgrade_module.ServiceTransitionError,
+        match="could not determine whether managed timers were active",
+    ) as exc_info:
+        service_upgrade_module._capture_preserved_timer_activation_states(
+            repo_root=tmp_path / "current",
+            runtime_root=tmp_path / "runtime",
+            profile={"service_provider": "systemd"},
+            run_cmd=lambda *_args, **_kwargs: None,
+        )
+
+    assert exc_info.value.status == "service_activation_snapshot_failed"
+    assert target in exc_info.value.remediation[0]
+
+
+def test_service_upgrade_reuses_paused_timer_snapshot_for_compensation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    _write_upgrade_release_skeleton(v101, "1.0.1")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    target = "options-monitor-tick-hk.timer"
+    profile = {
+        "service_provider": "systemd",
+        "services": [{"name": target}],
+    }
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile), encoding="utf-8"
+    )
+    drift_calls: list[dict[str, object]] = []
+
+    def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
+        drift_calls.append(dict(kwargs))
+        if not kwargs.get("confirm"):
+            return {
+                "activation_states": {target: "enabled"},
+                "active_states": {target: "inactive"},
+            }
+        confirmed_count = sum(bool(item.get("confirm")) for item in drift_calls)
+        if confirmed_count == 1:
+            return {
+                "summary": {"status": "error"},
+                "manual_actions": ["repair service reconcile"],
+            }
+        return {"summary": {"status": "ok"}, "manual_actions": []}
+
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "service_upgrade_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "latest_version": "1.0.1",
+            "release_tag": "v1.0.1",
+        },
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_materialize_release_from_git_cache",
+        lambda **_kwargs: {"status": "reused", "target_dir": str(v101)},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_ensure_release_runtime",
+        lambda **_kwargs: {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module, "_run_required", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_prepare_runtime_configs_for_release",
+        lambda **_kwargs: {"status": "prepared"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_commit_prepared_runtime_configs",
+        lambda **_kwargs: {"status": "committed"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_validate_committed_runtime_configs",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_restore_committed_runtime_configs",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "restored",
+            "restored": [],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
+
+    out = service_upgrade_module.service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+        preserve_activation_state=True,
+        run_cmd=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout="", stderr=""
+        ),
+    )
+
+    expected_snapshot = {
+        target: {
+            "activation_state": "enabled",
+            "active_state": "inactive",
+        }
+    }
+    confirmed_calls = [item for item in drift_calls if item.get("confirm")]
+    assert out["status"] == "upgrade_failed_rolled_back"
+    assert out["rolled_back"] is True
+    assert current.resolve() == v100.resolve()
+    assert out["activation_policy"] == "preserve-existing"
+    assert out["preserved_activation_units"] == [target]
+    assert len(confirmed_calls) == 2
+    assert all(
+        item["activation_policy"] == "preserve-existing"
+        and item["preserved_activation_states"] == expected_snapshot
+        for item in confirmed_calls
+    )
 
 
 @pytest.mark.parametrize("auto", [False, True])
@@ -5850,6 +6158,89 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     assert not downloads.exists()
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["post_upgrade_cleanup"]["status"] == "cleaned"
+
+
+def test_service_rollback_preserves_paused_timer_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    _write_upgrade_release_skeleton(v101, "1.0.1")
+    current = install / "current"
+    current.symlink_to(v101, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    target = "options-monitor-tick-hk.timer"
+    profile = {
+        "service_provider": "systemd",
+        "services": [{"name": target}],
+    }
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile), encoding="utf-8"
+    )
+    drift_calls: list[dict[str, object]] = []
+
+    def _service_drift(**kwargs):  # type: ignore[no-untyped-def]
+        drift_calls.append(dict(kwargs))
+        if not kwargs.get("confirm"):
+            return {
+                "activation_states": {target: "enabled"},
+                "active_states": {target: "inactive"},
+            }
+        return {
+            "summary": {"status": "warn"},
+            "preserved_activation_units": [target],
+        }
+
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_prepare_runtime_configs_for_release",
+        lambda **_kwargs: {"status": "prepared"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_commit_prepared_runtime_configs",
+        lambda **_kwargs: {"status": "committed"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_validate_committed_runtime_configs",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
+
+    out = service_upgrade_module.service_rollback(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        to_version="1.0.0",
+        confirm=True,
+        restart_services=False,
+        preserve_activation_state=True,
+        run_cmd=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout="", stderr=""
+        ),
+    )
+
+    confirmed_calls = [item for item in drift_calls if item.get("confirm")]
+    assert out["status"] == "rolled_back"
+    assert current.resolve() == v100.resolve()
+    assert out["activation_policy"] == "preserve-existing"
+    assert out["preserved_activation_units"] == [target]
+    assert len(confirmed_calls) == 1
+    assert confirmed_calls[0]["activation_policy"] == "preserve-existing"
+    assert confirmed_calls[0]["preserved_activation_states"] == {
+        target: {
+            "activation_state": "enabled",
+            "active_state": "inactive",
+        }
+    }
 
 
 def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:

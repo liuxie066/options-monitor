@@ -833,6 +833,9 @@ def _upgrade_defaults(arguments: dict[str, Any]) -> dict[str, Any]:
         "auto": True,
         "allow_major": bool(arguments.get("allow_major", False)),
         "restart_services": not bool(arguments.get("no_restart_services", False)),
+        "preserve_activation_state": bool(
+            arguments.get("preserve_activation_state", False)
+        ),
         "cleanup_after_upgrade": bool(arguments.get("cleanup_after_upgrade", False)),
         "cleanup_keep_releases": int(arguments.get("cleanup_keep_releases") or 2),
     }
@@ -889,6 +892,14 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
         "auto": True,
         "confirmed": False,
         "allow_major": bool(args.get("allow_major", False)),
+        "activation_policy": (
+            "preserve-existing"
+            if bool(args.get("preserve_activation_state", False))
+            else "ensure-active"
+        ),
+        "preserve_activation_state": bool(
+            args.get("preserve_activation_state", False)
+        ),
         "cleanup_after_upgrade": bool(args.get("cleanup_after_upgrade", False)),
         "cleanup_keep_releases": int(args.get("cleanup_keep_releases") or 2),
         "version_check": check,
@@ -924,6 +935,11 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
         f"validate {target_dir}",
         f"switch {repo_root} -> {target_dir}",
         "reconcile service drift from current release",
+        (
+            "preserve pre-existing paused timer activation state"
+            if bool(args.get("preserve_activation_state", False))
+            else "repair expected timer activation drift"
+        ),
         "restart long-running services" if bool(args.get("restart_services", True)) else "skip service restart",
     ]
     if bool(args.get("cleanup_after_upgrade", False)):
