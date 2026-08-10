@@ -15,6 +15,32 @@ def test_apply_prefilters_disables_sell_call_without_portfolio_context() -> None
         portfolio_ctx=None,
     )
     assert pf.want_call is False
+    assert pf.call_skip_reason == "covered_call_portfolio_context_unavailable"
+
+
+def test_apply_prefilters_treats_shared_symbol_without_account_holding_as_benign() -> None:
+    pf = apply_prefilters(
+        symbol="3690.HK",
+        sp={"enabled": False},
+        cc={"enabled": True},
+        want_put=False,
+        want_call=True,
+        portfolio_ctx={
+            "portfolio_source_name": "futu",
+            "stocks_by_symbol": {
+                "0700.HK": {
+                    "symbol": "0700.HK",
+                    "shares": 100,
+                    "avg_cost": 470.0,
+                    "currency": "HKD",
+                }
+            },
+        },
+    )
+
+    assert pf.want_call is False
+    assert pf.stock is None
+    assert pf.call_skip_reason == "covered_call_underlying_not_held"
 
 
 def test_apply_prefilters_keeps_sell_call_with_futu_portfolio_stock() -> None:
@@ -35,6 +61,7 @@ def test_apply_prefilters_keeps_sell_call_with_futu_portfolio_stock() -> None:
     assert pf.stock is not None
     assert pf.stock['shares'] == 200
     assert pf.stock['avg_cost'] == 100.0
+    assert pf.call_skip_reason is None
 
 
 @pytest.mark.parametrize(

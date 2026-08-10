@@ -146,7 +146,10 @@ def _stock_value_cny(
         converted = amount_to_cny(price * shares, ccy, exchange_rate_converter=exchange_rate_converter)
         return converted, "market_price", None if converted is not None else f"stock_price_fx_missing:{symbol}:{ccy}"
 
-    avg_cost = _first_float(stock, "avg_cost", "cost_price", "average_cost")
+    # ``avg_cost`` is strictly average acquisition cost.  Do not accept
+    # OpenD ``cost_price`` here because securities accounts define it as
+    # diluted cost.
+    avg_cost = _first_float(stock, "avg_cost", "average_cost")
     if avg_cost is not None and avg_cost > 0:
         converted = amount_to_cny(avg_cost * shares, ccy, exchange_rate_converter=exchange_rate_converter)
         return converted, "avg_cost", None if converted is not None else f"stock_avg_cost_fx_missing:{symbol}:{ccy}"

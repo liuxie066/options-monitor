@@ -222,7 +222,7 @@ net_assignment_discount_pct = (spot - breakeven) / spot
 ### 6.1 strike 底线与召回窗口
 
 ```text
-sale_floor = max(configured_min_strike, opend_avg_cost * 1.02)
+sale_floor = max(configured_min_strike, opend_average_cost * 1.02)
 recall_min = max(sale_floor, live_opend_spot)
 recall_max = recall_min * 1.20
 ```
@@ -236,7 +236,9 @@ recall_max = min(configured_max_strike, recall_min * 1.20)
 - 保持现有 DTE 配置窗口。
 - spot 缺失时 fail closed。
 - `recall_max < recall_min` 表示当前没有可行窗口，返回等待，不改写边界。
-- 成本只认同一物理账户、同一 symbol 的 OpenD `avg_cost`，不跨账户平均。
+- OM `avg_cost` 的唯一定义是平均成本价，直接映射同一物理账户、同一 symbol 的 OpenD `average_cost`。
+- OpenD `cost_price` / `diluted_cost` 是摊薄成本口径，不得写入或回退为 OM `avg_cost`。
+- OpenD `average_cost` 缺失时成本上下文 fail closed；不跨账户平均。
 
 ### 6.2 收益口径
 
@@ -253,7 +255,9 @@ annualized_net_premium_return = period_net_premium_return * 365 / DTE
 
 ### 6.3 覆盖能力
 
-- 持仓事实来自同一物理 Futu 账户的 OpenD `qty`、`can_sell_qty`、`avg_cost` 和 currency。
+- 持仓事实来自同一物理 Futu 账户的 OpenD `qty`、`can_sell_qty`、`average_cost` 和 currency；其中 `average_cost` 映射为 OM `avg_cost`。
+- symbol 配置可以在多账户间共用；当前账户未持有该 symbol 时，该 Covered Call scope 以 `covered_call_underlying_not_held` 正常跳过，不会将其他已完成 scope 降级为 `data_unavailable`。
+- 若当前账户的 Covered Call scope 全部因未持股而跳过，账户级结果是合法的 `no_candidate`；持仓上下文缺失或损坏仍为 `data_unavailable`。
 - 已开放 Short Call 的股票锁定来自权威 SQLite option-position ledger。
 - OpenD 持仓与 SQLite short-call 锁定无法一致解释时 fail closed。
 - 不跨账户借用股票，也不默认 multiplier。

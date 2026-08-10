@@ -126,6 +126,32 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert risk.unavailable_reasons == ()
 
 
+def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() -> None:
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    risk = build_portfolio_risk_context(
+        portfolio_ctx={
+            "cash_by_currency": {},
+            "stocks_by_symbol": {
+                "0883.HK": {
+                    "symbol": "0883.HK",
+                    "shares": 1000,
+                    "cost_price": 6.6,
+                    "currency": "HKD",
+                }
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(cny_per_hkd=0.92)
+        ),
+    )
+
+    assert risk.stock_value_cny_by_symbol == {}
+    assert risk.unavailable_reasons == ("stock_value_missing:0883.HK",)
+    assert risk.warnings == ()
+
+
 def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

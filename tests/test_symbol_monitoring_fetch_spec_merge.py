@@ -1244,3 +1244,93 @@ def test_sell_call_not_applicable_does_not_touch_historical_call_artifacts(
 
     assert stale_path.read_text(encoding="utf-8") == "stale\n1\n"
     assert out[-1]["strategy"] == "sell_call"
+
+
+def test_sell_call_shared_symbol_without_holding_reports_benign_scope_reason(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.symbol_monitoring as mod
+    from src.application.prefilters import apply_prefilters
+
+    capture_statuses: list[dict] = []
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=apply_prefilters,
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: None,
+        run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("sell_put must stay disabled")
+        ),
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {
+            "strategy": "sell_put",
+            "count": 0,
+        },
+        run_sell_call_scan_fn=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("covered_call must be skipped without holdings")
+        ),
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {
+            "strategy": "sell_call",
+            "count": 0,
+        },
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
+            "strategy": "combo_yield",
+            "count": 0,
+        },
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
+    )
+
+    mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "3690.HK",
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": True},
+            },
+            top_n=3,
+            portfolio_ctx={
+                "portfolio_source_name": "futu",
+                "stocks_by_symbol": {
+                    "0700.HK": {
+                        "symbol": "0700.HK",
+                        "shares": 100,
+                        "avg_cost": 470.0,
+                        "currency": "HKD",
+                    }
+                },
+            },
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+            candidate_capture_status_sink_fn=capture_statuses.append,
+        ),
+        deps=deps,
+    )
+
+    assert capture_statuses == [
+        {
+            "symbol": "3690.HK",
+            "strategy_mode": "call",
+            "status": "not_applicable",
+            "reason": "covered_call_underlying_not_held",
+            "quote_snapshot_id": None,
+            "quote_receipt_relpath": None,
+        }
+    ]
