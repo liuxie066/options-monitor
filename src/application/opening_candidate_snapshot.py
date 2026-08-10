@@ -41,6 +41,19 @@ STRATEGY_STATUSES = frozenset(
         "not_applicable",
     }
 )
+_CLEAN_NO_CANDIDATE_REASONS = frozenset(
+    {
+        "no_candidate",
+        "market_closed",
+        "no_expirations",
+        "no_contract_rows",
+        "covered_call_underlying_not_held",
+        "",
+    }
+)
+_BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS = frozenset(
+    {"covered_call_underlying_not_held"}
+)
 
 
 class OpeningCandidateSnapshotError(RuntimeError):
@@ -721,14 +734,16 @@ def _strategy_results(
             if str(item.get("reason") or "")
         }
         if values == {"not_applicable"}:
-            status = "not_applicable"
-        elif values <= {"completed", "not_applicable"} and reasons <= {
-            "no_candidate",
-            "market_closed",
-            "no_expirations",
-            "no_contract_rows",
-            "",
-        }:
+            status = (
+                "no_candidate"
+                if reasons
+                and reasons <= _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS
+                else "not_applicable"
+            )
+        elif (
+            values <= {"completed", "not_applicable"}
+            and reasons <= _CLEAN_NO_CANDIDATE_REASONS
+        ):
             status = "candidates_found" if counts else "no_candidate"
         elif values <= {"completed", "not_applicable"} and reasons == {
             "partial_data"

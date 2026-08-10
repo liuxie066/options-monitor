@@ -29,6 +29,7 @@ class _PrefilterResultLike(Protocol):
     sp: dict[str, Any]
     cc: dict[str, Any]
     stock: dict[str, Any] | None
+    call_skip_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,9 @@ def run_symbol_monitoring(
         (yield_enhancement_policy.config or {}).get("variant") or "sp_lc"
     ).strip().lower()
     stock = prefilters.stock
+    call_skip_reason = str(
+        getattr(prefilters, "call_skip_reason", None) or ""
+    ).strip() or None
     if want_call and isinstance(stock, dict):
         effective_min_strike = resolve_effective_sell_call_min_strike(
             min_strike=cc.get("min_strike"),
@@ -770,7 +774,10 @@ def run_symbol_monitoring(
             _report_capture(
                 strategy_mode="call",
                 status="not_applicable",
-                reason="covered_call_prefilter_not_applicable",
+                reason=(
+                    call_skip_reason
+                    or "covered_call_prefilter_not_applicable"
+                ),
             )
 
     return summary_rows

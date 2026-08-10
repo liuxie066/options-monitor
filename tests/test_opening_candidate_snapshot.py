@@ -306,6 +306,145 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
     assert function["events"][0]["is_rejection"] is False
 
 
+@pytest.mark.parametrize(
+    ("run_id", "call_statuses"),
+    [
+        (
+            "run-shared-call-all-unheld",
+            [
+                {
+                    "symbol": "3690.HK",
+                    "strategy_mode": "call",
+                    "status": "not_applicable",
+                    "reason": "covered_call_underlying_not_held",
+                }
+            ],
+        ),
+        (
+            "run-shared-call-mixed",
+            [
+                {
+                    "symbol": "0700.HK",
+                    "strategy_mode": "call",
+                    "status": "completed",
+                    "reason": "no_candidate",
+                },
+                {
+                    "symbol": "3690.HK",
+                    "strategy_mode": "call",
+                    "status": "not_applicable",
+                    "reason": "covered_call_underlying_not_held",
+                },
+                {
+                    "symbol": "9992.HK",
+                    "strategy_mode": "call",
+                    "status": "completed",
+                    "reason": "no_candidate",
+                },
+            ],
+        ),
+    ],
+)
+def test_shared_config_call_without_account_holding_is_a_legal_zero_candidate(
+    tmp_path: Path,
+    run_id: str,
+    call_statuses: list[dict],
+) -> None:
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id=run_id,
+        account="sy",
+        market="HK",
+        physical_account={
+            "status": "available",
+            "logical_account": "sy",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "HK",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, run_id, "sy"),
+        scan_statuses=[
+            {
+                "symbol": "0700.HK",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason": "no_candidate",
+            },
+            *call_statuses,
+        ],
+        final_candidates={"put": [], "call": []},
+        sealed_at=NOW,
+    )
+
+    assert payload["opening_status"] == "no_candidate"
+    assert {
+        row["strategy_mode"]: row["strategy_status"]
+        for row in payload["strategy_results"]
+    } == {"call": "no_candidate", "put": "no_candidate"}
+    unheld_scope = next(
+        row
+        for row in payload["scope_results"]
+        if row["symbol"] == "3690.HK" and row["strategy_mode"] == "call"
+    )
+    assert unheld_scope["status"] == "not_applicable"
+    assert unheld_scope["reason_code"] == "covered_call_underlying_not_held"
+
+
+def test_missing_call_portfolio_context_remains_data_unavailable(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-shared-call-context-unavailable"
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id=run_id,
+        account="sy",
+        market="HK",
+        physical_account={
+            "status": "available",
+            "logical_account": "sy",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "HK",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, run_id, "sy"),
+        scan_statuses=[
+            {
+                "symbol": "0700.HK",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason": "no_candidate",
+            },
+            {
+                "symbol": "0700.HK",
+                "strategy_mode": "call",
+                "status": "completed",
+                "reason": "no_candidate",
+            },
+            {
+                "symbol": "3690.HK",
+                "strategy_mode": "call",
+                "status": "not_applicable",
+                "reason": "covered_call_portfolio_context_unavailable",
+            },
+        ],
+        final_candidates={"put": [], "call": []},
+        sealed_at=NOW,
+    )
+
+    results = {
+        row["strategy_mode"]: row["strategy_status"]
+        for row in payload["strategy_results"]
+    }
+    assert payload["opening_status"] == "partial_data"
+    assert results == {"call": "data_unavailable", "put": "no_candidate"}
+
+
 def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     tmp_path: Path,
 ) -> None:

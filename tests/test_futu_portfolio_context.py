@@ -159,8 +159,8 @@ def test_build_futu_portfolio_context_merges_explicit_cash_and_fund_assets_and_n
             {"currency": "USD", "us_cash": 1000},
         ],
         position_rows=[
-            {"code": "US.NVDA", "qty": 100, "can_sell_qty": 80, "cost_price": 120, "currency": "USD", "stock_name": "NVIDIA"},
-            {"code": "HK.00700", "qty": 200, "can_sell_qty": 200, "cost_price": 380, "currency": "港币", "stock_name": "Tencent"},
+            {"code": "US.NVDA", "qty": 100, "can_sell_qty": 80, "average_cost": 120, "currency": "USD", "stock_name": "NVIDIA"},
+            {"code": "HK.00700", "qty": 200, "can_sell_qty": 200, "average_cost": 380, "currency": "港币", "stock_name": "Tencent"},
         ],
         account=" LX ",
         market="富途",
@@ -191,8 +191,8 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
     out = build_futu_portfolio_context(
         balance_rows=[],
         position_rows=[
-            {"code": "HK.09992", "qty": 100, "can_sell_qty": 80, "cost_price": 120, "currency": "HKD", "stock_name": "Pop Mart"},
-            {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "cost_price": 125, "currency": "HKD"},
+            {"code": "HK.09992", "qty": 100, "can_sell_qty": 80, "average_cost": 120, "currency": "HKD", "stock_name": "Pop Mart"},
+            {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "average_cost": 125, "currency": "HKD"},
         ],
         account="lx",
         market="富途",
@@ -205,14 +205,69 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
     assert out["stocks_by_symbol"]["9992.HK"]["currency"] == "HKD"
 
 
+def test_build_futu_portfolio_context_maps_average_cost_not_diluted_cost() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {
+                "code": "HK.00883",
+                "qty": 1000,
+                "can_sell_qty": 1000,
+                "average_cost": 18.153,
+                "cost_price": -6.6,
+                "diluted_cost": -6.6,
+                "currency": "HKD",
+            }
+        ],
+        account="sy",
+        market="富途",
+        base_currency="CNY",
+    )
+
+    stock = out["stocks_by_symbol"]["0883.HK"]
+    assert stock["avg_cost"] == pytest.approx(18.153)
+    assert stock["cost_basis_complete"] is True
+    assert stock["cost_known_shares"] == 1000
+    assert stock["cost_unknown_shares"] == 0
+
+
+def test_build_futu_portfolio_context_does_not_treat_diluted_cost_as_average_cost() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {
+                "code": "HK.00883",
+                "qty": 1000,
+                "can_sell_qty": 1000,
+                "cost_price": -6.6,
+                "diluted_cost": -6.6,
+                "currency": "HKD",
+            }
+        ],
+        account="sy",
+        market="富途",
+        base_currency="CNY",
+    )
+
+    stock = out["stocks_by_symbol"]["0883.HK"]
+    assert stock["avg_cost"] is None
+    assert stock["cost_basis_complete"] is False
+    assert stock["cost_known_shares"] == 0
+    assert stock["cost_unknown_shares"] == 1000
+
+
 def test_build_futu_portfolio_context_does_not_apply_partial_cost_basis_to_all_shares() -> None:
     from src.application.futu_portfolio_context import build_futu_portfolio_context
 
     out = build_futu_portfolio_context(
         balance_rows=[],
         position_rows=[
-            {"code": "US.NVDA", "qty": 50, "cost_price": 100, "currency": "USD"},
-            {"code": "US.NVDA", "qty": 50, "cost_price": None, "currency": "USD"},
+            {"code": "US.NVDA", "qty": 50, "average_cost": 100, "currency": "USD"},
+            {"code": "US.NVDA", "qty": 50, "average_cost": None, "currency": "USD"},
         ],
         account="lx",
         market="富途",
@@ -255,7 +310,7 @@ def test_mixed_ordinary_and_assigned_shares_remain_unallocated_for_wheel_return(
                 "code": "US.NVDA",
                 "qty": 100,
                 "can_sell_qty": 100,
-                "cost_price": 90,
+                "average_cost": 90,
                 "currency": "USD",
                 "holding_origin": "ordinary",
             },
@@ -263,7 +318,7 @@ def test_mixed_ordinary_and_assigned_shares_remain_unallocated_for_wheel_return(
                 "code": "US.NVDA",
                 "qty": 100,
                 "can_sell_qty": 100,
-                "cost_price": 110,
+                "average_cost": 110,
                 "currency": "USD",
                 "holding_origin": "sell_put_assignment",
             },
@@ -389,11 +444,11 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
             self.position_calls.append(acc_id)
             if acc_id == int(FAKE_FUTU_ACC_ID_LX_PRIMARY):
                 return [
-                    {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD"},
+                    {"code": "US.NVDA", "qty": 100, "average_cost": 120, "currency": "USD"},
                 ]
             if acc_id == int(FAKE_FUTU_ACC_ID_LX_SECONDARY):
                 return [
-                    {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD"},
+                    {"code": "US.AAPL", "qty": 100, "average_cost": 180, "currency": "USD"},
                 ]
             return []
 
@@ -473,7 +528,7 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
 
         def get_positions(self, **kwargs):
             captured["positions"].append(dict(kwargs))
-            return [{"code": "US.NVDA", "qty": 10, "cost_price": 120, "currency": "USD"}]
+            return [{"code": "US.NVDA", "qty": 10, "average_cost": 120, "currency": "USD"}]
 
         def close(self):
             return None
@@ -564,9 +619,9 @@ def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> 
     out = build_futu_portfolio_context(
         balance_rows=[],
         position_rows=[
-            {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD", "position_side": "LONG", "sec_type": "STOCK"},
-            {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD", "position_side": "SHORT", "sec_type": "STOCK"},
-            {"code": "US.TSLA", "qty": 50, "cost_price": 200, "currency": "USD", "sec_type": "DRVT"},
+            {"code": "US.NVDA", "qty": 100, "average_cost": 120, "currency": "USD", "position_side": "LONG", "sec_type": "STOCK"},
+            {"code": "US.AAPL", "qty": 100, "average_cost": 180, "currency": "USD", "position_side": "SHORT", "sec_type": "STOCK"},
+            {"code": "US.TSLA", "qty": 50, "average_cost": 200, "currency": "USD", "sec_type": "DRVT"},
             {"code": "US.AAPL250117C00175000", "qty": 1, "cost_price": 5, "currency": "USD"},
             {"code": "US.PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "stock_name": "PDD 260626 91.00C"},
             {"symbol": "PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "name": "PDD 260626 91.00C"},
