@@ -16,13 +16,13 @@
 
 `insurance_underwriting` 是 Sell Put / Covered Call 唯一的新开仓策略语义，不是整个开仓域的统一策略。新开仓配置不再接受 `return_first` 或 `short_vol`，也不再接受会改变正式排序的 `score_weights`。
 
-这次收敛只改变新开仓机会推荐。历史持仓、历史 artifact、Shadow Replay 和 Close Advice 仍可解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Combo Yield 开仓策略独立成型；Combo Yield 持仓侧退出语义后续单独处理。
+历史 artifact 和 Shadow Replay 可为离线开仓研究解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Close Advice 不读取这些 thesis，只使用固定 `strict_profit_capture.v1`。Combo Yield 仍只有独立开仓策略，不定义组合级退出动作。
 
 | Strategy Family | Opening Profile | Close Profile | Status |
 |---|---|---|---|
-| Sell Put | `insurance_underwriting` | `sell_put_short_vol`；历史 `sell_put_return_first` 兼容 | active |
-| Covered Call | `insurance_underwriting` | `covered_call_short_vol`；历史 `covered_call_return_first` 兼容 | active |
-| Combo Yield | Combo Yield funding / participation | pending combo close design | opening strategy refactored |
+| Sell Put | `insurance_underwriting` | `strict_profit_capture.v1` | active |
+| Covered Call | `insurance_underwriting` | `strict_profit_capture.v1` | active |
+| Combo Yield | Combo Yield funding / participation | 无组合级退出；short 腿仅按严格策略独立评估 | opening strategy active |
 
 ## 通用流水线
 
@@ -148,7 +148,7 @@ period_net_return = combo_net_credit / cash_required
 
 因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
 
-Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent、Daily Brief 与 Position Advice 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
+Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent 与 Daily Brief 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
 
 ### 候选身份、成交意图与回执
 
@@ -233,13 +233,12 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 
 - 开仓扫描证据使用 `scan_strategy_profile`，Sell Put / Covered Call 的承保扫描记录为 `insurance_underwriting`。
 - 历史 `enrich_and_filter_*_short_vol` 开仓别名及对应配置包装已移除，当前开仓只有 underwriting 入口。
-- Close Advice 继续读取历史 `short_vol` thesis 字段；兼容解析由 `domain/domain/short_vol_assessment.py` 统一负责，当前 Sell Put / Covered Call 顶层 underwriting 字段优先。
+- 历史 `short_vol` 解析只服务离线开仓研究；Close Advice 不消费该配置、字段或结论。
 - 开仓 underwriting 不再请求全局 path-risk / concentration context；只有明确声明 `scan_uses_path_risk` 的策略才应加载该上下文。
 
 不在本轮实现：
 
 - 修改生产 `config.yaml` / `config.us.json` / `config.hk.json`
-- 重命名 close advice 的 short-vol thesis 字段
 - 重构 shadow replay 的历史策略画像
 - 重命名 Combo Yield 的 legacy `yield_enhancement` 文件名和持仓标记
 

@@ -14,10 +14,6 @@ from src.application.shadow_replay.evidence import (
     shadow_replay_dataset_status,
     summarize_shadow_replay_readiness,
 )
-from src.application.position_advice_promotion import (
-    build_position_advice_promotion_evidence,
-    publish_position_advice_promotion_evidence,
-)
 from src.application.shadow_replay.combo_capture import capture_combo_variants
 from src.application.shadow_replay.combo_evaluation import (
     evaluate_combo_variant_dataset,
@@ -47,7 +43,6 @@ __all__ = [
     "build_combo_pair_decisions",
     "build_combo_variant_scorecards",
     "build_shadow_replay_dataset",
-    "build_position_advice_promotion_evidence",
     "capture_combo_variants",
     "evaluate_combo_variant_pairs",
     "evaluate_combo_variant_dataset",
@@ -59,7 +54,6 @@ __all__ = [
     "mark_shadow_replay_dataset",
     "OPENING_POLICY_SHADOW_SCHEMA",
     "compare_opening_policy_shadow",
-    "publish_position_advice_promotion_evidence",
     "publish_combo_pair_facet",
     "run_shadow_replay_candidate_impact",
     "run_shadow_replay_data_plan",

@@ -288,41 +288,33 @@ CLOSE_ADVICE_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "expiration",
     "strike",
     "contracts_open",
-    "tier",
     "policy_version",
     "recommendation_state",
     "decision_basis",
     "decision_evidence_status",
-    "close_action",
     "evaluation_status",
     "quote_status",
     "reason",
-    "estimated_pnl_if_close_gross",
+    "bid",
+    "ask",
+    "close_mid",
+    "spot",
+    "multiplier",
+    "is_otm",
+    "spread_ratio",
+    "opening_net_credit",
+    "all_in_close_cost",
+    "net_capture_ratio",
+    "close_cost_ratio",
+    "remaining_term_ratio",
     "estimated_close_fee",
     "fee_calc_status",
     "fee_calc_basis",
     "estimated_pnl_if_close_net",
-    "net_close_proceeds",
-    "realized_if_close",
-    "remaining_premium",
-    "buy_to_close_fee",
-    "buy_to_close_cost",
-    "close_fee_to_remaining_premium",
-    "remaining_risk_status",
-    "remaining_stress_scenario",
-    "remaining_stress_loss",
-    "remaining_reward_to_stress_loss",
-    "replacement_annualized_return",
-    "replacement_annualized_advantage",
-    "replacement_source",
-    "continued_willingness",
-    "continued_willingness_source",
-    "close_calibration_status",
-    "close_calibration_missing",
     "dte",
+    "original_dte",
     "position_lifecycle_state",
     "strategy_family",
-    "risk_model",
 )
 
 
@@ -772,7 +764,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "safe_join_keys": ("symbol", "account"),
     },
     "close_advice_snapshot": {
-        "description": "latest close-advice rows with recommendation, action, tier, reason, quote status, and close PnL context",
+        "description": "latest strict close-advice rows with recommendation, evidence, quote quality, and all-in close economics",
         "fields": CLOSE_ADVICE_SNAPSHOT_FIELDS,
         "row_grain": "account + position_id + advice_run_id",
         "primary_keys": ("account", "position_id", "advice_run_id"),
@@ -783,8 +775,6 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
             "account",
             "symbol",
             "recommendation_state",
-            "tier",
-            "close_action",
             "evaluation_status",
             "quote_status",
         ),
@@ -2227,41 +2217,33 @@ def _close_advice_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
         "expiration": expiration,
         "strike": row.get("strike"),
         "contracts_open": row.get("contracts_open"),
-        "tier": row.get("tier"),
         "policy_version": row.get("policy_version"),
         "recommendation_state": row.get("recommendation_state"),
         "decision_basis": row.get("decision_basis"),
         "decision_evidence_status": row.get("decision_evidence_status"),
-        "close_action": row.get("close_action"),
         "evaluation_status": row.get("evaluation_status"),
         "quote_status": row.get("quote_status"),
         "reason": row.get("reason"),
-        "estimated_pnl_if_close_gross": row.get("estimated_pnl_if_close_gross"),
+        "bid": row.get("bid"),
+        "ask": row.get("ask"),
+        "close_mid": row.get("close_mid"),
+        "spot": row.get("spot"),
+        "multiplier": row.get("multiplier"),
+        "is_otm": row.get("is_otm"),
+        "spread_ratio": row.get("spread_ratio"),
+        "opening_net_credit": row.get("opening_net_credit"),
+        "all_in_close_cost": row.get("all_in_close_cost"),
+        "net_capture_ratio": row.get("net_capture_ratio"),
+        "close_cost_ratio": row.get("close_cost_ratio"),
+        "remaining_term_ratio": row.get("remaining_term_ratio"),
         "estimated_close_fee": row.get("estimated_close_fee"),
         "fee_calc_status": row.get("fee_calc_status"),
         "fee_calc_basis": row.get("fee_calc_basis"),
         "estimated_pnl_if_close_net": row.get("estimated_pnl_if_close_net"),
-        "net_close_proceeds": row.get("net_close_proceeds"),
-        "realized_if_close": row.get("realized_if_close"),
-        "remaining_premium": row.get("remaining_premium"),
-        "buy_to_close_fee": row.get("buy_to_close_fee"),
-        "buy_to_close_cost": row.get("buy_to_close_cost"),
-        "close_fee_to_remaining_premium": row.get("close_fee_to_remaining_premium"),
-        "remaining_risk_status": row.get("remaining_risk_status"),
-        "remaining_stress_scenario": row.get("remaining_stress_scenario"),
-        "remaining_stress_loss": row.get("remaining_stress_loss"),
-        "remaining_reward_to_stress_loss": row.get("remaining_reward_to_stress_loss"),
-        "replacement_annualized_return": row.get("replacement_annualized_return"),
-        "replacement_annualized_advantage": row.get("replacement_annualized_advantage"),
-        "replacement_source": row.get("replacement_source"),
-        "continued_willingness": row.get("continued_willingness"),
-        "continued_willingness_source": row.get("continued_willingness_source"),
-        "close_calibration_status": row.get("close_calibration_status"),
-        "close_calibration_missing": row.get("close_calibration_missing"),
         "dte": row.get("dte"),
+        "original_dte": row.get("original_dte"),
         "position_lifecycle_state": row.get("position_lifecycle_state"),
         "strategy_family": row.get("strategy_family"),
-        "risk_model": row.get("risk_model"),
     }
     return {field: out.get(field) for field in CLOSE_ADVICE_SNAPSHOT_FIELDS}
 
@@ -3331,8 +3313,9 @@ def _rows_represent_no_matches(rows: list[dict[str, Any]]) -> bool:
 
 
 def _close_advice_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    actions = _sorted_unique_row_values(rows, "close_action")
-    tiers = _sorted_unique_row_values(rows, "tier")
+    recommendations = _sorted_unique_row_values(
+        rows, "recommendation_state"
+    )
     return [
         {
             "view": "close_advice_snapshot",
@@ -3340,9 +3323,10 @@ def _close_advice_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[st
             "severity": "info",
             "accounts": _sorted_unique_row_values(rows, "account"),
             "symbols": _sorted_unique_row_values(rows, "symbol"),
-            "observed_actions": actions,
-            "observed_tiers": tiers,
-            "summary": _close_advice_diagnostic_summary(actions=actions, tiers=tiers),
+            "observed_recommendations": recommendations,
+            "summary": _close_advice_diagnostic_summary(
+                recommendations=recommendations
+            ),
             "answer_boundary": "recorded_close_policy_evidence_only",
         }
     ]
@@ -3570,13 +3554,16 @@ def _diagnostic_warning_summary(*, view_name: str, warning: str, status: str) ->
     return message or f"{view_name} diagnostic source is missing"
 
 
-def _close_advice_diagnostic_summary(*, actions: list[Any], tiers: list[Any]) -> str:
-    parts: list[str] = []
-    if actions:
-        parts.append("actions=" + ",".join(str(item) for item in actions[:5]))
-    if tiers:
-        parts.append("tiers=" + ",".join(str(item) for item in tiers[:5]))
-    suffix = f" ({'; '.join(parts)})" if parts else ""
+def _close_advice_diagnostic_summary(
+    *, recommendations: list[Any]
+) -> str:
+    suffix = (
+        " (recommendations="
+        + ",".join(str(item) for item in recommendations[:5])
+        + ")"
+        if recommendations
+        else ""
+    )
     return f"close-advice snapshot rows were observed{suffix}"
 
 

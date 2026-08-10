@@ -380,14 +380,6 @@ def test_run_one_account_fails_closed_when_prepared_option_context_changes_after
             PreparedOptionPositionsContextError("payload hash mismatch")
         ),
     )
-    monkeypatch.setattr(
-        env["mod"],
-        "publish_account_position_advice_sources",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Position Advice must not consume changed facts")
-        ),
-    )
-
     outcome = run_one_account(
         request=request,
         runlog=runlog,
@@ -682,38 +674,11 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
 
 
 def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import (
-        publish_current_run_portfolio_source,
-        run_one_account,
-    )
-    from src.application.position_advice_account_identity_reader import (
-        read_current_run_portfolio_identity,
-    )
+    from src.application.account_run import run_one_account
 
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
-    env["acct_state_dir"].mkdir(parents=True, exist_ok=True)
-    cfg = json.loads(
-        request.account_config_authority.canonical_bytes.decode("utf-8")
-    )
-    portfolio = publish_current_run_portfolio_source(
-        cfg=cfg,
-        account_run_id=request.run_id,
-        account=request.acct,
-        markets_to_run=request.markets_to_run,
-        account_state_dir=env["acct_state_dir"],
-        prepared_portfolio_context={
-            "filters": {"account": "lx"},
-            "portfolio_source_name": "futu",
-            "source_account_identifiers": ["lx"],
-            "source_observed_at": datetime.now(timezone.utc).isoformat(),
-            "source_observation_status": "trusted",
-        },
-    )
-    receipt_path = Path(portfolio["receipt_path"])
-    receipt_bytes = receipt_path.read_bytes()
-
     monkeypatch.setattr(
         env["mod"],
         "decide_account_scan_gate",
@@ -744,14 +709,6 @@ def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch,
     assert outcome.result.should_notify is True
     assert outcome.result.notification_text == ""
     assert outcome.result.decision_reason == "pipeline failed"
-    assert receipt_path.read_bytes() == receipt_bytes
-    assert read_current_run_portfolio_identity(
-        account_state_dir=env["acct_state_dir"],
-        account_run_id=request.run_id,
-        expected_account=request.acct,
-        expected_market="US",
-        now=datetime.now(timezone.utc),
-    )["status"] == "available"
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "error" for evt in runlog.events)
     assert any(evt["action"] == "run_pipeline_result" for evt in env["audit_events"])
 
@@ -800,7 +757,10 @@ def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypa
     assert any(evt["action"] == "write_run_account_artifacts" and evt.get("status") == "error" for evt in env["audit_events"])
 
 
-def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_does_not_notify_close_advice_diagnostics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
     request = _make_request(
@@ -846,7 +806,6 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
             "rows": 3,
             "notify_rows": 0,
             "quote_issue_rows": 2,
-            "tier_counts": {"none": 3},
             "flag_counts": {
                 "missing_quote": 1,
                 "missing_mid": 1,
@@ -866,13 +825,9 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
         fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
     )
 
-    assert "本次未生成 strong/medium 提醒" in outcome.result.notification_text
-    assert "系统异常 0 条，行情质量不足 3 条" in outcome.result.notification_text
-    assert "系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够" in outcome.result.notification_text
-    assert "spread_too_wide=1" in outcome.result.notification_text
-    assert "样例: 0700.HK put 2026-04-29 480.00P: OpenD 限频" in outcome.result.notification_text
+    assert outcome.result.notification_text == ""
     final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
-    assert final_text == outcome.result.notification_text + "\n"
+    assert final_text == "\n"
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
     assert close_events
     assert close_events[-1]["extra"]["quote_issue_rows"] == 2
@@ -945,7 +900,6 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
             "rows": 0,
             "notify_rows": 0,
             "quote_issue_rows": 0,
-            "tier_counts": {},
             "flag_counts": {
                 "required_data_snapshot_integrity_failed": 1
             },
@@ -979,28 +933,37 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
     assert close_events[-1]["status"] == "error"
 
 
-def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_reuses_validated_close_inputs_and_result_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(
-        tmp_path,
-        prefetch_done=True,
-        close_advice_enabled=True,
+    prepared_manifest = tmp_path / "prepared-option-context.manifest.json"
+    request = replace(
+        _make_request(
+            tmp_path,
+            prefetch_done=True,
+            close_advice_enabled=True,
+        ),
+        prepared_option_positions_context_manifest=prepared_manifest,
+        prepared_option_positions_context_manifest_sha256="a" * 64,
+        required_data_snapshot_sha256="b" * 64,
     )
     env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    def _write_run_account_text(base, run_id, acct, name, text):
-        target = request.accounts_root / acct / "reports" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-
-    monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", _write_run_account_text)
-
+    validated_context = {
+        "context_status": "available",
+        "open_positions_min": [],
+    }
+    monkeypatch.setattr(
+        env["mod"],
+        "load_prepared_option_positions_context",
+        lambda **_kwargs: validated_context,
+    )
     monkeypatch.setattr(
         env["mod"],
         "decide_account_scan_gate",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "run_pipeline": True,
             "ran_scan": True,
             "meaningful": True,
@@ -1009,49 +972,63 @@ def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(mon
     )
 
     def _run_pipeline_script(**kwargs):
-        report_dir = kwargs["report_dir"]
-        report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / "symbols_notification.txt").write_text("", encoding="utf-8")
+        kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
+        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
+            "candidate text\n",
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
-    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
-    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
     monkeypatch.setattr(
         env["mod"],
-        "run_close_advice",
+        "normalize_pipeline_subprocess_output",
         lambda **kwargs: {
-            "enabled": True,
-            "rows": 1,
-            "notify_rows": 0,
-            "quote_issue_rows": 1,
-            "tier_counts": {"none": 1},
-            "flag_counts": {
-                "missing_quote": 0,
-                "missing_mid": 0,
-                "required_data_missing_expiration": 0,
-                "required_data_missing_contract": 0,
-                "required_data_fetch_error": 0,
-                "opend_fetch_error": 0,
-                "opend_fetch_no_usable_quote": 0,
-                "invalid_spread": 0,
-                "spread_too_wide": 1,
-            },
-            "quote_issue_samples": ["0700.HK put 2026-04-29 480.00P: spread too wide"],
+            "returncode": kwargs["returncode"],
+            "adapter": "pipeline",
         },
     )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "ok",
+        },
+    )
+    observed: dict[str, Any] = {}
+
+    def _run_close_advice(**kwargs):
+        observed.update(kwargs)
+        (kwargs["output_dir"] / "close_advice.txt").write_text(
+            "unvalidated path text\n",
+            encoding="utf-8",
+        )
+        return {
+            "enabled": True,
+            "status": "ok",
+            "snapshot_authority": "valid",
+            "rows": 0,
+            "notify_rows": 0,
+            "quote_issue_rows": 0,
+            "flag_counts": {},
+            "notification_text": "validated result text",
+        }
+
+    monkeypatch.setattr(env["mod"], "run_close_advice", _run_close_advice)
 
     outcome = run_one_account(
         request=request,
-        runlog=runlog,
+        runlog=_FakeRunlog(),
         audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+        fail_schema_validation=lambda **_kwargs: None,
     )
 
-    assert "### [lx] 平仓建议" in outcome.result.notification_text
-    assert "本次未生成 strong/medium 提醒" in outcome.result.notification_text
-    assert "行情质量不足" not in outcome.result.notification_text
-    assert "spread_too_wide=1" not in outcome.result.notification_text
-    assert "样例:" not in outcome.result.notification_text
-    final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
-    assert final_text == outcome.result.notification_text + "\n"
+    assert observed["context_override"] == validated_context
+    assert observed["required_data_snapshot_manifest_sha256"] == "b" * 64
+    assert outcome.result.notification_text == (
+        "candidate text\n\nvalidated result text"
+    )
+    assert "unvalidated path text" not in outcome.result.notification_text

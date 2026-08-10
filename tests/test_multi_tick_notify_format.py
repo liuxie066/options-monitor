@@ -225,7 +225,7 @@ def test_compact_account_overview_does_not_count_combo_legs_as_put_or_call() -> 
     assert "Put 0 · Call 0 · 组合 1 · 平仓 0" in message
 
 
-def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
+def test_compact_account_overview_renders_only_strict_close_reminder() -> None:
     from src.application.multi_tick.misc import AccountResult
     from src.application.multi_tick.notify_format import build_account_message_compact
 
@@ -233,12 +233,11 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
         "### Covered Call\n\n"
         "🟢 Covered Call 英伟达 180C @ 06-18 | 🎯建议挂单 2.4\n"
         "- 权利金 2.4USD · 年化 12% · 44天\n\n"
-        "### [lx] 平仓建议 (0)\n"
-        "- 本次无 strong/medium 平仓建议\n"
-        "- 待补数据:\n"
-        "- 0700.HK Call 2026-07-30 520.00C · 无法评估 | 收益捕获平仓仅支持 open short put/call\n"
-        "- 0700.HK Put 2026-07-30 440.00P · 无法评估 | 价差过宽\n"
-        "- 9992.HK Call 2026-07-30 200.00C · 无法评估 | 持仓对应合约已定位，但当前未取得可用价格，暂无法评估平仓建议\n"
+        "### [lx] 严格平仓提醒\n"
+        "- NVDA Put 2026-07-30 @100.00 · 建议买回平仓\n"
+        "- 条件: 净兑现 95.0% | 平仓全成本/名义本金 0.1% | 剩余期限 50.0%\n"
+        "- 价格: 当前 ask=$0.08 | 全成本=$8.50 | 预计净锁定=$191.00\n"
+        "- 理由: 已通过 strict_profit_capture.v1\n"
     )
 
     message = build_account_message_compact(
@@ -253,39 +252,8 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
         cash_footer_lines=[],
     )
 
-    assert "Put 0 · Call 1 · 平仓 0 · 待补 1" in message
-    assert "## 持仓\n当前没有平仓建议。\n待补｜以下持仓需要补充数据" in message
-    assert "9992.HK Call 2026-07-30 200.00C · 持仓对应合约已定位，但当前未取得可用价格" in message
-    assert "0700.HK Call 2026-07-30 520.00C" not in message
-    assert "价差过宽" not in message
-    assert_mobile_flat_markdown(message)
-
-
-def test_compact_account_overview_hides_non_data_gap_count() -> None:
-    from src.application.multi_tick.misc import AccountResult
-    from src.application.multi_tick.notify_format import build_account_message_compact
-
-    notif = (
-        "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
-        "### [lx] 平仓建议 (0)\n"
-        "- 本次无 strong/medium 平仓建议\n"
-        "- 待补数据:\n"
-        "- 0700.HK Call 2026-07-30 520.00C · 无法评估 | 收益捕获平仓仅支持 open short put/call\n"
-        "- 0700.HK Put 2026-07-30 440.00P · 无法评估 | 价差过宽\n"
-    )
-
-    message = build_account_message_compact(
-        AccountResult(
-            account='lx',
-            ran_scan=True,
-            should_notify=True,
-            decision_reason='dense',
-            notification_text=notif,
-        ),
-        now_bj='2026-06-01 15:50:24',
-        cash_footer_lines=[],
-    )
-
-    assert "结论｜Put 0 · Call 0 · 平仓 0\n" in message
+    assert "Put 0 · Call 1 · 平仓 1" in message
+    assert "## 持仓\nNVDA Put 2026-07-30 @100.00 · 建议买回平仓" in message
+    assert "净兑现 95.0%" in message
     assert "待补" not in message
-    assert "价差过宽" not in message
+    assert_mobile_flat_markdown(message)

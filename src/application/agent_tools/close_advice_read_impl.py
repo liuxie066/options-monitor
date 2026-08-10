@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import csv
-from datetime import date, datetime, timezone
+from datetime import date
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.close_advice import (
     DECISION_EVIDENCE_COMPLETE,
     DECISION_EVIDENCE_NOT_EVALUABLE,
-    LEGACY_CLOSE_POLICY_VERSION,
     RECOMMENDATION_CLOSE,
     RECOMMENDATION_HOLD,
     RECOMMENDATION_NOT_EVALUABLE,
-    TIER_PRIORITY,
-    current_policy_decision_fields,
+    STRICT_CLOSE_POLICY_VERSION,
 )
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
@@ -23,7 +22,7 @@ from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from src.application.close_advice_report_manifest import (
-    validate_close_advice_report_manifest,
+    read_close_advice_report_snapshot,
 )
 
 
@@ -152,6 +151,7 @@ class _Source:
         self.source_type = source_type
         self.run_id = run_id
         self.account = account
+        self.csv_bytes: bytes | None = None
 
 
 def _query_from_payload(payload: dict[str, Any]) -> PositionQuery:
@@ -183,9 +183,34 @@ def _resolve_sources(
                 message="没有找到指定的平仓建议报告。",
                 details={"csv_path": mask_path(explicit)},
             )
-        return [_Source(explicit, source_type="explicit")]
+        requested_run = str(payload.get("run_id") or "").strip() or None
+        source = _Source(
+            explicit,
+            source_type="explicit",
+            run_id=requested_run,
+        )
+        validation = _validate_source_manifest(
+            source,
+            desired_market=desired_market,
+            query_account=query.account,
+            expected_run_id=requested_run,
+        )
+        if not validation.get("ok"):
+            raise _invalid_report_error(
+                source,
+                validation=validation,
+                mask_path=mask_path,
+            )
+        return [source]
 
-    run_sources = _run_sources(payload, base=base, config_path=config_path, query=query, desired_market=desired_market)
+    run_sources = _run_sources(
+        payload,
+        base=base,
+        config_path=config_path,
+        query=query,
+        desired_market=desired_market,
+        mask_path=mask_path,
+    )
     if run_sources:
         return run_sources
     if str(payload.get("run_id") or "").strip():
@@ -228,6 +253,7 @@ def _run_sources(
     config_path: Path | None,
     query: PositionQuery,
     desired_market: str | None,
+    mask_path: Callable[[Any], str | None],
 ) -> list[_Source]:
     root = _runs_root(payload, base=base, config_path=config_path)
     if not root.exists() or not root.is_dir():
@@ -239,7 +265,18 @@ def _run_sources(
     for run_dir in run_dirs:
         if not run_dir.exists() or not run_dir.is_dir():
             continue
-        sources = _sources_for_run_dir(run_dir, query=query, desired_market=desired_market)
+        sources, failures = _validated_sources_for_run_dir(
+            run_dir,
+            query=query,
+            desired_market=desired_market,
+        )
+        if requested_run and failures:
+            source, validation = failures[0]
+            raise _invalid_report_error(
+                source,
+                validation=validation,
+                mask_path=mask_path,
+            )
         if sources:
             return sources
     return []
@@ -252,7 +289,11 @@ def _latest_run_sources_across_markets(run_dirs: list[Path], *, query: PositionQ
     for run_dir in run_dirs:
         if not run_dir.exists() or not run_dir.is_dir():
             continue
-        sources = _sources_for_run_dir(run_dir, query=query, desired_market=None)
+        sources, _failures = _validated_sources_for_run_dir(
+            run_dir,
+            query=query,
+            desired_market=None,
+        )
         if not sources:
             continue
         run_markets: set[str] = set()
@@ -295,7 +336,12 @@ def _latest_run_dirs(root: Path) -> list[Path]:
     )
 
 
-def _sources_for_run_dir(run_dir: Path, *, query: PositionQuery, desired_market: str | None) -> list[_Source]:
+def _candidate_sources_for_run_dir(
+    run_dir: Path,
+    *,
+    query: PositionQuery,
+    desired_market: str | None,
+) -> list[_Source]:
     accounts_root = run_dir / "accounts"
     if not accounts_root.exists() or not accounts_root.is_dir():
         path = run_dir / CLOSE_ADVICE_CSV
@@ -315,6 +361,32 @@ def _sources_for_run_dir(run_dir: Path, *, query: PositionQuery, desired_market:
         if path.exists() and _matches_market(run_dir=run_dir, account_dir=account_dir, desired_market=desired_market):
             sources.append(_Source(path, source_type="run", run_id=run_dir.name, account=account_dir.name))
     return sources
+
+
+def _validated_sources_for_run_dir(
+    run_dir: Path,
+    *,
+    query: PositionQuery,
+    desired_market: str | None,
+) -> tuple[list[_Source], list[tuple[_Source, dict[str, Any]]]]:
+    sources = _candidate_sources_for_run_dir(
+        run_dir,
+        query=query,
+        desired_market=desired_market,
+    )
+    failures: list[tuple[_Source, dict[str, Any]]] = []
+    for source in sources:
+        validation = _validate_source_manifest(
+            source,
+            desired_market=desired_market,
+            query_account=query.account,
+            expected_run_id=run_dir.name,
+        )
+        if not validation.get("ok"):
+            failures.append((source, validation))
+    if failures:
+        return [], failures
+    return sources, []
 
 
 def _agent_tool_report_sources(
@@ -361,16 +433,54 @@ def _agent_tool_report_sources(
             seen.add(resolved)
             if not resolved.exists():
                 continue
-            manifest = validate_close_advice_report_manifest(
-                csv_path=resolved,
+            source = _Source(resolved, source_type="agent_tool")
+            manifest = _validate_source_manifest(
+                source,
                 desired_market=desired_market,
-                account=query.account,
+                query_account=query.account,
+                expected_run_id=None,
             )
             if manifest.get("ok"):
-                out.append(_Source(resolved, source_type="agent_tool"))
+                out.append(source)
         if out:
             return out[:1]
     return out
+
+
+def _validate_source_manifest(
+    source: _Source,
+    *,
+    desired_market: str | None,
+    query_account: str | None,
+    expected_run_id: str | None,
+) -> dict[str, Any]:
+    snapshot = read_close_advice_report_snapshot(
+        csv_path=source.path,
+        desired_market=desired_market,
+        account=source.account or query_account,
+        expected_run_id=expected_run_id,
+    )
+    validation = snapshot["validation"]
+    if validation.get("ok"):
+        source.csv_bytes = snapshot["csv_bytes"]
+    return validation
+
+
+def _invalid_report_error(
+    source: _Source,
+    *,
+    validation: dict[str, Any],
+    mask_path: Callable[[Any], str | None],
+) -> AgentToolError:
+    return AgentToolError(
+        code="DEPENDENCY_INVALID",
+        message="平仓建议报告完整性校验失败。",
+        hint="请重新生成严格版平仓建议报告。",
+        details={
+            "csv_path": mask_path(source.path),
+            "reason": str(validation.get("reason") or "unknown"),
+        },
+    )
 
 
 def _is_direct_child_name(value: str) -> bool:
@@ -396,109 +506,37 @@ def _resolve_path(raw: Any, *, base: Path) -> Path:
 
 
 def _read_rows(source: _Source) -> list[dict[str, Any]]:
+    if source.csv_bytes is None:
+        raise AgentToolError(
+            code="DEPENDENCY_INVALID",
+            message="平仓建议报告缺少已校验的快照。",
+            hint="请重新生成严格版平仓建议报告。",
+        )
     rows: list[dict[str, Any]] = []
-    context_side_index = _context_side_index(source)
     try:
-        with source.path.open("r", encoding="utf-8-sig", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for raw in reader:
-                if not isinstance(raw, dict):
-                    continue
-                row = {str(key): value for key, value in raw.items() if key is not None}
-                if source.account and not str(row.get("account") or "").strip():
-                    row["account"] = source.account
-                if not row.get("side") and not row.get("position_side"):
-                    key = _position_side_index_key(
-                        symbol=row.get("symbol"),
-                        option_type=row.get("option_type"),
-                        expiration=row.get("expiration") or row.get("expiration_ymd"),
-                        strike=row.get("strike"),
-                    )
-                    side = context_side_index.get(key) if key else None
-                    if side:
-                        row["position_side"] = side
-                row["_source_run_id"] = source.run_id
-                row["_source_type"] = source.source_type
-                rows.append(row)
-    except OSError as exc:
+        reader = csv.DictReader(
+            StringIO(source.csv_bytes.decode("utf-8-sig"), newline="")
+        )
+        for raw in reader:
+            if not isinstance(raw, dict):
+                continue
+            row = {
+                str(key): value
+                for key, value in raw.items()
+                if key is not None
+            }
+            if source.account and not str(row.get("account") or "").strip():
+                row["account"] = source.account
+            row["_source_run_id"] = source.run_id
+            row["_source_type"] = source.source_type
+            rows.append(row)
+    except (UnicodeError, csv.Error) as exc:
         raise AgentToolError(
             code="READ_ERROR",
             message=f"读取平仓建议报告失败：{source.path.name}",
             details={"error": f"{type(exc).__name__}: {exc}"},
         ) from exc
     return rows
-
-
-def _context_side_index(source: _Source) -> dict[tuple[str, str, str, str], str]:
-    context_path = source.path.parent / "state" / "option_positions_context.json"
-    obj = _read_json(context_path)
-    positions = obj.get("open_positions_min") if isinstance(obj, dict) else []
-    if not isinstance(positions, list):
-        return {}
-    out: dict[tuple[str, str, str, str], str] = {}
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        side = _canonical_side(pos.get("side") or pos.get("position_side"))
-        if not side:
-            continue
-        key = _position_side_index_key(
-            symbol=pos.get("symbol"),
-            option_type=pos.get("option_type"),
-            expiration=pos.get("expiration") or pos.get("expiration_ymd") or pos.get("exp"),
-            strike=pos.get("strike"),
-        )
-        if key:
-            out[key] = side
-    return out
-
-
-def _position_side_index_key(
-    *,
-    symbol: Any,
-    option_type: Any,
-    expiration: Any,
-    strike: Any,
-) -> tuple[str, str, str, str] | None:
-    canonical = canonical_symbol(symbol)
-    opt = _lower(option_type)
-    exp = _normalize_expiration_for_index(expiration)
-    strike_key = _normalize_strike_for_index(strike)
-    if not (canonical and opt and exp and strike_key):
-        return None
-    return canonical, opt, exp, strike_key
-
-
-def _normalize_expiration_for_index(value: Any) -> str:
-    if value in (None, ""):
-        return ""
-    if isinstance(value, (int, float)):
-        return _date_from_epoch_like(float(value))
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        if text.isdigit():
-            return _date_from_epoch_like(float(text))
-    except Exception:
-        pass
-    parsed = _parse_date(text)
-    return parsed.isoformat() if parsed else text[:10]
-
-
-def _date_from_epoch_like(value: float) -> str:
-    try:
-        seconds = value / 1000 if value > 10_000_000_000 else value
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
-    except Exception:
-        return ""
-
-
-def _normalize_strike_for_index(value: Any) -> str:
-    parsed = _float_or_none(value)
-    if parsed is None:
-        return str(value or "").strip()
-    return f"{parsed:.8f}".rstrip("0").rstrip(".")
 
 
 def _desired_market(payload: dict[str, Any], *, cfg: dict[str, Any] | None, config_path: Path | None) -> str | None:
@@ -665,8 +703,6 @@ def _side_matches(row: dict[str, Any], side: str) -> bool:
         return False
 
     leg_role = _lower(row.get("leg_role"))
-    if side == "long" and leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call", "buy_call"}:
-        return True
     if side == "short" and leg_role in {"sell_put", "short_put", "sell_call", "short_call"}:
         return True
     return False
@@ -712,6 +748,17 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "account",
         "position_lot_id",
+        "quote_mode",
+        "required_data_snapshot_plan_id",
+        "required_data_snapshot_manifest_sha256",
+        "close_advice_required_data_plan_sha256",
+        "required_data_requirement_id",
+        "required_data_binding_id",
+        "required_data_snapshot_id",
+        "required_data_receipt_hash",
+        "required_data_payload_sha256",
+        "required_data_source_observed_at",
+        "required_data_expires_at",
         "symbol",
         "option_type",
         "side",
@@ -720,91 +767,38 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "expiration_ymd",
         "strike",
         "contracts_open",
+        "multiplier",
+        "currency",
         "premium",
-        "close_mid",
+        "spot",
         "bid",
         "ask",
+        "close_mid",
         "dte",
+        "original_dte",
+        "remaining_term_ratio",
         "position_lifecycle_state",
-        "capture_ratio",
-        "remaining_premium",
-        "estimated_pnl_if_close_gross",
+        "is_otm",
+        "spread_ratio",
+        "opening_gross_credit",
+        "estimated_open_fee",
+        "opening_net_credit",
         "estimated_close_fee",
+        "all_in_close_cost",
+        "net_capture_ratio",
+        "close_cost_ratio",
         "fee_calc_status",
         "fee_calc_basis",
         "estimated_pnl_if_close_net",
-        "net_close_proceeds",
-        "realized_if_close",
-        "buy_to_close_fee",
-        "buy_to_close_cost",
-        "close_fee_to_remaining_premium",
-        "remaining_risk_status",
-        "remaining_risk_unavailable_reason",
-        "remaining_stress_scenario",
-        "remaining_stress_loss",
-        "remaining_reward_to_stress_loss",
-        "replacement_annualized_return",
-        "replacement_annualized_advantage",
-        "replacement_source",
-        "continued_willingness",
-        "continued_willingness_source",
-        "close_calibration_status",
-        "close_calibration_missing",
-        "put_leg_realized_if_close",
-        "combo_call_cost",
-        "combo_call_value_if_close",
-        "combo_net_locked_if_close_put_keep_call",
-        "combo_net_if_close_both",
-        "combo_cost_basis_status",
-        "paired_leg_status",
-        "combo_group_classification",
-        "combo_group_status",
-        "combo_group_action",
-        "combo_group_reason",
-        "combo_group_issues",
-        "combo_put_contracts_open",
-        "combo_call_contracts_open",
-        "combo_group_quote_status",
-        "combo_group_evidence_scope",
-        "long_call_value_ratio",
-        "long_call_cost_basis",
-        "long_call_current_value",
-        "remaining_annualized_return",
         "evaluation_status",
         "quote_status",
-        "tier",
-        "tier_label",
         "reason",
-        "exit_state",
-        "exit_reason_type",
-        "hold_reason_type",
         "policy_version",
         "recommendation_state",
         "decision_basis",
         "decision_evidence_status",
-        "close_action",
-        "optional_combo_action",
-        "strategy_exit_mode",
-        "strategy",
-        "leg_role",
-        "yield_enhancement_mode",
         "strategy_family",
         "strategy_profile",
-        "risk_model",
-        "short_vol_thesis_status",
-        "short_vol_reason",
-        "event_risk_flag",
-        "event_risk_types",
-        "event_risk_dates",
-        "event_source_status",
-        "path_stress_status",
-        "implied_volatility",
-        "realized_volatility_estimate",
-        "iv_rv_ratio",
-        "iv_minus_rv",
-        "abs_delta",
-        "delta",
-        "gamma",
         "data_quality_flags",
     )
     source_row = {**row, **decision_fields}
@@ -821,7 +815,6 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     inferred_side = (
         _canonical_side(row.get("side"))
         or _canonical_side(row.get("position_side"))
-        or _side_from_leg_role(row.get("leg_role"))
     )
     if inferred_side:
         out["side"] = inferred_side
@@ -831,82 +824,89 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
+    policy_version = str(row.get("policy_version") or "").strip()
     recommendation = _lower(row.get("recommendation_state"))
-    if recommendation:
+    decision_basis = str(row.get("decision_basis") or "").strip()
+    evidence_status = _lower(row.get("decision_evidence_status"))
+    evaluation_status = _lower(row.get("evaluation_status"))
+    expected_evidence_status = (
+        DECISION_EVIDENCE_NOT_EVALUABLE
+        if recommendation == RECOMMENDATION_NOT_EVALUABLE
+        else DECISION_EVIDENCE_COMPLETE
+    )
+    if (
+        policy_version == STRICT_CLOSE_POLICY_VERSION
+        and recommendation
+        in {
+            RECOMMENDATION_CLOSE,
+            RECOMMENDATION_HOLD,
+            RECOMMENDATION_NOT_EVALUABLE,
+        }
+        and decision_basis
+        and evidence_status == expected_evidence_status
+        and (
+            (
+                recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
+                and evaluation_status == "priced"
+            )
+            or (
+                recommendation == RECOMMENDATION_NOT_EVALUABLE
+                and evaluation_status != "priced"
+            )
+        )
+    ):
         return {
-            "policy_version": row.get("policy_version") or LEGACY_CLOSE_POLICY_VERSION,
+            "policy_version": policy_version,
             "recommendation_state": recommendation,
-            "decision_basis": row.get("decision_basis") or "unspecified",
-            "decision_evidence_status": (
-                row.get("decision_evidence_status")
-                or (
-                    DECISION_EVIDENCE_NOT_EVALUABLE
-                    if recommendation == RECOMMENDATION_NOT_EVALUABLE
-                    else DECISION_EVIDENCE_COMPLETE
-                )
-            ),
+            "decision_basis": decision_basis,
+            "decision_evidence_status": evidence_status,
         }
 
-    action = _lower(row.get("close_action"))
-    if action == "not_evaluable":
-        recommendation = RECOMMENDATION_NOT_EVALUABLE
-        basis = "legacy_close_action_not_evaluable"
-    elif action in {"close", "close_put_keep_call", "sell_call_take_profit", "sell_call_salvage"}:
-        recommendation = RECOMMENDATION_CLOSE
-        basis = "legacy_close_action"
-    elif action:
-        recommendation = RECOMMENDATION_HOLD
-        basis = "legacy_hold_action"
+    if policy_version != STRICT_CLOSE_POLICY_VERSION:
+        invalid_basis = "unsupported_or_missing_strict_policy_version"
+    elif recommendation not in {
+        RECOMMENDATION_CLOSE,
+        RECOMMENDATION_HOLD,
+        RECOMMENDATION_NOT_EVALUABLE,
+    }:
+        invalid_basis = "invalid_or_missing_strict_recommendation_state"
+    elif not decision_basis:
+        invalid_basis = "missing_strict_decision_basis"
+    elif (
+        recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
+        and evaluation_status != "priced"
+    ):
+        invalid_basis = "strict_decision_not_priced"
+    elif (
+        recommendation == RECOMMENDATION_NOT_EVALUABLE
+        and evaluation_status == "priced"
+    ):
+        invalid_basis = "strict_not_evaluable_marked_priced"
     else:
-        projected = current_policy_decision_fields(
-            tier=row.get("tier"),
-            exit_state=row.get("exit_state"),
-            policy_version=LEGACY_CLOSE_POLICY_VERSION,
-        )
-        recommendation = str(projected["recommendation_state"])
-        basis = ";".join(projected["decision_basis"])
+        invalid_basis = "invalid_strict_decision_evidence_status"
     return {
-        "policy_version": LEGACY_CLOSE_POLICY_VERSION,
-        "recommendation_state": recommendation,
-        "decision_basis": basis,
-        "decision_evidence_status": (
-            DECISION_EVIDENCE_NOT_EVALUABLE
-            if recommendation == RECOMMENDATION_NOT_EVALUABLE
-            else DECISION_EVIDENCE_COMPLETE
-        ),
+        "policy_version": policy_version or "unversioned_report",
+        "recommendation_state": RECOMMENDATION_NOT_EVALUABLE,
+        "decision_basis": invalid_basis,
+        "decision_evidence_status": DECISION_EVIDENCE_NOT_EVALUABLE,
+        "evaluation_status": "not_evaluable",
+        "quote_status": "not_evaluable",
     }
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    tier_counts: dict[str, int] = {}
-    action_counts: dict[str, int] = {}
     recommendation_counts: dict[str, int] = {}
     evaluation_counts: dict[str, int] = {}
     for row in rows:
-        tier = _lower(row.get("tier")) or "none"
-        action = _lower(row.get("close_action")) or "-"
         recommendation = _lower(row.get("recommendation_state")) or "-"
-        evaluation = _lower(row.get("evaluation_status")) or "priced"
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
-        action_counts[action] = action_counts.get(action, 0) + 1
+        evaluation = _lower(row.get("evaluation_status")) or "not_evaluable"
         recommendation_counts[recommendation] = recommendation_counts.get(recommendation, 0) + 1
         evaluation_counts[evaluation] = evaluation_counts.get(evaluation, 0) + 1
     return {
-        "tier_counts": tier_counts,
-        "action_counts": action_counts,
         "recommendation_counts": recommendation_counts,
         "evaluation_counts": evaluation_counts,
         "not_evaluable_count": evaluation_counts.get("not_evaluable", 0),
     }
-
-
-def _side_from_leg_role(value: Any) -> str | None:
-    leg_role = _lower(value)
-    if leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call", "buy_call"}:
-        return "long"
-    if leg_role in {"sell_put", "short_put", "sell_call", "short_call"}:
-        return "short"
-    return None
 
 
 def _canonical_side(value: Any) -> str | None:
@@ -930,12 +930,18 @@ def _source_payload(sources: list[_Source], *, mask_path: Callable[[Any], str | 
     }
 
 
-def _sort_key(row: dict[str, Any]) -> tuple[int, float, str, str, float]:
-    tier = _lower(row.get("tier")) or "none"
-    realized = _float_or_none(row.get("realized_if_close"))
+def _sort_key(row: dict[str, Any]) -> tuple[int, float, float, str, str, float]:
+    recommendation = _lower(row.get("recommendation_state"))
+    capture = _float_or_none(row.get("net_capture_ratio"))
+    close_cost = _float_or_none(row.get("all_in_close_cost"))
     return (
-        TIER_PRIORITY.get(tier, 9),
-        -(realized if realized is not None else -10**12),
+        {
+            RECOMMENDATION_CLOSE: 0,
+            RECOMMENDATION_HOLD: 1,
+            RECOMMENDATION_NOT_EVALUABLE: 2,
+        }.get(recommendation, 3),
+        -(capture if capture is not None else -1.0),
+        close_cost if close_cost is not None else float("inf"),
         str(row.get("account") or ""),
         str(row.get("symbol") or ""),
         _float_or_none(row.get("strike")) or 0.0,
@@ -951,40 +957,23 @@ _NUMERIC_PUBLIC_FIELDS = frozenset(
         "bid",
         "ask",
         "dte",
-        "capture_ratio",
-        "remaining_premium",
-        "estimated_pnl_if_close_gross",
+        "original_dte",
+        "remaining_term_ratio",
+        "spot",
+        "multiplier",
+        "spread_ratio",
+        "opening_gross_credit",
+        "estimated_open_fee",
+        "opening_net_credit",
         "estimated_close_fee",
+        "all_in_close_cost",
+        "net_capture_ratio",
+        "close_cost_ratio",
         "estimated_pnl_if_close_net",
-        "net_close_proceeds",
-        "realized_if_close",
-        "buy_to_close_fee",
-        "buy_to_close_cost",
-        "close_fee_to_remaining_premium",
-        "remaining_stress_loss",
-        "remaining_reward_to_stress_loss",
-        "replacement_annualized_return",
-        "replacement_annualized_advantage",
-        "put_leg_realized_if_close",
-        "combo_call_cost",
-        "combo_call_value_if_close",
-        "combo_net_locked_if_close_put_keep_call",
-        "combo_net_if_close_both",
-        "long_call_value_ratio",
-        "long_call_cost_basis",
-        "long_call_current_value",
-        "remaining_annualized_return",
-        "implied_volatility",
-        "realized_volatility_estimate",
-        "iv_rv_ratio",
-        "iv_minus_rv",
-        "abs_delta",
-        "delta",
-        "gamma",
     }
 )
 
-_BOOLEAN_PUBLIC_FIELDS = frozenset({"continued_willingness"})
+_BOOLEAN_PUBLIC_FIELDS = frozenset({"is_otm"})
 
 
 def _normalize_public_value(key: str, value: Any) -> Any:

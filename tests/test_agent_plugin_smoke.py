@@ -12,6 +12,9 @@ import pandas as pd
 from domain.domain.decision_state_fingerprint import canonical_sha256
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
+from src.application.close_advice_report_manifest import (
+    publish_close_advice_report_manifest,
+)
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -64,6 +67,51 @@ def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
             }
         ],
     }
+
+
+def _write_close_advice_report(
+    report_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    market: str,
+) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = report_dir / "close_advice.csv"
+    text_path = report_dir / "close_advice.txt"
+    context_path = report_dir / "state" / "option_positions_context.json"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    if context_path.exists():
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    else:
+        accounts = sorted(
+            {
+                str(row.get("account") or "").strip().lower()
+                for row in rows
+                if str(row.get("account") or "").strip()
+            }
+        )
+        context = {
+            "context_status": "available",
+            "filters": {"account": accounts[0] if len(accounts) == 1 else None},
+            "open_positions_min": [],
+        }
+        context_path.write_text(
+            json.dumps(context, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    text_path.write_text("", encoding="utf-8")
+    publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=rows,
+        markets_to_run=[market],
+        run_id=run_id,
+        quote_mode="frozen_snapshot",
+    )
 
 
 def _execute_private_runtime_status(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2781,8 +2829,7 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
     assert "Service upgrade previously failed but current release and restart services look remediated." in warnings
     assert (
         "Service drift detected: required maintenance units are missing: "
-        "options-monitor-position-advice-promotion.timer, "
-        "options-monitor-projection-verify.timer."
+            "options-monitor-projection-verify.timer."
     ) in warnings
 
 
@@ -2837,8 +2884,7 @@ def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypat
     assert "Service upgrade status still indicates an unrecovered runtime failure." in warnings
     assert (
         "Service drift detected: required maintenance units are missing: "
-        "options-monitor-position-advice-promotion.timer, "
-        "options-monitor-projection-verify.timer."
+            "options-monitor-projection-verify.timer."
     ) in warnings
 
 
@@ -2855,8 +2901,7 @@ def test_runtime_status_treats_older_failed_upgrade_as_historical(tmp_path: Path
     assert "Service upgrade status file contains a historical failure for a non-current target version." in warnings
     assert (
         "Service drift detected: required maintenance units are missing: "
-        "options-monitor-position-advice-promotion.timer, "
-        "options-monitor-projection-verify.timer."
+            "options-monitor-projection-verify.timer."
     ) in warnings
 
 
@@ -3421,17 +3466,37 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     )
     reports_dir = out_root / "reports"
     reports_dir.mkdir(parents=True)
-    (reports_dir / "close_advice.csv").write_text("account,symbol,tier,tier_label,realized_if_close\n", encoding="utf-8")
+    (reports_dir / "close_advice.csv").write_text(
+        "account,symbol,recommendation_state,evaluation_status,net_capture_ratio\n",
+        encoding="utf-8",
+    )
     (reports_dir / "close_advice.txt").write_text("", encoding="utf-8")
 
     def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs["context_path"] == (state_dir / "option_positions_context.json")
         assert kwargs["required_data_root"] == required_dir
         assert kwargs["output_dir"] == (out_root / "reports")
+        context = json.loads(
+            (state_dir / "option_positions_context.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        manifest = publish_close_advice_report_manifest(
+            csv_path=out_root / "reports" / "close_advice.csv",
+            text_path=out_root / "reports" / "close_advice.txt",
+            context_path=state_dir / "option_positions_context.json",
+            context=context,
+            rows=[],
+            markets_to_run=["US"],
+            quote_mode="legacy_mutable",
+        )
         return {
             "enabled": True,
+            "status": "ok",
+            "quote_mode": "legacy_mutable",
             "rows": 0,
             "notify_rows": 0,
+            "report_manifest": manifest,
             "csv": str((out_root / "reports" / "close_advice.csv")),
             "text": str((out_root / "reports" / "close_advice.txt")),
         }
@@ -3447,6 +3512,72 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     assert out["meta"]["required_data_root"] == ".../required_data"
 
 
+def test_close_advice_does_not_summarize_stale_report_after_failed_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    out_root = tmp_path / "output_shared" / "agent_tools"
+    state_dir = out_root / "state"
+    required_dir = out_root / "required_data"
+    report_dir = out_root / "reports"
+    state_dir.mkdir(parents=True)
+    required_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps({"open_positions_min": []}),
+        encoding="utf-8",
+    )
+    (report_dir / "close_advice.csv").write_text(
+        "account,symbol,recommendation_state,evaluation_status,"
+        "policy_version,decision_evidence_status\n"
+        "user1,NVDA,close,priced,strict_profit_capture.v1,complete\n",
+        encoding="utf-8",
+    )
+    (report_dir / "close_advice.txt").write_text(
+        "### [user1] 平仓建议\n",
+        encoding="utf-8",
+    )
+
+    def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["output_dir"] == report_dir
+        return {
+            "enabled": True,
+            "status": "snapshot_integrity_failed",
+            "rows": 0,
+            "notify_rows": 0,
+            "report_manifest": {
+                "status": "failed",
+                "reason": "snapshot_integrity_failed",
+            },
+        }
+
+    _patch_agent_tool_dependencies(
+        monkeypatch,
+        run_close_advice=_fake_run_close_advice,
+    )
+    out = run_tool(
+        "close_advice",
+        {"config_path": str(cfg_path), "output_dir": str(out_root)},
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["status"] == "snapshot_integrity_failed"
+    assert out["data"]["summary"]["row_count"] == 0
+    assert out["data"]["summary"]["recommendation_counts"] == {}
+    assert out["data"]["top_rows"] == []
+    assert out["data"]["notification_preview"] == ""
+
+
 def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
@@ -3458,27 +3589,22 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
         json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    rows = [
             {
                 "account": "lx",
                 "position_lot_id": "lot-9992-call-1",
                 "symbol": "9992",
                 "option_type": "call",
-                "position_side": "buy",
-                "leg_role": "enhancement_call",
+                "position_side": "short",
                 "expiration": "2026-08-21",
                 "strike": 152.45,
                 "evaluation_status": "priced",
-                "close_action": "hold_call_as_convexity",
-                "tier": "none",
-                "tier_label": "继续持有",
-                "reason": "long call 仍保留右尾 convexity，可继续持有",
-                "realized_if_close": 320,
-                "long_call_cost_basis": 500,
-                "long_call_current_value": 820,
-                "long_call_value_ratio": 1.64,
-                "capture_ratio": 0.42,
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.95,
+                "all_in_close_cost": 8.5,
             },
             {
                 "account": "lx",
@@ -3488,13 +3614,19 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
                 "expiration": "2026-06-19",
                 "strike": 100,
                 "evaluation_status": "priced",
-                "close_action": "hold",
-                "tier": "none",
-                "tier_label": "继续持有",
-                "reason": "short-vol thesis intact",
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
+                "reason": "未同时满足严格收益捕获条件",
             },
         ]
-    ).to_csv(report_dir / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        report_dir,
+        rows,
+        run_id="run-1",
+        market="HK",
+    )
 
     out = run_tool(
         "close_advice_read",
@@ -3502,7 +3634,7 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
             "config_path": str(cfg_path),
             "runs_root": str(tmp_path / "output_runs"),
             "run_id": "run-1",
-            "query": {"symbol": "9992.HK", "option_type": "call", "side": "long", "status": "open"},
+            "query": {"symbol": "9992.HK", "option_type": "call", "side": "short", "status": "open"},
         },
     )
 
@@ -3513,12 +3645,275 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     row = out["data"]["rows"][0]
     assert row["position_lot_id"] == "lot-9992-call-1"
     assert row["symbol"] == "9992.HK"
-    assert row["side"] == "long"
-    assert row["close_action"] == "hold_call_as_convexity"
-    assert row["realized_if_close"] == 320
-    assert row["long_call_cost_basis"] == 500
-    assert row["long_call_current_value"] == 820
-    assert row["long_call_value_ratio"] == 1.64
+    assert row["side"] == "short"
+    assert row["recommendation_state"] == "close"
+    assert row["net_capture_ratio"] == 0.95
+    assert row["all_in_close_cost"] == 8.5
+
+
+def test_close_advice_read_uses_the_bytes_bound_during_validation(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools import close_advice_read_impl as reader
+
+    report_dir = tmp_path / "report"
+    original_row = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "evaluation_status": "priced",
+        "recommendation_state": "hold",
+        "policy_version": "strict_profit_capture.v1",
+        "decision_basis": "net_capture_below_threshold",
+        "decision_evidence_status": "complete",
+    }
+    _write_close_advice_report(
+        report_dir,
+        [original_row],
+        run_id="run-1",
+        market="US",
+    )
+    source = reader._Source(
+        report_dir / "close_advice.csv",
+        source_type="explicit",
+        run_id="run-1",
+        account="lx",
+    )
+
+    validation = reader._validate_source_manifest(
+        source,
+        desired_market="US",
+        query_account="lx",
+        expected_run_id="run-1",
+    )
+    pd.DataFrame([{**original_row, "symbol": "TSLA"}]).to_csv(
+        source.path,
+        index=False,
+    )
+
+    assert validation["ok"] is True
+    assert [row["symbol"] for row in reader._read_rows(source)] == ["NVDA"]
+
+
+def test_close_advice_read_fails_closed_for_non_strict_policy_rows() -> None:
+    from src.application.agent_tools.close_advice_read_impl import (
+        _decision_fields_for_read,
+    )
+
+    for row in (
+        {"recommendation_state": "close"},
+        {
+            "recommendation_state": "close",
+            "policy_version": "legacy_close_policy.v1",
+        },
+    ):
+        projected = _decision_fields_for_read(row)
+        assert projected["recommendation_state"] == "not_evaluable"
+        assert projected["evaluation_status"] == "not_evaluable"
+        assert (
+            projected["decision_basis"]
+            == "unsupported_or_missing_strict_policy_version"
+        )
+
+    for row, expected_basis in (
+        (
+            {
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_evidence_status": "complete",
+            },
+            "missing_strict_decision_basis",
+        ),
+        (
+            {
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "not_evaluable",
+                "evaluation_status": "priced",
+            },
+            "invalid_strict_decision_evidence_status",
+        ),
+        (
+            {
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
+                "evaluation_status": "not_evaluable",
+            },
+            "strict_decision_not_priced",
+        ),
+        (
+            {
+                "recommendation_state": "not_evaluable",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "missing_required_quote",
+                "decision_evidence_status": "not_evaluable",
+                "evaluation_status": "priced",
+            },
+            "strict_not_evaluable_marked_priced",
+        ),
+    ):
+        projected = _decision_fields_for_read(row)
+        assert projected["recommendation_state"] == "not_evaluable"
+        assert projected["evaluation_status"] == "not_evaluable"
+        assert projected["decision_basis"] == expected_basis
+
+
+def test_close_advice_read_rejects_explicit_report_without_manifest(
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    csv_path = tmp_path / "close_advice.csv"
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "report_path": str(csv_path),
+            "account": "lx",
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_INVALID"
+    assert (
+        out["error"]["details"]["reason"]
+        == "close_advice_manifest_missing"
+    )
+
+
+def test_close_advice_read_rejects_report_with_tampered_text(
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    report_dir = tmp_path / "report"
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "evaluation_status": "priced",
+            "recommendation_state": "close",
+            "policy_version": "strict_profit_capture.v1",
+            "decision_basis": "strict_profit_capture_all_gates_passed",
+            "decision_evidence_status": "complete",
+        }
+    ]
+    _write_close_advice_report(
+        report_dir,
+        rows,
+        run_id="run-1",
+        market="US",
+    )
+    (report_dir / "close_advice.txt").write_text(
+        "stale or tampered preview\n",
+        encoding="utf-8",
+    )
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "report_path": str(report_dir / "close_advice.csv"),
+            "account": "lx",
+            "run_id": "run-1",
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_INVALID"
+    assert (
+        out["error"]["details"]["reason"]
+        == "close_advice_text_bytes_mismatch"
+    )
+
+
+def test_close_advice_read_skips_newer_run_with_invalid_manifest(
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    runs_root = tmp_path / "output_runs"
+    valid_report = runs_root / "run-valid" / "accounts" / "lx"
+    (valid_report / "config.override.json").parent.mkdir(parents=True)
+    (valid_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "evaluation_status": "priced",
+            "recommendation_state": "hold",
+            "policy_version": "strict_profit_capture.v1",
+            "decision_basis": "net_capture_below_threshold",
+            "decision_evidence_status": "complete",
+        }
+    ]
+    _write_close_advice_report(
+        valid_report,
+        rows,
+        run_id="run-valid",
+        market="US",
+    )
+
+    invalid_report = runs_root / "run-invalid" / "accounts" / "lx"
+    invalid_report.mkdir(parents=True)
+    (invalid_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(rows).to_csv(invalid_report / "close_advice.csv", index=False)
+    os.utime(runs_root / "run-valid", (1_000_000, 1_000_000))
+    os.utime(runs_root / "run-invalid", (2_000_000, 2_000_000))
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "runs_root": str(runs_root),
+            "account": "lx",
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["source"]["run_id"] == "run-valid"
 
 
 def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path) -> None:
@@ -3534,20 +3929,27 @@ def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path
         json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    us_rows = [
             {
                 "account": "lx",
                 "symbol": "FUTU",
-                "option_type": "call",
+                "option_type": "put",
                 "position_side": "short",
                 "expiration": "2026-08-21",
                 "strike": 152.45,
                 "evaluation_status": "priced",
-                "tier": "none",
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
             },
         ]
-    ).to_csv(us_report / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        us_report,
+        us_rows,
+        run_id="run-us",
+        market="US",
+    )
 
     hk_report = runs_root / "run-hk" / "accounts" / "sy"
     hk_report.mkdir(parents=True)
@@ -3555,28 +3957,34 @@ def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path
         json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    hk_rows = [
             {
                 "account": "sy",
                 "symbol": "9992.HK",
                 "option_type": "call",
-                "position_side": "long",
+                "position_side": "short",
                 "expiration": "2026-07-30",
                 "strike": 172.5,
                 "evaluation_status": "priced",
-                "close_action": "hold_call",
-                "tier": "none",
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
             },
         ]
-    ).to_csv(hk_report / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        hk_report,
+        hk_rows,
+        run_id="run-hk",
+        market="HK",
+    )
 
     out = run_tool(
         "close_advice_read",
         {
             "config_path": str(cfg_path),
             "runs_root": str(runs_root),
-            "query": {"symbol": "9992.HK", "option_type": "call", "side": "long", "status": "open"},
+            "query": {"symbol": "9992.HK", "option_type": "call", "side": "short", "status": "open"},
         },
     )
 
@@ -3589,7 +3997,9 @@ def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path
     assert out["meta"]["config_market_filter"] == "US"
 
 
-def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_from_context(tmp_path: Path) -> None:
+def test_close_advice_read_all_market_scope_does_not_infer_missing_side_from_context(
+    tmp_path: Path,
+) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -3602,20 +4012,27 @@ def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_
         json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    us_rows = [
             {
                 "account": "lx",
                 "symbol": "FUTU",
-                "option_type": "call",
+                "option_type": "put",
                 "position_side": "short",
                 "expiration": "2026-08-21",
                 "strike": 152.45,
                 "evaluation_status": "priced",
-                "tier": "none",
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
             },
         ]
-    ).to_csv(us_report / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        us_report,
+        us_rows,
+        run_id="run-us",
+        market="US",
+    )
 
     hk_report = runs_root / "run-hk" / "accounts" / "sy"
     (hk_report / "state").mkdir(parents=True)
@@ -3631,7 +4048,7 @@ def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_
                         "account": "sy",
                         "symbol": "9992.HK",
                         "option_type": "call",
-                        "side": "long",
+                        "side": "short",
                         "expiration": 1785369600000,
                         "strike": 172.5,
                         "contracts_open": 1,
@@ -3643,8 +4060,7 @@ def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_
         ),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    hk_rows = [
             {
                 "account": "sy",
                 "symbol": "9992.HK",
@@ -3652,11 +4068,18 @@ def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_
                 "expiration": "2026-07-30",
                 "strike": 172.5,
                 "evaluation_status": "priced",
-                "close_action": "hold_call",
-                "tier": "none",
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
             },
         ]
-    ).to_csv(hk_report / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        hk_report,
+        hk_rows,
+        run_id="run-hk",
+        market="HK",
+    )
 
     out = run_tool(
         "close_advice_read",
@@ -3664,16 +4087,17 @@ def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_
             "config_path": str(cfg_path),
             "market_scope": "all",
             "runs_root": str(runs_root),
-            "query": {"option_type": "call", "side": "long", "status": "open"},
+            "query": {"option_type": "call", "side": "short", "status": "open"},
         },
     )
 
     assert out["ok"] is True
-    assert out["data"]["matched_count"] == 1
+    assert out["data"]["row_count"] == 2
+    assert out["data"]["matched_count"] == 0
     assert out["data"]["source"]["run_ids"] == ["run-hk", "run-us"]
     assert "fallback" not in out["data"]
     assert out["meta"]["market_scope"] == "all"
-    assert out["data"]["rows"][0]["side"] == "long"
+    assert out["data"]["rows"] == []
 
 
 def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_path: Path) -> None:
@@ -3684,32 +4108,37 @@ def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_
     runs_root = tmp_path / "output_runs"
     run_us = runs_root / "run-us" / "accounts" / "lx"
     run_hk = runs_root / "run-hk" / "accounts" / "lx"
-    for account_dir, market, symbol, realized in (
-        (run_us, "us", "NVDA", 100),
-        (run_hk, "hk", "0700.HK", 999),
+    for account_dir, market, symbol, net_capture in (
+        (run_us, "us", "NVDA", 0.95),
+        (run_hk, "hk", "0700.HK", 0.91),
     ):
         account_dir.mkdir(parents=True)
         (account_dir / "config.override.json").write_text(
             json.dumps(_minimal_cfg(market=market), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        pd.DataFrame(
-            [
+        rows = [
                 {
                     "account": "lx",
                     "symbol": symbol,
                     "option_type": "call",
-                    "position_side": "long",
+                    "position_side": "short",
                     "expiration": "2026-08-21",
                     "strike": 100,
                     "evaluation_status": "priced",
-                    "close_action": "hold_call",
-                    "tier": "none",
-                    "tier_label": "继续持有",
-                    "realized_if_close": realized,
+                    "recommendation_state": "close",
+                    "policy_version": "strict_profit_capture.v1",
+                    "decision_basis": "strict_profit_capture_all_gates_passed",
+                    "decision_evidence_status": "complete",
+                    "net_capture_ratio": net_capture,
                 }
             ]
-        ).to_csv(account_dir / "close_advice.csv", index=False)
+        _write_close_advice_report(
+            account_dir,
+            rows,
+            run_id=account_dir.parents[1].name,
+            market=market.upper(),
+        )
 
     os.utime(runs_root / "run-us", (1_000_000, 1_000_000))
     os.utime(runs_root / "run-hk", (2_000_000, 2_000_000))
@@ -3720,7 +4149,7 @@ def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_
             "config_key": "us",
             "config_path": str(cfg_path),
             "runs_root": str(runs_root),
-            "query": {"option_type": "call", "side": "long"},
+            "query": {"option_type": "call", "side": "short"},
         },
     )
 
@@ -3729,7 +4158,7 @@ def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_
     assert out["meta"]["market_filter"] == "US"
     assert out["data"]["row_count"] == 1
     assert out["data"]["rows"][0]["symbol"] == "NVDA"
-    assert out["data"]["rows"][0]["realized_if_close"] == 100
+    assert out["data"]["rows"][0]["net_capture_ratio"] == 0.95
 
 
 def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path: Path) -> None:
@@ -3746,29 +4175,35 @@ def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path:
         json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
+    rows = [
             {
                 "account": "lx",
                 "symbol": "NVDA",
                 "option_type": "call",
-                "position_side": "long",
+                "position_side": "short",
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "evaluation_status": "priced",
-                "close_action": "hold_call",
-                "tier": "none",
-                "realized_if_close": 100,
+                "recommendation_state": "hold",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "net_capture_below_threshold",
+                "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.50,
             }
         ]
-    ).to_csv(report_dir / "close_advice.csv", index=False)
+    _write_close_advice_report(
+        report_dir,
+        rows,
+        run_id="run-1",
+        market="US",
+    )
 
     out = run_tool(
         "close_advice_read",
         {
             "config_path": str(cfg_path),
             "run_id": "run-1",
-            "query": {"option_type": "call", "side": "long"},
+            "query": {"option_type": "call", "side": "short"},
         },
     )
 
@@ -3790,9 +4225,9 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
     cfg_path.parent.mkdir(parents=True)
     cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
 
-    for root, symbol, realized in (
-        (runtime_root, "NVDA", 100),
-        (release_root, "PDD", 999),
+    for root, symbol, net_capture in (
+        (runtime_root, "NVDA", 0.95),
+        (release_root, "PDD", 0.91),
     ):
         report_dir = root / "output_shared" / "agent_tools" / "reports"
         report_dir.mkdir(parents=True)
@@ -3801,14 +4236,13 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
                 "account": "lx",
                 "symbol": symbol,
                 "option_type": "call",
-                "position_side": "long",
+                "position_side": "short",
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "evaluation_status": "priced",
-                "close_action": "hold_call",
-                "tier": "none",
-                "tier_label": "继续持有",
-                "realized_if_close": realized,
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "net_capture_ratio": net_capture,
             }
         ]
         csv_path = report_dir / "close_advice.csv"
@@ -3842,7 +4276,7 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
 
     data, warnings, meta = close_advice_read_tool(
-        {"config_key": "us", "query": {"option_type": "call", "side": "long"}},
+        {"config_key": "us", "query": {"option_type": "call", "side": "short"}},
         load_runtime_config=lambda **_kwargs: (cfg_path, _minimal_cfg(market="us")),
         resolve_output_root=lambda _output_dir=None: release_root / "output_shared" / "agent_tools",
         repo_base=lambda: release_root,
@@ -3854,7 +4288,7 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
     assert data["row_count"] == 1
     assert data["source"]["type"] == "agent_tool"
     assert data["rows"][0]["symbol"] == "NVDA"
-    assert data["rows"][0]["realized_if_close"] == 100
+    assert data["rows"][0]["net_capture_ratio"] == 0.95
 
 
 def test_close_advice_read_rejects_agent_report_from_another_market(
@@ -3873,7 +4307,14 @@ def test_close_advice_read_rejects_agent_report_from_another_market(
     output_root = tmp_path / "output_shared" / "agent_tools"
     report_dir = output_root / "reports"
     report_dir.mkdir(parents=True)
-    rows = [{"account": "lx", "symbol": "NVDA", "tier": "none"}]
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "recommendation_state": "hold",
+            "policy_version": "strict_profit_capture.v1",
+        }
+    ]
     csv_path = report_dir / "close_advice.csv"
     text_path = report_dir / "close_advice.txt"
     context_path = report_dir / "option_positions_context.json"
@@ -3907,7 +4348,7 @@ def test_close_advice_read_rejects_agent_report_from_another_market(
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
 
 
-def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
+def test_close_advice_summary_orders_strict_recommendations(tmp_path: Path) -> None:
     from src.infrastructure.io_utils import safe_read_csv
     from src.application.agent_tools.runtime_helpers import as_float
     from src.application.agent_tools.materialization_impl import close_advice_rows_summary
@@ -3916,16 +4357,124 @@ def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path
     text_path = tmp_path / "close_advice.txt"
     pd.DataFrame(
         [
-            {"account": "lx", "symbol": "WEAK", "tier": "weak", "tier_label": "可观察平仓", "evaluation_status": "priced", "realized_if_close": 300},
-            {"account": "lx", "symbol": "OPT", "tier": "optional", "tier_label": "低价买回可选", "evaluation_status": "priced", "realized_if_close": 100},
-            {"account": "lx", "symbol": "MED", "tier": "medium", "tier_label": "建议平仓", "evaluation_status": "priced", "realized_if_close": 200},
+            {"account": "lx", "symbol": "HOLD", "recommendation_state": "hold", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.99},
+            {"account": "lx", "symbol": "CLOSE2", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.91},
+            {"account": "lx", "symbol": "CLOSE1", "recommendation_state": "close", "evaluation_status": "priced", "policy_version": "strict_profit_capture.v1", "decision_evidence_status": "complete", "net_capture_ratio": 0.95},
         ]
     ).to_csv(csv_path, index=False)
     text_path.write_text("", encoding="utf-8")
 
     summary = close_advice_rows_summary(csv_path, text_path, safe_read_csv=safe_read_csv, as_float=as_float)
 
-    assert [row["tier"] for row in summary["top_rows"]] == ["medium", "optional", "weak"]
+    assert [row["symbol"] for row in summary["top_rows"]] == ["CLOSE1", "CLOSE2", "HOLD"]
+
+
+def test_close_advice_summary_uses_supplied_validated_bytes(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.materialization_impl import (
+        close_advice_rows_summary,
+    )
+    from src.application.agent_tools.runtime_helpers import as_float
+    from src.infrastructure.io_utils import safe_read_csv
+
+    csv_path = tmp_path / "close_advice.csv"
+    text_path = tmp_path / "close_advice.txt"
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "recommendation_state": "close",
+                "evaluation_status": "priced",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.95,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+    text_path.write_text("NVDA preview\n", encoding="utf-8")
+    csv_bytes = csv_path.read_bytes()
+    text_bytes = text_path.read_bytes()
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "TSLA",
+                "recommendation_state": "hold",
+                "evaluation_status": "priced",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_evidence_status": "complete",
+                "net_capture_ratio": 0.10,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+    text_path.write_text("TSLA preview\n", encoding="utf-8")
+
+    summary = close_advice_rows_summary(
+        csv_path,
+        text_path,
+        safe_read_csv=safe_read_csv,
+        as_float=as_float,
+        csv_bytes=csv_bytes,
+        text_bytes=text_bytes,
+    )
+
+    assert [row["symbol"] for row in summary["top_rows"]] == ["NVDA"]
+    assert summary["notification_preview"] == "NVDA preview"
+
+
+def test_close_advice_summary_fails_closed_for_non_strict_or_incomplete_rows(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.materialization_impl import (
+        close_advice_rows_summary,
+    )
+    from src.application.agent_tools.runtime_helpers import as_float
+    from src.infrastructure.io_utils import safe_read_csv
+
+    csv_path = tmp_path / "close_advice.csv"
+    text_path = tmp_path / "close_advice.txt"
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "LEGACY",
+                "recommendation_state": "close",
+                "evaluation_status": "priced",
+                "decision_evidence_status": "complete",
+            },
+            {
+                "account": "lx",
+                "symbol": "INCOMPLETE",
+                "recommendation_state": "close",
+                "evaluation_status": "priced",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_evidence_status": "not_evaluable",
+            },
+            {
+                "account": "lx",
+                "symbol": "INVALID",
+                "recommendation_state": "reallocate",
+                "evaluation_status": "priced",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_evidence_status": "complete",
+            },
+        ]
+    ).to_csv(csv_path, index=False)
+    text_path.write_text("", encoding="utf-8")
+
+    summary = close_advice_rows_summary(
+        csv_path,
+        text_path,
+        safe_read_csv=safe_read_csv,
+        as_float=as_float,
+    )
+
+    assert summary["row_count"] == 3
+    assert summary["recommendation_counts"] == {}
+    assert summary["account_counts"] == {}
+    assert summary["top_rows"] == []
 
 
 def test_scan_summary_rows_normalizes_account_labels() -> None:
@@ -4354,8 +4903,13 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
                     "enabled": True,
                     "rows": 2,
                     "notify_rows": 1,
-                    "summary": {"row_count": 2, "tier_counts": {"strong": 1, "medium": 1}},
-                    "top_rows": [{"symbol": "NVDA", "tier": "strong"}],
+                    "summary": {
+                        "row_count": 2,
+                        "recommendation_counts": {"close": 1, "hold": 1},
+                    },
+                    "top_rows": [
+                        {"symbol": "NVDA", "recommendation_state": "close"}
+                    ],
                     "notification_preview": "### [user1] 平仓建议",
                 },
                 ["close_warn"],

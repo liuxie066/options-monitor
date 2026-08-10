@@ -253,7 +253,7 @@ def _horizon_close_outcome(
     close_now_cost, contracts, multiplier = decision
     future_close_cost = ask * multiplier * contracts + future_fee
     hold_incremental = close_now_cost - future_close_cost
-    result = {
+    return {
         **base,
         "evidence_status": "usable",
         "inconclusive_reason": None,
@@ -270,82 +270,6 @@ def _horizon_close_outcome(
         "source": "close_decision_mark",
         "mark_time_basis": mark.get("mark_time_basis"),
         "point_in_time_status": mark.get("point_in_time_status"),
-    }
-    result.update(
-        _replacement_horizon_outcome(
-            episode,
-            mark=mark,
-            hold_incremental=hold_incremental,
-        )
-    )
-    return result
-
-
-def _replacement_horizon_outcome(
-    episode: dict[str, Any],
-    *,
-    mark: dict[str, Any],
-    hold_incremental: float,
-) -> dict[str, Any]:
-    evidence = episode.get("replacement_evidence")
-    evidence = evidence if isinstance(evidence, dict) else {}
-    if text(evidence.get("status")).lower() != "review_switch":
-        return {
-            "replacement_outcome_status": "not_applicable",
-            "replacement_inconclusive_reason": "replacement_not_selected_at_decision",
-            "replacement_incremental": None,
-            "switch_vs_close_incremental": None,
-            "switch_vs_hold_incremental": None,
-        }
-    entry_credit = first_float(evidence, "entry_credit")
-    contracts = first_float(evidence, "contracts")
-    multiplier = first_float(evidence, "multiplier")
-    open_fee = first_float(evidence, "open_fee")
-    entry_slippage = first_float(evidence, "entry_slippage")
-    future_ask = first_float(mark, "replacement_ask")
-    exit_fee = first_float(mark, "replacement_future_close_fee")
-    if any(
-        value is None
-        for value in (
-            entry_credit,
-            contracts,
-            multiplier,
-            open_fee,
-            entry_slippage,
-            future_ask,
-            exit_fee,
-        )
-    ):
-        return {
-            "replacement_outcome_status": "inconclusive",
-            "replacement_inconclusive_reason": "replacement_entry_or_exit_evidence_incomplete",
-            "replacement_incremental": None,
-            "switch_vs_close_incremental": None,
-            "switch_vs_hold_incremental": None,
-        }
-    assert entry_credit is not None
-    assert contracts is not None
-    assert multiplier is not None
-    assert open_fee is not None
-    assert entry_slippage is not None
-    assert future_ask is not None
-    assert exit_fee is not None
-    replacement_incremental = (
-        entry_credit
-        - future_ask * multiplier * contracts
-        - open_fee
-        - exit_fee
-        - entry_slippage
-    )
-    return {
-        "replacement_outcome_status": "usable",
-        "replacement_inconclusive_reason": None,
-        "replacement_contract_symbol": evidence.get("contract_symbol"),
-        "replacement_future_ask": future_ask,
-        "replacement_future_close_fee": exit_fee,
-        "replacement_incremental": replacement_incremental,
-        "switch_vs_close_incremental": replacement_incremental,
-        "switch_vs_hold_incremental": replacement_incremental - hold_incremental,
     }
 
 
@@ -381,7 +305,7 @@ def _terminal_close_outcome(
             mark=expiry_mark,
         )
     close_now_cost, _contracts, _multiplier = decision
-    result = {
+    return {
         **base,
         "evidence_status": "usable",
         "inconclusive_reason": None,
@@ -398,14 +322,6 @@ def _terminal_close_outcome(
         "mark_time_basis": expiry_mark.get("mark_time_basis"),
         "point_in_time_status": expiry_mark.get("point_in_time_status"),
     }
-    result.update(
-        _replacement_horizon_outcome(
-            episode,
-            mark=expiry_mark,
-            hold_incremental=close_now_cost,
-        )
-    )
-    return result
 
 
 def _terminal_from_lifecycle(
@@ -441,7 +357,6 @@ def _terminal_from_lifecycle(
                 **_inconclusive_close_outcome(base, "lifecycle_contract_quantity_incomplete"),
                 "outcome": outcome,
                 "lifecycle_at_utc": event_at,
-                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
                 "source": "canonical_lifecycle_fact",
             }
         if incremental is None:
@@ -449,7 +364,6 @@ def _terminal_from_lifecycle(
                 **_inconclusive_close_outcome(base, "lifecycle_incremental_pnl_missing"),
                 "outcome": outcome,
                 "lifecycle_at_utc": event_at,
-                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
                 "source": "canonical_lifecycle_fact",
             }
         if not incremental_binding_ok:
@@ -457,7 +371,6 @@ def _terminal_from_lifecycle(
                 **_inconclusive_close_outcome(base, "lifecycle_incremental_pnl_unbound"),
                 "outcome": outcome,
                 "lifecycle_at_utc": event_at,
-                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
                 "source": "canonical_lifecycle_fact",
             }
         return {
@@ -469,7 +382,6 @@ def _terminal_from_lifecycle(
             "hold_to_horizon_incremental": incremental,
             "close_now_incremental": 0.0,
             "hold_vs_close_regret": incremental,
-            "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
             "source": "canonical_lifecycle_fact",
         }
 
@@ -505,8 +417,8 @@ def _terminal_from_lifecycle(
 
 
 def _close_outcome_base(episode: dict[str, Any], *, outcome_kind: str) -> dict[str, Any]:
-    shadow = episode.get("shadow_policy_results")
-    shadow = shadow if isinstance(shadow, dict) else {}
+    policy = episode.get("formal_policy_result")
+    policy = policy if isinstance(policy, dict) else {}
     return {
         "schema_version": CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
         "episode_id": episode.get("episode_id"),
@@ -514,11 +426,8 @@ def _close_outcome_base(episode: dict[str, Any], *, outcome_kind: str) -> dict[s
         "account": episode.get("account"),
         "position_lot_id": episode.get("position_lot_id"),
         "observed_at_utc": episode.get("observed_at_utc"),
-        "policy_recommendations": {
-            policy: result.get("recommendation_state")
-            for policy, result in shadow.items()
-            if isinstance(result, dict)
-        },
+        "policy_version": policy.get("policy_version"),
+        "recommendation_state": policy.get("recommendation_state"),
         "writes_runtime_config": False,
         "writes_trade_state": False,
     }
@@ -575,19 +484,6 @@ def _eligible_lifecycle_facts(
         if event_at > observed:
             out.append(fact)
     return sorted(out, key=_lifecycle_time)
-
-
-def _willingness_alignment(episode: dict[str, Any], *, outcome: str) -> str:
-    if outcome not in {"assigned", "called_away"}:
-        return "not_applicable"
-    facts = episode.get("normalized_decision_facts")
-    facts = facts if isinstance(facts, dict) else {}
-    willingness = facts.get("continued_willingness")
-    if willingness is True:
-        return "aligned"
-    if willingness is False:
-        return "misaligned"
-    return "unknown"
 
 
 def _lifecycle_incremental_matches_episode(

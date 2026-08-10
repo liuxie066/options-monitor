@@ -23,22 +23,6 @@ COVERED_CALL_SECTION_LABEL = strategy_section_label(STRATEGY_COVERED_CALL)
 _COMPACT_EXPIRY_RE = re.compile(r"@\s*\d{2}-\d{2}\b")
 _ISO_EXPIRY_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _OPTION_STRIKE_RE = re.compile(r"\b\d+(?:\.\d+)?[PC]\b")
-_DISPLAYABLE_CLOSE_GAP_PHRASES = (
-    "缺少",
-    "未取得可用价格",
-    "无可用报价",
-    "无可用 bid/ask",
-    "补拉",
-    "行情覆盖",
-    "拉取失败",
-    "限频",
-    "重试预算",
-    "数据源不可用",
-    "OpenD",
-    "价差无效",
-)
-
-
 def _looks_like_option_candidate_line(text: str) -> bool:
     s = str(text or "").strip()
     if not s:
@@ -243,7 +227,9 @@ def _split_monitor_sections(text: str) -> tuple[list[str], list[str], list[str]]
             section = "reject"
             reject_lines.append(stripped)
             continue
-        if stripped.startswith("### [") and "平仓建议" in stripped:
+        if stripped.startswith("### [") and (
+            "平仓建议" in stripped or "严格平仓提醒" in stripped
+        ):
             section = "close"
             close_lines.append(stripped)
             continue
@@ -304,74 +290,32 @@ def _compact_candidate_counts(lines: list[str]) -> tuple[int, int, int]:
 
 def _is_close_action_line(line: str) -> bool:
     s = str(line or "").strip()
-    if not s or s.startswith("###") or "本次无" in s or "待补数据" in s or "无法评估" in s:
+    if not s or s.startswith("###"):
         return False
-    has_contract = bool(re.search(r"\b(?:Put|Call)\b", s))
-    if not has_contract:
-        return False
-    if s[:1] in {"🔴", "🟠", "🟡", "🟢", "⚪"}:
-        return True
-    return s.startswith("- ") and any(token in s for token in ("平仓", "换仓", "止盈", "风险"))
+    return bool(
+        s.startswith("- ")
+        and "建议买回平仓" in s
+        and re.search(r"\b(?:Put|Call)\b", s)
+    )
 
 
-def _is_close_gap_line(line: str) -> bool:
-    s = str(line or "").strip()
-    return s.startswith("- ") and "无法评估" in s and bool(re.search(r"\b(?:Put|Call)\b", s))
-
-
-def _is_displayable_close_gap_line(line: str) -> bool:
-    s = str(line or "").strip()
-    if not _is_close_gap_line(s):
-        return False
-    return any(phrase in s for phrase in _DISPLAYABLE_CLOSE_GAP_PHRASES)
-
-
-def _compact_close_gap_line(line: str) -> str:
-    s = str(line or "").strip()
-    s = s.replace(" · 无法评估 | ", " · ")
-    s = s.replace("收益捕获平仓仅支持 open short put/call", "非 short put/call，跳过收益捕获")
-    return s
-
-
-def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[list[str], int, int]:
+def _compact_close_lines(lines: list[str]) -> tuple[list[str], int, int]:
     if not lines:
         return ["当前没有平仓建议。"], 0, 0
     action_count = sum(1 for line in lines if _is_close_action_line(line))
-    gap_lines = [str(line).strip() for line in lines if _is_displayable_close_gap_line(str(line))]
-    gap_count = len(gap_lines)
 
     out: list[str] = []
-    skip_header = True
-    in_gap = False
-    shown_gap = 0
     for raw in lines:
         s = str(raw or "").strip()
         if not s:
             continue
-        if skip_header and s.startswith("###"):
-            continue
-        if "本次无 strong/medium 平仓建议" in s or "本次未生成 strong/medium 提醒" in s:
-            if not action_count:
-                out.append("当前没有平仓建议。")
-            continue
-        if s == "- 待补数据:" or s == "待补数据:":
-            in_gap = True
-            if gap_count:
-                out.append("待补｜以下持仓需要补充数据")
-            continue
-        if in_gap:
-            if _is_displayable_close_gap_line(s):
-                if shown_gap < max_gap_items:
-                    out.append(_compact_close_gap_line(s).removeprefix("- ").strip())
-                shown_gap += 1
+        if s.startswith("###"):
             continue
         out.append(s.removeprefix("- ").strip())
 
-    if gap_count > max_gap_items:
-        out.append(f"补充｜另有 {gap_count - max_gap_items} 条待补数据")
     if not out:
         out.append("当前没有平仓建议。")
-    return out, action_count, gap_count
+    return out, action_count, 0
 
 
 def _flat_cash_footer_lines(footer_lines: list[str]) -> list[str]:

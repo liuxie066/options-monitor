@@ -623,10 +623,6 @@ def execute_per_account_delivery(
     sleep_fn: Callable[[float], Any] = sleep,
     idempotency_keys_by_account: dict[str, str] | None = None,
     transport_envelopes_by_account: dict[str, dict[str, Any]] | None = None,
-    authority_executor: (
-        Callable[[str, Callable[[], dict[str, object]]], dict[str, object]]
-        | None
-    ) = None,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
@@ -673,31 +669,7 @@ def execute_per_account_delivery(
                 ).get(str(acct)),
             )
 
-        if authority_executor is None:
-            send_result = _send_account()
-        else:
-            try:
-                send_result = authority_executor(
-                    str(acct),
-                    _send_account,
-                )
-            except Exception as exc:
-                send_result = {
-                    "ok": False,
-                    "account": str(acct),
-                    "error_code": "NOTIFICATION_AUTHORITY_FAILED",
-                    "attempts": 0,
-                    "final_returncode": 1,
-                    "message_id": None,
-                    "upstream_message_id": None,
-                    "command_ok": False,
-                    "delivery_confirmed": False,
-                    "retry_attempt_count": 0,
-                    "ambiguous_send": False,
-                    "duplicate_risk": False,
-                    "exception_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
+        send_result = _send_account()
         if not bool(send_result.get("ok")):
             send_results.append(dict(send_result))
             error_code = str(send_result.get("error_code") or "SEND_FAILED")

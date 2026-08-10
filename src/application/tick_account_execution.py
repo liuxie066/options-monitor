@@ -18,7 +18,6 @@ from src.application.account_run import (
     AccountRunRequest,
     _resolve_account_scan_decision,
     build_account_runtime_config,
-    publish_current_run_portfolio_source,
     run_one_account,
 )
 from src.application.account_config import (
@@ -76,7 +75,7 @@ from src.application.required_data_snapshot import (
     load_required_data_snapshot_manifest,
     seal_required_data_snapshot,
 )
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
@@ -763,59 +762,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 if account not in invalid_prepared_option_accounts
             }
 
-        invalid_portfolio_source_accounts: set[str] = set()
-        for account in sorted(scanning_configs):
-            prepared_context = prepared_contexts.get(account)
-            if not isinstance(prepared_context, dict):
-                account_config_errors[account] = AccountRunConfigError(
-                    "ACCOUNT_CONFIG_PORTFOLIO_SOURCE_INVALID",
-                    "prepared portfolio context is unavailable",
-                )
-                invalid_portfolio_source_accounts.add(account)
-                continue
-            try:
-                portfolio_source = publish_current_run_portfolio_source(
-                    cfg=scanning_configs[account],
-                    account_run_id=request.run_id,
-                    account=account,
-                    markets_to_run=request.markets_to_run,
-                    account_state_dir=account_state_dirs[account],
-                    prepared_portfolio_context=prepared_context,
-                )
-            except AccountRunConfigError as exc:
-                account_config_errors[account] = exc
-                invalid_portfolio_source_accounts.add(account)
-                request.runlog.safe_event(
-                    "position_advice_portfolio_source",
-                    "error",
-                    error_code=exc.code,
-                    message=str(exc),
-                    data={"account": account},
-                )
-                continue
-            request.runlog.safe_event(
-                "position_advice_portfolio_source",
-                "ok",
-                data={
-                    "account": account,
-                    "snapshot_id": portfolio_source["receipt"].get(
-                        "snapshot_id"
-                    ),
-                },
-            )
-
-        if invalid_portfolio_source_accounts:
-            scanning_accounts = [
-                account
-                for account in scanning_accounts
-                if account not in invalid_portfolio_source_accounts
-            ]
-            scanning_configs = {
-                account: config
-                for account, config in scanning_configs.items()
-                if account not in invalid_portfolio_source_accounts
-            }
-
         union_cfg = build_cross_account_prefetch_config(
             base_config=request.base_cfg,
             account_configs=scanning_configs,
@@ -1075,14 +1021,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         expected_manifest_sha256=prepared_option_digest,
                         expected_runtime_config=config,
                     )
-                )
-                publish_current_run_portfolio_source(
-                    cfg=config,
-                    account_run_id=request.run_id,
-                    account=account_key,
-                    markets_to_run=request.markets_to_run,
-                    account_state_dir=account_state_dir,
-                    prepared_portfolio_context=prepared_context,
                 )
             except PreparedPortfolioContextError as exc:
                 account_config_errors[account_key] = AccountRunConfigError(

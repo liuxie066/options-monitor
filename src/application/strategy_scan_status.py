@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.infrastructure.io_utils import atomic_write_json
 
 
