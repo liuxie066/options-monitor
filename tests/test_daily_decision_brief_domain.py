@@ -537,6 +537,26 @@ def test_daily_brief_digest_handles_non_finite_nested_values_deterministically()
     assert daily_brief_digest(with_nan) == daily_brief_digest(with_none)
 
 
+def test_daily_brief_digest_compatibility_is_limited_to_absent_optional_defaults() -> None:
+    from domain.domain.daily_decision_brief import (
+        daily_brief_compatible_digests,
+        normalize_daily_decision_brief,
+    )
+
+    historical = _brief(revision=0)
+    compatible = daily_brief_compatible_digests(historical)
+    assert len(compatible) == 2
+
+    materialized = normalize_daily_decision_brief(historical)
+    assert "ai_decision_advice" in materialized
+    assert "ai_decision_advice_evidence_index" in materialized
+    assert daily_brief_compatible_digests(materialized) == (compatible[0],)
+
+    tampered = deepcopy(historical)
+    tampered["strategy_summary"] = "different strategy facts"
+    assert compatible[1] not in daily_brief_compatible_digests(tampered)
+
+
 def test_diff_emits_candidate_bound_event_material_changes() -> None:
     from domain.domain.daily_decision_brief import diff_daily_decision_briefs
 

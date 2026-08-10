@@ -830,6 +830,71 @@ def test_v2_attempt_and_confirmation_advance_exact_envelope_and_candidates(tmp_p
     assert {item["via"] for item in day["alerted_candidates"].values()} == {"fixed_report"}
 
 
+def test_v2_delivery_accepts_digest_from_revision_before_optional_ai_defaults(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        inspect_daily_decision_brief_delivery,
+        persist_daily_decision_brief_success,
+        read_daily_decision_brief_delivery_state,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    prepared = _prepare_fixed(tmp_path, persisted)
+    envelope = prepared["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+        confirmed_at_utc="2026-07-21T14:00:04+00:00",
+    )
+
+    for path in (persisted["paths"]["revision"], persisted["paths"]["current"]):
+        historical = json.loads(path.read_text(encoding="utf-8"))
+        historical.pop("ai_decision_advice", None)
+        historical.pop("ai_decision_advice_evidence_index", None)
+        path.write_text(json.dumps(historical), encoding="utf-8")
+    legacy_digest = daily_brief_compatible_digests(historical)[-1]
+    assert legacy_digest != persisted["current_brief_digest"]
+
+    delivery_path = prepared["paths"]["delivery"]
+    delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+    day = delivery["days"][MARKET_DATE]
+    day["fixed_reports"][TARGET_1000]["source_digest"] = legacy_digest
+    for alerted in day["alerted_candidates"].values():
+        alerted["brief_digest"] = legacy_digest
+    delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
+
+    inspected = inspect_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )
+    assert inspected["reason"] == "already_v2"
+    assert inspected["state"]["days"][MARKET_DATE]["fixed_reports"][TARGET_1000][
+        "source_digest"
+    ] == legacy_digest
+
+    next_run = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=_brief(run_id="run-2", actions=[_action()]),
+    )
+    assert next_run["current_revision"] == 1
+    assert read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["available"] is True
+
+
 def test_v2_ambiguous_attempt_freezes_envelope_and_exact_retry_can_confirm(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import (
         DailyDecisionBriefStateError,

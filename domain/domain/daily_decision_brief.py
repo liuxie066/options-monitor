@@ -49,6 +49,17 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "event_risk",
 )
 
+# These optional sections were introduced as normalizer-owned defaults after
+# Daily Brief revisions had already been persisted in production.  A revision
+# written before a field existed must keep the digest that was computed from
+# its original shape.  Compatibility is permitted only when the source JSON
+# truly lacks the field; a present value is always covered by the current
+# digest contract.
+_DIGEST_ABSENT_OPTIONAL_FIELDS = (
+    "ai_decision_advice",
+    "ai_decision_advice_evidence_index",
+)
+
 _STABLE_ACTION_ID_FIELDS = (
     "action_type",
     "strategy_family",
@@ -1001,13 +1012,32 @@ def diff_daily_decision_briefs(
 
 
 def daily_brief_digest(brief: Mapping[str, Any]) -> str:
+    return daily_brief_compatible_digests(brief)[0]
+
+
+def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return current and source-shape-compatible Daily Brief digests.
+
+    The first value is always the digest used for new writes.  A second value
+    is emitted only for a persisted source that predates one or more known
+    optional normalizer defaults.  This preserves strict historical integrity
+    without treating arbitrary digest mismatches as compatible.
+    """
+
+    source = dict(brief or {})
     normalized = normalize_daily_decision_brief(brief)
     payload = {
         key: value
         for key, value in normalized.items()
         if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
     }
-    return _digest(payload)
+    current = _digest(payload)
+    historical_payload = dict(payload)
+    for field in _DIGEST_ABSENT_OPTIONAL_FIELDS:
+        if field not in source:
+            historical_payload.pop(field, None)
+    historical = _digest(historical_payload)
+    return (current,) if historical == current else (current, historical)
 
 
 def _ensure_same_brief_identity(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
@@ -1237,6 +1267,7 @@ __all__ = [
     "build_daily_brief_candidate_identity",
     "decide_daily_brief_notification",
     "build_daily_brief_id",
+    "daily_brief_compatible_digests",
     "daily_brief_digest",
     "diff_daily_decision_briefs",
     "effective_daily_brief_actionability",
