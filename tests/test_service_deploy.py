@@ -193,7 +193,8 @@ def test_render_systemd_bundle_ai_evidence_collector_opt_in(
     )
     assert str(repo / "om") + " ai-evidence-collector" not in service
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in service
-    assert "OnUnitActiveSec=4h" in timer
+    assert "OnUnitActiveSec=24h" in timer
+    assert "OnUnitActiveSec=4h" not in timer
     assert "Persistent=true" in timer
     assert "Unit=options-monitor-ai-evidence-collector.service" in timer
 

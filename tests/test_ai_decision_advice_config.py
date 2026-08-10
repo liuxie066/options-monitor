@@ -4,6 +4,9 @@ import pytest
 
 from src.application.ai_decision_advice.config import (
     API_KEY_ENV,
+    EVIDENCE_FULL_RECHECK_SECONDS,
+    EVIDENCE_REFRESH_INTERVAL_SECONDS,
+    EVIDENCE_STALE_SECONDS,
     PORTFOLIO_DISTRIBUTION_PROVIDER_NONE,
     PORTFOLIO_DISTRIBUTION_PROVIDER_PM,
     ai_decision_advice_enabled,
@@ -19,6 +22,12 @@ def _base_cfg() -> dict:
         "accounts": ["lx"],
         "symbols": [{"symbol": "NVDA", "market": "us"}],
     }
+
+
+def test_external_evidence_daily_cadence_contract() -> None:
+    assert EVIDENCE_REFRESH_INTERVAL_SECONDS == 24 * 60 * 60
+    assert EVIDENCE_FULL_RECHECK_SECONDS == EVIDENCE_REFRESH_INTERVAL_SECONDS
+    assert EVIDENCE_STALE_SECONDS == 2 * EVIDENCE_REFRESH_INTERVAL_SECONDS
 
 
 def test_ai_decision_advice_accepts_disabled_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
