@@ -942,7 +942,8 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
         context=alert_context,
     )
     assert "状态｜新增候选 · 10:30 发现" in alert
-    assert "## 新增候选" in alert
+    assert "## Sell Put" in alert
+    assert "### 新增策略候选" in alert
     assert "## 持仓" not in alert
     assert "另有 1 个新增候选未展开" in alert
     assert "MSFT｜Sell Put" in alert
@@ -1214,6 +1215,7 @@ def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> No
     brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
     extra[1]["candidate_id"] = "put-rank4"
     brief["candidates"]["sell_put"].extend(extra)
+    brief["candidates"]["covered_call"] = []
     brief["ai_decision_advice"] = {
         "status": "completed",
         "unavailable_reason": None,
@@ -1241,8 +1243,9 @@ def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> No
     assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" in message
     assert "C3｜Sell Put" not in message
     assert "### AI建议" in message
-    assert "建议改选策略排序 4：C4 合约信息不完整。" in message
-    assert "Covered Call｜本轮无可供 AI 评估的策略候选" not in message
+    assert "建议改选策略排序 4：C4 08-21 $104 Put。" in message
+    assert "## Covered Call" in message
+    assert "本轮无可供 AI 评估的策略候选。" in message
 
 
 def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
@@ -1289,7 +1292,106 @@ def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
 
     message = render_fixed_report(brief, context=_scheduled_context())
     assert "### AI建议" in message
-    assert "来源｜监管新规征求意见（监管机构 · 2026-07-19） https://example.gov/rule" in message
+    assert (
+        "来源｜监管新规征求意见（监管机构 · 2026-07-19 · example.gov） "
+        "https://example.gov/rule"
+    ) in message
+
+
+def test_fixed_report_card_places_ai_advice_inside_strategy_module() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    brief["candidates"]["sell_put"][0]["candidate_id"] = "put-1"
+    brief["ai_decision_advice"] = {
+        "status": "completed",
+        "unavailable_reason": None,
+        "evidence_as_of": "2026-07-20T13:00:00+00:00",
+        "sell_put": {
+            "action": "keep",
+            "baseline_candidate_id": "put-1",
+            "selected_candidate_id": "put-1",
+            "rationale": {},
+            "source_refs": {},
+        },
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": "adv-1",
+    }
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    sell_put = message.index("## Sell Put")
+    advice = message.index("### AI建议", sell_put)
+    candidates = message.index("### 策略候选", advice)
+    assert sell_put < advice < candidates
+    assert "结论｜维持策略排序 1。" in message
+
+
+def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_candidate_identity,
+    )
+    from src.application.daily_decision_brief_renderer import (
+        render_candidate_alert_card_markdown,
+    )
+
+    brief = _brief()
+    new_candidate = brief["candidates"]["sell_put"][0]
+    old_candidate = brief["candidates"]["sell_put"][1]
+    new_candidate["candidate_id"] = "put-new"
+    old_candidate["candidate_id"] = "put-old"
+    identity = build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="MSFT",
+        strategy_family="sell_put",
+    )
+    brief["candidate_index"] = [
+        {
+            "identity": identity,
+            "symbol": "MSFT",
+            "strategy_family": "sell_put",
+            "representative": new_candidate,
+            "contract_count": 1,
+        }
+    ]
+    brief["ai_decision_advice"] = {
+        "status": "completed",
+        "unavailable_reason": None,
+        "evidence_as_of": "2026-07-20T13:00:00+00:00",
+        "sell_put": {
+            "action": "switch",
+            "baseline_candidate_id": "put-new",
+            "selected_candidate_id": "put-old",
+            "rationale": {
+                "risk_mechanism": "当前首选存在额外事件风险",
+                "candidate_effect": "风险落在本次到期窗口内",
+                "decision_reason": "旧候选避开该窗口",
+            },
+            "source_refs": {},
+        },
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": "adv-1",
+    }
+
+    message = render_candidate_alert_card_markdown(
+        brief,
+        [identity],
+        context=_scheduled_context(),
+    )
+
+    assert "结论｜建议改选策略排序 2：NVDA 08-21 $100 Put。" in message
+    assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
+    assert "**NVDA｜Sell Put" not in message
 
 
 def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_table() -> None:
@@ -1326,7 +1428,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     )
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
-    assert "### Sell Put" in message
+    assert "## Sell Put" in message
+    assert "### 策略候选" in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）**" in message
     assert (
@@ -1334,10 +1437,10 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
         "预计净收入 $480.00"
         in message
     )
-    assert "### Covered Call" in message
+    assert "## Covered Call" in message
     assert "**AAPL｜Covered Call｜08-21 $250 Call（策略排序 1）**" in message
     assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
-    assert "### 组合增强" in message
+    assert "## 组合增强" in message
     assert "**TSLA｜组合增强（策略排序 1）**" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
@@ -1527,7 +1630,8 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
         context=_scheduled_context(),
     )
 
-    assert "### Sell Put" in message
+    assert "## Sell Put" in message
+    assert "### 新增策略候选" in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "| 优先 | 合约 |" not in message
     assert "\n\n事件｜Sell Put #1：" in message
