@@ -384,6 +384,72 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     assert rendered_helper.stat().st_mode & 0o777 == 0o755
 
 
+def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = tmp_path / "credstore.encrypted"
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["us"],
+        include_opend=True,
+        include_feishu_ws=True,
+        include_quality_monitoring=True,
+        include_secret_credentials=True,
+        secret_credential_store_root=store,
+        deploy_user="liuxie",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    tick = files[
+        "systemd/options-monitor-tick-us.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert f"om-feishu-holdings-app-secret:{store}/om-feishu-holdings-app-secret" in tick
+    assert f"om-feishu-bot-app-secret:{store}/om-feishu-bot-app-secret" in tick
+    assert "om-quality-read-token" not in tick
+    assert "om-inbound-operation-hmac-key" not in tick
+
+    quality = files[
+        "systemd/options-monitor-quality-http.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert f"om-quality-read-token:{store}/om-quality-read-token" in quality
+    assert "om-feishu-bot-app-secret" not in quality
+
+    feishu_ws = files[
+        "systemd/options-monitor-feishu-ws.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assert "om-feishu-bot-app-secret" in feishu_ws
+    assert "om-feishu-holdings-app-secret" in feishu_ws
+    assert "om-inbound-operation-hmac-key" in feishu_ws
+    assert "om-quality-read-token" not in feishu_ws
+
+    assert not any(
+        item["relative_path"].endswith("options-monitor-materialize-feishu-agent-credential")
+        for item in bundle["files"]
+    )
+    assert profile["secret_credentials"]["backend"] == "systemd"
+    assert profile["secret_credentials"]["legacy_env_materializer_enabled"] is False
+    assert "options-monitor-opend.service" not in profile["secret_credentials"]["service_credentials"]
+
+
+def test_render_rejects_mixed_legacy_and_per_unit_secret_modes(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=tmp_path,
+            markets=["us"],
+            include_secret_credentials=True,
+            include_feishu_agent_credential=True,
+        )
+
+
 def test_render_launchd_bundle_rejects_feishu_agent_credential(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -829,6 +895,120 @@ def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
     assert retired["summary"]["status"] == "ok"
     assert retired["applied"]["retired_managed_files"] == [stale_key]
     assert not stale_dropin.exists()
+
+
+def test_service_drift_manages_per_unit_secret_credential_dropins(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import (
+        SECRET_CREDENTIAL_DROPIN,
+        render_service_bundle,
+    )
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_secret_credentials=True,
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(
+        files["service.profile.json"]["content"],
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    secret_items = [
+        item
+        for item in bundle["files"]
+        if item.get("kind") == "systemd_secret_dropin"
+    ]
+    secret_keys = sorted(str(item["install_path"]) for item in secret_items)
+
+    before = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+    assert secret_keys
+    assert all(key in before["missing_managed_files"] for key in secret_keys)
+
+    installed = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+    assert installed["missing_managed_files"] == []
+    assert installed["mismatched_managed_files"] == []
+    assert installed["applied"]["written_managed_files"] == secret_keys
+    for item in secret_items:
+        relative = Path(str(item["install_path"])).relative_to(
+            "/etc/systemd/system"
+        )
+        assert (systemd_root / relative).read_text(encoding="utf-8") == item["content"]
+
+    first_item = secret_items[0]
+    first_relative = Path(str(first_item["install_path"])).relative_to(
+        "/etc/systemd/system"
+    )
+    first_path = systemd_root / first_relative
+    first_path.write_text("stale mapping\n", encoding="utf-8")
+    mismatched = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+    assert mismatched["mismatched_managed_files"] == [
+        str(first_item["install_path"])
+    ]
+
+    repaired = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+    assert repaired["mismatched_managed_files"] == []
+    assert first_path.read_text(encoding="utf-8") == first_item["content"]
+
+    stale_dropin = (
+        systemd_root
+        / "options-monitor-retired.service.d"
+        / SECRET_CREDENTIAL_DROPIN
+    )
+    stale_dropin.parent.mkdir(parents=True)
+    stale_dropin.write_text("stale grant\n", encoding="utf-8")
+    stale_key = str(
+        Path("/etc/systemd/system")
+        / stale_dropin.parent.name
+        / stale_dropin.name
+    )
+    stale = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+    assert stale["extra_managed_files"] == [stale_key]
+
+    retired = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+    assert retired["applied"]["retired_managed_files"] == [stale_key]
+    assert not stale_dropin.exists()
+    assert profile["secret_credentials"]["enabled"] is True
 
 
 def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
@@ -1610,7 +1790,7 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
         "http": {
             "host": "127.0.0.1",
             "port": 8792,
-            "token_env": "OM_QUALITY_READ_TOKEN",
+            "credential_name": "quality.read_token",
         },
         "regular_refresh_interval": "15min",
         "recheck_interval": "1min",

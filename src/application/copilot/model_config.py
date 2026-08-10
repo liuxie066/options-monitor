@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ from src.application.config_validator import validate_assistant_config
 from src.application.config_yaml import default_yaml_assistant_config_path
 from src.application.copilot.model_client import CopilotModelSettings
 from src.application.llm_provider_registry import provider_requires_api_key
+from src.application.secret_store import SecretProvider, resolve_secret_status
 
 
 def load_assistant_llm_config(
@@ -86,15 +86,25 @@ def _load_assistant_config(
     return payload, None
 
 
-def model_api_key_configured(raw: dict[str, Any], *, environ: dict[str, str] | None = None) -> tuple[bool, str | None]:
+def model_api_key_configured(
+    raw: dict[str, Any],
+    *,
+    environ: dict[str, str] | None = None,
+    secret_provider: SecretProvider | None = None,
+) -> tuple[bool, str | None]:
     try:
         settings = CopilotModelSettings.from_config(raw)
     except Exception:
         return False, "invalid_model_config"
     if not provider_requires_api_key(settings.provider):
         return True, None
-    env = environ if environ is not None else os.environ
-    if not str(env.get(settings.api_key_env) or "").strip():
+    status = resolve_secret_status(
+        settings.credential_name,
+        provider=secret_provider,
+        environ=environ,
+        legacy_env_name=settings.api_key_env,
+    )
+    if not status.configured:
         return False, "model_api_key_missing"
     return True, None
 

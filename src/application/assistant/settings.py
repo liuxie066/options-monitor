@@ -37,6 +37,7 @@ class AssistantLlmSettings:
     base_url: str = ""
     model: str = ""
     api_key_env: str = DEFAULT_LLM_API_KEY_ENV
+    credential_name: str = ""
     confidence_min: float = DEFAULT_LLM_CONFIDENCE_MIN
     timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
     max_output_tokens: int = DEFAULT_LLM_MAX_OUTPUT_TOKENS
@@ -48,6 +49,7 @@ class AssistantLlmSettings:
             "base_url": self.base_url,
             "model": self.model,
             "api_key_env": self.api_key_env,
+            "credential_name": self.credential_name,
             "confidence_min": float(self.confidence_min),
             "timeout_seconds": int(self.timeout_seconds),
             "max_output_tokens": int(self.max_output_tokens),
@@ -146,6 +148,11 @@ def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSett
         base_url=str(llm_cfg.get("base_url") or "").strip(),
         model=model,
         api_key_env=default_api_key_env if raw_api_key_env is None else str(raw_api_key_env).strip(),
+        credential_name=(
+            spec.credential_name
+            if spec is not None and spec.requires_api_key
+            else ""
+        ),
         confidence_min=_float(llm_cfg.get("confidence_min"), default=DEFAULT_LLM_CONFIDENCE_MIN),
         timeout_seconds=_int(
             llm_cfg.get("timeout_seconds"),

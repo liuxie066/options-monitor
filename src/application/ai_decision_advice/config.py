@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 from typing import Any, Mapping
+
+from src.application.secret_store import LLM_DEEPSEEK_API_KEY, SecretProvider, resolve_secret
 
 CONFIG_KEY = "ai_decision_advice"
 PORTFOLIO_DISTRIBUTION_KEY = "portfolio_distribution"
@@ -18,6 +19,7 @@ PORTFOLIO_DISTRIBUTION_PROVIDERS = frozenset(
 PROVIDER = "deepseek"
 MODEL = "deepseek-v4-flash"
 API_KEY_ENV = "DEEPSEEK_API_KEY"
+CREDENTIAL_NAME = LLM_DEEPSEEK_API_KEY
 BASE_URL = "https://api.deepseek.com"
 
 EVIDENCE_REFRESH_INTERVAL_SECONDS = 4 * 60 * 60
@@ -68,7 +70,14 @@ def portfolio_distribution_provider(
     return provider
 
 
-def resolve_api_key(environ: Mapping[str, str] | None = None) -> str | None:
-    env = environ if environ is not None else os.environ
-    value = str(env.get(API_KEY_ENV) or "").strip()
-    return value or None
+def resolve_api_key(
+    environ: Mapping[str, str] | None = None,
+    *,
+    secret_provider: SecretProvider | None = None,
+) -> str | None:
+    return resolve_secret(
+        CREDENTIAL_NAME,
+        provider=secret_provider,
+        environ=environ,
+        legacy_env_name=API_KEY_ENV,
+    )

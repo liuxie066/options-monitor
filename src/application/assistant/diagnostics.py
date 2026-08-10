@@ -15,8 +15,10 @@ from src.application.llm_provider_registry import (
 )
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.settings import build_effective_env
+from src.application.secret_store import SecretProvider, resolve_secret_status
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
 from src.infrastructure.openai_responses import resolve_responses_url
+from src.infrastructure.secret_store.factory import build_secret_provider
 
 
 def check_assistant_llm(
@@ -26,6 +28,7 @@ def check_assistant_llm(
     env_file: str | Path | None = None,
     include_local_env_file: bool = True,
     live: bool = False,
+    secret_provider: SecretProvider | None = None,
 ) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     path, cfg = load_assistant_config(
@@ -40,10 +43,11 @@ def check_assistant_llm(
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
+    provider = secret_provider or build_secret_provider(environ=effective_env.values)
 
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
-    checks.extend(_config_checks(settings, effective_env=effective_env))
+    checks.extend(_config_checks(settings, secret_provider=provider))
     live_probe = _live_probe_check(
         live=bool(live),
     )
@@ -57,6 +61,16 @@ def check_assistant_llm(
         status = "ready"
     else:
         status = "error"
+    requires_api_key = bool(settings.provider) and provider_requires_api_key(settings.provider)
+    credential_status = (
+        resolve_secret_status(
+            settings.credential_name,
+            provider=provider,
+            legacy_env_name=settings.api_key_env,
+        )
+        if requires_api_key
+        else None
+    )
 
     return {
         "summary": {
@@ -88,10 +102,13 @@ def check_assistant_llm(
             if _provider_api_kind(settings) == "chat_completions"
             else None,
             "api_key_configured": (
-                not provider_requires_api_key(settings.provider)
-                or bool(effective_env.get(settings.api_key_env))
+                bool(settings.enabled)
+                and (
+                    not requires_api_key
+                    or bool(credential_status and credential_status.configured)
+                )
             ),
-            "api_key_source": _source_value(effective_env.source_of(settings.api_key_env)),
+            "api_key_source": credential_status.source if credential_status is not None else "not_required",
         },
         "capabilities": _capability_summary(),
         "checks": checks,
@@ -114,8 +131,14 @@ def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[st
     return True
 
 
-def _config_checks(settings: AssistantLlmSettings, *, effective_env: Any) -> list[dict[str, Any]]:
+def _config_checks(settings: AssistantLlmSettings, *, secret_provider: SecretProvider) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
+    if secret_provider.backend_name == "env":
+        checks.append({
+            "name": "secret_backend",
+            "status": "warn",
+            "message": "OM_SECRET_BACKEND=env and api_key_env are deprecated compatibility surfaces",
+        })
     checks.append({
         "name": "enabled",
         "status": "ok" if settings.enabled else "warn",
@@ -123,33 +146,42 @@ def _config_checks(settings: AssistantLlmSettings, *, effective_env: Any) -> lis
     })
     checks.append(_provider_check(settings.provider, required=settings.enabled))
     checks.append(_required_text_check("model", settings.model, required=settings.enabled))
-    requires_api_key = provider_requires_api_key(settings.provider)
+    requires_api_key = bool(settings.provider) and provider_requires_api_key(settings.provider)
     checks.append(
-        _required_text_check("api_key_env", settings.api_key_env, required=settings.enabled)
+        _required_text_check("credential_name", settings.credential_name, required=settings.enabled)
         if requires_api_key
         else {
-            "name": "api_key_env",
+            "name": "credential_name",
             "status": "skipped",
-            "message": "provider does not require an API key environment variable",
+            "message": "provider does not require a credential",
         }
     )
 
-    api_key_source = effective_env.source_of(settings.api_key_env)
-    api_key_configured = not requires_api_key or bool(effective_env.get(settings.api_key_env))
+    credential_status = (
+        resolve_secret_status(
+            settings.credential_name,
+            provider=secret_provider,
+            legacy_env_name=settings.api_key_env,
+        )
+        if requires_api_key
+        else None
+    )
+    api_key_configured = not requires_api_key or bool(credential_status and credential_status.configured)
     checks.append({
         "name": "api_key",
         "status": "ok" if api_key_configured else ("error" if settings.enabled else "warn"),
         "message": (
             "provider does not require an API key"
             if not requires_api_key
-            else f"{settings.api_key_env} is configured"
+            else f"{settings.credential_name} is configured"
             if api_key_configured
-            else f"{settings.api_key_env} is not configured"
+            else f"{settings.credential_name} is not configured"
         ),
         "value": {
-            "env_name": settings.api_key_env,
+            "credential_name": settings.credential_name,
+            "legacy_env_name": settings.api_key_env,
             "configured": api_key_configured,
-            "source": _source_value(api_key_source),
+            "source": credential_status.source if credential_status is not None else "not_required",
             "secret": True,
         },
     })

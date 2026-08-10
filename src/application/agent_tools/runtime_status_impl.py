@@ -23,6 +23,7 @@ from src.application.service_deploy import service_status_from_profile
 from src.application.service_drift import service_drift_status
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.llm_provider_registry import provider_requires_api_key
+from src.application.secret_store import SecretError, resolve_secret_status
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 
@@ -732,6 +733,21 @@ def _assistant_runtime_summary(
         except Exception as exc:
             audit_summary["error"] = f"{type(exc).__name__}: {exc}"
 
+    requires_api_key = bool(settings.llm.provider) and provider_requires_api_key(
+        settings.llm.provider
+    )
+    credential_status = None
+    credential_error = None
+    if requires_api_key:
+        try:
+            credential_status = resolve_secret_status(
+                settings.llm.credential_name,
+                environ=env.values,
+                legacy_env_name=settings.llm.api_key_env,
+            )
+        except (SecretError, ValueError) as exc:
+            credential_error = str(exc)
+
     return {
         "available": True,
         "config": {
@@ -746,9 +762,17 @@ def _assistant_runtime_summary(
             **settings.llm.public_payload(),
             "endpoint_url": endpoint_url,
             "api_key_configured": (
-                not provider_requires_api_key(settings.llm.provider)
-                or bool(env.get(settings.llm.api_key_env))
+                not requires_api_key
+                or bool(credential_status and credential_status.configured)
             ),
+            "api_key_source": (
+                credential_status.source
+                if credential_status is not None
+                else "not_required"
+                if not requires_api_key
+                else "unavailable"
+            ),
+            **({"credential_error": credential_error} if credential_error else {}),
             "env_file": mask_path(env.env_file) if env.env_file is not None else None,
             "env_file_loaded": bool(env.env_file_loaded),
         },

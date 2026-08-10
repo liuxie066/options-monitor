@@ -6,24 +6,31 @@ import json
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.settings import build_effective_env
+from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, SecretProvider, resolve_secret
 
 
 OPERATION_SIGNATURE_VERSION = "hmac-sha256-v1"
 OPERATION_HMAC_KEY_ENV = "OM_INBOUND_OPERATION_HMAC_KEY"
 
 
-def operation_hmac_key() -> str:
-    return str(build_effective_env().get(OPERATION_HMAC_KEY_ENV) or "").strip()
+def operation_hmac_key(*, secret_provider: SecretProvider | None = None) -> str:
+    return str(
+        resolve_secret(
+            INBOUND_OPERATION_HMAC_KEY,
+            provider=secret_provider,
+            legacy_env_name=OPERATION_HMAC_KEY_ENV,
+        )
+        or ""
+    )
 
 
-def require_operation_hmac_key() -> str:
-    key = operation_hmac_key()
+def require_operation_hmac_key(*, secret_provider: SecretProvider | None = None) -> str:
+    key = operation_hmac_key(secret_provider=secret_provider)
     if not key:
         raise AgentToolError(
             code="CONFIG_ERROR",
             message="inbound operation HMAC key is not configured",
-            hint=f"Set {OPERATION_HMAC_KEY_ENV} before enabling inbound write operations.",
+            hint=f"Provision {INBOUND_OPERATION_HMAC_KEY} before enabling inbound write operations.",
         )
     return key
 
