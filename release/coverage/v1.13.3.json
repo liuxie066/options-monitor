@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.3",
+  "base": {
+    "tag": "v1.13.2",
+    "commit": "f8583513c364ace9412223380a16bddbce29658c"
+  },
+  "reviewed_head": "1f3a26362fc9628400677316dbfccbd0eadd5a39",
+  "commits": [
+    {
+      "sha": "567015c06ca47cc93b27a29838b515ff4671fc7a",
+      "subject": "fix(security): keep channel diagnostics metadata-only"
+    },
+    {
+      "sha": "1f3a26362fc9628400677316dbfccbd0eadd5a39",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept runtime and channel diagnostics metadata-only: credential readiness now uses `SecretStatus` and degrades safely when a Linux process has no credential context, so scheduled runtime-status snapshots no longer require or read Feishu secret values.",
+      "commits": [
+        "567015c06ca47cc93b27a29838b515ff4671fc7a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1f3a26362fc9628400677316dbfccbd0eadd5a39",
+      "reason": "Generated dependency graph refresh for the mapped diagnostics fix; it adds no independent runtime behavior."
+    }
+  ]
+}
