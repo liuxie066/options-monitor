@@ -932,36 +932,30 @@ def test_success_empty_frozen_source_corruption_uses_fixed_failure(
 def test_missing_success_summary_blocks_normal_delivery_but_current_run_identity_allows_failure(
     tmp_path: Path,
 ) -> None:
-    from domain.domain.position_advice_authority import (
-        portfolio_account_identity_hash,
-    )
-    from src.application.position_advice_source_producers import (
-        publish_portfolio_source_snapshot,
+    from src.application.position_advice_account_sources import (
+        publish_or_reuse_account_portfolio_source,
     )
 
     account_dir = _account_dir(tmp_path)
     state_dir = account_dir / "state"
     (state_dir / "position_advice_sources.v2.json").unlink()
     identifiers = ["futu-lx-current"]
-    identity_hash = portfolio_account_identity_hash(
-        normalized_portfolio_source="futu",
-        broker_account_identifiers=identifiers,
-    )
-    publish_portfolio_source_snapshot(
-        producer_root=state_dir,
+    portfolio = publish_or_reuse_account_portfolio_source(
         account_run_id="run-1",
-        account="lx",
+        normalized_account="lx",
         broker="futu",
-        normalized_portfolio_source="futu",
-        portfolio_account_identity_hash=identity_hash,
         included_markets=["US"],
+        account_state_dir=state_dir,
         portfolio_context={
+            "portfolio_source_name": "futu",
             "source_observed_at": "2026-07-17T14:00:00+00:00",
+            "source_observation_status": "trusted",
             "source_account_identifiers": identifiers,
             "cash_by_currency": {"USD": 1000},
         },
         completed_at="2026-07-17T14:00:01+00:00",
     )
+    identity_hash = portfolio["portfolio_account_identity_hash"]
 
     brief = _assemble(tmp_path)
     authority = brief["notification_authority"]

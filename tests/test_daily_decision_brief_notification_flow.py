@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.position_advice_authority import (
+    portfolio_account_identity_hash,
+)
 from src.application.position_advice_authority_service import (
     apply_authority_change,
     build_identity_binding_evidence,
@@ -50,17 +54,26 @@ class _Audit:
 
 
 def _portfolio_identity_hash(account: str) -> str:
-    return canonical_sha256(
-        {
-            "normalized_portfolio_source": "futu",
-            "normalized_account": account,
-            "broker_account_id": f"test-{account}",
-        }
+    return portfolio_account_identity_hash(
+        normalized_portfolio_source="futu",
+        broker_account_identifiers=[f"test-{account}"],
     )
 
 
 def _ensure_v1_authority(base: Path, account: str) -> None:
-    identity_hash = _portfolio_identity_hash(account)
+    _ensure_v1_authority_identity(
+        base,
+        account=account,
+        identity_hash=_portfolio_identity_hash(account),
+    )
+
+
+def _ensure_v1_authority_identity(
+    base: Path,
+    *,
+    account: str,
+    identity_hash: str,
+) -> None:
     resolution = read_authority_resolution(
         base=base,
         normalized_account=account,
@@ -593,6 +606,123 @@ def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current
     assert envelope["delivery_kind"] == "fixed_failure"
     assert "数据异常" in envelope["rendered_message"]
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is False
+
+
+def test_early_portfolio_receipt_drives_actual_fixed_failure_in_no_send(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.daily_decision_brief_service as service
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+    from src.application.position_advice_account_sources import (
+        publish_or_reuse_account_portfolio_source,
+    )
+
+    run_id = "early-receipt-failure"
+    bundle = _request(
+        tmp_path,
+        run_id=run_id,
+        pipeline_ok=False,
+        no_send=True,
+    )
+    state_dir = (
+        tmp_path
+        / "output_runs"
+        / run_id
+        / "accounts"
+        / "lx"
+        / "state"
+    )
+    state_dir.mkdir(parents=True)
+    observed_at = datetime.now(timezone.utc)
+    portfolio_context = {
+        "portfolio_source_name": "futu",
+        "source_observed_at": observed_at.isoformat(),
+        "source_observation_status": "trusted",
+        "source_account_identifiers": ["test-lx"],
+        "cash_by_currency": {"USD": 1000},
+    }
+    (state_dir / "portfolio_context.json").write_text(
+        json.dumps(portfolio_context),
+        encoding="utf-8",
+    )
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": observed_at.isoformat(),
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_unavailable_by_symbol": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    portfolio = publish_or_reuse_account_portfolio_source(
+        account_run_id=run_id,
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state_dir,
+        portfolio_context=portfolio_context,
+        completed_at=observed_at,
+    )
+    _ensure_v1_authority_identity(
+        tmp_path,
+        account="lx",
+        identity_hash=portfolio["portfolio_account_identity_hash"],
+    )
+    monkeypatch.setattr(
+        service,
+        "read_position_advice_v2_from_ledger",
+        lambda **_kwargs: {
+            "availability_status": "unavailable",
+            "freshness": {"status": "fresh", "reason_codes": []},
+            "authority_mode": "v1",
+            "authority_generation": 0,
+            "authority_policy_hash": None,
+            "portfolio_plan_id": None,
+            "account_run_id": run_id,
+            "row_count": 0,
+            "actionable_count": 0,
+            "model_actionable_count": 0,
+            "model_trade_actionable_count": 0,
+            "human_review_required_count": 0,
+            "rows": [],
+        },
+    )
+    assembled: dict[str, dict] = {}
+
+    def assemble(**kwargs):
+        briefs = service.assemble_daily_decision_briefs(**kwargs)
+        assembled.update(briefs)
+        return briefs
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    provider_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=provider_calls)
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+
+    authority = assembled["US"]["notification_authority"]
+    prepared = bundle.request.tick_metrics["daily_brief"]["prepared"][0]
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=prepared["market_trading_date"],
+    )
+    assert authority["authority_identity_source"] == (
+        "current_run_portfolio_receipt"
+    )
+    assert authority["identity_snapshot_id"] == portfolio["receipt"][
+        "snapshot_id"
+    ]
+    assert prepared["decision"] == "fixed_failure"
+    assert prepared["fixed_failure_delivery_allowed"] is True
+    assert provider_calls == []
+    assert retry["envelope"] is None
 
 
 def test_pending_fixed_failure_without_provider_attempt_upgrades_to_fixed_report(

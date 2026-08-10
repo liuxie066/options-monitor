@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.position_advice_authority import (
     capacity_pool_authority_id,
     normalize_account_label,
@@ -18,6 +19,7 @@ from src.application.ledger.api import (
     open_position_ledger,
 )
 from src.application.position_advice_source_producers import (
+    PORTFOLIO_SOURCE_SCHEMA,
     publish_opening_candidate_snapshot_receipt,
     publish_cash_capacity_snapshot,
     publish_fx_source_snapshot,
@@ -27,8 +29,10 @@ from src.application.position_advice_source_producers import (
 )
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
+    safe_existing_relative_path,
     sha256_bytes,
     source_dependency_from_receipt,
+    validate_source_receipt,
 )
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
@@ -41,6 +45,212 @@ CASH_SCOPE_SEMANTICS_VERSION = "uncommitted_headroom.v1"
 
 class PositionAdviceAccountSourceError(RuntimeError):
     """Raised when one Account Run cannot publish coherent v2 source receipts."""
+
+
+def publish_or_reuse_account_portfolio_source(
+    *,
+    account_run_id: str,
+    normalized_account: str,
+    broker: str,
+    included_markets: Iterable[str],
+    account_state_dir: Path,
+    portfolio_context: Mapping[str, Any],
+    completed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Publish one current-run portfolio receipt or reuse its exact bytes.
+
+    The deterministic run directory is a write-once identity boundary.  Once it
+    exists, incomplete, ambiguous, or input-conflicting contents fail closed;
+    this helper never repairs the directory by publishing a second identity.
+    """
+
+    try:
+        account = normalize_account_label(normalized_account)
+        run_id = _required_text(account_run_id, "account_run_id")
+        broker_value = _required_text(broker, "broker")
+        markets = _markets(included_markets)
+        state_root = _existing_directory(account_state_dir, "account_state_dir")
+        context = dict(portfolio_context or {})
+        portfolio_source = normalize_portfolio_source(
+            context.get("portfolio_source_name")
+        )
+        account_identifiers = _identity_values(
+            context.get("source_account_identifiers")
+        )
+        identity_hash = portfolio_account_identity_hash(
+            normalized_portfolio_source=portfolio_source,
+            broker_account_identifiers=account_identifiers,
+        )
+        payload = {
+            "schema_version": PORTFOLIO_SOURCE_SCHEMA,
+            "normalized_portfolio_source": portfolio_source,
+            "portfolio_context": context,
+        }
+        payload_hash = canonical_sha256(payload)
+        run_key = canonical_sha256({"producer_run_id": run_id})
+        run_dir = (
+            state_root
+            / "position_advice_producers"
+            / "portfolio"
+            / run_key
+        )
+        validation_now = completed_at or datetime.now(timezone.utc)
+
+        if not run_dir.exists():
+            publish_portfolio_source_snapshot(
+                producer_root=state_root,
+                account_run_id=run_id,
+                account=account,
+                broker=broker_value,
+                normalized_portfolio_source=portfolio_source,
+                portfolio_account_identity_hash=identity_hash,
+                included_markets=markets,
+                portfolio_context=context,
+                completed_at=validation_now,
+            )
+
+        record = _reuse_account_portfolio_source(
+            state_root=state_root,
+            run_dir=run_dir,
+            payload_hash=payload_hash,
+            expected_payload=payload,
+            account=account,
+            run_id=run_id,
+            broker=broker_value,
+            markets=markets,
+            portfolio_source=portfolio_source,
+            identity_hash=identity_hash,
+            now=validation_now,
+        )
+        return {
+            **record,
+            "account_run_id": run_id,
+            "account": account,
+            "broker": broker_value,
+            "included_markets": markets,
+            "normalized_portfolio_source": portfolio_source,
+            "source_account_identifiers": account_identifiers,
+            "portfolio_account_identity_hash": identity_hash,
+        }
+    except PositionAdviceAccountSourceError:
+        raise
+    except (
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+        PositionAdviceSourceError,
+    ) as exc:
+        raise PositionAdviceAccountSourceError(str(exc)) from exc
+
+
+def _reuse_account_portfolio_source(
+    *,
+    state_root: Path,
+    run_dir: Path,
+    payload_hash: str,
+    expected_payload: Mapping[str, Any],
+    account: str,
+    run_id: str,
+    broker: str,
+    markets: list[str],
+    portfolio_source: str,
+    identity_hash: str,
+    now: datetime | str,
+) -> dict[str, Any]:
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio source directory is invalid"
+        )
+    children = list(run_dir.iterdir())
+    if (
+        len(children) != 1
+        or children[0].is_symlink()
+        or not children[0].is_dir()
+        or children[0].name != payload_hash
+    ):
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio source directory is incomplete or ambiguous"
+        )
+    content_dir = children[0]
+    content_children = list(content_dir.iterdir())
+    if (
+        {item.name for item in content_children} != {"payload.json", "receipt.json"}
+        or any(item.is_symlink() or not item.is_file() for item in content_children)
+    ):
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio source content is incomplete or invalid"
+        )
+
+    receipt_relpath = (content_dir / "receipt.json").relative_to(
+        state_root
+    ).as_posix()
+    receipt_path = safe_existing_relative_path(state_root, receipt_relpath)
+    receipt_bytes = _stable_file_bytes(receipt_path, "portfolio receipt")
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    if not isinstance(receipt, dict):
+        raise PositionAdviceAccountSourceError(
+            "portfolio receipt must be an object"
+        )
+    validated = validate_source_receipt(
+        receipt,
+        producer_root=state_root,
+        now=now,
+        require_fresh=True,
+        expected_source_kind="portfolio",
+        expected_account=account,
+        expected_identity_hash=identity_hash,
+        expected_producer_account_run_id=run_id,
+    )
+    expected_policy_hash = canonical_sha256(
+        {
+            "schema": PORTFOLIO_SOURCE_SCHEMA,
+            "normalized_portfolio_source": portfolio_source,
+        }
+    )
+    if (
+        receipt.get("producer_run_id") != run_id
+        or receipt.get("producer_schema_version") != PORTFOLIO_SOURCE_SCHEMA
+        or receipt.get("broker") != broker
+        or receipt.get("included_markets") != markets
+        or receipt.get("producer_policy_hash") != expected_policy_hash
+        or validated["source_observed_at"]
+        != _latest_observation(
+            [expected_payload["portfolio_context"].get("source_observed_at")]
+        )
+    ):
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio receipt conflicts with prepared inputs"
+        )
+
+    payload_path = Path(validated["payload_path"])
+    expected_payload_path = content_dir / "payload.json"
+    if payload_path != expected_payload_path.resolve():
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio payload path is invalid"
+        )
+    payload_bytes = _stable_file_bytes(payload_path, "portfolio payload")
+    published_payload = json.loads(payload_bytes.decode("utf-8"))
+    if (
+        not isinstance(published_payload, dict)
+        or published_payload != dict(expected_payload)
+        or canonical_sha256(published_payload) != payload_hash
+        or sha256_bytes(payload_bytes) != validated["payload_sha256"]
+    ):
+        raise PositionAdviceAccountSourceError(
+            "current-run portfolio payload conflicts with prepared inputs"
+        )
+    if _stable_file_bytes(receipt_path, "portfolio receipt") != receipt_bytes:
+        raise PositionAdviceAccountSourceError(
+            "portfolio receipt changed while it was being validated"
+        )
+    return _receipt_record(
+        source_kind="portfolio",
+        producer_root=state_root,
+        receipt_path=receipt_path,
+        receipt=receipt,
+    )
 
 
 def publish_account_run_sources(
@@ -74,16 +284,18 @@ def publish_account_run_sources(
             state_root / "portfolio_context.json",
             "portfolio context",
         )
-    portfolio_source = normalize_portfolio_source(
-        portfolio_context.get("portfolio_source_name")
+    portfolio_record = publish_or_reuse_account_portfolio_source(
+        account_run_id=run_id,
+        normalized_account=account,
+        broker=_required_text(broker, "broker"),
+        included_markets=markets,
+        account_state_dir=state_root,
+        portfolio_context=portfolio_context,
+        completed_at=completed_at,
     )
-    account_identifiers = _identity_values(
-        portfolio_context.get("source_account_identifiers")
-    )
-    identity_hash = portfolio_account_identity_hash(
-        normalized_portfolio_source=portfolio_source,
-        broker_account_identifiers=account_identifiers,
-    )
+    portfolio_source = str(portfolio_record["normalized_portfolio_source"])
+    account_identifiers = list(portfolio_record["source_account_identifiers"])
+    identity_hash = str(portfolio_record["portfolio_account_identity_hash"])
     capacity_authority = capacity_pool_authority_id(
         normalized_portfolio_source=portfolio_source,
         broker_account_identifiers=account_identifiers,
@@ -92,26 +304,9 @@ def publish_account_run_sources(
     decision_snapshot = dict(decision_snapshot_reader() or {})
     completed = completed_at or datetime.now(timezone.utc)
 
-    receipt_records: list[dict[str, Any]] = []
-    portfolio_path, portfolio_receipt = publish_portfolio_source_snapshot(
-        producer_root=state_root,
-        account_run_id=run_id,
-        account=account,
-        broker=_required_text(broker, "broker"),
-        normalized_portfolio_source=portfolio_source,
-        portfolio_account_identity_hash=identity_hash,
-        included_markets=markets,
-        portfolio_context=portfolio_context,
-        completed_at=completed,
-    )
-    receipt_records.append(
-        _receipt_record(
-            source_kind="portfolio",
-            producer_root=state_root,
-            receipt_path=portfolio_path,
-            receipt=portfolio_receipt,
-        )
-    )
+    receipt_records: list[dict[str, Any]] = [portfolio_record]
+    portfolio_path = Path(portfolio_record["receipt_path"])
+    portfolio_receipt = dict(portfolio_record["receipt"])
 
     ledger_path, ledger_receipt = publish_ledger_source_snapshot(
         producer_root=state_root,
@@ -645,11 +840,21 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     return payload
 
 
+def _stable_file_bytes(path: Path, label: str) -> bytes:
+    first = Path(path).read_bytes()
+    second = Path(path).read_bytes()
+    if first != second:
+        raise PositionAdviceAccountSourceError(
+            f"{label} changed while it was being read"
+        )
+    return first
+
+
 def _existing_directory(path: Path, field: str) -> Path:
-    candidate = Path(path).resolve()
-    if not candidate.is_dir() or candidate.is_symlink():
+    supplied = Path(path)
+    if supplied.is_symlink() or not supplied.is_dir():
         raise PositionAdviceAccountSourceError(f"{field} is invalid")
-    return candidate
+    return supplied.resolve()
 
 
 def _identity_values(value: Any) -> list[str]:
@@ -769,5 +974,6 @@ __all__ = [
     "build_cash_capacity",
     "build_share_coverage",
     "publish_account_position_advice_sources",
+    "publish_or_reuse_account_portfolio_source",
     "publish_account_run_sources",
 ]
