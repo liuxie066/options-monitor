@@ -334,14 +334,15 @@ receipts, and event review/replay flows. Both route writes through
 
 Close advice keeps deterministic policy in `domain.domain.close_advice`.
 `src.application.close_advice_runner` assembles option-position inputs, required
-data quotes, quality flags, fees, yield-enhancement leg pairing, rows, and
-output files around that domain logic.
-Domain policy owns return capture, short-vol risk exits, long-call convexity
-exits, and the exit-state contract. The runner preserves domain decisions,
-including `not_evaluable` rows, and maps them through the close-action policy
-registry to CSV/text actions such as `close_put_keep_call`,
-`hold_call_as_convexity`, and `close_both_optional`.
-The close-advice exit-state contract and scenario matrix are documented in
+data quotes, quality flags, Futu fee estimates, rows, and output files around
+that domain logic.
+Domain policy owns one fixed `strict_profit_capture.v1` rule for short puts and
+short calls. It emits only `close`, `hold`, or `not_evaluable`; it does not pair
+yield-enhancement legs, compare opening candidates, or produce roll,
+replacement, reallocation, short-vol, or long-option exit actions. The runner
+preserves those strict decisions, including fail-closed `not_evaluable` rows,
+and publishes CSV/text reports plus their integrity manifest. The Close Advice
+state and evidence contract is documented in
 `docs/CLOSE_ADVICE_CONTRACT.md`.
 
 ## Config And Runtime State

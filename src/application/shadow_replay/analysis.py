@@ -63,9 +63,6 @@ def _analyze_shadow_replay_dataset_unlocked(
     )
     close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
     if close_episode_path.is_file():
-        from src.application.shadow_replay.close_policy_analysis import (
-            analyze_close_policy_rows,
-        )
         from src.application.shadow_replay.readiness import (
             summarize_close_decision_readiness,
         )
@@ -80,11 +77,6 @@ def _analyze_shadow_replay_dataset_unlocked(
             min_sample=30,
         )
         analysis["close_decision_readiness"] = close_readiness
-        analysis["close_policy_analysis"] = analyze_close_policy_rows(
-            episodes=close_episodes,
-            outcomes=close_outcomes,
-            readiness=close_readiness,
-        )
     combo_decision_path = dataset_dir / "combo_pair_decisions.jsonl"
     if combo_decision_path.is_file():
         from src.application.shadow_replay.combo_settlement import (

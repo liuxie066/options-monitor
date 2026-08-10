@@ -87,7 +87,7 @@ def _audit_paths(*, base: Path, run_id: str | None, audit_path: str | Path | Non
     if str(run_id or "").strip():
         runs_root = base / "output_runs"
         run_dir = runs_root / _safe_run_id(run_id)
-        # 与 position_advice_runner / opend_symbol_outputs 先例一致：
+        # 与其他运行时 artifact reader 一致：
         # containment 边界上的目录不允许是符号链接，避免经 resolve() 逃逸出仓。
         state_dir = run_dir / "state"
         if runs_root.is_symlink() or run_dir.is_symlink() or state_dir.is_symlink():

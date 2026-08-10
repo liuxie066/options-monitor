@@ -16,8 +16,8 @@ from src.application.opend_symbol_outputs import (
     save_outputs,
     validate_required_data_payload_candidate,
 )
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
+from src.application.source_receipts import (
+    SourceReceiptError,
 )
 from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
@@ -471,7 +471,7 @@ def _publish(
 
 
 def _receipt_paths(root: Path) -> list[Path]:
-    return list(root.glob("position_advice_sources/quotes/*/*/*/receipt.json"))
+    return list(root.glob("source_receipts/quotes/*/*/*/receipt.json"))
 
 
 def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]]:
@@ -774,7 +774,7 @@ def _assert_fresh_finalizer_rejects_without_artifacts(
     expected_fetch_contract: dict[str, object],
     match: str,
 ) -> None:
-    with pytest.raises(PositionAdviceSourceError, match=match):
+    with pytest.raises(SourceReceiptError, match=match):
         finalize_required_data_quote_candidate(
             base=tmp_path,
             producer_root=tmp_path,
@@ -1014,7 +1014,7 @@ def test_receipt_rejects_consumer_csv_value_drift(
     frame.to_csv(csv_path, index=False)
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="canonical projections differ",
     ):
         _publish(root=tmp_path, raw_path=raw_path, csv_path=csv_path)
@@ -1039,7 +1039,7 @@ def test_receipt_rejects_duplicate_requested_contract_rows(
         output_root=tmp_path,
     )
 
-    with pytest.raises(PositionAdviceSourceError, match=r"^invalid_row_identity:"):
+    with pytest.raises(SourceReceiptError, match=r"^invalid_row_identity:"):
         _publish(root=tmp_path, raw_path=raw_path, csv_path=csv_path)
 
     assert _receipt_paths(tmp_path) == []
@@ -1059,7 +1059,7 @@ def test_direct_publisher_cannot_claim_unattested_multiplier_enrichment(
     frame.to_csv(csv_path, index=False)
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="metadata does not bind canonical bytes",
     ):
         _publish(root=tmp_path, raw_path=raw_path, csv_path=csv_path)
@@ -1169,7 +1169,7 @@ def test_multi_request_payload_requires_exact_child_timestamp_evidence(
     payload["meta"]["requests"] = [deepcopy(child) for _ in range(child_count)]
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="child",
     ):
         validate_required_data_payload_candidate(
@@ -1212,7 +1212,7 @@ def test_multi_request_payload_rejects_scope_coverage_tampering(case: str) -> No
     else:
         scope["filtered_contract_count"] = 2
 
-    with pytest.raises(PositionAdviceSourceError, match="does not cover"):
+    with pytest.raises(SourceReceiptError, match="does not cover"):
         validate_required_data_payload_candidate(
             payload=payload,
             expected_fetch_contract=contract,
@@ -1351,7 +1351,7 @@ def test_multi_request_payload_rejects_child_identity_or_outcome_drift(
     else:
         children[1]["status"] = "error"
 
-    with pytest.raises(PositionAdviceSourceError, match="child request"):
+    with pytest.raises(SourceReceiptError, match="child request"):
         validate_required_data_payload_candidate(
             payload=payload,
             expected_fetch_contract=contract,
@@ -1439,7 +1439,7 @@ def test_multi_request_payload_rejects_child_coverage_drift(case: str) -> None:
     payload, contract = _valid_multi_child_candidate()
     _apply_child_coverage_drift(payload, case=case)
 
-    with pytest.raises(PositionAdviceSourceError, match="child request"):
+    with pytest.raises(SourceReceiptError, match="child request"):
         validate_required_data_payload_candidate(
             payload=payload,
             expected_fetch_contract=contract,
@@ -1476,7 +1476,7 @@ def test_child_scope_drift_has_scope_identity_reason(case: str) -> None:
     _apply_child_coverage_drift(payload, case=case)
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match=r"^scope_identity_mismatch:",
     ):
         validate_required_data_payload_candidate(
@@ -1492,7 +1492,7 @@ def test_child_hash_drift_has_scope_identity_reason() -> None:
     children[0]["planned_request_sha256"] = "0" * 64
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match=r"^scope_identity_mismatch:",
     ):
         validate_required_data_payload_candidate(
@@ -1509,7 +1509,7 @@ def test_child_index_swap_has_internal_contract_reason() -> None:
     children[1]["request_index"] = 0
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match=r"^internal_contract_error:",
     ):
         validate_required_data_payload_candidate(
@@ -1531,7 +1531,7 @@ def test_direct_publisher_rejects_child_coverage_drift_without_receipt(
     )
     plan = _fetch_plan(request_count=2)
 
-    with pytest.raises(PositionAdviceSourceError, match="child request"):
+    with pytest.raises(SourceReceiptError, match="child request"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-child-drift",
@@ -1570,7 +1570,7 @@ def test_direct_publisher_rejects_child_rv_drift_without_receipt(
     )
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="child request realized volatility mismatch",
     ):
         publish_required_data_quote_snapshot(

@@ -44,12 +44,12 @@ class ShortVolPortfolioContext:
 
 
 def resolve_short_vol_assessment_config(raw: dict[str, Any] | None) -> ShortVolAssessmentConfig:
-    """Resolve the historical short-vol thesis used by Close Advice.
+    """Resolve legacy short-vol settings for offline opening-strategy research.
 
     Current opening configs keep the IV/RV and event fields at the strategy
-    top level. Older position snapshots may still carry the broader thesis
-    under ``short_vol`` and ``concentration``. Close Advice owns that read
-    compatibility; opening strategy adapters should not recreate it.
+    top level. Historical replay inputs may still carry the broader thesis
+    under ``short_vol`` and ``concentration``. This compatibility is not part
+    of Close Advice, whose only live policy is ``strict_profit_capture.v1``.
     """
 
     cfg = raw if isinstance(raw, dict) else {}

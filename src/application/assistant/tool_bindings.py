@@ -179,12 +179,12 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "close_advice_read": {
         "intent_name": "position_exit_analysis",
-        "display_name": "平仓/止盈分析",
+        "display_name": "严格平仓分析",
         "arguments": ("account", "symbol", "option_type", "side", "strike", "expiration", "limit"),
         "direct_executable": True,
         "risk_level": "read_only",
-        "examples": ("分析 long call 是不是应该平仓", "泡泡玛特 long call 的持仓应该止盈吗"),
-        "summary": "analyze matching option positions using the latest generated close-advice report",
+        "examples": ("分析 NVDA short put 是否已达到严格平仓条件", "查看 lx 账户 short call 的平仓建议"),
+        "summary": "read the latest strict close-advice report for matching short put/call positions",
         "scope_policy": "config_required",
     },
     "option_performance_report": {

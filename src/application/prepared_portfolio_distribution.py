@@ -18,7 +18,7 @@ from src.application.ai_decision_advice.config import (
     ai_decision_advice_enabled,
     portfolio_distribution_provider,
 )
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     load_retained_account_run_config,
