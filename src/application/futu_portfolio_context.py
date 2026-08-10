@@ -149,6 +149,18 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _extract_average_cost(row: Mapping[str, Any]) -> float | None:
+    """Return average acquisition cost, never diluted/economic cost.
+
+    For OpenD securities positions, ``cost_price`` is the diluted cost while
+    ``average_cost`` is the average acquisition cost.  OM's ``avg_cost`` field
+    is defined as the latter, so missing average cost must remain unavailable
+    instead of falling back to ``cost_price`` or ``diluted_cost``.
+    """
+
+    return _to_float(_pick(row, "average_cost", "avg_cost"))
+
+
 def _to_int(value: Any) -> int | None:
     try:
         if value in (None, "", "-"):
@@ -523,7 +535,7 @@ def build_futu_portfolio_context(
             _pick(row, "can_sell_qty", "can_sell_quantity", "sellable_qty")
         )
 
-        avg_cost = _to_float(_pick(row, "cost_price", "average_cost", "avg_cost", "cost"))
+        avg_cost = _extract_average_cost(row)
         currency = _normalize_currency(
             _pick(row, "currency", "currency_code", "ccy"),
             fallback=(symbol_currency(symbol) or base_ccy),

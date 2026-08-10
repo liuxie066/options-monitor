@@ -17,6 +17,7 @@ class PrefilterResult:
     sp: dict
     cc: dict
     stock: dict | None
+    call_skip_reason: str | None = None
 
 
 def apply_prefilters(
@@ -31,16 +32,34 @@ def apply_prefilters(
     # Pre-filter (call): sell_call must be based on account-level portfolio context.
     # If portfolio_ctx is unavailable for this account, skip sell_call entirely.
     stock = None
+    call_skip_reason = None
     if want_call:
-        if not portfolio_ctx:
+        if not isinstance(portfolio_ctx, dict):
             want_call = False
+            call_skip_reason = "covered_call_portfolio_context_unavailable"
         else:
             try:
-                stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
+                stocks_by_symbol = portfolio_ctx.get("stocks_by_symbol")
+                if not isinstance(stocks_by_symbol, dict):
+                    want_call = False
+                    call_skip_reason = (
+                        "covered_call_portfolio_context_unavailable"
+                    )
+                elif symbol not in stocks_by_symbol:
+                    want_call = False
+                    call_skip_reason = "covered_call_underlying_not_held"
+                else:
+                    raw_stock = stocks_by_symbol.get(symbol)
+                    if isinstance(raw_stock, dict) and raw_stock:
+                        stock = raw_stock
+                    else:
+                        want_call = False
+                        call_skip_reason = (
+                            "covered_call_portfolio_context_unavailable"
+                        )
             except Exception:
-                stock = None
-            if not stock:
                 want_call = False
+                call_skip_reason = "covered_call_portfolio_context_unavailable"
 
     return PrefilterResult(
         want_put=bool(want_put),
@@ -48,4 +67,5 @@ def apply_prefilters(
         sp=sp,
         cc=cc,
         stock=stock,
+        call_skip_reason=call_skip_reason,
     )
