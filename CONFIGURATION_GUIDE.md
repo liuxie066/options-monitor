@@ -9,7 +9,8 @@
 | 文件 / 来源 | 内容 |
 |---|---|
 | `config.yaml` | 账户、市场、symbols、策略与非 secret 行为 override |
-| env-file | secrets、provider credential、本机设置和写入开关 |
+| Keychain / systemd credentials | secrets、provider credential；逻辑名和迁移见 `docs/SECRET_STORAGE.md` |
+| env-file | 非秘密本机设置和写入开关；`OM_SECRET_BACKEND=env` 仅为显式兼容 |
 | 生成快照 | `config.us.json`、`config.hk.json`、`resolved/config.assistant.json` |
 
 期权仓位不需要 Bitable：
@@ -173,7 +174,8 @@ YAML authoring 使用 `covered_call`；生成的 runtime、CSV 或 trace 可能�
   --output resolved/config.assistant.json
 ```
 
-模型 API key 只写 env-file，YAML 里保存 `api_key_env` 名称。
+模型 API key 只 provision 到固定逻辑凭据；YAML 选择 provider/model 即可。旧 `api_key_env`
+仅在显式 `OM_SECRET_BACKEND=env` 的迁移模式下作为兼容名称使用。
 
 Feishu long-connection、WeChat ClawBot 和本地 Assistant 共享 Control/Copilot 安全边界，但渠道 credential、sender allowlist 和 provider readiness 分别验证。详见：
 

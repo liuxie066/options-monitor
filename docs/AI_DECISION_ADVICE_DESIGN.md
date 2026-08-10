@@ -157,7 +157,7 @@ v1 固定使用：
 - Model：`deepseek-v4-flash`；
 - API：Responses API；
 - 搜索：服务端原生 `web_search`；
-- 密钥：环境变量 `DEEPSEEK_API_KEY`。
+- 密钥：逻辑凭据 `llm.deepseek.api_key`；`DEEPSEEK_API_KEY` 仅为显式 env 兼容名。
 
 参考官方文档：[DeepSeek Responses API](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)。
 
@@ -1204,9 +1204,9 @@ ai_decision_advice:
 - 不保留 `ai_interpretation`、`ai_strategy_advice` 等旧字段或兼容别名；
 - 不提供每账户开关；
 - 模型、4 小时间隔、5 分钟搜索预算、批大小、并发和 30 秒 Advice 预算均为 v1 固定合同；
-- `enabled: true` 但缺少 `DEEPSEEK_API_KEY` 时，配置校验直接失败；
+- 静态配置校验不读取运行时秘密；`enabled: true` 时 Collector/Advice 启动边界若缺少 `llm.deepseek.api_key` 会失败关闭；
 - `enabled: false` 时不运行两个阶段，也不在回执中创建空 AI 区块；
-- API key 只从环境读取，不能写入 YAML、JSONL、Prompt 或模型输入。
+- API key 只从 SecretProvider 读取，不能写入 YAML、JSONL、Prompt 或模型输入；安全后端不会回退到 env。
 
 ## 18. 隐私与安全
 

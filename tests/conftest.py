@@ -10,6 +10,23 @@ import pytest
 BASE = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_secret_backend(monkeypatch: pytest.MonkeyPatch):
+    """Keep legacy env-oriented tests away from real OS credential stores.
+
+    New secret-subsystem tests inject ``InMemorySecretProvider`` directly. The
+    existing suite remains an explicit compatibility-backend test until each
+    caller has its own injected provider fixture.
+    """
+
+    from src.application.secret_store import reset_default_secret_provider
+
+    monkeypatch.setenv("OM_SECRET_BACKEND", "env")
+    reset_default_secret_provider()
+    yield
+    reset_default_secret_provider()
+
+
 def phase2_opening_row(row: dict[str, Any]) -> dict[str, Any]:
     """Add the normalized Phase-1 evidence required by formal candidate scans."""
 

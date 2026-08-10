@@ -23,6 +23,7 @@
 - [Config Contract](../CONFIGS.md)：`config.yaml -> build -> runtime JSON` 权威链和迁移边界。
 - [Configuration Guide](../CONFIGURATION_GUIDE.md)：账户、市场、环境变量、通知和验证方法。
 - [Security](../SECURITY.md)：漏洞和敏感信息处理。
+- [Secret Storage](SECRET_STORAGE.md)：逻辑凭据、macOS Keychain、systemd credentials、env 兼容和轮换边界。
 
 配置字段会持续演进。静态文档只记录稳定心智模型；具体字段来源优先使用：
 
