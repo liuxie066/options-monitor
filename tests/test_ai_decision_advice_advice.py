@@ -15,10 +15,23 @@ from src.application.ai_decision_advice.contexts import (
     FrozenInputs,
     build_fact_registry,
 )
+from src.application.ai_decision_advice.prompts import (
+    PROMPT_PACK_ADVICE,
+    compile_prompt_pack,
+)
 from src.application.ai_decision_advice.validation import derive_scopes
 
 
 NOW = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_decision_advice_prompt_uses_account_level_advisor_role():
+    prompt = compile_prompt_pack(PROMPT_PACK_ADVICE).prompt
+
+    assert "账户级期权决策顾问" in prompt
+    assert "你不是策略引擎，也不是交易执行器" in prompt
+    assert "最终决策由用户作出" in prompt
+    assert "期权开仓决策建议器" not in prompt
 
 
 def _frozen(
