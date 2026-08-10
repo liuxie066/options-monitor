@@ -4,6 +4,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -25,7 +26,9 @@ from src.application.config_sections import (
 from src.application.config_loader import resolve_data_config_path
 from src.application.close_advice_runner import run_close_advice
 from src.application.position_advice_account_sources import (
+    PositionAdviceAccountSourceError,
     publish_account_position_advice_sources,
+    publish_or_reuse_account_portfolio_source,
 )
 from src.application.position_advice_runner import (
     run_position_advice_v2_from_account_run,
@@ -47,6 +50,7 @@ from src.application.multi_tick.misc import (
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
+    AccountRunConfigError,
     load_account_run_config,
     load_retained_account_run_config,
 )
@@ -223,6 +227,40 @@ def _position_advice_markets(
         }
     )
     return inferred or ["HK", "US"]
+
+
+def publish_current_run_portfolio_source(
+    *,
+    cfg: dict[str, Any],
+    account_run_id: str,
+    account: str,
+    markets_to_run: list[str],
+    account_state_dir: Path,
+    prepared_portfolio_context: dict[str, Any],
+    completed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Publish/reuse the current-run identity receipt from frozen inputs only."""
+
+    portfolio_cfg = (
+        cfg.get("portfolio")
+        if isinstance(cfg.get("portfolio"), dict)
+        else {}
+    )
+    try:
+        return publish_or_reuse_account_portfolio_source(
+            account_run_id=account_run_id,
+            normalized_account=str(account).strip().lower(),
+            broker=str(portfolio_cfg.get("broker") or "futu"),
+            included_markets=_position_advice_markets(cfg, markets_to_run),
+            account_state_dir=account_state_dir,
+            portfolio_context=prepared_portfolio_context,
+            completed_at=completed_at,
+        )
+    except PositionAdviceAccountSourceError as exc:
+        raise AccountRunConfigError(
+            "ACCOUNT_CONFIG_PORTFOLIO_SOURCE_INVALID",
+            str(exc),
+        ) from exc
 
 
 def build_account_runtime_config(
