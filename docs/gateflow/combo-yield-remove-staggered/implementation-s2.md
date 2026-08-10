@@ -130,3 +130,59 @@ Decision 3 同时要求 config_validator 增加 removed-fields 显式检查，�
 ## Completion Status
 
 S2 implementation 完成，待 code review。
+
+## Code Review
+
+### Review scope
+
+- Base: `fe967db9`（accepted S1 commit）；当前树 HEAD = S2 implementation commit
+  `e8fcd036`。
+- Reviewed files：S2 全部 8 个改动文件（4 个 src + 示例配置 + 3 个测试文件）。
+- Excluded：`config_validator.py` 中 `close_advice.position_advice_authority` 检查删除
+  （5 行）为 position-advice 既有 dirty 改动，不属于本 work unit；提交时已用
+  `git add -p` 排除，未混入 S2 commit，review 亦未计入。
+
+### Findings
+
+#### S2-1 — 已修复 — `required_data_planning._expiration_date` 为死代码
+
+- **入口/函数**: `src/application/required_data_planning.py` `_expiration_date()`
+- **输入场景**: S2 删除 `_filter_staggered_call_expirations` 后，`_expiration_date`
+  失去唯一调用者。
+- **实际行为**: 函数保留但全仓库无调用（`rg "_expiration_date"` 在
+  `required_data_planning.py` 内零命中），属于错期过滤专用 helper 的残留。
+- **预期行为**: 与计划"删除 `_filter_staggered_call_expirations` 与 gap 分支/字段"
+  同源，该私有 helper 应一并删除。
+- **修复**: 删除 `_expiration_date()` 定义；`datetime`/`date` 导入仍被
+  `_filter_expirations_by_dte`、`_strict_iso_expiration` 等使用，不删。
+- **验证**: `test_sell_put_yield_enhancement_required_data_planning.py` +
+  `test_required_data_prefetch_inprocess.py` 45 passed；ruff 通过；
+  `rg "_expiration_date" src/application/required_data_planning.py` 零命中。
+- **严重程度**: 低
+
+#### S2-2 — 非问题 — `call_window` 并非死代码
+
+- Review 初判 `_resolve_combo_yield_call_plan` 中 `call_window` 可能未使用；复核确认
+  `call_window` 作为 `defaults=call_window` 传给 `_resolve_call_side_plan`，为同期
+  窗口的唯一来源，保留正确。
+
+### Review 结论
+
+- S2 改动与 plan §9 Slice 2 的 exact allowed changes 逐条一致；完成信号核对通过：
+  4 个 src 文件 + 示例配置 `rg -i "staggered|gap_days"` 零命中；
+  `config_validator.py` 仅剩 removed-fields 检测自身的 2 处字面量（有意命中）。
+- validator 的 removed-gap 检查覆盖 template（`templates.<name>.combo_yield`）与
+  symbol（`<sym>.combo_yield`）两条路径，且位于 `_reject_unknown_keys` 之前，
+  旧配置 fail closed，无静默兼容路径。
+- S2 提交为部分暂存：`config_validator.py` 的 position-advice hunk 保留在工作树
+  （提交后该文件状态 `MM`，未暂存部分仅剩该 5 行删除），position-advice dirty
+  worktree 完整保留。
+- 环境注记：`.venv/bin/python` 无 pytest，验证使用 pyenv `python3.12 -m pytest`
+  （与 S1 相同）；`src/application/shadow_replay/settlement.py` 的 SyntaxError 与
+  `test_daily_decision_brief_service.py` 的 1 个失败均来自 position-advice 既有
+  脏改动，非本 work unit 引入，全量测试验证被其阻塞（记录基线，不属 S2 回归判据）。
+
+## Completion Status（更新）
+
+S2 已实现、review 通过、accept 提交待创建（S2 implementation commit `e8fcd036`
+已完成）。

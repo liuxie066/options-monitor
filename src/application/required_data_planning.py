@@ -277,13 +277,6 @@ def _filter_expirations_by_dte(
     return out
 
 
-def _expiration_date(value: Any) -> date | None:
-    try:
-        return datetime.fromisoformat(str(value)[:10]).date()
-    except Exception:
-        return None
-
-
 def _strict_iso_expiration(value: Any) -> str | None:
     if not isinstance(value, str) or not value or value != value.strip():
         return None
