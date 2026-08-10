@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.3 - 2026-08-10
+
+### Bug Fixes
+- Kept runtime and channel diagnostics metadata-only: credential readiness now uses `SecretStatus` and degrades safely when a Linux process has no credential context, so scheduled runtime-status snapshots no longer require or read Feishu secret values.
+
 ## 1.13.2 - 2026-08-10
 
 ### Improvements
