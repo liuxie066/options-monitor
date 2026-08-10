@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 973 (`src`: 524, `domain`: 76, `scripts`: 8, `tests`: 365)
-- Internal import edges: 6228 total, 2662 production/script edges excluding tests
+- Internal import edges: 6240 total, 2662 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|442| domain
+  application -->|441| domain
   application -->|4| domain_services
   application -->|156| infrastructure
   application -->|43| storage
@@ -45,8 +45,8 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2660| application
-  tests -->|450| domain
+  tests -->|2671| application
+  tests -->|451| domain
   tests -->|2| domain_services
   tests -->|168| infrastructure
   tests -->|223| interfaces
@@ -58,7 +58,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 442 |
+| application | domain | 441 |
 | application | infrastructure | 156 |
 | interfaces | application | 148 |
 | application | storage | 43 |
@@ -77,8 +77,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2660 |
-| tests | domain | 450 |
+| tests | application | 2671 |
+| tests | domain | 451 |
 | tests | interfaces | 223 |
 | tests | infrastructure | 168 |
 | tests | storage | 18 |
@@ -91,7 +91,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 257 |
+| src.application | domain.domain | 256 |
 | src.interfaces | src.application | 121 |
 | src.application | src.infrastructure | 118 |
 | src.application.ledger | domain.domain | 49 |
@@ -178,7 +178,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | incoming imports |
 |---|---|
 | src.application.agent_tool_contracts | 97 |
-| domain.domain.symbol_identity | 76 |
+| domain.domain.symbol_identity | 75 |
 | src.application.agent_tool_config | 59 |
 | src.infrastructure.io_utils | 57 |
 | src.application.ledger.api | 57 |
