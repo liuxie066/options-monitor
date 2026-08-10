@@ -17,8 +17,8 @@ from src.application.opend_symbol_outputs import (
     finalize_unplanned_required_data_candidate,
     resolve_exact_fresh_required_data_quote_receipt,
 )
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
+from src.application.source_receipts import (
+    SourceReceiptError,
 )
 from src.application.required_data_coverage import (
     build_required_data_coverage,
@@ -62,7 +62,7 @@ def ensure_required_data(
     fetch_plan: RequiredDataFetchPlanBundle | None = None,
     report_dir: Path | None = None,
     opend_fetch_config: dict[str, float | int] | None = None,
-    position_advice_producer_run_id: str | None = None,
+    source_producer_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
 ) -> dict[str, Any] | None:
@@ -80,9 +80,9 @@ def ensure_required_data(
         )
 
     src = 'opend'
-    producer_run_id = str(position_advice_producer_run_id or "").strip()
+    producer_run_id = str(source_producer_run_id or "").strip()
     if producer_run_id and fetch_plan is None:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data producer run id requires an exact fetch plan"
         )
     fetch_plan_payload = (

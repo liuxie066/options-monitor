@@ -590,13 +590,13 @@ def test_manual_fetch_without_run_id_saves_without_publishing_quote_authority(
         min_dte=10,
         max_dte=60,
         fetch_plan=None,
-        position_advice_producer_run_id=None,
+        source_producer_run_id=None,
     )
 
     assert result is None
     assert (required / "raw" / f"{symbol}_required_data.json").is_file()
     assert (required / "parsed" / f"{symbol}_required_data.csv").is_file()
-    quote_root = required / "position_advice_sources" / "quotes"
+    quote_root = required / "source_receipts" / "quotes"
     assert list(quote_root.glob("**/receipt.json")) == []
     assert list(quote_root.glob("**/payload.json")) == []
     assert receipt_reads == []
@@ -648,7 +648,7 @@ def test_planned_cached_data_without_run_id_never_adopts_receipt(
         fetch_plan=_nvda_put_fetch_plan(
             expirations=[expiration],
         ),
-        position_advice_producer_run_id=None,
+        source_producer_run_id=None,
     )
 
     assert result is None
@@ -699,12 +699,12 @@ def test_planned_fresh_data_without_run_id_never_adopts_or_signs_receipt(
         fetch_plan=_nvda_put_fetch_plan(
             expirations=[expiration],
         ),
-        position_advice_producer_run_id=None,
+        source_producer_run_id=None,
     )
 
     assert result is None
     assert receipt_reads == []
-    quote_root = required / "position_advice_sources" / "quotes"
+    quote_root = required / "source_receipts" / "quotes"
     assert list(quote_root.glob("**/receipt.json")) == []
     assert list(quote_root.glob("**/payload.json")) == []
 
@@ -714,8 +714,8 @@ def test_manual_fetch_with_run_id_fails_before_cache_or_provider(
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_steps as mod
-    from src.application.position_advice_source_receipts import (
-        PositionAdviceSourceError,
+    from src.application.source_receipts import (
+        SourceReceiptError,
     )
 
     required, _state_dir = _make_dirs(tmp_path)
@@ -743,7 +743,7 @@ def test_manual_fetch_with_run_id_fails_before_cache_or_provider(
         ),
     )
 
-    with pytest.raises(PositionAdviceSourceError, match="fetch plan"):
+    with pytest.raises(SourceReceiptError, match="fetch plan"):
         mod.ensure_required_data(
             py="python3",
             base=tmp_path,
@@ -758,13 +758,13 @@ def test_manual_fetch_with_run_id_fails_before_cache_or_provider(
             fetch_host="127.0.0.1",
             fetch_port=11111,
             fetch_plan=None,
-            position_advice_producer_run_id="run-manual-must-fail",
+            source_producer_run_id="run-manual-must-fail",
         )
 
     assert provider_calls == []
     assert receipt_reads == []
     assert parsed.read_bytes() == parsed_before
-    quote_root = required / "position_advice_sources" / "quotes"
+    quote_root = required / "source_receipts" / "quotes"
     assert list(quote_root.glob("**/receipt.json")) == []
     assert list(quote_root.glob("**/payload.json")) == []
 
@@ -878,7 +878,7 @@ def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp
     assert current["status"] == "error"
     assert "snapshot rate limited" in current["reason"]
     assert not list(
-        (required / "position_advice_sources" / "quotes").glob(
+        (required / "source_receipts" / "quotes").glob(
             "*/*/*/receipt.json"
         )
     )
@@ -889,8 +889,8 @@ def test_ensure_required_data_rejects_direct_contract_coverage_gap(
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_steps as mod
-    from src.application.position_advice_source_receipts import (
-        PositionAdviceSourceError,
+    from src.application.source_receipts import (
+        SourceReceiptError,
     )
     from src.application.opend_symbol_chain_fetching import (
         OptionExpirationDiscoveryResult,
@@ -1016,7 +1016,7 @@ def test_ensure_required_data_rejects_direct_contract_coverage_gap(
     )
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match=r"^invalid_row_identity:",
     ):
         mod.ensure_required_data(
@@ -1033,11 +1033,11 @@ def test_ensure_required_data_rejects_direct_contract_coverage_gap(
             fetch_host="127.0.0.1",
             fetch_port=11111,
             fetch_plan=plan,
-            position_advice_producer_run_id="run-coverage-gap",
+            source_producer_run_id="run-coverage-gap",
         )
 
     assert not list(
-        (required / "position_advice_sources" / "quotes").glob(
+        (required / "source_receipts" / "quotes").glob(
             "*/*/*/receipt.json"
         )
     )
@@ -1048,8 +1048,8 @@ def test_fresh_candidate_missing_dte_preserves_existing_required_data_bytes(
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_steps as mod
-    from src.application.position_advice_source_receipts import (
-        PositionAdviceSourceError,
+    from src.application.source_receipts import (
+        SourceReceiptError,
     )
 
     required, _state_dir = _make_dirs(tmp_path)
@@ -1088,7 +1088,7 @@ def test_fresh_candidate_missing_dte_preserves_existing_required_data_bytes(
     )
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="rows would be dropped during persistence",
     ):
         mod.ensure_required_data(
@@ -1107,12 +1107,12 @@ def test_fresh_candidate_missing_dte_preserves_existing_required_data_bytes(
             fetch_plan=_nvda_put_fetch_plan(
                 expirations=["2026-09-18"],
             ),
-            position_advice_producer_run_id="run-missing-dte",
+            source_producer_run_id="run-missing-dte",
         )
 
     assert raw_path.read_bytes() == raw_before
     assert csv_path.read_bytes() == csv_before
-    quote_root = required / "position_advice_sources" / "quotes"
+    quote_root = required / "source_receipts" / "quotes"
     assert list(quote_root.glob("**/receipt.json")) == []
     assert list(quote_root.glob("**/payload.json")) == []
 
@@ -1308,8 +1308,8 @@ def test_multi_spec_rejects_invalid_child_time_without_publishing_receipt(
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_steps as mod
-    from src.application.position_advice_source_receipts import (
-        PositionAdviceSourceError,
+    from src.application.source_receipts import (
+        SourceReceiptError,
     )
 
     required, _state_dir = _make_dirs(tmp_path)
@@ -1356,7 +1356,7 @@ def test_multi_spec_rejects_invalid_child_time_without_publishing_receipt(
         _execute_required_data_opend,
     )
 
-    with pytest.raises(PositionAdviceSourceError, match=error_match):
+    with pytest.raises(SourceReceiptError, match=error_match):
         mod.ensure_required_data(
             py="python3",
             base=tmp_path,
@@ -1371,10 +1371,10 @@ def test_multi_spec_rejects_invalid_child_time_without_publishing_receipt(
             fetch_host="127.0.0.1",
             fetch_port=11111,
             fetch_plan=_nvda_split_side_fetch_plan(),
-            position_advice_producer_run_id=f"run-child-time-{invalid_time_kind}",
+            source_producer_run_id=f"run-child-time-{invalid_time_kind}",
         )
 
-    quote_root = required / "position_advice_sources" / "quotes"
+    quote_root = required / "source_receipts" / "quotes"
     assert list(quote_root.glob("**/receipt.json")) == []
     assert list(quote_root.glob("**/payload.json")) == []
 

@@ -29,7 +29,7 @@ from src.application.ledger.api import (
     list_position_lot_snapshots,
     open_position_ledger,
 )
-from domain.domain.position_advice_authority import scope_for
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
     load_holdings_portfolio_shared_context,
@@ -82,7 +82,7 @@ def _decision_snapshots_for_records(
         account: decision_state_snapshot(
             repo,
             account=account,
-            portfolio_scope_id=scope_for(account),
+            portfolio_scope_id=portfolio_scope_id(account),
         )
         for account in accounts
     }
@@ -238,7 +238,7 @@ def load_option_positions_context(
             decision_state_snapshot(
                 _repo,
                 account=normalized_account,
-                portfolio_scope_id=scope_for(normalized_account),
+                portfolio_scope_id=portfolio_scope_id(normalized_account),
             )
             if normalized_account
             else None

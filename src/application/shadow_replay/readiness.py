@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from domain.domain.close_advice import STRICT_CLOSE_POLICY_VERSION
 from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.capture import (
     accepted_candidate_snapshots,
@@ -32,12 +33,6 @@ from src.application.shadow_replay.common import (
 
 
 CLOSE_READINESS_SCHEMA_VERSION = "shadow_replay_close_readiness.v1"
-_CLOSE_POLICIES = (
-    "P0_current",
-    "P1_semantic_split",
-    "P2_profile_aware",
-    "P3_opportunity_required",
-)
 _CLOSE_HORIZONS = ("1d", "3d", "7d", "14d", "expiry")
 _CLOSE_OUTCOME_KINDS = (
     "horizon_1d",
@@ -47,7 +42,7 @@ _CLOSE_OUTCOME_KINDS = (
     "terminal",
 )
 _FEE_USABLE_STATUSES = {"schedule_estimate", "conservative_estimate"}
-_RECOMMENDATION_STATES = {"close", "review", "hold", "not_evaluable"}
+_RECOMMENDATION_STATES = {"close", "hold", "not_evaluable"}
 _EPISODE_QUOTE_TIME_BASES = {
     "run_anchor",
     "quote_as_of_utc",
@@ -153,7 +148,7 @@ def summarize_close_decision_readiness(
     min_segment_sample: int = 10,
     min_usable_outcome_ratio: float = 0.8,
 ) -> dict[str, Any]:
-    """Return mechanical Close Advice evidence coverage without judging policy quality."""
+    """Measure evidence coverage for the single strict Close Advice policy."""
 
     overall_floor = max(1, int(min_sample))
     segment_floor = max(1, int(min_segment_sample))
@@ -192,6 +187,7 @@ def summarize_close_decision_readiness(
         for row in unique_episodes
         if text(row.get("episode_id"))
     }
+
     marks_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
     orphan_mark_count = 0
     invalid_mark_horizon_count = 0
@@ -204,6 +200,7 @@ def summarize_close_decision_readiness(
             invalid_mark_horizon_count += 1
             continue
         marks_by_episode[episode_id].append(mark)
+
     outcome_groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     orphan_outcome_count = 0
     invalid_outcome_kind_count = 0
@@ -221,28 +218,19 @@ def summarize_close_decision_readiness(
         key: _preferred_close_outcome(rows)
         for key, rows in outcome_groups.items()
     }
-    outcome_duplicate_count = sum(max(0, len(rows) - 1) for rows in outcome_groups.values())
+    outcome_duplicate_count = sum(
+        max(0, len(rows) - 1) for rows in outcome_groups.values()
+    )
     missing_outcome_key_count = sum(
         (episode_id, kind) not in outcome_groups
         for episode_id in episode_by_id
         for kind in _CLOSE_OUTCOME_KINDS
     )
 
-    policy_complete_ids = {
+    formal_policy_complete_ids = {
         episode_id
         for episode_id, episode in episode_by_id.items()
-        if _paired_policy_complete(episode)
-    }
-    outcome_policy_pair_complete_ids = {
-        episode_id
-        for episode_id, episode in episode_by_id.items()
-        if all(
-            (
-                outcome := outcome_by_key.get((episode_id, kind))
-            ) is not None
-            and _outcome_policy_pair_complete(outcome, episode=episode)
-            for kind in _CLOSE_OUTCOME_KINDS
-        )
+        if _formal_policy_complete(episode)
     }
     strategy_complete_ids = {
         episode_id
@@ -254,17 +242,6 @@ def summarize_close_decision_readiness(
         for episode_id, episode in episode_by_id.items()
         if _strategy_point_in_time_complete(episode)
     }
-    replacement_required_ids = {
-        episode_id
-        for episode_id, episode in episode_by_id.items()
-        if text((episode.get("replacement_evidence") or {}).get("status")).lower()
-        == "review_switch"
-    }
-    replacement_time_complete_ids = {
-        episode_id
-        for episode_id, episode in episode_by_id.items()
-        if _replacement_point_in_time_complete(episode)
-    }
     decision_fee_complete_ids = {
         episode_id
         for episode_id, episode in episode_by_id.items()
@@ -275,30 +252,26 @@ def summarize_close_decision_readiness(
         for episode_id, episode in episode_by_id.items()
         if _episode_point_in_time_complete(episode)
     }
+
     usable_outcomes_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    promotion_outcomes_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    analysis_outcomes_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (episode_id, _kind), outcome in outcome_by_key.items():
         if text(outcome.get("evidence_status")).lower() != "usable":
             continue
         usable_outcomes_by_episode[episode_id].append(outcome)
         if (
-            episode_id in policy_complete_ids
-            and episode_id in outcome_policy_pair_complete_ids
+            episode_id in formal_policy_complete_ids
             and episode_id in strategy_complete_ids
             and episode_id in strategy_time_complete_ids
-            and (
-                episode_id not in replacement_required_ids
-                or episode_id in replacement_time_complete_ids
-            )
             and episode_id in decision_fee_complete_ids
             and episode_id in episode_time_complete_ids
             and _outcome_point_in_time_complete(outcome)
             and _outcome_fee_complete(outcome)
         ):
-            promotion_outcomes_by_episode[episode_id].append(outcome)
+            analysis_outcomes_by_episode[episode_id].append(outcome)
 
     settled_ids = set(usable_outcomes_by_episode)
-    promotion_usable_ids = set(promotion_outcomes_by_episode)
+    analysis_usable_ids = set(analysis_outcomes_by_episode)
     mark_coverage = _close_mark_window_coverage(
         episode_ids=set(episode_by_id),
         marks_by_episode=marks_by_episode,
@@ -311,31 +284,23 @@ def summarize_close_decision_readiness(
         episode_ids=set(episode_by_id),
         decision_fee_complete_ids=decision_fee_complete_ids,
         usable_outcomes_by_episode=usable_outcomes_by_episode,
-        promotion_outcomes_by_episode=promotion_outcomes_by_episode,
-    )
-    paired_coverage = _close_paired_policy_coverage(
-        episode_by_id=episode_by_id,
-        policy_complete_ids=policy_complete_ids,
-        outcome_policy_pair_complete_ids=outcome_policy_pair_complete_ids,
-        promotion_outcomes_by_episode=promotion_outcomes_by_episode,
+        analysis_outcomes_by_episode=analysis_outcomes_by_episode,
     )
     point_in_time_coverage = _close_point_in_time_coverage(
         episode_ids=set(episode_by_id),
         episode_time_complete_ids=episode_time_complete_ids,
         strategy_time_complete_ids=strategy_time_complete_ids,
-        replacement_required_ids=replacement_required_ids,
-        replacement_time_complete_ids=replacement_time_complete_ids,
         marks_by_episode=marks_by_episode,
         outcome_by_key=outcome_by_key,
     )
     segments = _close_segment_readiness(
         episode_by_id=episode_by_id,
         settled_ids=settled_ids,
-        promotion_usable_ids=promotion_usable_ids,
+        analysis_usable_ids=analysis_usable_ids,
         min_segment_sample=segment_floor,
         min_usable_outcome_ratio=ratio_floor,
     )
-    promotable_segments = [
+    evaluable_segments = [
         {
             "strategy_profile": row["strategy_profile"],
             "strategy_family": row["strategy_family"],
@@ -348,6 +313,7 @@ def summarize_close_decision_readiness(
         for outcome in outcome_by_key.values()
         if text(outcome.get("evidence_status")).lower() == "inconclusive"
     )
+
     blockers: list[str] = []
     if len(settled_ids) < overall_floor:
         blockers.append("settled_unique_episodes_below_minimum")
@@ -367,15 +333,20 @@ def summarize_close_decision_readiness(
         blockers.append("close_facet_enum_invalid")
     if invalid_episode_schema_count or invalid_mark_schema_count or invalid_outcome_schema_count:
         blockers.append("close_facet_schema_mismatch")
-    if not promotable_segments:
+    if len(formal_policy_complete_ids) != len(episode_by_id):
+        blockers.append("formal_policy_evidence_incomplete")
+    if not evaluable_segments:
         blockers.append("no_profile_family_segment_meets_sample_and_coverage")
-    status = "ready_for_paired_policy_analysis" if not blockers else "collecting_close_evidence"
-    reason = "mechanical_readiness_passed" if not blockers else blockers[0]
+
     episode_count = len(episode_by_id)
     return {
         "schema_version": CLOSE_READINESS_SCHEMA_VERSION,
-        "status": status,
-        "reason": reason,
+        "status": (
+            "ready_for_strict_policy_evaluation"
+            if not blockers
+            else "collecting_close_evidence"
+        ),
+        "reason": "mechanical_readiness_passed" if not blockers else blockers[0],
         "thresholds": {
             "min_settled_unique_episodes_overall": overall_floor,
             "min_settled_unique_episodes_per_segment": segment_floor,
@@ -393,16 +364,23 @@ def summarize_close_decision_readiness(
                 }
             ),
             "settled_unique_episode_count": len(settled_ids),
-            "promotion_usable_episode_count": len(promotion_usable_ids),
-            "promotion_usable_episode_ratio": _ratio(len(promotion_usable_ids), episode_count),
-            "repeated_tick_observation_count": dedupe["repeated_tick_observation_count"],
+            "analysis_usable_episode_count": len(analysis_usable_ids),
+            "analysis_usable_episode_ratio": _ratio(
+                len(analysis_usable_ids), episode_count
+            ),
+            "repeated_tick_observation_count": dedupe[
+                "repeated_tick_observation_count"
+            ],
             "duplicate_episode_row_count": dedupe["duplicate_episode_row_count"],
-            "conflicting_episode_id_count": dedupe["conflicting_episode_id_count"],
+            "conflicting_episode_id_count": dedupe[
+                "conflicting_episode_id_count"
+            ],
             "missing_episode_id_count": dedupe["missing_episode_id_count"],
-            "episode_grain_deduped": not (
-                dedupe["duplicate_episode_row_count"]
-                or dedupe["conflicting_episode_id_count"]
-                or dedupe["missing_episode_id_count"]
+        },
+        "formal_policy_coverage": {
+            "complete_episode_count": len(formal_policy_complete_ids),
+            "complete_ratio": _ratio(
+                len(formal_policy_complete_ids), episode_count
             ),
         },
         "mark_window_coverage": mark_coverage,
@@ -414,27 +392,38 @@ def summarize_close_decision_readiness(
             "profile_family_complete_ratio": _ratio(
                 len(strategy_complete_ids), episode_count
             ),
-            "strategy_time_complete_episode_count": len(strategy_time_complete_ids),
+            "strategy_time_complete_episode_count": len(
+                strategy_time_complete_ids
+            ),
             "strategy_time_complete_ratio": _ratio(
                 len(strategy_time_complete_ids), episode_count
             ),
         },
-        "paired_policy_coverage": paired_coverage,
         "point_in_time_coverage": point_in_time_coverage,
         "segments": segments,
-        "promotable_segments": promotable_segments,
+        "evaluable_segments": evaluable_segments,
         "analysis_eligibility": {
-            "promotion_usable_episode_ids": sorted(promotion_usable_ids),
-            "promotion_usable_outcome_keys": [
-                {"episode_id": episode_id, "outcome_kind": text(row.get("outcome_kind")).lower()}
-                for episode_id, rows in sorted(promotion_outcomes_by_episode.items())
-                for row in sorted(rows, key=lambda item: text(item.get("outcome_kind")).lower())
+            "analysis_usable_episode_ids": sorted(analysis_usable_ids),
+            "analysis_usable_outcome_keys": [
+                {
+                    "episode_id": episode_id,
+                    "outcome_kind": text(row.get("outcome_kind")).lower(),
+                }
+                for episode_id, rows in sorted(
+                    analysis_outcomes_by_episode.items()
+                )
+                for row in sorted(
+                    rows,
+                    key=lambda item: text(item.get("outcome_kind")).lower(),
+                )
             ],
         },
         "inconclusive_reasons": dict(sorted(inconclusive_reasons.items())),
         "outcome_duplicate_key_count": outcome_duplicate_count,
         "outcome_matrix": {
-            "expected_outcome_key_count": len(episode_by_id) * len(_CLOSE_OUTCOME_KINDS),
+            "expected_outcome_key_count": (
+                len(episode_by_id) * len(_CLOSE_OUTCOME_KINDS)
+            ),
             "present_outcome_key_count": len(outcome_by_key),
             "missing_outcome_key_count": missing_outcome_key_count,
             "complete": missing_outcome_key_count == 0,
@@ -468,8 +457,6 @@ def summarize_close_decision_readiness(
             outcome_count=len(outcome_by_key),
             blockers=blockers,
         ),
-        "policy_quality_judgment": "not_evaluated",
-        "production_promotion_allowed": False,
         "safety": safety_payload(writes_local_dataset=False),
     }
 
@@ -597,7 +584,7 @@ def _close_fee_coverage(
     episode_ids: set[str],
     decision_fee_complete_ids: set[str],
     usable_outcomes_by_episode: dict[str, list[dict[str, Any]]],
-    promotion_outcomes_by_episode: dict[str, list[dict[str, Any]]],
+    analysis_outcomes_by_episode: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     outcome_fee_complete_ids = {
         episode_id
@@ -609,47 +596,9 @@ def _close_fee_coverage(
         "decision_fee_complete_episode_count": len(decision_fee_complete_ids),
         "decision_fee_complete_ratio": _ratio(len(decision_fee_complete_ids), len(episode_ids)),
         "usable_outcome_fee_complete_episode_count": len(outcome_fee_complete_ids),
-        "promotion_fee_complete_episode_count": len(promotion_outcomes_by_episode),
-        "promotion_fee_complete_ratio": _ratio(len(promotion_outcomes_by_episode), len(episode_ids)),
-    }
-
-
-def _close_paired_policy_coverage(
-    *,
-    episode_by_id: dict[str, dict[str, Any]],
-    policy_complete_ids: set[str],
-    outcome_policy_pair_complete_ids: set[str],
-    promotion_outcomes_by_episode: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    p3_opportunity_ids = {
-        episode_id
-        for episode_id, episode in episode_by_id.items()
-        if text((episode.get("replacement_evidence") or {}).get("status")).lower()
-        == "review_switch"
-    }
-    p3_same_horizon_ids = {
-        episode_id
-        for episode_id, rows in promotion_outcomes_by_episode.items()
-        if any(text(row.get("replacement_outcome_status")).lower() == "usable" for row in rows)
-    }
-    return {
-        "episode_count": len(episode_by_id),
-        "all_four_policy_projection_count": len(policy_complete_ids),
-        "all_four_policy_projection_ratio": _ratio(len(policy_complete_ids), len(episode_by_id)),
-        "complete_outcome_policy_pair_episode_count": len(
-            outcome_policy_pair_complete_ids
-        ),
-        "complete_outcome_policy_pair_ratio": _ratio(
-            len(outcome_policy_pair_complete_ids), len(episode_by_id)
-        ),
-        "paired_policy_with_promotion_outcome_count": len(
-            policy_complete_ids & set(promotion_outcomes_by_episode)
-        ),
-        "p3_opportunity_episode_count": len(p3_opportunity_ids),
-        "p3_same_horizon_usable_episode_count": len(p3_opportunity_ids & p3_same_horizon_ids),
-        "p3_same_horizon_usable_ratio": _ratio(
-            len(p3_opportunity_ids & p3_same_horizon_ids),
-            len(p3_opportunity_ids),
+        "analysis_fee_complete_episode_count": len(analysis_outcomes_by_episode),
+        "analysis_fee_complete_ratio": _ratio(
+            len(analysis_outcomes_by_episode), len(episode_ids)
         ),
     }
 
@@ -659,8 +608,6 @@ def _close_point_in_time_coverage(
     episode_ids: set[str],
     episode_time_complete_ids: set[str],
     strategy_time_complete_ids: set[str],
-    replacement_required_ids: set[str],
-    replacement_time_complete_ids: set[str],
     marks_by_episode: dict[str, list[dict[str, Any]]],
     outcome_by_key: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
@@ -688,14 +635,6 @@ def _close_point_in_time_coverage(
         "strategy_time_complete_ratio": _ratio(
             len(strategy_time_complete_ids), len(episode_ids)
         ),
-        "replacement_timestamp_required_episode_count": len(replacement_required_ids),
-        "replacement_timestamp_complete_episode_count": len(
-            replacement_required_ids & replacement_time_complete_ids
-        ),
-        "replacement_timestamp_complete_ratio": _ratio(
-            len(replacement_required_ids & replacement_time_complete_ids),
-            len(replacement_required_ids),
-        ),
         "verified_mark_episode_count": len(verified_mark_ids),
         "verified_mark_episode_ratio": _ratio(len(verified_mark_ids), len(episode_ids)),
         "verified_usable_outcome_episode_count": len(verified_outcome_ids),
@@ -707,7 +646,7 @@ def _close_segment_readiness(
     *,
     episode_by_id: dict[str, dict[str, Any]],
     settled_ids: set[str],
-    promotion_usable_ids: set[str],
+    analysis_usable_ids: set[str],
     min_segment_sample: int,
     min_usable_outcome_ratio: float,
 ) -> list[dict[str, Any]]:
@@ -719,7 +658,7 @@ def _close_segment_readiness(
     out: list[dict[str, Any]] = []
     for (profile, family), ids in sorted(groups.items()):
         segment_settled = ids & settled_ids
-        segment_usable = ids & promotion_usable_ids
+        segment_usable = ids & analysis_usable_ids
         coverage = _ratio(len(segment_usable), len(ids))
         sample_pass = len(segment_usable) >= min_segment_sample
         coverage_pass = coverage >= min_usable_outcome_ratio
@@ -729,8 +668,8 @@ def _close_segment_readiness(
                 "strategy_family": family,
                 "episode_count": len(ids),
                 "settled_unique_episode_count": len(segment_settled),
-                "promotion_usable_episode_count": len(segment_usable),
-                "promotion_usable_ratio": coverage,
+                "analysis_usable_episode_count": len(segment_usable),
+                "analysis_usable_ratio": coverage,
                 "min_sample_pass": sample_pass,
                 "usable_outcome_ratio_pass": coverage_pass,
                 "mechanically_ready": sample_pass and coverage_pass,
@@ -739,36 +678,24 @@ def _close_segment_readiness(
     return out
 
 
-def _paired_policy_complete(episode: dict[str, Any]) -> bool:
-    projections = episode.get("shadow_policy_results")
-    if not isinstance(projections, dict):
+def _formal_policy_complete(episode: dict[str, Any]) -> bool:
+    result = episode.get("formal_policy_result")
+    if not isinstance(result, dict):
         return False
-    for policy in _CLOSE_POLICIES:
-        row = projections.get(policy)
-        if not isinstance(row, dict):
-            return False
-        if text(row.get("recommendation_state")).lower() not in _RECOMMENDATION_STATES:
-            return False
-    return True
-
-
-def _outcome_policy_pair_complete(
-    outcome: dict[str, Any],
-    *,
-    episode: dict[str, Any],
-) -> bool:
-    actual = outcome.get("policy_recommendations")
-    projections = episode.get("shadow_policy_results")
-    if not isinstance(actual, dict) or not isinstance(projections, dict):
-        return False
-    expected = {
-        policy: text((projections.get(policy) or {}).get("recommendation_state")).lower()
-        for policy in _CLOSE_POLICIES
-    }
-    return {
-        policy: text(actual.get(policy)).lower()
-        for policy in _CLOSE_POLICIES
-    } == expected
+    recommendation = text(result.get("recommendation_state")).lower()
+    evidence_status = text(result.get("decision_evidence_status")).lower()
+    expected_evidence_status = (
+        "not_evaluable"
+        if recommendation == "not_evaluable"
+        else "complete"
+    )
+    return bool(
+        text(result.get("policy_version")) == STRICT_CLOSE_POLICY_VERSION
+        and recommendation in _RECOMMENDATION_STATES
+        and isinstance(result.get("decision_basis"), list)
+        and bool(result.get("decision_basis"))
+        and evidence_status == expected_evidence_status
+    )
 
 
 def _segment_key(episode: dict[str, Any]) -> tuple[str, str] | None:
@@ -785,8 +712,13 @@ def _decision_fee_complete(episode: dict[str, Any]) -> bool:
     return (
         text(economics.get("evidence_status")).lower() == "complete"
         and text(economics.get("fee_calc_status")).lower() in _FEE_USABLE_STATUSES
+        and bool(text(economics.get("fee_calc_basis")))
+        and text(economics.get("currency")).upper() in {"USD", "HKD"}
+        and text(economics.get("broker")).lower() in {"futu", "富途"}
+        and economics.get("decision_open_fee") is not None
         and economics.get("decision_close_fee") is not None
         and economics.get("close_now_cost") is not None
+        and economics.get("opening_net_credit") is not None
     )
 
 
@@ -810,24 +742,6 @@ def _strategy_point_in_time_complete(episode: dict[str, Any]) -> bool:
         and strategy_at <= observed_at
         and text(episode.get("strategy_time_basis")).lower()
         == "position_context_as_of_utc"
-    )
-
-
-def _replacement_point_in_time_complete(episode: dict[str, Any]) -> bool:
-    evidence = episode.get("replacement_evidence")
-    evidence = evidence if isinstance(evidence, dict) else {}
-    if text(evidence.get("status")).lower() != "review_switch":
-        return True
-    provenance = episode.get("replacement_provenance")
-    provenance = provenance if isinstance(provenance, dict) else {}
-    observed_at = _utc_datetime(episode.get("observed_at_utc"))
-    source_run_at = _utc_datetime(provenance.get("source_run_at_utc"))
-    return bool(
-        text(provenance.get("status")).lower() == "validated_same_decision_run"
-        and text(provenance.get("source_run_id"))
-        and observed_at is not None
-        and source_run_at is not None
-        and source_run_at <= observed_at
     )
 
 
@@ -886,7 +800,7 @@ def _close_readiness_next_action(
         return "settle_close_decision_outcomes"
     if blockers:
         return "collect_more_close_decision_evidence"
-    return "run_paired_policy_analysis"
+    return "evaluate_strict_close_policy"
 
 
 def _close_facet_paths(paths: list[Path]) -> dict[str, list[Path]]:

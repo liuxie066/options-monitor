@@ -191,3 +191,56 @@ def test_option_performance_renderer_separates_profit_cash_and_assignment() -> N
     assert "指派股票卖出费用：USD -2.15" in text
     assert "证据不完整" in text
     assert "不直接等于 PnL" in text
+
+
+def test_position_exit_renderer_uses_only_strict_close_contract() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="position_exit_analysis",
+        tool_result={"ok": True},
+        data={
+            "query": {"account": "lx", "symbol": "NVDA"},
+            "source": {"run_id": "run-strict"},
+            "matched_count": 1,
+            "rows": [
+                {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "side": "short",
+                    "option_type": "put",
+                    "expiration": "2026-09-18",
+                    "strike": 100,
+                    "currency": "USD",
+                    "policy_version": "strict_profit_capture.v1",
+                    "recommendation_state": "close",
+                    "evaluation_status": "priced",
+                    "reason": "all_strict_close_gates_passed",
+                    "net_capture_ratio": 0.95,
+                    "opening_net_credit": 170,
+                    "all_in_close_cost": 8.5,
+                    "close_cost_ratio": 0.0009,
+                    "remaining_term_ratio": 0.5,
+                    "spread_ratio": 0.1333,
+                    "dte": 39,
+                    "is_otm": True,
+                    # Retired v2 fields must never alter or leak into the public answer.
+                    "close_action": "close_put_keep_call",
+                    "optional_combo_action": "close_both_optional",
+                    "tier_label": "P0",
+                    "iv_rv_ratio": 2.5,
+                    "abs_delta": 0.2,
+                }
+            ],
+        },
+    )
+
+    assert "结论：建议平仓" in text
+    assert "净捕获 95.00%" in text
+    assert "全成本买回 USD 8.5" in text
+    assert "买回成本/行权本金 0.09%" in text
+    assert "剩余期限占比 50.00%" in text
+    assert "DTE 39" in text
+    assert "价外 是" in text
+    assert "可选：" not in text
+    assert "Put腿" not in text
+    assert "IV/RV" not in text
+    assert "delta" not in text

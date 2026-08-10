@@ -4,6 +4,7 @@ import math
 import json
 from collections.abc import Mapping
 from datetime import datetime, time, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,27 +30,9 @@ from src.application.strategy_scan_failures import (
     read_strategy_scan_failures,
 )
 from src.application.multi_tick.misc import AccountResult
-from src.application.config_loader import resolve_data_config_path
-from src.application.position_advice_reader import (
-    read_position_advice_v2_from_ledger,
-)
-from src.application.position_advice_account_identity_reader import (
-    PositionAdviceAccountIdentityError,
-    read_current_run_portfolio_identity,
-)
-from src.application.position_advice_authority_service import (
-    read_authority_resolution,
-)
-from src.application.position_advice_notification_authority import (
-    build_fixed_failure_notification_authority_token,
-    build_notification_authority_token,
-)
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
-    safe_existing_relative_path,
+from src.application.source_receipts import (
     sha256_bytes,
-    validate_source_receipt,
 )
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
@@ -57,12 +40,6 @@ from src.application.prepared_portfolio_context import (
 )
 from src.application.prepared_portfolio_distribution import (
     PreparedPortfolioDistribution,
-)
-from src.application.required_data_snapshot import (
-    FrozenRequiredDataUnavailable,
-    RequiredDataSnapshotError,
-    load_required_data_snapshot_manifest,
-    resolve_frozen_required_data,
 )
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
@@ -83,10 +60,12 @@ from src.application.cc_lp_candidate_snapshot import (
     CcLpCandidateSnapshotError,
     load_cc_lp_candidate_snapshot,
 )
+from src.application.close_advice_report_manifest import (
+    read_close_advice_report_snapshot,
+)
 
 
 _DEFAULT_MAX_CANDIDATES = 3
-_DEFAULT_CLOSE_ADVICE_NOTIFY_LEVELS = ("strong", "medium")
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
 _COMBO_OCCURRENCE_FIELDS = (
@@ -148,7 +127,6 @@ def assemble_daily_decision_brief(
         _daily_brief_config(config_map).get("max_candidates_per_strategy"),
         default=_DEFAULT_MAX_CANDIDATES,
     )
-    close_advice_notify_levels = _close_advice_notify_levels(config_map)
     close_advice_max_items = _close_advice_max_items_per_account(config_map)
 
     (
@@ -185,72 +163,15 @@ def assemble_daily_decision_brief(
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
-    advice_authority = _daily_brief_advice_authority(
-        base=base_path,
-        state_dir=state_dir,
-        account=account_norm,
+    close_rows, close_available = _load_close_advice(
+        path=run_account_dir / "close_advice.csv",
+        run_account_dir=run_account_dir,
         market=market_norm,
-        config=config_map,
-        now_utc=effective_now,
-    )
-    current_run_identity = _daily_brief_current_run_identity(
-        state_dir=state_dir,
-        account_run_id=run_id_norm,
         account=account_norm,
-        market=market_norm,
-        now_utc=effective_now,
+        run_id=run_id_norm,
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
     )
-    position_advice_rows: list[dict[str, Any]] = []
-    if advice_authority["mode"] == "v2":
-        position_advice_rows = [
-            dict(item)
-            for item in advice_authority.get("rows") or []
-            if isinstance(item, Mapping) and _row_market(item) == market_norm
-        ]
-        close_rows = []
-        close_available = bool(advice_authority.get("available"))
-        source_artifacts.append(
-            {
-                "kind": "position_advice_v2",
-                "path": (
-                    "current:"
-                    + str(advice_authority.get("portfolio_plan_id") or "")
-                ),
-                "row_count": len(position_advice_rows),
-            }
-        )
-        if not close_available:
-            data_gaps.append(
-                {
-                    "scope": "strategy",
-                    "strategy_family": "position_advice",
-                    "reason": str(
-                        advice_authority.get("blocker")
-                        or "position_advice_unavailable"
-                    ),
-                }
-            )
-    elif advice_authority["mode"] == "authority_conflict":
-        close_rows, close_available = [], False
-        position_advice_rows = []
-        data_gaps.append(
-            {
-                "scope": "authority",
-                "strategy_family": "position_advice",
-                "reason": str(
-                    advice_authority.get("blocker")
-                    or "position_advice_authority_conflict"
-                ),
-            }
-        )
-    else:
-        close_rows, close_available = _load_close_advice(
-            path=run_account_dir / "close_advice.csv",
-            run_account_dir=run_account_dir,
-            market=market_norm,
-            source_artifacts=source_artifacts,
-            data_gaps=data_gaps,
-        )
 
     strategy_status_index = _load_json_artifact(
         path=run_account_dir / "strategy_scan_status_index.v1.json",
@@ -267,38 +188,6 @@ def assemble_daily_decision_brief(
         market=market_norm,
         data_gaps=data_gaps,
     )
-    success_empty_authority_blocker = (
-        _append_success_empty_strategy_gaps(
-            statuses=indexed_strategy_statuses,
-            base=base_path,
-            run_id=run_id_norm,
-            account=account_norm,
-            market=market_norm,
-            account_state_dir=state_dir,
-            advice_authority=advice_authority,
-            now_utc=effective_now,
-            data_gaps=data_gaps,
-        )
-    )
-    if success_empty_authority_blocker:
-        advice_authority = {
-            **advice_authority,
-            "mode": "authority_conflict",
-            "available": False,
-            "blocker": success_empty_authority_blocker,
-            "rows": [],
-            "human_review_rows": [],
-        }
-        position_advice_rows = []
-        close_rows = []
-        close_available = False
-        data_gaps.append(
-            {
-                "scope": "authority",
-                "strategy_family": "position_advice",
-                "reason": success_empty_authority_blocker,
-            }
-        )
     indexed_expected_families = {
         str(item.get("strategy_family") or "").strip().lower()
         for item in indexed_strategy_statuses
@@ -321,7 +210,6 @@ def assemble_daily_decision_brief(
     close_rows = _dedupe_close_rows(close_rows)
     selected_close_rows = select_close_advice_notification_rows(
         close_rows,
-        notify_levels=close_advice_notify_levels,
         max_items_per_account=close_advice_max_items,
     )
     selected_close_row_ids = {id(row) for row in selected_close_rows}
@@ -445,40 +333,16 @@ def assemble_daily_decision_brief(
             )
         )
 
-    if advice_authority["mode"] == "v2":
-        for row in position_advice_rows:
-            positions.append(_position_advice_position_view(row))
-            if (
-                row.get("actionable") is True
-                or row.get("human_review_required") is True
-            ):
-                actions.append(
-                    _position_advice_action(row, account=account_norm)
-                )
-    else:
-        for row in close_rows:
-            notification_eligible = id(row) in selected_close_row_ids
-            positions.append(
-                _position_view(
-                    row,
-                    notification_eligible=notification_eligible,
-                )
+    for row in close_rows:
+        notification_eligible = id(row) in selected_close_row_ids
+        positions.append(
+            _position_view(
+                row,
+                notification_eligible=notification_eligible,
             )
-        for row in selected_close_rows:
-            actions.append(_close_action(row, account=account_norm))
-        for row in close_rows:
-            if (
-                id(row) not in selected_close_row_ids
-                and _close_advice_evaluation_unavailable(row)
-            ):
-                actions.append(_close_action(row, account=account_norm))
-        for row in advice_authority.get("human_review_rows") or []:
-            if not isinstance(row, Mapping):
-                continue
-            positions.append(_position_advice_position_view(row))
-            actions.append(
-                _position_advice_action(row, account=account_norm)
-            )
+        )
+    for row in selected_close_rows:
+        actions.append(_close_action(row, account=account_norm))
 
     portfolio_context = _load_portfolio_context(
         base=base_path,
@@ -605,14 +469,6 @@ def assemble_daily_decision_brief(
         blockers.append("all_required_account_capacity_sources_unavailable")
     if not cash_total_reliable:
         blockers.append("cash_total_unavailable")
-    if advice_authority["mode"] == "authority_conflict":
-        blockers.append(
-            str(
-                advice_authority.get("blocker")
-                or "position_advice_authority_conflict"
-            )
-        )
-
     if blockers:
         actionability = "blocked"
         status = "blocked"
@@ -684,16 +540,6 @@ def assemble_daily_decision_brief(
             "events": events,
             "data_gaps": deduped_data_gaps,
             "source_artifacts": _dedupe_source_artifacts(source_artifacts),
-            "position_advice_preview": _json_safe(
-                advice_authority.get("preview") or {}
-            ),
-            "notification_authority": _daily_brief_notification_authority(
-                advice_authority,
-                base=base_path,
-                account=account_norm,
-                account_run_id=run_id_norm,
-                current_run_identity=current_run_identity,
-            ),
         }
     )
 
@@ -1066,404 +912,52 @@ def _load_cc_lp_snapshot_family(
     return market_rows, True
 
 
-def _daily_brief_advice_authority(
-    *,
-    base: Path,
-    state_dir: Path,
-    account: str,
-    market: str,
-    config: Mapping[str, Any],
-    now_utc: datetime,
-) -> dict[str, Any]:
-    summary_path = state_dir / "position_advice_sources.v2.json"
-    if not summary_path.exists():
-        return {
-            "mode": "authority_conflict",
-            "available": False,
-            "blocker": "position_advice_source_summary_missing",
-            "rows": [],
-            "human_review_rows": [],
-            "preview": {},
-        }
-    try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if not isinstance(summary, dict):
-            raise ValueError("position advice source summary is not an object")
-        if str(summary.get("account") or "").strip().lower() != account:
-            raise ValueError("position advice source account mismatch")
-        source = str(
-            summary.get("normalized_portfolio_source") or ""
-        ).strip()
-        identity_hash = str(
-            summary.get("portfolio_account_identity_hash") or ""
-        ).strip()
-        portfolio_cfg = (
-            config.get("portfolio")
-            if isinstance(config.get("portfolio"), Mapping)
-            else {}
-        )
-        data_config_path = resolve_data_config_path(
-            base=base,
-            data_config=portfolio_cfg.get("data_config"),
-        )
-        result = read_position_advice_v2_from_ledger(
-            base=base,
-            normalized_account=account,
-            normalized_portfolio_source=source,
-            portfolio_account_identity_hash=identity_hash,
-            data_config_path=data_config_path,
-            requested_market=market,
-            now=now_utc,
-        )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return {
-            "mode": "authority_conflict",
-            "available": False,
-            "blocker": "position_advice_authority_resolution_failed",
-            "rows": [],
-            "preview": {},
-        }
-
-    mode = str(result.get("authority_mode") or "").strip()
-    freshness = str(
-        dict(result.get("freshness") or {}).get("status") or ""
-    ).strip()
-    preview = {
-        "authority_mode": mode or None,
-        "availability_status": result.get("availability_status"),
-        "freshness": dict(result.get("freshness") or {}),
-        "portfolio_plan_id": result.get("portfolio_plan_id"),
-        "account_run_id": result.get("account_run_id"),
-        "row_count": result.get("row_count"),
-        "actionable_count": result.get("actionable_count"),
-        "model_actionable_count": result.get("model_actionable_count"),
-        "model_trade_actionable_count": result.get(
-            "model_trade_actionable_count"
-        ),
-        "human_review_required_count": result.get(
-            "human_review_required_count"
-        ),
-    }
-    authority_common = {
-        "resolved_mode": mode or None,
-        "authority_generation": result.get("authority_generation"),
-        "authority_policy_hash": result.get("authority_policy_hash"),
-        "normalized_portfolio_source": source,
-        "portfolio_account_identity_hash": identity_hash,
-    }
-    available = (
-        result.get("availability_status") == "available"
-        and freshness == "fresh"
-    )
-    human_review_rows = (
-        [
-            dict(item)
-            for item in result.get("rows") or []
-            if isinstance(item, Mapping)
-            and item.get("human_review_required") is True
-        ]
-        if available
-        else []
-    )
-    if mode == "v1":
-        return {
-            "mode": "v1",
-            "available": True,
-            "blocker": None,
-            "rows": [],
-            "human_review_rows": human_review_rows,
-            "preview": preview,
-            **authority_common,
-        }
-    if mode == "v2_shadow":
-        return {
-            "mode": "v1",
-            "available": True,
-            "blocker": None,
-            "rows": [],
-            "human_review_rows": human_review_rows,
-            "preview": preview,
-            **authority_common,
-        }
-    if mode != "v2":
-        return {
-            "mode": "authority_conflict",
-            "available": False,
-            "blocker": "position_advice_authority_conflict",
-            "rows": [],
-            "preview": preview,
-            **authority_common,
-        }
-    return {
-        "mode": "v2",
-        "available": available,
-        "blocker": (
-            None if available else f"position_advice_{freshness or 'unavailable'}"
-        ),
-        "rows": (
-            [
-                dict(item)
-                for item in result.get("rows") or []
-                if isinstance(item, Mapping)
-            ]
-            if available
-            else []
-        ),
-        "human_review_rows": human_review_rows,
-        "portfolio_plan_id": result.get("portfolio_plan_id"),
-        "preview": preview,
-        **authority_common,
-    }
-
-
-def _daily_brief_notification_authority(
-    advice_authority: Mapping[str, Any],
-    *,
-    base: Path,
-    account: str,
-    account_run_id: str,
-    current_run_identity: Mapping[str, Any],
-) -> dict[str, Any]:
-    selected = str(advice_authority.get("mode") or "").strip()
-    available = bool(advice_authority.get("available"))
-    normal_allowed = selected == "v1" or (
-        selected == "v2" and available
-    )
-    resolved_mode = str(
-        advice_authority.get("resolved_mode") or selected
-    ).strip()
-    normal_token: dict[str, Any] | None = None
-    source = str(
-        advice_authority.get("normalized_portfolio_source") or ""
-    ).strip()
-    identity_hash = str(
-        advice_authority.get("portfolio_account_identity_hash") or ""
-    ).strip()
-    if normal_allowed and source and len(identity_hash) == 64:
-        try:
-            normal_token = build_notification_authority_token(
-                normalized_account=account,
-                normalized_portfolio_source=source,
-                portfolio_account_identity_hash=identity_hash,
-                selected_advice_contract=selected,
-                resolved_mode=resolved_mode,
-                authority_generation=advice_authority.get(
-                    "authority_generation"
-                ),
-                authority_policy_hash=advice_authority.get(
-                    "authority_policy_hash"
-                ),
-                account_run_id=account_run_id,
-            )
-        except (TypeError, ValueError):
-            normal_allowed = False
-    if normal_allowed and normal_token is None:
-        normal_allowed = False
-
-    failure_token: dict[str, Any] | None = None
-    failure_allowed = False
-    failure_blocker = "position_advice_failure_identity_unavailable"
-    failure_source = source
-    failure_identity_hash = identity_hash
-    failure_identity_source = (
-        "successful_position_advice_summary"
-        if failure_source and len(failure_identity_hash) == 64
-        else None
-    )
-    if not failure_source or len(failure_identity_hash) != 64:
-        if current_run_identity.get("status") == "available":
-            failure_source = str(
-                current_run_identity.get(
-                    "normalized_portfolio_source"
-                )
-                or ""
-            ).strip()
-            failure_identity_hash = str(
-                current_run_identity.get(
-                    "portfolio_account_identity_hash"
-                )
-                or ""
-            ).strip()
-            failure_identity_source = "current_run_portfolio_receipt"
-        else:
-            failure_blocker = str(
-                current_run_identity.get("reason")
-                or failure_blocker
-            )
-    failure_resolution = None
-    if failure_source and len(failure_identity_hash) == 64:
-        try:
-            failure_resolution = read_authority_resolution(
-                base=base,
-                normalized_account=account,
-                normalized_portfolio_source=failure_source,
-                portfolio_account_identity_hash=failure_identity_hash,
-            )
-        except (OSError, TypeError, ValueError, RuntimeError):
-            failure_blocker = (
-                "position_advice_authority_resolution_failed"
-            )
-        else:
-            if failure_resolution.notifications_allowed:
-                failure_selected = (
-                    "v2" if failure_resolution.mode == "v2" else "v1"
-                )
-                try:
-                    failure_token = build_fixed_failure_notification_authority_token(
-                        normalized_account=account,
-                        normalized_portfolio_source=failure_source,
-                        portfolio_account_identity_hash=(
-                            failure_identity_hash
-                        ),
-                        selected_advice_contract=failure_selected,
-                        resolved_mode=str(failure_resolution.mode),
-                        authority_generation=(
-                            failure_resolution.generation
-                        ),
-                        authority_policy_hash=(
-                            failure_resolution.policy_hash
-                        ),
-                        account_run_id=account_run_id,
-                    )
-                except (TypeError, ValueError):
-                    failure_blocker = (
-                        "position_advice_failure_token_build_failed"
-                    )
-                else:
-                    failure_allowed = True
-                    failure_blocker = ""
-            else:
-                failure_blocker = "position_advice_authority_conflict"
-    return {
-        "selected_advice_contract": (
-            selected if selected in {"v1", "v2"} else None
-        ),
-        "resolved_mode": resolved_mode or None,
-        "authority_generation": advice_authority.get(
-            "authority_generation"
-        ),
-        "authority_policy_hash": advice_authority.get(
-            "authority_policy_hash"
-        ),
-        "normal_delivery_allowed": normal_allowed,
-        "fixed_failure_delivery_allowed": failure_allowed,
-        "notification_allowed": normal_allowed,
-        "blocker": (
-            None
-            if normal_allowed
-            else str(
-                advice_authority.get("blocker")
-                or "position_advice_notification_authority_unavailable"
-            )
-        ),
-        "fixed_failure_blocker": failure_blocker or None,
-        "normal_delivery_token": normal_token,
-        "fixed_failure_delivery_token": failure_token,
-        "token": normal_token,
-        "failure_authority_resolution_status": (
-            failure_resolution.resolution_status
-            if failure_resolution is not None
-            else None
-        ),
-        "failure_authority_resolved_mode": (
-            failure_resolution.mode
-            if failure_resolution is not None
-            else None
-        ),
-        "failure_authority_generation": (
-            failure_resolution.generation
-            if failure_resolution is not None
-            else None
-        ),
-        "failure_authority_policy_hash": (
-            failure_resolution.policy_hash
-            if failure_resolution is not None
-            else None
-        ),
-        "normalized_portfolio_source": (
-            failure_source or source or None
-        ),
-        "portfolio_account_identity_hash": (
-            failure_identity_hash
-            if len(failure_identity_hash) == 64
-            else None
-        ),
-        "authority_identity_source": failure_identity_source,
-        "identity_snapshot_id": current_run_identity.get("snapshot_id"),
-        "identity_receipt_hash": current_run_identity.get(
-            "receipt_hash"
-        ),
-        "identity_evidence": _identity_evidence_audit(
-            current_run_identity
-        ),
-    }
-
-
-def _daily_brief_current_run_identity(
-    *,
-    state_dir: Path,
-    account_run_id: str,
-    account: str,
-    market: str,
-    now_utc: datetime,
-) -> dict[str, Any]:
-    try:
-        return read_current_run_portfolio_identity(
-            account_state_dir=state_dir,
-            account_run_id=account_run_id,
-            expected_account=account,
-            expected_market=market,
-            now=now_utc,
-        )
-    except PositionAdviceAccountIdentityError as exc:
-        return {
-            "status": "unavailable",
-            "reason": exc.reason_code,
-        }
-    except (OSError, TypeError, ValueError, RuntimeError):
-        return {
-            "status": "unavailable",
-            "reason": "current_run_portfolio_receipt_invalid",
-        }
-
-
-def _identity_evidence_audit(
-    evidence: Mapping[str, Any],
-) -> dict[str, Any]:
-    allowed_fields = (
-        "status",
-        "reason",
-        "account",
-        "normalized_portfolio_source",
-        "portfolio_account_identity_hash",
-        "producer_account_run_id",
-        "included_markets",
-        "snapshot_id",
-        "receipt_hash",
-        "payload_sha256",
-        "source_observed_at",
-        "expires_at",
-    )
-    return {
-        field: evidence.get(field)
-        for field in allowed_fields
-        if evidence.get(field) is not None
-    }
-
 
 def _load_close_advice(
     *,
     path: Path,
     run_account_dir: Path,
     market: str,
+    account: str,
+    run_id: str,
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], bool]:
     if not path.exists():
         data_gaps.append({"scope": "strategy", "strategy_family": "close_advice", "reason": "source_artifact_missing"})
         return [], False
+    snapshot = read_close_advice_report_snapshot(
+        csv_path=path,
+        desired_market=market,
+        account=account,
+        expected_run_id=run_id,
+        expected_quote_mode="frozen_snapshot",
+    )
+    manifest = snapshot["validation"]
+    if not manifest.get("ok"):
+        reason = str(
+            manifest.get("reason") or "close_advice_manifest_invalid"
+        )
+        data_gaps.append(
+            {
+                "scope": "source",
+                "strategy_family": "close_advice",
+                "path": _source_path(run_account_dir, path),
+                "reason": reason,
+            }
+        )
+        source_artifacts.append(
+            {
+                "kind": "close_advice",
+                "path": _source_path(run_account_dir, path),
+                "row_count": 0,
+                "status": "invalid",
+                "reason": reason,
+            }
+        )
+        return [], False
     try:
-        frame = pd.read_csv(path)
+        frame = pd.read_csv(BytesIO(snapshot["csv_bytes"]))
     except pd.errors.EmptyDataError:
         source_artifacts.append(
             {"kind": "close_advice", "path": _source_path(run_account_dir, path), "row_count": 0}
@@ -1484,6 +978,26 @@ def _load_close_advice(
     rows: list[dict[str, Any]] = []
     for source_row, raw in enumerate(frame.to_dict("records"), start=1):
         row = _json_safe(dict(raw))
+        if _text(row.get("account")).lower() != account:
+            reason = "close_advice_report_account_row_mismatch"
+            data_gaps.append(
+                {
+                    "scope": "source",
+                    "strategy_family": "close_advice",
+                    "path": _source_path(run_account_dir, path),
+                    "reason": reason,
+                }
+            )
+            source_artifacts.append(
+                {
+                    "kind": "close_advice",
+                    "path": _source_path(run_account_dir, path),
+                    "row_count": 0,
+                    "status": "invalid",
+                    "reason": reason,
+                }
+            )
+            return [], False
         if _row_market(row) != market:
             continue
         row["_source_path"] = _source_path(run_account_dir, path)
@@ -2046,14 +1560,9 @@ def _candidate_view(
 
 
 def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
-    tier = _text(row.get("tier")).lower()
-    evaluation = _text(row.get("evaluation_status") or row.get("quote_status")).lower()
-    state = "active" if tier in {"strong", "medium"} else "observe"
-    if evaluation in {"unavailable", "not_evaluable", "blocked", "error"} or _text(row.get("close_action")).lower() == "not_evaluable":
-        state = "blocked"
     return {
         "priority": _priority_from_row(row, default="P2"),
-        "state": state,
+        "state": "active",
         "action_type": "close_position",
         "strategy_family": _text(row.get("strategy_family") or row.get("strategy") or "close_advice").lower(),
         "account": account,
@@ -2066,19 +1575,25 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
         "position_lot_id": _text(row.get("position_lot_id")),
         "strategy_group_id": _text(row.get("strategy_group_id")),
         "leg_role": _text(row.get("leg_role")).lower(),
-        "title": _text(row.get("tier_label") or "平仓建议"),
+        "title": "严格平仓提醒",
         "reason": _text(row.get("reason")),
-        "close_action": _text(row.get("close_action")),
+        "recommendation_state": _text(
+            row.get("recommendation_state")
+        ).lower(),
+        "policy_version": _text(row.get("policy_version")),
         "metrics": {
             key: _json_safe(row.get(key))
             for key in (
                 "contracts_open",
-                "close_mid",
+                "ask",
                 "dte",
-                "capture_ratio",
-                "remaining_premium",
-                "realized_if_close",
-                "remaining_annualized_return",
+                "original_dte",
+                "remaining_term_ratio",
+                "net_capture_ratio",
+                "opening_net_credit",
+                "all_in_close_cost",
+                "close_cost_ratio",
+                "estimated_pnl_if_close_net",
             )
             if row.get(key) is not None
         },
@@ -2100,12 +1615,11 @@ def _position_view(
         "expiration",
         "strike",
         "contract_symbol",
-        "tier",
-        "tier_label",
         "reason",
-        "close_action",
         "evaluation_status",
         "quote_status",
+        "recommendation_state",
+        "policy_version",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
     out["advice_kind"] = "close_advice"
@@ -2113,9 +1627,12 @@ def _position_view(
     out["metrics"] = {
         key: _json_safe(row.get(key))
         for key in (
-            "close_mid",
-            "realized_if_close",
-            "remaining_annualized_return",
+            "ask",
+            "remaining_term_ratio",
+            "net_capture_ratio",
+            "all_in_close_cost",
+            "close_cost_ratio",
+            "estimated_pnl_if_close_net",
         )
         if row.get(key) is not None
     }
@@ -2124,132 +1641,6 @@ def _position_view(
     ).lower()
     return out
 
-
-def _position_advice_action(
-    row: Mapping[str, Any],
-    *,
-    account: str,
-) -> dict[str, Any]:
-    recommendation = _text(row.get("recommendation")).lower()
-    action_labels = {
-        "roll": "滚动当前期权",
-        "replace": "替换当前期权腿",
-        "reallocate": "重新分配期权资金",
-        "review": "人工核查持仓事实",
-    }
-    reasons = [
-        str(item)
-        for item in row.get("reason_codes") or []
-        if str(item)
-    ]
-    return {
-        "priority": "P1" if recommendation != "review" else "P0",
-        "state": "active",
-        "action_type": f"position_{recommendation}",
-        "strategy_family": _text(row.get("strategy_family")).lower(),
-        "account": account,
-        "symbol": _text(row.get("symbol")).upper(),
-        "option_type": _text(row.get("option_type")).lower(),
-        "side": _text(row.get("side")).lower(),
-        "expiration": _text(row.get("expiration")),
-        "strike": row.get("strike"),
-        "contract_symbol": _text(row.get("contract_symbol")).upper(),
-        "position_lot_id": _text(row.get("position_id")),
-        "strategy_group_id": _text(row.get("strategy_group_id")),
-        "leg_role": _text(row.get("leg_role")).lower(),
-        "title": action_labels.get(recommendation, "持仓建议"),
-        "reason": "; ".join(reasons),
-        "recommendation": recommendation,
-        "model_trade_actionable": (
-            row.get("model_trade_actionable") is True
-        ),
-        "human_review_required": (
-            row.get("human_review_required") is True
-        ),
-        "action_scope": row.get("action_scope"),
-        "portfolio_plan_id": row.get("portfolio_plan_id"),
-        "execution_order": row.get("execution_order"),
-        "depends_on": list(row.get("depends_on") or []),
-        "requires_user_confirmation": True,
-        "metrics": {
-            key: _json_safe(row.get(key))
-            for key in (
-                "current_daily_carry",
-                "candidate_daily_carry",
-                "friction",
-                "net_carry_improvement_H",
-                "net_carry_improvement_H_base_cny",
-                "payback_days",
-            )
-            if row.get(key) is not None
-        },
-        "source": {
-            "kind": "position_advice_v2",
-            "position_id": row.get("position_id"),
-            "portfolio_plan_id": row.get("portfolio_plan_id"),
-        },
-    }
-
-
-def _position_advice_position_view(
-    row: Mapping[str, Any],
-) -> dict[str, Any]:
-    out = {
-        key: _json_safe(row.get(key))
-        for key in (
-            "position_id",
-            "strategy_group_id",
-            "leg_role",
-            "symbol",
-            "option_type",
-            "side",
-            "expiration",
-            "strike",
-            "contract_symbol",
-            "strategy_family",
-            "lifecycle_state",
-            "group_structure_state",
-            "recommendation",
-            "actionable",
-            "model_trade_actionable",
-            "human_review_required",
-            "action_scope",
-            "reason_codes",
-            "best_candidate",
-            "resource_deltas",
-            "leg_plan",
-            "execution_order",
-            "depends_on",
-            "promotion_scope_status",
-        )
-    }
-    out["position_lot_id"] = out.pop("position_id")
-    out["advice_kind"] = "position_advice"
-    out["evaluation_status"] = (
-        "evaluable" if row.get("recommendation") != "not_evaluable"
-        else "not_evaluable"
-    )
-    out["quote_status"] = (
-        "fresh" if row.get("quote_as_of") else "unavailable"
-    )
-    out["close_action"] = row.get("recommendation")
-    out["metrics"] = {
-        key: _json_safe(row.get(key))
-        for key in (
-            "current_extrinsic",
-            "current_daily_carry",
-            "current_capital_efficiency",
-            "candidate_daily_carry",
-            "candidate_capital_efficiency",
-            "comparison_horizon_days",
-            "friction",
-            "net_carry_improvement_H",
-            "net_carry_improvement_H_base_cny",
-            "payback_days",
-        )
-        if row.get(key) is not None
-    }
-    return out
 
 
 def _blocked_action(account: str, market: str, blockers: list[str]) -> dict[str, Any]:
@@ -2703,287 +2094,6 @@ def _append_strategy_status_gaps(
     return relevant
 
 
-def _append_success_empty_strategy_gaps(
-    *,
-    statuses: list[dict[str, Any]],
-    base: Path,
-    run_id: str,
-    account: str,
-    market: str,
-    account_state_dir: Path,
-    advice_authority: Mapping[str, Any],
-    now_utc: datetime,
-    data_gaps: list[dict[str, Any]],
-) -> str | None:
-    annotated = [
-        item
-        for item in statuses
-        if _text(item.get("source_outcome"))
-        or _text(item.get("reason_code"))
-    ]
-    if not annotated:
-        return None
-    if (
-        advice_authority.get("mode") == "authority_conflict"
-        or not bool(advice_authority.get("available"))
-    ):
-        return str(
-            advice_authority.get("blocker")
-            or "position_advice_authority_conflict"
-        )
-    try:
-        candidate_source = _load_adopted_candidate_source(
-            account_state_dir=account_state_dir,
-            account=account,
-            run_id=run_id,
-            now_utc=now_utc,
-        )
-        manifest_path = (
-            paths.run_state_dir(base, run_id)
-            / "required_data_snapshot_manifest.json"
-        )
-        _manifest, required_data_root = (
-            load_required_data_snapshot_manifest(
-                manifest_path=manifest_path,
-                expected_run_id=run_id,
-            )
-        )
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        json.JSONDecodeError,
-        PositionAdviceSourceError,
-        RequiredDataSnapshotError,
-    ):
-        return "position_advice_source_integrity_invalid"
-
-    evidence_by_symbol: dict[str, dict[str, Any]] = {}
-    for item in annotated:
-        symbol = _text(item.get("symbol")).upper()
-        family = _text(item.get("strategy_family")).lower()
-        try:
-            evidence = evidence_by_symbol.get(symbol)
-            if evidence is None:
-                evidence = resolve_frozen_required_data(
-                    manifest_path=manifest_path,
-                    expected_run_id=run_id,
-                    symbol=symbol,
-                    required_data_root=required_data_root,
-                    now=now_utc,
-                )
-                evidence_by_symbol[symbol] = evidence
-        except FrozenRequiredDataUnavailable:
-            return "position_advice_source_integrity_invalid"
-
-        projection_matches = _success_empty_projection_matches(
-            status=item,
-            evidence=evidence,
-            candidate_source=candidate_source,
-        )
-        if projection_matches:
-            data_gaps.append(
-                {
-                    "scope": "strategy",
-                    "market": market,
-                    "symbol": symbol,
-                    "strategy_family": family,
-                    "outcome": "success_empty",
-                    "reason": _text(item.get("reason_code")),
-                    "severity": "warning",
-                    "actionable": False,
-                }
-            )
-        else:
-            data_gaps.append(
-                {
-                    "scope": "strategy",
-                    "market": market,
-                    "symbol": symbol,
-                    "strategy_family": family,
-                    "reason": "strategy_status_projection_mismatch",
-                    "severity": "warning",
-                    "actionable": False,
-                }
-            )
-    return None
-
-
-def _load_adopted_candidate_source(
-    *,
-    account_state_dir: Path,
-    account: str,
-    run_id: str,
-    now_utc: datetime,
-) -> dict[str, Any]:
-    root = Path(account_state_dir).resolve()
-    summary = json.loads(
-        (root / "position_advice_sources.v2.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    records = summary.get("source_receipts")
-    if not isinstance(records, list):
-        raise PositionAdviceSourceError(
-            "candidate source receipt index is unavailable"
-        )
-    record = next(
-        (
-            dict(item)
-            for item in records
-            if isinstance(item, Mapping)
-            and _text(item.get("source_kind")) == "opening_candidates"
-        ),
-        None,
-    )
-    if record is None:
-        raise PositionAdviceSourceError(
-            "candidate source receipt is unavailable"
-        )
-    producer_root = Path(
-        _text(record.get("producer_root"))
-    ).resolve()
-    if producer_root != root:
-        raise PositionAdviceSourceError(
-            "candidate source producer root mismatch"
-        )
-    receipt_input = Path(
-        _text(record.get("receipt_path"))
-    ).resolve()
-    try:
-        receipt_relpath = receipt_input.relative_to(root).as_posix()
-    except ValueError as exc:
-        raise PositionAdviceSourceError(
-            "candidate source receipt escapes account state"
-        ) from exc
-    receipt_path = safe_existing_relative_path(root, receipt_relpath)
-    receipt_bytes = receipt_path.read_bytes()
-    if sha256_bytes(receipt_bytes) != _text(
-        record.get("receipt_hash")
-    ):
-        raise PositionAdviceSourceError(
-            "candidate source receipt hash mismatch"
-        )
-    receipt = json.loads(receipt_bytes.decode("utf-8"))
-    validated = validate_source_receipt(
-        receipt,
-        producer_root=root,
-        now=now_utc,
-        expected_source_kind="opening_candidates",
-        expected_account=account,
-        expected_producer_account_run_id=run_id,
-    )
-    payload = json.loads(
-        validated["payload_path"].read_text(encoding="utf-8")
-    )
-    try:
-        validate_opening_candidate_snapshot(
-            payload,
-            expected_run_id=run_id,
-            expected_account=account,
-            verify_dependency_root=root.parents[4],
-        )
-        decisions = ranked_opening_candidate_decisions(payload)
-    except OpeningCandidateSnapshotError as exc:
-        raise PositionAdviceSourceError(
-            "candidate source payload is invalid"
-        ) from exc
-    quote_snapshot_ids = {
-        _text(item.get("quote_snapshot_id"))
-        for item in payload.get("ranked_candidates") or []
-        if isinstance(item, Mapping) and _text(item.get("quote_snapshot_id"))
-    }
-    if not quote_snapshot_ids:
-        quote_snapshot_ids = {
-            _text(item.get("snapshot_id"))
-            for item in validated.get("dependencies") or []
-            if isinstance(item, Mapping)
-            and _text(item.get("source_kind")) == "quotes"
-        }
-    if not quote_snapshot_ids:
-        raise PositionAdviceSourceError("candidate quote dependencies are unavailable")
-    return {
-        "candidate_decisions": [
-            dict(item)
-            for item in decisions
-        ],
-        "quote_snapshot_ids": {
-            _text(item)
-            for item in quote_snapshot_ids
-            if _text(item)
-        },
-        "quote_dependencies": {
-            _text(item.get("snapshot_id")): dict(item)
-            for item in validated.get("dependencies") or []
-            if isinstance(item, Mapping)
-            and _text(item.get("source_kind")) == "quotes"
-        },
-    }
-
-
-def _success_empty_projection_matches(
-    *,
-    status: Mapping[str, Any],
-    evidence: Mapping[str, Any],
-    candidate_source: Mapping[str, Any],
-) -> bool:
-    family = _text(status.get("strategy_family")).lower()
-    if family not in {"sell_put", "covered_call", "combo_yield"}:
-        return False
-    try:
-        candidate_count = int(status.get("candidate_count"))
-    except (TypeError, ValueError):
-        return False
-    snapshot_id = _text(status.get("snapshot_id"))
-    receipt_relpath = _text(status.get("receipt_relpath"))
-    reason_code = _text(status.get("reason_code"))
-    if (
-        _text(status.get("status")).lower() != "completed"
-        or candidate_count != 0
-        or _text(status.get("source_outcome")) != "success_empty"
-        or reason_code not in SUCCESS_EMPTY_REASON_CODES
-        or not snapshot_id
-        or not receipt_relpath
-        or snapshot_id != _text(evidence.get("snapshot_id"))
-        or receipt_relpath != _text(evidence.get("receipt_relpath"))
-        or _text(evidence.get("source_outcome")) != "success_empty"
-        or reason_code != _text(evidence.get("reason_code"))
-        or snapshot_id
-        not in set(candidate_source.get("quote_snapshot_ids") or set())
-    ):
-        return False
-    dependency = dict(
-        (candidate_source.get("quote_dependencies") or {}).get(
-            snapshot_id
-        )
-        or {}
-    )
-    if (
-        not dependency
-        or _text(dependency.get("receipt_hash"))
-        != _text(evidence.get("receipt_hash"))
-        or _text(dependency.get("payload_sha256"))
-        != _text(evidence.get("payload_sha256"))
-    ):
-        return False
-    expected_mode = {
-        "sell_put": "put",
-        "covered_call": "call",
-    }.get(family)
-    for decision in candidate_source.get("candidate_decisions") or []:
-        if not isinstance(decision, Mapping):
-            continue
-        if _text(decision.get("symbol")).upper() != _text(
-            status.get("symbol")
-        ).upper():
-            continue
-        if expected_mode is None:
-            if _text(decision.get("strategy_family")).lower() == family:
-                return False
-        elif _text(decision.get("strategy_mode")).lower() == expected_mode:
-            return False
-    return True
-
 
 def _account_result_view(result: AccountResult | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(result, Mapping):
@@ -3005,24 +2115,6 @@ def _daily_brief_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return dict(brief) if isinstance(brief, Mapping) else {}
 
 
-def _close_advice_notify_levels(config: Mapping[str, Any]) -> set[str]:
-    close_advice = config.get("close_advice")
-    close_advice_map = (
-        dict(close_advice)
-        if isinstance(close_advice, Mapping)
-        else {}
-    )
-    configured = (
-        close_advice_map.get("notify_levels")
-        or _DEFAULT_CLOSE_ADVICE_NOTIFY_LEVELS
-    )
-    return {
-        _text(item).lower()
-        for item in configured
-        if _text(item)
-    }
-
-
 def _close_advice_max_items_per_account(config: Mapping[str, Any]) -> int:
     close_advice = config.get("close_advice")
     close_advice_map = (
@@ -3035,16 +2127,6 @@ def _close_advice_max_items_per_account(config: Mapping[str, Any]) -> int:
         _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT
         if configured is None
         else configured
-    )
-
-
-def _close_advice_evaluation_unavailable(row: Mapping[str, Any]) -> bool:
-    evaluation = _text(
-        row.get("evaluation_status") or row.get("quote_status")
-    ).lower()
-    return (
-        evaluation in {"unavailable", "not_evaluable", "blocked", "error"}
-        or _text(row.get("close_action")).lower() == "not_evaluable"
     )
 
 

@@ -61,37 +61,34 @@ def _brief() -> dict:
                 "priority": "P0",
                 "state": "active",
                 "action_type": "close_position",
-                "strategy_family": "combo_yield",
+                "strategy_family": "sell_put",
                 "account": "lx",
                 "symbol": "NVDA",
                 "contract_symbol": "US.NVDA260821P100000",
                 "position_lot_id": "lot-put-secret",
-                "strategy_group_id": "combo-secret",
-                "leg_role": "funding_put",
                 "reason": "internal reason",
             }
         ],
         "positions": [
             {
                 "symbol": "NVDA",
-                "strategy_family": "combo_yield",
-                "leg_role": "funding_put",
+                "strategy_family": "sell_put",
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "option_type": "put",
                 "contract_symbol": "US.NVDA260821P100000",
-                "close_action": "close_put_keep_call",
+                "recommendation_state": "close",
+                "notification_eligible": True,
                 "evaluation_status": "evaluable",
                 "quote_status": "priced",
                 "position_lot_id": "lot-put-secret",
-                "strategy_group_id": "combo-secret",
             },
             {
                 "symbol": "PDD",
                 "strategy_family": "combo_yield",
                 "leg_role": "funding_put",
                 "contract_symbol": "US.PDD260821P95000",
-                "close_action": "not_evaluable",
+                "recommendation_state": "not_evaluable",
                 "evaluation_status": "not_evaluable",
                 "quote_status": "coverage_missing",
                 "position_lot_id": "lot-pdd-secret",
@@ -100,7 +97,7 @@ def _brief() -> dict:
             {
                 "symbol": "FUTU",
                 "strategy_family": "sell_put",
-                "close_action": "not_evaluable",
+                "recommendation_state": "not_evaluable",
                 "evaluation_status": "not_evaluable",
                 "quote_status": "quote_unusable",
                 "position_lot_id": "lot-futu-secret",
@@ -325,13 +322,15 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
             "expiration": "2026-08-28",
             "strike": 65,
             "option_type": "put",
-            "close_action": "close",
+            "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
             "metrics": {
-                "close_mid": 0.52,
-                "realized_if_close": 474.5,
-                "remaining_annualized_return": 0.042,
+                "ask": 0.52,
+                "estimated_pnl_if_close_net": 474.5,
+                "net_capture_ratio": 0.93,
+                "close_cost_ratio": 0.0008,
+                "remaining_term_ratio": 0.60,
             },
         }
     ]
@@ -341,8 +340,8 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
 
     assert "3690.HK｜Sell Put｜08-28 HK$65 Put｜建议平仓" in message
     assert (
-        "参考｜参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · "
-        "剩余权利金毛年化 4.2%"
+        "参考｜买回参考价 HK$0.52（ask） · 预计锁定收益 HK$474.50 · "
+        "净兑现比例 93.0% · 全成本平仓占名义本金 0.1% · 剩余期限比例 60.0%"
         in message
     )
 
@@ -350,12 +349,13 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
     brief["positions"][0]["symbol"] = "NVDA"
     us_message = render_full_brief(brief)
     assert (
-        "参考平仓价 $0.52（mid） · 预计锁定收益 $474.50 · 剩余权利金毛年化 4.2%"
+        "买回参考价 $0.52（ask） · 预计锁定收益 $474.50 · "
+        "净兑现比例 93.0%"
         in us_message
     )
 
 
-def test_standard_close_uses_tier_wording_and_preserves_actionable_fallbacks() -> None:
+def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     brief = _brief()
@@ -363,19 +363,11 @@ def test_standard_close_uses_tier_wording_and_preserves_actionable_fallbacks() -
         {
             "symbol": symbol,
             "strategy_family": "sell_put",
-            "close_action": "close",
-            "tier": tier,
+            "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
         }
-        for symbol, tier in (
-            ("STRONG", "strong"),
-            ("MEDIUM", "medium"),
-            ("WEAK", "weak"),
-            ("OPTIONAL", "optional"),
-            ("UNKNOWN", "future_tier"),
-            ("MISSING", None),
-        )
+        for symbol in ("A", "B", "C", "D", "E", "F")
     ]
     brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
 
@@ -384,12 +376,8 @@ def test_standard_close_uses_tier_wording_and_preserves_actionable_fallbacks() -
         limits={"max_actions_per_priority": 10},
     )
 
-    assert "STRONG｜Sell Put｜强烈建议平仓" in message
-    assert "MEDIUM｜Sell Put｜建议平仓" in message
-    assert "WEAK｜Sell Put｜可观察平仓" in message
-    assert "OPTIONAL｜Sell Put｜低价买回可选" in message
-    assert "UNKNOWN｜Sell Put｜建议平仓" in message
-    assert "MISSING｜Sell Put｜建议平仓" in message
+    for symbol in ("A", "B", "C", "D", "E", "F"):
+        assert f"{symbol}｜Sell Put｜建议平仓" in message
     assert "汇总｜共 6 条，需处理 6 条。" in message
 
 
@@ -405,10 +393,10 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
             "expiration": "2026-08-28",
             "strike": 50,
             "option_type": "put",
-            "close_action": "close",
+            "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
-            "metrics": {"realized_if_close": -125.5},
+            "metrics": {"estimated_pnl_if_close_net": -125.5},
         },
         {
             "symbol": "PARTIAL.HK",
@@ -416,30 +404,30 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
             "expiration": "2026-08-28",
             "strike": 55,
             "option_type": "put",
-            "close_action": "close",
+            "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
             "metrics": {
-                "close_mid": 0.3,
-                "realized_if_close": "nan",
-                "remaining_annualized_return": "invalid",
+                "ask": 0.3,
+                "estimated_pnl_if_close_net": "nan",
+                "remaining_term_ratio": "invalid",
             },
         },
         {
             "symbol": "HOLD.HK",
             "strategy_family": "sell_put",
-            "close_action": "hold",
+            "recommendation_state": "hold",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
-            "metrics": {"close_mid": 88, "realized_if_close": 9999},
+            "metrics": {"ask": 88, "realized_if_close": 9999},
         },
         {
             "symbol": "GAP.HK",
             "strategy_family": "sell_put",
-            "close_action": "not_evaluable",
+            "recommendation_state": "not_evaluable",
             "evaluation_status": "not_evaluable",
             "quote_status": "quote_unusable",
-            "metrics": {"close_mid": 77, "realized_if_close": 8888},
+            "metrics": {"ask": 77, "realized_if_close": 8888},
         },
     ]
     brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
@@ -448,7 +436,7 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
 
     assert "预计平仓损益 -HK$125.50" in message
     assert "PARTIAL.HK｜Sell Put｜08-28 HK$55 Put｜建议平仓" in message
-    assert "参考平仓价 HK$0.30（mid）" in message
+    assert "买回参考价 HK$0.30（ask）" in message
     assert "nan" not in message.lower()
     assert "invalid" not in message.lower()
     assert "HK$88.00" not in message
@@ -459,7 +447,7 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
     assert "HK$8,888.00" not in message
 
 
-def test_combo_position_attribution_is_independent_from_new_combo_candidates() -> None:
+def test_strict_close_position_is_independent_from_new_combo_candidates() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     brief = _brief()
@@ -467,7 +455,7 @@ def test_combo_position_attribution_is_independent_from_new_combo_candidates() -
     message = render_full_brief(brief)
 
     assert "TSLA · 组合增强" not in message
-    assert "NVDA｜组合增强（Put 侧）" in message
+    assert "NVDA｜Sell Put" in message
     assert "PDD" not in message
     assert "combo-pdd-secret" not in message
     assert "funding_put" not in message
@@ -599,7 +587,7 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
             "strategy_family": "sell_put",
             "quote_status": "priced",
             "evaluation_status": "evaluable",
-            "close_action": "hold",
+            "recommendation_state": "hold",
         },
     ]
     message = render_full_brief(brief)
@@ -684,7 +672,7 @@ def test_renderer_honors_section_limits() -> None:
             "strategy_family": "sell_put",
             "quote_status": "priced",
             "evaluation_status": "evaluable",
-            "close_action": "close",
+            "recommendation_state": "close",
         }
         for i in range(8)
     ]
@@ -814,8 +802,7 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
     brief["positions"] = [
         {
             "symbol": "PDD",
-            "strategy_family": "combo_yield",
-            "leg_role": "funding_put",
+            "strategy_family": "sell_put",
             "expiration": "2026-08-21",
             "strike": 95,
             "option_type": "put",
@@ -823,9 +810,9 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
             "position_lot_id": f"lot-{i}",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
-            "close_action": action,
+            "recommendation_state": state,
         }
-        for i, action in enumerate(("hold", "hold", "close_put_keep_call"))
+        for i, state in enumerate(("hold", "hold", "close"))
     ]
     diff = {
         "changes": [
@@ -833,14 +820,13 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
                 "change_type": "action_added",
                 "action": {
                     "action_type": "close_position",
-                    "strategy_family": "combo_yield",
+                    "strategy_family": "sell_put",
                     "symbol": "PDD",
                     "option_type": "put",
                     "expiration": "2026-08-21",
                     "strike": 95,
                     "contract_symbol": "US.PDD260821P95000",
                     "position_lot_id": "lot-2",
-                    "leg_role": "funding_put",
                 },
             }
         ]
@@ -852,7 +838,7 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
         limits={"max_actions_per_priority": 1},
     )
 
-    assert "PDD｜组合增强（Put 侧）｜08-21 $95 Put｜建议平掉 Put，保留 Call" in view_message
+    assert "PDD｜Sell Put｜08-21 $95 Put｜建议平仓" in view_message
     assert "继续观察" not in view_message
     assert "汇总｜共 3 条，需处理 1 条。" in view_message
     assert "持仓未展开" not in view_message
@@ -1398,10 +1384,20 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
 
     brief = _brief()
+    brief["positions"][0].update(
+        {
+            "strategy_family": "sell_put",
+            "leg_role": None,
+            "recommendation_state": "close",
+            "notification_eligible": True,
+        }
+    )
     brief["positions"][0]["metrics"] = {
-        "close_mid": 0.35,
-        "realized_if_close": 285,
-        "remaining_annualized_return": 0.041,
+        "ask": 0.35,
+        "estimated_pnl_if_close_net": 285,
+        "net_capture_ratio": 0.925,
+        "close_cost_ratio": 0.0008,
+        "remaining_term_ratio": 0.61,
     }
     brief["positions"].append(
         {
@@ -1410,14 +1406,16 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
             "expiration": "2026-08-21",
             "strike": 150,
             "option_type": "put",
-            "close_action": "close",
-            "tier": "strong",
+            "recommendation_state": "close",
+            "notification_eligible": True,
             "evaluation_status": "evaluable",
             "quote_status": "priced",
             "metrics": {
-                "close_mid": 0.52,
-                "realized_if_close": -74.5,
-                "remaining_annualized_return": 0.022,
+                "ask": 0.52,
+                "estimated_pnl_if_close_net": 74.5,
+                "net_capture_ratio": 0.91,
+                "close_cost_ratio": 0.0009,
+                "remaining_term_ratio": 0.55,
             },
         }
     )
@@ -1446,143 +1444,17 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "指标｜门槛年化 15.4% · 预计净收入 $620.00" in message
     assert "\n\n事件｜" in message
-    assert "**1｜NVDA｜组合增强（Put 侧）｜08-21 $100 Put｜建议平掉 Put，保留 Call**" in message
-    assert "NVDA｜组合增强（Put 侧）｜08-21 $100 Put" in message
-    assert "参考｜参考平仓价 $0.35 · 预计锁定损益 +$285.00 · 剩余年化 4.1%" in message
-    assert "AMD｜Sell Put｜08-21 $150 Put｜强烈建议平仓" in message
+    assert "**1｜NVDA｜Sell Put｜08-21 $100 Put｜建议平仓**" in message
+    assert "参考｜买回参考价 $0.35 · 预计锁定损益 +$285.00" in message
+    assert "净兑现比例 92.5%" in message
+    assert "平仓成本占本金 0.1%" in message
+    assert "剩余期限比例 61.0%" in message
+    assert "AMD｜Sell Put｜08-21 $150 Put｜建议平仓" in message
     assert "现金总额｜暂不可用" in message
     assert "可用于期权开仓｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
-
-
-def test_fixed_report_card_renders_v2_roll_economics_outside_table() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report_card_markdown,
-    )
-
-    brief = _brief()
-    brief["positions"] = [
-        {
-            "symbol": "NVDA",
-            "strategy_family": "sell_put",
-            "expiration": "2026-08-21",
-            "strike": 100,
-            "option_type": "put",
-            "recommendation": "roll",
-            "metrics": {
-                "net_carry_improvement_H_base_cny": 120,
-                "payback_days": 2,
-                "comparison_horizon_days": 30,
-            },
-        }
-    ]
-
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
-
-    assert "### 持仓决策依据" in message
-    assert (
-        "- **NVDA｜Sell Put｜08-21 $100 Put｜建议滚仓**："
-        "比较期净 carry 提升 ¥120.00 · 摩擦回收期 2 天 · "
-        "比较期限 30 天"
-    ) in message
-    details_block = message.split("### 持仓决策依据", 1)[1]
-    assert "| 比较期净 carry" not in details_block
-
-
-def test_human_fact_review_is_separate_from_close_advice_metrics() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        build_daily_brief_user_view,
-        render_fixed_report,
-        render_fixed_report_card_markdown,
-    )
-
-    brief = _brief()
-    brief["positions"] = [
-        {
-            "advice_kind": "close_advice",
-            "position_lot_id": "pdd-put",
-            "symbol": "PDD",
-            "strategy_family": "sell_put",
-            "expiration": "2026-08-28",
-            "strike": 85,
-            "option_type": "put",
-            "close_action": "not_evaluable",
-            "evaluation_status": "not_evaluable",
-            "quote_status": "not_evaluable",
-            "notification_eligible": False,
-            "metrics": {"close_mid": 3.375},
-        },
-        {
-            "advice_kind": "position_advice",
-            "position_lot_id": "pdd-put",
-            "symbol": "PDD",
-            "strategy_family": "funding_put",
-            "expiration": "2026-08-28",
-            "strike": 85,
-            "option_type": "put",
-            "recommendation": "review",
-            "close_action": "review",
-            "evaluation_status": "evaluable",
-            "quote_status": "unavailable",
-            "human_review_required": True,
-            "model_trade_actionable": False,
-            "reason_codes": [
-                "combo_identity_unverified",
-                "v2_not_authoritative",
-            ],
-            "metrics": {},
-        },
-    ]
-
-    view = build_daily_brief_user_view(
-        brief,
-        delivery_kind="fixed_report",
-        context=_scheduled_context(),
-    )
-    plain = render_fixed_report(
-        brief,
-        context=_scheduled_context(),
-    )
-    card = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
-
-    assert view["position_review_total"] == 1
-    assert view["positions"][0]["display_kind"] == "fact_review"
-    for message in (plain, card):
-        assert "## 持仓事实核查（非交易建议）" in message
-        assert "PDD｜08-28 $85 Put｜持仓事实待核查" in message
-        assert "以下事项仅用于核对持仓或组合身份" not in message
-        assert (
-            "核查原因｜组合身份尚未核验；"
-            "Position Advice v2 当前不是正式交易建议来源"
-        ) in message
-        assert "combo_identity_unverified" not in message
-        assert "v2_not_authoritative" not in message
-        assert "建议人工核查" not in message
-    assert "| 持仓 | 建议 | 参考平仓价 |" not in card
-    assert "预计锁定损益" not in card
-    assert "剩余年化" not in card
-
-    no_review_brief = _brief()
-    for message in (
-        render_fixed_report(
-            no_review_brief,
-            context=_scheduled_context(),
-        ),
-        render_fixed_report_card_markdown(
-            no_review_brief,
-            context=_scheduled_context(),
-        ),
-    ):
-        assert "持仓事实核查（非交易建议）" not in message
-
 
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown

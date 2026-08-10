@@ -111,8 +111,8 @@ def test_watchlist_combo_sink_receives_pairs(tmp_path: Path) -> None:
         build_pipeline_context_fn=_build_ctx,
         build_symbols_summary_fn=_noop,
         build_symbols_digest_fn=_noop,
-        position_advice_producer_run_id='run-1',
-        position_advice_candidate_capture_status_sink_fn=_noop,
+        source_producer_run_id='run-1',
+        candidate_capture_status_sink_fn=_noop,
         required_data_snapshot_manifest=tmp_path / 'required.json',
         account_config_sha256='a' * 64,
         combo_pairs_sink_fn=_combo_sink,
@@ -386,8 +386,8 @@ def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
         build_pipeline_context_fn=lambda **_kwargs: ({}, None, None, None),
         build_symbols_summary_fn=lambda *_args, **_kwargs: None,
         build_symbols_digest_fn=lambda *_args, **_kwargs: None,
-        position_advice_producer_run_id="run-1",
-        position_advice_candidate_capture_status_sink_fn=lambda _row: None,
+        source_producer_run_id="run-1",
+        candidate_capture_status_sink_fn=lambda _row: None,
         opening_candidate_decisions_sink_fn=(
             lambda _mode, rows: captured.extend(rows)
         ),
