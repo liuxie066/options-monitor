@@ -157,8 +157,24 @@ def test_freeze_index_completed_with_zero_evidence(tmp_path: Path) -> None:
     assert view.last_success_at == checked
 
 
-def test_freeze_index_stale_after_8_hours(tmp_path: Path) -> None:
-    checked = (datetime(2026, 8, 9, tzinfo=timezone.utc) - timedelta(hours=9)).isoformat()
+def test_freeze_index_remains_fresh_across_daily_refresh_interval(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+    checked = (now - timedelta(hours=25)).isoformat()
+    append_evidence_records(
+        base=tmp_path,
+        records=[_status("NVDA", checked=checked)],
+        evidence_run_id="run-1",
+        appended_at=checked,
+    )
+    index = freeze_evidence_index(tmp_path, symbols=["NVDA"], now=now)
+    view = index.view_for("NVDA")
+    assert view is not None
+    assert view.coverage == COVERAGE_COMPLETED
+
+
+def test_freeze_index_stale_after_48_hours(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+    checked = (now - timedelta(hours=49)).isoformat()
     append_evidence_records(
         base=tmp_path,
         records=[_status("NVDA", checked=checked)],
@@ -168,7 +184,7 @@ def test_freeze_index_stale_after_8_hours(tmp_path: Path) -> None:
     index = freeze_evidence_index(
         tmp_path,
         symbols=["NVDA"],
-        now=datetime(2026, 8, 9, tzinfo=timezone.utc),
+        now=now,
     )
     view = index.view_for("NVDA")
     assert view is not None

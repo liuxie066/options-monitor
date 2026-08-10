@@ -1697,7 +1697,7 @@ def render_service_bundle(
                 _systemd_timer(
                     description="Options Monitor AI Decision Advice external evidence collector timer",
                     unit_name=collector_service,
-                    interval="4h",
+                    interval="24h",
                 ),
                 install_path=f"/etc/systemd/system/{collector_timer}",
                 kind="systemd_timer",

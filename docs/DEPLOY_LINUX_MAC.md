@@ -216,7 +216,7 @@ cd "$REPO"
 当 `config.yaml` 中 `ai_decision_advice.enabled: true` 时，`service render` 会自动额外渲染：
 
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.service`：由 systemd 执行内部 Python module wrapper，不通过 `./om` 公开 collector 命令；
-- `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 4 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=4h`，`Persistent=true`）。
+- `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 24 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=24h`，`Persistent=true`）。
 
 Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；
 运行前必须 provision 逻辑凭据 `llm.deepseek.api_key`，并由 collector unit 选定的逐 unit

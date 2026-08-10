@@ -108,6 +108,26 @@ def _ok_output(symbols: list[str], evidence_by_symbol: dict[str, list] | None = 
     }
 
 
+def _strict_schema_gaps(schema: dict, *, path: str = "$") -> list[str]:
+    gaps: list[str] = []
+    if schema.get("type") == "object":
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        property_names = set(properties)
+        if required != property_names:
+            gaps.append(
+                f"{path}: required={sorted(required)!r} properties={sorted(property_names)!r}"
+            )
+        if schema.get("additionalProperties") is not False:
+            gaps.append(f"{path}: additionalProperties must be false")
+        for name, child in properties.items():
+            gaps.extend(_strict_schema_gaps(child, path=f"{path}.properties.{name}"))
+    items = schema.get("items")
+    if isinstance(items, dict):
+        gaps.extend(_strict_schema_gaps(items, path=f"{path}.items"))
+    return gaps
+
+
 def test_validate_payload_happy_path() -> None:
     payload = _ok_output(["NVDA"], {
         "NVDA": [
@@ -140,7 +160,21 @@ def test_validate_payload_rejects_bad_shapes() -> None:
         validate_evidence_payload(
             {"results": [{"symbol": "NVDA", "evidence": [{
                 "topic": "t", "claim": "c", "event_status": "developing",
+                "event_time": None,
                 "source": {"title": "t", "publisher": "p", "url": " ", "published_at": None},
+            }]}]},
+            batch_symbols=["NVDA"],
+        )
+    with pytest.raises(ValueError, match="event_time"):
+        validate_evidence_payload(
+            {"results": [{"symbol": "NVDA", "evidence": [{
+                "topic": "t", "claim": "c", "event_status": "developing",
+                "source": {
+                    "title": "t",
+                    "publisher": "p",
+                    "url": "https://example.com",
+                    "published_at": None,
+                },
             }]}]},
             batch_symbols=["NVDA"],
         )
@@ -383,6 +417,7 @@ def test_output_schema_shape() -> None:
     assert EVIDENCE_OUTPUT_SCHEMA["required"] == ["results"]
     item_props = EVIDENCE_OUTPUT_SCHEMA["properties"]["results"]["items"]["properties"]
     assert set(item_props) == {"symbol", "evidence"}
+    assert _strict_schema_gaps(EVIDENCE_OUTPUT_SCHEMA) == []
 
 
 def test_collector_requires_attributable_completed_search(tmp_path: Path) -> None:
@@ -503,6 +538,7 @@ def test_citation_binding_cannot_cross_symbol_search_sources(tmp_path: Path) -> 
                     "topic": "regulatory",
                     "claim": "NVDA claim",
                     "event_status": "developing",
+                    "event_time": None,
                     "source": {
                         "title": "n",
                         "publisher": "p",
@@ -516,6 +552,7 @@ def test_citation_binding_cannot_cross_symbol_search_sources(tmp_path: Path) -> 
                     "topic": "regulatory",
                     "claim": "AAPL claim",
                     "event_status": "developing",
+                    "event_time": None,
                     "source": {
                         "title": "a",
                         "publisher": "p",

@@ -208,7 +208,7 @@ For runtime questions, prefer `runtime_status` because it already knows how to s
 
 AI Decision Advice 是两阶段 LLM 增强（设计：`docs/AI_DECISION_ADVICE_DESIGN.md`）：
 
-- Collector（managed systemd internal wrapper）：4 小时刷新外部证据，只用公开 symbol 身份
+- Collector（managed systemd internal wrapper）：每 24 小时刷新外部证据，只用公开 symbol 身份
   和 web_search；不写持仓/候选，也不提供 `./om` 手工刷新命令。共享产物在
   `output_shared/state/ai_decision_advice/`（`observation_set.json`、
   `external_evidence.jsonl`、`symbol_identity_snapshot.json`）。观察集合由 Tick 从开放期权、
@@ -235,7 +235,7 @@ AI Decision Advice 是两阶段 LLM 增强（设计：`docs/AI_DECISION_ADVICE_D
 - Provider 原始响应、搜索 query/call ID 不落盘；只保存内容 hash、白名单 usage、
   搜索状态聚合和验证后的业务结果，相关状态文件为 `0600`、目录为 `0700`。
 - systemd：`render_service_bundle` 在配置开启时额外渲染
-  `options-monitor-ai-evidence-collector.service/.timer`（4 小时间隔）。
+  `options-monitor-ai-evidence-collector.service/.timer`（24 小时间隔）。
 
 ## 6. Module Ownership
 
