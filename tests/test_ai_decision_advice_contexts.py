@@ -13,6 +13,7 @@ from src.application.ai_decision_advice.contexts import (
     freeze_external_evidence,
     freeze_option_positions,
     freeze_portfolio_distribution,
+    verified_relevant_symbols,
 )
 from src.application.ai_decision_advice.evidence_store import (
     EvidenceIndex,
@@ -487,6 +488,36 @@ def test_formal_unavailable_portfolio_preserves_soft_dependency_reason() -> None
 
     assert out["status"] == "unavailable"
     assert out["gaps"] == ["portfolio_unavailable:provider_none"]
+
+
+def test_verified_relevant_symbols_keeps_valid_non_candidate_holdings() -> None:
+    portfolio = _portfolio(
+        assets=[
+            {
+                "code": "MSFT",
+                "normalized_type": "stock",
+                "currency": "USD",
+                "quantity": 100.0,
+                "value": 100_000.0,
+            }
+        ]
+    )
+    options = _option_context(
+        rows=[
+            _position(
+                "tsla-put",
+                symbol="TSLA",
+                strike=200,
+            )
+        ]
+    )
+
+    assert verified_relevant_symbols(
+        snapshot=_snapshot(),
+        portfolio_distribution=portfolio,
+        option_positions_context=options,
+        market="US",
+    ) == ("AAPL", "MSFT", "NVDA", "TSLA")
 
 
 def test_option_positions_aggregate_all_but_detail_candidate_symbols_only() -> None:
