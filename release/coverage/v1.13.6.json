@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.6",
+  "base": {
+    "tag": "v1.13.5",
+    "commit": "40e8e2cf4672e908264026ff199f163436b0dca9"
+  },
+  "reviewed_head": "14039aa92e08d56b25806ea4a9477708a3ffbca0",
+  "commits": [
+    {
+      "sha": "8829dc1656fb554bc8b4e576d9811acd06308702",
+      "subject": "fix(services): preserve paused timers during upgrades"
+    },
+    {
+      "sha": "14039aa92e08d56b25806ea4a9477708a3ffbca0",
+      "subject": "fix(candidates): honor average cost and account holdings"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved pre-existing inactive, disabled, or masked timer states during upgrades when activation-state preservation is requested, preventing intentionally paused schedules from being re-enabled by service reconciliation or rollback.",
+      "commits": [
+        "8829dc1656fb554bc8b4e576d9811acd06308702"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Defined broker portfolio `avg_cost` strictly as OpenD `average_cost` without current-price or diluted-cost fallback, and treated shared-config Covered Call symbols absent from an account's holdings as a legal no-candidate result while keeping missing or corrupt portfolio evidence fail-closed.",
+      "commits": [
+        "14039aa92e08d56b25806ea4a9477708a3ffbca0"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
