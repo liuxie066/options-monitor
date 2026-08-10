@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -7,11 +8,20 @@ import re
 import os
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from domain.domain.close_advice import (
+    DECISION_EVIDENCE_COMPLETE,
+    DECISION_EVIDENCE_NOT_EVALUABLE,
+    RECOMMENDATION_CLOSE,
+    RECOMMENDATION_HOLD,
+    RECOMMENDATION_NOT_EVALUABLE,
+    STRICT_CLOSE_POLICY_VERSION,
+)
 from domain.domain.engine import explain_candidate_rank
 
 from src.application.candidate_filter_trace import (
@@ -19,11 +29,10 @@ from src.application.candidate_filter_trace import (
     infer_trace_scope_from_path,
     read_candidate_filter_trace,
 )
-from src.application.shadow_replay.candidate_analysis import analyze_rows
-from src.application.shadow_replay.close_decision_policy import (
-    close_decision_facts_from_row,
-    evaluate_shadow_close_policy_variants,
+from src.application.close_advice_report_manifest import (
+    read_close_advice_report_snapshot,
 )
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.common import (
     CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
     CLOSE_DECISION_EPISODE_SCHEMA_VERSION,
@@ -76,7 +85,6 @@ class ShadowReplaySourceSelection:
     outcome_paths: tuple[Path, ...] = ()
     close_advice_paths: tuple[Path, ...] = ()
     position_context_paths: tuple[Path, ...] = ()
-    reallocation_paths: tuple[Path, ...] = ()
     run_audit_paths: tuple[Path, ...] = ()
 
 
@@ -94,7 +102,6 @@ def build_shadow_replay_dataset(
     outcome_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     close_advice_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     position_context_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
-    reallocation_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     run_audit_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     include_close_decisions: bool = False,
     output_dir: str | Path | None = None,
@@ -140,7 +147,6 @@ def build_shadow_replay_dataset(
         outcome_paths=tuple(resolve_many(outcome_paths, base=base)),
         close_advice_paths=tuple(resolve_many(close_advice_paths, base=base)),
         position_context_paths=tuple(resolve_many(position_context_paths, base=base)),
-        reallocation_paths=tuple(resolve_many(reallocation_paths, base=base)),
         run_audit_paths=tuple(resolve_many(run_audit_paths, base=base)),
     )
     resolved_candidates = candidate_paths_from_selection(selection)
@@ -152,21 +158,15 @@ def build_shadow_replay_dataset(
         include_close_decisions
         or close_advice_paths
         or position_context_paths
-        or reallocation_paths
         or run_audit_paths
     )
     resolved_close_advice: list[Path] = []
     resolved_position_contexts: list[Path] = []
-    resolved_reallocations: list[Path] = []
     resolved_run_audits: list[Path] = []
     close_decision_episodes: list[dict[str, Any]] = []
     if close_facet_requested:
         resolved_close_advice = close_advice_paths_from_selection(selection)
         resolved_position_contexts = position_context_paths_from_selection(
-            selection,
-            close_paths=resolved_close_advice,
-        )
-        resolved_reallocations = reallocation_paths_from_selection(
             selection,
             close_paths=resolved_close_advice,
         )
@@ -177,7 +177,6 @@ def build_shadow_replay_dataset(
         close_decision_episodes = capture_close_decision_episodes(
             close_paths=resolved_close_advice,
             position_context_paths=resolved_position_contexts,
-            reallocation_paths=resolved_reallocations,
             run_audit_paths=resolved_run_audits,
             base=base,
         )
@@ -238,7 +237,6 @@ def build_shadow_replay_dataset(
                 "position_context_paths": [
                     safe_rel(path, base=base) for path in resolved_position_contexts
                 ],
-                "reallocation_paths": [safe_rel(path, base=base) for path in resolved_reallocations],
                 "run_audit_paths": [safe_rel(path, base=base) for path in resolved_run_audits],
             }
         )
@@ -289,21 +287,19 @@ _QUOTE_TIME_FIELDS = (
     "quote_time",
 )
 _MATERIAL_RATIO_FIELDS = (
-    "capture_ratio",
-    "remaining_annualized_return",
+    "net_capture_ratio",
+    "remaining_term_ratio",
     "spread_ratio",
-    "close_fee_to_remaining_premium",
-    "replacement_annualized_return",
-    "replacement_annualized_advantage",
+    "close_cost_ratio",
 )
 _MATERIAL_MONEY_FIELDS = (
     "close_mid",
     "bid",
     "ask",
-    "remaining_premium",
+    "opening_net_credit",
+    "all_in_close_cost",
     "estimated_close_fee",
     "estimated_pnl_if_close_net",
-    "close_fee",
 )
 
 
@@ -311,7 +307,6 @@ def capture_close_decision_episodes(
     *,
     close_paths: list[Path],
     position_context_paths: list[Path],
-    reallocation_paths: list[Path],
     run_audit_paths: list[Path],
     base: Path,
 ) -> list[dict[str, Any]]:
@@ -320,14 +315,34 @@ def capture_close_decision_episodes(
     if not close_paths:
         raise ValueError("close decision facet requested but no close_advice.csv was found")
     contexts = _position_context_index(position_context_paths)
-    reallocations = _reallocation_index(reallocation_paths)
     decision_times = _close_decision_time_index(run_audit_paths)
     observations: list[dict[str, Any]] = []
     observed_lots: set[tuple[str, str, str]] = set()
     for close_path in close_paths:
         run_id, run_started_at = _run_anchor(close_path)
         source_account = account_hint(close_path)
-        close_rows = read_csv_rows(close_path)
+        close_rows, report_validation = _validated_close_report_rows(
+            close_path,
+            expected_run_id=run_id,
+        )
+        report_accounts = {
+            text(value).lower()
+            for value in report_validation.get("accounts") or []
+            if text(value)
+        }
+        report_context_sha256 = text(
+            report_validation.get("context_sha256")
+        ).lower()
+        report_snapshot_sha256 = text(
+            report_validation.get(
+                "required_data_snapshot_manifest_sha256"
+            )
+        ).lower()
+        report_plan_sha256 = text(
+            report_validation.get(
+                "close_advice_required_data_plan_sha256"
+            )
+        ).lower()
         for row_number, source_row in enumerate(close_rows, start=1):
             row = dict(source_row)
             account = text(row.get("account")).lower() or source_account
@@ -337,6 +352,31 @@ def capture_close_decision_episodes(
                 raise ValueError(
                     f"close advice account conflicts with source directory: {close_path}:{row_number}"
                 )
+            if account not in report_accounts:
+                raise ValueError(
+                    "close advice account conflicts with report manifest: "
+                    f"{close_path}:{row_number}"
+                )
+            if text(row.get("quote_mode")).lower() != "frozen_snapshot":
+                raise ValueError(
+                    "close advice row is not bound to frozen inputs: "
+                    f"{close_path}:{row_number}"
+                )
+            for field, expected_digest in (
+                (
+                    "required_data_snapshot_manifest_sha256",
+                    report_snapshot_sha256,
+                ),
+                (
+                    "close_advice_required_data_plan_sha256",
+                    report_plan_sha256,
+                ),
+            ):
+                if text(row.get(field)).lower() != expected_digest:
+                    raise ValueError(
+                        "close advice row conflicts with report manifest: "
+                        f"{close_path}:{row_number} field={field}"
+                    )
             lot_id = text(row.get("position_lot_id"))
             if not lot_id:
                 raise ValueError(f"close advice position_lot_id missing: {close_path}:{row_number}")
@@ -362,6 +402,11 @@ def capture_close_decision_episodes(
                     f"position context missing for run/account: run_id={run_id} account={account}"
                 )
             context_path, context = context_entry
+            if _sha256_json(context) != report_context_sha256:
+                raise ValueError(
+                    "close advice position context conflicts with report manifest: "
+                    f"run_id={run_id} account={account}"
+                )
             _validate_context_time(context, observed_at=observed_at, path=context_path)
             position = _exact_position_lot(
                 context,
@@ -375,21 +420,10 @@ def capture_close_decision_episodes(
                 close_path=close_path,
                 run_id=run_id,
             )
-            reallocation_row = _exact_reallocation_row(
-                reallocations.get((run_id, account), []),
-                lot_id=lot_id,
-                path_by_row=True,
-            )
-            _validate_replacement_time(
-                reallocation_row,
-                observed_at=observed_at,
-                close_path=close_path,
-            )
             observations.append(
                 _close_episode_observation(
                     row=row,
                     position=position,
-                    reallocation_row=reallocation_row,
                     account=account,
                     lot_id=lot_id,
                     run_id=run_id,
@@ -405,6 +439,74 @@ def capture_close_decision_episodes(
                 )
             )
     return dedupe_close_decision_episodes(observations)
+
+
+def _close_report_rows_from_snapshot(
+    csv_bytes: Any,
+    *,
+    path: Path,
+) -> list[dict[str, Any]]:
+    if not isinstance(csv_bytes, bytes):
+        raise ValueError(f"close advice report bytes are unavailable: {path}")
+    try:
+        decoded = csv_bytes.decode("utf-8-sig")
+        return [dict(row) for row in csv.DictReader(StringIO(decoded))]
+    except (UnicodeError, csv.Error) as exc:
+        raise ValueError(f"close advice report CSV is invalid: {path}") from exc
+
+
+def _validated_close_report_rows(
+    close_path: Path,
+    *,
+    expected_run_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    source_account = account_hint(close_path)
+    report_snapshot = read_close_advice_report_snapshot(
+        csv_path=close_path,
+        account=source_account or None,
+        expected_run_id=expected_run_id,
+        expected_quote_mode="frozen_snapshot",
+    )
+    report_validation = report_snapshot["validation"]
+    if not report_validation.get("ok"):
+        raise ValueError(
+            "close advice report integrity validation failed: "
+            f"{close_path} reason="
+            f"{report_validation.get('reason') or 'unknown'}"
+        )
+    close_rows = _close_report_rows_from_snapshot(
+        report_snapshot.get("csv_bytes"),
+        path=close_path,
+    )
+    report_row_count = report_validation.get("row_count")
+    if (
+        isinstance(report_row_count, bool)
+        or not isinstance(report_row_count, int)
+        or report_row_count != len(close_rows)
+    ):
+        raise ValueError(
+            "close advice report row count mismatch: "
+            f"{close_path} manifest={report_row_count} "
+            f"actual={len(close_rows)}"
+        )
+    for field in (
+        "context_sha256",
+        "required_data_snapshot_manifest_sha256",
+        "close_advice_required_data_plan_sha256",
+    ):
+        if not _is_sha256(report_validation.get(field)):
+            raise ValueError(
+                "close advice report manifest binding is invalid: "
+                f"{close_path} field={field}"
+            )
+    return close_rows, report_validation
+
+
+def _is_sha256(value: Any) -> bool:
+    digest = text(value).lower()
+    return len(digest) == 64 and all(
+        character in "0123456789abcdef" for character in digest
+    )
 
 
 def dedupe_close_decision_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -464,7 +566,6 @@ def _close_episode_observation(
     *,
     row: dict[str, Any],
     position: dict[str, Any],
-    reallocation_row: dict[str, Any] | None,
     account: str,
     lot_id: str,
     run_id: str,
@@ -478,36 +579,15 @@ def _close_episode_observation(
     source_row_number: int,
     base: Path,
 ) -> dict[str, Any]:
-    facts = close_decision_facts_from_row(row)
-    policy_results = evaluate_shadow_close_policy_variants(
-        row,
-        reallocation_row=reallocation_row,
-    )
+    facts = _normalized_close_decision_facts(row)
     formal = _formal_policy_result(row, path=close_path, row_number=source_row_number)
-    normalized_results = {
-        policy: _policy_result_payload(result)
-        for policy, result in sorted(policy_results.items())
-    }
-    if (
-        formal["recommendation_state"]
-        != normalized_results["P0_current"]["recommendation_state"]
-    ):
-        raise ValueError(
-            "formal close recommendation does not match P0_current projection: "
-            f"path={close_path} row={source_row_number}"
-        )
     decision_economics = _decision_economics(row, position=position)
     material_facts = {
-        "normalized_decision_facts": asdict(facts),
-        "formal_recommendation_state": formal["recommendation_state"],
-        "policy_recommendations": {
-            policy: result["recommendation_state"]
-            for policy, result in normalized_results.items()
-        },
+        "normalized_decision_facts": facts,
+        "formal_policy_result": formal,
         "economic_buckets": _material_economic_buckets(row),
         "threshold_inputs": _threshold_inputs(row),
         "decision_economics": decision_economics,
-        "replacement": _material_replacement_facts(reallocation_row),
     }
     fingerprint = _sha256_json(material_facts)
     observed_text = _iso_utc(observed_at)
@@ -526,20 +606,11 @@ def _close_episode_observation(
         "strategy_context_at_utc": strategy_context_at,
         "strategy_time_basis": "position_context_as_of_utc",
         "material_fact_fingerprint": fingerprint,
-        "normalized_decision_facts": asdict(facts),
+        "normalized_decision_facts": facts,
         "formal_policy_result": formal,
-        "shadow_policy_results": normalized_results,
-        "p0_parity": {
-            "recommendation_matches": (
-                formal["recommendation_state"]
-                == normalized_results["P0_current"]["recommendation_state"]
-            )
-        },
         "material_economic_buckets": material_facts["economic_buckets"],
         "threshold_inputs": material_facts["threshold_inputs"],
         "decision_economics": decision_economics,
-        "replacement_evidence": material_facts["replacement"],
-        "replacement_provenance": _replacement_provenance(reallocation_row),
         "position_identity": _position_identity(position, row=row),
         "source": {
             "close_advice_path": safe_rel(close_path, base=base),
@@ -550,45 +621,106 @@ def _close_episode_observation(
     }
 
 
+def _normalized_close_decision_facts(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recommendation_state": text(row.get("recommendation_state")).lower(),
+        "decision_evidence_status": text(
+            row.get("decision_evidence_status")
+        ).lower(),
+        "strategy_family": text(row.get("strategy_family")).lower(),
+        "strategy_profile": text(row.get("strategy_profile")).lower(),
+        "option_type": text(row.get("option_type")).lower(),
+        "is_otm": _optional_bool(row.get("is_otm")),
+        "dte": _rounded_number(row.get("dte"), digits=0),
+        "original_dte": _rounded_number(row.get("original_dte"), digits=0),
+        "remaining_term_ratio": _rounded_number(
+            row.get("remaining_term_ratio"), digits=12
+        ),
+        "net_capture_ratio": _rounded_number(
+            row.get("net_capture_ratio"), digits=12
+        ),
+        "close_cost_ratio": _rounded_number(
+            row.get("close_cost_ratio"), digits=12
+        ),
+        "spread_ratio": _rounded_number(row.get("spread_ratio"), digits=12),
+    }
+
+
 def _formal_policy_result(row: dict[str, Any], *, path: Path, row_number: int) -> dict[str, Any]:
     required = (
         "policy_version",
         "recommendation_state",
         "decision_basis",
         "decision_evidence_status",
+        "evaluation_status",
     )
     missing = [key for key in required if not text(row.get(key))]
     if missing:
         joined = ",".join(missing)
         raise ValueError(f"formal close policy fields missing ({joined}): {path}:{row_number}")
+    policy_version = text(row.get("policy_version"))
+    recommendation = text(row.get("recommendation_state")).lower()
+    evidence_status = text(row.get("decision_evidence_status")).lower()
+    evaluation_status = text(row.get("evaluation_status")).lower()
+    if policy_version != STRICT_CLOSE_POLICY_VERSION:
+        raise ValueError(
+            "unsupported close policy version: "
+            f"{path}:{row_number} policy_version={policy_version}"
+        )
+    if recommendation not in {
+        RECOMMENDATION_CLOSE,
+        RECOMMENDATION_HOLD,
+        RECOMMENDATION_NOT_EVALUABLE,
+    }:
+        raise ValueError(
+            "invalid strict close recommendation: "
+            f"{path}:{row_number} recommendation_state={recommendation}"
+        )
+    expected_evidence_status = (
+        DECISION_EVIDENCE_NOT_EVALUABLE
+        if recommendation == RECOMMENDATION_NOT_EVALUABLE
+        else DECISION_EVIDENCE_COMPLETE
+    )
+    if evidence_status != expected_evidence_status:
+        raise ValueError(
+            "strict close evidence status mismatch: "
+            f"{path}:{row_number} recommendation_state={recommendation} "
+            f"decision_evidence_status={evidence_status}"
+        )
+    if (
+        recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
+        and evaluation_status != "priced"
+    ):
+        raise ValueError(
+            "strict close recommendation is not priced: "
+            f"{path}:{row_number} recommendation_state={recommendation} "
+            f"evaluation_status={evaluation_status}"
+        )
+    if (
+        recommendation == RECOMMENDATION_NOT_EVALUABLE
+        and evaluation_status == "priced"
+    ):
+        raise ValueError(
+            "strict not-evaluable recommendation is marked priced: "
+            f"{path}:{row_number} evaluation_status={evaluation_status}"
+        )
     return {
-        "policy_version": text(row.get("policy_version")),
-        "recommendation_state": text(row.get("recommendation_state")).lower(),
+        "policy_version": policy_version,
+        "recommendation_state": recommendation,
         "decision_basis": [
             token.strip()
             for token in text(row.get("decision_basis")).split(";")
             if token.strip()
         ],
-        "decision_evidence_status": text(row.get("decision_evidence_status")).lower(),
-    }
-
-
-def _policy_result_payload(result: Any) -> dict[str, Any]:
-    return {
-        "policy_version": result.policy_version,
-        "recommendation_state": result.recommendation_state,
-        "decision_basis": list(result.decision_basis),
-        "decision_evidence_status": result.decision_evidence_status,
+        "decision_evidence_status": evidence_status,
     }
 
 
 def _material_economic_buckets(row: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "tier": text(row.get("tier")).lower(),
-        "exit_state": text(row.get("exit_state")).lower(),
+        "recommendation_state": text(row.get("recommendation_state")).lower(),
         "evaluation_status": text(row.get("evaluation_status")).lower(),
         "fee_calc_status": text(row.get("fee_calc_status")).lower(),
-        "close_calibration_status": text(row.get("close_calibration_status")).lower(),
         "dte": _rounded_number(row.get("dte"), digits=0),
     }
     for key in _MATERIAL_RATIO_FIELDS:
@@ -601,47 +733,18 @@ def _material_economic_buckets(row: dict[str, Any]) -> dict[str, Any]:
 def _threshold_inputs(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "dte": _rounded_number(row.get("dte"), digits=0),
-        "capture_ratio": _rounded_number(row.get("capture_ratio"), digits=12),
-        "remaining_annualized_return": _rounded_number(
-            row.get("remaining_annualized_return"),
-            digits=12,
+        "original_dte": _rounded_number(row.get("original_dte"), digits=0),
+        "remaining_term_ratio": _rounded_number(
+            row.get("remaining_term_ratio"), digits=12
         ),
-    }
-
-
-def _material_replacement_facts(row: dict[str, Any] | None) -> dict[str, Any]:
-    source = row if isinstance(row, dict) else {}
-    return {
-        "status": text(source.get("reallocation_status")).lower() or "not_evaluable",
-        "reason": text(source.get("reallocation_reason")).lower(),
-        "contract_symbol": text(source.get("replacement_contract_symbol")).upper() or None,
-        "symbol": text(source.get("replacement_symbol")).upper() or None,
-        "option_type": text(source.get("replacement_option_type")).lower() or None,
-        "expiration": text(source.get("replacement_expiration")) or None,
-        "strike": _rounded_number(source.get("replacement_strike"), digits=4),
-        "rank": _rounded_number(source.get("replacement_rank"), digits=0),
-        "entry_credit": _rounded_number(source.get("replacement_entry_credit"), digits=6),
-        "contracts": _rounded_number(source.get("replacement_contracts"), digits=0),
-        "multiplier": _rounded_number(source.get("replacement_multiplier"), digits=6),
-        "currency": text(source.get("replacement_currency")).upper() or None,
-        "fee_calc_status": text(source.get("replacement_fee_calc_status")).lower() or None,
-        "open_fee": _rounded_number(source.get("replacement_open_fee"), digits=6),
-        "entry_slippage": _rounded_number(source.get("replacement_spread_slippage"), digits=6),
-    }
-
-
-def _replacement_provenance(row: dict[str, Any] | None) -> dict[str, Any]:
-    source = row if isinstance(row, dict) else {}
-    if not source:
-        return {
-            "status": "not_applicable",
-            "source_run_id": None,
-            "source_run_at_utc": None,
-        }
-    return {
-        "status": "validated_same_decision_run",
-        "source_run_id": text(source.get("_source_run_id")) or None,
-        "source_run_at_utc": text(source.get("_source_run_at_utc")) or None,
+        "net_capture_ratio": _rounded_number(
+            row.get("net_capture_ratio"), digits=12
+        ),
+        "close_cost_ratio": _rounded_number(
+            row.get("close_cost_ratio"), digits=12
+        ),
+        "spread_ratio": _rounded_number(row.get("spread_ratio"), digits=12),
+        "is_otm": _optional_bool(row.get("is_otm")),
     }
 
 
@@ -652,12 +755,8 @@ def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dic
     if contracts is None:
         contracts = _first_number(position, "contracts")
     multiplier = _first_number(row, "multiplier", fallback=position.get("multiplier"))
-    fee = _first_number(
-        row,
-        "estimated_close_fee",
-        "buy_to_close_fee",
-        "close_fee",
-    )
+    fee = _first_number(row, "estimated_close_fee")
+    open_fee = _first_number(row, "estimated_open_fee")
     close_cost = None
     close_slippage = None
     if (
@@ -677,9 +776,13 @@ def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dic
         "decision_ask": _rounded_number(ask, digits=6),
         "contracts": _rounded_number(contracts, digits=0),
         "multiplier": _rounded_number(multiplier, digits=6),
+        "decision_open_fee": _rounded_number(open_fee, digits=6),
         "decision_close_fee": _rounded_number(fee, digits=6),
         "decision_close_slippage": _rounded_number(close_slippage, digits=6),
         "close_now_cost": _rounded_number(close_cost, digits=6),
+        "opening_net_credit": _rounded_number(
+            row.get("opening_net_credit"), digits=6
+        ),
         "fee_calc_status": text(row.get("fee_calc_status")).lower(),
         "fee_calc_basis": text(row.get("fee_calc_basis")) or None,
         "currency": text(row.get("currency") or position.get("currency")).upper() or None,
@@ -757,24 +860,6 @@ def _close_decision_time_index(
     return out
 
 
-def _reallocation_index(paths: list[Path]) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    out: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for path in paths:
-        run_id, run_at = _run_anchor(path)
-        source_account = account_hint(path)
-        for row_number, row in enumerate(read_csv_rows(path), start=1):
-            account = text(row.get("account")).lower() or source_account
-            if not account:
-                raise ValueError(f"reallocation account missing: {path}:{row_number}")
-            item = dict(row)
-            item["_source_path"] = str(path)
-            item["_source_row_number"] = row_number
-            item["_source_run_id"] = run_id
-            item["_source_run_at_utc"] = _iso_utc(run_at)
-            out.setdefault((run_id, account), []).append(item)
-    return out
-
-
 def _exact_position_lot(
     context: dict[str, Any],
     *,
@@ -797,21 +882,6 @@ def _exact_position_lot(
             f"position lot match must resolve exactly once: lot_id={lot_id} matches={len(matches)} path={path}"
         )
     return matches[0]
-
-
-def _exact_reallocation_row(
-    rows: list[dict[str, Any]],
-    *,
-    lot_id: str,
-    path_by_row: bool = False,
-) -> dict[str, Any] | None:
-    matches = [row for row in rows if text(row.get("position_lot_id")) == lot_id]
-    if len(matches) > 1:
-        source = text(matches[0].get("_source_path")) if path_by_row else ""
-        raise ValueError(
-            f"reallocation lot match is ambiguous: lot_id={lot_id} matches={len(matches)} path={source}"
-        )
-    return matches[0] if matches else None
 
 
 def _validate_context_time(context: dict[str, Any], *, observed_at: datetime, path: Path) -> None:
@@ -846,32 +916,6 @@ def _quote_time(
     if source_run_id != run_id:
         raise ValueError(f"close advice source is outside the decision run: {close_path}")
     return _iso_utc(observed_at), "run_anchor"
-
-
-def _validate_replacement_time(
-    row: dict[str, Any] | None,
-    *,
-    observed_at: datetime,
-    close_path: Path,
-) -> None:
-    if not isinstance(row, dict):
-        return
-    source_path = Path(text(row.get("_source_path")))
-    close_run_id, _close_time = _run_anchor(close_path)
-    replacement_run_id, replacement_file_time = _run_anchor(source_path)
-    if replacement_run_id != close_run_id or replacement_file_time > observed_at:
-        raise ValueError(
-            f"reallocation evidence is not from the same decision run: close={close_path} reallocation={source_path}"
-        )
-    for key in ("replacement_run_id", "candidate_run_id", "source_run_id"):
-        raw = text(row.get(key))
-        if not raw:
-            continue
-        replacement_time = _run_id_time(raw)
-        if replacement_time > observed_at:
-            raise ValueError(
-                f"replacement evidence is newer than close decision: field={key} value={raw} path={source_path}"
-            )
 
 
 def _run_anchor(path: Path) -> tuple[str, datetime]:
@@ -923,6 +967,17 @@ def _rounded_number(value: Any, *, digits: int) -> float | int | None:
     except (TypeError, ValueError):
         return None
     return int(rounded) if digits == 0 else rounded
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    token = text(value).lower()
+    if token in {"true", "1", "yes"}:
+        return True
+    if token in {"false", "0", "no"}:
+        return False
+    return None
 
 
 def _first_number(row: dict[str, Any], *keys: str, fallback: Any = None) -> float | None:
@@ -1589,21 +1644,6 @@ def position_context_paths_from_selection(
     return unique(inferred)
 
 
-def reallocation_paths_from_selection(
-    selection: ShadowReplaySourceSelection,
-    *,
-    close_paths: list[Path],
-) -> list[Path]:
-    if selection.reallocation_paths:
-        return _required_explicit_paths(selection.reallocation_paths, label="reallocation")
-    inferred = [
-        path.parent / "close_advice_reallocation_shadow.csv"
-        for path in close_paths
-        if (path.parent / "close_advice_reallocation_shadow.csv").is_file()
-    ]
-    return unique(inferred)
-
-
 def run_audit_paths_from_selection(
     selection: ShadowReplaySourceSelection,
     *,
@@ -1734,7 +1774,15 @@ def latest_close_decision_run_dir(
         if not close_paths:
             skipped_without_close_count += 1
             continue
-        close_row_count = sum(len(read_csv_rows(path)) for path in close_paths)
+        close_row_count = sum(
+            len(
+                _validated_close_report_rows(
+                    path,
+                    expected_run_id=run_dir.name,
+                )[0]
+            )
+            for path in close_paths
+        )
         if close_row_count <= 0:
             skipped_empty_count += 1
             continue

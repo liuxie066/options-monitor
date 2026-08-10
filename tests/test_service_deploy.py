@@ -108,12 +108,6 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
     verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
-    promotion = files[
-        "systemd/options-monitor-position-advice-promotion.service"
-    ]["content"]
-    promotion_timer = files[
-        "systemd/options-monitor-position-advice-promotion.timer"
-    ]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in tick
@@ -230,8 +224,6 @@ def test_render_systemd_bundle_service_hardening() -> None:
     verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
     intake = files["systemd/options-monitor-trade-intake.service"]["content"]
     auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
-    promotion = files["systemd/options-monitor-position-advice-promotion.service"]["content"]
-    promotion_timer = files["systemd/options-monitor-position-advice-promotion.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
     assert "TimeoutStartSec=" not in tick
     assert "TimeoutStartSec=" not in runtime_status
@@ -245,31 +237,16 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "verify-projection --mode auto" in verify
     assert "[Install]\nWantedBy=multi-user.target" not in verify
     assert "OnCalendar=*-*-* 09:30:00 Asia/Shanghai" in verify_timer
-    assert (
-        str(repo / "om")
-        + " position-advice --runtime-root "
-        + str(runtime)
-        + " promotion refresh --accounts lx --confirm"
-        in promotion
-    )
-    assert "TimeoutStartSec=600" in promotion
-    assert (
-        "OnCalendar=*-*-* 05:15:00 Asia/Shanghai"
-        in promotion_timer
-    )
     assert profile["service_provider"] == "systemd"
     assert profile["runtime_root"] == str(runtime)
     assert {"name": "options-monitor-tick-us.service"} in profile["services"]
     assert {"name": "options-monitor-tick-us.timer"} in profile["services"]
     assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
-    assert {
-        "name": "options-monitor-position-advice-promotion.timer"
-    } in profile["services"]
-    assert profile["position_advice_promotion"] == {
-        "enabled": True,
-        "schedule_beijing": "05:15",
-        "automatic_authority_cas": False,
-    }
+    assert not any(
+        "position-advice" in str(item.get("name") or "")
+        for item in profile["services"]
+    )
+    assert "position_advice_promotion" not in profile
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
 
@@ -1852,6 +1829,75 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
     assert out["before"]["extra_installed_units"] == ["options-monitor-feishu-ws.service"]
     assert out["applied"]["retired_units"] == ["options-monitor-feishu-ws.service"]
     assert ["systemctl", "disable", "--now", "options-monitor-feishu-ws.service"] in calls
+
+
+def test_service_drift_retires_removed_position_advice_promotion_units(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    retired_units = (
+        "options-monitor-position-advice-promotion.service",
+        "options-monitor-position-advice-promotion.timer",
+    )
+    profile["services"].extend({"name": name} for name in retired_units)
+    profile["position_advice_promotion"] = {
+        "enabled": True,
+        "schedule_beijing": "05:15",
+    }
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    systemd_root.mkdir(exist_ok=True)
+    for name in retired_units:
+        (systemd_root / name).write_text("legacy\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+    refreshed = json.loads(
+        (runtime / "service.profile.json").read_text(encoding="utf-8")
+    )
+
+    assert out["before"]["extra_installed_units"] == sorted(retired_units)
+    assert out["applied"]["retired_units"] == sorted(retired_units)
+    assert "position_advice_promotion" not in refreshed
+    assert not any(
+        "position-advice" in str(item.get("name") or "")
+        for item in refreshed["services"]
+    )
+    for name in retired_units:
+        assert not (systemd_root / name).exists()
+        assert ["systemctl", "disable", "--now", name] in calls
 
 
 def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_path: Path) -> None:
@@ -3633,9 +3679,6 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     tick = files["launchd/com.options-monitor.tick-hk.plist"]["content"]
     auto_close = files["launchd/com.options-monitor.auto-close-hk.plist"]["content"]
     verify = files["launchd/com.options-monitor.projection-verify.plist"]["content"]
-    promotion = files[
-        "launchd/com.options-monitor.position-advice-promotion.plist"
-    ]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<key>Label</key>" in tick
@@ -3656,21 +3699,13 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert "<key>Minute</key>" in verify
     assert "<integer>30</integer>" in verify
     assert "verify-projection" in verify
-    assert (
-        "<string>com.options-monitor.position-advice-promotion</string>"
-        in promotion
-    )
-    assert "<integer>5</integer>" in promotion
-    assert "<integer>15</integer>" in promotion
-    assert "<string>promotion</string>" in promotion
-    assert "<string>refresh</string>" in promotion
-    assert "<string>--confirm</string>" in promotion
     assert profile["service_provider"] == "launchd"
     assert {"name": "com.options-monitor.tick-hk"} in profile["services"]
     assert {"name": "com.options-monitor.projection-verify"} in profile["services"]
-    assert {
-        "name": "com.options-monitor.position-advice-promotion"
-    } in profile["services"]
+    assert not any(
+        "position-advice" in str(item.get("name") or "")
+        for item in profile["services"]
+    )
 
 
 def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
@@ -4151,23 +4186,18 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
         "--now",
         "options-monitor-feishu-agent-credential.service",
     ] in calls
-    assert [
-        "systemctl",
-        "enable",
-        "--now",
-        "options-monitor-position-advice-promotion.timer",
-    ] in calls
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert {"name": "options-monitor-projection-verify.timer"} in refreshed_profile["services"]
-    assert {
-        "name": "options-monitor-position-advice-promotion.timer"
-    } in refreshed_profile["services"]
+    assert not any(
+        "position-advice" in str(item.get("name") or "")
+        for item in refreshed_profile["services"]
+    )
     assert refreshed_profile["feishu_agent_credential"]["enabled"] is True
     assert refreshed_profile["feishu_agent_credential"]["helper_path"] == str(
         credential_helper
     )
     assert (systemd_root / "options-monitor-projection-verify.timer").exists()
-    assert (
+    assert not (
         systemd_root / "options-monitor-position-advice-promotion.timer"
     ).exists()
     assert (

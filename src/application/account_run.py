@@ -17,28 +17,15 @@ from domain.domain.engine import (
 )
 from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
-from domain.domain.symbol_identity import symbol_market
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.config_sections import (
     resolve_watchlist_config,
     set_watchlist_config,
 )
-from src.application.config_loader import resolve_data_config_path
 from src.application.close_advice_runner import run_close_advice
-from src.application.position_advice_account_sources import (
-    PositionAdviceAccountSourceError,
-    publish_account_position_advice_sources,
-    publish_or_reuse_account_portfolio_source,
-)
-from src.application.position_advice_runner import (
-    run_position_advice_v2_from_account_run,
-)
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
-)
-from src.application.prepared_portfolio_context import (
-    load_prepared_portfolio_context,
 )
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
@@ -110,32 +97,6 @@ def _pipeline_account_config_error_code(output: str) -> str | None:
     return match.group(1) if match is not None else None
 
 
-def _close_advice_issue_breakdown(flag_counts: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
-    system_issue_keys = {
-        "close_advice_plan_unavailable",
-        "required_data_position_not_planned",
-        "required_data_symbol_config_missing",
-        "required_data_symbol_source_unsupported",
-        "required_data_route_conflict",
-        "required_data_symbol_not_planned",
-        "required_data_snapshot_unavailable",
-        "required_data_missing_expiration",
-        "required_data_missing_contract",
-        "required_data_fetch_error",
-        "opend_fetch_error",
-    }
-    quality_issue_keys = {
-        "missing_quote",
-        "missing_mid",
-        "opend_fetch_no_usable_quote",
-        "invalid_spread",
-        "spread_too_wide",
-    }
-    system = {key: int(flag_counts.get(key) or 0) for key in system_issue_keys}
-    quality = {key: int(flag_counts.get(key) or 0) for key in quality_issue_keys}
-    return system, quality
-
-
 def _record_account_run_degraded(
     *,
     runlog,
@@ -202,65 +163,6 @@ def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[st
         if str(item).strip()
     }
     return {item for item in out if item} or None
-
-
-def _position_advice_markets(
-    cfg: dict[str, Any],
-    requested: list[str],
-) -> list[str]:
-    explicit = sorted(
-        {
-            str(item or "").strip().upper()
-            for item in requested
-            if str(item or "").strip().upper() in {"US", "HK"}
-        }
-    )
-    if explicit:
-        return explicit
-    inferred = sorted(
-        {
-            str(symbol_market(item.get("symbol")) or "").strip().upper()
-            for item in resolve_watchlist_config(cfg)
-            if isinstance(item, dict)
-            and str(symbol_market(item.get("symbol")) or "").strip().upper()
-            in {"US", "HK"}
-        }
-    )
-    return inferred or ["HK", "US"]
-
-
-def publish_current_run_portfolio_source(
-    *,
-    cfg: dict[str, Any],
-    account_run_id: str,
-    account: str,
-    markets_to_run: list[str],
-    account_state_dir: Path,
-    prepared_portfolio_context: dict[str, Any],
-    completed_at: datetime | str | None = None,
-) -> dict[str, Any]:
-    """Publish/reuse the current-run identity receipt from frozen inputs only."""
-
-    portfolio_cfg = (
-        cfg.get("portfolio")
-        if isinstance(cfg.get("portfolio"), dict)
-        else {}
-    )
-    try:
-        return publish_or_reuse_account_portfolio_source(
-            account_run_id=account_run_id,
-            normalized_account=str(account).strip().lower(),
-            broker=str(portfolio_cfg.get("broker") or "futu"),
-            included_markets=_position_advice_markets(cfg, markets_to_run),
-            account_state_dir=account_state_dir,
-            portfolio_context=prepared_portfolio_context,
-            completed_at=completed_at,
-        )
-    except PositionAdviceAccountSourceError as exc:
-        raise AccountRunConfigError(
-            "ACCOUNT_CONFIG_PORTFOLIO_SOURCE_INVALID",
-            str(exc),
-        ) from exc
 
 
 def build_account_runtime_config(
@@ -524,7 +426,7 @@ def run_one_account(
         shared_required_data=request.shared_required,
         shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id),
         symbols_arg=request.symbols_arg,
-        position_advice_account_run_id=request.run_id,
+        source_account_run_id=request.run_id,
         required_data_snapshot_manifest=request.required_data_snapshot_manifest,
         prepared_portfolio_context_manifest=(
             request.prepared_portfolio_context_manifest
@@ -658,242 +560,13 @@ def run_one_account(
         except PreparedOptionPositionsContextError as exc:
             return _prepared_option_integrity_failure(exc)
 
-    position_advice_sources: dict[str, Any] | None = None
-    try:
-        prepared_portfolio_context: dict[str, Any] | None = None
-        if request.prepared_portfolio_context_manifest is not None:
-            prepared_portfolio_context = load_prepared_portfolio_context(
-                manifest_path=request.prepared_portfolio_context_manifest,
-                expected_base=request.base,
-                expected_run_id=request.run_id,
-                expected_account=acct,
-                expected_account_config_sha256=(
-                    request.account_config_authority.account_config_sha256
-                ),
-                expected_manifest_sha256=(
-                    request.prepared_portfolio_context_manifest_sha256
-                ),
-                expected_runtime_config=cfg,
-            )
-            if not isinstance(prepared_portfolio_context, dict):
-                raise RuntimeError(
-                    "prepared portfolio context is unavailable"
-                )
-        portfolio_cfg = (
-            cfg.get("portfolio")
-            if isinstance(cfg.get("portfolio"), dict)
-            else {}
-        )
-        data_config_path = resolve_data_config_path(
-            base=request.base,
-            data_config=portfolio_cfg.get("data_config"),
-        )
-        prepared_fx_payload = (
-            (
-                prepared_option_context.get("exchange_rates")
-                if isinstance(
-                    prepared_option_context.get("exchange_rates"),
-                    dict,
-                )
-                else {}
-            )
-            if isinstance(prepared_option_context, dict)
-            else None
-        )
-        position_advice_sources = publish_account_position_advice_sources(
-            account_run_root=acct_report_dir,
-            account_state_dir=acct_state_dir,
-            quote_producer_root=request.shared_required,
-            data_config_path=data_config_path,
-            account_run_id=request.run_id,
-            account=acct,
-            broker=str(portfolio_cfg.get("broker") or "futu"),
-            included_markets=_position_advice_markets(
-                cfg,
-                request.markets_to_run,
-            ),
-            decision_state_snapshot_override=(
-                prepared_option_context.get("decision_state_snapshot")
-                if isinstance(prepared_option_context, dict)
-                else None
-            ),
-            portfolio_context_override=prepared_portfolio_context,
-            # An unavailable prepared observation is an explicit empty fact;
-            # never fall back to an unrelated account-local rate cache.
-            fx_payload_override=prepared_fx_payload,
-        )
-        source_summary = {
-            key: value
-            for key, value in position_advice_sources.items()
-            if key
-            not in {
-                "decision_state_snapshot",
-                "cash_capacity",
-                "share_coverage",
-            }
-        }
-        source_summary["decision_state_fingerprint"] = (
-            position_advice_sources["decision_state_snapshot"].get(
-                "decision_state_fingerprint"
-            )
-        )
-        source_summary["cash_capacity_status"] = (
-            position_advice_sources["cash_capacity"].get("status")
-        )
-        source_summary["share_coverage_symbol_count"] = len(
-            (
-                position_advice_sources["share_coverage"].get("by_symbol")
-                or {}
-            )
-        )
-        _write_acct_run_state(
-            "position_advice_sources.v2.json",
-            source_summary,
-        )
-        audit_fn(
-            "write",
-            "position_advice_sources_v2",
-            run_id=request.run_id,
-            account=acct,
-            status="ok",
-            extra={
-                "portfolio_account_identity_hash": (
-                    position_advice_sources[
-                        "portfolio_account_identity_hash"
-                    ]
-                ),
-                "decision_state_fingerprint": source_summary[
-                    "decision_state_fingerprint"
-                ],
-            },
-        )
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="position_advice_sources_v2",
-            exc=exc,
-        )
-
-    if position_advice_sources is not None:
-        try:
-            position_advice_result = run_position_advice_v2_from_account_run(
-                base=request.base,
-                account_run_root=acct_report_dir,
-                account_run_id=request.run_id,
-                account=acct,
-                broker=str(position_advice_sources["broker"]),
-                included_markets=position_advice_sources[
-                    "included_markets"
-                ],
-                normalized_portfolio_source=str(
-                    position_advice_sources[
-                        "normalized_portfolio_source"
-                    ]
-                ),
-                portfolio_account_identity_hash=str(
-                    position_advice_sources[
-                        "portfolio_account_identity_hash"
-                    ]
-                ),
-                capacity_pool_authority_id=(
-                    str(
-                        position_advice_sources[
-                            "capacity_pool_authority_id"
-                        ]
-                    )
-                    if position_advice_sources.get(
-                        "capacity_pool_authority_id"
-                    )
-                    else None
-                ),
-                source_receipts=position_advice_sources[
-                    "source_receipts"
-                ],
-                data_config_path=data_config_path,
-                decision_state_snapshot_override=(
-                    prepared_option_context.get(
-                        "decision_state_snapshot"
-                    )
-                    if isinstance(prepared_option_context, dict)
-                    else None
-                ),
-            )
-            _write_acct_run_state(
-                "position_advice_v2_run.json",
-                position_advice_result,
-            )
-            audit_fn(
-                "write",
-                "position_advice_v2",
-                run_id=request.run_id,
-                account=acct,
-                status=(
-                    "ok"
-                    if position_advice_result.get("status")
-                    in {"published", "skipped_v1_authority"}
-                    else "error"
-                ),
-                extra={
-                    "result_status": position_advice_result.get("status"),
-                    "authority_mode": position_advice_result.get(
-                        "authority_mode"
-                    ),
-                    "portfolio_plan_id": position_advice_result.get(
-                        "portfolio_plan_id"
-                    ),
-                    "current_switched": position_advice_result.get(
-                        "current_switched"
-                    ),
-                },
-            )
-        except Exception as exc:
-            _record_account_run_degraded(
-                runlog=runlog,
-                audit_fn=audit_fn,
-                run_id=request.run_id,
-                account=acct,
-                action="position_advice_v2",
-                exc=exc,
-            )
-
     text = notif_path.read_text(encoding="utf-8", errors="replace").strip() if notif_path.exists() else ""
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
-        if request.prepared_option_positions_context_manifest is not None:
-            try:
-                prepared_option_context = (
-                    load_prepared_option_positions_context(
-                        manifest_path=(
-                            request.prepared_option_positions_context_manifest
-                        ),
-                        expected_base=request.base,
-                        expected_run_id=request.run_id,
-                        expected_account=acct,
-                        expected_account_config_sha256=(
-                            request.account_config_authority.account_config_sha256
-                        ),
-                        expected_manifest_sha256=(
-                            request.prepared_option_positions_context_manifest_sha256
-                        ),
-                        expected_runtime_config=cfg,
-                    )
-                )
-            except PreparedOptionPositionsContextError as exc:
-                return _prepared_option_integrity_failure(exc)
         try:
-            close_advice_run_cfg = cfg
-            if isinstance(cfg, dict):
-                cfg_copy = dict(cfg)
-                close_advice_cfg_copy = dict(close_advice_cfg)
-                close_advice_cfg_copy.setdefault("render_style", "compact")
-                cfg_copy["close_advice"] = close_advice_cfg_copy
-                close_advice_run_cfg = cfg_copy
             raw_close_result = run_close_advice(
-                config=close_advice_run_cfg,
+                config=cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
                 required_data_root=request.shared_required,
                 output_dir=acct_report_dir,
@@ -907,6 +580,10 @@ def run_one_account(
                     request.close_advice_required_data_plan
                 ),
                 account=acct,
+                context_override=prepared_option_context,
+                required_data_snapshot_manifest_sha256=(
+                    request.required_data_snapshot_sha256
+                ),
             )
             close_result: dict[str, Any] = raw_close_result if isinstance(raw_close_result, dict) else {}
             snapshot_authority_invalid = (
@@ -930,7 +607,6 @@ def run_one_account(
                     "rows": close_result.get("rows"),
                     "notify_rows": close_result.get("notify_rows"),
                     "quote_issue_rows": close_result.get("quote_issue_rows"),
-                    "tier_counts": close_result.get("tier_counts"),
                     "flag_counts": close_result.get("flag_counts"),
                 },
             )
@@ -976,55 +652,11 @@ def run_one_account(
                     prefetch_done=prefetch_done,
                     ran_pipeline=False,
                 )
-            close_text_path = acct_report_dir / "close_advice.txt"
-            close_text = close_text_path.read_text(encoding="utf-8", errors="replace").strip() if close_text_path.exists() else ""
+            close_text = str(
+                close_result.get("notification_text") or ""
+            ).strip()
             if close_text:
                 text = (text.strip() + "\n\n" + close_text.strip()).strip()
-            elif int(close_result.get("quote_issue_rows") or 0) > 0:
-                flag_counts_raw = close_result.get("flag_counts")
-                flag_counts: dict[str, Any] = flag_counts_raw if isinstance(flag_counts_raw, dict) else {}
-                missing_quote = int(flag_counts.get("missing_quote") or 0)
-                missing_mid = int(flag_counts.get("missing_mid") or 0)
-                missing_expiration = int(flag_counts.get("required_data_missing_expiration") or 0)
-                missing_contract = int(flag_counts.get("required_data_missing_contract") or 0)
-                coverage_fetch_error = int(flag_counts.get("required_data_fetch_error") or 0)
-                opend_fetch_error = int(flag_counts.get("opend_fetch_error") or 0)
-                opend_fetch_no_usable_quote = int(flag_counts.get("opend_fetch_no_usable_quote") or 0)
-                invalid_spread = int(flag_counts.get("invalid_spread") or 0)
-                spread_too_wide = int(flag_counts.get("spread_too_wide") or 0)
-                evaluation_gap_rows = int(close_result.get("evaluation_gap_rows") or 0)
-                quote_issue_samples = close_result.get("quote_issue_samples") if isinstance(close_result.get("quote_issue_samples"), list) else []
-                system_issues, quality_issues = _close_advice_issue_breakdown(flag_counts)
-                system_issue_rows = sum(system_issues.values())
-                quality_issue_rows = sum(quality_issues.values())
-                suppress_quality_summary = (
-                    system_issue_rows == 0
-                    and quality_issue_rows == spread_too_wide
-                    and spread_too_wide > 0
-                    and missing_quote == 0
-                    and missing_mid == 0
-                    and missing_expiration == 0
-                    and missing_contract == 0
-                    and coverage_fetch_error == 0
-                    and opend_fetch_error == 0
-                    and opend_fetch_no_usable_quote == 0
-                    and invalid_spread == 0
-                )
-                if suppress_quality_summary:
-                    summary = f"### [{acct}] 平仓建议\n- 本次未生成 strong/medium 提醒\n"
-                else:
-                    summary = (
-                        f"### [{acct}] 平仓建议\n"
-                        f"- 本次未生成 strong/medium 提醒；系统异常 {system_issue_rows} 条，行情质量不足 {quality_issue_rows} 条\n"
-                        f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
-                        f"required_data_missing_expiration={missing_expiration} | required_data_missing_contract={missing_contract} | required_data_fetch_error={coverage_fetch_error} | "
-                        f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote} | "
-                        f"invalid_spread={invalid_spread} | spread_too_wide={spread_too_wide}\n"
-                        f"- 说明: evaluation_gap_rows={evaluation_gap_rows}；系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够（如价差过大、无法形成可信 mid）\n"
-                    )
-                if quote_issue_samples and not suppress_quality_summary:
-                    summary += f"- 样例: {' ; '.join(str(x) for x in quote_issue_samples[:3])}\n"
-                text = (text.strip() + "\n\n" + summary.strip()).strip()
         except Exception as exc:
             audit_fn(
                 "tool_call",

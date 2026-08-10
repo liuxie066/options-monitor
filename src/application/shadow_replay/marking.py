@@ -549,15 +549,9 @@ def _close_mark_snapshot_from_required_data(
         "writes_runtime_config": False,
         "writes_trade_state": False,
     }
-    replacement_payload = _replacement_mark_payload(
-        episode,
-        quote_index=quote_index,
-        aliases=aliases,
-    )
     if not quote:
         return {
             **base,
-            **replacement_payload,
             "point_in_time_status": "missing_quote",
             "quote_status": "missing_quote",
             "mark_quality": "missing_quote",
@@ -573,7 +567,6 @@ def _close_mark_snapshot_from_required_data(
     future_fee, future_fee_status = _close_future_fee(episode, ask=ask)
     return {
         **base,
-        **replacement_payload,
         "quote_status": "matched",
         "mark_quality": "usable" if mid is not None else "missing_mid",
         "matched_by": matched_by,
@@ -589,59 +582,6 @@ def _close_mark_snapshot_from_required_data(
         "quote_flags": mid_flags,
         "future_close_fee": future_fee,
         "future_fee_status": future_fee_status,
-    }
-
-
-def _replacement_mark_payload(
-    episode: dict[str, Any],
-    *,
-    quote_index: dict[str, Any],
-    aliases: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    evidence = episode.get("replacement_evidence")
-    evidence = evidence if isinstance(evidence, dict) else {}
-    contract_symbol = text(evidence.get("contract_symbol")).upper()
-    if not contract_symbol:
-        return {
-            "replacement_quote_status": "not_applicable",
-            "replacement_inconclusive_reason": "replacement_identity_missing",
-        }
-    current_identity = episode.get("position_identity")
-    current_identity = current_identity if isinstance(current_identity, dict) else {}
-    identity = {
-        "symbol": evidence.get("symbol"),
-        "contract_symbol": contract_symbol,
-        "option_type": evidence.get("option_type") or current_identity.get("option_type"),
-        "expiration": evidence.get("expiration"),
-        "strike": evidence.get("strike"),
-    }
-    quote, matched_by = _match_required_data_quote(
-        identity,
-        quote_index=quote_index,
-        aliases=aliases,
-    )
-    if not quote:
-        return {
-            "replacement_quote_status": "missing_quote",
-            "replacement_matched_by": None,
-            "replacement_inconclusive_reason": "replacement_quote_missing",
-        }
-    mid, flags = _quote_mid(quote)
-    ask = first_float(quote, "ask")
-    fee, fee_status = _replacement_future_fee(evidence, ask=ask)
-    return {
-        "replacement_quote_status": "matched",
-        "replacement_matched_by": matched_by,
-        "replacement_bid": first_float(quote, "bid"),
-        "replacement_ask": ask,
-        "replacement_option_mid": mid,
-        "replacement_spot": first_float(quote, "spot", "underlying_price"),
-        "replacement_quote_flags": flags,
-        "replacement_future_close_fee": fee,
-        "replacement_future_fee_status": fee_status,
-        "replacement_required_data_source_path": quote.get("_source_path"),
-        "replacement_required_data_source_row_number": quote.get("_source_row_number"),
-        "replacement_inconclusive_reason": None if ask is not None else "replacement_ask_missing",
     }
 
 
@@ -699,37 +639,6 @@ def _close_future_fee(episode: dict[str, Any], *, ask: float | None) -> tuple[fl
     except ValueError:
         return None, "not_evaluable"
     return fee, "estimated_from_decision_fee_basis"
-
-
-def _replacement_future_fee(
-    evidence: dict[str, Any],
-    *,
-    ask: float | None,
-) -> tuple[float | None, str]:
-    contracts = first_float(evidence, "contracts")
-    multiplier = first_float(evidence, "multiplier")
-    currency = text(evidence.get("currency")).upper()
-    if (
-        text(evidence.get("fee_calc_status")).lower() != "candidate_futu_fee"
-        or ask is None
-        or ask <= 0
-        or contracts is None
-        or contracts <= 0
-        or multiplier is None
-        or multiplier <= 0
-    ):
-        return None, "not_evaluable"
-    try:
-        fee = calc_futu_option_fee(
-            currency,
-            ask,
-            contracts=int(contracts),
-            multiplier=int(multiplier),
-            is_sell=False,
-        )
-    except ValueError:
-        return None, "not_evaluable"
-    return fee, "estimated_from_replacement_candidate_fee"
 
 
 def is_usable_close_mark(row: dict[str, Any]) -> bool:

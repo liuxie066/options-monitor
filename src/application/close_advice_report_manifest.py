@@ -30,9 +30,12 @@ def publish_close_advice_report_manifest(
 ) -> dict[str, Any]:
     csv = Path(csv_path).resolve()
     text = Path(text_path).resolve()
-    context_file = Path(context_path).resolve()
-    if not csv.is_file() or not text.is_file() or not context_file.is_file():
+    if not csv.is_file() or not text.is_file():
         raise ValueError("close_advice report inputs are incomplete")
+    csv_bytes = csv.read_bytes()
+    text_bytes = text.read_bytes()
+    context_bytes = _canonical_context_bytes(context)
+    del context_path
     markets = {
         str(symbol_market(row.get("symbol")) or "").upper()
         for row in rows
@@ -55,11 +58,14 @@ def publish_close_advice_report_manifest(
     if filter_account:
         accounts.add(filter_account)
     generated_at = datetime.now(timezone.utc)
+    csv_sha256 = _sha256_bytes(csv_bytes)
+    text_sha256 = _sha256_bytes(text_bytes)
+    context_sha256 = _sha256_bytes(context_bytes)
     identity = "|".join(
         (
-            _sha256(csv),
-            _sha256(text),
-            _sha256(context_file),
+            csv_sha256,
+            text_sha256,
+            context_sha256,
             ",".join(sorted(markets)),
             ",".join(sorted(accounts)),
         )
@@ -72,9 +78,9 @@ def publish_close_advice_report_manifest(
         "included_markets": sorted(markets),
         "accounts": sorted(accounts),
         "row_count": len(rows),
-        "csv_sha256": _sha256(csv),
-        "text_sha256": _sha256(text),
-        "context_sha256": _sha256(context_file),
+        "csv_sha256": csv_sha256,
+        "text_sha256": text_sha256,
+        "context_sha256": context_sha256,
     }
     if str(run_id or "").strip():
         payload["run_id"] = str(run_id).strip()
@@ -129,30 +135,91 @@ def validate_close_advice_report_manifest(
     csv_path: Path,
     desired_market: str | None = None,
     account: str | None = None,
+    expected_run_id: str | None = None,
+    expected_quote_mode: str | None = None,
 ) -> dict[str, Any]:
+    snapshot = read_close_advice_report_snapshot(
+        csv_path=csv_path,
+        desired_market=desired_market,
+        account=account,
+        expected_run_id=expected_run_id,
+        expected_quote_mode=expected_quote_mode,
+    )
+    return dict(snapshot["validation"])
+
+
+def read_close_advice_report_snapshot(
+    *,
+    csv_path: Path,
+    desired_market: str | None = None,
+    account: str | None = None,
+    expected_run_id: str | None = None,
+    expected_quote_mode: str | None = None,
+) -> dict[str, Any]:
+    """Read and validate the exact report bytes a caller may consume.
+
+    Data files are read before the commit marker.  A concurrent publisher
+    therefore either leaves this snapshot bound to one successful manifest or
+    makes validation fail closed; callers never need to reopen validated files.
+    """
+
     csv = Path(csv_path).resolve()
+    text = csv.parent / "close_advice.txt"
     manifest_path = csv.parent / MANIFEST_NAME
     base = {
         "ok": False,
         "manifest_path": str(manifest_path),
     }
+    csv_bytes = _read_bytes(csv)
+    text_bytes = _read_bytes(text)
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_path.read_bytes()
+        payload = json.loads(manifest_bytes)
     except Exception:
-        return {**base, "reason": "close_advice_manifest_missing"}
+        return _snapshot_result(
+            {**base, "reason": "close_advice_manifest_missing"}
+        )
     if not isinstance(payload, dict):
-        return {**base, "reason": "close_advice_manifest_malformed"}
+        return _snapshot_result(
+            {**base, "reason": "close_advice_manifest_malformed"}
+        )
     if payload.get("schema_version") != CLOSE_ADVICE_REPORT_SCHEMA:
-        return {**base, "reason": "close_advice_manifest_schema_invalid"}
-    status = str(payload.get("status") or "success").strip().lower()
+        return _snapshot_result(
+            {**base, "reason": "close_advice_manifest_schema_invalid"}
+        )
+    status = str(payload.get("status") or "").strip().lower()
     if status != "success":
-        return {
-            **base,
-            "reason": "close_advice_manifest_not_success",
-            "status": status,
-        }
-    if not csv.is_file() or payload.get("csv_sha256") != _sha256(csv):
-        return {**base, "reason": "close_advice_report_bytes_mismatch"}
+        return _snapshot_result(
+            {
+                **base,
+                "reason": "close_advice_manifest_not_success",
+                "status": status,
+            }
+        )
+    if csv_bytes is None or payload.get("csv_sha256") != _sha256_bytes(
+        csv_bytes
+    ):
+        return _snapshot_result(
+            {**base, "reason": "close_advice_report_bytes_mismatch"}
+        )
+    if text_bytes is None or payload.get("text_sha256") != _sha256_bytes(
+        text_bytes
+    ):
+        return _snapshot_result(
+            {**base, "reason": "close_advice_text_bytes_mismatch"}
+        )
+    run_id = str(payload.get("run_id") or "").strip()
+    expected_run = str(expected_run_id or "").strip()
+    if expected_run and run_id != expected_run:
+        return _snapshot_result(
+            {**base, "reason": "close_advice_report_run_mismatch"}
+        )
+    quote_mode = str(payload.get("quote_mode") or "").strip().lower()
+    expected_mode = str(expected_quote_mode or "").strip().lower()
+    if expected_mode and quote_mode != expected_mode:
+        return _snapshot_result(
+            {**base, "reason": "close_advice_report_quote_mode_mismatch"}
+        )
     markets = {
         str(item or "").strip().upper()
         for item in list(payload.get("included_markets") or [])
@@ -160,7 +227,9 @@ def validate_close_advice_report_manifest(
     }
     market = str(desired_market or "").strip().upper()
     if market and market not in markets:
-        return {**base, "reason": "close_advice_report_market_mismatch"}
+        return _snapshot_result(
+            {**base, "reason": "close_advice_report_market_mismatch"}
+        )
     account_norm = normalize_account(account)
     accounts = {
         normalize_account(item)
@@ -168,24 +237,71 @@ def validate_close_advice_report_manifest(
         if normalize_account(item)
     }
     if account_norm and account_norm not in accounts:
-        return {**base, "reason": "close_advice_report_account_mismatch"}
+        return _snapshot_result(
+            {**base, "reason": "close_advice_report_account_mismatch"}
+        )
+    return _snapshot_result(
+        {
+            **base,
+            "ok": True,
+            "reason": None,
+            "generation_id": payload.get("generation_id"),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "run_id": run_id or None,
+            "quote_mode": quote_mode or None,
+            "included_markets": sorted(markets),
+            "accounts": sorted(accounts),
+            "row_count": payload.get("row_count"),
+            "context_sha256": str(
+                payload.get("context_sha256") or ""
+            ).strip().lower()
+            or None,
+            "required_data_snapshot_manifest_sha256": str(
+                payload.get("required_data_snapshot_manifest_sha256") or ""
+            ).strip().lower()
+            or None,
+            "close_advice_required_data_plan_sha256": str(
+                payload.get("close_advice_required_data_plan_sha256") or ""
+            ).strip().lower()
+            or None,
+        },
+        csv_bytes=csv_bytes,
+        text_bytes=text_bytes,
+    )
+
+
+def _snapshot_result(
+    validation: dict[str, Any],
+    *,
+    csv_bytes: bytes | None = None,
+    text_bytes: bytes | None = None,
+) -> dict[str, Any]:
     return {
-        **base,
-        "ok": True,
-        "reason": None,
-        "generation_id": payload.get("generation_id"),
-        "generated_at_utc": payload.get("generated_at_utc"),
-        "included_markets": sorted(markets),
-        "accounts": sorted(accounts),
+        "validation": validation,
+        "csv_bytes": csv_bytes if validation.get("ok") else None,
+        "text_bytes": text_bytes if validation.get("ok") else None,
     }
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return Path(path).read_bytes()
+    except OSError:
+        return None
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _canonical_context_bytes(context: dict[str, Any]) -> bytes:
+    return json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 __all__ = [
@@ -193,5 +309,6 @@ __all__ = [
     "MANIFEST_NAME",
     "publish_close_advice_report_manifest",
     "publish_close_advice_report_status",
+    "read_close_advice_report_snapshot",
     "validate_close_advice_report_manifest",
 ]

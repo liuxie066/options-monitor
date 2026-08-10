@@ -336,7 +336,11 @@ def test_agent_internal_init_minimal_config() -> None:
         assert sell_put_template["min_iv_rv_ratio"] == 1.10
         assert "min_annualized_net_return" not in sell_put_template
         assert cfg["runtime"]["symbol_timeout_sec"] == 120
-        assert cfg["close_advice"]["max_spread_ratio"] == 0.3
+        assert cfg["close_advice"] == {
+            "enabled": True,
+            "quote_source": "auto",
+            "max_items_per_account": 5,
+        }
         assert cfg["alert_policy"]["change_annual_threshold"] == 0.02
         assert cfg["alert_policy"]["sell_put"] == {
             "high_annual": 0.20,

@@ -12,33 +12,9 @@ import pytest
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import rank_candidate_rows
 from src.application.multi_tick.misc import AccountResult
-
-
-@pytest.fixture(autouse=True)
-def _default_successful_v1_position_advice_summary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    monkeypatch.setattr(
-        service,
-        "read_position_advice_v2_from_ledger",
-        lambda **_kwargs: {
-            "availability_status": "unavailable",
-            "freshness": {"status": "fresh", "reason_codes": []},
-            "authority_mode": "v1",
-            "authority_generation": 0,
-            "authority_policy_hash": None,
-            "portfolio_plan_id": None,
-            "account_run_id": "run-1",
-            "row_count": 0,
-            "actionable_count": 0,
-            "model_actionable_count": 0,
-            "model_trade_actionable_count": 0,
-            "human_review_required_count": 0,
-            "rows": [],
-        },
-    )
+from src.application.close_advice_report_manifest import (
+    publish_close_advice_report_manifest,
+)
 
 
 def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path:
@@ -66,21 +42,40 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
                     "rates": {"USDCNY": 7.0, "HKDCNY": 0.9},
                     "timestamp": "2026-07-17T13:59:30+00:00",
                 },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (state_dir / "position_advice_sources.v2.json").write_text(
-        json.dumps(
-            {
-                "account": account,
-                "normalized_portfolio_source": "futu",
-                "portfolio_account_identity_hash": "a" * 64,
+                "filters": {"account": account},
             }
         ),
         encoding="utf-8",
     )
     return path
+
+
+def _write_close_report(
+    account_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str = "run-1",
+    market: str = "US",
+) -> None:
+    csv_path = account_dir / "close_advice.csv"
+    text_path = account_dir / "close_advice.txt"
+    if rows:
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+    else:
+        csv_path.write_text("", encoding="utf-8")
+    text_path.write_text("", encoding="utf-8")
+    context_path = account_dir / "state" / "option_positions_context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=rows,
+        markets_to_run=[market],
+        run_id=run_id,
+        quote_mode="frozen_snapshot",
+    )
 
 
 def _config(*, timezone_name: str = "America/New_York") -> dict:
@@ -499,13 +494,6 @@ def _install_success_empty_strategy_evidence(
         publish_required_data_quote_snapshot,
         save_outputs,
     )
-    from src.application.position_advice_source_producers import (
-        publish_opening_candidate_snapshot_receipt,
-    )
-    from src.application.position_advice_source_receipts import (
-        sha256_bytes,
-        source_dependency_from_receipt,
-    )
     from src.application.required_data_plan_identity import (
         build_required_data_expected_fetch_contract,
         required_data_plan_id,
@@ -671,49 +659,6 @@ def _install_success_empty_strategy_evidence(
             encoding="utf-8"
         )
     )
-    quote_dependency = source_dependency_from_receipt(
-        receipt_path=quote_receipt_path,
-        producer_root=required_data_root,
-        now=completed_at,
-        expected_source_kind="quotes",
-    )
-    candidate_receipt_path, candidate_receipt = (
-        publish_opening_candidate_snapshot_receipt(
-            producer_root=state_dir,
-            account_run_id="run-1",
-            account="lx",
-            broker="futu",
-            portfolio_account_identity_hash="a" * 64,
-            included_markets=["US"],
-            snapshot=snapshot,
-            quote_dependencies=[quote_dependency],
-            source_observed_at=observed_at,
-            completed_at=completed_at,
-        )
-    )
-    (state_dir / "position_advice_sources.v2.json").write_text(
-        json.dumps(
-            {
-                "account": "lx",
-                "normalized_portfolio_source": "futu",
-                "portfolio_account_identity_hash": "a" * 64,
-                "source_receipts": [
-                    {
-                        "source_kind": "opening_candidates",
-                        "producer_root": str(state_dir.resolve()),
-                        "receipt_path": str(
-                            candidate_receipt_path.resolve()
-                        ),
-                        "snapshot_id": candidate_receipt["snapshot_id"],
-                        "receipt_hash": sha256_bytes(
-                            candidate_receipt_path.read_bytes()
-                        ),
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
     publish_strategy_scan_status(
         report_dir=account_dir,
         run_id="run-1",
@@ -743,7 +688,7 @@ def _install_success_empty_strategy_evidence(
     return completed_at + timedelta(seconds=1), evidence
 
 
-def test_success_empty_strategy_is_a_local_degraded_warning(
+def test_success_empty_opening_snapshot_remains_non_actionable(
     tmp_path: Path,
 ) -> None:
     now_utc, _evidence = _install_success_empty_strategy_evidence(
@@ -758,31 +703,11 @@ def test_success_empty_strategy_is_a_local_degraded_warning(
 
     assert brief["status"] == "degraded"
     assert brief["actionability"] == "live_actionable"
-    assert brief["notification_authority"][
-        "normal_delivery_allowed"
-    ] is True
-    assert brief["notification_authority"][
-        "notification_allowed"
-    ] is True
-    assert any(
-        {
-            "scope": item.get("scope"),
-            "symbol": item.get("symbol"),
-            "strategy_family": item.get("strategy_family"),
-            "outcome": item.get("outcome"),
-            "reason": item.get("reason"),
-            "severity": item.get("severity"),
-            "actionable": item.get("actionable"),
-        }
-        == {
-            "scope": "strategy",
-            "symbol": "NVDA",
-            "strategy_family": "sell_put",
-            "outcome": "success_empty",
-            "reason": "no_expirations",
-            "severity": "warning",
-            "actionable": False,
-        }
+    assert "notification_authority" not in brief
+    assert brief["candidates"]["sell_put"] == []
+    assert not any(
+        item.get("strategy_family") == "sell_put"
+        and item.get("actionable") is True
         for item in brief["data_gaps"]
     )
     assert not any(
@@ -803,7 +728,7 @@ def test_success_empty_strategy_is_a_local_degraded_warning(
         ("candidate_count", 1),
     ),
 )
-def test_success_empty_status_only_mismatch_remains_local(
+def test_status_index_cannot_override_sealed_opening_snapshot(
     tmp_path: Path,
     field: str,
     value: object,
@@ -831,10 +756,8 @@ def test_success_empty_status_only_mismatch_remains_local(
 
     assert brief["status"] == "degraded"
     assert brief["actionability"] == "live_actionable"
-    assert brief["notification_authority"][
-        "normal_delivery_allowed"
-    ] is True
-    assert any(
+    assert "notification_authority" not in brief
+    assert not any(
         item.get("reason")
         == "strategy_status_projection_mismatch"
         for item in brief["data_gaps"]
@@ -843,238 +766,6 @@ def test_success_empty_status_only_mismatch_remains_local(
         item.get("outcome") == "success_empty"
         for item in brief["data_gaps"]
     )
-
-
-def test_success_empty_frozen_source_corruption_uses_fixed_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    now_utc, evidence = _install_success_empty_strategy_evidence(
-        tmp_path
-    )
-    monkeypatch.setattr(
-        service,
-        "read_position_advice_v2_from_ledger",
-        lambda **_kwargs: {
-            "availability_status": "available",
-            "freshness": {"status": "fresh", "reason_codes": []},
-            "authority_mode": "v2",
-            "portfolio_plan_id": "plan-v2",
-            "account_run_id": "run-1",
-            "row_count": 1,
-            "actionable_count": 1,
-            "model_actionable_count": 1,
-            "model_trade_actionable_count": 1,
-            "human_review_required_count": 0,
-            "rows": [
-                {
-                    "position_id": "v2-lot",
-                    "strategy_family": "short_put",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "expiration": "2026-08-21",
-                    "strike": 100,
-                    "contract_symbol": "NVDA260821P00100000",
-                    "lifecycle_state": "open",
-                    "group_structure_state": "standalone",
-                    "recommendation": "roll",
-                    "actionable": True,
-                    "action_scope": "position",
-                    "reason_codes": ["positive_carry_improvement"],
-                    "portfolio_plan_id": "plan-v2",
-                    "execution_order": 1,
-                    "depends_on": [],
-                }
-            ],
-        },
-    )
-    raw_path = (
-        tmp_path
-        / "output_runs"
-        / "run-1"
-        / "required_data"
-        / evidence["raw_json_relpath"]
-    )
-    raw_path.write_bytes(raw_path.read_bytes() + b"\n")
-
-    brief = _assemble(
-        tmp_path,
-        now_utc=now_utc,
-        config=_live_window_config(now_utc),
-    )
-
-    assert brief["status"] == "blocked"
-    assert brief["actionability"] == "blocked"
-    assert brief["notification_authority"][
-        "normal_delivery_allowed"
-    ] is False
-    assert brief["notification_authority"][
-        "fixed_failure_delivery_allowed"
-    ] is True
-    assert brief["notification_authority"]["blocker"] == (
-        "position_advice_source_integrity_invalid"
-    )
-    assert brief["positions"] == []
-    assert not any(
-        str(item.get("action_type") or "").startswith("position_")
-        for item in brief["actions"]
-    )
-    assert any(
-        item.get("reason")
-        == "position_advice_source_integrity_invalid"
-        for item in brief["data_gaps"]
-    )
-
-
-def test_missing_success_summary_blocks_normal_delivery_but_current_run_identity_allows_failure(
-    tmp_path: Path,
-) -> None:
-    from src.application.position_advice_account_sources import (
-        publish_or_reuse_account_portfolio_source,
-    )
-
-    account_dir = _account_dir(tmp_path)
-    state_dir = account_dir / "state"
-    (state_dir / "position_advice_sources.v2.json").unlink()
-    identifiers = ["futu-lx-current"]
-    portfolio = publish_or_reuse_account_portfolio_source(
-        account_run_id="run-1",
-        normalized_account="lx",
-        broker="futu",
-        included_markets=["US"],
-        account_state_dir=state_dir,
-        portfolio_context={
-            "portfolio_source_name": "futu",
-            "source_observed_at": "2026-07-17T14:00:00+00:00",
-            "source_observation_status": "trusted",
-            "source_account_identifiers": identifiers,
-            "cash_by_currency": {"USD": 1000},
-        },
-        completed_at="2026-07-17T14:00:01+00:00",
-    )
-    identity_hash = portfolio["portfolio_account_identity_hash"]
-
-    brief = _assemble(tmp_path)
-    authority = brief["notification_authority"]
-
-    assert brief["actionability"] == "blocked"
-    assert authority["normal_delivery_allowed"] is False
-    assert authority["notification_allowed"] is False
-    assert authority["blocker"] == "position_advice_source_summary_missing"
-    assert authority["normal_delivery_token"] is None
-    assert authority["fixed_failure_delivery_allowed"] is True
-    assert authority["fixed_failure_delivery_token"][
-        "schema_version"
-    ] == "position_advice_notification_authority_token.v2"
-    assert authority["fixed_failure_delivery_token"][
-        "authorized_delivery_kinds"
-    ] == ["fixed_failure"]
-    assert authority["identity_evidence"]["status"] == "available"
-    assert authority["authority_identity_source"] == (
-        "current_run_portfolio_receipt"
-    )
-    assert len(authority["identity_snapshot_id"]) == 64
-    assert len(authority["identity_receipt_hash"]) == 64
-    assert (
-        authority["identity_evidence"][
-            "portfolio_account_identity_hash"
-        ]
-        == identity_hash
-    )
-
-
-def test_missing_success_summary_without_current_run_identity_blocks_all_delivery(
-    tmp_path: Path,
-) -> None:
-    account_dir = _account_dir(tmp_path)
-    (
-        account_dir
-        / "state"
-        / "position_advice_sources.v2.json"
-    ).unlink()
-
-    brief = _assemble(tmp_path)
-    authority = brief["notification_authority"]
-
-    assert authority["normal_delivery_allowed"] is False
-    assert authority["fixed_failure_delivery_allowed"] is False
-    assert authority["normal_delivery_token"] is None
-    assert authority["fixed_failure_delivery_token"] is None
-    assert authority["identity_evidence"]["reason"] == (
-        "current_run_portfolio_receipt_missing"
-    )
-
-
-@pytest.mark.parametrize(
-    ("authority_allowed", "builder_fails", "expected_blocker"),
-    (
-        (
-            False,
-            False,
-            "position_advice_authority_conflict",
-        ),
-        (
-            True,
-            True,
-            "position_advice_failure_token_build_failed",
-        ),
-    ),
-)
-def test_failure_authority_reason_codes_remain_distinct(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    authority_allowed: bool,
-    builder_fails: bool,
-    expected_blocker: str,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    monkeypatch.setattr(
-        service,
-        "read_authority_resolution",
-        lambda **_kwargs: SimpleNamespace(
-            notifications_allowed=authority_allowed,
-            resolution_status=(
-                "resolved" if authority_allowed else "authority_conflict"
-            ),
-            mode="v1" if authority_allowed else None,
-            generation=0 if authority_allowed else None,
-            policy_hash=None,
-        ),
-    )
-    if builder_fails:
-        monkeypatch.setattr(
-            service,
-            "build_fixed_failure_notification_authority_token",
-            lambda **_kwargs: (_ for _ in ()).throw(
-                ValueError("invalid token")
-            ),
-        )
-
-    result = service._daily_brief_notification_authority(
-        {
-            "mode": "authority_conflict",
-            "available": False,
-            "blocker": "position_advice_source_summary_missing",
-        },
-        base=tmp_path,
-        account="sy",
-        account_run_id="run-sy",
-        current_run_identity={
-            "status": "available",
-            "normalized_portfolio_source": "futu",
-            "portfolio_account_identity_hash": "a" * 64,
-            "snapshot_id": "b" * 64,
-            "receipt_hash": "c" * 64,
-        },
-    )
-
-    assert result["fixed_failure_delivery_allowed"] is False
-    assert result["fixed_failure_delivery_token"] is None
-    assert result["fixed_failure_blocker"] == expected_blocker
 
 
 def _call_row(*, symbol: str = "NVDA", contract: str = "NVDA260821C00140000", annualized: float = 0.1) -> dict:
@@ -1264,7 +955,7 @@ def test_missing_cash_context_blocks_snapshot_without_fabricating_zero(tmp_path:
 def test_prepared_portfolio_context_is_used_when_legacy_file_is_absent(
     tmp_path: Path,
 ) -> None:
-    from src.application.position_advice_source_receipts import sha256_bytes
+    from src.application.source_receipts import sha256_bytes
     from src.application.tick_run_workspace import publish_account_run_config
 
     account_dir = _account_dir(tmp_path)
@@ -1523,7 +1214,8 @@ def test_candidate_priority_does_not_change_sealed_candidate_order(tmp_path: Pat
 def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
-    pd.DataFrame(
+    _write_close_report(
+        account_dir,
         [
             {
                 "account": "lx",
@@ -1534,35 +1226,44 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
                 "option_type": "put",
                 "expiration": "2026-08-21",
                 "strike": 100,
-                "tier": "strong",
-                "tier_label": "强提醒",
                 "reason": "收益已锁定",
-                "close_action": "close_put_keep_call",
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
+                "evaluation_status": "priced",
+                "quote_status": "priced",
                 "position_side": "short",
-                "close_mid": 0.52,
-                "realized_if_close": 474.5,
-                "remaining_annualized_return": 0.042,
+                "ask": 0.54,
+                "net_capture_ratio": 0.94,
+                "all_in_close_cost": 52.0,
+                "close_cost_ratio": 0.00052,
+                "remaining_term_ratio": 0.60,
+                "estimated_pnl_if_close_net": 474.5,
             }
-        ]
-    ).to_csv(account_dir / "close_advice.csv", index=False)
+        ],
+    )
 
     brief = _assemble(tmp_path)
     action = next(item for item in brief["actions"] if item["action_type"] == "close_position")
 
-    assert action["priority"] == "P0"
+    assert action["priority"] == "P2"
     assert action["position_lot_id"] == "lot-put"
     assert action["strategy_group_id"] == "group-1"
     assert action["leg_role"] == "funding_put"
-    assert action["close_action"] == "close_put_keep_call"
+    assert action["recommendation_state"] == "close"
     assert brief["positions"][0]["position_lot_id"] == "lot-put"
     assert brief["positions"][0]["metrics"] == {
-        "close_mid": 0.52,
-        "realized_if_close": 474.5,
-        "remaining_annualized_return": 0.042,
+        "ask": 0.54,
+        "remaining_term_ratio": 0.60,
+        "net_capture_ratio": 0.94,
+        "all_in_close_cost": 52.0,
+        "close_cost_ratio": 0.00052,
+        "estimated_pnl_if_close_net": 474.5,
     }
 
 
-def test_close_advice_daily_brief_honors_notify_levels(tmp_path: Path) -> None:
+def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     account_dir = _account_dir(tmp_path)
@@ -1570,35 +1271,40 @@ def test_close_advice_daily_brief_honors_notify_levels(tmp_path: Path) -> None:
         account_dir / "nvda_sell_put_candidates_labeled.csv",
         index=False,
     )
-    pd.DataFrame(
-        [
+    close_rows = [
             {
                 "account": "lx",
-                "position_lot_id": f"lot-{tier}",
+                "position_lot_id": f"lot-{state}-{symbol.lower()}",
                 "symbol": symbol,
                 "strategy_family": "sell_put",
                 "option_type": "put",
                 "expiration": "2026-08-21",
                 "strike": strike,
-                "tier": tier,
-                "tier_label": tier,
                 "reason": "test",
-                "close_action": "close",
+                "recommendation_state": state,
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": (
+                    "strict_profit_capture_all_gates_passed"
+                    if state == "close"
+                    else "test_gate"
+                ),
+                "decision_evidence_status": (
+                    "not_evaluable" if state == "not_evaluable" else "complete"
+                ),
                 "evaluation_status": "priced",
                 "quote_status": "priced",
             }
-            for tier, symbol, strike in (
-                ("strong", "STRONG", 100),
-                ("medium", "MEDIUM", 101),
-                ("optional", "OPTIONAL", 102),
-                ("weak", "WEAK", 103),
+            for state, symbol, strike in (
+                ("close", "FIRST", 100),
+                ("close", "SECOND", 101),
+                ("hold", "HOLD", 102),
+                ("not_evaluable", "GAP", 103),
             )
         ]
-    ).to_csv(account_dir / "close_advice.csv", index=False)
+    _write_close_report(account_dir, close_rows)
     config = _config()
     config["close_advice"] = {
         "enabled": True,
-        "notify_levels": ["strong", "medium"],
     }
 
     brief = _assemble(tmp_path, config=config)
@@ -1616,37 +1322,152 @@ def test_close_advice_daily_brief_honors_notify_levels(tmp_path: Path) -> None:
         limits={"max_actions_per_priority": 10},
     )
 
-    assert {item["symbol"] for item in close_actions} == {"STRONG", "MEDIUM"}
+    assert {item["symbol"] for item in close_actions} == {"FIRST", "SECOND"}
     assert eligibility == {
-        "STRONG": True,
-        "MEDIUM": True,
-        "OPTIONAL": False,
-        "WEAK": False,
+        "FIRST": True,
+        "SECOND": True,
+        "HOLD": False,
+        "GAP": False,
     }
-    assert "STRONG｜Sell Put｜08-21 $100 Put｜强烈建议平仓" in message
-    assert "MEDIUM｜Sell Put｜08-21 $101 Put｜建议平仓" in message
-    assert "OPTIONAL" not in message
-    assert "WEAK" not in message
+    assert "FIRST｜Sell Put｜08-21 $100 Put｜建议平仓" in message
+    assert "SECOND｜Sell Put｜08-21 $101 Put｜建议平仓" in message
+    assert "HOLD" not in message
+    assert "GAP" not in message
     assert "汇总｜共 4 条，需处理 2 条。" in message
 
-    config["close_advice"]["notify_levels"] = ["optional"]
-    optional_brief = _assemble(tmp_path, config=config)
-    optional_actions = [
-        item
-        for item in optional_brief["actions"]
-        if item["action_type"] == "close_position"
-    ]
-    optional_message = render_full_brief(
-        optional_brief,
-        limits={"max_actions_per_priority": 10},
+
+def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "position_lot_id": "lot-unbound",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
+                "evaluation_status": "priced",
+                "quote_status": "priced",
+            }
+        ]
+    ).to_csv(account_dir / "close_advice.csv", index=False)
+
+    brief = _assemble(tmp_path)
+
+    assert not any(
+        action["action_type"] == "close_position"
+        for action in brief["actions"]
+    )
+    assert any(
+        gap.get("reason") == "close_advice_manifest_missing"
+        for gap in brief["data_gaps"]
     )
 
-    assert {item["symbol"] for item in optional_actions} == {"OPTIONAL"}
-    assert "OPTIONAL｜Sell Put｜08-21 $102 Put｜低价买回可选" in optional_message
-    assert "STRONG" not in optional_message
-    assert "MEDIUM" not in optional_message
-    assert "WEAK" not in optional_message
-    assert "汇总｜共 4 条，需处理 1 条。" in optional_message
+
+def test_close_advice_mixed_account_report_cannot_enter_daily_brief(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    common = {
+        "position_lot_id": "lot-close",
+        "symbol": "NVDA",
+        "strategy_family": "sell_put",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "recommendation_state": "close",
+        "policy_version": "strict_profit_capture.v1",
+        "decision_basis": "strict_profit_capture_all_gates_passed",
+        "decision_evidence_status": "complete",
+        "evaluation_status": "priced",
+        "quote_status": "priced",
+    }
+    _write_close_report(
+        account_dir,
+        [
+            {**common, "account": "lx"},
+            {**common, "account": "sy", "position_lot_id": "lot-other"},
+        ],
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert not any(
+        action["action_type"] == "close_position"
+        for action in brief["actions"]
+    )
+    assert any(
+        gap.get("reason")
+        == "close_advice_report_account_row_mismatch"
+        for gap in brief["data_gaps"]
+    )
+
+
+def test_close_advice_loader_consumes_the_validated_csv_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    account_dir = _account_dir(tmp_path)
+    csv_path = account_dir / "close_advice.csv"
+    original_row = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "recommendation_state": "close",
+        "policy_version": "strict_profit_capture.v1",
+        "decision_basis": "strict_profit_capture_all_gates_passed",
+        "decision_evidence_status": "complete",
+        "evaluation_status": "priced",
+    }
+    _write_close_report(account_dir, [original_row])
+    original_reader = service.read_close_advice_report_snapshot
+
+    def _read_then_replace(**kwargs):
+        snapshot = original_reader(**kwargs)
+        pd.DataFrame([{**original_row, "symbol": "TSLA"}]).to_csv(
+            csv_path,
+            index=False,
+        )
+        return snapshot
+
+    monkeypatch.setattr(
+        service,
+        "read_close_advice_report_snapshot",
+        _read_then_replace,
+    )
+    source_artifacts: list[dict[str, Any]] = []
+    data_gaps: list[dict[str, Any]] = []
+
+    rows, available = service._load_close_advice(
+        path=csv_path,
+        run_account_dir=account_dir,
+        market="US",
+        account="lx",
+        run_id="run-1",
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+    )
+
+    assert available is True
+    assert [row["symbol"] for row in rows] == ["NVDA"]
+    assert data_gaps == []
 
 
 def test_close_advice_daily_brief_honors_ranked_account_limit(
@@ -1659,8 +1480,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
         account_dir / "nvda_sell_put_candidates_labeled.csv",
         index=False,
     )
-    pd.DataFrame(
-        [
+    close_rows = [
             {
                 "account": "lx",
                 "position_lot_id": f"lot-{symbol.lower()}",
@@ -1669,14 +1489,15 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
                 "option_type": "put",
                 "expiration": "2026-08-21",
                 "strike": strike,
-                "tier": "strong",
-                "tier_label": "strong",
                 "reason": "test",
-                "close_action": "close",
+                "recommendation_state": "close",
+                "policy_version": "strict_profit_capture.v1",
+                "decision_basis": "strict_profit_capture_all_gates_passed",
+                "decision_evidence_status": "complete",
                 "evaluation_status": "priced",
                 "quote_status": "priced",
-                "capture_ratio": capture_ratio,
-                "remaining_premium": remaining_premium,
+                "net_capture_ratio": capture_ratio,
+                "all_in_close_cost": remaining_premium,
             }
             for symbol, strike, capture_ratio, remaining_premium in (
                 ("SECOND", 101, 0.80, 10),
@@ -1684,11 +1505,10 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
                 ("THIRD", 102, 0.70, 20),
             )
         ]
-    ).to_csv(account_dir / "close_advice.csv", index=False)
+    _write_close_report(account_dir, close_rows)
     config = _config()
     config["close_advice"] = {
         "enabled": True,
-        "notify_levels": ["strong", "medium"],
         "max_items_per_account": 1,
     }
 
@@ -1713,182 +1533,10 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
         "FIRST": True,
         "THIRD": False,
     }
-    assert "FIRST｜Sell Put｜08-21 $100 Put｜强烈建议平仓" in message
+    assert "FIRST｜Sell Put｜08-21 $100 Put｜建议平仓" in message
     assert "SECOND" not in message
     assert "THIRD" not in message
     assert "汇总｜共 3 条，需处理 1 条。" in message
-
-
-def test_daily_brief_uses_only_v2_position_authority_when_promoted(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
-    (account_dir / "state" / "position_advice_sources.v2.json").write_text(
-        json.dumps(
-            {
-                "account": "lx",
-                "normalized_portfolio_source": "futu",
-                "portfolio_account_identity_hash": "a" * 64,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pd.DataFrame(
-        [
-            {
-                "account": "lx",
-                "position_lot_id": "legacy-lot",
-                "symbol": "NVDA",
-                "option_type": "put",
-                "tier": "strong",
-                "close_action": "close",
-            }
-        ]
-    ).to_csv(account_dir / "close_advice.csv", index=False)
-    monkeypatch.setattr(
-        service,
-        "read_position_advice_v2_from_ledger",
-        lambda **_kwargs: {
-            "availability_status": "available",
-            "freshness": {"status": "fresh", "reason_codes": []},
-            "authority_mode": "v2",
-            "portfolio_plan_id": "plan-v2",
-            "account_run_id": "run-1",
-            "row_count": 1,
-            "actionable_count": 1,
-            "model_actionable_count": 1,
-            "rows": [
-                {
-                    "position_id": "v2-lot",
-                    "strategy_family": "short_put",
-                    "strategy_group_id": None,
-                    "leg_role": None,
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "expiration": "2026-08-21",
-                    "strike": 100,
-                    "contract_symbol": "NVDA260821P00100000",
-                    "lifecycle_state": "open",
-                    "group_structure_state": "standalone",
-                    "recommendation": "roll",
-                    "actionable": True,
-                    "action_scope": "position",
-                    "reason_codes": ["positive_carry_improvement"],
-                    "portfolio_plan_id": "plan-v2",
-                    "execution_order": 1,
-                    "depends_on": [],
-                    "quote_as_of": "2026-07-17T13:59:30Z",
-                    "net_carry_improvement_H_base_cny": "120",
-                    "payback_days": "2",
-                }
-            ],
-        },
-    )
-
-    brief = _assemble(tmp_path)
-
-    position_actions = [
-        item
-        for item in brief["actions"]
-        if item["action_type"].startswith("position_")
-    ]
-    assert [item["position_lot_id"] for item in position_actions] == [
-        "v2-lot"
-    ]
-    assert not any(
-        item.get("position_lot_id") == "legacy-lot"
-        for item in brief["actions"]
-    )
-    assert brief["positions"][0]["recommendation"] == "roll"
-    assert brief["position_advice_preview"]["authority_mode"] == "v2"
-
-
-@pytest.mark.parametrize("authority_mode", ("v1", "v2_shadow", "v2"))
-def test_daily_brief_keeps_lifecycle_human_review_visible_in_every_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    authority_mode: str,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "state" / "position_advice_sources.v2.json").write_text(
-        json.dumps(
-            {
-                "account": "lx",
-                "normalized_portfolio_source": "futu",
-                "portfolio_account_identity_hash": "a" * 64,
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        service,
-        "read_position_advice_v2_from_ledger",
-        lambda **_kwargs: {
-            "availability_status": "available",
-            "freshness": {"status": "fresh", "reason_codes": []},
-            "authority_mode": authority_mode,
-            "portfolio_plan_id": "plan-review",
-            "account_run_id": "run-review",
-            "row_count": 1,
-            "actionable_count": 0,
-            "model_actionable_count": 0,
-            "model_trade_actionable_count": 0,
-            "human_review_required_count": 1,
-            "rows": [
-                {
-                    "position_id": "review-lot",
-                    "strategy_family": "short_put",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "expiration": "2026-07-01",
-                    "strike": 100,
-                    "contract_symbol": "NVDA260701P00100000",
-                    "lifecycle_state": "needs_review",
-                    "group_structure_state": "standalone",
-                    "recommendation": "review",
-                    "model_trade_actionable": False,
-                    "model_actionable": False,
-                    "human_review_required": True,
-                    "actionable": False,
-                    "action_scope": "lifecycle_fact_review",
-                    "reason_codes": [
-                        "lifecycle_needs_review",
-                        "lifecycle_read_model_missing",
-                    ],
-                    "portfolio_plan_id": "plan-review",
-                    "depends_on": [],
-                }
-            ],
-        },
-    )
-
-    brief = _assemble(tmp_path)
-    review = next(
-        item
-        for item in brief["actions"]
-        if item.get("position_lot_id") == "review-lot"
-    )
-
-    assert review["priority"] == "P0"
-    assert review["action_type"] == "position_review"
-    assert review["human_review_required"] is True
-    assert review["model_trade_actionable"] is False
-    assert review["requires_user_confirmation"] is True
-    assert any(
-        item.get("position_lot_id") == "review-lot"
-        for item in brief["positions"]
-    )
 
 
 def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp_path: Path) -> None:
@@ -2031,7 +1679,7 @@ def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(t
 def test_header_only_and_empty_csv_are_readable_empty_decisions(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
-    (account_dir / "close_advice.csv").write_text("", encoding="utf-8")
+    _write_close_report(account_dir, [])
 
     brief = _assemble(tmp_path)
 

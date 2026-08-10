@@ -18,6 +18,7 @@ from src.application.required_data_snapshot import (
     RequiredDataSnapshotError,
     _validate_complete_required_data_bundle,
     _validate_physical_binding,
+    load_required_data_snapshot_manifest_snapshot,
     resolve_frozen_required_data,
     seal_required_data_snapshot,
 )
@@ -25,8 +26,8 @@ from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
     required_data_plan_id,
 )
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
+from src.application.source_receipts import (
+    SourceReceiptError,
 )
 
 
@@ -160,7 +161,7 @@ def test_snapshot_physical_binding_rejects_non_integer_ports(
     expected_port: object,
 ) -> None:
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="required-data manifest physical binding is invalid",
     ):
         _validate_physical_binding(
@@ -466,6 +467,32 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
     } == before
 
 
+def test_manifest_snapshot_returns_the_exact_validated_generation(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1")
+    sealed = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+
+    payload, resolved_root, manifest_bytes = (
+        load_required_data_snapshot_manifest_snapshot(
+            manifest_path=manifest_path,
+            expected_run_id="run-1",
+            expected_required_data_root=root,
+        )
+    )
+    manifest_path.write_text("{}\n", encoding="utf-8")
+
+    assert payload == sealed
+    assert resolved_root == root.resolve()
+    assert json.loads(manifest_bytes) == sealed
+
+
 def test_sealed_snapshot_accepts_positive_success_empty_evidence(
     tmp_path: Path,
 ) -> None:
@@ -520,7 +547,7 @@ def test_frozen_bundle_rejects_rows_with_non_success_source_outcome(
     }
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="non-success required-data bundle contains rows",
     ):
         _validate_complete_required_data_bundle(bundle)

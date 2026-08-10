@@ -15,8 +15,8 @@ from src.application.opend_symbol_outputs import (
     resolve_exact_fresh_required_data_quote_receipt,
     save_outputs,
 )
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
+from src.application.source_receipts import (
+    SourceReceiptError,
     validate_source_receipt,
 )
 from src.application.required_data_plan_identity import (
@@ -366,7 +366,9 @@ def test_quote_receipt_binds_exact_json_csv_and_fetch_policy(
         now=NOW + timedelta(seconds=3),
         expected_source_kind="quotes",
     )
-    bundle = json.loads(validated["payload_path"].read_text(encoding="utf-8"))
+    validated_payload_bytes = validated["payload_bytes"]
+    validated["payload_path"].write_text("{}\n", encoding="utf-8")
+    bundle = json.loads(validated_payload_bytes)
 
     assert base64.b64decode(bundle["raw_json_base64"]) == raw_path.read_bytes()
     assert base64.b64decode(bundle["required_data_csv_base64"]) == csv_path.read_bytes()
@@ -394,7 +396,7 @@ def test_quote_receipt_rejects_partial_required_data_payload(
     fetch_plan = _fetch_plan()
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="incomplete required-data payload",
     ):
         publish_required_data_quote_snapshot(
@@ -436,7 +438,7 @@ def test_quote_receipt_rejects_rows_with_non_success_source_evidence(
     fetch_plan = _fetch_plan()
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="non-success required-data payload contains rows",
     ):
         publish_required_data_quote_snapshot(
@@ -460,7 +462,7 @@ def test_quote_receipt_rejects_missing_explicit_source_outcome(tmp_path: Path) -
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="explicit success-rows"):
+    with pytest.raises(SourceReceiptError, match="explicit success-rows"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -482,7 +484,7 @@ def test_quote_receipt_rejects_missing_top_level_symbol(tmp_path: Path) -> None:
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="payload symbol mismatch"):
+    with pytest.raises(SourceReceiptError, match="payload symbol mismatch"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -504,7 +506,7 @@ def test_quote_receipt_rejects_wrong_physical_binding(tmp_path: Path) -> None:
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="payload port mismatch"):
+    with pytest.raises(SourceReceiptError, match="payload port mismatch"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -530,7 +532,7 @@ def test_quote_receipt_rejects_non_integer_raw_port(
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="payload port is invalid"):
+    with pytest.raises(SourceReceiptError, match="payload port is invalid"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -546,7 +548,7 @@ def test_quote_receipt_rejects_non_integer_raw_port(
         )
 
     assert list(
-        tmp_path.glob("position_advice_sources/quotes/**/receipt.json")
+        tmp_path.glob("source_receipts/quotes/**/receipt.json")
     ) == []
 
 
@@ -597,7 +599,7 @@ def test_quote_receipt_rejects_wrong_raw_underlier_identity(
     )
     fetch_plan = _fetch_plan(projection_outcome=projection_outcome)
 
-    with pytest.raises(PositionAdviceSourceError, match="underlier identity"):
+    with pytest.raises(SourceReceiptError, match="underlier identity"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -612,7 +614,7 @@ def test_quote_receipt_rejects_wrong_raw_underlier_identity(
             now=NOW + timedelta(seconds=1),
         )
     assert list(
-        tmp_path.glob("position_advice_sources/quotes/**/receipt.json")
+        tmp_path.glob("source_receipts/quotes/**/receipt.json")
     ) == []
 
 
@@ -637,7 +639,7 @@ def test_quote_receipt_rejects_incomplete_snapshot_evidence(tmp_path: Path) -> N
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match=r"^provider_incomplete:"):
+    with pytest.raises(SourceReceiptError, match=r"^provider_incomplete:"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -681,7 +683,7 @@ def test_quote_receipt_rejects_csv_identity_subset(tmp_path: Path) -> None:
     pd.read_csv(csv_path).iloc[:1].to_csv(csv_path, index=False)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="row counts differ"):
+    with pytest.raises(SourceReceiptError, match="row counts differ"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -706,7 +708,7 @@ def test_quote_receipt_rejects_bad_required_realized_volatility(tmp_path: Path) 
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="required realized volatility"):
+    with pytest.raises(SourceReceiptError, match="required realized volatility"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -736,7 +738,7 @@ def test_direct_publisher_cannot_bypass_strict_evidence(tmp_path: Path) -> None:
     )
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError):
+    with pytest.raises(SourceReceiptError):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -763,7 +765,7 @@ def test_direct_publisher_rejects_wrong_plan_before_commit(tmp_path: Path) -> No
     wrong_plan = {**expected_plan, "projected_expirations": []}
 
     with pytest.raises(
-        PositionAdviceSourceError,
+        SourceReceiptError,
         match="fetch plan contradicts expected contract",
     ):
         publish_required_data_quote_snapshot(
@@ -780,7 +782,7 @@ def test_direct_publisher_rejects_wrong_plan_before_commit(tmp_path: Path) -> No
             now=NOW + timedelta(seconds=1),
         )
 
-    assert list(tmp_path.glob("position_advice_sources/quotes/**/*.json")) == []
+    assert list(tmp_path.glob("source_receipts/quotes/**/*.json")) == []
 
 
 def test_stale_quote_is_rejected_before_any_immutable_commit(tmp_path: Path) -> None:
@@ -792,7 +794,7 @@ def test_stale_quote_is_rejected_before_any_immutable_commit(tmp_path: Path) -> 
     )
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="stale"):
+    with pytest.raises(SourceReceiptError, match="stale"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
@@ -807,8 +809,8 @@ def test_stale_quote_is_rejected_before_any_immutable_commit(tmp_path: Path) -> 
             now=NOW + timedelta(minutes=31),
         )
 
-    assert list(tmp_path.glob("position_advice_sources/quotes/**/payload.json")) == []
-    assert list(tmp_path.glob("position_advice_sources/quotes/**/receipt.json")) == []
+    assert list(tmp_path.glob("source_receipts/quotes/**/payload.json")) == []
+    assert list(tmp_path.glob("source_receipts/quotes/**/receipt.json")) == []
 
 
 def test_quote_commit_time_resamples_clock_and_leaves_only_orphan_payload(
@@ -835,7 +837,7 @@ def test_quote_commit_time_resamples_clock_and_leaves_only_orphan_payload(
             return value if tz is None else value.astimezone(tz)
 
     monkeypatch.setattr(outputs, "datetime", _AdvancingDateTime)
-    with pytest.raises(PositionAdviceSourceError, match="observation is stale"):
+    with pytest.raises(SourceReceiptError, match="observation is stale"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-crosses-ttl",
@@ -851,9 +853,9 @@ def test_quote_commit_time_resamples_clock_and_leaves_only_orphan_payload(
 
     assert _AdvancingDateTime.calls == 3
     assert len(
-        list(tmp_path.glob("position_advice_sources/quotes/**/payload.json"))
+        list(tmp_path.glob("source_receipts/quotes/**/payload.json"))
     ) == 1
-    assert list(tmp_path.glob("position_advice_sources/quotes/**/receipt.json")) == []
+    assert list(tmp_path.glob("source_receipts/quotes/**/receipt.json")) == []
 
 
 def test_receipt_last_crash_reentry_adopts_exact_commit(
@@ -893,10 +895,10 @@ def test_receipt_last_crash_reentry_adopts_exact_commit(
         )
 
     receipt_paths = list(
-        tmp_path.glob("position_advice_sources/quotes/**/receipt.json")
+        tmp_path.glob("source_receipts/quotes/**/receipt.json")
     )
     payload_paths = list(
-        tmp_path.glob("position_advice_sources/quotes/**/payload.json")
+        tmp_path.glob("source_receipts/quotes/**/payload.json")
     )
     assert len(receipt_paths) == 1
     assert len(payload_paths) == 1
@@ -922,8 +924,8 @@ def test_receipt_last_crash_reentry_adopts_exact_commit(
     assert adopted_receipt == json.loads(committed_receipt_bytes)
     assert receipt_paths[0].read_bytes() == committed_receipt_bytes
     assert payload_paths[0].read_bytes() == committed_payload_bytes
-    assert len(list(tmp_path.glob("position_advice_sources/quotes/**/receipt.json"))) == 1
-    assert len(list(tmp_path.glob("position_advice_sources/quotes/**/payload.json"))) == 1
+    assert len(list(tmp_path.glob("source_receipts/quotes/**/receipt.json"))) == 1
+    assert len(list(tmp_path.glob("source_receipts/quotes/**/payload.json"))) == 1
 
 
 def test_cache_discovery_reuses_receipt_observation_after_shared_files_change(
@@ -972,7 +974,7 @@ def test_same_run_rejects_second_quote_observation(tmp_path: Path) -> None:
         output_root=tmp_path,
     )
 
-    with pytest.raises(PositionAdviceSourceError, match="conflicts with committed"):
+    with pytest.raises(SourceReceiptError, match="conflicts with committed"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",

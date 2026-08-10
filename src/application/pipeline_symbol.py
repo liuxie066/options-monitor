@@ -52,7 +52,7 @@ def process_symbol(
     runtime_config: dict | None = None,
     fetch_only: bool = False,
     quote_snapshot_id: str | None = None,
-    position_advice_producer_run_id: str | None = None,
+    source_producer_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
     candidate_capture_status_sink_fn: (
@@ -90,7 +90,7 @@ def process_symbol(
             runtime_config=runtime_config,
             fetch_only=bool(fetch_only),
             quote_snapshot_id=quote_snapshot_id,
-            position_advice_producer_run_id=position_advice_producer_run_id,
+            source_producer_run_id=source_producer_run_id,
             required_data_snapshot_manifest=required_data_snapshot_manifest,
             required_data_snapshot_run_id=required_data_snapshot_run_id,
             candidate_capture_status_sink_fn=(

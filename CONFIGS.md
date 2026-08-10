@@ -38,13 +38,13 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - per-symbol 策略 override 放在 `markets.<market>.overrides.<symbol>`；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
-- account label 在 trim + lowercase 后必须唯一；Position Advice 把它作为 deployment
-  内的 durable scope identity，同一真实账户改名或复用旧 label 不是普通配置编辑；
-- Position Advice authority 不属于 `config.yaml` 或 market runtime JSON。
-  `close_advice.position_advice_authority` 会被验证器拒绝，v1/v2 模式只存在于 shared
-  human-CAS policy；
-- Position Advice source TTL、300 秒 snapshot skew、72 小时 lifecycle review
-  deadline 和 promotion floor 是 versioned fixed policy，不提供可调低的配置键；
+- account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
+- `close_advice` 只保留 `enabled`、`quote_source` 和 `max_items_per_account`
+  运行配置。止盈公式与门槛在 `strict_profit_capture.v1` 中固定，
+  不提供可调的策略键；
+- 旧 `notify_levels`、`max_spread_ratio`、`strong_remaining_annualized_max`、
+  `medium_remaining_annualized_max` 和 `quote_max_age_sec` 不再影响决策，
+  验证器只输出迁移警告；
 - secrets、token、Feishu credential 和 Agent write gate 不进入 YAML。
 
 当前示例：
@@ -52,10 +52,8 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - `configs/examples/config.yaml.example`
 - `src/application/config_defaults.py`
 
-Authority、首次 cross-market identity binding 和 mixed-version 规则见
-[Position Advice v2 Contract](docs/POSITION_ADVICE_V2_CONTRACT.md) 与
-[Position Advice Compatibility](docs/POSITION_ADVICE_COMPATIBILITY.md)。示例配置
-不会加入 authority 或 freshness tuning 字段。
+Close Advice 详细固定规则见
+[Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md)。
 
 ## 生成与验证
 

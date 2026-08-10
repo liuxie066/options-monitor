@@ -49,7 +49,7 @@ class SymbolMonitoringInputs:
     runtime_config: dict[str, Any] | None = None
     fetch_only: bool = False
     quote_snapshot_id: str | None = None
-    position_advice_producer_run_id: str | None = None
+    source_producer_run_id: str | None = None
     required_data_snapshot_manifest: Path | None = None
     required_data_snapshot_run_id: str | None = None
     candidate_capture_status_sink_fn: (
@@ -172,7 +172,7 @@ def run_symbol_monitoring(
     )
     frozen_status_enabled = bool(
         inputs.required_data_snapshot_manifest is not None
-        and str(inputs.position_advice_producer_run_id or "").strip()
+        and str(inputs.source_producer_run_id or "").strip()
     )
     portfolio_cfg = (
         runtime_config.get("portfolio")
@@ -202,7 +202,7 @@ def run_symbol_monitoring(
         try:
             publish_strategy_scan_status(
                 report_dir=inputs.report_dir,
-                run_id=str(inputs.position_advice_producer_run_id),
+                run_id=str(inputs.source_producer_run_id),
                 account=status_account,
                 market=status_market,
                 symbol=symbol,
@@ -287,8 +287,8 @@ def run_symbol_monitoring(
             "fetch_plan": fetch_plan,
             "report_dir": inputs.report_dir,
             "opend_fetch_config": fetch_request_kwargs,
-            "position_advice_producer_run_id": (
-                inputs.position_advice_producer_run_id
+            "source_producer_run_id": (
+                inputs.source_producer_run_id
             ),
         }
         if inputs.required_data_snapshot_manifest is not None:

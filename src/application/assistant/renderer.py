@@ -1117,9 +1117,6 @@ def _render_position_exit_analysis(data: dict[str, Any]) -> str:
         conclusion = _close_advice_conclusion(row)
         if conclusion != "-":
             lines.append(f"  结论：{conclusion}")
-        optional_action = _close_action_label(row.get("optional_combo_action"))
-        if optional_action != "-":
-            lines.append(f"  可选：{optional_action}")
         status = _value(row.get("evaluation_status") or row.get("quote_status"))
         if status != "-":
             lines.append(f"  状态：{status}")
@@ -1159,86 +1156,42 @@ def _close_advice_source_text(source: dict[str, Any]) -> str:
 
 
 def _close_advice_conclusion(row: dict[str, Any]) -> str:
-    action = _close_action_label(row.get("close_action"))
-    tier_label = _value(row.get("tier_label"))
-    if action != "-":
-        return action if tier_label == "-" or tier_label == action else f"{action}（{tier_label}）"
-    for key in ("tier_label", "tier", "exit_state"):
-        value = _value(row.get(key))
-        if value != "-":
-            return value
-    return "-"
-
-
-def _close_action_label(value: Any) -> str:
-    action = str(value or "").strip().lower()
-    if not action:
-        return "-"
-    mapping = {
-        "close_put_keep_call": "买回 Put，保留收益增强 Call",
-        "hold_put_keep_call": "继续持有 Put，保留收益增强 Call",
-        "sell_call_take_profit": "卖出 Call 止盈",
-        "hold_call": "继续持有 Call",
-        "hold_call_as_convexity": "继续持有 Call 凸性腿",
-        "sell_call_salvage": "卖出 Call 回收残值",
-        "hold_to_expiry_or_expire": "保留至到期或允许归零",
-        "close_both_optional": "可选组合止盈",
-        "close": "平仓",
-        "hold": "持有观察",
-        "not_evaluable": "无法评估",
-    }
-    return mapping.get(action, action)
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    return {
+        "close": "建议平仓",
+        "hold": "继续持有",
+        "not_evaluable": "暂无法评估",
+    }.get(recommendation, "-")
 
 
 def _close_advice_reason(row: dict[str, Any]) -> str:
-    for key in ("reason", "short_vol_reason"):
-        value = _value(row.get(key))
-        if value != "-":
-            return value
-    return "-"
+    return _value(row.get("reason"))
 
 
 def _close_advice_metric_text(row: dict[str, Any]) -> str:
     parts: list[str] = []
-    realized = row.get("realized_if_close")
-    if realized is not None:
-        parts.append(f"平仓收益 {_num(realized)}")
-    put_realized = row.get("put_leg_realized_if_close")
-    if put_realized is not None:
-        parts.append(f"Put腿收益 {_num(put_realized)}")
-    combo_locked = row.get("combo_net_locked_if_close_put_keep_call")
-    if combo_locked is not None:
-        parts.append(f"组合锁定净收益 {_num(combo_locked)}")
-    combo_both = row.get("combo_net_if_close_both")
-    if combo_both is not None:
-        parts.append(f"组合全平净收益 {_num(combo_both)}")
-    call_value = row.get("long_call_current_value")
-    if call_value is not None:
-        parts.append(f"Call现值 {_num(call_value)}")
-    call_cost = row.get("long_call_cost_basis")
-    if call_cost is not None:
-        parts.append(f"Call成本 {_num(call_cost)}")
-    call_ratio = row.get("long_call_value_ratio")
-    if call_ratio is not None:
-        parts.append(f"Call现值/成本 {_num(call_ratio)}")
-    capture = row.get("capture_ratio")
+    capture = row.get("net_capture_ratio")
     if capture is not None:
-        parts.append(f"收益捕获 {_pct(capture)}")
-    remaining = row.get("remaining_annualized_return")
+        parts.append(f"净捕获 {_pct(capture)}")
+    opening_credit = row.get("opening_net_credit")
+    if opening_credit is not None:
+        parts.append(f"开仓净权利金 {_money(opening_credit, row.get('currency'))}")
+    close_cost = row.get("all_in_close_cost")
+    if close_cost is not None:
+        parts.append(f"全成本买回 {_money(close_cost, row.get('currency'))}")
+    close_cost_ratio = row.get("close_cost_ratio")
+    if close_cost_ratio is not None:
+        parts.append(f"买回成本/行权本金 {_pct(close_cost_ratio)}")
+    remaining = row.get("remaining_term_ratio")
     if remaining is not None:
-        parts.append(f"剩余年化 {_pct(remaining)}")
-    iv_rv = row.get("iv_rv_ratio")
-    if iv_rv is not None:
-        parts.append(f"IV/RV {_num(iv_rv)}")
-    delta = row.get("abs_delta") if row.get("abs_delta") is not None else row.get("delta")
-    if delta is not None:
-        parts.append(f"delta {_num(delta)}")
-    event_status = _value(row.get("event_source_status"))
-    if event_status != "-":
-        parts.append(f"事件源 {event_status}")
-    path_status = _value(row.get("path_stress_status"))
-    if path_status != "-":
-        parts.append(f"路径压力 {path_status}")
+        parts.append(f"剩余期限占比 {_pct(remaining)}")
+    spread = row.get("spread_ratio")
+    if spread is not None:
+        parts.append(f"价差 {_pct(spread)}")
+    if row.get("dte") is not None:
+        parts.append(f"DTE {_num(row.get('dte'))}")
+    if isinstance(row.get("is_otm"), bool):
+        parts.append(f"价外 {'是' if row['is_otm'] else '否'}")
     return "，".join(parts)
 
 

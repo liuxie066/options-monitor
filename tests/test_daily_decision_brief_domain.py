@@ -605,16 +605,13 @@ def test_daily_brief_notification_decision_matrix() -> None:
     from domain.domain.daily_decision_brief import decide_daily_brief_notification
 
     cases = [
-        ({"ran_scan": False, "pipeline_reliable": False, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": False, "fixed_due": False, "pending_candidate_identities": [], "retryable_envelope_kind": "fixed_report"}, "retry_exact"),
-        ({"ran_scan": False, "pipeline_reliable": False, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": False, "fixed_due": False, "pending_candidate_identities": []}, "none"),
-        ({"ran_scan": True, "pipeline_reliable": False, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": True, "fixed_due": True, "pending_candidate_identities": []}, "fixed_failure"),
-        ({"ran_scan": True, "pipeline_reliable": False, "normal_delivery_allowed": True, "fixed_failure_delivery_allowed": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "none"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": True, "fixed_failure_delivery_allowed": True, "fixed_due": True, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "fixed_report"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": True, "fixed_failure_delivery_allowed": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "candidate_alert"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": True, "fixed_failure_delivery_allowed": True, "fixed_due": False, "pending_candidate_identities": []}, "none"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": True, "fixed_due": True, "pending_candidate_identities": []}, "fixed_failure"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": False, "fixed_due": True, "pending_candidate_identities": []}, "none"),
-        ({"ran_scan": True, "pipeline_reliable": True, "normal_delivery_allowed": False, "fixed_failure_delivery_allowed": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "none"),
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": [], "retryable_envelope_kind": "fixed_report"}, "retry_exact"),
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": []}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": True, "pending_candidate_identities": []}, "fixed_failure"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": True, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "fixed_report"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "candidate_alert"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": []}, "none"),
     ]
 
     for inputs, expected in cases:

@@ -32,11 +32,9 @@ from src.application.secret_store import credential_spec
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
     FEISHU_AGENT_CREDENTIAL_SERVICE,
-    "options-monitor-position-advice-promotion.timer",
     "options-monitor-projection-verify.timer",
 )
 LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
-    "com.options-monitor.position-advice-promotion",
     "com.options-monitor.projection-verify",
 )
 LEGACY_STRATEGY_LAB_RECORDER_HOST = "127.0.0.1"
@@ -2042,7 +2040,6 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "wechat_clawbot",
         "strategy_lab_recorder",
         "quality_monitoring",
-        "position_advice_promotion",
         "feishu_agent_credential",
         "secret_credentials",
         "restart",
