@@ -46,9 +46,7 @@
 
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
-- [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：exit state、报价证据和组合动作。
-- [Position Advice v2 Contract](POSITION_ADVICE_V2_CONTRACT.md)：portfolio advice、source receipt、allocator、reader、authority 与 promotion 合同。
-- [Position Advice Compatibility](POSITION_ADVICE_COMPATIBILITY.md)：v1/v2 mixed-version、rollout、rollback 与通知兼容矩阵。
+- [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：period、PnL、cash、activity 和 bridge 合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地检查实现与操作入口；跨系统正式设计由 `investment-quality` 维护。

@@ -39,7 +39,7 @@
 1. 应用层一次性收集并冻结 OpenD 行情、合约、事件、持仓、现金、汇率和账本事实；
 2. Candidate Engine 执行召回后的归一化、硬筛、容量计算和正式排序；
 3. 生成不可变、可校验、已封存的账户级 opening decision snapshot；
-4. Agent、通知和 Position Advice 只消费该快照，不重新筛选或平行排序。
+4. Agent 和通知只消费该快照，不重新筛选或平行排序。
 
 正式排序唯一所有者是：
 
@@ -179,7 +179,7 @@ max_new_contracts = floor(effective_free_cash / assignment_notional)
 
 - `max_new_contracts >= 1` 才具备开仓能力。
 - 各候选共享同一现金池，候选容量不能相加。
-- 每张候选按一张合约计算收益、费用和 CNY 50 门槛；实际数量由 Position Advice 或人工决定。
+- 每张候选按一张合约计算收益、费用和 CNY 50 门槛；实际数量由操作者决定。
 
 ### 5.4 不作为硬门槛的指标
 
@@ -383,14 +383,14 @@ OI、volume、delta 等可选字段缺失不产生 `partial_data`。
 Candidate Agent 工具必须显式提供 account。run 可省略，但只能解析到该账户最新已封存且
 hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
-## 10. 组合口径、Position Advice 与消费边界
+## 10. 组合口径与消费边界
 
 - Sell Put 的接货后 concentration 和 Covered Call 的被叫走后剩余 concentration
   继续使用当前组合 NAV 计算口径；资产按当前市值计量，货币基金计入 NAV。
 - concentration 只在跨 symbol 且收益接近时参与选择，不变成硬风险门槛。
 - 美股和港股使用同一套公式、状态和失败范围；市场配置窗口、费用表、时区和交易日历分别取对应市场事实。
-- opening snapshot 只负责开仓候选和容量事实。Position Advice 自行计算
-  `hold / replace / reallocate / manual-review` 的资格，不由候选生产者预先写死。
+- opening snapshot 只负责开仓候选和容量事实。它不为已有持仓生成
+  `hold / replace / reallocate` 决策，Close Advice 也不消费候选来比较换仓。
 - 可以复用现有 producer payload / receipt 基础设施，但 opening candidate domain
   拥有 payload、seal、hash 和状态语义。
 - 人工没有导出 CSV 查看需求，正式分析入口是 Agent。CSV/JSONL 不再是公共合同或事实真源。
@@ -486,10 +486,10 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | A04 | Candidate Engine 是唯一正式过滤/排序所有者 | §2 |
 | A05 | Candidate ID 包含逻辑账户和物理 futu_account_id | §3.3 |
 | A06 | Agent 查询必须给 account；省略 run 只能取最新 seal/hash 有效 snapshot | §9 |
-| A07 | Position Advice 自行判断 replacement，不复制候选生产者决策字段 | §10 |
+| A07 | 开仓候选与已有持仓处置彻底分离，不生成 replacement/reallocate | §10 |
 | A08 | Combo Yield 只共享标准化证据，保留独立策略和 snapshot | §2 |
 | A09 | 人工不依赖 CSV 导出；Agent 是正式分析入口 | §10 |
-| A10 | 删除 runtime CSV/JSONL 候选流水线、重复 Position Advice artifact 和旧字段 | §12 |
+| A10 | 删除 runtime CSV/JSONL 候选流水线、重复候选 artifact 和旧字段 | §12 |
 | A11 | 开仓候选不考虑自动下单、自动换汇或自动归属 Wheel 批次 | §10 |
 | A12 | 当前代码与目标合同的差距必须明确，不能把文档目标声称为已上线 | §13 |
 
@@ -505,7 +505,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
   gamma、vega、gap-up/gap-down 等旧开仓评分；
 - OI / volume / delta 硬门槛；
 - 第二套 application 排序；
-- runtime CSV/JSONL 候选流水线和重复 Position Advice 候选 artifact；
+- runtime CSV/JSONL 候选流水线和重复候选 artifact；
 - multiplier `100` 默认值、旧 spot/last/CSV fallback；
 - 旧字段、旧 CLI 参数和只为已删除决策保留的兼容读取。
 
@@ -523,11 +523,11 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - Sell Put / Covered Call 的计算、硬筛和排序由 Candidate Engine 唯一所有；
 - 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
-- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，Agent、Daily Brief 和
-  Position Advice 读取同一封存事实；
+- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，Agent 和 Daily Brief
+  读取同一封存事实；
 - yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV/JSONL 权威路径和重复
-  Position Advice 候选 artifact 已退出当前开仓路径；历史读取只保留在明确的
-  Close Advice、Combo Yield、research/archive/shadow 兼容边界。
+  候选 artifact 已退出当前开仓路径；历史读取只保留在明确的
+  Combo Yield、research/archive/shadow 兼容边界。
 
 上述结论证明当前 `main` 源码与 v1.10.17 发布产物已按本合同运行。受控远程升级是
 独立授权边界；在完成升级和运行时验证前，不得宣称生产环境已按本合同运行。

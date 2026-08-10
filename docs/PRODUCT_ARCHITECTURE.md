@@ -84,7 +84,6 @@
 - Ledger / Position Lots
 - Position Lifecycle
 - Close Advice
-- Position Advice
 - Position / Income Reports
 
 核心事实模型：
@@ -93,15 +92,16 @@
 trade_events
   -> projection
   -> position_lots
-  -> position context / close advice / position advice / reports
+  -> position context / close advice / reports
 ```
 
 边界：
 
 - Ledger / projection 是持仓事实来源。
 - Feishu `option_positions` 不是 source of truth。
-- Close Advice 是持仓管理能力，不是开仓策略；其中 `short_vol` thesis 是持仓/平仓语义，本轮不重命名。
-- Position Advice v2 是独立的 portfolio-level advisory contract，比较 hold、roll、replace、reallocate 和 manual-review 方案；它不替代 Close Advice v1，也不构成交易执行授权。
+- Close Advice 是持仓管理能力，不是开仓策略。它只对 short put/call
+  判断严格止盈平仓，不比较新候选，不生成 roll、replace 或 reallocate。
+- 除 `close` 外的可评估持仓统一为 `hold`；证据不全为 `not_evaluable`。
 
 主要实现位置：
 
@@ -111,11 +111,6 @@ trade_events
 - `src/application/trades/`
 - `src/application/close_advice_runner.py`
 - `domain/domain/close_advice.py`
-- `src/application/position_advice_runner.py`
-- `src/application/position_advice_plan_builder.py`
-- `src/application/position_advice_reader.py`
-- `domain/domain/position_advice.py`
-- `domain/domain/position_advice_allocator.py`
 
 ### 3. 运行与通知
 
@@ -270,9 +265,10 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 | 支撑能力 | 定义 | 典型消费者 |
 |---|---|---|
 | 行情与 required data | 期权链、quote、DTE、IV、delta、multiplier 等开仓/平仓输入 | 开仓机会监控、Close Advice、Research |
-| Event Risk | 财报、除权等事件快照和状态 | 开仓机会监控、Close Advice |
+| Event Risk | 财报、除权等事件快照和状态 | 开仓机会监控、Research |
 | Portfolio / Ledger Context | 现金、正股、锁定股数、position lots、risk view | 开仓机会监控、持仓管理 |
-| Candidate Trace / Run Evidence | 拒绝原因、排序证据、运行状态、审计事件 | Tool Gateway 工具、Research、排障 |
+| Candidate Trace / Run Evidence | 开仓候选拒绝原因、排序证据、运行状态、审计事件 | Tool Gateway 工具、Research、排障 |
+| Close Report Evidence | 严格持仓决策、封存输入绑定、report manifest 和运行审计 | Daily Brief、Close Replay、人工查询 |
 | Storage | SQLite、`output_runs`、`output_shared`、reports、state | 全部产品域 |
 | External Adapters | OpenD/Futu、Feishu、exchange rate、subprocess | 运行与通知、数据采集、Inbound |
 | Domain Rules | 确定性策略、账本、通知、调度和 schema 决策 | Application use cases |
@@ -285,13 +281,12 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 - 开仓配置不再接受 `strategy=short_vol`。
 - Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；错期 Funding Put 仍通过显式依赖复用 Sell Put underwriting。
 - 已有错期两腿可用精确 lot id 原子登记 `pair_intent_id` 和共享 `strategy_group_id`，不做启发式匹配。
-- Close Advice 和持仓侧保留 `short_vol` thesis 命名。
+- Close Advice 已收敛为固定 `strict_profit_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
 - Research / Shadow Replay 与生产执行保持分离。
 
 当前未完全对齐：
 
 - Combo Yield 仍有部分内部模块/函数名沿用 legacy `yield_enhancement`。
-- Close Advice 侧仍保留 legacy `yield_enhancement` 持仓退出适配。
 
 下一步目标：
 

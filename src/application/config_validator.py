@@ -1157,43 +1157,42 @@ def validate_config(cfg: dict):
     if isinstance(close_advice, dict):
         if 'position_advice_authority' in close_advice:
             die(
-                'close_advice.position_advice_authority is not supported; '
-                'Position Advice authority is portfolio-scoped shared control-plane state'
+                'close_advice.position_advice_authority has been removed; '
+                'there is no Position Advice v2 authority or control plane'
             )
         if 'strategy' in close_advice or 'strategy_profile' in close_advice:
-            die('close_advice.strategy is not supported; close_advice uses sell_put/sell_call strategy')
+            die(
+                'close_advice.strategy is not supported; '
+                'close_advice uses the fixed strict_profit_capture.v1 policy'
+            )
         if 'optimizer' in close_advice:
             die('close_advice.optimizer has been removed')
         quote_source = str(close_advice.get('quote_source') or '').strip().lower()
         if quote_source and quote_source not in {'auto', 'required_data'}:
             die('close_advice.quote_source must be auto or required_data')
-        notify_levels = close_advice.get('notify_levels')
-        if notify_levels is not None:
-            if not isinstance(notify_levels, list):
-                die('close_advice.notify_levels must be a list')
-            bad_levels = [
-                str(item).strip().lower()
-                for item in notify_levels
-                if str(item).strip().lower() not in {'strong', 'medium', 'optional', 'weak'}
-            ]
-            if bad_levels:
-                die(f"close_advice.notify_levels has unsupported levels: {', '.join(bad_levels)}")
+        ignored_strict_policy_keys = sorted(
+            key
+            for key in (
+                'notify_levels',
+                'max_spread_ratio',
+                'strong_remaining_annualized_max',
+                'medium_remaining_annualized_max',
+                'quote_max_age_sec',
+            )
+            if key in close_advice
+        )
+        if ignored_strict_policy_keys:
+            warn(
+                'CLOSE_ADVICE_STRICT_POLICY_KEYS_IGNORED: '
+                'strict_profit_capture.v1 uses fixed versioned thresholds; '
+                'remove close_advice.'
+                + ', close_advice.'.join(ignored_strict_policy_keys)
+            )
         if 'max_items_per_account' in close_advice and close_advice.get('max_items_per_account') is not None:
             validate_non_negative_integer(
                 close_advice.get('max_items_per_account'),
                 'close_advice.max_items_per_account',
             )
-        if 'quote_max_age_sec' in close_advice and close_advice.get('quote_max_age_sec') is not None:
-            validate_positive_integer(
-                close_advice.get('quote_max_age_sec'),
-                'close_advice.quote_max_age_sec',
-            )
-        for key in ('max_spread_ratio', 'strong_remaining_annualized_max', 'medium_remaining_annualized_max'):
-            if key not in close_advice or close_advice.get(key) is None:
-                continue
-            if _finite_number(close_advice.get(key), f'close_advice.{key}') < 0:
-                die(f'close_advice.{key} must be >= 0')
-
     alert_policy = cfg.get('alert_policy')
     if alert_policy is not None and not isinstance(alert_policy, (dict, str)):
         die('alert_policy must be an object or a path string')

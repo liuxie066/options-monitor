@@ -29,10 +29,6 @@ from src.application.ledger.api import position_lot_risk_view
 from src.application.pipeline_watchlist import (
     resolve_watchlist_item_runtime_config,
 )
-from src.application.strategy_policy import (
-    resolve_position_strategy_semantics,
-    resolve_yield_enhancement_position_role,
-)
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -128,6 +124,8 @@ def build_close_advice_required_data_plan(
             if expected_broker and normalize_broker(view.broker) != expected_broker:
                 continue
             position = view.as_open_position_min(as_of_date=business_date)
+            if str(position.get("side") or "").strip().lower() != "short":
+                continue
             symbol = canonical_symbol(position.get("symbol")) or str(
                 position.get("symbol") or ""
             ).strip().upper()
@@ -178,10 +176,6 @@ def build_close_advice_required_data_plan(
                     expiration_fallback_raw=False,
                 )
             )
-            requires_rv = _position_requires_realized_volatility(
-                position,
-                config=config,
-            )
             requirement: dict[str, Any] = {
                 "position_lot_id": lot_id,
                 "market": market,
@@ -189,7 +183,7 @@ def build_close_advice_required_data_plan(
                 "option_type": option_type,
                 "expiration": expiration,
                 "strike": strike,
-                "requires_realized_volatility": requires_rv,
+                "requires_realized_volatility": False,
                 "quote_key": quote_key,
                 "planning_status": (
                     "ready" if binding_error is None else "unavailable"
@@ -386,8 +380,25 @@ def load_close_advice_required_data_plan(
 ) -> dict[str, Any]:
     target = Path(path).resolve()
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload_bytes = target.read_bytes()
+    except OSError as exc:
+        raise CloseAdviceRequiredDataPlanError(
+            "close-advice required-data plan is unreadable"
+        ) from exc
+    return _load_close_advice_required_data_plan_bytes(
+        payload_bytes=payload_bytes,
+        expected_run_id=expected_run_id,
+    )
+
+
+def _load_close_advice_required_data_plan_bytes(
+    *,
+    payload_bytes: bytes,
+    expected_run_id: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CloseAdviceRequiredDataPlanError(
             "close-advice required-data plan is unreadable"
         ) from exc
@@ -454,6 +465,25 @@ def resolve_bound_close_advice_required_data_plan(
     expected_run_id: str,
     expected_plan_path: Path | None = None,
 ) -> tuple[dict[str, Any], Path] | None:
+    snapshot = resolve_bound_close_advice_required_data_plan_snapshot(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        expected_run_id=expected_run_id,
+        expected_plan_path=expected_plan_path,
+    )
+    if snapshot is None:
+        return None
+    payload, candidate, _payload_bytes = snapshot
+    return payload, candidate
+
+
+def resolve_bound_close_advice_required_data_plan_snapshot(
+    *,
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    expected_run_id: str,
+    expected_plan_path: Path | None = None,
+) -> tuple[dict[str, Any], Path, bytes] | None:
     relpath_raw = manifest.get("close_advice_required_data_plan_relpath")
     sha_raw = manifest.get("close_advice_required_data_plan_sha256")
     if relpath_raw in (None, "") and sha_raw in (None, ""):
@@ -483,15 +513,23 @@ def resolve_bound_close_advice_required_data_plan(
             "close-advice required-data plan binding is unavailable"
         )
     expected_sha = _required_text(sha_raw, "plan sha256")
-    if not _is_sha256(expected_sha) or _sha256_file(candidate) != expected_sha:
+    try:
+        payload_bytes = candidate.read_bytes()
+    except OSError as exc:
+        raise CloseAdviceRequiredDataPlanError(
+            "close-advice required-data plan binding is unavailable"
+        ) from exc
+    if not _is_sha256(expected_sha) or hashlib.sha256(
+        payload_bytes
+    ).hexdigest() != expected_sha:
         raise CloseAdviceRequiredDataPlanError(
             "close-advice required-data plan file hash mismatch"
         )
-    payload = load_close_advice_required_data_plan(
-        path=candidate,
+    payload = _load_close_advice_required_data_plan_bytes(
+        payload_bytes=payload_bytes,
         expected_run_id=expected_run_id,
     )
-    return payload, candidate
+    return payload, candidate, payload_bytes
 
 
 def account_requirement_index(
@@ -528,25 +566,6 @@ def account_requirement_index(
         if lot_id and reason:
             reasons.setdefault(lot_id, reason)
     return requirements, reasons, str(raw.get("status") or "unavailable")
-
-
-def _position_requires_realized_volatility(
-    position: dict[str, Any],
-    *,
-    config: dict[str, Any],
-) -> bool:
-    if resolve_yield_enhancement_position_role(
-        position
-    ).is_yield_enhancement_long_call:
-        return False
-    try:
-        _resolution, semantics = resolve_position_strategy_semantics(
-            position=position,
-            config=config,
-        )
-        return bool(semantics.close_requires_rv)
-    except Exception:
-        return False
 
 
 def _requirement_id(
@@ -610,14 +629,6 @@ def _is_sha256(value: Any) -> bool:
     return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 __all__ = [
     "CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA",
     "CloseAdviceRequiredDataPlanError",
@@ -628,5 +639,6 @@ __all__ = [
     "load_close_advice_required_data_plan",
     "publish_close_advice_required_data_plan",
     "resolve_bound_close_advice_required_data_plan",
+    "resolve_bound_close_advice_required_data_plan_snapshot",
     "resolve_position_fetch_binding",
 ]

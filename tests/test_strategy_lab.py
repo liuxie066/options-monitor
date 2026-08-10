@@ -307,73 +307,100 @@ def _write_close_run(
     *,
     include_audit: bool = True,
     include_candidate: bool = False,
+    empty: bool = False,
 ) -> Path:
+    from src.application.close_advice_report_manifest import (
+        publish_close_advice_report_manifest,
+    )
+
     account_dir = runs_root / run_id / "accounts" / "lx"
     close_path = account_dir / "close_advice.csv"
+    snapshot_manifest_sha256 = "a" * 64
+    required_data_plan_sha256 = "b" * 64
     row = {
         "account": "lx",
         "position_lot_id": "lot-1",
+        "broker": "富途",
         "symbol": "NVDA",
         "option_type": "put",
         "expiration": "2026-08-21",
         "strike": 100,
         "position_side": "short",
         "strategy_family": "sell_put",
-        "strategy_profile": "insurance_underwriting",
-        "tier": "medium",
-        "exit_state": "profit_capture",
+        "strategy_profile": "strict_profit_capture.v1",
         "evaluation_status": "priced",
         "fee_calc_status": "schedule_estimate",
-        "estimated_pnl_if_close_net": 80,
-        "short_vol_thesis_status": "valid",
-        "continued_willingness": "true",
-        "close_calibration_status": "complete",
-        "capture_ratio": 0.85,
-        "remaining_annualized_return": 0.07,
+        "premium": 2.0,
+        "opening_gross_credit": 200.0,
+        "estimated_open_fee": 0.5,
+        "opening_net_credit": 199.5,
+        "all_in_close_cost": 8.5,
+        "estimated_pnl_if_close_net": 191.0,
+        "net_capture_ratio": 1 - 8.5 / 199.5,
+        "close_cost_ratio": 0.00085,
         "dte": 29,
-        "close_mid": 0.2,
-        "bid": 0.19,
-        "ask": 0.21,
-        "remaining_premium": 20,
+        "original_dte": 58,
+        "remaining_term_ratio": 0.5,
+        "spot": 120,
+        "is_otm": True,
+        "close_mid": 0.065,
+        "bid": 0.06,
+        "ask": 0.07,
+        "spread_ratio": (0.07 - 0.06) / 0.065,
         "estimated_close_fee": 1.5,
         "fee_calc_basis": "futu_us_fixed_package_2026-07-22",
         "contracts_open": 1,
         "multiplier": 100,
         "currency": "USD",
-        "policy_version": "p0_current.v1",
+        "policy_version": "strict_profit_capture.v1",
         "recommendation_state": "close",
-        "decision_basis": "profit_capture_medium",
+        "decision_basis": "strict_profit_capture_all_gates_passed",
         "decision_evidence_status": "complete",
+        "quote_mode": "frozen_snapshot",
+        "required_data_snapshot_manifest_sha256": snapshot_manifest_sha256,
+        "close_advice_required_data_plan_sha256": required_data_plan_sha256,
     }
     close_path.parent.mkdir(parents=True, exist_ok=True)
     with close_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(row))
         writer.writeheader()
-        writer.writerow(row)
+        if not empty:
+            writer.writerow(row)
     context_path = account_dir / "state" / "option_positions_context.json"
     context_path.parent.mkdir(parents=True, exist_ok=True)
-    context_path.write_text(
-        json.dumps(
+    context = {
+        "as_of_utc": "2026-07-23T01:00:30Z",
+        "filters": {"account": "lx"},
+        "open_positions_min": [
             {
-                "as_of_utc": "2026-07-23T01:00:30Z",
-                "open_positions_min": [
-                    {
-                        "record_id": "lot-1",
-                        "account": "lx",
-                        "symbol": "NVDA",
-                        "option_type": "put",
-                        "side": "short",
-                        "expiration": "2026-08-21",
-                        "strike": 100,
-                        "contracts": 1,
-                        "contracts_open": 1,
-                        "multiplier": 100,
-                        "currency": "USD",
-                    }
-                ],
+                "record_id": "lot-1",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "contracts": 1,
+                "contracts_open": 1,
+                "multiplier": 100,
+                "currency": "USD",
             }
-        ),
-        encoding="utf-8",
+        ],
+    }
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    text_path = account_dir / "close_advice.txt"
+    text_path.write_text("", encoding="utf-8")
+    publish_close_advice_report_manifest(
+        csv_path=close_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=[] if empty else [row],
+        markets_to_run=["US"],
+        run_id=run_id,
+        quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256=snapshot_manifest_sha256,
+        close_advice_required_data_plan_sha256=required_data_plan_sha256,
     )
     if include_audit:
         audit_path = runs_root / run_id / "state" / "audit_events.jsonl"
@@ -1832,9 +1859,7 @@ def test_strategy_lab_update_skips_empty_close_run_and_keeps_candidate_build(tmp
     from src.application.strategy_lab import run_strategy_lab_update
 
     runs_root = tmp_path / "output_runs"
-    empty_close = runs_root / "20260723T020000Z-empty" / "accounts" / "lx" / "close_advice.csv"
-    empty_close.parent.mkdir(parents=True, exist_ok=True)
-    empty_close.write_text("account,position_lot_id\n", encoding="utf-8")
+    _write_close_run(runs_root, "20260723T020000Z-empty", empty=True)
     _write_candidate_run(runs_root, "20260723T030000Z-candidate")
     dataset_root = tmp_path / "datasets"
 
@@ -1853,6 +1878,40 @@ def test_strategy_lab_update_skips_empty_close_run_and_keeps_candidate_build(tmp
     assert close_build["reason"] == "latest_close_decision_run_not_found"
     assert close_build["source_selection"]["skipped_empty_count"] == 1
     assert result["summary"]["dataset_built"] is True
+
+
+def test_strategy_lab_update_rejects_uncommitted_empty_close_report(
+    tmp_path: Path,
+) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    close_path = (
+        runs_root
+        / "20260723T020000Z-empty"
+        / "accounts"
+        / "lx"
+        / "close_advice.csv"
+    )
+    close_path.parent.mkdir(parents=True, exist_ok=True)
+    close_path.write_text("account,position_lot_id\n", encoding="utf-8")
+    candidate_run_id = "20260723T030000Z-candidate"
+    _write_candidate_run(runs_root, candidate_run_id)
+    dataset_root = tmp_path / "datasets"
+
+    with pytest.raises(ValueError, match="close_advice_manifest_missing"):
+        run_strategy_lab_update(
+            repo_root=tmp_path,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            build_dataset=True,
+            include_close_decisions=True,
+            write=True,
+            max_datasets=0,
+            min_sample=1,
+        )
+
+    assert (dataset_root / candidate_run_id / "manifest.json").is_file()
 
 
 def test_strategy_lab_update_malformed_close_fails_after_independent_candidate_build(tmp_path: Path) -> None:

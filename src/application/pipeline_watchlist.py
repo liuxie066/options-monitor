@@ -428,9 +428,9 @@ def run_watchlist_pipeline(
     build_pipeline_context_fn: Callable[..., tuple[dict | None, dict | None, float | None, float | None]],
     build_symbols_summary_fn: Callable[[list[dict]], object],
     build_symbols_digest_fn: Callable[[list[dict], int], object],
-    position_advice_quote_snapshot_ids: dict[str, str] | None = None,
-    position_advice_producer_run_id: str | None = None,
-    position_advice_candidate_capture_status_sink_fn: (
+    quote_snapshot_ids: dict[str, str] | None = None,
+    source_producer_run_id: str | None = None,
+    candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
     opening_final_candidates_sink_fn: (
@@ -474,7 +474,7 @@ def run_watchlist_pipeline(
             prepared_portfolio_context_manifest
         )
         context_kwargs["prepared_portfolio_context_run_id"] = (
-            position_advice_producer_run_id
+            source_producer_run_id
         )
         context_kwargs[
             "prepared_portfolio_context_account_config_sha256"
@@ -487,7 +487,7 @@ def run_watchlist_pipeline(
             "prepared_option_positions_context_manifest"
         ] = prepared_option_positions_context_manifest
         context_kwargs["prepared_option_positions_context_run_id"] = (
-            position_advice_producer_run_id
+            source_producer_run_id
         )
         context_kwargs[
             "prepared_option_positions_context_account_config_sha256"
@@ -512,7 +512,7 @@ def run_watchlist_pipeline(
     expected_strategy_statuses: list[dict[str, str]] = []
     if (
         required_data_snapshot_manifest is not None
-        and str(position_advice_producer_run_id or "").strip()
+        and str(source_producer_run_id or "").strip()
     ):
         for item0 in watchlist_items:
             resolved = resolve_watchlist_item_runtime_config(
@@ -622,20 +622,20 @@ def run_watchlist_pipeline(
             item_portfolio_ctx = dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
             symbol_key = normalize_symbol_read(item.get("symbol"))
             quote_snapshot_id = (
-                (position_advice_quote_snapshot_ids or {}).get(symbol_key)
+                (quote_snapshot_ids or {}).get(symbol_key)
                 if symbol_key
                 else None
             )
             advice_scan_kwargs: dict[str, Any] = {}
             if (
-                position_advice_candidate_capture_status_sink_fn is not None
+                candidate_capture_status_sink_fn is not None
             ):
                 advice_scan_kwargs = {
-                    "position_advice_producer_run_id": (
-                        position_advice_producer_run_id
+                    "source_producer_run_id": (
+                        source_producer_run_id
                     ),
                     "candidate_capture_status_sink_fn": (
-                        position_advice_candidate_capture_status_sink_fn
+                        candidate_capture_status_sink_fn
                     ),
                     "final_candidates_sink_fn": (
                         opening_final_candidates_sink_fn
@@ -654,7 +654,7 @@ def run_watchlist_pipeline(
                             required_data_snapshot_manifest
                         ),
                         "required_data_snapshot_run_id": (
-                            position_advice_producer_run_id
+                            source_producer_run_id
                         ),
                     }
                 )
@@ -730,7 +730,7 @@ def run_watchlist_pipeline(
         build_symbols_digest_fn(summary_rows, int(top_n))
         if (
             required_data_snapshot_manifest is not None
-            and str(position_advice_producer_run_id or "").strip()
+            and str(source_producer_run_id or "").strip()
         ):
             portfolio_cfg = (
                 cfg.get("portfolio")
@@ -739,7 +739,7 @@ def run_watchlist_pipeline(
             )
             publish_strategy_scan_status_index(
                 report_dir=report_dir,
-                run_id=str(position_advice_producer_run_id),
+                run_id=str(source_producer_run_id),
                 account=str(portfolio_cfg.get("account") or ""),
                 expected=expected_strategy_statuses,
             )
@@ -765,7 +765,7 @@ def run_watchlist_pipeline_default(
     symbols_arg: str | None,
     log: Callable[[str], None],
     want_fn: Callable[[str], bool],
-    position_advice_account_run_id: str | None = None,
+    source_account_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
@@ -779,7 +779,7 @@ def run_watchlist_pipeline_default(
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
     whitelist = _parse_symbols_whitelist(symbols_arg)
-    account_run_id = str(position_advice_account_run_id or "").strip()
+    account_run_id = str(source_account_run_id or "").strip()
     capture_statuses: list[dict[str, Any]] = []
     captured_final_candidates: dict[str, list[dict[str, Any]]] = {
         "put": [],
@@ -870,10 +870,10 @@ def run_watchlist_pipeline_default(
             if is_scheduled
             else build_symbols_digest([r.get("symbol") for r in rows if r.get("symbol")], report_dir)
         ),
-        position_advice_producer_run_id=(
+        source_producer_run_id=(
             account_run_id if candidate_capture_enabled else None
         ),
-        position_advice_candidate_capture_status_sink_fn=(
+        candidate_capture_status_sink_fn=(
             _capture_status if candidate_capture_enabled else None
         ),
         opening_final_candidates_sink_fn=(

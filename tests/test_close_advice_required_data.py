@@ -53,10 +53,15 @@ def _position(
             "option_type": "put",
             "contracts": 1,
             "contracts_open": 1,
+            "multiplier": 100,
             "strike": 100,
             "expiration_ymd": expiration,
             "currency": "USD",
             "premium": 2.0,
+            "opened_at": int(
+                datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+                * 1000
+            ),
         },
     }
 
@@ -892,6 +897,79 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
     } == before
 
 
+def test_bound_plan_snapshot_returns_the_exact_validated_generation(
+    tmp_path: Path,
+) -> None:
+    from src.application.close_advice_required_data import (
+        resolve_bound_close_advice_required_data_plan_snapshot,
+    )
+    from src.application.required_data_snapshot import (
+        load_required_data_snapshot_manifest_snapshot,
+    )
+
+    (
+        _config_payload,
+        _context_path,
+        required_root,
+        _output_dir,
+        manifest_path,
+    ) = _frozen_workspace(tmp_path)
+    manifest, _root, _manifest_bytes = (
+        load_required_data_snapshot_manifest_snapshot(
+            manifest_path=manifest_path,
+            expected_run_id="run-1",
+            expected_required_data_root=required_root,
+        )
+    )
+    snapshot = resolve_bound_close_advice_required_data_plan_snapshot(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        expected_run_id="run-1",
+    )
+    assert snapshot is not None
+    payload, plan_path, plan_bytes = snapshot
+    plan_path.write_text("{}\n", encoding="utf-8")
+
+    assert json.loads(plan_bytes) == payload
+    assert plan_path.read_bytes() != plan_bytes
+
+
+def test_frozen_close_advice_rejects_parent_manifest_generation_mismatch(
+    tmp_path: Path,
+) -> None:
+    from src.application.close_advice_runner import run_close_advice
+
+    (
+        config,
+        context_path,
+        required_root,
+        output_dir,
+        manifest_path,
+    ) = _frozen_workspace(tmp_path)
+
+    result = run_close_advice(
+        config=config,
+        context_path=context_path,
+        required_data_root=required_root,
+        output_dir=output_dir,
+        base_dir=tmp_path,
+        markets_to_run=["US"],
+        required_data_snapshot_manifest=manifest_path,
+        required_data_snapshot_manifest_sha256="0" * 64,
+        required_data_snapshot_run_id="run-1",
+        close_advice_required_data_plan=(
+            manifest_path.parent / "close_advice_required_data_plan.json"
+        ),
+        account="lx",
+    )
+
+    assert result["status"] == "snapshot_integrity_failed"
+    assert result["snapshot_authority"] == "invalid"
+    assert "generation mismatch" in result["integrity_failure"]["evidence"][
+        "message"
+    ]
+
+
 def test_frozen_integrity_failure_invalidates_old_success_report(
     tmp_path: Path,
 ) -> None:
@@ -941,6 +1019,56 @@ def test_frozen_integrity_failure_invalidates_old_success_report(
     assert validation["ok"] is False
     assert validation["reason"] == "close_advice_manifest_not_success"
     assert validation["status"] == "failed"
+
+
+def test_close_report_manifest_binds_run_and_quote_mode(tmp_path: Path) -> None:
+    from src.application.close_advice_report_manifest import (
+        validate_close_advice_report_manifest,
+    )
+    from src.application.close_advice_runner import run_close_advice
+
+    (
+        config,
+        context_path,
+        required_root,
+        output_dir,
+        manifest_path,
+    ) = _frozen_workspace(tmp_path)
+    result = run_close_advice(
+        config=config,
+        context_path=context_path,
+        required_data_root=required_root,
+        output_dir=output_dir,
+        base_dir=tmp_path,
+        markets_to_run=["US"],
+        required_data_snapshot_manifest=manifest_path,
+        required_data_snapshot_run_id="run-1",
+        close_advice_required_data_plan=(
+            manifest_path.parent / "close_advice_required_data_plan.json"
+        ),
+        account="lx",
+    )
+
+    assert result["snapshot_authority"] == "valid"
+    valid = validate_close_advice_report_manifest(
+        csv_path=output_dir / "close_advice.csv",
+        desired_market="US",
+        account="lx",
+        expected_run_id="run-1",
+        expected_quote_mode="frozen_snapshot",
+    )
+    wrong_run = validate_close_advice_report_manifest(
+        csv_path=output_dir / "close_advice.csv",
+        expected_run_id="run-2",
+    )
+    wrong_mode = validate_close_advice_report_manifest(
+        csv_path=output_dir / "close_advice.csv",
+        expected_quote_mode="legacy_mutable",
+    )
+
+    assert valid["ok"] is True
+    assert wrong_run["reason"] == "close_advice_report_run_mismatch"
+    assert wrong_mode["reason"] == "close_advice_report_quote_mode_mismatch"
 
 
 def test_frozen_missing_exact_contract_is_position_scoped_without_fetch(
