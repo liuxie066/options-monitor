@@ -2219,6 +2219,29 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
     )
 
 
+def test_runtime_status_diagnostics_survive_unavailable_secret_backend(monkeypatch, tmp_path: Path) -> None:
+    from src.application.secret_store import reset_default_secret_provider
+    from src.infrastructure.secret_store import factory as secret_factory
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+    monkeypatch.delenv("OM_SECRET_BACKEND", raising=False)
+    monkeypatch.setattr(secret_factory.platform, "system", lambda: "Linux")
+    reset_default_secret_provider()
+
+    data, _warnings, _meta = _call_runtime_status_for_upgrade(
+        tmp_path,
+        fixture["cfg_path"],
+        fixture["cfg"],
+    )
+
+    health = data["channel_health"]["feishu"]
+    assert health["configured"] is True
+    assert health["available"] is False
+    assert health["credentials_configured"] is False
+    assert health["credential_error"].startswith("SecretBackendUnavailable:")
+    assert data["environment"]["secret_credentials"]["summary"]["values_exposed"] is False
+
+
 def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
 
