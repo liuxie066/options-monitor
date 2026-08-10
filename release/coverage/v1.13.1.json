@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.1",
+  "base": {
+    "tag": "v1.13.0",
+    "commit": "0d635e116ab46c1caafb2a93f325fc23a992c27d"
+  },
+  "reviewed_head": "81f79787ffeff073f15ff45f2618ee368eebabc4",
+  "commits": [
+    {
+      "sha": "15523172413f0c9e5d42f5357aaaeb3f44d1dc5a",
+      "subject": "feat(security): add runtime credential delivery"
+    },
+    {
+      "sha": "81f79787ffeff073f15ff45f2618ee368eebabc4",
+      "subject": "merge(security): integrate runtime credential delivery"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added an explicit Linux `runtime-files` secret-delivery profile for restricted Incus/LXC hosts, materializing fixed systemd-encrypted credentials into a root-owned tmpfs runtime directory without exposing secret values through argv, logs, or environment variables.",
+      "commits": [
+        "15523172413f0c9e5d42f5357aaaeb3f44d1dc5a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added a guarded `om service credentials-migrate` workflow with decryptability and consumer preflights, dry-run-first activation, active-service-only restarts, post-apply drift verification, rollback, and legacy shared-environment cleanup only after a successful cutover.",
+      "commits": [
+        "15523172413f0c9e5d42f5357aaaeb3f44d1dc5a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed service-profile drift and rollback to compare against the profile persisted on disk, so failed credential migrations restore the previous profile and unit state instead of validating against the requested target profile.",
+      "commits": [
+        "15523172413f0c9e5d42f5357aaaeb3f44d1dc5a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "81f79787ffeff073f15ff45f2618ee368eebabc4",
+      "reason": "Integration merge contains the already mapped runtime credential delivery change and adds no separate user-facing behavior."
+    }
+  ]
+}
