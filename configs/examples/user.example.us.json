@@ -19,11 +19,9 @@
       },
       "combo_yield": {
         "enabled": true,
-        "structure_mode": "staggered_expiry_pair",
+        "structure_mode": "same_expiry_pair",
         "min_combo_net_credit": 0,
         "min_net_credit_retention": 0.6,
-        "min_expiry_gap_days": 30,
-        "max_expiry_gap_days": 90,
         "call": {
           "min_delta": 0.1,
           "max_delta": 0.45
