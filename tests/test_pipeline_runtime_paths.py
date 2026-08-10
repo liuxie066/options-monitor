@@ -162,7 +162,7 @@ def test_pipeline_runtime_passes_validated_account_config_payload_to_loader(
         + [
             "--stage",
             "fetch",
-            "--position-advice-account-run-id",
+            "--source-account-run-id",
             "run-pipeline",
             "--prepared-option-positions-context-manifest",
             str(prepared_options),
@@ -237,7 +237,7 @@ def test_pipeline_runtime_classifies_prepared_option_context_failure(
             + [
                 "--stage",
                 "fetch",
-                "--position-advice-account-run-id",
+                "--source-account-run-id",
                 authority.run_id,
                 "--prepared-option-positions-context-manifest",
                 str(prepared_options),

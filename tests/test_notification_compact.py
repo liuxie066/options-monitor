@@ -167,46 +167,6 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
     assert out.index("### Put") < out.index("### Call")
 
 
-def test_render_markdown_compact_long_call_metrics() -> None:
-    from src.application.close_advice_runner import render_markdown_compact
-
-    rows = [
-        {
-            "account": "sy",
-            "symbol": "9992.HK",
-            "option_type": "call",
-            "position_side": "long",
-            "expiration": "2026-07-30",
-            "strike": 167.5,
-            "tier": "medium",
-            "evaluation_status": "priced",
-            "dte": 59,
-            "premium": 6.38,
-            "close_mid": 19.0,
-            "bid": 18.8,
-            "ask": 19.2,
-            "realized_if_close": 2458.0,
-            "remaining_premium": 3760.0,
-            "long_call_value_ratio": 2.978,
-            "long_call_cost_basis": 1276.0,
-            "long_call_current_value": 3760.0,
-            "currency": "HKD",
-            "strategy": "yield_enhancement",
-            "leg_role": "enhancement_call",
-            "risk_model": "long_call_convexity",
-            "close_action": "sell_call_take_profit",
-        }
-    ]
-
-    md = render_markdown_compact(rows, notify_levels={"strong", "medium"}, max_items=5)
-
-    assert "🟠 卖Call止盈 9992.HK Call 167.5C @ 07-30" in md
-    assert "- 现值/成本 3.0x · 59天 · 浮盈 +198%" in md
-    assert "- 建议出价 ¥19 · 买一/卖一 ¥18.8/¥19.2 · 收益 ¥2,458（余 ¥3,760）" in md
-    assert "已锁定 -" not in md
-    assert "余年化 -" not in md
-
-
 def test_build_account_message_compact() -> None:
     from src.application.multi_tick.misc import AccountResult
     from src.application.multi_tick.notify_format import build_account_message_compact
@@ -216,9 +176,9 @@ def test_build_account_message_compact() -> None:
         "腾讯 卖Put 2026-04-29 460P\n"
         "担保 1张 余量 ¥-100\n"
         "\n"
-        "### [lx] 平仓建议\n"
-        "- NVDA Put 2026-06-19 150P · 强烈建议平仓\n"
-        "- 已锁定: 85.0% | 剩余DTE=14 | 剩余收益年化=5.0%\n"
+        "### [lx] 严格平仓提醒\n"
+        "- NVDA Put 2026-06-19 @150.00 · 建议买回平仓\n"
+        "- 条件: 净兑现 95.0% | 平仓全成本/名义本金 0.1% | 剩余期限 50.0%\n"
     )
 
     message = build_account_message_compact(
@@ -242,7 +202,7 @@ def test_build_account_message_compact() -> None:
     assert "时间｜2026-05-12 22:31:00 北京时间" in message
     assert "结论｜Put 1 · Call 0 · 平仓 1" in message
     assert "## 候选\nPut\n- 腾讯 卖Put 2026-04-29 460P" in message
-    assert "## 持仓\nNVDA Put 2026-06-19 150P · 强烈建议平仓" in message
+    assert "## 持仓\nNVDA Put 2026-06-19 @150.00 · 建议买回平仓" in message
     assert "## 资金\n账户｜LX 总现金 ¥1,000 (CNY)｜担保后 ¥200 (CNY)" in message
     assert "数据｜截至 2026-05-12 22:30:00 北京时间" in message
     assert "──────────────" not in message

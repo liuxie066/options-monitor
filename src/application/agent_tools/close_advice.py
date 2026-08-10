@@ -30,8 +30,6 @@ _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].recommendation_state",
         "rows[].decision_basis",
         "rows[].decision_evidence_status",
-        "rows[].close_action",
-        "rows[].tier_label",
         "rows[].evaluation_status",
         "rows[].quote_status",
         "rows[].reason",
@@ -86,7 +84,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     handler=_close_advice_read_tool,
     pure_read=True,
     safe_default_input={},
-    examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
+    examples=({"input": {"config_key": "us", "query": {"option_type": "put", "side": "short"}}},),
     output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
     copilot_input_fields=("config_key", "market_scope", "query", "run_id"),
 )

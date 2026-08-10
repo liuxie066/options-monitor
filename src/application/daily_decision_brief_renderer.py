@@ -44,48 +44,10 @@ _COMBO_LEG_LABELS = {
     "covered_call": "Call 侧",
     "call": "Call 侧",
 }
-_CLOSE_ACTION_LABELS = {
+_CLOSE_RECOMMENDATION_LABELS = {
     "close": "建议平仓",
-    "close_put_keep_call": "建议平掉 Put，保留 Call",
-    "hold_put_keep_call": "继续持有 Put，保留 Call",
-    "sell_call_take_profit": "建议卖出 Call 止盈",
-    "sell_call_salvage": "建议卖出 Call 回收价值",
-    "hold_to_expiry_or_expire": "继续持有至到期",
-    "hold_call_as_convexity": "继续持有 Call",
-    "hold_call": "继续持有 Call",
-    "hold": "继续观察",
-}
-_POSITION_ADVICE_LABELS = {
-    "roll": "建议滚仓",
-    "replace": "建议替换当前期权腿",
-    "reallocate": "建议重新分配资金",
-    "review": "持仓事实待核查",
     "hold": "继续观察",
     "not_evaluable": "暂无法评估（证据不足）",
-    "none": "继续观察",
-}
-_POSITION_REVIEW_REASON_LABELS = {
-    "combo_identity_unverified": "组合身份尚未核验",
-    "combo_opening_incomplete": "组合开仓证据不完整",
-    "combo_partially_decomposed": "组合已部分拆解，需确认剩余结构",
-    "combo_review_required": "组合状态需要人工确认",
-    "lifecycle_conflict": "持仓生命周期证据存在冲突",
-    "lifecycle_needs_review": "持仓生命周期状态需要人工确认",
-    "lifecycle_read_model_missing": "持仓生命周期读取信息不完整",
-    "promotion_scope_uncovered": "当前持仓不在已批准的 Position Advice 范围",
-    "v2_not_authoritative": "Position Advice v2 当前不是正式交易建议来源",
-}
-_STANDARD_CLOSE_TIER_LABELS = {
-    "strong": "强烈建议平仓",
-    "medium": "建议平仓",
-    "weak": "可观察平仓",
-    "optional": "低价买回可选",
-}
-_CLOSE_DETAIL_ACTIONS = {
-    "close",
-    "close_put_keep_call",
-    "sell_call_take_profit",
-    "sell_call_salvage",
 }
 
 
@@ -733,24 +695,25 @@ def _render_user_view_card(
                     ]
                 )
                 facts = [
-                    f"参考平仓价 {_table_cell(item.get('close_mid'))}"
-                    if item.get("close_mid") not in (None, "")
+                    f"买回参考价 {_table_cell(item.get('close_ask'))}"
+                    if item.get("close_ask") not in (None, "")
                     else "",
                     f"预计锁定损益 {_table_cell(item.get('realized_if_close'))}"
                     if item.get("realized_if_close") not in (None, "")
                     else "",
-                    f"剩余年化 {_table_cell(item.get('remaining_annualized'))}"
-                    if item.get("remaining_annualized") not in (None, "")
+                    f"净兑现比例 {_table_cell(item.get('net_capture'))}"
+                    if item.get("net_capture") not in (None, "")
+                    else "",
+                    f"平仓成本占本金 {_table_cell(item.get('close_cost_ratio'))}"
+                    if item.get("close_cost_ratio") not in (None, "")
+                    else "",
+                    f"剩余期限比例 {_table_cell(item.get('remaining_term_ratio'))}"
+                    if item.get("remaining_term_ratio") not in (None, "")
                     else "",
                 ]
                 facts = [fact for fact in facts if fact]
                 if facts:
                     lines.append("参考｜" + " · ".join(facts))
-            decision_details = _render_position_decision_details_card(
-                positions
-            )
-            if decision_details:
-                lines.extend(["", *decision_details])
         if fact_reviews:
             lines.extend(
                 [
@@ -1336,9 +1299,9 @@ def _position_contract_label(row: Mapping[str, Any], *, market: str) -> str:
 
 
 def _position_status_label(row: Mapping[str, Any]) -> str:
-    recommendation = _lower(row.get("recommendation"))
-    if recommendation in _POSITION_ADVICE_LABELS:
-        return _POSITION_ADVICE_LABELS[recommendation]
+    recommendation = _lower(row.get("recommendation_state"))
+    if recommendation == "not_evaluable":
+        return _CLOSE_RECOMMENDATION_LABELS["not_evaluable"]
     evaluation = _lower(row.get("evaluation_status"))
     quote = _lower(row.get("quote_status"))
     statuses = {evaluation, quote}
@@ -1354,51 +1317,24 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     if evaluation not in known_evaluation or quote not in known_quote:
         return "暂无法评估（报价质量不足）"
 
-    action = _lower(row.get("close_action"))
-    if action == "not_evaluable":
-        return "暂无法评估（报价质量不足）"
-    if action == "close":
-        return _STANDARD_CLOSE_TIER_LABELS.get(
-            _lower(row.get("tier")),
-            _CLOSE_ACTION_LABELS[action],
-        )
-    if action in _CLOSE_ACTION_LABELS:
-        return _CLOSE_ACTION_LABELS[action]
-    tier = _lower(row.get("tier"))
-    if tier in {"strong", "medium"}:
-        return "建议复核持仓"
-    if tier in {"", "observe", "weak", "none"}:
-        return "继续观察"
+    if recommendation in _CLOSE_RECOMMENDATION_LABELS:
+        return _CLOSE_RECOMMENDATION_LABELS[recommendation]
     return "暂无法评估（报价质量不足）"
 
 
-_POSITION_ACTIONABLE_LABELS = frozenset(
-    [
-        *(_CLOSE_ACTION_LABELS[action] for action in _CLOSE_DETAIL_ACTIONS),
-        *(
-            _POSITION_ADVICE_LABELS[action]
-            for action in ("roll", "replace", "reallocate", "review")
-        ),
-        *_STANDARD_CLOSE_TIER_LABELS.values(),
-        "建议复核持仓",
-    ]
-)
+_POSITION_ACTIONABLE_LABELS = frozenset({"建议平仓"})
 
 
 def _position_has_advice(row: Mapping[str, Any]) -> bool:
-    # 只展示指向实际动作的持仓（平仓/止盈建议、需人工复核）；
-    # “继续观察”和无法评估的持仓不需要用户做出变化，属于干扰信息
+    # 只展示严格策略已触发的平仓动作；hold 和
+    # not_evaluable 仍保留在结构化审计数据中，但不进入普通提醒。
     if row.get("notification_eligible") is False:
         return False
     return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
 
 
 def _is_position_fact_review(row: Mapping[str, Any]) -> bool:
-    return (
-        _lower(row.get("recommendation")) == "review"
-        and row.get("human_review_required") is True
-        and row.get("model_trade_actionable") is not True
-    )
+    return False
 
 
 def _partition_position_views(
@@ -1445,100 +1381,62 @@ def _position_summary(
 
 
 def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:
-    recommendation = _lower(row.get("recommendation"))
-    if recommendation in {"roll", "replace", "reallocate"}:
-        metrics = (
-            row.get("metrics")
-            if isinstance(row.get("metrics"), Mapping)
-            else {}
-        )
-        parts: list[str] = []
-        improvement = _number(
-            metrics.get("net_carry_improvement_H_base_cny")
-        )
-        if improvement is not None:
-            parts.append(f"比较期净 carry 提升 {_currency_money('CNY', improvement)}")
-        payback = _number(metrics.get("payback_days"))
-        if payback is not None:
-            parts.append(f"摩擦回收期 {payback:g} 天")
-        horizon = _number(metrics.get("comparison_horizon_days"))
-        if horizon is not None:
-            parts.append(f"比较期限 {horizon:g} 天")
-        return [" · ".join(parts)] if parts else []
-    if recommendation == "review":
-        reasons = [
-            _POSITION_REVIEW_REASON_LABELS.get(
-                str(item),
-                str(item),
-            )
-            for item in row.get("reason_codes") or []
-            if str(item)
-        ]
-        return ["；".join(reasons)] if reasons else []
-    if status.startswith("暂无法评估") or _lower(row.get("close_action")) not in _CLOSE_DETAIL_ACTIONS:
+    if (
+        status.startswith("暂无法评估")
+        or _lower(row.get("recommendation_state")) != "close"
+    ):
         return []
     metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
     parts: list[str] = []
-    close_mid = _number(metrics.get("close_mid"))
-    if close_mid is not None:
-        parts.append(f"参考平仓价 {_money(close_mid, market=market)}（mid）")
-    realized = _number(metrics.get("realized_if_close"))
+    close_ask = _number(metrics.get("ask"))
+    if close_ask is not None:
+        parts.append(f"买回参考价 {_money(close_ask, market=market)}（ask）")
+    realized = _number(metrics.get("estimated_pnl_if_close_net"))
     if realized is not None:
         label = "预计锁定收益" if realized >= 0 else "预计平仓损益"
         parts.append(f"{label} {_money(realized, market=market)}")
-    remaining_annualized = _number(metrics.get("remaining_annualized_return"))
-    if remaining_annualized is not None:
-        parts.append(f"剩余权利金毛年化 {_percent(remaining_annualized)}")
+    capture = _number(metrics.get("net_capture_ratio"))
+    if capture is not None:
+        parts.append(f"净兑现比例 {_percent(capture)}")
+    close_cost_ratio = _number(metrics.get("close_cost_ratio"))
+    if close_cost_ratio is not None:
+        parts.append(f"全成本平仓占名义本金 {_percent(close_cost_ratio)}")
+    remaining_term = _number(metrics.get("remaining_term_ratio"))
+    if remaining_term is not None:
+        parts.append(f"剩余期限比例 {_percent(remaining_term)}")
     return [" · ".join(parts)] if parts else []
 
 
 def _position_card_fields(row: Mapping[str, Any], *, market: str, status: str) -> dict[str, str]:
-    if status.startswith("暂无法评估") or _lower(row.get("close_action")) not in _CLOSE_DETAIL_ACTIONS:
+    if (
+        status.startswith("暂无法评估")
+        or _lower(row.get("recommendation_state")) != "close"
+    ):
         return {
-            "close_mid": "—",
+            "close_ask": "—",
             "realized_if_close": "—",
-            "remaining_annualized": "—",
+            "net_capture": "—",
+            "close_cost_ratio": "—",
+            "remaining_term_ratio": "—",
         }
     metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
-    close_mid = _number(metrics.get("close_mid"))
-    realized = _number(metrics.get("realized_if_close"))
-    remaining = _number(metrics.get("remaining_annualized_return"))
+    close_ask = _number(metrics.get("ask"))
+    realized = _number(metrics.get("estimated_pnl_if_close_net"))
+    capture = _number(metrics.get("net_capture_ratio"))
+    close_cost_ratio = _number(metrics.get("close_cost_ratio"))
+    remaining_term = _number(metrics.get("remaining_term_ratio"))
     realized_text = "—"
     if realized is not None:
         realized_text = _money(realized, market=market)
         if realized > 0:
             realized_text = "+" + realized_text
     return {
-        "close_mid": _money(close_mid, market=market) if close_mid is not None else "—",
+        "close_ask": _money(close_ask, market=market) if close_ask is not None else "—",
         "realized_if_close": realized_text,
-        "remaining_annualized": _percent(remaining) if remaining is not None else "—",
+        "net_capture": _percent(capture) if capture is not None else "—",
+        "close_cost_ratio": _percent(close_cost_ratio) if close_cost_ratio is not None else "—",
+        "remaining_term_ratio": _percent(remaining_term) if remaining_term is not None else "—",
     }
-
-
-def _render_position_decision_details_card(
-    positions: list[Mapping[str, Any]],
-) -> list[str]:
-    rows: list[str] = []
-    for item in positions:
-        if _lower(item.get("recommendation")) not in {
-            "roll",
-            "replace",
-            "reallocate",
-        }:
-            continue
-        details = [
-            str(detail).strip()
-            for detail in item.get("details") or []
-            if str(detail).strip()
-        ]
-        if not details:
-            continue
-        holding = _flat_title(item.get("holding") or item.get("title"))
-        status = str(item.get("status") or "").strip()
-        rows.append(
-            f"- **{holding}｜{status}**：{'；'.join(details)}"
-        )
-    return ["### 持仓决策依据", *rows] if rows else []
 
 
 def _strategy_failure_items(brief: Mapping[str, Any]) -> list[dict[str, str]]:

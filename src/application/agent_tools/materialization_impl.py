@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from copy import deepcopy
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 import json
@@ -10,7 +11,13 @@ import re
 import uuid
 
 from src.application.agent_tool_contracts import AgentToolError
-from domain.domain.close_advice import TIER_PRIORITY
+from domain.domain.close_advice import (
+    DECISION_EVIDENCE_COMPLETE,
+    RECOMMENDATION_CLOSE,
+    RECOMMENDATION_HOLD,
+    RECOMMENDATION_NOT_EVALUABLE,
+    STRICT_CLOSE_POLICY_VERSION,
+)
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import PeriodRequest, PeriodWindow, normalize_period
 from domain.domain.strategy_vocab import (
@@ -29,6 +36,9 @@ from src.application.close_advice_quote_cache import (
     DEFAULT_QUOTE_MAX_AGE_SEC,
     publish_quote_cache_metadata,
     validate_quote_cache_metadata,
+)
+from src.application.close_advice_report_manifest import (
+    read_close_advice_report_snapshot,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.account_config import accounts_from_config
@@ -296,19 +306,54 @@ def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[
     }
 
 
-def close_advice_rows_summary(csv_path: Path, text_path: Path, *, safe_read_csv: Callable[[Path], Any], as_float: Callable[[Any], float | None]) -> dict[str, Any]:
-    df = safe_read_csv(csv_path)
-    rows = df.to_dict(orient="records") if not df.empty else []
-    tier_counts: dict[str, int] = {}
+def close_advice_rows_summary(
+    csv_path: Path,
+    text_path: Path,
+    *,
+    safe_read_csv: Callable[[Path], Any],
+    as_float: Callable[[Any], float | None],
+    csv_bytes: bytes | None = None,
+    text_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    if csv_bytes is None:
+        df = safe_read_csv(csv_path)
+        rows = df.to_dict(orient="records") if not df.empty else []
+    else:
+        try:
+            rows = [
+                {
+                    str(key): value
+                    for key, value in raw.items()
+                    if key is not None
+                }
+                for raw in csv.DictReader(
+                    StringIO(csv_bytes.decode("utf-8-sig"), newline="")
+                )
+                if isinstance(raw, dict)
+            ]
+        except (UnicodeError, csv.Error):
+            rows = []
+    recommendation_counts: dict[str, int] = {}
     account_counts: dict[str, int] = {}
     top_rows: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if str(row.get("evaluation_status") or "priced").strip().lower() != "priced":
+        if (
+            str(row.get("policy_version") or "").strip()
+            != STRICT_CLOSE_POLICY_VERSION
+            or str(row.get("evaluation_status") or "").strip().lower()
+            != "priced"
+            or str(row.get("decision_evidence_status") or "").strip().lower()
+            != DECISION_EVIDENCE_COMPLETE
+        ):
             continue
-        tier = str(row.get("tier") or "").strip().lower() or "none"
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        recommendation = str(row.get("recommendation_state") or "").strip().lower()
+        if recommendation not in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}:
+            continue
+        recommendation_counts[recommendation] = (
+            recommendation_counts.get(recommendation, 0) + 1
+        )
         account = normalize_account(row.get("account"))
         if account:
             account_counts[account] = account_counts.get(account, 0) + 1
@@ -319,26 +364,39 @@ def close_advice_rows_summary(csv_path: Path, text_path: Path, *, safe_read_csv:
                 "option_type": (str(row.get("option_type") or "").strip().lower() or None),
                 "expiration": (str(row.get("expiration") or "").strip() or None),
                 "strike": as_float(row.get("strike")),
-                "tier": tier,
-                "tier_label": (str(row.get("tier_label") or "").strip() or None),
-                "remaining_annualized_return": as_float(row.get("remaining_annualized_return")),
-                "realized_if_close": as_float(row.get("realized_if_close")),
+                "recommendation_state": recommendation,
+                "net_capture_ratio": as_float(row.get("net_capture_ratio")),
+                "all_in_close_cost": as_float(row.get("all_in_close_cost")),
             }
         )
     top_rows = sorted(
         top_rows,
         key=lambda item: (
-            TIER_PRIORITY.get(str(item.get("tier") or "none"), 9),
-            -(item["realized_if_close"] if item["realized_if_close"] is not None else -10**12),
+            {
+                RECOMMENDATION_CLOSE: 0,
+                RECOMMENDATION_HOLD: 1,
+                RECOMMENDATION_NOT_EVALUABLE: 2,
+            }.get(str(item.get("recommendation_state") or ""), 3),
+            -(
+                item["net_capture_ratio"]
+                if item["net_capture_ratio"] is not None
+                else -1.0
+            ),
         ),
     )[:5]
-    try:
-        notification_preview = text_path.read_text(encoding="utf-8").strip()
-    except Exception:
-        notification_preview = ""
+    if text_bytes is not None:
+        try:
+            notification_preview = text_bytes.decode("utf-8").strip()
+        except UnicodeError:
+            notification_preview = ""
+    else:
+        try:
+            notification_preview = text_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            notification_preview = ""
     return {
         "row_count": len(rows),
-        "tier_counts": tier_counts,
+        "recommendation_counts": recommendation_counts,
         "account_counts": account_counts,
         "top_rows": top_rows,
         "notification_preview": notification_preview,
@@ -1017,11 +1075,7 @@ def prepare_close_advice_inputs_tool(
     fetched: list[dict[str, Any]] = []
     warnings = [item for item in logs if item.startswith("[WARN]")]
     force_required_data_refresh = bool(payload.get("force_required_data_refresh", False))
-    quote_max_age_sec = int(
-        payload.get("quote_max_age_sec")
-        or ((cfg.get("close_advice") or {}).get("quote_max_age_sec") if isinstance(cfg.get("close_advice"), dict) else None)
-        or DEFAULT_QUOTE_MAX_AGE_SEC
-    )
+    quote_max_age_sec = DEFAULT_QUOTE_MAX_AGE_SEC
     for spec in position_requirements:
         symbol = str(spec.get("symbol") or "").strip()
         raw_symbol_cfg = symbol_map.get(symbol)
@@ -1184,12 +1238,51 @@ def close_advice_tool(
             message=str(exc),
             details={"context_path": mask_path(context_path)},
         ) from exc
-    advice_summary = close_advice_rows_summary_fn(report_dir / "close_advice.csv", report_dir / "close_advice.txt")
+    report_manifest = (
+        result.get("report_manifest")
+        if isinstance(result.get("report_manifest"), dict)
+        else {}
+    )
+    if not bool(result.get("enabled")) or str(
+        report_manifest.get("status") or ""
+    ).strip().lower() != "success":
+        advice_summary = {
+            "row_count": 0,
+            "recommendation_counts": {},
+            "account_counts": {},
+            "top_rows": [],
+            "notification_preview": "",
+        }
+    else:
+        snapshot = read_close_advice_report_snapshot(
+            csv_path=report_dir / "close_advice.csv",
+            desired_market=market if market in {"US", "HK"} else None,
+            account=normalize_account(payload.get("account")) or None,
+            expected_quote_mode=str(result.get("quote_mode") or "").strip()
+            or None,
+        )
+        validation = snapshot["validation"]
+        if not validation.get("ok"):
+            raise AgentToolError(
+                code="DEPENDENCY_INVALID",
+                message="平仓建议报告完整性校验失败。",
+                hint="请重新生成严格版平仓建议报告。",
+                details={
+                    "csv_path": mask_path(report_dir / "close_advice.csv"),
+                    "reason": str(validation.get("reason") or "unknown"),
+                },
+            )
+        advice_summary = close_advice_rows_summary_fn(
+            report_dir / "close_advice.csv",
+            report_dir / "close_advice.txt",
+            csv_bytes=snapshot["csv_bytes"],
+            text_bytes=snapshot["text_bytes"],
+        )
     return {
         **result,
         "summary": {
             "row_count": advice_summary["row_count"],
-            "tier_counts": advice_summary["tier_counts"],
+            "recommendation_counts": advice_summary["recommendation_counts"],
             "account_counts": advice_summary["account_counts"],
         },
         "top_rows": advice_summary["top_rows"],
@@ -1221,7 +1314,7 @@ def get_close_advice_tool(
         "prepared_context_rows": int(prepared_data.get("context_rows") or 0),
         "advice_row_count": int(advice_data.get("rows") or advice_data.get("summary", {}).get("row_count") or 0),
         "notify_row_count": int(advice_data.get("notify_rows") or 0),
-        "tier_counts": dict(advice_data.get("summary", {}).get("tier_counts")) if isinstance(advice_data.get("summary"), dict) and isinstance(advice_data.get("summary", {}).get("tier_counts"), dict) else {},
+        "recommendation_counts": dict(advice_data.get("summary", {}).get("recommendation_counts")) if isinstance(advice_data.get("summary"), dict) and isinstance(advice_data.get("summary", {}).get("recommendation_counts"), dict) else {},
         "coverage_summary": dict(prepared_data.get("coverage_summary")) if isinstance(prepared_data.get("coverage_summary"), dict) else {},
     }
     return {

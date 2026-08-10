@@ -85,7 +85,7 @@ def run_pipeline_script(
     shared_required_data: Path | None = None,
     shared_context_dir: Path | None = None,
     symbols_arg: str | None = None,
-    position_advice_account_run_id: str | None = None,
+    source_account_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
@@ -121,11 +121,11 @@ def run_pipeline_script(
         cmd.extend(['--shared-context-dir', str(shared_context_dir)])
     if str(symbols_arg or '').strip():
         cmd.extend(['--symbols', str(symbols_arg).strip()])
-    if str(position_advice_account_run_id or "").strip():
+    if str(source_account_run_id or "").strip():
         cmd.extend(
             [
-                "--position-advice-account-run-id",
-                str(position_advice_account_run_id).strip(),
+                "--source-account-run-id",
+                str(source_account_run_id).strip(),
             ]
         )
     if required_data_snapshot_manifest is not None:

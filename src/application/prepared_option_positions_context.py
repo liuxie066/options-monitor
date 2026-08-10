@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
-from domain.domain.position_advice_authority import scope_for
+from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.services import adapt_option_positions_context
 from src.application.exchange_rate_loader import (
     fetch_opend_exchange_rate_observation,
@@ -22,7 +22,7 @@ from src.application.ledger.api import (
     resolve_position_ledger_sqlite_path,
     validate_position_fact_snapshot_contract,
 )
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.application.positions.context_builder import (
     build_shared_context,
     slice_shared_context_for_account,
@@ -213,7 +213,7 @@ def prepare_option_positions_contexts(
                 account: decision_state_snapshot_from_rows(
                     rows_by_account[account],
                     account=account,
-                    portfolio_scope_id=scope_for(account),
+                    portfolio_scope_id=portfolio_scope_id(account),
                     source_observed_at=observed_at_utc,
                 )
                 for account in accounts

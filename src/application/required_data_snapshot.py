@@ -19,8 +19,8 @@ from src.application.opend_symbol_outputs import (
     validate_required_data_quote_candidate,
     validate_required_data_source_outcome,
 )
-from src.application.position_advice_source_receipts import (
-    PositionAdviceSourceError,
+from src.application.source_receipts import (
+    SourceReceiptError,
     safe_existing_relative_path,
     sha256_bytes,
     validate_source_receipt,
@@ -257,6 +257,24 @@ def load_required_data_snapshot_manifest(
     expected_run_id: str,
     expected_required_data_root: Path | None = None,
 ) -> tuple[dict[str, Any], Path]:
+    payload, root, _manifest_bytes = (
+        load_required_data_snapshot_manifest_snapshot(
+            manifest_path=manifest_path,
+            expected_run_id=expected_run_id,
+            expected_required_data_root=expected_required_data_root,
+        )
+    )
+    return payload, root
+
+
+def load_required_data_snapshot_manifest_snapshot(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    expected_required_data_root: Path | None = None,
+) -> tuple[dict[str, Any], Path, bytes]:
+    """Validate one exact manifest byte snapshot and return those bytes."""
+
     path_input = Path(manifest_path)
     if path_input.is_symlink():
         raise RequiredDataSnapshotError(
@@ -268,7 +286,8 @@ def load_required_data_snapshot_manifest(
             "required-data snapshot manifest is unreadable"
         )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        manifest_bytes = path.read_bytes()
+        payload = json.loads(manifest_bytes)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RequiredDataSnapshotError("required-data snapshot manifest is unreadable") from exc
     if not isinstance(payload, dict):
@@ -343,7 +362,7 @@ def load_required_data_snapshot_manifest(
         run_id=run_id,
         sealed_at=sealed_at,
     )
-    return payload, root
+    return payload, root, manifest_bytes
 
 
 def _validate_manifest_close_advice_plan(
@@ -368,7 +387,7 @@ def _validate_manifest_close_advice_plan(
             ),
         )
         actual_hash = sha256_bytes(plan_path.read_bytes())
-    except (OSError, PositionAdviceSourceError, ValueError) as exc:
+    except (OSError, SourceReceiptError, ValueError) as exc:
         raise RequiredDataSnapshotError(
             "close-advice required-data plan authority is invalid"
         ) from exc
@@ -547,10 +566,12 @@ def resolve_frozen_required_data_csv_bytes(
 ) -> tuple[dict[str, Any], bytes]:
     symbol_norm = _required_text(symbol, "symbol").upper()
     try:
-        manifest, root = load_required_data_snapshot_manifest(
-            manifest_path=manifest_path,
-            expected_run_id=expected_run_id,
-            expected_required_data_root=required_data_root,
+        manifest, root, manifest_bytes = (
+            load_required_data_snapshot_manifest_snapshot(
+                manifest_path=manifest_path,
+                expected_run_id=expected_run_id,
+                expected_required_data_root=required_data_root,
+            )
         )
     except _RequiredDataSnapshotEntryError as exc:
         raise FrozenRequiredDataUnavailable(
@@ -592,7 +613,7 @@ def resolve_frozen_required_data_csv_bytes(
         UnicodeDecodeError,
         json.JSONDecodeError,
         binascii.Error,
-        PositionAdviceSourceError,
+        SourceReceiptError,
         RequiredDataSnapshotError,
     ) as exc:
         raise FrozenRequiredDataUnavailable(
@@ -602,7 +623,6 @@ def resolve_frozen_required_data_csv_bytes(
             snapshot_id=str(entry.get("snapshot_id") or ""),
             receipt_relpath=str(entry.get("receipt_relpath") or ""),
         ) from exc
-    manifest_bytes = Path(manifest_path).resolve().read_bytes()
     return (
         {
             **validated,
@@ -711,7 +731,7 @@ def _ready_manifest_entry(
     )
     if str(validated.get("producer_run_id") or "") != run_id:
         raise RequiredDataSnapshotError(f"{symbol} quote receipt run mismatch")
-    bundle = json.loads(validated["payload_path"].read_text(encoding="utf-8"))
+    bundle = json.loads(validated["payload_bytes"])
     if (
         not isinstance(bundle, dict)
         or bundle.get("schema_version") != REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA
@@ -775,7 +795,7 @@ def _validate_ready_entry(
     receipt_path = safe_existing_relative_path(root, receipt_relpath)
     receipt_bytes = receipt_path.read_bytes()
     if sha256_bytes(receipt_bytes) != _required_text(entry.get("receipt_hash"), "receipt_hash"):
-        raise PositionAdviceSourceError("manifest receipt hash mismatch")
+        raise SourceReceiptError("manifest receipt hash mismatch")
     receipt = json.loads(receipt_bytes.decode("utf-8"))
     validated = validate_source_receipt(
         receipt,
@@ -784,31 +804,31 @@ def _validate_ready_entry(
         expected_source_kind="quotes",
     )
     if str(validated.get("producer_run_id") or "") != run_id:
-        raise PositionAdviceSourceError("manifest receipt producer run mismatch")
+        raise SourceReceiptError("manifest receipt producer run mismatch")
     if str(validated.get("snapshot_id") or "") != str(entry.get("snapshot_id") or ""):
-        raise PositionAdviceSourceError("manifest snapshot id mismatch")
+        raise SourceReceiptError("manifest snapshot id mismatch")
     if str(validated.get("payload_sha256") or "") != str(
         entry.get("payload_sha256") or ""
     ):
-        raise PositionAdviceSourceError("manifest payload hash mismatch")
+        raise SourceReceiptError("manifest payload hash mismatch")
     if str(validated.get("source_observed_at") or "") != str(
         entry.get("source_observed_at") or ""
     ):
-        raise PositionAdviceSourceError("manifest source timestamp mismatch")
+        raise SourceReceiptError("manifest source timestamp mismatch")
     if str(validated.get("expires_at") or "") != str(
         entry.get("expires_at") or ""
     ):
-        raise PositionAdviceSourceError("manifest expiry mismatch")
-    bundle = json.loads(validated["payload_path"].read_text(encoding="utf-8"))
+        raise SourceReceiptError("manifest expiry mismatch")
+    bundle = json.loads(validated["payload_bytes"])
     if (
         not isinstance(bundle, dict)
         or bundle.get("schema_version") != REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
-        raise PositionAdviceSourceError("required-data quote bundle mismatch")
+        raise SourceReceiptError("required-data quote bundle mismatch")
     expected_contract_payload = entry.get("expected_fetch_contract")
     if not isinstance(expected_contract_payload, Mapping):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "manifest expected fetch contract is missing"
         )
     expected_contract = validate_required_data_expected_fetch_contract(
@@ -818,7 +838,7 @@ def _validate_ready_entry(
     if str(entry.get("expected_fetch_contract_sha256") or "") != str(
         expected_contract["contract_sha256"]
     ):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "manifest expected fetch contract hash mismatch"
         )
     contract = _validate_bundle_authority(
@@ -839,21 +859,21 @@ def _validate_ready_entry(
         "required_data_csv_relpath",
     )
     if raw_relpath != str(bundle.get("raw_json_relpath") or ""):
-        raise PositionAdviceSourceError("required-data JSON path mismatch")
+        raise SourceReceiptError("required-data JSON path mismatch")
     if csv_relpath != str(bundle.get("required_data_csv_relpath") or ""):
-        raise PositionAdviceSourceError("required-data CSV path mismatch")
+        raise SourceReceiptError("required-data CSV path mismatch")
     if dict(entry.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
-        raise PositionAdviceSourceError("required-data fetch plan mismatch")
+        raise SourceReceiptError("required-data fetch plan mismatch")
     if str(entry.get("fetch_policy_hash") or "") != str(
         bundle.get("fetch_policy_hash") or ""
     ):
-        raise PositionAdviceSourceError("required-data fetch policy mismatch")
+        raise SourceReceiptError("required-data fetch policy mismatch")
     if str(entry.get("source_outcome") or "") != source_outcome:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data source outcome mismatch"
         )
     if str(entry.get("reason_code") or "") != str(reason_code or ""):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data reason code mismatch"
         )
     raw_bytes = safe_existing_relative_path(root, raw_relpath).read_bytes()
@@ -867,7 +887,7 @@ def _validate_ready_entry(
         validate=True,
     )
     if raw_bytes != captured_raw or csv_bytes != captured_csv:
-        raise PositionAdviceSourceError("required-data bytes do not match the sealed receipt")
+        raise SourceReceiptError("required-data bytes do not match the sealed receipt")
     return (
         {
             "receipt_relpath": receipt_relpath,
@@ -899,7 +919,7 @@ def _validate_bundle_authority(
 ) -> dict[str, Any]:
     contract_payload = bundle.get("expected_fetch_contract")
     if not isinstance(contract_payload, Mapping):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle expected fetch contract is missing"
         )
     contract = validate_required_data_expected_fetch_contract(
@@ -911,22 +931,22 @@ def _validate_bundle_authority(
         expected_symbol=symbol,
     )
     if contract != expected:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle expected fetch contract mismatch"
         )
     contract_hash = str(contract["contract_sha256"])
     if str(bundle.get("expected_fetch_contract_sha256") or "") != contract_hash:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle expected fetch contract hash mismatch"
         )
     if dict(bundle.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle fetch plan contradicts its contract"
         )
 
     fetch_policy = bundle.get("fetch_policy")
     if not isinstance(fetch_policy, Mapping):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data operational fetch policy is invalid"
         )
     policy_payload = {
@@ -939,7 +959,7 @@ def _validate_bundle_authority(
         str(bundle.get("fetch_policy_hash") or "") != policy_hash
         or str(receipt.get("producer_policy_hash") or "") != policy_hash
     ):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data operational fetch policy hash mismatch"
         )
     _validate_physical_binding(
@@ -959,12 +979,12 @@ def _validate_bundle_authority(
         json.JSONDecodeError,
         binascii.Error,
     ) as exc:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle raw JSON is unreadable"
         ) from exc
     meta = raw_payload.get("meta") if isinstance(raw_payload, Mapping) else None
     if not isinstance(meta, Mapping):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data payload physical binding is missing"
         )
     _validate_physical_binding(
@@ -1011,7 +1031,7 @@ def _validate_physical_binding(
         or isinstance(expected_port, bool)
         or not isinstance(expected_port, int)
     ):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             f"required-data {subject} physical binding is invalid"
         )
     try:
@@ -1026,11 +1046,11 @@ def _validate_physical_binding(
             "port": expected_port,
         }
     except (TypeError, ValueError) as exc:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             f"required-data {subject} physical binding is invalid"
         ) from exc
     if not actual_binding["source"] or actual_binding != expected_binding:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             f"required-data {subject} physical binding mismatch"
         )
 
@@ -1050,17 +1070,17 @@ def _validate_complete_required_data_bundle(
         json.JSONDecodeError,
         binascii.Error,
     ) as exc:
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle raw JSON is unreadable"
         ) from exc
     meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
     if str((meta or {}).get("status") or "").strip().lower() != "ok":
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle is not complete"
         )
     rows = raw_payload.get("rows") if isinstance(raw_payload, dict) else None
     if not isinstance(rows, list):
-        raise PositionAdviceSourceError(
+        raise SourceReceiptError(
             "required-data bundle rows are invalid"
         )
     source_outcome, reason_code = validate_required_data_source_outcome(
@@ -1089,7 +1109,7 @@ def _validate_complete_required_data_bundle(
             csv.Error,
             binascii.Error,
         ) as exc:
-            raise PositionAdviceSourceError(
+            raise SourceReceiptError(
                 "success-empty required-data CSV is unreadable"
             ) from exc
         if (
@@ -1097,7 +1117,7 @@ def _validate_complete_required_data_bundle(
             or csv_rows[0] != REQUIRED_DATA_COLUMNS
             or len(csv_rows) != 1
         ):
-            raise PositionAdviceSourceError(
+            raise SourceReceiptError(
                 "success-empty required-data CSV is not header-only"
             )
         return source_outcome, reason_code
@@ -1193,6 +1213,7 @@ __all__ = [
     "REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA",
     "RequiredDataSnapshotError",
     "load_required_data_snapshot_manifest",
+    "load_required_data_snapshot_manifest_snapshot",
     "resolve_frozen_required_data",
     "resolve_frozen_required_data_csv_bytes",
     "seal_required_data_snapshot",

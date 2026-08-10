@@ -38,7 +38,7 @@ from src.infrastructure.io_utils import (
     is_fresh,
     load_cached_json,
 )
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,

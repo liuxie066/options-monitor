@@ -103,8 +103,8 @@ def shadow_replay_dataset_status(
             {
                 "close_decision_dataset_count": len(close_datasets),
                 "close_decision_by_status": dict(sorted(close_status_counts.items())),
-                "close_decision_ready_for_paired_analysis_count": close_status_counts.get(
-                    "ready_for_paired_policy_analysis", 0
+                "close_decision_ready_for_strict_evaluation_count": close_status_counts.get(
+                    "ready_for_strict_policy_evaluation", 0
                 ),
             }
         )
@@ -262,7 +262,7 @@ def _close_readiness_commands(
             ),
             "requires_lifecycle_path": "repeat --lifecycle-path for canonical terminal evidence",
         }
-    if next_action == "run_paired_policy_analysis":
+    if next_action == "evaluate_strict_close_policy":
         return {
             "suggested_command": (
                 f"./om research shadow-replay analyze --dataset {dataset} --min-sample 30"

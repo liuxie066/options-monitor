@@ -182,6 +182,11 @@ candidate/filter/rank/mark/outcome JSONL；close-aware build 还会重建 close 
 并把 close mark/outcome 初始化为空。复用已有 `dataset-id` 会覆盖已积累的 evidence。
 若需要两种口径或保留已有 mark/outcome，必须使用新的 dataset id。
 
+Close episode 只接受 `status=success`、`quote_mode=frozen_snapshot` 的 Close Advice
+report manifest。CSV 必须与 manifest 的 run、账户、行数、required-data/plan hash
+一致，持仓 context 也必须匹配 manifest 绑定的 context hash；任一不一致都会终止
+dataset build，不把被改写或未提交的报告降级纳入研究样本。
+
 ## 远端证据归档
 
 远端 runtime 空间有限时，把原始 run 证据镜像到本地归档，再从本地归档生成 Shadow Replay dataset。默认归档根目录：
@@ -453,7 +458,7 @@ funding horizon、Call participation horizon、research-assigned stock continuat
 - `wheel_lifecycle_risk`：按账户和标的汇总 Sell Put 的单张候选接货义务、接货后标的/账户暴露，以及 Covered Call 的已锁定和单张候选可能叫走股数。候选 strike 是替代场景，不会相加成实际仓位；缺现金、NAV 或持股上下文时输出 `not_evaluable`，该汇总不参与生产过滤。
 - `outcome_by_bucket`：DTE、Delta、IV/RV、Spread、集中度各区间的表现。
 - `close_decision_readiness`：close facet 的 episode、point-in-time、费用、窗口和 terminal lifecycle 覆盖；它是机械 evidence gate，不是生产策略授权。
-- `close_policy_analysis`：只在 close facet 存在时，对 P0/P1/P2/P3 做 paired analysis；缺失或不合格 episode 保持 inconclusive，不输出自动 policy winner。
+- Close facet 只保留 `strict_profit_capture.v1` 的正式决策、mark、outcome 和机械就绪度；不再重建 P0/P1/P2/P3，不输出替代策略比较、policy winner 或自动晋级结论。
 
 ## Status 解释
 

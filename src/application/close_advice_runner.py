@@ -2,45 +2,35 @@ from __future__ import annotations
 
 import csv
 from collections import OrderedDict
-from dataclasses import dataclass
+from collections.abc import Mapping
 from io import BytesIO
 import json
 import math
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 from uuid import uuid4
 
 import pandas as pd
 
-from domain.domain.expiration_dates import expiration_business_today
+from domain.domain.expiration_dates import (
+    expiration_business_today,
+    expiration_timestamp_to_date,
+)
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.close_advice import (
-    CloseAdviceConfig,
     CloseAdviceInput,
-    LongCallConvexityConfig,
-    EXIT_STATE_HOLD,
-    EXIT_STATE_LET_EXPIRE,
-    EXIT_STATE_NOT_EVALUABLE,
-    EXIT_STATE_PROFIT_CAPTURE,
-    EXIT_STATE_SALVAGE,
-    EXIT_STATE_TAKE_PROFIT,
+    DECISION_EVIDENCE_NOT_EVALUABLE,
     RECOMMENDATION_CLOSE,
     RECOMMENDATION_NOT_EVALUABLE,
-    apply_fee_economic_safety,
-    current_policy_decision_fields,
+    STRICT_CLOSE_POLICY_VERSION,
     evaluate_close_advice,
-    evaluate_long_call_convexity_advice,
-    evaluate_short_vol_close_advice,
     safe_float,
     safe_int,
     select_close_advice_notification_rows,
     sort_advice_rows,
-    synthesize_combo_yield_group_close_advice,
 )
-from domain.domain.short_vol_assessment import resolve_short_vol_assessment_config
-from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.fee_calc import (
     FUTU_HK_OPTION_FEE_BASIS,
     FUTU_US_OPTION_FEE_BASIS,
@@ -73,35 +63,18 @@ from src.application.close_advice_report_manifest import (
 from src.application.close_advice_required_data import (
     CloseAdviceRequiredDataPlanError,
     account_requirement_index,
-    resolve_bound_close_advice_required_data_plan,
+    resolve_bound_close_advice_required_data_plan_snapshot,
 )
-from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.source_receipts import sha256_bytes
 from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
-    load_required_data_snapshot_manifest,
+    load_required_data_snapshot_manifest_snapshot,
     resolve_frozen_required_data_csv_bytes,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
 from src.infrastructure.opend_retcodes import classify_opend_error
-from src.application.candidate_filter_trace import (
-    append_candidate_filter_trace_rows,
-    build_candidate_filter_trace_row,
-    candidate_trace_path_for_output,
-    infer_trace_scope_from_path,
-)
-from src.application.strategy_policy import (
-    SELL_CALL_FAMILY,
-    SELL_PUT_FAMILY,
-    resolve_position_strategy,
-    resolve_position_strategy_semantics,
-    resolve_yield_enhancement_position_role,
-    strategy_side_config_for_resolution,
-    yield_enhancement_mode_uses_short_vol,
-)
-
-
 OUTPUT_COLUMNS = [
     "account",
     "position_lot_id",
@@ -121,122 +94,51 @@ OUTPUT_COLUMNS = [
     "expiration",
     "strike",
     "contracts_open",
+    "multiplier",
+    "spot",
+    "currency",
     "premium",
-    "close_mid",
     "bid",
     "ask",
+    "close_mid",
     "dte",
+    "original_dte",
+    "remaining_term_ratio",
+    "spread_ratio",
     "position_lifecycle_state",
-    "multiplier",
-    "capture_ratio",
-    "remaining_premium",
-    "estimated_pnl_if_close_gross",
+    "net_capture_ratio",
+    "opening_gross_credit",
+    "estimated_open_fee",
+    "opening_net_credit",
+    "all_in_close_cost",
+    "close_cost_ratio",
+    "is_otm",
     "estimated_close_fee",
     "fee_calc_status",
     "fee_calc_basis",
     "estimated_pnl_if_close_net",
-    "net_close_proceeds",
-    "realized_if_close",
-    "buy_to_close_fee",
-    "buy_to_close_cost",
-    "close_fee_to_remaining_premium",
-    "remaining_risk_status",
-    "remaining_risk_unavailable_reason",
-    "remaining_stress_scenario",
-    "remaining_stress_loss",
-    "remaining_reward_to_stress_loss",
-    "replacement_annualized_return",
-    "replacement_annualized_advantage",
-    "replacement_source",
-    "continued_willingness",
-    "continued_willingness_source",
-    "close_calibration_status",
-    "close_calibration_missing",
-    "sell_to_close_fee",
-    "close_fee",
-    "put_leg_realized_if_close",
-    "combo_call_cost",
-    "combo_call_value_if_close",
-    "combo_net_locked_if_close_put_keep_call",
-    "combo_net_if_close_both",
-    "combo_cost_basis_status",
-    "paired_leg_status",
-    "combo_group_classification",
-    "combo_group_status",
-    "combo_group_action",
-    "combo_group_reason",
-    "combo_group_issues",
-    "combo_put_contracts_open",
-    "combo_call_contracts_open",
-    "combo_group_quote_status",
-    "combo_group_evidence_scope",
-    "long_call_value_ratio",
-    "long_call_cost_basis",
-    "long_call_current_value",
-    "remaining_annualized_return",
     "evaluation_status",
     "quote_status",
-    "tier",
-    "tier_label",
     "reason",
-    "exit_state",
-    "exit_reason_type",
-    "hold_reason_type",
     "policy_version",
     "recommendation_state",
     "decision_basis",
     "decision_evidence_status",
-    "close_action",
-    "optional_combo_action",
-    "strategy_exit_mode",
-    "strategy",
-    "leg_role",
-    "strategy_group_id",
-    "yield_enhancement_mode",
+    "broker",
     "position_side",
     "strategy_family",
     "strategy_profile",
-    "strategy_source",
-    "strategy_config_path",
-    "risk_model",
-    "close_advice_profile",
-    "close_requires_rv",
-    "short_vol_thesis_status",
-    "short_vol_reason",
-    "short_vol_mode",
-    "short_gamma_profile",
-    "short_vega_profile",
-    "implied_volatility",
-    "realized_volatility_estimate",
-    "iv_rv_ratio",
-    "iv_minus_rv",
-    "abs_delta",
-    "equity_delta_equivalent",
-    "delta_target_score",
-    "vol_edge_score",
-    "event_risk_flag",
-    "event_risk_types",
-    "event_risk_dates",
-    "event_source_status",
-    "event_source_error",
-    "event_context_status",
-    "event_context_types",
-    "event_context_dates",
-    "path_stress_status",
-    "path_stress_evaluable",
-    "path_stress_unavailable_reason",
-    "stress_sigma_move_pct",
-    "put_stress_down_loss_nav_pct",
-    "put_gap_down_loss_nav_pct",
-    "call_gap_up_opportunity_cost_nav_pct",
-    "call_gap_up_opportunity_cost_to_premium",
     "data_quality_flags",
 ]
 
 QUOTE_ISSUE_FLAGS = {
     "missing_quote",
-    "missing_mid",
-    "mid_fallback_last_price",
+    "missing_bid",
+    "missing_ask",
+    "missing_bid_ask",
+    "invalid_bid",
+    "invalid_ask",
+    "invalid_bid_ask",
     "required_data_missing_expiration",
     "required_data_missing_contract",
     "required_data_fetch_error",
@@ -254,11 +156,6 @@ QUOTE_ISSUE_FLAGS = {
     "spread_too_wide",
     "invalid_spread",
 }
-ACTIONABLE_CLOSE_TIERS = {"strong", "medium", "weak", "optional"}
-CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION = "standard_short_option"
-CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG = "yield_enhancement_put_leg"
-CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG = "yield_enhancement_long_call_leg"
-LEGACY_EXIT_STATE_RISK_EXIT = "risk_exit"
 
 
 class _PositionFetchSpec(TypedDict):
@@ -267,7 +164,6 @@ class _PositionFetchSpec(TypedDict):
     requested_expirations: set[str]
     option_types: set[str]
     strikes: list[float]
-    short_vol_keys: set[tuple[str, str, str, str]]
 
 
 class _OpenDFetchKwargs(TypedDict):
@@ -280,13 +176,6 @@ class _OpenDFetchKwargs(TypedDict):
     expiration_max_wait_sec: float
     expiration_window_sec: float
     expiration_max_calls: int
-
-
-@dataclass(frozen=True)
-class _CloseActionPolicy:
-    exit_mode: str
-    apply: Callable[[dict[str, Any]], dict[str, Any]]
-
 
 def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
     aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
@@ -438,54 +327,13 @@ def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
         return False
     bid = _quote_number(quote.get("bid"))
     ask = _quote_number(quote.get("ask"))
-    has_usable_bid_ask = bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
-    if has_usable_bid_ask:
-        return True
-    mid = _quote_number(quote.get("mid"))
-    if mid is None:
-        return False
-    last_price = _quote_number(quote.get("last_price"))
-    if last_price is not None and abs(float(mid) - float(last_price)) < 0.000001:
-        return False
-    return True
-
-
-_SHORT_VOL_RV_FIELDS = (
-    "realized_volatility_estimate",
-    "rv_estimate",
-    "rv_est",
-    "rv_60",
-    "realized_volatility_60",
-)
-
-
-def _quote_has_numeric_field(quote: dict[str, Any] | None, *keys: str) -> bool:
-    if not isinstance(quote, dict):
-        return False
-    return any(_quote_number(quote.get(key)) is not None for key in keys)
-
-
-def _short_vol_source_missing_fields(quote: dict[str, Any] | None) -> list[str]:
-    if not isinstance(quote, dict):
-        return ["quote"]
-    missing: list[str] = []
-    if not _quote_has_numeric_field(quote, "implied_volatility"):
-        missing.append("iv")
-    if not _quote_has_numeric_field(quote, *_SHORT_VOL_RV_FIELDS):
-        missing.append("rv")
-    if not _quote_has_numeric_field(quote, "delta"):
-        missing.append("delta")
-    return missing
-
-
-def _position_requires_short_vol_source_data(pos: dict[str, Any], config: dict[str, Any] | None) -> bool:
-    if not isinstance(pos, dict) or _is_yield_enhancement_long_call_position(pos):
-        return False
-    try:
-        _resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
-        return bool(semantics.close_requires_rv)
-    except Exception:
-        return False
+    return (
+        bid is not None
+        and ask is not None
+        and bid >= 0
+        and ask > 0
+        and ask >= bid
+    )
 
 
 def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) -> str | None:
@@ -513,11 +361,6 @@ def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) 
     return None
 
 
-def _has_explicit_futu_fetch_source(fetch_cfg: dict[str, Any]) -> bool:
-    raw = fetch_cfg.get("source") if isinstance(fetch_cfg, dict) else None
-    return bool(str(raw or "").strip()) and is_futu_fetch_source(raw)
-
-
 def _build_position_fetch_specs(
     positions: list[dict[str, Any]],
     *,
@@ -540,15 +383,12 @@ def _build_position_fetch_specs(
                 "requested_expirations": set[str](),
                 "option_types": set[str](),
                 "strikes": list[float](),
-                "short_vol_keys": set[tuple[str, str, str, str]](),
             }
             specs[sym] = new_item
             item = new_item
         item["requested_keys"].add(key)
         item["requested_expirations"].add(key[2])
         item["option_types"].add(key[1])
-        if _position_requires_short_vol_source_data(pos, config):
-            item["short_vol_keys"].add(key)
         strike_num = safe_float(pos.get("strike"))
         if strike_num is not None:
             item["strikes"].append(strike_num)
@@ -612,7 +452,6 @@ def _ensure_required_data_coverage_for_positions(
         return fetch_reasons, fetch_details, summary
 
     current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
-    current_quotes = load_required_data_quotes(required_data_root, symbols=set(specs), base_dir=base_dir)
     current_contract_expiration_index = _build_contract_expiration_index(current_covered)
 
     try:
@@ -628,27 +467,14 @@ def _ensure_required_data_coverage_for_positions(
         for symbol, spec in specs.items():
             requested_keys = set(spec["requested_keys"])
             requested_expirations = sorted(spec["requested_expirations"])
-            short_vol_keys = set(spec["short_vol_keys"])
             missing_keys = [key for key in requested_keys if key not in current_covered]
-            incomplete_short_vol_keys = [
-                key
-                for key in requested_keys
-                if key in current_covered
-                and key in short_vol_keys
-                and _short_vol_source_missing_fields(current_quotes.get(key))
-            ]
-            refresh_keys = list(dict.fromkeys([*missing_keys, *incomplete_short_vol_keys]))
-            if not refresh_keys:
+            if not missing_keys:
                 continue
             summary["attempted_symbols"] += 1
             symbol_cfg = symbol_cfgs.get(symbol) or {}
             fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
             fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
-            can_refresh = (
-                is_futu_fetch_source(fetch_cfg.get("source"))
-                if missing_keys
-                else _has_explicit_futu_fetch_source(fetch_cfg)
-            )
+            can_refresh = is_futu_fetch_source(fetch_cfg.get("source"))
             if not can_refresh:
                 for key in missing_keys:
                     near_miss = find_unique_near_miss_expiration(
@@ -686,7 +512,7 @@ def _ensure_required_data_coverage_for_positions(
                     chain_cache_force_refresh=False,
                     freshness_policy="refresh_missing",
                     gateway=gateway,
-                    include_realized_volatility=bool(short_vol_keys.intersection(refresh_keys)),
+                    include_realized_volatility=False,
                     **_typed_opend_fetch_kwargs(config),
                 )
             except Exception as exc:
@@ -746,7 +572,6 @@ def _ensure_required_data_coverage_for_positions(
             save_outputs(base_dir, symbol, payload, output_root=required_data_root)
             summary["fetched_symbols"] += 1
             current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
-            current_quotes = load_required_data_quotes(required_data_root, symbols=set(specs), base_dir=base_dir)
             if payload_reason:
                 still_missing = [key for key in requested_keys if key not in current_covered]
                 if still_missing:
@@ -787,7 +612,6 @@ def _fetch_missing_quotes_via_opend(
     symbol_cfgs = _symbol_config_by_symbol(config)
     missing_by_symbol: dict[str, list[dict[str, Any]]] = {}
     price_refresh_keys: set[tuple[str, str, str, str]] = set()
-    short_vol_refresh_keys: set[tuple[str, str, str, str]] = set()
     attempted_reasons: dict[tuple[str, str, str, str], str] = {}
     attempted_details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for pos in positions:
@@ -798,16 +622,9 @@ def _fetch_missing_quotes_via_opend(
             continue
         quote = quotes.get(key)
         needs_price_refresh = not _quote_has_usable_price(quote)
-        needs_short_vol_refresh = (
-            _position_requires_short_vol_source_data(pos, config)
-            and bool(_short_vol_source_missing_fields(quote))
-        )
-        if needs_price_refresh or needs_short_vol_refresh:
+        if needs_price_refresh:
             missing_by_symbol.setdefault(key[0], []).append(pos)
-            if needs_price_refresh:
-                price_refresh_keys.add(key)
-            if needs_short_vol_refresh:
-                short_vol_refresh_keys.add(key)
+            price_refresh_keys.add(key)
 
     if not missing_by_symbol:
         return {}, {}
@@ -842,12 +659,7 @@ def _fetch_missing_quotes_via_opend(
                         "quote_key": "|".join(key),
                     },
                 )
-        valid_missing_keys = {key for key in missing_keys if all(key)}
-        can_fetch = (
-            is_futu_fetch_source(fetch_cfg.get("source"))
-            if price_refresh_keys.intersection(valid_missing_keys)
-            else _has_explicit_futu_fetch_source(fetch_cfg)
-        )
+        can_fetch = is_futu_fetch_source(fetch_cfg.get("source"))
         if not can_fetch:
             for key in missing_keys:
                 if all(key) and key in price_refresh_keys:
@@ -880,7 +692,7 @@ def _fetch_missing_quotes_via_opend(
                 explicit_expirations=expirations,
                 chain_cache=True,
                 freshness_policy="refresh_missing",
-                include_realized_volatility=bool(short_vol_refresh_keys.intersection(set(missing_keys))),
+                include_realized_volatility=False,
                 **_typed_opend_fetch_kwargs(config),
             )
         except Exception as exc:
@@ -1056,9 +868,10 @@ def _mark_not_evaluable(
 ) -> dict[str, Any]:
     row["evaluation_status"] = evaluation_status
     row["quote_status"] = quote_status
-    row["tier"] = "not_evaluable"
-    row["tier_label"] = "无法评估"
     row["reason"] = reason
+    row["recommendation_state"] = RECOMMENDATION_NOT_EVALUABLE
+    row["decision_evidence_status"] = DECISION_EVIDENCE_NOT_EVALUABLE
+    row["decision_basis"] = evaluation_status
     return row
 
 
@@ -1088,6 +901,13 @@ def _position_premium(pos: dict[str, Any]) -> float | None:
         if token.startswith("premium_per_share="):
             return safe_float(token.split("=", 1)[1])
     return None
+
+
+def _is_supported_short_option(pos: dict[str, Any]) -> bool:
+    return (
+        str(pos.get("side") or "").strip().lower() == "short"
+        and _norm_option_type(pos.get("option_type")) in {"put", "call"}
+    )
 
 
 def _position_lifecycle(
@@ -1125,20 +945,91 @@ def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[st
         return None, ["missing_quote"]
     bid = _quote_number(quote.get("bid"))
     ask = _quote_number(quote.get("ask"))
-    has_usable_bid_ask = bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
-    mid = _quote_number(quote.get("mid"))
-    if mid is not None:
-        last_price = _quote_number(quote.get("last_price"))
-        if not has_usable_bid_ask and last_price is not None and abs(float(mid) - float(last_price)) < 0.000001:
-            return mid, ["mid_fallback_last_price"]
-        return mid, []
-    if has_usable_bid_ask:
-        assert bid is not None and ask is not None
-        return round((bid + ask) / 2, 6), ["mid_from_bid_ask"]
-    last_price = _quote_number(quote.get("last_price"))
-    if last_price is not None:
-        return last_price, ["mid_fallback_last_price"]
-    return None, ["missing_mid"]
+    if bid is None or ask is None:
+        return None, ["missing_bid_ask"]
+    if bid < 0 or ask <= 0 or ask < bid:
+        return None, ["invalid_bid_ask"]
+    return round((bid + ask) / 2, 6), ["mid_from_bid_ask"]
+
+
+def _original_dte(pos: dict[str, Any], expiration: str | None) -> int | None:
+    if not expiration:
+        return None
+    opened_at = pos.get("opened_at")
+    if isinstance(opened_at, bool):
+        return None
+    opened_date = expiration_timestamp_to_date(opened_at)
+    if opened_date is None:
+        return None
+    try:
+        expiration_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (expiration_date - opened_date).days
+
+
+def _position_multiplier(pos: dict[str, Any]) -> float | None:
+    if isinstance(pos.get("multiplier"), bool):
+        return None
+    return safe_float(effective_multiplier(pos))
+
+
+def _strict_fee_estimates(
+    pos: dict[str, Any],
+    *,
+    ask: float | None,
+) -> tuple[float | None, float | None, str, str | None]:
+    broker = normalize_broker(pos.get("broker"))
+    currency = normalize_currency(pos.get("currency"))
+    premium = _position_premium(pos)
+    contracts = safe_int(pos.get("contracts_open"))
+    multiplier = _position_multiplier(pos)
+    multiplier_int = safe_int(multiplier)
+    if broker != "富途":
+        return None, None, "unsupported_broker", None
+    if currency not in {"USD", "HKD"}:
+        return None, None, "unsupported_currency", None
+    if (
+        premium is None
+        or premium <= 0
+        or ask is None
+        or ask <= 0
+        or contracts is None
+        or contracts <= 0
+        or multiplier_int is None
+        or multiplier_int <= 0
+    ):
+        return None, None, "unavailable", None
+    try:
+        open_fee = calc_futu_option_fee(
+            currency,
+            premium,
+            contracts=contracts,
+            multiplier=multiplier_int,
+            is_sell=True,
+        )
+        close_fee = calc_futu_option_fee(
+            currency,
+            ask,
+            contracts=contracts,
+            multiplier=multiplier_int,
+            is_sell=False,
+        )
+    except (TypeError, ValueError):
+        return None, None, "unavailable", None
+    if currency == "HKD":
+        return (
+            float(open_fee),
+            float(close_fee),
+            "conservative_estimate",
+            FUTU_HK_OPTION_FEE_BASIS,
+        )
+    return (
+        float(open_fee),
+        float(close_fee),
+        "schedule_estimate",
+        FUTU_US_OPTION_FEE_BASIS,
+    )
 
 
 def _position_to_input(
@@ -1149,9 +1040,16 @@ def _position_to_input(
 ) -> tuple[CloseAdviceInput, list[str]]:
     expiration = _position_expiration(pos)
     mid, quote_flags = _mid_from_quote(quote)
+    bid = safe_float((quote or {}).get("bid"))
+    ask = safe_float((quote or {}).get("ask"))
+    open_fee, close_fee, fee_status, fee_basis = _strict_fee_estimates(
+        pos,
+        ask=ask,
+    )
     return (
         CloseAdviceInput(
             account=normalize_account(pos.get("account")),
+            position_lot_id=str(pos.get("record_id") or "").strip() or None,
             symbol=_norm_symbol(pos.get("symbol")),
             option_type=_norm_option_type(pos.get("option_type")),
             side=str(pos.get("side") or "").strip().lower(),
@@ -1159,36 +1057,20 @@ def _position_to_input(
             strike=safe_float(pos.get("strike")),
             contracts_open=safe_int(pos.get("contracts_open")),
             premium=_position_premium(pos),
-            close_mid=mid,
-            bid=safe_float((quote or {}).get("bid")),
-            ask=safe_float((quote or {}).get("ask")),
+            bid=bid,
+            ask=ask,
             dte=_calc_dte(expiration, business_date=business_date),
-            multiplier=effective_multiplier(pos) or safe_float((quote or {}).get("multiplier")),
+            multiplier=_position_multiplier(pos),
             spot=safe_float((quote or {}).get("spot")),
             currency=normalize_currency(pos.get("currency") or (quote or {}).get("currency")),
-            delta=safe_float((quote or {}).get("delta")),
+            original_dte=_original_dte(pos, expiration),
+            estimated_open_fee=open_fee,
+            estimated_close_fee=close_fee,
+            fee_calc_status=fee_status,
+            fee_calc_basis=fee_basis,
         ),
         quote_flags,
     )
-
-
-def _yield_enhancement_long_call_metadata(pos: dict[str, Any]) -> dict[str, Any]:
-    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
-    out = {
-        "strategy_family": "combo_yield",
-        "strategy_profile": str(
-            pos.get("yield_enhancement_mode")
-            or strategy_snapshot.get("yield_enhancement_mode")
-            or ""
-        ).strip(),
-        "strategy_source": "position_snapshot",
-        "strategy_config_path": None,
-        "risk_model": "long_call_convexity",
-        "close_advice_profile": "combo_yield_long_call",
-        "close_requires_rv": False,
-    }
-    out.update(_position_strategy_metadata(pos))
-    return out
 
 
 def _evaluate_position_close_advice(
@@ -1196,72 +1078,20 @@ def _evaluate_position_close_advice(
     inp: CloseAdviceInput,
     pos: dict[str, Any],
     quote: dict[str, Any] | None,
-    config: dict[str, Any],
-    close_cfg: CloseAdviceConfig,
 ) -> dict[str, Any]:
-    if _is_yield_enhancement_long_call_position(pos):
-        long_call_cfg_raw = (
-            ((config.get("close_advice") or {}).get("long_call") if isinstance(config.get("close_advice"), dict) else None)
-            if isinstance(config, dict)
-            else None
-        )
-        row = evaluate_long_call_convexity_advice(
-            inp,
-            LongCallConvexityConfig.from_mapping(
-                long_call_cfg_raw if isinstance(long_call_cfg_raw, dict) else None
-            ),
-        )
-        row.update(_yield_enhancement_long_call_metadata(pos))
-        return row
-
-    resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
-    if semantics.close_uses_short_vol_thesis:
-        side_cfg = strategy_side_config_for_resolution(
-            resolution=resolution,
-            position=pos,
-            config=config,
-        )
-        if resolution.strategy_family in {SELL_PUT_FAMILY, SELL_CALL_FAMILY}:
-            row = evaluate_short_vol_close_advice(
-                inp,
-                short_vol_config=resolve_short_vol_assessment_config(side_cfg),
-                close_config=close_cfg,
-                quote_row=quote,
-                mode="put" if resolution.strategy_family == SELL_PUT_FAMILY else "call",
-            )
-        else:
-            row = evaluate_close_advice(inp, close_cfg)
-    else:
-        row = evaluate_close_advice(inp, close_cfg)
-    row.update(resolution.to_fields())
+    del quote
+    row = evaluate_close_advice(inp)
     row.update(
         {
-            "close_advice_profile": semantics.close_advice_profile,
-            "close_requires_rv": bool(semantics.close_requires_rv),
+            "broker": normalize_broker(pos.get("broker")),
+            "position_side": str(pos.get("side") or "").strip().lower(),
+            "strategy_family": (
+                "sell_put" if inp.option_type == "put" else "covered_call"
+            ),
+            "strategy_profile": "strict_profit_capture.v1",
         }
     )
-    row.update(_position_strategy_metadata(pos))
     return row
-
-
-def _is_yield_enhancement_long_call_position(pos: dict[str, Any]) -> bool:
-    return resolve_yield_enhancement_position_role(pos).is_yield_enhancement_long_call
-
-
-def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
-    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
-    return {
-        "broker": normalize_broker(pos.get("broker")),
-        "strategy": str(pos.get("strategy") or strategy_snapshot.get("strategy") or "").strip(),
-        "leg_role": str(pos.get("leg_role") or strategy_snapshot.get("leg_role") or "").strip(),
-        "strategy_group_id": str(pos.get("strategy_group_id") or strategy_snapshot.get("strategy_group_id") or "").strip(),
-        "yield_enhancement_mode": str(
-            pos.get("yield_enhancement_mode")
-            or strategy_snapshot.get("yield_enhancement_mode")
-            or ""
-        ).strip(),
-        "position_side": str(pos.get("side") or "").strip().lower(),
-    }
 
 
 def _lifecycle_not_evaluable_row(
@@ -1272,7 +1102,7 @@ def _lifecycle_not_evaluable_row(
     lifecycle_state: str,
 ) -> dict[str, Any]:
     reasons = {
-        "expiry_day": "持仓已到到期日，当前不运行常规剩余年化或凸性平仓评估",
+        "expiry_day": "持仓已到到期日，已离开严格提前止盈窗口，当前不请求常规平仓报价",
         "expired_open": "持仓到期日已过但仍标记为 open，需要先核对持仓生命周期；当前不请求行情",
         "unknown": "持仓缺少可解析到期日，当前无法确定生命周期或评估平仓建议",
     }
@@ -1283,6 +1113,7 @@ def _lifecycle_not_evaluable_row(
     }
     row: dict[str, Any] = {
         "account": str(inp.account or "").strip().lower(),
+        "position_lot_id": inp.position_lot_id,
         "symbol": str(inp.symbol or "").strip().upper(),
         "option_type": str(inp.option_type or "").strip().lower(),
         "expiration": inp.expiration,
@@ -1295,522 +1126,34 @@ def _lifecycle_not_evaluable_row(
         "dte": safe_int(inp.dte),
         "position_lifecycle_state": lifecycle_state,
         "multiplier": safe_float(inp.multiplier),
-        "capture_ratio": None,
-        "remaining_premium": None,
-        "estimated_pnl_if_close_gross": None,
         "estimated_close_fee": None,
         "fee_calc_status": "not_required",
         "fee_calc_basis": None,
         "estimated_pnl_if_close_net": None,
-        "net_close_proceeds": None,
-        "realized_if_close": None,
-        "remaining_annualized_return": None,
         "spread_ratio": None,
-        "tier": "not_evaluable",
-        "tier_label": "无法评估",
         "reason": reasons[lifecycle_state],
-        "exit_state": EXIT_STATE_NOT_EVALUABLE,
-        "exit_reason_type": EXIT_STATE_NOT_EVALUABLE,
         "evaluation_status": "not_evaluable",
         "quote_status": "not_required" if lifecycle_state != "unknown" else "not_evaluable",
         "data_quality_flags": flags[lifecycle_state],
         "currency": str(inp.currency or "").strip().upper() or None,
         "spot": safe_float(inp.spot),
+        "policy_version": STRICT_CLOSE_POLICY_VERSION,
+        "recommendation_state": RECOMMENDATION_NOT_EVALUABLE,
+        "decision_basis": flags[lifecycle_state],
+        "decision_evidence_status": DECISION_EVIDENCE_NOT_EVALUABLE,
     }
-    if _is_yield_enhancement_long_call_position(pos):
-        row.update(_yield_enhancement_long_call_metadata(pos))
-    else:
-        resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
-        row.update(resolution.to_fields())
-        row.update(
-            {
-                "close_advice_profile": semantics.close_advice_profile,
-                "close_requires_rv": bool(semantics.close_requires_rv),
-            }
-        )
-        row.update(_position_strategy_metadata(pos))
-    return row
-
-
-def _is_yield_enhancement_short_put(row: dict[str, Any]) -> bool:
-    return resolve_yield_enhancement_position_role(row).is_yield_enhancement_short_put
-
-
-def _is_yield_enhancement_long_call(row: dict[str, Any]) -> bool:
-    return resolve_yield_enhancement_position_role(row).is_yield_enhancement_long_call
-
-
-def _is_actionable_close(row: dict[str, Any]) -> bool:
-    recommendation = str(row.get("recommendation_state") or "").strip().lower()
-    if recommendation:
-        return recommendation == RECOMMENDATION_CLOSE
-    exit_state = str(row.get("exit_state") or "").strip().lower()
-    if exit_state:
-        return exit_state == EXIT_STATE_PROFIT_CAPTURE
-    return str(row.get("tier") or "").strip().lower() in ACTIONABLE_CLOSE_TIERS
-
-
-def _has_complete_yield_enhancement_combo_close(row: dict[str, Any]) -> bool:
-    status = str(row.get("combo_cost_basis_status") or "").strip().lower()
-    paired = str(row.get("paired_leg_status") or "").strip().lower()
-    return (
-        paired == "paired"
-        and status == "ok"
-        and safe_float(row.get("combo_net_if_close_both")) is not None
-    )
-
-
-def _apply_yield_enhancement_put_action(row: dict[str, Any]) -> dict[str, Any]:
-    tier = str(row.get("tier") or "").strip().lower()
-    exit_state = str(row.get("exit_state") or "").strip().lower()
-    recommendation = str(row.get("recommendation_state") or "").strip().lower()
-    if (
-        recommendation == RECOMMENDATION_NOT_EVALUABLE
-        or exit_state == EXIT_STATE_NOT_EVALUABLE
-        or tier == "not_evaluable"
-    ):
-        row["close_action"] = "not_evaluable"
-        return row
-    if _is_actionable_close(row):
-        row["close_action"] = "close_put_keep_call"
-        if _has_complete_yield_enhancement_combo_close(row):
-            row["optional_combo_action"] = "close_both_optional"
-    else:
-        row["close_action"] = "hold_put_keep_call"
-    return row
-
-
-def _apply_yield_enhancement_long_call_action(row: dict[str, Any]) -> dict[str, Any]:
-    tier = str(row.get("tier") or "").strip().lower()
-    exit_state = str(row.get("exit_state") or "").strip().lower()
-    recommendation = str(row.get("recommendation_state") or "").strip().lower()
-    if (
-        recommendation == RECOMMENDATION_NOT_EVALUABLE
-        or exit_state == EXIT_STATE_NOT_EVALUABLE
-        or tier == "not_evaluable"
-    ):
-        row["close_action"] = "not_evaluable"
-    elif recommendation == RECOMMENDATION_CLOSE and exit_state == EXIT_STATE_TAKE_PROFIT:
-        row["close_action"] = "sell_call_take_profit"
-    elif recommendation == RECOMMENDATION_CLOSE and exit_state == EXIT_STATE_SALVAGE:
-        row["close_action"] = "sell_call_salvage"
-    elif exit_state == EXIT_STATE_LET_EXPIRE:
-        row["close_action"] = "hold_to_expiry_or_expire"
-    elif yield_enhancement_mode_uses_short_vol(row.get("yield_enhancement_mode")):
-        row["close_action"] = "hold_call_as_convexity"
-    else:
-        row["close_action"] = "hold_call"
-    return row
-
-
-def _apply_standard_short_option_action(row: dict[str, Any]) -> dict[str, Any]:
-    tier = str(row.get("tier") or "").strip().lower()
-    exit_state = str(row.get("exit_state") or "").strip().lower()
-    recommendation = str(row.get("recommendation_state") or "").strip().lower()
-    if (
-        recommendation == RECOMMENDATION_NOT_EVALUABLE
-        or exit_state == EXIT_STATE_NOT_EVALUABLE
-        or tier == "not_evaluable"
-    ):
-        row["close_action"] = "not_evaluable"
-        return row
-    row["close_action"] = "close" if _is_actionable_close(row) else "hold"
-    return row
-
-
-_CLOSE_ACTION_POLICY_REGISTRY: dict[str, _CloseActionPolicy] = {
-    CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG: _CloseActionPolicy(
-        exit_mode=CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG,
-        apply=_apply_yield_enhancement_put_action,
-    ),
-    CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG: _CloseActionPolicy(
-        exit_mode=CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG,
-        apply=_apply_yield_enhancement_long_call_action,
-    ),
-    CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION: _CloseActionPolicy(
-        exit_mode=CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION,
-        apply=_apply_standard_short_option_action,
-    ),
-}
-
-
-def _resolve_close_action_policy(row: dict[str, Any]) -> _CloseActionPolicy:
-    if _is_yield_enhancement_short_put(row):
-        return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG]
-    if _is_yield_enhancement_long_call(row):
-        return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG]
-    return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION]
-
-
-def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
-    _ensure_current_policy_decision(row)
-    policy = _resolve_close_action_policy(row)
-    row["strategy_exit_mode"] = policy.exit_mode
-    return policy.apply(row)
-
-
-def _ensure_current_policy_decision(row: dict[str, Any]) -> dict[str, Any]:
-    recommendation = str(row.get("recommendation_state") or "").strip().lower()
-    if not recommendation:
-        row.update(
-            current_policy_decision_fields(
-                tier=row.get("tier"),
-                exit_state=row.get("exit_state"),
-            )
-        )
-    basis = row.get("decision_basis")
-    if isinstance(basis, (list, tuple)):
-        row["decision_basis"] = ";".join(
-            dict.fromkeys(str(item or "").strip() for item in basis if str(item or "").strip())
-        )
-    return row
-
-
-def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
-    row["fee_calc_status"] = "not_required"
-    row["fee_calc_basis"] = None
-    row["estimated_close_fee"] = None
-    row["estimated_pnl_if_close_net"] = None
-    row["buy_to_close_fee"] = None
-    row["sell_to_close_fee"] = None
-    row["close_fee"] = None
-    row["net_close_proceeds"] = None
-    mid = safe_float(row.get("close_mid"))
-    if mid is None:
-        return row
-    row["fee_calc_status"] = "unavailable"
-    broker_raw = str(row.get("broker") or "").strip()
-    broker = normalize_broker(broker_raw)
-    if not broker:
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    if broker != "富途":
-        row["fee_calc_status"] = "unsupported_broker"
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    currency = normalize_currency(row.get("currency"))
-    if currency not in {"USD", "HKD"}:
-        row["fee_calc_status"] = "unsupported_currency"
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    contracts = safe_int(row.get("contracts_open"))
-    if contracts is None or contracts <= 0:
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    multiplier = safe_int(row.get("multiplier"))
-    if multiplier is None or multiplier <= 0:
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    is_long_close = str(row.get("position_side") or "").strip().lower() == "long"
-    try:
-        fee = calc_futu_option_fee(
-            currency,
-            mid,
-            contracts=contracts,
-            multiplier=multiplier,
-            is_sell=is_long_close,
-        )
-    except Exception:
-        return _with_extra_flags(row, ["fee_calc_unavailable"])
-    gross = safe_float(row.get("estimated_pnl_if_close_gross"))
-    if gross is None:
-        gross = safe_float(row.get("realized_if_close"))
-    row["estimated_pnl_if_close_gross"] = gross
-    row["estimated_close_fee"] = float(fee)
-    if currency == "HKD":
-        row["fee_calc_status"] = "conservative_estimate"
-        row["fee_calc_basis"] = FUTU_HK_OPTION_FEE_BASIS
-    else:
-        row["fee_calc_status"] = "schedule_estimate"
-        row["fee_calc_basis"] = FUTU_US_OPTION_FEE_BASIS
-    net = gross - float(fee) if gross is not None else None
-    row["estimated_pnl_if_close_net"] = net
-    # Deprecated compatibility alias: historically this field was net after the runner applied fees.
-    row["realized_if_close"] = net
-    row["close_fee"] = float(fee)
-    if is_long_close:
-        row["sell_to_close_fee"] = float(fee)
-        row["net_close_proceeds"] = mid * multiplier * contracts - float(fee)
-    else:
-        row["buy_to_close_fee"] = float(fee)
-        remaining = safe_float(row.get("remaining_premium"))
-        if remaining is not None:
-            row["buy_to_close_cost"] = remaining + float(fee)
-            row["close_fee_to_remaining_premium"] = (
-                float(fee) / remaining if remaining > 0 else None
-            )
-    return row
-
-
-def _position_calibration_value(pos: dict[str, Any], key: str) -> tuple[Any, str | None]:
-    value = pos.get(key)
-    if value not in (None, ""):
-        return value, "position_lot"
-    snapshot = pos.get("strategy_snapshot")
-    if isinstance(snapshot, dict) and snapshot.get(key) not in (None, ""):
-        return snapshot.get(key), "strategy_snapshot"
-    return None, None
-
-
-def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in {0, 1}:
-        return bool(value)
-    token = str(value or "").strip().lower()
-    if token in {"true", "yes", "y", "1", "acceptable", "continue"}:
-        return True
-    if token in {"false", "no", "n", "0", "changed", "revoked"}:
-        return False
-    return None
-
-
-def _apply_close_calibration_context(row: dict[str, Any], pos: dict[str, Any]) -> dict[str, Any]:
-    side = str(row.get("position_side") or pos.get("side") or "").strip().lower()
-    option_type = str(row.get("option_type") or pos.get("option_type") or "").strip().lower()
-    if side != "short" or option_type not in {"put", "call"}:
-        return row
-
-    replacement_raw, replacement_location = _position_calibration_value(
-        pos,
-        "replacement_annualized_return",
-    )
-    replacement = safe_float(replacement_raw)
-    if replacement is not None and replacement >= 0:
-        row["replacement_annualized_return"] = replacement
-        source_raw, _ = _position_calibration_value(pos, "replacement_source")
-        row["replacement_source"] = str(source_raw or replacement_location or "explicit").strip()
-        remaining_annualized = safe_float(row.get("remaining_annualized_return"))
-        if remaining_annualized is not None:
-            row["replacement_annualized_advantage"] = replacement - remaining_annualized
-
-    willingness_key = "assignment_acceptable" if option_type == "put" else "called_away_acceptable"
-    willingness_raw, willingness_source = _position_calibration_value(pos, willingness_key)
-    if willingness_source is None:
-        willingness = True
-        willingness_source = "strategy_default"
-    else:
-        willingness = _optional_bool(willingness_raw)
-    row["continued_willingness"] = willingness
-    row["continued_willingness_source"] = willingness_source
-
-    missing: list[str] = []
-    if safe_float(row.get("buy_to_close_cost")) is None:
-        missing.append("close_transaction_cost")
-    if str(row.get("remaining_risk_status") or "").strip().lower() != "ok":
-        missing.append("remaining_risk")
-    if replacement is None or replacement < 0:
-        missing.append("replacement_opportunity")
-    if willingness is None:
-        missing.append("continued_willingness")
-
-    evaluation_status = str(row.get("evaluation_status") or "").strip().lower()
-    if evaluation_status and evaluation_status != "priced":
-        status = "not_evaluable"
-    elif willingness is False:
-        status = "review_required"
-    elif missing:
-        status = "partial"
-    else:
-        status = "complete"
-    row["close_calibration_status"] = status
-    row["close_calibration_missing"] = ";".join(missing) or None
-    return row
-
-
-def _strategy_group_id(row: dict[str, Any]) -> str:
-    return str(row.get("strategy_group_id") or "").strip()
-
-
-def _gross_leg_value(row: dict[str, Any], price_key: str) -> float | None:
-    price = safe_float(row.get(price_key))
-    multiplier = safe_float(row.get("multiplier"))
-    contracts = safe_int(row.get("contracts_open"))
-    if price is None or multiplier is None or contracts is None:
-        return None
-    if multiplier <= 0 or contracts <= 0:
-        return None
-    return price * multiplier * contracts
-
-
-def _combo_inventory_input(pos: dict[str, Any]) -> dict[str, Any]:
-    snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
-    return {
-        "record_id": pos.get("record_id"),
-        "account": pos.get("account"),
-        "symbol": pos.get("symbol"),
-        "option_type": pos.get("option_type"),
-        "side": pos.get("side"),
-        "contracts": pos.get("contracts"),
-        "contracts_open": pos.get("contracts_open"),
-        "contracts_closed": pos.get("contracts_closed"),
-        "expiration_ymd": pos.get("expiration_ymd") or _position_expiration(pos),
-        "strategy": pos.get("strategy") or snapshot.get("strategy"),
-        "leg_role": pos.get("leg_role") or snapshot.get("leg_role"),
-        "strategy_group_id": pos.get("strategy_group_id") or snapshot.get("strategy_group_id"),
-        "yield_enhancement_mode": pos.get("yield_enhancement_mode") or snapshot.get("yield_enhancement_mode"),
-        "expiry_structure": pos.get("expiry_structure") or snapshot.get("expiry_structure"),
-        "strategy_snapshot": snapshot,
-    }
-
-
-def _group_sum(rows: list[dict[str, Any]], value_fn: Callable[[dict[str, Any]], float | None]) -> float | None:
-    values = [value_fn(row) for row in rows]
-    if not values or any(value is None for value in values):
-        return None
-    return sum(float(value) for value in values if value is not None)
-
-
-def _apply_combo_group_fields(
-    rows: list[dict[str, Any]],
-    *,
-    group: dict[str, Any],
-) -> None:
-    put_rows = [row for row in rows if _is_yield_enhancement_short_put(row)]
-    call_rows = [row for row in rows if _is_yield_enhancement_long_call(row)]
-    evidence_issues: list[str] = []
-    for leg_name, leg_rows in (("put", put_rows), ("call", call_rows)):
-        for row in leg_rows:
-            if str(row.get("quote_status") or "").strip().lower() != "priced":
-                evidence_issues.append(f"{leg_name}_quote_unavailable")
-            if str(row.get("evaluation_status") or "").strip().lower() != "priced":
-                evidence_issues.append(f"{leg_name}_advice_not_evaluable")
-
-    synthesis = synthesize_combo_yield_group_close_advice(
-        inventory_classification=group.get("summary_classification"),
-        inventory_issues=list(group.get("inventory_issues") or []),
-        put_actions=[str(row.get("close_action") or "") for row in put_rows],
-        call_actions=[str(row.get("close_action") or "") for row in call_rows],
-        evidence_issues=evidence_issues,
-    )
-    issue_list = list(synthesis.get("combo_group_issues") or [])
-    common = {
-        **synthesis,
-        "combo_group_issues": ";".join(issue_list),
-        "combo_put_contracts_open": group.get("put_contracts_open"),
-        "combo_call_contracts_open": group.get("call_contracts_open"),
-        "combo_group_quote_status": "priced" if not evidence_issues else "incomplete",
-        "combo_group_evidence_scope": "open_option_lots_and_current_quotes",
-    }
-    for row in rows:
-        row.update(common)
-        _with_extra_flags(row, [f"combo_group_{issue}" for issue in issue_list])
-
-    classification = str(synthesis.get("combo_group_classification") or "").strip().lower()
-    status = str(synthesis.get("combo_group_status") or "").strip().lower()
-    if classification == "review_required" or status == "review_required":
-        for row in put_rows:
-            row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
-            row["combo_cost_basis_status"] = "review_required"
-            row["paired_leg_status"] = "review_required"
-        return
-    if classification == "missing_call":
-        for row in put_rows:
-            row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
-            row["combo_cost_basis_status"] = "missing_paired_call"
-            row["paired_leg_status"] = "missing"
-        return
-    if classification == "residual_call":
-        for row in call_rows:
-            row["combo_cost_basis_status"] = "not_applicable_residual_call"
-            row["paired_leg_status"] = "residual_call"
-        return
-    if classification != "active_combo":
-        return
-
-    for row in put_rows:
-        row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
-        row["paired_leg_status"] = "paired"
-
-    fee_unavailable = any(
-        "fee_calc_unavailable" in {
-            flag for flag in str(row.get("data_quality_flags") or "").split(";") if flag
+    del config
+    row.update(
+        {
+            "broker": normalize_broker(pos.get("broker")),
+            "position_side": str(pos.get("side") or "").strip().lower(),
+            "strategy_family": (
+                "sell_put" if inp.option_type == "put" else "covered_call"
+            ),
+            "strategy_profile": "strict_profit_capture.v1",
         }
-        for row in [*put_rows, *call_rows]
     )
-    if fee_unavailable:
-        for row in put_rows:
-            row["combo_cost_basis_status"] = "fee_calc_unavailable"
-        return
-
-    call_cost = _group_sum(call_rows, lambda row: _gross_leg_value(row, "premium"))
-    call_value_before_fee = _group_sum(call_rows, lambda row: _gross_leg_value(row, "close_mid"))
-    call_fees = _group_sum(
-        call_rows,
-        lambda row: safe_float(row.get("sell_to_close_fee"))
-        if safe_float(row.get("sell_to_close_fee")) is not None
-        else (safe_float(row.get("close_fee")) or 0.0),
-    )
-    put_realized = _group_sum(put_rows, lambda row: safe_float(row.get("realized_if_close")))
-    call_value = (
-        call_value_before_fee - (call_fees or 0.0)
-        if call_value_before_fee is not None and call_fees is not None
-        else None
-    )
-    for row in put_rows:
-        row["combo_call_cost"] = call_cost
-        row["combo_call_value_if_close"] = call_value
-        if call_cost is None:
-            row["combo_cost_basis_status"] = "missing_call_cost"
-            continue
-        if put_realized is None:
-            row["combo_cost_basis_status"] = "missing_put_realized"
-            continue
-        row["combo_net_locked_if_close_put_keep_call"] = put_realized - call_cost
-        if call_value is None:
-            row["combo_cost_basis_status"] = "missing_call_quote"
-            continue
-        row["combo_net_if_close_both"] = put_realized - call_cost + call_value
-        row["combo_cost_basis_status"] = "ok"
-        if (
-            _is_actionable_close(row)
-            and str(row.get("combo_group_action") or "").strip().lower() == "close_put_keep_call"
-        ):
-            row["optional_combo_action"] = "close_both_optional"
-
-
-def _apply_yield_enhancement_combo_economics(
-    rows: list[dict[str, Any]],
-    *,
-    positions: list[dict[str, Any]],
-) -> None:
-    inventory = build_option_group_inventory(
-        [_combo_inventory_input(pos) for pos in positions if isinstance(pos, dict)]
-    )
-    inventory_by_group = {
-        str(group.get("strategy_group_id") or "").strip(): group
-        for group in inventory
-        if str(group.get("strategy_group_id") or "").strip()
-    }
-    rows_by_group: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        if not (_is_yield_enhancement_short_put(row) or _is_yield_enhancement_long_call(row)):
-            continue
-        group_id = _strategy_group_id(row)
-        if not group_id:
-            group = {
-                "summary_classification": "review_required",
-                "inventory_issues": ["missing_group_identity"],
-                "put_contracts_open": safe_int(row.get("contracts_open")) if _is_yield_enhancement_short_put(row) else 0,
-                "call_contracts_open": safe_int(row.get("contracts_open")) if _is_yield_enhancement_long_call(row) else 0,
-            }
-            _apply_combo_group_fields([row], group=group)
-            continue
-        rows_by_group.setdefault(group_id, []).append(row)
-
-    for group_id, group_rows in rows_by_group.items():
-        group = inventory_by_group.get(group_id)
-        if group is None:
-            group = {
-                "summary_classification": "review_required",
-                "inventory_issues": ["missing_group_inventory"],
-                "put_contracts_open": sum(
-                    safe_int(row.get("contracts_open")) or 0
-                    for row in group_rows
-                    if _is_yield_enhancement_short_put(row)
-                ),
-                "call_contracts_open": sum(
-                    safe_int(row.get("contracts_open")) or 0
-                    for row in group_rows
-                    if _is_yield_enhancement_long_call(row)
-                ),
-            }
-        _apply_combo_group_fields(group_rows, group=group)
+    return row
 
 
 def _with_extra_flags(row: dict[str, Any], flags: list[str]) -> dict[str, Any]:
@@ -1849,512 +1192,45 @@ def _num(value: Any) -> str:
     return f"{v:.2f}"
 
 
-def _selected_evaluation_gap_rows(rows: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
-    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for row in sort_advice_rows(rows):
-        if str(row.get("evaluation_status") or "").strip().lower() == "priced":
-            continue
-        acct = _row_account(row.get("account"))
-        grouped.setdefault(acct, []).append(row)
-    selected: list[dict[str, Any]] = []
-    for acct_rows in grouped.values():
-        if max_items > 0:
-            selected.extend(acct_rows[:max_items])
-        else:
-            selected.extend(acct_rows)
-    return selected
-
-
-def _gap_reason_label(row: dict[str, Any]) -> str:
-    flags = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
-    mapping = {
-        "required_data_missing_expiration": "缺少到期日覆盖",
-        "required_data_missing_contract": "缺少合约覆盖",
-        "required_data_fetch_error": "补拉持仓覆盖失败",
-        "required_data_fetch_error_rate_limit": "OpenD 限频",
-        "required_data_fetch_skipped_non_futu_source": "非 Futu 行情源，无法补拉持仓覆盖",
-        "opend_fetch_no_usable_quote": "无可用报价",
-        "opend_fetch_error_rate_limit": "OpenD 限频",
-        "opend_fetch_error_retry_budget": "OpenD 重试预算耗尽",
-        "opend_fetch_error": "OpenD 拉取失败",
-        "missing_quote": "缺少报价",
-        "missing_mid": "缺少可用定价",
-        "mid_fallback_last_price": "只有最近成交价，缺少可用 bid/ask",
-        "spread_too_wide": "价差过宽",
-        "invalid_spread": "价差无效",
-        "short_vol_risk_data_missing": "缺少 short-vol 风险数据",
-        "event_source_unavailable": "事件风险数据源不可用",
-    }
-    if "short_vol_risk_data_missing" in flags:
-        return str(row.get("reason") or mapping["short_vol_risk_data_missing"]).strip()
-    if "event_source_unavailable" in flags:
-        err = str(row.get("event_source_error") or "").strip()
-        base = str(row.get("reason") or mapping["event_source_unavailable"]).strip()
-        return f"{base}: {err}" if err else base
-    for flag in ("required_data_fetch_error_rate_limit", "opend_fetch_error_rate_limit"):
-        if flag in flags:
-            return mapping[flag]
-    for flag in flags:
-        if flag in mapping:
-            return mapping[flag]
-    return str(row.get("reason") or "无法评估").strip() or "无法评估"
-
-
-def _close_action_label(row: dict[str, Any]) -> str:
-    if _is_legacy_risk_exit_display_row(row):
-        realized = safe_float(row.get("realized_if_close"))
-        return "风险止损" if realized is not None and realized < 0 else "风险平仓"
-    action = str(row.get("close_action") or "").strip().lower()
-    group_status = str(row.get("combo_group_status") or "").strip().lower()
-    group_action = str(row.get("combo_group_action") or "").strip().lower()
-    group_mapping = {
-        "close_put_unpaired": "买回 Put（Call 腿缺失）",
-        "hold_put_unpaired": "持有 Put（Call 腿缺失）",
-        "sell_residual_call_take_profit": "卖出剩余 Call 止盈",
-        "sell_residual_call_salvage": "卖出剩余 Call 回收残值",
-        "hold_residual_call_to_expiry_or_expire": "剩余 Call 保留至到期或允许归零",
-        "hold_residual_call_as_convexity": "继续持有剩余 Call 凸性腿",
-        "hold_residual_call": "继续持有剩余 Call",
-    }
-    if group_action in group_mapping:
-        return group_mapping[group_action]
-    if group_status == "review_required":
-        review_mapping = {
-            "close_put_keep_call": "逐腿建议：买回 Put；组合需人工复核",
-            "hold_put_keep_call": "逐腿建议：持有 Put；组合需人工复核",
-            "sell_call_take_profit": "逐腿建议：卖出 Call 止盈；组合需人工复核",
-            "sell_call_salvage": "逐腿建议：卖出 Call 回收残值；组合需人工复核",
-            "hold_to_expiry_or_expire": "逐腿建议：Call 保留至到期；组合需人工复核",
-            "hold_call_as_convexity": "逐腿建议：持有 Call 凸性腿；组合需人工复核",
-            "hold_call": "逐腿建议：持有 Call；组合需人工复核",
-            "not_evaluable": "逐腿无法评估；组合需人工复核",
-        }
-        if action in review_mapping:
-            return review_mapping[action]
-    mapping = {
-        "close_put_keep_call": "买回 Put，保留收益增强 Call",
-        "hold_put_keep_call": "继续持有 Put，保留收益增强 Call",
-        "sell_call_take_profit": "卖出收益增强 Call 止盈",
-        "hold_call": "继续持有收益增强 Call",
-        "hold_call_as_convexity": "继续持有收益增强 Call 凸性腿",
-        "sell_call_salvage": "卖出收益增强 Call 回收残值",
-        "hold_to_expiry_or_expire": "保留至到期或允许归零",
-        "close_both_optional": "可选组合止盈",
-        "close": "平仓",
-        "hold": "持有观察",
-        "not_evaluable": "无法评估",
-    }
-    label = mapping.get(action)
-    if not label:
-        return str(row.get("tier_label") or "-")
-    optional = str(row.get("optional_combo_action") or "").strip().lower()
-    if action == "close_put_keep_call" and optional == "close_both_optional":
-        return f"{label}；组合止盈可选"
-    return label
-
-
-def _close_tier_label_display(row: dict[str, Any]) -> str:
-    if _is_legacy_risk_exit_display_row(row):
-        tier = str(row.get("tier") or "").strip().lower()
-        if tier == "strong":
-            return "高优先级风险退出"
-        if tier == "medium":
-            return "中优先级风险退出"
-        return "风险退出"
-    return str(row.get("tier_label") or "-")
-
-
-def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
+def render_markdown(rows: list[dict[str, Any]], *, max_items: int) -> str:
     selected = select_close_advice_notification_rows(
         rows,
-        notify_levels=notify_levels,
         max_items_per_account=max_items,
     )
-    gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
-    if not selected and not gap_rows:
+    if not selected:
         return ""
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in selected:
         acct = _row_account(row.get("account"))
         grouped.setdefault(acct, []).append(row)
-    gap_grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for row in gap_rows:
-        acct = _row_account(row.get("account"))
-        gap_grouped.setdefault(acct, []).append(row)
 
     lines: list[str] = []
-    for acct in list(grouped.keys()) + [x for x in gap_grouped.keys() if x not in grouped]:
-        acct_rows = grouped.get(acct) or []
-        acct_gap_rows = gap_grouped.get(acct) or []
+    for acct, acct_rows in grouped.items():
         if lines:
             lines.append("")
-        lines.append(f"### [{acct}] 平仓建议")
-        if acct_rows:
-            for row in acct_rows:
-                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-                exp = row.get("expiration") or "-"
-                strike = _num(row.get("strike"))
-                suffix = "P" if opt == "Put" else "C"
-                currency = row.get("currency")
-                lines.extend(
-                    [
-                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {_close_action_label(row)} · {_close_tier_label_display(row)}",
-                        (
-                            _long_call_metric_line(row)
-                            if _is_long_call_convexity_display_row(row)
-                            else (
-                                f"- 风险: {_short_vol_status_label(row)} | "
-                                f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
-                                f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
-                            )
-                            if _is_legacy_risk_exit_display_row(row)
-                            else (
-                                f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
-                                f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
-                                f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
-                            )
-                        ),
-                        (
-                            _long_call_price_line(row, currency)
-                            if _is_long_call_convexity_display_row(row)
-                            else f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}"
-                        ),
-                        (
-                            f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
-                            f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
-                            if not _is_legacy_risk_exit_display_row(row)
-                            else f"- 估算: 平仓损益 {_money(row.get('realized_if_close'), currency)} | "
-                            f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
-                        ),
-                        f"- 理由: {row.get('reason') or '-'}",
-                        "---",
-                    ]
-                )
-        else:
-            lines.append("- 本次无 strong/medium 平仓建议")
-        if acct_gap_rows:
-            lines.append("- 待补数据:")
-            for row in acct_gap_rows:
-                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-                exp = row.get("expiration") or "-"
-                strike = _num(row.get("strike"))
-                suffix = "P" if opt == "Put" else "C"
-                lines.append(
-                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · 无法评估 | {_gap_reason_label(row)}"
-                )
-    return "\n".join(lines).strip() + "\n"
-
-
-def _tier_emoji_compact(tier: str) -> str:
-    tier_map = {
-        "strong": "🔴",
-        "medium": "🟠",
-        "weak": "🟡",
-        "optional": "⚪",
-        "defer": "⚪",
-        "none": "⚪",
-    }
-    return tier_map.get(str(tier).strip().lower(), "⚪")
-
-
-def _tier_verb_compact(tier: str) -> str:
-    verb_map = {
-        "strong": "强烈平仓",
-        "medium": "建议平仓",
-        "weak": "考虑平仓",
-        "optional": "可选平仓",
-        "defer": "观察",
-        "none": "观察",
-    }
-    return verb_map.get(str(tier).strip().lower(), "评估")
-
-
-def _is_legacy_risk_exit_display_row(row: dict[str, Any]) -> bool:
-    """Read-only renderer compatibility for historical close-advice artifacts."""
-
-    return str(row.get("exit_state") or "").strip().lower() == LEGACY_EXIT_STATE_RISK_EXIT
-
-
-def _short_vol_status_label(row: dict[str, Any]) -> str:
-    status = str(row.get("short_vol_thesis_status") or "").strip().lower()
-    mapping = {
-        "event_risk": "事件风险",
-        "vol_edge_lost": "IV/RV edge丢失",
-        "vol_edge_weakened": "IV/RV edge转弱",
-        "delta_risk_high": "delta风险升高",
-    }
-    return mapping.get(status, "风险退出")
-
-
-def _legacy_risk_exit_verb_compact(row: dict[str, Any], fallback: str) -> str:
-    realized = safe_float(row.get("realized_if_close"))
-    if realized is not None and realized < 0:
-        return "风险止损"
-    return "风险平仓" if fallback in {"强烈平仓", "建议平仓", "考虑平仓", "可选平仓"} else fallback
-
-
-def _close_action_verb_compact(row: dict[str, Any], fallback: str) -> str:
-    if _is_legacy_risk_exit_display_row(row):
-        return _legacy_risk_exit_verb_compact(row, fallback)
-    action = str(row.get("close_action") or "").strip().lower()
-    mapping = {
-        "close_put_keep_call": "买回Put留Call",
-        "hold_put_keep_call": "持有Put留Call",
-        "sell_call_take_profit": "卖Call止盈",
-        "hold_call": "持有Call",
-        "hold_call_as_convexity": "持有凸性Call",
-        "sell_call_salvage": "卖Call残值",
-        "hold_to_expiry_or_expire": "允许Call归零",
-        "close": fallback,
-        "hold": fallback,
-        "not_evaluable": fallback,
-    }
-    return mapping.get(action, fallback)
-
-
-def _fmt_date_compact_ca(exp: str) -> str:
-    if not exp or exp == "-":
-        return ""
-    try:
-        from datetime import datetime
-        dt = datetime.strptime(str(exp), "%Y-%m-%d")
-        now = datetime.now()
-        if dt.year == now.year:
-            return f"@ {dt.strftime('%m-%d')}"
-        return f"@ {exp}"
-    except Exception:
-        return f"@ {exp}"
-
-
-def _pct_compact(val) -> str:
-    try:
-        n = float(val)
-        if n >= 0.1:
-            return f"{int(round(n * 100))}%"
-        return f"{n * 100:.1f}%"
-    except Exception:
-        return str(val) if val is not None else "-"
-
-
-def _signed_pct_compact(val: Any) -> str:
-    n = safe_float(val)
-    if n is None:
-        return "-"
-    sign = "+" if n > 0 else ""
-    if abs(n) >= 0.1:
-        return f"{sign}{int(round(n * 100))}%"
-    return f"{sign}{n * 100:.1f}%"
-
-
-def _ratio_x_compact(val: Any) -> str:
-    n = safe_float(val)
-    if n is None:
-        return "-"
-    if abs(n) >= 10:
-        return f"{n:.0f}x"
-    return f"{n:.1f}x"
-
-
-def _is_long_call_convexity_display_row(row: dict[str, Any]) -> bool:
-    if _is_yield_enhancement_long_call(row):
-        return True
-    if str(row.get("risk_model") or "").strip().lower() == "long_call_convexity":
-        return True
-    option_type = str(row.get("option_type") or "").strip().lower()
-    side = str(row.get("position_side") or row.get("side") or "").strip().lower()
-    return (
-        option_type == "call"
-        and side == "long"
-        and safe_float(row.get("long_call_value_ratio")) is not None
-    )
-
-
-def _long_call_gain_ratio(row: dict[str, Any]) -> float | None:
-    value_ratio = safe_float(row.get("long_call_value_ratio"))
-    if value_ratio is not None:
-        return value_ratio - 1.0
-    realized = safe_float(row.get("realized_if_close"))
-    cost = safe_float(row.get("long_call_cost_basis"))
-    if realized is None or cost is None or cost <= 0:
-        return None
-    return realized / cost
-
-
-def _long_call_metric_line(row: dict[str, Any]) -> str:
-    ratio = _ratio_x_compact(row.get("long_call_value_ratio"))
-    dte = row.get("dte")
-    dte_text = dte if dte is not None else "-"
-    gain = _signed_pct_compact(_long_call_gain_ratio(row))
-    return f"- Call价值: 现值/成本={ratio} | 剩余DTE={dte_text} | 浮盈={gain}"
-
-
-def _long_call_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
-    ratio = _ratio_x_compact(row.get("long_call_value_ratio"))
-    gain = _signed_pct_compact(_long_call_gain_ratio(row))
-    return f"- 现值/成本 {ratio} · {dte_str} · 浮盈 {gain}"
-
-
-def _legacy_risk_exit_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
-    remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
-    return f"- 风险退出 {_short_vol_status_label(row)} · {dte_str} · 余年化 {remaining_ann}"
-
-
-def _price_compact(val: Any, currency: str | None) -> str:
-    n = safe_float(val)
-    if n is None:
-        return "-"
-    prefix = "$" if currency == "USD" else "¥"
-    if abs(n) >= 1000:
-        body = f"{n:,.2f}"
-    else:
-        body = f"{n:.2f}"
-    return f"{prefix}{body.rstrip('0').rstrip('.')}"
-
-
-def _quote_range_compact(row: dict[str, Any], currency: str | None) -> str:
-    bid = safe_float(row.get("bid"))
-    ask = safe_float(row.get("ask"))
-    if bid is not None and ask is not None:
-        return f" · 买一/卖一 {_price_compact(bid, currency)}/{_price_compact(ask, currency)}"
-    if bid is not None:
-        return f" · 买一 {_price_compact(bid, currency)}"
-    if ask is not None:
-        return f" · 卖一 {_price_compact(ask, currency)}"
-    return ""
-
-
-def _long_call_price_line_compact(row: dict[str, Any], currency: str | None) -> str:
-    suggested = _price_compact(row.get("close_mid"), currency)
-    realized = _money_compact(row.get("realized_if_close"), currency)
-    remaining = _money_compact(row.get("remaining_premium"), currency)
-    quote_range = _quote_range_compact(row, currency)
-    return f"- 建议出价 {suggested}{quote_range} · 收益 {realized}（余 {remaining}）"
-
-
-def _short_option_price_line_compact(row: dict[str, Any], currency: str | None) -> str:
-    close_mid = _money_compact(row.get("close_mid"), currency)
-    realized = _money_compact(row.get("realized_if_close"), currency)
-    remaining = _money_compact(row.get("remaining_premium"), currency)
-    label = "平仓损益" if _is_legacy_risk_exit_display_row(row) else "收益"
-    return f"- 建议价 {close_mid} · {label} {realized}（余 {remaining}）"
-
-
-def _money_compact(val, currency: str | None) -> str:
-    try:
-        n = float(val)
-        prefix = "$" if currency == "USD" else "¥"
-        if abs(n) >= 1000:
-            return f"{prefix}{n:,.0f}"
-        if abs(n) >= 10:
-            return f"{prefix}{n:.0f}"
-        return f"{prefix}{n:.2f}"
-    except Exception:
-        return str(val) if val is not None else "-"
-
-
-def _strike_compact(val: Any) -> str:
-    try:
-        n = float(val)
-        if n.is_integer():
-            return str(int(n))
-        return f"{n:.2f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(val) if val is not None else "-"
-
-
-def _quote_range_text(row: dict[str, Any], currency: Any) -> str:
-    bid = safe_float(row.get("bid"))
-    ask = safe_float(row.get("ask"))
-    if bid is not None and ask is not None:
-        return f"买一/卖一={_money(bid, currency)}/{_money(ask, currency)}"
-    if bid is not None:
-        return f"买一={_money(bid, currency)}"
-    if ask is not None:
-        return f"卖一={_money(ask, currency)}"
-    return ""
-
-
-def _long_call_price_line(row: dict[str, Any], currency: Any) -> str:
-    parts = [
-        f"开仓权利金={_num(row.get('premium'))}",
-        f"建议出价={_money(row.get('close_mid'), currency)}",
-    ]
-    quote_range = _quote_range_text(row, currency)
-    if quote_range:
-        parts.append(quote_range)
-    return "- 价格: " + " | ".join(parts)
-
-
-def render_markdown_compact(
-    rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int
-) -> str:
-    selected = select_close_advice_notification_rows(
-        rows,
-        notify_levels=notify_levels,
-        max_items_per_account=max_items,
-    )
-    gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
-    if not selected and not gap_rows:
-        return ""
-
-    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for row in selected:
-        acct = _row_account(row.get("account"))
-        grouped.setdefault(acct, []).append(row)
-    gap_grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for row in gap_rows:
-        acct = _row_account(row.get("account"))
-        gap_grouped.setdefault(acct, []).append(row)
-
-    lines: list[str] = []
-    for acct in list(grouped.keys()) + [x for x in gap_grouped.keys() if x not in grouped]:
-        acct_rows = grouped.get(acct) or []
-        acct_gap_rows = gap_grouped.get(acct) or []
-        if lines:
-            lines.append("")
-        lines.append(f"### [{acct}] 平仓建议 ({len(acct_rows)})")
-        if acct_rows:
-            for row in acct_rows:
-                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-                exp = row.get("expiration") or "-"
-                strike = _strike_compact(row.get("strike"))
-                suffix = "P" if opt == "Put" else "C"
-                currency = row.get("currency")
-                tier = str(row.get("tier") or "").strip().lower()
-                emoji = _tier_emoji_compact(tier)
-                verb = _close_action_verb_compact(row, _tier_verb_compact(tier))
-                l1 = f"{emoji} {verb} {row.get('symbol')} {opt} {strike}{suffix} {_fmt_date_compact_ca(exp)}"
-                is_long_call_row = _is_long_call_convexity_display_row(row)
-                capture = _pct_compact(row.get("capture_ratio"))
-                dte = row.get("dte")
-                dte_str = f"{int(dte)}天" if dte is not None else "-"
-                remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
-                if is_long_call_row:
-                    l2 = _long_call_metric_line_compact(row, dte_str=dte_str)
-                elif _is_legacy_risk_exit_display_row(row):
-                    l2 = _legacy_risk_exit_metric_line_compact(row, dte_str=dte_str)
-                else:
-                    l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
-                if is_long_call_row:
-                    l3 = _long_call_price_line_compact(row, currency)
-                else:
-                    l3 = _short_option_price_line_compact(row, currency)
-                lines.append(l1)
-                lines.append(l2)
-                lines.append(l3)
-        else:
-            lines.append("- 本次无 strong/medium 平仓建议")
-        if acct_gap_rows:
-            lines.append("- 待补数据:")
-            for row in acct_gap_rows:
-                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-                exp = row.get("expiration") or "-"
-                strike = _num(row.get("strike"))
-                suffix = "P" if opt == "Put" else "C"
-                lines.append(
-                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · 无法评估 | {_gap_reason_label(row)}"
-                )
+        lines.append(f"### [{acct}] 严格平仓提醒")
+        for row in acct_rows:
+            opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+            exp = row.get("expiration") or "-"
+            strike = _num(row.get("strike"))
+            currency = row.get("currency")
+            lines.extend(
+                [
+                    f"- {row.get('symbol')} {opt} {exp} @{strike} · 建议买回平仓",
+                    (
+                        f"- 条件: 净兑现 {_pct(row.get('net_capture_ratio'))} | "
+                        f"平仓全成本/名义本金 {_pct(row.get('close_cost_ratio'))} | "
+                        f"剩余期限 {_pct(row.get('remaining_term_ratio'))}"
+                    ),
+                    (
+                        f"- 价格: 当前 ask={_money(row.get('ask'), currency)} | "
+                        f"全成本={_money(row.get('all_in_close_cost'), currency)} | "
+                        f"预计净锁定={_money(row.get('estimated_pnl_if_close_net'), currency)}"
+                    ),
+                    f"- 理由: {row.get('reason') or '-'}",
+                ]
+            )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -2370,79 +1246,12 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     atomic_write_text(path, buf.getvalue(), encoding="utf-8")
 
 
-def _close_trace_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
-    return (
-        str(row.get("account") or "").strip().lower(),
-        str(row.get("position_lot_id") or "").strip(),
-        str(row.get("symbol") or "").strip().upper(),
-        str(row.get("option_type") or "").strip().lower(),
-        str(row.get("expiration") or "").strip(),
-        str(row.get("strike") or "").strip(),
-    )
-
-
-def _append_close_advice_filter_trace(
-    *,
-    csv_path: Path,
-    rows: list[dict[str, Any]],
-    selected_notify_rows: list[dict[str, Any]],
-    notify_levels: set[str],
-) -> None:
-    scope = infer_trace_scope_from_path(csv_path)
-    selected_keys = {_close_trace_key(row) for row in selected_notify_rows}
-    trace_rows: list[dict[str, Any]] = []
-    for row in rows:
-        symbol = str(row.get("symbol") or "").strip()
-        if not symbol:
-            continue
-        flags = [flag for flag in str(row.get("data_quality_flags") or "").split(";") if flag]
-        evaluation_status = str(row.get("evaluation_status") or "").strip().lower()
-        tier = str(row.get("tier") or "").strip().lower()
-        key = _close_trace_key(row)
-        if evaluation_status != "priced":
-            status = "rejected"
-            rule = flags[0] if flags else (evaluation_status or "close_advice_not_priced")
-            message = str(row.get("reason") or "close advice row could not be priced")
-        elif key in selected_keys:
-            status = "notified"
-            rule = "close_advice_notified"
-            message = str(row.get("reason") or "close advice selected for notification")
-        elif tier in notify_levels:
-            status = "ranked_below"
-            rule = "close_advice_over_max_items"
-            message = str(row.get("reason") or "close advice matched notify tier but was not selected")
-        else:
-            status = "accepted"
-            rule = f"close_advice_{tier or 'hold'}"
-            message = str(row.get("reason") or "close advice evaluated")
-        trace_rows.append(
-            build_candidate_filter_trace_row(
-                run_id=scope.get("run_id"),
-                account=scope.get("account") or row.get("account"),
-                symbol=symbol,
-                function="close_advice",
-                mode=str(row.get("option_type") or "close"),
-                option_type=row.get("option_type"),
-                strategy_family=row.get("strategy_family"),
-                strategy_profile=row.get("strategy_profile"),
-                status=status,
-                stage="close_advice",
-                rule=rule,
-                metric_value=row.get("capture_ratio"),
-                threshold=None,
-                contract_symbol=row.get("contract_symbol"),
-                expiration=row.get("expiration"),
-                strike=row.get("strike"),
-                message=message,
-                evidence_path=csv_path.name,
-                config_values={"notify_levels": sorted(notify_levels)},
-            )
-        )
-    append_candidate_filter_trace_rows(candidate_trace_path_for_output(csv_path), trace_rows)
-
-
 def _load_context(context_path: Path) -> dict[str, Any]:
     obj = read_json(context_path, default=None)
+    return _validate_context(obj)
+
+
+def _validate_context(obj: Any) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise ValueError("close_advice position context is missing or malformed")
     status = str(obj.get("context_status") or "").strip().lower()
@@ -2477,7 +1286,7 @@ def _snapshot_integrity_failure_result(
         "evaluable_rows": 0,
         "evaluation_gap_rows": 0,
         "notify_rows": 0,
-        "tier_counts": {},
+        "recommendation_counts": {},
         "evaluation_status_counts": {},
         "flag_counts": {"required_data_snapshot_integrity_failed": 1},
         "quote_issue_rows": 0,
@@ -2507,6 +1316,7 @@ def _snapshot_integrity_failure_result(
         },
         "csv": str(Path(output_dir).resolve() / "close_advice.csv"),
         "text": str(Path(output_dir).resolve() / "close_advice.txt"),
+        "notification_text": "",
     }
 
 
@@ -2579,6 +1389,7 @@ def _validate_frozen_symbols(
     expected_run_id: str,
     required_data_root: Path,
     symbols: set[str],
+    expected_manifest_sha256: str,
 ) -> tuple[
     dict[str, dict[str, Any]],
     dict[str, str],
@@ -2590,14 +1401,23 @@ def _validate_frozen_symbols(
     for symbol in sorted(symbols):
         try:
             (
-                provenance[symbol],
-                csv_bytes_by_symbol[symbol],
+                symbol_provenance,
+                symbol_csv_bytes,
             ) = resolve_frozen_required_data_csv_bytes(
                 manifest_path=manifest_path,
                 expected_run_id=expected_run_id,
                 symbol=symbol,
                 required_data_root=required_data_root,
             )
+            if (
+                str(symbol_provenance.get("manifest_sha256") or "")
+                != expected_manifest_sha256
+            ):
+                raise RequiredDataSnapshotError(
+                    "required-data snapshot manifest changed during Close Advice"
+                )
+            provenance[symbol] = symbol_provenance
+            csv_bytes_by_symbol[symbol] = symbol_csv_bytes
         except FrozenRequiredDataUnavailable as exc:
             if exc.reason in {
                 "manifest_invalid",
@@ -2723,19 +1543,44 @@ def run_close_advice(
     required_data_snapshot_run_id: str | None = None,
     close_advice_required_data_plan: Path | None = None,
     account: str | None = None,
+    context_override: Mapping[str, Any] | None = None,
+    required_data_snapshot_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     advice_cfg_raw = config.get("close_advice") if isinstance(config, dict) else {}
     advice_cfg = advice_cfg_raw if isinstance(advice_cfg_raw, dict) else {}
     output_dir = Path(output_dir).resolve()
     csv_path = output_dir / "close_advice.csv"
     text_path = output_dir / "close_advice.txt"
+    frozen_mode = required_data_snapshot_manifest is not None
+    quote_mode = "frozen_snapshot" if frozen_mode else "legacy_mutable"
 
     if not bool(advice_cfg.get("enabled", False)):
+        report_manifest = publish_close_advice_report_status(
+            output_dir=output_dir,
+            status="failed",
+            run_id=required_data_snapshot_run_id,
+            quote_mode=quote_mode,
+            reason="close_advice_disabled",
+        )
         _write_csv(csv_path, [])
         atomic_write_text(text_path, "", encoding="utf-8")
-        return {"enabled": False, "rows": 0, "notify_rows": 0, "csv": str(csv_path), "text": str(text_path)}
+        return {
+            "enabled": False,
+            "status": "disabled",
+            "rows": 0,
+            "notify_rows": 0,
+            "report_manifest": report_manifest,
+            "csv": str(csv_path),
+            "text": str(text_path),
+            "notification_text": "",
+        }
 
-    frozen_mode = required_data_snapshot_manifest is not None
+    publish_close_advice_report_status(
+        output_dir=output_dir,
+        status="pending",
+        run_id=required_data_snapshot_run_id,
+        quote_mode=quote_mode,
+    )
     frozen_manifest_path = (
         Path(required_data_snapshot_manifest).resolve()
         if required_data_snapshot_manifest is not None
@@ -2747,39 +1592,41 @@ def run_close_advice(
     frozen_manifest_sha256: str | None = None
     frozen_plan_sha256: str | None = None
     if frozen_mode:
-        publish_close_advice_report_status(
-            output_dir=output_dir,
-            status="pending",
-            run_id=required_data_snapshot_run_id,
-            quote_mode="frozen_snapshot",
-        )
         try:
             run_id = str(required_data_snapshot_run_id or "").strip()
             if not run_id or frozen_manifest_path is None:
                 raise RequiredDataSnapshotError(
                     "frozen Close Advice run identity is unavailable"
                 )
-            frozen_manifest_payload, _frozen_root = (
-                load_required_data_snapshot_manifest(
-                    manifest_path=frozen_manifest_path,
-                    expected_run_id=run_id,
-                    expected_required_data_root=Path(required_data_root),
+            (
+                frozen_manifest_payload,
+                _frozen_root,
+                frozen_manifest_bytes,
+            ) = load_required_data_snapshot_manifest_snapshot(
+                manifest_path=frozen_manifest_path,
+                expected_run_id=run_id,
+                expected_required_data_root=Path(required_data_root),
+            )
+            frozen_manifest_sha256 = sha256_bytes(frozen_manifest_bytes)
+            expected_manifest_sha256 = str(
+                required_data_snapshot_manifest_sha256 or ""
+            ).strip().lower()
+            if (
+                expected_manifest_sha256
+                and expected_manifest_sha256 != frozen_manifest_sha256
+            ):
+                raise RequiredDataSnapshotError(
+                    "required-data snapshot manifest generation mismatch"
                 )
-            )
-            frozen_manifest_sha256 = sha256_bytes(
-                frozen_manifest_path.read_bytes()
-            )
-            bound_plan = resolve_bound_close_advice_required_data_plan(
+            bound_plan = resolve_bound_close_advice_required_data_plan_snapshot(
                 manifest_path=frozen_manifest_path,
                 manifest=frozen_manifest_payload,
                 expected_run_id=run_id,
                 expected_plan_path=close_advice_required_data_plan,
             )
             if bound_plan is not None:
-                frozen_plan, frozen_plan_path = bound_plan
-                frozen_plan_sha256 = sha256_bytes(
-                    frozen_plan_path.read_bytes()
-                )
+                frozen_plan, frozen_plan_path, frozen_plan_bytes = bound_plan
+                frozen_plan_sha256 = sha256_bytes(frozen_plan_bytes)
                 business_date = datetime.strptime(
                     str(frozen_plan["business_date"]),
                     "%Y-%m-%d",
@@ -2803,7 +1650,11 @@ def run_close_advice(
             )
     else:
         business_date = expiration_business_today()
-    ctx = _load_context(context_path)
+    ctx = (
+        _validate_context(dict(context_override))
+        if context_override is not None
+        else _load_context(context_path)
+    )
     account_norm = (
         normalize_account(account)
         or normalize_account(
@@ -2815,6 +1666,11 @@ def run_close_advice(
     positions = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     positions = positions if isinstance(positions, list) else []
     positions = _filter_positions_by_markets(positions, markets_to_run)
+    positions = [
+        pos
+        for pos in positions
+        if isinstance(pos, dict) and _is_supported_short_option(pos)
+    ]
     position_entries = [
         (pos, *_position_lifecycle(pos, business_date=business_date))
         for pos in positions
@@ -2870,6 +1726,7 @@ def run_close_advice(
                 ),
                 required_data_root=Path(required_data_root),
                 symbols=symbols_to_validate,
+                expected_manifest_sha256=str(frozen_manifest_sha256),
             )
             quotes = _load_frozen_required_data_quotes(
                 csv_bytes_by_symbol=frozen_csv_bytes_by_symbol,
@@ -2945,10 +1802,7 @@ def run_close_advice(
     provenance_enforced = (
         str(ctx.get("context_status") or "").strip().lower() == "available"
     )
-    quote_max_age_sec = int(
-        advice_cfg.get("quote_max_age_sec")
-        or DEFAULT_QUOTE_MAX_AGE_SEC
-    )
+    quote_max_age_sec = DEFAULT_QUOTE_MAX_AGE_SEC
     quote_freshness_by_symbol: dict[str, dict[str, Any]] = {}
     freshness_reasons: dict[tuple[str, str, str, str], str] = {}
     if frozen_mode:
@@ -3022,7 +1876,6 @@ def run_close_advice(
     }
     issue_details = {**coverage_details, **coverage_fetch_details, **attempted_fetch_details}
 
-    cfg = CloseAdviceConfig.from_mapping(advice_cfg)
     rows: list[dict[str, Any]] = []
     evaluation_status_counts: dict[str, int] = {}
     for pos0, lifecycle_state, _lifecycle_dte in position_entries:
@@ -3039,7 +1892,6 @@ def run_close_advice(
                 config=config,
                 lifecycle_state=lifecycle_state,
             )
-            row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
             row = _apply_required_data_row_provenance(
                 row,
                 position=pos0,
@@ -3057,7 +1909,6 @@ def run_close_advice(
                 requirements_by_lot=frozen_requirements_by_lot,
                 provenance_by_symbol=frozen_provenance,
             )
-            row = _apply_close_calibration_context(row, pos0)
             status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
             evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
             rows.append(row)
@@ -3074,11 +1925,8 @@ def run_close_advice(
             inp=inp,
             pos=pos0,
             quote=quote,
-            config=config,
-            close_cfg=cfg,
         )
         row["position_lifecycle_state"] = lifecycle_state
-        row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
         row = _apply_required_data_row_provenance(
             row,
             position=pos0,
@@ -3110,57 +1958,45 @@ def run_close_advice(
                 quote_status="quote_unusable",
                 reason="持仓对应合约已定位，但当前未取得可用价格，暂无法评估平仓建议",
             )
-        elif "mid_fallback_last_price" in quote_flags and not _quote_has_usable_price(quote):
-            row = _mark_not_evaluable(
-                row,
-                evaluation_status="quote_unusable",
-                quote_status="quote_unusable",
-                reason="持仓对应合约只有最近成交价，缺少可用 bid/ask，暂无法评估平仓建议",
-            )
         elif (
-            str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_NOT_EVALUABLE
-            or str(row.get("tier") or "").strip().lower() == "not_evaluable"
+            str(row.get("recommendation_state") or "").strip().lower()
+            == RECOMMENDATION_NOT_EVALUABLE
         ):
             row["evaluation_status"] = "not_evaluable"
             row["quote_status"] = "not_evaluable"
         else:
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
-            row = _apply_buy_to_close_fee(row)
-            row = apply_fee_economic_safety(row)
-        row = _apply_close_calibration_context(row, pos0)
         status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
         rows.append(row)
 
-    for row in rows:
-        _apply_close_action_semantics(row)
-
-    _apply_yield_enhancement_combo_economics(rows, positions=positions)
-
     rows = sort_advice_rows(rows)
-    notify_levels = advice_cfg.get("notify_levels") or ["strong", "medium"]
-    notify_level_set = {str(x).strip().lower() for x in notify_levels if str(x).strip()}
     max_items_raw = safe_int(advice_cfg.get("max_items_per_account"))
     max_items = 5 if max_items_raw is None else max_items_raw
-    render_style = str(advice_cfg.get("render_style") or "legacy").strip().lower()
-    if render_style == "compact":
-        text = render_markdown_compact(rows, notify_levels=notify_level_set, max_items=max_items)
-    else:
-        text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
+    text = render_markdown(
+        rows,
+        max_items=max_items,
+    )
     selected_notify_rows = select_close_advice_notification_rows(
         rows,
-        notify_levels=notify_level_set,
         max_items_per_account=max_items,
     )
     flag_counts: dict[str, int] = {}
-    tier_counts: dict[str, int] = {}
+    recommendation_counts: dict[str, int] = {}
     quote_issue_rows = 0
     evaluation_gap_rows = 0
     for row in rows:
         if str(row.get("evaluation_status") or "").strip().lower() == "priced":
-            tier = str(row.get("tier") or "").strip().lower() or "unknown"
-            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+            recommendation = (
+                str(row.get("recommendation_state") or "")
+                .strip()
+                .lower()
+                or "unknown"
+            )
+            recommendation_counts[recommendation] = (
+                recommendation_counts.get(recommendation, 0) + 1
+            )
         else:
             evaluation_gap_rows += 1
         flags = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
@@ -3185,19 +2021,21 @@ def run_close_advice(
     if frozen_mode:
         try:
             assert frozen_manifest_path is not None
-            manifest_now, _root_now = load_required_data_snapshot_manifest(
+            (
+                manifest_now,
+                _root_now,
+                manifest_bytes_now,
+            ) = load_required_data_snapshot_manifest_snapshot(
                 manifest_path=frozen_manifest_path,
                 expected_run_id=str(required_data_snapshot_run_id or ""),
                 expected_required_data_root=Path(required_data_root),
             )
-            manifest_hash_now = sha256_bytes(
-                frozen_manifest_path.read_bytes()
-            )
+            manifest_hash_now = sha256_bytes(manifest_bytes_now)
             if manifest_hash_now != frozen_manifest_sha256:
                 raise RequiredDataSnapshotError(
                     "required-data snapshot manifest changed during Close Advice"
                 )
-            plan_now = resolve_bound_close_advice_required_data_plan(
+            plan_now = resolve_bound_close_advice_required_data_plan_snapshot(
                 manifest_path=frozen_manifest_path,
                 manifest=manifest_now,
                 expected_run_id=str(required_data_snapshot_run_id or ""),
@@ -3208,14 +2046,13 @@ def run_close_advice(
                     "close-advice required-data plan binding changed"
                 )
             if plan_now is not None:
-                plan_payload_now, plan_path_now = plan_now
+                plan_payload_now, _plan_path_now, plan_bytes_now = plan_now
                 if (
                     str(plan_payload_now.get("content_sha256") or "")
                     != str(
                         (frozen_plan or {}).get("content_sha256") or ""
                     )
-                    or sha256_bytes(plan_path_now.read_bytes())
-                    != frozen_plan_sha256
+                    or sha256_bytes(plan_bytes_now) != frozen_plan_sha256
                 ):
                     raise CloseAdviceRequiredDataPlanError(
                         "close-advice required-data plan changed during evaluation"
@@ -3229,6 +2066,7 @@ def run_close_advice(
                 expected_run_id=str(required_data_snapshot_run_id or ""),
                 required_data_root=Path(required_data_root),
                 symbols=symbols_to_validate,
+                expected_manifest_sha256=str(frozen_manifest_sha256),
             )
             if unavailable_now:
                 raise RequiredDataSnapshotError(
@@ -3254,15 +2092,6 @@ def run_close_advice(
                     "message": str(exc),
                 },
             )
-    try:
-        _append_close_advice_filter_trace(
-            csv_path=csv_path,
-            rows=rows,
-            selected_notify_rows=selected_notify_rows,
-            notify_levels=notify_level_set,
-        )
-    except Exception:
-        pass
     report_manifest = publish_close_advice_report_manifest(
         csv_path=csv_path,
         text_path=text_path,
@@ -3343,7 +2172,7 @@ def run_close_advice(
         "evaluable_rows": sum(1 for row in rows if str(row.get("evaluation_status") or "").strip().lower() == "priced"),
         "evaluation_gap_rows": evaluation_gap_rows,
         "notify_rows": len(selected_notify_rows),
-        "tier_counts": tier_counts,
+        "recommendation_counts": recommendation_counts,
         "evaluation_status_counts": evaluation_status_counts,
         "flag_counts": flag_counts,
         "quote_issue_rows": quote_issue_rows,
@@ -3404,6 +2233,7 @@ def run_close_advice(
         "report_manifest": report_manifest,
         "csv": str(csv_path),
         "text": str(text_path),
+        "notification_text": text,
     }
 
 

@@ -441,21 +441,18 @@ unconfirmed record is also frozen and must not be automatically resent.
 - Domain policy: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
 - Recommended agent entry: `get_close_advice`
-- Portfolio-level v2 read: `position_advice_read`
-- v2 contract: `docs/POSITION_ADVICE_V2_CONTRACT.md`
-- v1/v2 matrix: `docs/POSITION_ADVICE_COMPATIBILITY.md`
+- Contract: `docs/CLOSE_ADVICE_CONTRACT.md`
 
 Core domain functions:
 
 ```python
-def evaluate_close_advice(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
-def evaluate_short_vol_close_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
-def evaluate_long_call_convexity_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
+def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]: ...
 ```
 
-Keep scoring, thesis checks, and exit-state policy in the domain layer. The
-runner stays focused on loading local artifacts, pairing yield-enhancement legs,
-preserving `not_evaluable` rows, and formatting CSV/text output.
+The domain has one fixed `strict_profit_capture.v1` policy for short puts and
+short calls. It returns only `close`, `hold`, or `not_evaluable`. The runner
+loads sealed position/quote facts, preserves fail-closed rows, and formats the
+report; it does not pair opening candidates or make replacement decisions.
 
 Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 
@@ -478,19 +475,9 @@ Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 - Each Close Advice CSV row carries the snapshot-plan, manifest, requirement-plan, route-binding, snapshot, receipt, payload, observation-time, and expiry identifiers needed to trace the decision to its frozen inputs.
 
 The legacy mutable runner mode remains available to direct compatibility
-callers, but it is not the scheduled Tick authority.
-
-Position Advice v2 remains an independent immutable portfolio plan. Its Agent
-surface is pure-read; shared authority changes and unknown-delivery resolution
-are human CLI operations only. `v2_shadow` must not enter scheduled
-notifications, and v2 reader failures always zero actionable rows rather than
-falling back to v1. The mandatory daily promotion maintenance timer may append
-compressed content-addressed source copies plus immutable evidence and gate
-artifacts after calculating safety counters and running deterministic replay
-fixtures; it must never perform the final v2 CAS or pin complete output runs.
-Use `om position-advice --runtime-root <root> promotion status --account
-<account>` to obtain the reviewed evidence path and expected policy hash for
-that separate human operation.
+callers, but it is not the scheduled Tick authority. There is no portfolio
+allocator, replacement/reallocation plan, v2 authority, promotion state, or
+notification token around Close Advice.
 
 ### Notifications
 
@@ -712,7 +699,7 @@ Smallest remaining actions, with blockers called out.
 - Persistence order: durable successful outcome or fixed-failure evidence plus exact envelope -> exact scheduled-target watermark -> provider send -> attempt/ambiguous/confirmed transition.
 - Retry: no-scan wake-ups may replay only an already persisted exact envelope. They must not run broker access, pipeline, assembler, candidate detection, revision persistence, or message re-rendering.
 - Successful current: ready/degraded reliable scans advance current; failed/blocked/no-op scans do not. Query always reads the latest successful current, never the last delivered message.
-- Close Advice projection: structured positions retain every evaluated holding for the total count, but only priced rows selected by the canonical `close_advice.notify_levels`, ranking, and `max_items_per_account` policy enter Daily Brief actions and actionable position details. Quote/evaluation gaps remain explicit data-quality evidence rather than recommendations.
+- Close Advice projection: structured positions retain every evaluated holding for the total count, but only priced `recommendation_state=close` rows enter Daily Brief actions, ordered deterministically and capped by `max_items_per_account`. `hold` rows stay silent; quote/evaluation gaps remain explicit data-quality evidence rather than recommendations.
 - Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. Sell Put capacities share account cash and cannot be summed.
 - Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
 - Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.

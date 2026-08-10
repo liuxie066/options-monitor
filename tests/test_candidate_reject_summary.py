@@ -52,16 +52,6 @@ def test_candidate_reject_summary_groups_trace_rejections(tmp_path: Path) -> Non
                 stage="stage4_ranking",
                 rule="candidate_accepted",
             ),
-            build_candidate_filter_trace_row(
-                run_id="run-1",
-                account="lx",
-                symbol="AAPL",
-                function="close_advice",
-                mode="call",
-                status="rejected",
-                stage="post_filter",
-                rule="spread_too_wide",
-            ),
         ],
     )
 

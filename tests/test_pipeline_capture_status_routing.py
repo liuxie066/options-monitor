@@ -73,7 +73,7 @@ def _run_default_capture(
 
     def _fake_pipeline(**kwargs: Any) -> list[dict[str, Any]]:
         for item in statuses:
-            kwargs["position_advice_candidate_capture_status_sink_fn"](item)
+            kwargs["candidate_capture_status_sink_fn"](item)
         if pairs:
             kwargs["combo_pairs_sink_fn"](pairs)
         kwargs["opening_runtime_context_sink_fn"](
@@ -110,7 +110,7 @@ def _run_default_capture(
         symbols_arg=None,
         log=lambda _message: None,
         want_fn=lambda name: name == "scan",
-        position_advice_account_run_id=RUN_ID,
+        source_account_run_id=RUN_ID,
         required_data_snapshot_manifest=required_manifest,
         prepared_portfolio_context_manifest=portfolio_manifest,
         prepared_option_positions_context_manifest=ledger_manifest,

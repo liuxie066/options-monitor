@@ -252,18 +252,6 @@ def _close_quote_subjects(episodes: list[dict[str, Any]]) -> list[dict[str, Any]
                 "position_lot_id": episode.get("position_lot_id"),
             }
         )
-        replacement = episode.get("replacement_evidence")
-        if isinstance(replacement, dict) and text(replacement.get("contract_symbol")):
-            out.append(
-                {
-                    "account": episode.get("account"),
-                    "symbol": replacement.get("symbol"),
-                    "contract_symbol": replacement.get("contract_symbol"),
-                    "option_type": replacement.get("option_type") or identity.get("option_type"),
-                    "expiration": replacement.get("expiration"),
-                    "strike": replacement.get("strike"),
-                }
-            )
     return out
 
 

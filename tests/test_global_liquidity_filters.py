@@ -620,33 +620,6 @@ def test_validate_config_rejects_close_advice_strategy_mode() -> None:
         assert 'close_advice.strategy is not supported' in msg
 
 
-def test_validate_config_rejects_market_local_position_advice_authority() -> None:
-    _add_repo_to_syspath()
-    from src.application.config_validator import validate_config
-
-    cfg = {
-        'close_advice': {
-            'enabled': True,
-            'position_advice_authority': 'v2',
-        },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
-    }
-
-    try:
-        validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'close_advice.position_advice_authority is not supported' in msg
-
-
 def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
     import pytest
 
@@ -734,6 +707,55 @@ def test_validate_config_rejects_decimal_close_advice_max_items_per_account() ->
         msg = str(e)
         assert '[CONFIG_ERROR]' in msg
         assert 'close_advice.max_items_per_account must be an integer' in msg
+
+
+def test_validate_config_ignores_removed_close_advice_threshold_keys(capsys) -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'close_advice': {
+            'enabled': True,
+            'quote_max_age_sec': 1,
+            'notify_levels': ['strong'],
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
+
+    warning = capsys.readouterr().err
+    assert 'CLOSE_ADVICE_STRICT_POLICY_KEYS_IGNORED' in warning
+    assert 'close_advice.quote_max_age_sec' in warning
+    assert 'close_advice.notify_levels' in warning
+
+
+def test_validate_config_rejects_removed_position_advice_authority() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'close_advice': {'position_advice_authority': {'enabled': True}},
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as exc:
+        assert 'there is no Position Advice v2 authority' in str(exc)
 
 
 def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:

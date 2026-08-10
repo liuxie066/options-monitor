@@ -201,7 +201,7 @@ def test_notification_perception_run_id_rejects_symlinked_output_runs(
     tmp_path: Path,
 ) -> None:
     # output_runs 是指向仓库外目录的符号链接时，containment resolve 后会放行，
-    # 必须显式拒绝，且外部文件不被读取（与 position_advice_runner 先例一致）。
+    # 必须显式拒绝，且外部文件不被读取。
     external = tmp_path / "external" / "output_runs"
     run_state = external / "20260808T000000Z-abcdef" / "state"
     run_state.mkdir(parents=True)
