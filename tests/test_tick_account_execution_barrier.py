@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,19 @@ class _Audit:
 
     def fail_schema_validation(self, **_kwargs):
         return None
+
+
+def _portfolio_context(account: str) -> dict:
+    return {
+        "filters": {"account": account},
+        "portfolio_source_name": "futu",
+        "source_account_identifiers": [account],
+        "source_observed_at": datetime.now(timezone.utc).isoformat(),
+        "source_observation_status": "trusted",
+        "stocks_by_symbol": {
+            "NVDA": {"avg_cost": 100, "shares": 100, "account": account}
+        },
+    }
 
 
 def _request(tmp_path: Path, *, accounts: list[str], workers: int, force: bool):
@@ -91,13 +105,7 @@ def _fake_prepare(**kwargs):
         assert authority.compatibility_path.read_bytes() == authority.canonical_bytes
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
-        context = {
-            "filters": {"account": account},
-            "portfolio_source_name": "futu",
-            "stocks_by_symbol": {
-                "NVDA": {"avg_cost": 100, "shares": 100, "account": account}
-            }
-        }
+        context = _portfolio_context(account)
         context_path = state_dir / "portfolio_context.json"
         atomic_write_json(context_path, context)
         manifest_path = state_dir / "prepared_portfolio_context.v1.json"
@@ -178,6 +186,23 @@ def _stub_prepared_option_context(monkeypatch):
         "prepare_option_positions_contexts",
         _fake_prepare_options,
     )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_option_positions_context",
+        lambda **kwargs: {
+            "prepared_authority": {
+                "run_id": kwargs["expected_run_id"],
+                "account": kwargs["expected_account"],
+            },
+            "filters": {
+                "account": kwargs["expected_account"],
+                "broker": "futu",
+            },
+            "context_status": "available",
+            "decision_snapshot_status": "trusted",
+            "open_positions_min": [],
+        },
+    )
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -193,12 +218,33 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     snapshot_status: str,
 ) -> None:
     from src.application import tick_account_execution as mod
+    from src.application.position_advice_account_identity_reader import (
+        read_current_run_portfolio_identity,
+    )
     from src.infrastructure.io_utils import atomic_write_json
 
     prefetch_calls: list[dict] = []
+    identities_at_prefetch: dict[str, dict] = {}
     account_requests = []
 
     def fake_prefetch(**kwargs):
+        for account in accounts:
+            identities_at_prefetch[account] = (
+                read_current_run_portfolio_identity(
+                    account_state_dir=(
+                        tmp_path
+                        / "output_runs"
+                        / "run-1"
+                        / "accounts"
+                        / account
+                        / "state"
+                    ),
+                    account_run_id="run-1",
+                    expected_account=account,
+                    expected_market="US",
+                    now=datetime.now(timezone.utc),
+                )
+            )
         prefetch_calls.append(kwargs)
         return {
             "schema_version": "1.0",
@@ -253,6 +299,11 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     )
 
     assert len(prefetch_calls) == 1
+    assert set(identities_at_prefetch) == set(accounts)
+    assert all(
+        item["status"] == "available"
+        for item in identities_at_prefetch.values()
+    )
     assert prefetch_calls[0]["force_refresh"] is force
     assert {item.acct for item in account_requests} == set(accounts)
     assert all(item.required_data_snapshot_manifest for item in account_requests)
@@ -667,6 +718,10 @@ def test_pm_recovery_corrupt_artifact_is_soft_and_never_refetches(
     account_state = request.run_dir / "accounts" / "lx" / "state"
     account_state.mkdir(parents=True)
     atomic_write_json(
+        account_state / "prepared_portfolio_context.v1.json",
+        {"schema_version": "prepared_portfolio_context.v1"},
+    )
+    atomic_write_json(
         account_state / "prepared_option_positions_context.v1.json",
         {
             "schema_version": "prepared_option_positions_context.v1",
@@ -683,6 +738,11 @@ def test_pm_recovery_corrupt_artifact_is_soft_and_never_refetches(
         mod,
         "load_required_data_snapshot_manifest",
         lambda **_kwargs: (snapshot, request.shared_required.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_portfolio_context",
+        lambda **_kwargs: _portfolio_context("lx"),
     )
     monkeypatch.setattr(
         mod,
@@ -966,6 +1026,10 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     )
     option_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
+        option_manifest_path.parent / "prepared_portfolio_context.v1.json",
+        {"schema_version": "prepared_portfolio_context.v1"},
+    )
+    atomic_write_json(
         option_manifest_path,
         {
             "schema_version": "prepared_option_positions_context.v1",
@@ -979,6 +1043,11 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         mod,
         "load_required_data_snapshot_manifest",
         lambda **_kwargs: (manifest, request.shared_required.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_portfolio_context",
+        lambda **_kwargs: _portfolio_context("lx"),
     )
     monkeypatch.setattr(
         mod,
@@ -1059,6 +1128,9 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
     prefetch_done: bool,
 ) -> None:
     from src.application import tick_account_execution as mod
+    from src.application.position_advice_account_identity_reader import (
+        read_current_run_portfolio_identity,
+    )
     from src.infrastructure.io_utils import atomic_write_json
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
@@ -1111,12 +1183,168 @@ def test_terminal_barrier_failure_returns_typed_account_outcomes_without_pipelin
     assert outcome.ran_pipeline_accounts == []
     assert outcome.prefetch_done is prefetch_done
     assert [item.decision_reason for item in outcome.results] == [reason, reason]
+    assert all(item.should_notify is True for item in outcome.results)
+    for account in ("lx", "sy"):
+        assert read_current_run_portfolio_identity(
+            account_state_dir=(
+                tmp_path
+                / "output_runs"
+                / "run-1"
+                / "accounts"
+                / account
+                / "state"
+            ),
+            account_run_id="run-1",
+            expected_account=account,
+            expected_market="US",
+            now=datetime.now(timezone.utc),
+        )["status"] == "available"
     assert set(outcome.scheduled_scan_targets_by_account) == {"lx", "sy"}
     assert all(
         item["ran_pipeline"] is False
         and item["snapshot_status"] in {"failed", "unavailable"}
         for item in outcome.account_metrics
     )
+
+
+def test_portfolio_receipt_conflict_blocks_prefetch_and_account_execution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import tick_account_execution as mod
+
+    state_dir = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+    )
+    run_dir = (
+        state_dir
+        / "position_advice_producers"
+        / "portfolio"
+        / canonical_sha256({"producer_run_id": "run-1"})
+    )
+    run_dir.mkdir(parents=True)
+    provider_calls: list[str] = []
+    account_calls: list[str] = []
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(
+        mod,
+        "prefetch_required_data",
+        lambda **_kwargs: provider_calls.append("prefetch"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_one_account",
+        lambda **_kwargs: account_calls.append("account"),
+    )
+
+    outcome = mod.run_tick_account_execution(
+        _request(
+            tmp_path,
+            accounts=["lx"],
+            workers=1,
+            force=False,
+        )
+    )
+
+    assert provider_calls == []
+    assert account_calls == []
+    assert outcome.prefetch_invocation_count == 0
+    assert outcome.results[0].should_notify is False
+    assert (
+        outcome.results[0].decision_reason
+        == "account_config_portfolio_source_invalid"
+    )
+    assert list(run_dir.iterdir()) == []
+
+
+def test_recovery_reuses_early_portfolio_receipt_without_provider_refresh(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    manifest = {
+        "schema_version": "required_data_snapshot_manifest.v1",
+        "run_id": request.run_id,
+        "status": "complete",
+        "plan_id": "a" * 64,
+        "symbols": {},
+        "summary": {},
+    }
+    provider_calls: list[str] = []
+
+    def _prefetch(**_kwargs):
+        provider_calls.append("prefetch")
+        return {
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+            "symbols": [],
+            "results": {},
+        }
+
+    def _seal(**kwargs):
+        atomic_write_json(kwargs["manifest_path"], manifest)
+        return manifest
+
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(mod, "prefetch_required_data", _prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(
+        mod,
+        "run_one_account",
+        lambda *, request, **_kwargs: mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        ),
+    )
+
+    mod.run_tick_account_execution(request)
+    run_dir = (
+        request.run_dir
+        / "accounts"
+        / "lx"
+        / "state"
+        / "position_advice_producers"
+        / "portfolio"
+        / canonical_sha256({"producer_run_id": request.run_id})
+    )
+    receipt_path = next(run_dir.glob("*/receipt.json"))
+    receipt_bytes = receipt_path.read_bytes()
+    monkeypatch.setattr(
+        mod,
+        "load_required_data_snapshot_manifest",
+        lambda **_kwargs: (manifest, request.shared_required.resolve()),
+    )
+
+    recovered = mod.run_tick_account_execution(
+        replace(request, prefetch_done=True)
+    )
+
+    assert provider_calls == ["prefetch"]
+    assert recovered.prefetch_invocation_count == 0
+    assert receipt_path.read_bytes() == receipt_bytes
+    assert len(list(run_dir.iterdir())) == 1
+    assert recovered.ran_pipeline_accounts == ["lx"]
 
 
 def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(

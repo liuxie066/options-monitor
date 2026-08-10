@@ -18,6 +18,7 @@ from src.application.account_run import (
     AccountRunRequest,
     _resolve_account_scan_decision,
     build_account_runtime_config,
+    publish_current_run_portfolio_source,
     run_one_account,
 )
 from src.application.account_config import (
@@ -36,6 +37,7 @@ from src.application.prepared_portfolio_context import (
 from src.application.prepared_option_positions_context import (
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PreparedOptionPositionsBatch,
+    PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
     prepare_option_positions_contexts,
 )
@@ -445,6 +447,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     prepared_option_positions_context_unavailable_by_account: dict[
         str, str
     ] = {}
+    prepared_contexts: dict[str, dict[str, Any] | None] = {}
+    validated_prepared_option_contexts: dict[str, dict[str, Any]] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -511,7 +515,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 reason="portfolio_context_preparation_failed",
                 error_type=type(exc).__name__,
             )
-        prepared_contexts: dict[str, dict[str, Any] | None] = {}
         invalid_prepared_accounts: set[str] = set()
         for account, manifest in prepared.items():
             prepared_context_metrics.append(
@@ -760,6 +763,59 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 if account not in invalid_prepared_option_accounts
             }
 
+        invalid_portfolio_source_accounts: set[str] = set()
+        for account in sorted(scanning_configs):
+            prepared_context = prepared_contexts.get(account)
+            if not isinstance(prepared_context, dict):
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PORTFOLIO_SOURCE_INVALID",
+                    "prepared portfolio context is unavailable",
+                )
+                invalid_portfolio_source_accounts.add(account)
+                continue
+            try:
+                portfolio_source = publish_current_run_portfolio_source(
+                    cfg=scanning_configs[account],
+                    account_run_id=request.run_id,
+                    account=account,
+                    markets_to_run=request.markets_to_run,
+                    account_state_dir=account_state_dirs[account],
+                    prepared_portfolio_context=prepared_context,
+                )
+            except AccountRunConfigError as exc:
+                account_config_errors[account] = exc
+                invalid_portfolio_source_accounts.add(account)
+                request.runlog.safe_event(
+                    "position_advice_portfolio_source",
+                    "error",
+                    error_code=exc.code,
+                    message=str(exc),
+                    data={"account": account},
+                )
+                continue
+            request.runlog.safe_event(
+                "position_advice_portfolio_source",
+                "ok",
+                data={
+                    "account": account,
+                    "snapshot_id": portfolio_source["receipt"].get(
+                        "snapshot_id"
+                    ),
+                },
+            )
+
+        if invalid_portfolio_source_accounts:
+            scanning_accounts = [
+                account
+                for account in scanning_accounts
+                if account not in invalid_portfolio_source_accounts
+            ]
+            scanning_configs = {
+                account: config
+                for account, config in scanning_configs.items()
+                if account not in invalid_portfolio_source_accounts
+            }
+
         union_cfg = build_cross_account_prefetch_config(
             base_config=request.base_cfg,
             account_configs=scanning_configs,
@@ -960,6 +1016,113 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 "pm_read_count": 0,
             },
         )
+        invalid_recovery_accounts: set[str] = set()
+        for account in list(scanning_accounts):
+            account_key = str(account).strip().lower()
+            config = account_configs[account_key]
+            authority = account_config_authorities[account_key]
+            account_state_dir = run_repo.get_run_account_state_dir(
+                request.base,
+                request.run_id,
+                account_key,
+            )
+            prepared = (
+                account_state_dir / "prepared_portfolio_context.v1.json"
+            ).resolve()
+            prepared_option = (
+                account_state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
+            ).resolve()
+            try:
+                if not prepared.is_file():
+                    raise AccountRunConfigError(
+                        "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                        "prepared portfolio context manifest is unavailable",
+                    )
+                prepared_digest = sha256_bytes(prepared.read_bytes())
+                prepared_context = load_prepared_portfolio_context(
+                    manifest_path=prepared,
+                    expected_base=request.base,
+                    expected_run_id=request.run_id,
+                    expected_account=account_key,
+                    expected_account_config_sha256=(
+                        authority.account_config_sha256
+                    ),
+                    expected_manifest_sha256=prepared_digest,
+                    expected_runtime_config=config,
+                )
+                if not isinstance(prepared_context, dict):
+                    raise AccountRunConfigError(
+                        "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                        "prepared portfolio context is unavailable",
+                    )
+                if not prepared_option.is_file():
+                    raise AccountRunConfigError(
+                        "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                        "prepared option context manifest is unavailable",
+                    )
+                prepared_option_digest = sha256_bytes(
+                    prepared_option.read_bytes()
+                )
+                validated_prepared_option_contexts[account_key] = (
+                    load_prepared_option_positions_context(
+                        manifest_path=prepared_option,
+                        expected_base=request.base,
+                        expected_run_id=request.run_id,
+                        expected_account=account_key,
+                        expected_account_config_sha256=(
+                            authority.account_config_sha256
+                        ),
+                        expected_manifest_sha256=prepared_option_digest,
+                        expected_runtime_config=config,
+                    )
+                )
+                publish_current_run_portfolio_source(
+                    cfg=config,
+                    account_run_id=request.run_id,
+                    account=account_key,
+                    markets_to_run=request.markets_to_run,
+                    account_state_dir=account_state_dir,
+                    prepared_portfolio_context=prepared_context,
+                )
+            except PreparedPortfolioContextError as exc:
+                account_config_errors[account_key] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    str(exc),
+                )
+                invalid_recovery_accounts.add(account_key)
+                continue
+            except PreparedOptionPositionsContextError as exc:
+                account_config_errors[account_key] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                    str(exc),
+                )
+                invalid_recovery_accounts.add(account_key)
+                continue
+            except OSError as exc:
+                account_config_errors[account_key] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    f"prepared recovery artifact is unavailable: {exc}",
+                )
+                invalid_recovery_accounts.add(account_key)
+                continue
+            except AccountRunConfigError as exc:
+                account_config_errors[account_key] = exc
+                invalid_recovery_accounts.add(account_key)
+                continue
+            prepared_contexts[account_key] = prepared_context
+            prepared_manifest_paths[account_key] = prepared
+            prepared_manifest_sha256_by_account[account_key] = prepared_digest
+            prepared_option_manifest_paths[account_key] = prepared_option
+            prepared_option_manifest_sha256_by_account[account_key] = (
+                prepared_option_digest
+            )
+
+        if invalid_recovery_accounts:
+            scanning_accounts = [
+                account
+                for account in scanning_accounts
+                if account not in invalid_recovery_accounts
+            ]
         candidate = (
             run_repo.get_run_state_dir(request.base, request.run_id)
             / "required_data_snapshot_manifest.json"
@@ -996,41 +1159,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 )
             if snapshot_status == "failed":
                 barrier_reason = "required_data_snapshot_failed"
-            for account in scanning_accounts:
-                account_key = str(account).strip().lower()
-                prepared = (
-                    run_repo.get_run_account_state_dir(
-                        request.base,
-                        request.run_id,
-                        account_key,
-                    )
-                    / "prepared_portfolio_context.v1.json"
-                ).resolve()
-                if prepared.is_file():
-                    prepared_manifest_paths[account_key] = prepared
-                    prepared_manifest_sha256_by_account[account_key] = sha256_bytes(
-                        prepared.read_bytes()
-                    )
-                prepared_option = (
-                    run_repo.get_run_account_state_dir(
-                        request.base,
-                        request.run_id,
-                        account_key,
-                    )
-                    / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
-                ).resolve()
-                if prepared_option.is_file():
-                    prepared_option_manifest_paths[account_key] = (
-                        prepared_option
-                    )
-                    prepared_option_manifest_sha256_by_account[account_key] = (
-                        sha256_bytes(prepared_option.read_bytes())
-                    )
-                else:
-                    account_config_errors[account_key] = AccountRunConfigError(
-                        "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
-                        "prepared option context manifest is unavailable",
-                    )
         except (OSError, RequiredDataSnapshotError):
             barrier_reason = "required_data_snapshot_manifest_unavailable"
             snapshot_status = "unavailable"
@@ -1044,6 +1172,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             or authority is None
             or not ai_decision_advice_enabled(config)
         ):
+            continue
+        validated_context = validated_prepared_option_contexts.get(account)
+        if isinstance(validated_context, dict):
+            prepared_option_positions_context_by_account[account] = (
+                validated_context
+            )
             continue
         manifest_path = prepared_option_manifest_paths.get(account)
         manifest_sha256 = prepared_option_manifest_sha256_by_account.get(
