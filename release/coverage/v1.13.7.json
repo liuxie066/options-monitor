@@ -1,0 +1,32 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.7",
+  "base": {
+    "tag": "v1.13.6",
+    "commit": "968c0b546fdb948a9d5c20fe96899ec30e526ee8"
+  },
+  "reviewed_head": "b5c540e501e4ae2ad081bf68b8388dc0a4c95613",
+  "commits": [
+    {
+      "sha": "b5c540e501e4ae2ad081bf68b8388dc0a4c95613",
+      "subject": "fix(ai-advice): align evidence schema and daily refresh"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced external news-evidence collection from every 4 hours to every 24 hours and extended evidence freshness to 48 hours, preserving the existing two-refresh-cycle tolerance.",
+      "commits": [
+        "b5c540e501e4ae2ad081bf68b8388dc0a4c95613"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Completed the strict external-evidence response schema by requiring nullable `event_time`, preventing provider-side schema rejection before web search or generation.",
+      "commits": [
+        "b5c540e501e4ae2ad081bf68b8388dc0a4c95613"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
