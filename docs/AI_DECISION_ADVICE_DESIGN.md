@@ -17,9 +17,9 @@
 > `domain/domain/daily_decision_brief.py`；systemd collector unit 由
 > `src/application/service_deploy.py` 在 `ai_decision_advice.enabled` 时渲染。
 
-AI Decision Advice 是固定工作流中的建议层。它把策略候选、组合分布、开放期权
-持仓和可靠外部证据放在同一个冻结上下文中，为当前一轮 Sell Put / Covered Call
-候选给出可审计建议。
+AI Decision Advice 是固定工作流中的建议层，模型角色定位为“账户级期权决策顾问”。
+它把策略候选、组合分布、开放期权持仓和可靠外部证据放在同一个冻结上下文中，
+为当前一轮 Sell Put / Covered Call 候选给出可审计建议。
 
 它不是资讯摘要器，也不是第二套 Candidate Engine。外部资讯只是四类输入之一；
 产品价值在于把公开事件与账户当前暴露联系起来，判断本轮应维持、改选、暂缓，
@@ -36,6 +36,7 @@ Sell Put / Covered Call 的召回、硬门槛、容量和排序仍以
 | 层级 | 名称 |
 |---|---|
 | 正式产品名称 | `AI Decision Advice` |
+| 模型角色定位 | `账户级期权决策顾问（Account-level Options Decision Advisor）` |
 | Python / 配置标识 | `ai_decision_advice` |
 | v1 输出契约 | `ai_decision_advice.v1` |
 | 用户回执名称 | `AI建议` |
