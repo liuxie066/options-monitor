@@ -576,8 +576,10 @@ Advice 运行开始时，从追加日志冻结一份当轮证据索引视图（�
 候选阶段不存在实际下单手数，`可开 X 手`只是最大容量。AI Decision Advice 统一按
 “新增一张合约”的边际影响判断，不假设用户会把容量全部开满，也不推荐手数。
 
-每张投影只拼接同一 OM 账户的候选、该账户映射后的 PM 分布和该账户的 prepared option
-context。Sell Put 的组合总市值分母和 Covered Call 的持股数量分母均来自这份 PM 分布；
+每张 AI Advice 投影只拼接同一 OM 账户的候选、该账户映射后的 PM 分布和该账户的
+prepared option context。这里的 Sell Put 组合总市值分母和 Covered Call 持股数量分母均来自
+PM，仅用于 AI Decision Advice 的“新增一张后的组合影响”；Candidate Engine 原策略的容量分母仍按账户
+配置从 Futu 或 holdings 运营上下文取得，两者不互相改写。
 已有期权叠加只来自该账户的 SQLite ledger projection。不得用 Futu 运营持股替代 PM
 分母，也不得借用其他账户的 PM 资产、持股或期权仓位来补全投影。
 
