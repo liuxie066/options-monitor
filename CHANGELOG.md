@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.4 - 2026-08-10
+
+### Bug Fixes
+- Restored HK scheduled failure reporting by routing Combo Yield capture statuses to their owning SP+LC or CC+LP snapshots instead of the opening put/call validator, and by publishing the validated portfolio identity receipt before required-data prefetch so OpenD or pipeline failures can reach the existing guarded Daily Brief failure path.
+
 ## 1.13.3 - 2026-08-10
 
 ### Bug Fixes

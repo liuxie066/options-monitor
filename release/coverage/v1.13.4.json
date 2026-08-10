@@ -1,0 +1,87 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.4",
+  "base": {
+    "tag": "v1.13.3",
+    "commit": "47887347cac7f72be76d050ee2f8f8b532b0978e"
+  },
+  "reviewed_head": "41f72e784e019d07ea4a23a201a834e33c46035e",
+  "commits": [
+    {
+      "sha": "6e0d896484a8680de3bc243139604c4c9e1b4d85",
+      "subject": "docs(gateflow): accept plan for hk-combo-capture-failure-notification"
+    },
+    {
+      "sha": "7241fe9a77abdd1bfa7ee52de594642f352635a6",
+      "subject": "fix(pipeline): accept HK capture routing slice"
+    },
+    {
+      "sha": "aef308a0beea03a4efbd89820791289b548b2c47",
+      "subject": "fix(notifications): accept early identity receipt slice"
+    },
+    {
+      "sha": "af461f3bf3adccd07f653859cfc42f9d01676025",
+      "subject": "docs(gateflow): accept aggregate review for HK notification fix"
+    },
+    {
+      "sha": "45a7ecbb5afa18ef59d7948036163e6f9c551b90",
+      "subject": "docs(gateflow): record HK notification PR readiness"
+    },
+    {
+      "sha": "2ebb8972f39657335b3674b1f5bd464ad5d126f6",
+      "subject": "docs(gateflow): accept PR review for HK notification fix"
+    },
+    {
+      "sha": "096963f9ba6022f1b16dcf5859a3ecb0ac65493c",
+      "subject": "docs(gateflow): record HK notification final closeout"
+    },
+    {
+      "sha": "86bcc62ab8294d2cd6f84d4886ac5d9cc399232b",
+      "subject": "Merge pull request #143 from liuxie066/fix/hk-combo-capture-failure-notification"
+    },
+    {
+      "sha": "41f72e784e019d07ea4a23a201a834e33c46035e",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored HK scheduled failure reporting by routing Combo Yield capture statuses to their owning SP+LC or CC+LP snapshots instead of the opening put/call validator, and by publishing the validated portfolio identity receipt before required-data prefetch so OpenD or pipeline failures can reach the existing guarded Daily Brief failure path.",
+      "commits": [
+        "7241fe9a77abdd1bfa7ee52de594642f352635a6",
+        "aef308a0beea03a4efbd89820791289b548b2c47"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "6e0d896484a8680de3bc243139604c4c9e1b4d85",
+      "reason": "Gateflow planning and review evidence only; the resulting runtime behavior is covered by the mapped implementation commits."
+    },
+    {
+      "commit": "af461f3bf3adccd07f653859cfc42f9d01676025",
+      "reason": "Aggregate Gateflow review evidence only; it introduces no independent runtime or user-facing behavior."
+    },
+    {
+      "commit": "45a7ecbb5afa18ef59d7948036163e6f9c551b90",
+      "reason": "PR readiness evidence only; it introduces no independent runtime or user-facing behavior."
+    },
+    {
+      "commit": "2ebb8972f39657335b3674b1f5bd464ad5d126f6",
+      "reason": "PR-level review evidence only; it introduces no independent runtime or user-facing behavior."
+    },
+    {
+      "commit": "096963f9ba6022f1b16dcf5859a3ecb0ac65493c",
+      "reason": "Gateflow closeout documentation only; it introduces no independent runtime or user-facing behavior."
+    },
+    {
+      "commit": "86bcc62ab8294d2cd6f84d4886ac5d9cc399232b",
+      "reason": "PR merge commit contains the already mapped implementation and review evidence with no separate user-facing behavior."
+    },
+    {
+      "commit": "41f72e784e019d07ea4a23a201a834e33c46035e",
+      "reason": "Generated dependency graph refresh for the mapped HK notification fix; it adds no independent runtime behavior."
+    }
+  ]
+}
