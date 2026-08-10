@@ -110,7 +110,20 @@ cd "$REPO"
 
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
-推荐的 `--include-secret-credentials` 会为每个消费 unit 生成只包含所需 `LoadCredentialEncrypted=` 的 drop-in，不解密为共享 env 文件。它只渲染配置，不创建或修改真实凭据。
+推荐的 `--include-secret-credentials` 默认为每个消费 unit 生成只包含所需
+`LoadCredentialEncrypted=` 的 drop-in，不解密为共享 env 文件。它只渲染配置，不创建或修改真实凭据。
+
+对于无法启用 systemd credential mount namespace 的受限 Incus/LXC 容器，在同一命令中显式增加：
+
+```bash
+--secret-credential-delivery runtime-files
+```
+
+该模式会渲染并由 service drift 管理 `/usr/local/libexec/options-monitor-materialize-service-credentials`
+（`0755 root:root`）及逐 unit drop-in。helper 只把该 unit 需要的凭据解密到
+`/run/options-monitor/credentials/<unit>/`，启动时验证 `/run` 为 tmpfs，停止时清理。该模式不会自动回退到
+`OM_SECRET_BACKEND=env`，也不需要修改 Incus 宿主配置。两种安全交付模式都会从服务进程环境中
+移除固定注册表里的旧 secret env 名；env-file 只保留非秘密配置。
 
 以下 `--include-feishu-agent-credential` 是存量迁移兼容路径，不得与推荐开关同时使用：
 
@@ -125,6 +138,25 @@ cd "$REPO"
 - 每个由该 profile 生成的非 OpenD options-monitor service 下的 `zzzz-feishu-agent-credential.conf` drop-in。
 
 默认读取 `/etc/credstore.encrypted/pm-feishu-agent-app-secret` 和 `/etc/credstore.encrypted/om-feishu-holdings-app-secret`，将解密结果原子写入 tmpfs 上的 `/run/credentials/options-monitor-feishu-agent.env`，权限为 `0440 root:<deploy_user>`。渲染和 drift 不会创建、修改或输出加密凭据；这两个 credential store 必须由运维事先独立配置。OpenD 不读取 Feishu 凭据，因此不会添加该 drop-in。
+
+存量主机不要手工改写 `service.profile.json`。升级到包含新模式的 release 后，使用受控迁移命令：
+
+```bash
+./om service credentials-migrate \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --secret-credential-delivery runtime-files
+
+# 核对 dry-run 后才执行
+./om service credentials-migrate \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --secret-credential-delivery runtime-files \
+  --confirm --yes
+```
+
+命令不运行 oneshot/timer 业务服务，不修改加密 store；它会在新长运行消费者重启成功后退役旧共享 env 明文。
+详细的预检、回滚和残余验证契约见 [Secret Storage](SECRET_STORAGE.md)。
 
 如果要启用远端自动升级，建议 `$REPO` 使用 `/opt/options-monitor/current` 这样的 symlink 布局，并额外传：
 
@@ -185,8 +217,8 @@ cd "$REPO"
 - `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 4 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=4h`，`Persistent=true`）。
 
 Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；
-运行前必须 provision 逻辑凭据 `llm.deepseek.api_key`，并由 collector unit 的
-`LoadCredentialEncrypted=` 单独注入。未开启 `ai_decision_advice.enabled` 时不渲染这两个
+运行前必须 provision 逻辑凭据 `llm.deepseek.api_key`，并由 collector unit 选定的逐 unit
+credential delivery 模式单独注入。未开启 `ai_decision_advice.enabled` 时不渲染这两个
 unit，默认关闭；显式开启代表同意按设计文档第 18 节的最小数据合同向 DeepSeek
 传输数据。本功能不提供 operator/manual refresh 命令；Provider 原始响应、搜索
 query/call ID 不落盘。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。

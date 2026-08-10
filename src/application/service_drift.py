@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
+import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +14,8 @@ from src.application.service_deploy import (
     DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER,
     DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE,
     DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE,
+    DEFAULT_SECRET_CREDENTIAL_HELPER,
+    DEFAULT_SECRET_CREDENTIAL_DELIVERY,
     DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
     DEFAULT_ACCOUNTS,
     DEFAULT_MARKETS,
@@ -18,9 +23,11 @@ from src.application.service_deploy import (
     FEISHU_AGENT_CREDENTIAL_SERVICE,
     SECRET_CREDENTIAL_DROPIN,
     load_service_profile,
+    normalize_secret_credential_delivery,
     render_service_bundle,
     resolve_strategy_lab_recorder_endpoint_matches,
 )
+from src.application.secret_store import credential_spec
 
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
@@ -40,6 +47,7 @@ LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH = Path(
 SYSTEMD_MANAGED_DROPIN_KINDS = frozenset(
     {"systemd_dropin", "systemd_secret_dropin"}
 )
+SECRET_BACKEND_COMPAT_DROPIN = "zzzzz-secret-backend-compat.conf"
 
 
 def service_drift(
@@ -50,6 +58,8 @@ def service_drift(
     profile: dict[str, Any] | None = None,
     confirm: bool = False,
     systemd_unit_root: str | Path | None = None,
+    managed_root_uid: int = 0,
+    managed_root_gid: int = 0,
     run_cmd: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
@@ -66,6 +76,8 @@ def service_drift(
         profile_path=profile_path,
         profile=profile,
         systemd_unit_root=systemd_unit_root,
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
     )
     command_runner = run_cmd or subprocess.run
     initial["run_cmd"] = command_runner
@@ -111,6 +123,8 @@ def service_drift_status(
     profile_path: str | Path | None = None,
     profile: dict[str, Any] | None = None,
     systemd_unit_root: str | Path | None = None,
+    managed_root_uid: int = 0,
+    managed_root_gid: int = 0,
 ) -> dict[str, Any]:
     try:
         return service_drift(
@@ -120,6 +134,8 @@ def service_drift_status(
             profile=profile,
             confirm=False,
             systemd_unit_root=systemd_unit_root,
+            managed_root_uid=managed_root_uid,
+            managed_root_gid=managed_root_gid,
         )
     except Exception as exc:
         return {
@@ -137,6 +153,878 @@ def service_drift_status(
         }
 
 
+def migrate_service_credentials(
+    *,
+    repo_root: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    profile_path: str | Path | None = None,
+    secret_credential_delivery: str,
+    secret_credential_store_root: str | Path | None = None,
+    confirm: bool = False,
+    systemd_unit_root: str | Path | None = None,
+    managed_root_uid: int = 0,
+    managed_root_gid: int = 0,
+    run_cmd: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Migrate the deprecated shared secret env materializer to per-unit credentials.
+
+    The command is dry-run by default. Confirmed execution validates every required
+    encrypted credential without emitting plaintext, reconciles the target profile,
+    restarts only active long-running credential consumers, and retires the legacy
+    tmpfs env file after the new path has started successfully. A failed transition
+    attempts to restore the original profile and restart the previously active set.
+    """
+
+    delivery = normalize_secret_credential_delivery(secret_credential_delivery)
+    command_runner = run_cmd or subprocess.run
+    initial = _load_profile_and_paths(
+        repo_root=repo_root,
+        runtime_root=runtime_root,
+        profile_path=profile_path,
+        profile=None,
+        systemd_unit_root=systemd_unit_root,
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+    )
+    initial["run_cmd"] = command_runner
+    initial["run_cmd_injected"] = run_cmd is not None
+    original_profile = copy.deepcopy(initial["profile"])
+    provider = str(initial.get("provider") or "").strip().lower()
+    if provider != "systemd":
+        return _credential_migration_result(
+            initial,
+            delivery=delivery,
+            confirm=confirm,
+            ok=False,
+            supported=False,
+            status="blocked",
+            reason=(
+                "service_profile_missing"
+                if not provider
+                else "credential_migration_requires_systemd"
+            ),
+        )
+
+    rollback_profile, _compatibility_warnings = (
+        _effective_profile_with_legacy_feishu_credential(
+            original_profile,
+            ctx=initial,
+        )
+    )
+    rollback_profile = copy.deepcopy(rollback_profile)
+    target_profile = _secret_credential_migration_profile(
+        rollback_profile,
+        delivery=delivery,
+        store_root=secret_credential_store_root,
+    )
+    original_drift = service_drift(
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+        profile_path=initial["profile_path"],
+        profile=original_profile,
+        confirm=False,
+        systemd_unit_root=initial["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=command_runner,
+    )
+    unrelated_drift = _unrelated_secret_migration_drift(original_drift)
+    if unrelated_drift:
+        return _credential_migration_result(
+            initial,
+            delivery=delivery,
+            confirm=confirm,
+            ok=False,
+            supported=True,
+            status="blocked",
+            reason="unrelated_service_drift_must_be_reconciled_first",
+            precondition_drift=original_drift,
+            unrelated_drift=unrelated_drift,
+            remediation=[
+                "reconcile ordinary service drift before changing credential delivery",
+            ],
+        )
+
+    target_bundle = _expected_bundle_from_profile(
+        target_profile,
+        provider=provider,
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+    )
+    expected_profile = _bundle_profile(target_bundle)
+    credential_ids = _profile_systemd_credential_ids(expected_profile)
+    if not credential_ids:
+        return _credential_migration_result(
+            initial,
+            delivery=delivery,
+            confirm=confirm,
+            ok=False,
+            supported=True,
+            status="blocked",
+            reason="no_registered_credential_consumers",
+            precondition_drift=original_drift,
+        )
+
+    target_drift = service_drift(
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+        profile_path=initial["profile_path"],
+        profile=target_profile,
+        confirm=False,
+        systemd_unit_root=initial["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=command_runner,
+    )
+    restart_consumers = _credential_restart_consumers(expected_profile)
+    active_probe = _active_credential_consumers(
+        initial,
+        profile=expected_profile,
+        service_names=restart_consumers,
+        run_cmd=command_runner,
+    )
+    legacy_paths = _legacy_secret_runtime_paths(rollback_profile)
+    legacy_detected = _legacy_secret_delivery_detected(
+        rollback_profile,
+        original_drift=original_drift,
+        legacy_paths=legacy_paths,
+    )
+    current_secret_raw = rollback_profile.get("secret_credentials")
+    current_secret = current_secret_raw if isinstance(current_secret_raw, dict) else {}
+    current_delivery = (
+        normalize_secret_credential_delivery(current_secret.get("delivery"))
+        if current_secret.get("enabled")
+        else None
+    )
+    if current_delivery is not None and current_delivery != delivery:
+        return _credential_migration_result(
+            initial,
+            delivery=delivery,
+            confirm=confirm,
+            ok=False,
+            supported=True,
+            status="blocked",
+            reason="existing_secure_delivery_transition_not_supported",
+            precondition_drift=original_drift,
+            target_drift=target_drift,
+            current_secret_credential_delivery=current_delivery,
+            remediation=[
+                "use a dedicated credential-delivery transition that verifies and retires the previous per-unit runtime",
+            ],
+        )
+    already_migrated = bool(
+        not legacy_detected
+        and current_secret.get("enabled")
+        and str(current_secret.get("delivery") or "").strip().lower() == delivery
+        and target_drift.get("summary", {}).get("ok")
+    )
+    base = _credential_migration_result(
+        initial,
+        delivery=delivery,
+        confirm=confirm,
+        ok=True,
+        supported=True,
+        status="already_migrated" if already_migrated else "dry_run",
+        reason=None,
+        precondition_drift=original_drift,
+        target_drift=target_drift,
+        credential_ids=credential_ids,
+        restart_consumers=restart_consumers,
+        active_consumer_probe=active_probe,
+        legacy_paths=[str(path) for path in legacy_paths],
+        oneshot_consumers=_credential_oneshot_consumers(expected_profile),
+    )
+    if already_migrated or not confirm:
+        return base
+    if not active_probe.get("supported"):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "reason": "active_consumer_probe_unavailable",
+        }
+    if active_probe.get("errors"):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "reason": "active_consumer_probe_failed",
+        }
+
+    preflight = _preflight_encrypted_credentials(
+        delivery=delivery,
+        store_root=Path(str(expected_profile["secret_credentials"]["store_root"])),
+        credential_ids=credential_ids,
+        run_cmd=command_runner,
+    )
+    if not preflight.get("ok"):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "reason": "encrypted_credential_preflight_failed",
+            "preflight": preflight,
+        }
+
+    try:
+        backup_path = _backup_service_profile(initial["profile_path"])
+    except Exception as exc:
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "reason": "service_profile_backup_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "preflight": preflight,
+        }
+
+    active_services = list(active_probe.get("active") or [])
+    target_helper_path = _runtime_credential_helper_path(expected_profile)
+    target_helper_existed = bool(
+        target_helper_path is not None
+        and (target_helper_path.exists() or target_helper_path.is_symlink())
+    )
+    reconcile = service_drift(
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+        profile_path=initial["profile_path"],
+        profile=target_profile,
+        confirm=True,
+        systemd_unit_root=initial["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=command_runner,
+    )
+    if _service_drift_apply_failed(reconcile):
+        rollback = _rollback_secret_credential_migration(
+            initial,
+            original_profile=rollback_profile,
+            target_profile=expected_profile,
+            target_helper_existed=target_helper_existed,
+            active_services=active_services,
+            managed_root_uid=managed_root_uid,
+            managed_root_gid=managed_root_gid,
+            run_cmd=command_runner,
+        )
+        return {
+            **base,
+            "ok": False,
+            "status": "rolled_back" if rollback.get("ok") else "rollback_failed",
+            "changed": bool(reconcile.get("changed")),
+            "reason": "target_service_reconcile_failed",
+            "backup_path": str(backup_path),
+            "preflight": preflight,
+            "service_reconcile": reconcile,
+            "rollback": rollback,
+        }
+
+    restart = _restart_and_verify_credential_consumers(
+        initial,
+        profile=expected_profile,
+        service_names=active_services,
+        run_cmd=command_runner,
+    )
+    if not restart.get("ok"):
+        rollback = _rollback_secret_credential_migration(
+            initial,
+            original_profile=rollback_profile,
+            target_profile=expected_profile,
+            target_helper_existed=target_helper_existed,
+            active_services=active_services,
+            managed_root_uid=managed_root_uid,
+            managed_root_gid=managed_root_gid,
+            run_cmd=command_runner,
+        )
+        return {
+            **base,
+            "ok": False,
+            "status": "rolled_back" if rollback.get("ok") else "rollback_failed",
+            "changed": True,
+            "reason": "credential_consumer_restart_failed",
+            "backup_path": str(backup_path),
+            "preflight": preflight,
+            "service_reconcile": reconcile,
+            "restart": restart,
+            "rollback": rollback,
+        }
+
+    post_restart_drift = service_drift(
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+        profile_path=initial["profile_path"],
+        confirm=False,
+        systemd_unit_root=initial["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=command_runner,
+    )
+    if not post_restart_drift.get("summary", {}).get("ok"):
+        rollback = _rollback_secret_credential_migration(
+            initial,
+            original_profile=rollback_profile,
+            target_profile=expected_profile,
+            target_helper_existed=target_helper_existed,
+            active_services=active_services,
+            managed_root_uid=managed_root_uid,
+            managed_root_gid=managed_root_gid,
+            run_cmd=command_runner,
+        )
+        return {
+            **base,
+            "ok": False,
+            "status": "rolled_back" if rollback.get("ok") else "rollback_failed",
+            "changed": True,
+            "reason": "post_restart_target_drift_failed",
+            "backup_path": str(backup_path),
+            "preflight": preflight,
+            "service_reconcile": reconcile,
+            "restart": restart,
+            "post_restart_drift": post_restart_drift,
+            "rollback": rollback,
+        }
+
+    cleanup = _retire_legacy_secret_runtime_paths(
+        initial,
+        paths=legacy_paths,
+        run_cmd=command_runner,
+    )
+    final_drift = service_drift(
+        repo_root=initial["repo_root"],
+        runtime_root=initial["runtime_root"],
+        profile_path=initial["profile_path"],
+        confirm=False,
+        systemd_unit_root=initial["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=command_runner,
+    )
+    complete = bool(cleanup.get("ok") and final_drift.get("summary", {}).get("ok"))
+    return {
+        **base,
+        "ok": complete,
+        "status": "migrated" if complete else "migration_incomplete",
+        "changed": True,
+        "reason": None if complete else "post_migration_cleanup_or_drift_failed",
+        "backup_path": str(backup_path),
+        "preflight": preflight,
+        "service_reconcile": reconcile,
+        "restart": restart,
+        "post_restart_drift": post_restart_drift,
+        "legacy_cleanup": cleanup,
+        "final_drift": final_drift,
+    }
+
+
+def _credential_migration_result(
+    ctx: dict[str, Any],
+    *,
+    delivery: str,
+    confirm: bool,
+    ok: bool,
+    supported: bool,
+    status: str,
+    reason: str | None,
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "checked": True,
+        "supported": supported,
+        "ok": ok,
+        "status": status,
+        "reason": reason,
+        "confirmed": bool(confirm),
+        "changed": False,
+        "secret_credential_delivery": delivery,
+        "profile_path": str(ctx["profile_path"]),
+        "repo_root": str(ctx["repo_root"]),
+        "runtime_root": str(ctx["runtime_root"]),
+        "values_exposed": False,
+        **extra,
+    }
+
+
+def _secret_credential_migration_profile(
+    profile: dict[str, Any],
+    *,
+    delivery: str,
+    store_root: str | Path | None,
+) -> dict[str, Any]:
+    target = copy.deepcopy(profile)
+    services = target.get("services")
+    if isinstance(services, list):
+        target["services"] = [
+            item
+            for item in services
+            if str(item.get("name") if isinstance(item, dict) else item or "").strip()
+            != FEISHU_AGENT_CREDENTIAL_SERVICE
+        ]
+    target["feishu_agent_credential"] = {"enabled": False}
+    current_raw = target.get("secret_credentials")
+    current = current_raw if isinstance(current_raw, dict) else {}
+    selected_store = Path(
+        str(
+            store_root
+            or current.get("store_root")
+            or DEFAULT_SECRET_CREDENTIAL_STORE_ROOT
+        )
+    ).expanduser()
+    if not selected_store.is_absolute() or ".." in selected_store.parts:
+        raise ValueError("secret credential store root must be an absolute normalized path")
+    target["secret_credentials"] = {
+        "enabled": True,
+        "backend": "systemd",
+        "delivery": delivery,
+        "store_root": str(selected_store),
+        "legacy_env_materializer_enabled": False,
+    }
+    return target
+
+
+def _profile_systemd_credential_ids(profile: dict[str, Any]) -> list[str]:
+    secret_raw = profile.get("secret_credentials")
+    secret = secret_raw if isinstance(secret_raw, dict) else {}
+    bindings_raw = secret.get("service_credentials")
+    bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
+    credential_ids: set[str] = set()
+    for raw_names in bindings.values():
+        names = raw_names if isinstance(raw_names, list) else []
+        for logical_name in names:
+            spec = credential_spec(str(logical_name or ""))
+            if spec is None:
+                raise ValueError("rendered service profile contains an unknown credential")
+            credential_ids.add(spec.systemd_credential_id)
+    return sorted(credential_ids)
+
+
+def _credential_restart_consumers(profile: dict[str, Any]) -> list[str]:
+    secret_raw = profile.get("secret_credentials")
+    secret = secret_raw if isinstance(secret_raw, dict) else {}
+    bindings_raw = secret.get("service_credentials")
+    bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
+    restart_raw = profile.get("restart")
+    restart = restart_raw if isinstance(restart_raw, dict) else {}
+    restart_names_raw = restart.get("services")
+    restart_names = restart_names_raw if isinstance(restart_names_raw, list) else []
+    return sorted(
+        {
+            str(name)
+            for name in restart_names
+            if str(name) in bindings and str(name).endswith(".service")
+        }
+    )
+
+
+def _credential_oneshot_consumers(profile: dict[str, Any]) -> list[str]:
+    secret_raw = profile.get("secret_credentials")
+    secret = secret_raw if isinstance(secret_raw, dict) else {}
+    bindings_raw = secret.get("service_credentials")
+    bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
+    restartable = set(_credential_restart_consumers(profile))
+    return sorted(
+        name
+        for name in bindings
+        if str(name).endswith(".service") and name not in restartable
+    )
+
+
+def _credential_managed_path(path: str) -> bool:
+    name = Path(path).name
+    return name in {
+        FEISHU_AGENT_CREDENTIAL_DROPIN,
+        SECRET_CREDENTIAL_DROPIN,
+        SECRET_BACKEND_COMPAT_DROPIN,
+        DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER.name,
+        DEFAULT_SECRET_CREDENTIAL_HELPER.name,
+    }
+
+
+def _unrelated_secret_migration_drift(drift: dict[str, Any]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for key in (
+        "missing_profile_units",
+        "missing_installed_units",
+        "extra_profile_units",
+        "extra_installed_units",
+        "mismatched_units",
+        "activation_drift_units",
+        "execution_drift_units",
+    ):
+        values = [
+            str(item)
+            for item in drift.get(key) or []
+            if str(item) != FEISHU_AGENT_CREDENTIAL_SERVICE
+        ]
+        if values:
+            out[key] = values
+    for key in (
+        "missing_managed_files",
+        "extra_managed_files",
+        "mismatched_managed_files",
+        "mode_mismatched_managed_files",
+    ):
+        values = [
+            str(item)
+            for item in drift.get(key) or []
+            if not _credential_managed_path(str(item))
+        ]
+        if values:
+            out[key] = values
+    return out
+
+
+def _active_credential_consumers(
+    ctx: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    service_names: list[str],
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    probe_ctx = {**ctx, "profile": profile, "run_cmd": run_cmd, "run_cmd_injected": ctx.get("run_cmd_injected", False)}
+    if not _live_systemctl_enabled(probe_ctx):
+        return {"supported": False, "active": [], "inactive": [], "states": {}, "errors": []}
+    active: list[str] = []
+    inactive: list[str] = []
+    states: dict[str, str] = {}
+    errors: list[str] = []
+    for name in service_names:
+        result = _run_systemctl(probe_ctx, ["is-active", name], run_cmd=run_cmd)
+        text = str(result.get("stdout") or result.get("stderr") or "").strip().lower()
+        state = text.splitlines()[0].strip() if text else "unknown"
+        states[name] = state
+        if state in {"active", "reloading"}:
+            active.append(name)
+        elif state in {"inactive", "deactivating"}:
+            inactive.append(name)
+        else:
+            errors.append(name)
+    return {
+        "supported": True,
+        "active": active,
+        "inactive": inactive,
+        "states": states,
+        "errors": errors,
+    }
+
+
+def _preflight_encrypted_credentials(
+    *,
+    delivery: str,
+    store_root: Path,
+    credential_ids: list[str],
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    if delivery == "runtime-files":
+        command = [
+            "/usr/bin/findmnt",
+            "--noheadings",
+            "--output",
+            "FSTYPE",
+            "--target",
+            "/run",
+        ]
+        try:
+            proc = run_cmd(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            fstype = str(getattr(proc, "stdout", "") or "").strip()
+            ok = int(getattr(proc, "returncode", 1)) == 0 and fstype == "tmpfs"
+        except Exception:
+            ok = False
+        checks.append({"check": "runtime_tmpfs", "ok": ok})
+        if not ok:
+            return {"ok": False, "checks": checks, "values_exposed": False}
+
+    try:
+        is_root = os.geteuid() == 0
+    except (AttributeError, OSError):
+        is_root = False
+    prefix = [] if is_root else ["sudo", "-n"]
+    for credential_id in credential_ids:
+        source = store_root / credential_id
+        command = [
+            *prefix,
+            "/usr/bin/systemd-creds",
+            "decrypt",
+            f"--name={credential_id}",
+            str(source),
+            "/dev/null",
+        ]
+        try:
+            proc = run_cmd(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+            ok = int(getattr(proc, "returncode", 1)) == 0
+        except Exception:
+            ok = False
+        checks.append(
+            {
+                "check": "encrypted_credential_decrypt",
+                "credential_id": credential_id,
+                "ok": ok,
+            }
+        )
+        if not ok:
+            return {"ok": False, "checks": checks, "values_exposed": False}
+    return {"ok": True, "checks": checks, "values_exposed": False}
+
+
+def _backup_service_profile(profile_path: Path) -> Path:
+    if not profile_path.is_file():
+        raise FileNotFoundError(f"service profile is unavailable: {profile_path}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = profile_path.with_name(
+        f"{profile_path.name}.pre-credential-migration-{stamp}.bak"
+    )
+    shutil.copy2(profile_path, backup)
+    return backup
+
+
+def _service_drift_apply_failed(result: dict[str, Any]) -> bool:
+    return bool(
+        result.get("apply_errors")
+        or not result.get("summary", {}).get("ok", False)
+    )
+
+
+def _restart_and_verify_credential_consumers(
+    ctx: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    service_names: list[str],
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    restart_ctx = {**ctx, "profile": profile}
+    restarted: list[str] = []
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for name in service_names:
+        restart_result = _run_systemctl(restart_ctx, ["restart", name], run_cmd=run_cmd)
+        checks.append({"service": name, "action": "restart", "ok": bool(restart_result.get("ok"))})
+        if not restart_result.get("ok"):
+            errors.append(name)
+            break
+        active_result = _run_systemctl(restart_ctx, ["is-active", name], run_cmd=run_cmd)
+        active_state = str(active_result.get("stdout") or "").strip().lower().splitlines()
+        active_ok = bool(active_result.get("ok") and active_state and active_state[0] == "active")
+        checks.append({"service": name, "action": "is-active", "ok": active_ok})
+        if not active_ok:
+            errors.append(name)
+            break
+        restarted.append(name)
+    return {"ok": not errors, "restarted": restarted, "checks": checks, "errors": errors}
+
+
+def _rollback_secret_credential_migration(
+    ctx: dict[str, Any],
+    *,
+    original_profile: dict[str, Any],
+    target_profile: dict[str, Any],
+    target_helper_existed: bool,
+    active_services: list[str],
+    managed_root_uid: int,
+    managed_root_gid: int,
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    reconcile = service_drift(
+        repo_root=ctx["repo_root"],
+        runtime_root=ctx["runtime_root"],
+        profile_path=ctx["profile_path"],
+        profile=original_profile,
+        confirm=True,
+        systemd_unit_root=ctx["systemd_unit_root"],
+        managed_root_uid=managed_root_uid,
+        managed_root_gid=managed_root_gid,
+        run_cmd=run_cmd,
+    )
+    restart = _restart_and_verify_credential_consumers(
+        ctx,
+        profile=original_profile,
+        service_names=active_services,
+        run_cmd=run_cmd,
+    )
+    target_cleanup = _cleanup_rolled_back_runtime_credentials(
+        profile=target_profile,
+        helper_existed_before=target_helper_existed,
+        run_cmd=run_cmd,
+    )
+    ok = bool(
+        not _service_drift_apply_failed(reconcile)
+        and restart.get("ok")
+        and target_cleanup.get("ok")
+    )
+    return {
+        "ok": ok,
+        "service_reconcile": reconcile,
+        "restart": restart,
+        "target_cleanup": target_cleanup,
+    }
+
+
+def _runtime_credential_helper_path(profile: dict[str, Any]) -> Path | None:
+    secret_raw = profile.get("secret_credentials")
+    secret = secret_raw if isinstance(secret_raw, dict) else {}
+    if str(secret.get("delivery") or "").strip().lower() != "runtime-files":
+        return None
+    raw_path = str(secret.get("helper_path") or DEFAULT_SECRET_CREDENTIAL_HELPER)
+    path = Path(raw_path).expanduser()
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.name != DEFAULT_SECRET_CREDENTIAL_HELPER.name
+    ):
+        raise ValueError("unsafe runtime credential helper path in service profile")
+    return path
+
+
+def _cleanup_rolled_back_runtime_credentials(
+    *,
+    profile: dict[str, Any],
+    helper_existed_before: bool,
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    helper_path = _runtime_credential_helper_path(profile)
+    if helper_path is None:
+        return {"ok": True, "status": "not_applicable", "cleaned_units": []}
+    if not helper_path.exists() or helper_path.is_symlink():
+        return {
+            "ok": not helper_path.is_symlink(),
+            "status": "helper_missing" if not helper_path.is_symlink() else "unsafe_helper",
+            "cleaned_units": [],
+        }
+    secret_raw = profile.get("secret_credentials")
+    secret = secret_raw if isinstance(secret_raw, dict) else {}
+    bindings_raw = secret.get("service_credentials")
+    bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
+    try:
+        is_root = os.geteuid() == 0
+    except (AttributeError, OSError):
+        is_root = False
+    prefix = [] if is_root else ["sudo", "-n"]
+    cleaned_units: list[str] = []
+    errors: list[str] = []
+    for service_name, raw_logical_names in sorted(bindings.items()):
+        logical_names = raw_logical_names if isinstance(raw_logical_names, list) else []
+        credential_ids: list[str] = []
+        for logical_name in logical_names:
+            spec = credential_spec(str(logical_name or ""))
+            if spec is None:
+                errors.append(str(service_name))
+                break
+            credential_ids.append(spec.systemd_credential_id)
+        if not credential_ids or str(service_name) in errors:
+            continue
+        command = [
+            *prefix,
+            str(helper_path),
+            "cleanup",
+            "--unit",
+            str(service_name),
+        ]
+        for credential_id in credential_ids:
+            command.extend(["--credential-id", credential_id])
+        try:
+            proc = run_cmd(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+            ok = int(getattr(proc, "returncode", 1)) == 0
+        except Exception:
+            ok = False
+        if ok:
+            cleaned_units.append(str(service_name))
+        else:
+            errors.append(str(service_name))
+    helper_retired = False
+    if not errors and not helper_existed_before:
+        delete_result = _delete_unit_with_sudo_fallback(helper_path, run_cmd=run_cmd)
+        helper_retired = bool(delete_result.get("ok"))
+        if not helper_retired:
+            errors.append(str(helper_path))
+    return {
+        "ok": not errors,
+        "status": "cleaned" if not errors else "cleanup_failed",
+        "cleaned_units": cleaned_units,
+        "helper_retired": helper_retired,
+        "errors": errors,
+    }
+
+
+def _legacy_secret_runtime_paths(profile: dict[str, Any]) -> list[Path]:
+    credential_raw = profile.get("feishu_agent_credential")
+    credential = credential_raw if isinstance(credential_raw, dict) else {}
+    candidates = (
+        (
+            credential.get("helper_path") or DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER,
+            DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER.name,
+        ),
+        (
+            credential.get("runtime_env_file") or DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE,
+            DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE.name,
+        ),
+    )
+    paths: list[Path] = []
+    for raw_path, required_name in candidates:
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute() or ".." in path.parts or path.name != required_name:
+            raise ValueError(f"unsafe legacy credential migration path: {required_name}")
+        paths.append(path)
+    return paths
+
+
+def _legacy_secret_delivery_detected(
+    profile: dict[str, Any],
+    *,
+    original_drift: dict[str, Any],
+    legacy_paths: list[Path],
+) -> bool:
+    credential_raw = profile.get("feishu_agent_credential")
+    credential = credential_raw if isinstance(credential_raw, dict) else {}
+    if credential.get("enabled") or FEISHU_AGENT_CREDENTIAL_SERVICE in _service_names_from_profile(profile):
+        return True
+    if any(path.exists() or path.is_symlink() for path in legacy_paths):
+        return True
+    return any(
+        Path(str(path)).name
+        in {FEISHU_AGENT_CREDENTIAL_DROPIN, SECRET_BACKEND_COMPAT_DROPIN}
+        for path in original_drift.get("installed_managed_files") or []
+    )
+
+
+def _retire_legacy_secret_runtime_paths(
+    ctx: dict[str, Any],
+    *,
+    paths: list[Path],
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    retired: list[str] = []
+    operations: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for path in paths:
+        result = _delete_unit_with_sudo_fallback(path, run_cmd=run_cmd)
+        operations.append(result)
+        if result.get("ok"):
+            retired.append(str(path))
+        else:
+            errors.append(str(path))
+    return {"ok": not errors, "retired": retired, "errors": errors, "operations": operations}
+
+
 def _load_profile_and_paths(
     *,
     repo_root: str | Path | None,
@@ -144,12 +1032,19 @@ def _load_profile_and_paths(
     profile_path: str | Path | None,
     profile: dict[str, Any] | None,
     systemd_unit_root: str | Path | None,
+    managed_root_uid: int,
+    managed_root_gid: int,
 ) -> dict[str, Any]:
-    loaded_profile = dict(profile or {})
+    loaded_profile = dict(profile) if profile is not None else {}
     runtime = Path(runtime_root or loaded_profile.get("runtime_root") or "/var/lib/options-monitor").expanduser()
     profile_file = Path(profile_path).expanduser() if profile_path else runtime / "service.profile.json"
-    if not loaded_profile and profile_file.exists():
-        loaded_profile = load_service_profile(profile_file)
+    persisted_profile = (
+        load_service_profile(profile_file)
+        if profile_file.exists()
+        else {}
+    )
+    if profile is None and persisted_profile:
+        loaded_profile = dict(persisted_profile)
         if runtime_root is None and loaded_profile.get("runtime_root"):
             runtime = Path(str(loaded_profile["runtime_root"])).expanduser()
     repo = Path(repo_root or loaded_profile.get("repo_root") or Path.cwd()).expanduser()
@@ -162,11 +1057,14 @@ def _load_profile_and_paths(
     )
     return {
         "profile": loaded_profile,
+        "profile_on_disk": persisted_profile,
         "profile_path": profile_file,
         "repo_root": repo,
         "runtime_root": runtime,
         "provider": provider,
         "systemd_unit_root": Path(unit_root_raw).expanduser(),
+        "managed_root_uid": int(managed_root_uid),
+        "managed_root_gid": int(managed_root_gid),
     }
 
 
@@ -216,6 +1114,9 @@ def _effective_profile_with_legacy_feishu_credential(
 
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     profile = ctx["profile"]
+    persisted_profile = ctx.get("profile_on_disk")
+    if not isinstance(persisted_profile, dict):
+        persisted_profile = profile
     provider = str(ctx["provider"] or "").strip().lower()
     if provider not in {"systemd", "launchd"}:
         return {
@@ -315,7 +1216,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         ctx=ctx,
     )
     expected_services = _service_names_from_profile(_bundle_profile(bundle))
-    profile_services = _service_names_from_profile(profile)
+    profile_services = _service_names_from_profile(persisted_profile)
     installed_units = _installed_units(provider=provider, expected_files=expected_files, ctx=ctx)
     missing_profile_units = sorted(set(expected_services) - set(profile_services))
     extra_profile_units = sorted(set(profile_services) - set(expected_services))
@@ -369,7 +1270,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         for unit in required_units
         if unit in set(missing_profile_units) or unit in set(missing_installed_units)
     )
-    profile_content_changed = _profile_content_changed(profile, bundle)
+    profile_content_changed = _profile_content_changed(persisted_profile, bundle)
     manual_actions = _manual_actions(
         provider=provider,
         missing_installed_units=missing_installed_units,
@@ -553,6 +1454,10 @@ def _expected_bundle_from_profile(
         "include_quality_monitoring": include_quality_monitoring,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
+        "secret_credential_delivery": (
+            secret_credentials.get("delivery")
+            or DEFAULT_SECRET_CREDENTIAL_DELIVERY
+        ),
         "secret_credential_store_root": (
             secret_credentials.get("store_root")
             or DEFAULT_SECRET_CREDENTIAL_STORE_ROOT
@@ -713,6 +1618,7 @@ def _installed_managed_files(
         for dropin_name in (
             FEISHU_AGENT_CREDENTIAL_DROPIN,
             SECRET_CREDENTIAL_DROPIN,
+            SECRET_BACKEND_COMPAT_DROPIN,
         ):
             for path in root.glob(f"options-monitor-*.service.d/{dropin_name}"):
                 if not path.is_file():
@@ -845,6 +1751,13 @@ def _managed_file_status(
     mode_mismatched: list[str] = []
     for key, item in expected_files.items():
         path = _install_path(item, provider=provider, ctx=ctx)
+        has_expected_owner = (
+            item.get("owner_uid") is not None
+            or item.get("owner_gid") is not None
+        )
+        if has_expected_owner and path.is_symlink():
+            mode_mismatched.append(key)
+            continue
         if not path.exists() or not path.is_file():
             missing.append(key)
             continue
@@ -856,13 +1769,30 @@ def _managed_file_status(
         if actual != str(item.get("content") or ""):
             mismatched.append(key)
         expected_mode = item.get("mode")
-        if expected_mode is not None:
+        expected_owner_uid = item.get("owner_uid")
+        expected_owner_gid = item.get("owner_gid")
+        if expected_owner_uid == 0:
+            expected_owner_uid = int(ctx.get("managed_root_uid", 0))
+        if expected_owner_gid == 0:
+            expected_owner_gid = int(ctx.get("managed_root_gid", 0))
+        if (
+            expected_mode is not None
+            or expected_owner_uid is not None
+            or expected_owner_gid is not None
+        ):
             try:
-                actual_mode = path.stat().st_mode & 0o777
+                metadata = path.stat()
             except OSError:
                 mode_mismatched.append(key)
             else:
-                if actual_mode != int(expected_mode):
+                if (
+                    (
+                        expected_mode is not None
+                        and (metadata.st_mode & 0o777) != int(expected_mode)
+                    )
+                    or (expected_owner_uid is not None and metadata.st_uid != int(expected_owner_uid))
+                    or (expected_owner_gid is not None and metadata.st_gid != int(expected_owner_gid))
+                ):
                     mode_mismatched.append(key)
     return sorted(missing), sorted(mismatched), sorted(mode_mismatched)
 
@@ -1213,6 +2143,16 @@ def _apply_service_drift(
             ctx=ctx,
             run_cmd=run_cmd,
             mode=(int(item["mode"]) if item.get("mode") is not None else None),
+            owner_uid=(
+                int(ctx.get("managed_root_uid", 0))
+                if item.get("owner_uid") == 0
+                else (int(item["owner_uid"]) if item.get("owner_uid") is not None else None)
+            ),
+            owner_gid=(
+                int(ctx.get("managed_root_gid", 0))
+                if item.get("owner_gid") == 0
+                else (int(item["owner_gid"]) if item.get("owner_gid") is not None else None)
+            ),
         )
         operations.append({**write_result, "managed_file": key})
         if not write_result.get("ok"):
@@ -1245,6 +2185,7 @@ def _apply_service_drift(
         else:
             profile_written = True
             ctx["profile"] = _bundle_profile(bundle)
+            ctx["profile_on_disk"] = dict(ctx["profile"])
             operations.append({"operation": "write_profile", "path": str(ctx["profile_path"]), "ok": True})
 
     enabled_timers: list[str] = []
@@ -1478,21 +2419,70 @@ def _write_text_with_sudo_fallback(
     ctx: dict[str, Any],
     run_cmd: Callable[..., Any],
     mode: int | None = None,
+    owner_uid: int | None = None,
+    owner_gid: int | None = None,
 ) -> dict[str, Any]:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        if mode is not None:
-            path.chmod(mode)
-        return {"operation": "write_unit", "path": str(path), "ok": True, "sudo_fallback": False}
-    except Exception as exc:
-        first_error = f"{type(exc).__name__}: {exc}"
+    if (owner_uid is None) != (owner_gid is None):
+        return {
+            "operation": "write_unit",
+            "path": str(path),
+            "ok": False,
+            "error": "owner_uid and owner_gid must be configured together",
+            "sudo_fallback": False,
+        }
+    if owner_uid is not None and path.is_symlink():
+        return {
+            "operation": "write_unit",
+            "path": str(path),
+            "ok": False,
+            "error": "managed privileged path must not be a symbolic link",
+            "sudo_fallback": False,
+        }
+    direct_owner_allowed = owner_uid is None or os.geteuid() == owner_uid
+    if direct_owner_allowed:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            if owner_uid is not None and owner_gid is not None:
+                os.chown(path, owner_uid, owner_gid)
+            if mode is not None:
+                path.chmod(mode)
+            return {
+                "operation": "write_unit",
+                "path": str(path),
+                "ok": True,
+                "sudo_fallback": False,
+            }
+        except Exception as exc:
+            first_error = f"{type(exc).__name__}: {exc}"
+    else:
+        first_error = "privileged ownership requires sudo installation"
 
     if str(ctx.get("provider") or "") != "systemd":
         return {"operation": "write_unit", "path": str(path), "ok": False, "error": first_error, "sudo_fallback": False}
 
-    mkdir_command = ["sudo", "-n", "install", "-d", str(path.parent)]
-    write_command = ["sudo", "-n", "sh", "-c", 'cat > "$1"', "sh", str(path)]
+    mkdir_command = ["sudo", "-n", "install", "-d"]
+    if owner_uid is not None and owner_gid is not None:
+        mkdir_command.extend(
+            ["-o", str(owner_uid), "-g", str(owner_gid), "-m", "0755"]
+        )
+    mkdir_command.append(str(path.parent))
+    if owner_uid is not None and owner_gid is not None:
+        write_command = [
+            "sudo",
+            "-n",
+            "install",
+            "-o",
+            str(owner_uid),
+            "-g",
+            str(owner_gid),
+            "-m",
+            f"{int(mode if mode is not None else 0o644):04o}",
+            "/dev/stdin",
+            str(path),
+        ]
+    else:
+        write_command = ["sudo", "-n", "sh", "-c", 'cat > "$1"', "sh", str(path)]
     try:
         mkdir_proc = run_cmd(mkdir_command, capture_output=True, text=True, timeout=60, check=False)
         mkdir_rc = int(getattr(mkdir_proc, "returncode", 1))
@@ -1512,7 +2502,7 @@ def _write_text_with_sudo_fallback(
         write_rc = int(getattr(write_proc, "returncode", 1))
         chmod_proc = None
         chmod_command = None
-        if write_rc == 0 and mode is not None:
+        if write_rc == 0 and mode is not None and owner_uid is None:
             chmod_command = ["sudo", "-n", "chmod", f"{mode:04o}", str(path)]
             chmod_proc = run_cmd(
                 chmod_command,
@@ -1531,13 +2521,35 @@ def _write_text_with_sudo_fallback(
             "sudo_command": write_command,
         }
     chmod_rc = int(getattr(chmod_proc, "returncode", 0)) if chmod_proc is not None else 0
-    ok = write_rc == 0 and chmod_rc == 0
+    ownership_ok = True
+    if write_rc == 0 and owner_uid is not None and owner_gid is not None:
+        if not path.exists() or path.is_symlink():
+            ownership_ok = False
+        else:
+            try:
+                metadata = path.stat()
+            except OSError:
+                ownership_ok = False
+            else:
+                ownership_ok = (
+                    metadata.st_uid == owner_uid
+                    and metadata.st_gid == owner_gid
+                    and (mode is None or (metadata.st_mode & 0o777) == mode)
+                )
+    ok = write_rc == 0 and chmod_rc == 0 and ownership_ok
     if ok:
         error = None
     elif write_rc != 0:
         error = first_error
-    else:
+    elif chmod_rc != 0:
         error = f"chmod failed: {path}"
+    else:
+        error = f"ownership verification failed: {path}"
+    result_rc = (
+        write_rc
+        if write_rc != 0
+        else (chmod_rc if chmod_rc != 0 else (0 if ownership_ok else 1))
+    )
     return {
         "operation": "write_unit",
         "path": str(path),
@@ -1545,7 +2557,7 @@ def _write_text_with_sudo_fallback(
         "error": error,
         "sudo_fallback": True,
         "sudo_command": chmod_command or write_command,
-        "returncode": chmod_rc if write_rc == 0 else write_rc,
+        "returncode": result_rc,
         "stdout": str(
             getattr(chmod_proc if chmod_proc is not None else write_proc, "stdout", "")
             or ""
@@ -1577,6 +2589,7 @@ def _systemctl_prefix(profile: dict[str, Any]) -> list[str]:
 
 
 __all__ = [
+    "migrate_service_credentials",
     "service_drift",
     "service_drift_status",
 ]

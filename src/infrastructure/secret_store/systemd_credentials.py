@@ -29,7 +29,7 @@ class SystemdCredentialProvider:
         raw = str(credential_directory or "").strip()
         if not raw:
             raise SecretBackendUnavailable(
-                "systemd credential backend requires CREDENTIALS_DIRECTORY; run inside a unit with LoadCredentialEncrypted"
+                "systemd credential backend requires CREDENTIALS_DIRECTORY; run inside a unit with an explicit credential delivery mode"
             )
         directory = Path(raw)
         if not directory.is_absolute():
