@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.13.2 - 2026-08-10
+
+### Improvements
+- Bound AI Decision Advice account context to the configured portfolio distribution and authoritative prepared option-position source, with run, account, and source receipts preventing cross-account or fallback input drift.
+
+### Bug Fixes
+- Fixed restricted Incus `runtime-files` credential delivery to normalize the root-owned runtime parent to traverse-only mode, so hardened systemd `UMask=0077` cannot make per-service `0400` credential files unreadable by their owning service user after boot or restart.
+
 ## 1.13.1 - 2026-08-10
 
 ### New Features
