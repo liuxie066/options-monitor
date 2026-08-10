@@ -14,7 +14,7 @@ from src.application.service_deploy import (
     service_status_from_profile,
     write_service_bundle,
 )
-from src.application.service_drift import service_drift
+from src.application.service_drift import migrate_service_credentials, service_drift
 from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check, service_upgrade_verify
 from src.application.write_contract import attach_write_contract
 
@@ -95,7 +95,16 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_render.add_argument(
         "--include-secret-credentials",
         action="store_true",
-        help="render recommended per-unit systemd LoadCredentialEncrypted drop-ins",
+        help="render per-unit systemd credential drop-ins using the selected delivery mode",
+    )
+    service_render.add_argument(
+        "--secret-credential-delivery",
+        default="load-credential-encrypted",
+        choices=("load-credential-encrypted", "runtime-files"),
+        help=(
+            "credential injection mode: native systemd encrypted credentials or "
+            "an explicit Incus-compatible tmpfs runtime-file materializer"
+        ),
     )
     service_render.add_argument(
         "--secret-credential-store-root",
@@ -143,6 +152,34 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_drift_cmd.add_argument("--profile-path", default=None)
     service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing/changed units and profile, then reload affected timers")
     service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
+    service_credential_migrate = service_sub.add_parser(
+        "credentials-migrate",
+        help="migrate deprecated shared secret env delivery to per-unit systemd credentials",
+    )
+    service_credential_migrate.add_argument("--repo-root", default=None)
+    service_credential_migrate.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_credential_migrate.add_argument("--profile-path", default=None)
+    service_credential_migrate.add_argument(
+        "--secret-credential-delivery",
+        required=True,
+        choices=("load-credential-encrypted", "runtime-files"),
+        help="explicit target delivery; use runtime-files for restricted Incus/LXC",
+    )
+    service_credential_migrate.add_argument(
+        "--secret-credential-store-root",
+        default=None,
+        help="override the encrypted credential store root recorded by the profile",
+    )
+    service_credential_migrate.add_argument(
+        "--confirm",
+        action="store_true",
+        help="validate credentials, reconcile units, restart active consumers, and retire legacy runtime files",
+    )
+    service_credential_migrate.add_argument(
+        "--yes",
+        action="store_true",
+        help="non-interactive confirmation; emits an audit_id",
+    )
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
@@ -215,6 +252,7 @@ def _service_write_contract(data: dict[str, Any], *, confirmed: bool, rollback_h
         data,
         dry_run=not bool(confirmed),
         write_applied=bool(confirmed and data.get("changed", False)),
+        backup_path=data.get("backup_path"),
         rollback_hint=rollback_hint,
     )
 
@@ -240,6 +278,7 @@ def handle_service_update_command(
     service_status_from_profile_fn: Callable[..., dict[str, Any]] = service_status_from_profile,
     write_service_bundle_fn: Callable[..., list[str]] = write_service_bundle,
     service_drift_fn: Callable[..., dict[str, Any]] = service_drift,
+    migrate_service_credentials_fn: Callable[..., dict[str, Any]] = migrate_service_credentials,
     service_cleanup_fn: Callable[..., dict[str, Any]] = service_cleanup,
     service_upgrade_check_fn: Callable[..., dict[str, Any]] = service_upgrade_check,
     service_upgrade_verify_fn: Callable[..., dict[str, Any]] = service_upgrade_verify,
@@ -277,6 +316,7 @@ def handle_service_update_command(
             include_quality_monitoring=bool(args.include_quality_monitoring),
             include_feishu_agent_credential=bool(args.include_feishu_agent_credential),
             include_secret_credentials=bool(args.include_secret_credentials),
+            secret_credential_delivery=args.secret_credential_delivery,
             secret_credential_store_root=args.secret_credential_store_root,
             include_content=(not bool(args.no_content)) or bool(args.output_dir),
         )
@@ -317,6 +357,30 @@ def handle_service_update_command(
         )
         ok = bool(data.get("summary", {}).get("ok", True))
         return build_response(tool_name="service.drift", ok=ok, data=data)
+
+    if args.command == "service" and args.service_command == "credentials-migrate":
+        confirmed = _confirmed(args)
+        data = migrate_service_credentials_fn(
+            repo_root=args.repo_root or repo_base_fn(),
+            runtime_root=args.runtime_root,
+            profile_path=args.profile_path,
+            secret_credential_delivery=args.secret_credential_delivery,
+            secret_credential_store_root=args.secret_credential_store_root,
+            confirm=confirmed,
+        )
+        data = _service_write_contract(
+            data,
+            confirmed=confirmed,
+            rollback_hint=(
+                "restore the reported service.profile.json backup and run service drift; "
+                "encrypted credential files are not modified"
+            ),
+        )
+        return build_response(
+            tool_name="service.credentials-migrate",
+            ok=bool(data.get("ok")),
+            data=data,
+        )
 
     if args.command == "service" and args.service_command == "cleanup":
         confirmed = _confirmed(args)
