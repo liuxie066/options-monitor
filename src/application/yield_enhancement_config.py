@@ -12,10 +12,8 @@ from src.application.strategy_policy import (
 
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
-YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair", "staggered_expiry_pair"}
+YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair"}
 YIELD_ENHANCEMENT_VARIANTS: set[str] = {"sp_lc", "cc_lp"}
-DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS = 1
-DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS = 90
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
     "optimizer_enabled",
     "max_downside_worsen_pct",
@@ -59,15 +57,6 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "call": {
         "min_delta": 0.10,
         "max_delta": 0.45,
-    },
-}
-YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS: dict[str, dict[str, Any]] = {
-    "staggered_expiry_pair": {
-        "min_combo_net_credit": 0.0,
-        "min_net_credit_annualized": None,
-        "min_net_credit_retention": 0.60,
-        "min_expiry_gap_days": DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS,
-        "max_expiry_gap_days": DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS,
     },
 }
 YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -158,29 +147,6 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
     return out
 
 
-def resolve_staggered_expiry_gap_days(cfg: dict[str, Any] | None) -> tuple[int, int]:
-    raw = _as_dict(cfg)
-    try:
-        min_gap = int(
-            raw.get(
-                "min_expiry_gap_days",
-                DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS,
-            )
-        )
-    except Exception:
-        min_gap = DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS
-    try:
-        max_gap = int(
-            raw.get(
-                "max_expiry_gap_days",
-                DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS,
-            )
-        )
-    except Exception:
-        max_gap = DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS
-    return max(1, min_gap), max(1, max_gap)
-
-
 def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str, Any]:
     market_key = str(market or "").strip().lower()
     defaults = deepcopy(YIELD_ENHANCEMENT_DEFAULTS)
@@ -193,9 +159,7 @@ def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str
 def apply_yield_enhancement_defaults(cfg: dict[str, Any] | None, *, market: str | None = None) -> dict[str, Any]:
     defaults = yield_enhancement_defaults_for_market(market)
     raw_cfg = _as_dict(cfg)
-    structure_mode = str(raw_cfg.get("structure_mode") or defaults["structure_mode"]).strip().lower()
-    structure_defaults = YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS.get(structure_mode) or {}
-    return _deep_merge_dict(_deep_merge_dict(defaults, structure_defaults), raw_cfg)
+    return _deep_merge_dict(defaults, raw_cfg)
 
 
 def derive_yield_enhancement_policy(
@@ -213,7 +177,6 @@ def derive_yield_enhancement_policy(
     derived_defaults = YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS.get(mode) or {}
     cfg = _deep_merge_dict(base, derived_defaults)
     structure_mode = str(raw_cfg.get("structure_mode") or cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
-    cfg = _deep_merge_dict(cfg, YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS.get(structure_mode) or {})
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
     cfg["structure_mode"] = structure_mode
     cfg["enabled"] = bool(enabled)
