@@ -267,7 +267,7 @@ DeepSeek 的搜索请求连优先级也不包含。某市场下一次成功 Tick
 
 ### 6.1 调度与预算
 
-- 每 4 小时刷新一次，全天运行，每日最多 6 次；
+- 常规调度每 24 小时刷新一次，全天运行，每日 1 次；
 - 服务启动时如不存在有效证据快照，立即补刷；
 - 一次刷新总预算为 5 分钟，不是每个标的 5 分钟；
 - 每批最多 5 个标的；
@@ -290,8 +290,8 @@ DeepSeek 的搜索请求连优先级也不包含。某市场下一次成功 Tick
 ### 6.2 增量与全量核对
 
 - 新标的首次搜索：最近 30 天，加仍在持续的历史事项；
-- 4 小时刷新：从上次成功 cutoff 开始做增量搜索；
-- 每 24 小时：重新核对最近 30 天和此前未解决的重要事项；
+- 距上次全量成功不足 24 小时的启动补刷：从上次成功 cutoff 开始做增量搜索；
+- 每 24 小时常规刷新：重新核对最近 30 天和此前未解决的重要事项；
 - URL 和内容指纹去重；
 - 全量核对可以确认事项已经解决或失效，并生成新的语义证据快照；历史记录仍追加保留。
 
@@ -358,8 +358,8 @@ refs。历史 evidence 行继续追加保留，但不再自动进入当前 froze
 - 已成功标的立即发布；
 - 未完成标的保留上一份成功快照，同时记录最新失败状态；失败记录不能覆盖或隐藏
   最近一次成功事实；
-- 旧快照不超过 8 小时时可以使用，并显示实际证据时间；
-- 超过 8 小时则为 `unavailable: evidence_stale`，不能输出 `keep`；
+- 旧快照不超过 48 小时时可以使用，并显示实际证据时间；
+- 超过 48 小时则为 `unavailable: evidence_stale`，不能输出 `keep`；
 - 单个标的失败不影响其他标的；
 - 采集失败只记录运行状态，不单独发送飞书消息。
 
@@ -383,7 +383,7 @@ Freeze 必须选择当前 identity semantic hash 下最近一条成功 `symbol_s
 1. 该标的的搜索范围和查询 cutoff 可审计；
 2. provider response 至少含一个 `completed` web-search call，且当轮每个请求
    标的都能通过冻结的 symbol/company identity 归因到已完成搜索；
-3. 证据快照年龄不超过 8 小时。
+3. 证据快照年龄不超过 48 小时。
 
 模型 `results` 的 symbol 集合必须与本批请求集合严格相等，不允许遗漏、重复或额外
 symbol。“结构上缺一个 symbol，然后由 OM 补空数组”属于采集失败，不得记为
@@ -394,7 +394,7 @@ symbol。“结构上缺一个 symbol，然后由 OM 补空数组”属于采集
 
 ### 6.6.2 新标的的首次覆盖
 
-观察集合是动态并集。两次 4 小时刷新之间首次出现的新标的，在下一轮刷新完成
+观察集合是动态并集。两次每日刷新之间首次出现的新标的，在下一轮刷新完成
 前没有任何证据快照，明确标记为 `unavailable: no_evidence`，不能输出 `keep`，
 也不允许把“尚未搜索”解释为“无风险”。
 
@@ -1231,7 +1231,7 @@ ai_decision_advice:
   `portfolio_unavailable` 并使动作最高为 `needs_review`；
 - 不保留 `ai_interpretation`、`ai_strategy_advice` 等旧字段或兼容别名；
 - 不提供每账户开关；
-- 模型、4 小时间隔、5 分钟搜索预算、批大小、并发和 30 秒 Advice 预算均为 v1 固定合同；
+- 模型、24 小时间隔、5 分钟搜索预算、批大小、并发和 30 秒 Advice 预算均为 v1 固定合同；
 - 静态配置校验不读取运行时秘密；`enabled: true` 时 Collector/Advice 启动边界若缺少 `llm.deepseek.api_key` 会失败关闭；
 - `enabled: false` 时不运行两个阶段，也不在回执中创建空 AI 区块；
 - API key 只从 SecretProvider 读取，不能写入 YAML、JSONL、Prompt 或模型输入；安全后端不会回退到 env。
@@ -1327,8 +1327,8 @@ query 只含公开标的身份，可与 cutoff 一起审计；provider 原始响
 | 组合或开放期权上下文缺失 | 不能 `keep`，最多 `needs_review` |
 | 单标的身份无法建立 | 仅该标的 `identity_unavailable` |
 | 两次刷新之间首次出现的新标的 | `unavailable: no_evidence`，不能 `keep` |
-| 单标的搜索失败，旧证据不超过 8 小时 | 可使用旧证据，显示实际时间 |
-| 证据超过 8 小时 | `unavailable: evidence_stale`，不能 `keep` |
+| 单标的搜索失败，旧证据不超过 48 小时 | 可使用旧证据，显示实际时间 |
+| 证据超过 48 小时 | `unavailable: evidence_stale`，不能 `keep` |
 | Advice 运行途中 Collector 写入新证据 | 当轮使用开始时冻结的证据索引，不受影响 |
 | US 与 HK Tick 先后或并发发布 observation | 只替换各自 market partition，不丢失另一市场；并发写无 lost update |
 | observation snapshot 损坏 | publisher/collector fail closed，不用当前市场局部集合覆盖为完整跨市场集合 |

@@ -52,7 +52,13 @@ EVIDENCE_OUTPUT_SCHEMA: dict[str, Any] = {
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["topic", "claim", "event_status", "source"],
+                            "required": [
+                                "topic",
+                                "claim",
+                                "event_status",
+                                "event_time",
+                                "source",
+                            ],
                             "properties": {
                                 "topic": {"type": "string"},
                                 "claim": {"type": "string"},
@@ -274,9 +280,8 @@ def validate_evidence_payload(payload: Any, *, batch_symbols: Iterable[str]) -> 
 def _validate_evidence_item(item: Any) -> None:
     if not isinstance(item, dict):
         raise ValueError("evidence item must be an object")
-    required = {"topic", "claim", "event_status", "source"}
-    allowed = required | {"event_time"}
-    if not set(item).issubset(allowed):
+    required = {"topic", "claim", "event_status", "event_time", "source"}
+    if not set(item).issubset(required):
         raise ValueError("evidence item contains unexpected fields")
     for key in required:
         if key not in item:
