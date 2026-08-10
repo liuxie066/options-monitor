@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-### Bug Fixes
-- Completed the strict external-evidence response schema by requiring nullable `event_time`, preventing provider-side schema rejection before web search or generation.
+## 1.13.7 - 2026-08-10
 
 ### Improvements
 - Reduced external news-evidence collection from every 4 hours to every 24 hours and extended evidence freshness to 48 hours, preserving the existing two-refresh-cycle tolerance.
+
+### Bug Fixes
+- Completed the strict external-evidence response schema by requiring nullable `event_time`, preventing provider-side schema rejection before web search or generation.
 
 ## 1.13.6 - 2026-08-10
 
