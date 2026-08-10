@@ -110,6 +110,40 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     assert not target_dir.exists()
 
 
+def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversal(
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    credential_id = "om-quality-read-token"
+    store, _source = _secure_store(tmp_path, credential_id)
+    runtime_parent = tmp_path / "run" / "options-monitor"
+    runtime_parent.mkdir(parents=True, mode=0o700)
+    runtime_parent.chmod(0o700)
+    runtime_root = runtime_parent / "credentials"
+
+    helper.materialize_credentials(
+        unit_name="options-monitor-quality-http.service",
+        credential_ids=(credential_id,),
+        store_root=store,
+        runtime_root=runtime_root,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+        required_source_uid=os.getuid(),
+        verify_runtime_filesystem=lambda _path: None,
+        decrypt_credential=(
+            lambda _name, _source, output_path: output_path.write_text(
+                "test-secret-value\n",
+                encoding="utf-8",
+            )
+        ),
+    )
+
+    target = runtime_root / "options-monitor-quality-http.service" / credential_id
+    assert stat.S_IMODE(runtime_parent.stat().st_mode) == 0o711
+    assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
+    assert target.read_text(encoding="utf-8") == "test-secret-value\n"
+
+
 def test_materializer_rejects_symlinked_encrypted_source(tmp_path: Path) -> None:
     helper = _load_helper()
     credential_id = "om-quality-read-token"
