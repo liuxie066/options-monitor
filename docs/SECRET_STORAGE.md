@@ -25,8 +25,8 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 默认 `OM_SECRET_BACKEND=auto`：
 
 - macOS 使用 Login Keychain，service 固定为 `options-monitor`，account 为逻辑名；
-- Linux systemd unit 使用 `LoadCredentialEncrypted=`，应用只读取 systemd 提供的
-  `$CREDENTIALS_DIRECTORY/<credential-id>`；
+- Linux systemd unit 显式选择逐 unit 凭据交付模式，应用只读取
+  `$CREDENTIALS_DIRECTORY/<credential-id>`；普通主机默认使用 `LoadCredentialEncrypted=`；
 - Linux 普通 shell 若没有 `CREDENTIALS_DIRECTORY` 会明确失败，不会回退到 env；
 - `OM_SECRET_BACKEND=env` 只用于 CI、测试和限时迁移。
 
@@ -55,7 +55,7 @@ macOS 命令写入 Keychain。Linux 写入 `/etc/credstore.encrypted/<credential
 root 授权运行，例如先确认目标，再执行 `sudo ./om secrets set <logical-name>`。不要把秘密放在
 命令参数、shell 变量或管道中。
 
-## systemd 最小权限注入
+## Linux 逐 unit 最小权限注入
 
 渲染服务时使用：
 
@@ -67,12 +67,72 @@ root 授权运行，例如先确认目标，再执行 `sudo ./om secrets set <lo
   --output-dir /tmp/options-monitor-service
 ```
 
-渲染结果为各消费 unit 生成 `zzzz-secret-credentials.conf`，每一行只绑定该 unit 所需的固定
+默认 `--secret-credential-delivery load-credential-encrypted`，为各消费 unit 生成
+`LoadCredentialEncrypted=` 绑定。每个 drop-in 只包含该 unit 固定注册表中需要的
 credential ID。它不会创建、读取或修改 `/etc/credstore.encrypted` 中的文件，也不会安装 drop-in。
+两种安全交付 drop-in 都会用 `UnsetEnvironment=` 从进程环境中移除固定注册表里的旧 secret env 名；
+普通 env-file 仍可保留非秘密配置。
 安装、daemon-reload、服务重启和健康验证仍属于独立的部署授权边界。
 
+如果 Incus/LXC 宿主禁止 systemd credential 所需的 mount namespace，可显式选择：
+
+```bash
+./om service render \
+  --target systemd \
+  --include-secret-credentials \
+  --secret-credential-delivery runtime-files \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --output-dir /tmp/options-monitor-service
+```
+
+`runtime-files` 不会回退到 env。它安装一个 `0755 root:root` 的自包含 helper，在 unit
+启动前以 root 解密该 unit 的最小凭据集合，原子发布到
+`/run/options-monitor/credentials/<unit>/`。helper 要求 `/run` 由 tmpfs 承载，拒绝来源路径祖先中的
+符号链接或可替换目录，以及非 root 加密源、过宽权限和异常大小；明文文件为 `0400 <deploy_user>:root`，目录为
+`0510 root:<deploy_user-primary-group>`，
+unit 停止后清理。值不进入 argv、stdout、stderr 或服务环境变量。
+
+这是受限容器的显式兼容模式，不会自动从原生模式降级。它的隔离强度低于 systemd
+私有、只读 credential mount：当多个服务共用同一 Unix 用户时，同 UID 进程之间不具备强文件隔离。
+但它仍保持持久层加密、逐 unit 最小映射、tmpfs 明文生命周期以及不使用 secret env。
+
 旧 `--include-feishu-agent-credential` 会生成共享 Feishu env materializer，仅为存量迁移保留；
-它与 `--include-secret-credentials` 不能同时启用。完成真实凭据轮换、逐 unit dry-run、升级和回读验证后，再单独删除旧 helper、oneshot、drop-in 和共享 env 文件。
+它与 `--include-secret-credentials` 不能同时启用。
+
+### 存量 Linux 服务迁移
+
+先升级到包含目标交付模式的已发布版本，再从当前 release 使用稳定 repo 链接执行 dry-run。
+受限 Incus/LXC 使用：
+
+```bash
+./om service credentials-migrate \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --secret-credential-delivery runtime-files
+```
+
+输出会列出固定 credential ID、将重启的长运行消费者、不会被主动触发的 oneshot 消费者以及
+目标 drift，但不解密、不写 profile、不重启服务。如果存在与凭据迁移无关的 service drift，命令会先阻断。
+
+确认 dry-run 后再显式执行：
+
+```bash
+./om service credentials-migrate \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --secret-credential-delivery runtime-files \
+  --confirm --yes
+```
+
+确认模式会在任何 service/profile 写入前，把每个固定加密凭据解密到 `/dev/null` 做失败闭合验证；
+stdout/stderr 均不接收明文。随后备份 `service.profile.json`、安装新 helper/drop-in、移除兼容 drop-in，
+仅重启迁移前处于 active 的长运行凭据消费者。任一重启失败时尝试恢复旧 profile/unit 并重启原 active 集合。
+只有新路径重启和回读 drift 都成功后，才删除旧 helper 和 tmpfs 共享 secret env 文件。
+加密 store 本身不会被修改或删除。
+
+oneshot/timer 服务不会被迁移命令主动运行，以避免触发通知、账本或其他业务写入；它们在下一次自然调度时使用新路径。
+该命令只负责从存量共享 secret env 迁移到所选安全模式；如果 profile 已启用一种安全的逐 unit
+delivery，再请求切换到另一种会明确阻断，避免在没有专用旧 runtime 清理合同时遗留明文。
 
 ## env 兼容与风险
 

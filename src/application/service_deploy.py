@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -26,12 +27,14 @@ from src.application.secret_store import (
     LLM_DEEPSEEK_API_KEY,
     QUALITY_READ_TOKEN,
     credential_spec,
+    legacy_secret_env_names,
 )
 from src.application.settings import build_effective_env
 
 
 ServiceTarget = Literal["systemd", "launchd"]
 ServiceProvider = Literal["systemd", "launchd", "manual"]
+SecretCredentialDelivery = Literal["load-credential-encrypted", "runtime-files"]
 
 DEFAULT_MARKETS: tuple[str, ...] = ("us", "hk")
 DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
@@ -69,6 +72,12 @@ FEISHU_AGENT_CREDENTIAL_SERVICE = "options-monitor-feishu-agent-credential.servi
 FEISHU_AGENT_CREDENTIAL_DROPIN = "zzzz-feishu-agent-credential.conf"
 SECRET_CREDENTIAL_DROPIN = "zzzz-secret-credentials.conf"
 DEFAULT_SECRET_CREDENTIAL_STORE_ROOT = Path("/etc/credstore.encrypted")
+DEFAULT_SECRET_CREDENTIAL_DELIVERY: SecretCredentialDelivery = "load-credential-encrypted"
+DEFAULT_SECRET_CREDENTIAL_HELPER = Path(
+    "/usr/local/libexec/options-monitor-materialize-service-credentials"
+)
+DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT = Path("/run/options-monitor/credentials")
+_RUNTIME_CREDENTIAL_USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER = Path(
     "/usr/local/libexec/options-monitor-materialize-feishu-agent-credential"
 )
@@ -91,6 +100,8 @@ class RenderedServiceFile:
     install_path: str
     kind: str
     mode: int | None = None
+    owner_uid: int | None = None
+    owner_gid: int | None = None
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -100,6 +111,10 @@ class RenderedServiceFile:
         }
         if self.mode is not None:
             out["mode"] = self.mode
+        if self.owner_uid is not None:
+            out["owner_uid"] = self.owner_uid
+        if self.owner_gid is not None:
+            out["owner_gid"] = self.owner_gid
         if include_content:
             out["content"] = self.content
         return out
@@ -119,6 +134,35 @@ def normalize_target(value: str) -> ServiceTarget:
     if out not in {"systemd", "launchd"}:
         raise ValueError(f"unsupported service target: {value}")
     return cast(ServiceTarget, out)
+
+
+def normalize_secret_credential_delivery(value: str | None) -> SecretCredentialDelivery:
+    delivery = str(value or DEFAULT_SECRET_CREDENTIAL_DELIVERY).strip().lower()
+    if delivery not in {"load-credential-encrypted", "runtime-files"}:
+        raise ValueError(
+            "secret credential delivery must be load-credential-encrypted or runtime-files"
+        )
+    return cast(SecretCredentialDelivery, delivery)
+
+
+def _validate_secret_credential_store_root(store_root: Path) -> None:
+    if not store_root.is_absolute() or ".." in store_root.parts:
+        raise ValueError("secret credential store root must be an absolute normalized path")
+    store_text = str(store_root)
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in store_text):
+        raise ValueError("secret credential store root contains control characters")
+    if "$" in store_text or "%" in store_text:
+        raise ValueError("secret credential store root contains systemd expansion syntax")
+
+
+def _validate_runtime_credential_exec_inputs(
+    *,
+    deploy_user: str,
+    store_root: Path,
+) -> None:
+    if not _RUNTIME_CREDENTIAL_USER_PATTERN.fullmatch(deploy_user):
+        raise ValueError("runtime credential deploy user is not a safe system account name")
+    _validate_secret_credential_store_root(store_root)
 
 
 def normalize_markets(values: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -795,19 +839,71 @@ def _render_systemd_secret_dropin(
     logical_names: tuple[str, ...],
     *,
     store_root: Path,
+    delivery: SecretCredentialDelivery,
+    consumer: str,
+    deploy_user: str,
 ) -> str:
-    directives: list[str] = []
+    credential_ids: list[str] = []
     for logical_name in logical_names:
         spec = credential_spec(logical_name)
         if spec is None:
             raise ValueError(f"unknown logical credential in service binding: {logical_name}")
-        source = store_root / spec.systemd_credential_id
-        directives.append(
-            f"LoadCredentialEncrypted={spec.systemd_credential_id}:{_systemd_quote_arg(source)}"
+        credential_ids.append(spec.systemd_credential_id)
+    unset_legacy_secret_env = "UnsetEnvironment=" + " ".join(
+        sorted(legacy_secret_env_names())
+    )
+    if delivery == "load-credential-encrypted":
+        directives = [
+            f"LoadCredentialEncrypted={credential_id}:{_systemd_quote_arg(store_root / credential_id)}"
+            for credential_id in credential_ids
+        ]
+        return _render_systemd_service_asset(
+            "zzzz-secret-credentials.conf.in",
+            {
+                "LOAD_CREDENTIALS": "\n".join(directives),
+                "UNSET_LEGACY_SECRET_ENV": unset_legacy_secret_env,
+            },
         )
+
+    _validate_runtime_credential_exec_inputs(
+        deploy_user=deploy_user,
+        store_root=store_root,
+    )
+    runtime_directory = DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT / consumer
+    materialize_args = [
+        f"+{DEFAULT_SECRET_CREDENTIAL_HELPER}",
+        "materialize",
+        "--unit",
+        consumer,
+        "--deploy-user",
+        deploy_user,
+        "--store-root",
+        str(store_root),
+    ]
+    cleanup_args = [
+        f"+{DEFAULT_SECRET_CREDENTIAL_HELPER}",
+        "cleanup",
+        "--unit",
+        consumer,
+    ]
+    for credential_id in credential_ids:
+        materialize_args.extend(["--credential-id", credential_id])
+        cleanup_args.extend(["--credential-id", credential_id])
     return _render_systemd_service_asset(
-        "zzzz-secret-credentials.conf.in",
-        {"LOAD_CREDENTIALS": "\n".join(directives)},
+        "zzzz-secret-runtime-files.conf.in",
+        {
+            "BACKEND_ENVIRONMENT": _systemd_environment_assignment(
+                "OM_SECRET_BACKEND",
+                "systemd",
+            ),
+            "DIRECTORY_ENVIRONMENT": _systemd_environment_assignment(
+                "CREDENTIALS_DIRECTORY",
+                runtime_directory,
+            ),
+            "EXEC_START": _systemd_join_args(materialize_args),
+            "EXEC_STOP": _systemd_join_args(cleanup_args),
+            "UNSET_LEGACY_SECRET_ENV": unset_legacy_secret_env,
+        },
     )
 
 
@@ -1098,6 +1194,7 @@ def render_service_bundle(
     include_quality_monitoring: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
+    secret_credential_delivery: str | None = DEFAULT_SECRET_CREDENTIAL_DELIVERY,
     secret_credential_store_root: str | Path | None = None,
     feishu_agent_credential_helper_path: str | Path | None = None,
     feishu_agent_credential_store: str | Path | None = None,
@@ -1106,6 +1203,7 @@ def render_service_bundle(
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
+    secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
@@ -1148,6 +1246,8 @@ def render_service_bundle(
         base=repo,
         default=DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
     )
+    if include_secret_credentials:
+        _validate_secret_credential_store_root(secret_store_root)
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
@@ -1274,6 +1374,8 @@ def render_service_bundle(
         kind: str,
         service_name: str | None = None,
         mode: int | None = None,
+        owner_uid: int | None = None,
+        owner_gid: int | None = None,
     ) -> None:
         files.append(
             RenderedServiceFile(
@@ -1282,6 +1384,8 @@ def render_service_bundle(
                 install_path=install_path,
                 kind=kind,
                 mode=mode,
+                owner_uid=owner_uid,
+                owner_gid=owner_gid,
             )
         )
         if service_name:
@@ -2028,12 +2132,31 @@ def render_service_bundle(
                 ai_decision_advice_enabled=ai_advice_enabled,
                 assistant_credential_name=assistant_credential_name,
             )
+            secret_deploy_user = str(systemd_user or "root")
             for consumer, logical_names in secret_credential_bindings.items():
                 add(
                     f"systemd/{consumer}.d/{SECRET_CREDENTIAL_DROPIN}",
-                    _render_systemd_secret_dropin(logical_names, store_root=secret_store_root),
+                    _render_systemd_secret_dropin(
+                        logical_names,
+                        store_root=secret_store_root,
+                        delivery=secret_delivery,
+                        consumer=consumer,
+                        deploy_user=secret_deploy_user,
+                    ),
                     install_path=f"/etc/systemd/system/{consumer}.d/{SECRET_CREDENTIAL_DROPIN}",
                     kind="systemd_secret_dropin",
+                )
+            if secret_delivery == "runtime-files" and secret_credential_bindings:
+                add(
+                    "systemd/libexec/options-monitor-materialize-service-credentials",
+                    _read_systemd_service_asset(
+                        "options-monitor-materialize-service-credentials"
+                    ),
+                    install_path=str(DEFAULT_SECRET_CREDENTIAL_HELPER),
+                    kind="systemd_executable",
+                    mode=0o755,
+                    owner_uid=0,
+                    owner_gid=0,
                 )
 
         if include_feishu_agent_credential:
@@ -2595,7 +2718,16 @@ def render_service_bundle(
         secret_credentials={
             "enabled": True,
             "backend": "systemd",
+            "delivery": secret_delivery,
             "store_root": str(secret_store_root),
+            **(
+                {
+                    "helper_path": str(DEFAULT_SECRET_CREDENTIAL_HELPER),
+                    "runtime_root": str(DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT),
+                }
+                if secret_delivery == "runtime-files"
+                else {}
+            ),
             "service_credentials": {
                 service_name: list(logical_names)
                 for service_name, logical_names in secret_credential_bindings.items()
@@ -2907,11 +3039,15 @@ def _run_status_command(command: list[str], *, run_cmd: Callable[..., Any]) -> d
 
 
 __all__ = [
+    "DEFAULT_SECRET_CREDENTIAL_DELIVERY",
+    "DEFAULT_SECRET_CREDENTIAL_HELPER",
+    "DEFAULT_SECRET_CREDENTIAL_RUNTIME_ROOT",
     "build_service_profile",
     "default_runtime_root",
     "load_service_profile",
     "normalize_accounts",
     "normalize_markets",
+    "normalize_secret_credential_delivery",
     "normalize_target",
     "render_service_bundle",
     "service_preflight",
