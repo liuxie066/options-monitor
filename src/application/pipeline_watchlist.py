@@ -60,6 +60,10 @@ LIQUIDITY_COMMON_FIELDS = (
     'max_spread_ratio',
 )
 DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS = 4
+_CAPTURE_STATUSES = frozenset(
+    {"completed", "not_applicable", "failed", "incomplete", "unavailable"}
+)
+_COMBO_CAPTURE_VARIANTS = frozenset({"sp_lc", "cc_lp"})
 
 
 class SymbolProcessingTimeout(TimeoutError):
@@ -138,6 +142,192 @@ def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
         return None
     items = {normalize_symbol_read(s) for s in str(symbols_arg).split(',') if str(s).strip()}
     return items or None
+
+
+def _normalize_candidate_capture_status(
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    symbol = normalize_symbol_read(raw.get("symbol"))
+    if not symbol:
+        raise ValueError("candidate capture status symbol is missing")
+    mode = str(raw.get("strategy_mode") or "").strip().lower()
+    status = str(raw.get("status") or "").strip().lower()
+    if status not in _CAPTURE_STATUSES:
+        raise ValueError(
+            f"invalid candidate capture status: {symbol}:{mode or 'missing'}:{status or 'missing'}"
+        )
+    variant = str(raw.get("variant") or "").strip().lower()
+    if mode in {"put", "call"}:
+        if variant:
+            raise ValueError(
+                f"unexpected opening scan variant: {symbol}:{mode}:{variant}"
+            )
+        owner = "opening"
+        variant_value: str | None = None
+    elif mode == "combo_yield":
+        if variant not in _COMBO_CAPTURE_VARIANTS:
+            raise ValueError(
+                f"invalid combo yield scan variant: {symbol}:{variant or 'missing'}"
+            )
+        owner = variant
+        variant_value = variant
+    else:
+        raise ValueError(
+            f"unexpected candidate capture mode: {symbol}:{mode or 'missing'}"
+        )
+    return {
+        "symbol": symbol,
+        "strategy_mode": mode,
+        "status": status,
+        "reason": str(raw.get("reason") or "").strip(),
+        "quote_snapshot_id": (
+            str(raw.get("quote_snapshot_id") or "").strip() or None
+        ),
+        "quote_receipt_relpath": (
+            str(raw.get("quote_receipt_relpath") or "").strip() or None
+        ),
+        "variant": variant_value,
+        "owner": owner,
+    }
+
+
+def _capture_scope_error_label(owner: str) -> str:
+    return {
+        "opening": "opening",
+        "sp_lc": "combo yield",
+        "cc_lp": "cc_lp",
+    }[owner]
+
+
+def _complete_capture_owner_statuses(
+    *,
+    owner: str,
+    statuses: list[dict[str, Any]],
+    expected_scopes: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    by_scope: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in statuses:
+        key = (str(item["symbol"]), str(item["strategy_mode"]))
+        by_scope.setdefault(key, []).append(item)
+    unexpected_scopes = set(by_scope) - expected_scopes
+    if unexpected_scopes:
+        unexpected = ", ".join(
+            f"{symbol}:{mode}" for symbol, mode in sorted(unexpected_scopes)
+        )
+        raise ValueError(
+            f"unexpected {_capture_scope_error_label(owner)} scan scopes: {unexpected}"
+        )
+    completed = list(statuses)
+    for symbol, mode in sorted(expected_scopes):
+        items = by_scope.get((symbol, mode), [])
+        if not items:
+            completed.append(
+                {
+                    "symbol": symbol,
+                    "strategy_mode": mode,
+                    "status": "incomplete",
+                    "reason": f"{owner}_scan_status_missing",
+                    "quote_snapshot_id": None,
+                    "quote_receipt_relpath": None,
+                    "variant": None if owner == "opening" else owner,
+                    "owner": owner,
+                }
+            )
+            continue
+        if len(items) != 1:
+            raise ValueError(
+                f"duplicate {_capture_scope_error_label(owner)} scan scope: {symbol}:{mode}"
+            )
+        item = items[0]
+        if item["status"] == "completed" and (
+            not item["quote_snapshot_id"]
+            or not item["quote_receipt_relpath"]
+        ):
+            item["status"] = "incomplete"
+            item["reason"] = f"{owner}_quote_binding_missing"
+    return sorted(
+        completed,
+        key=lambda item: (
+            str(item["symbol"]),
+            str(item["strategy_mode"]),
+        ),
+    )
+
+
+def _apply_capture_quote_binding_guard(
+    statuses_by_owner: dict[str, list[dict[str, Any]]],
+) -> None:
+    quote_bindings_by_symbol: dict[str, set[tuple[str, str]]] = {}
+    for statuses in statuses_by_owner.values():
+        for item in statuses:
+            if item["quote_snapshot_id"] and item["quote_receipt_relpath"]:
+                quote_bindings_by_symbol.setdefault(
+                    str(item["symbol"]),
+                    set(),
+                ).add(
+                    (
+                        str(item["quote_snapshot_id"]),
+                        str(item["quote_receipt_relpath"]),
+                    )
+                )
+    conflict_symbols = {
+        symbol
+        for symbol, bindings in quote_bindings_by_symbol.items()
+        if len(bindings) != 1
+    }
+    for owner, statuses in statuses_by_owner.items():
+        for item in statuses:
+            if (
+                item["symbol"] in conflict_symbols
+                and item["status"] == "completed"
+            ):
+                item["status"] = "incomplete"
+                item["reason"] = f"{owner}_quote_binding_conflict"
+
+
+def _yield_snapshot_status(
+    statuses: list[dict[str, Any]],
+) -> str | None:
+    if not statuses:
+        raise ValueError("yield enhancement capture statuses are missing")
+    observed = [
+        item for item in statuses if item["status"] != "not_applicable"
+    ]
+    if observed and all(item["reason"] == "market_closed" for item in observed):
+        return "market_closed"
+    states = {str(item["status"]) for item in statuses}
+    if states == {"completed"}:
+        return None
+    if states == {"not_applicable"}:
+        return "not_applicable"
+    if "completed" in states:
+        return "partial_data"
+    return "data_unavailable"
+
+
+def _partition_combo_pairs(
+    rows: list[dict[str, Any]],
+    *,
+    expected_scopes_by_owner: dict[str, set[tuple[str, str]]],
+) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {"sp_lc": [], "cc_lp": []}
+    for raw in rows:
+        item = dict(raw)
+        explicit_variant = str(item.get("variant") or "").strip().lower()
+        variant = explicit_variant or "sp_lc"
+        if variant not in _COMBO_CAPTURE_VARIANTS:
+            raise ValueError(
+                f"invalid combo yield pair variant: {variant}"
+            )
+        symbol = normalize_symbol_read(item.get("symbol"))
+        if not symbol:
+            raise ValueError("combo yield pair symbol is missing")
+        if (symbol, "combo_yield") not in expected_scopes_by_owner[variant]:
+            raise ValueError(
+                f"unexpected {_capture_scope_error_label(variant)} pair scope: {symbol}:combo_yield"
+            )
+        out[variant].append(item)
+    return out
 
 
 def _iter_watchlist(cfg: dict) -> Iterable[dict]:
@@ -716,7 +906,11 @@ def run_watchlist_pipeline_default(
 
     captured_at = datetime.now(timezone.utc)
     profiles = resolve_templates_config(cfg)
-    expected_scopes: set[tuple[str, str]] = set()
+    expected_scopes_by_owner: dict[str, set[tuple[str, str]]] = {
+        "opening": set(),
+        "sp_lc": set(),
+        "cc_lp": set(),
+    }
     for raw_item in _iter_watchlist(cfg):
         symbol = normalize_symbol_read(raw_item.get("symbol"))
         if not symbol or (whitelist is not None and symbol not in whitelist):
@@ -730,84 +924,44 @@ def run_watchlist_pipeline_default(
         except Exception:
             continue
         if bool((resolved_item.get("sell_put") or {}).get("enabled", False)):
-            expected_scopes.add((symbol, "put"))
+            expected_scopes_by_owner["opening"].add((symbol, "put"))
         if bool((resolved_item.get("sell_call") or {}).get("enabled", False)):
-            expected_scopes.add((symbol, "call"))
-
-    normalized_statuses = [
-        {
-            "symbol": normalize_symbol_read(item.get("symbol")),
-            "strategy_mode": str(item.get("strategy_mode") or "").strip(),
-            "status": str(item.get("status") or "").strip(),
-            "reason": str(item.get("reason") or "").strip(),
-            "quote_snapshot_id": (
-                str(item.get("quote_snapshot_id") or "").strip() or None
-            ),
-            "quote_receipt_relpath": (
-                str(item.get("quote_receipt_relpath") or "").strip() or None
-            ),
-        }
-        for item in capture_statuses
-    ]
-    statuses_by_scope: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for item in normalized_statuses:
-        key = (str(item["symbol"]), str(item["strategy_mode"]))
-        statuses_by_scope.setdefault(key, []).append(item)
-    unexpected_scopes = set(statuses_by_scope) - expected_scopes
-    if unexpected_scopes:
-        unexpected = ", ".join(
-            f"{symbol}:{mode}" for symbol, mode in sorted(unexpected_scopes)
+            expected_scopes_by_owner["opening"].add((symbol, "call"))
+        yield_policy = derive_yield_enhancement_policy(
+            resolve_yield_enhancement_cfg(resolved_item)
         )
-        raise ValueError(f"unexpected opening scan scopes: {unexpected}")
-    for symbol, mode in sorted(expected_scopes):
-        items = statuses_by_scope.get((symbol, mode), [])
-        if not items:
-            normalized_statuses.append(
-                {
-                    "symbol": symbol,
-                    "strategy_mode": mode,
-                    "status": "incomplete",
-                    "reason": "opening_scan_status_missing",
-                    "quote_snapshot_id": None,
-                    "quote_receipt_relpath": None,
-                }
-            )
-            continue
-        if len(items) != 1:
-            raise ValueError(f"duplicate opening scan scope: {symbol}:{mode}")
-        item = items[0]
-        if item["status"] == "completed" and (
-            not item["quote_snapshot_id"] or not item["quote_receipt_relpath"]
-        ):
-            item["status"] = "incomplete"
-            item["reason"] = "opening_quote_binding_missing"
-    quote_bindings_by_symbol: dict[str, set[tuple[str, str]]] = {}
-    for item in normalized_statuses:
-        if item["quote_snapshot_id"] and item["quote_receipt_relpath"]:
-            quote_bindings_by_symbol.setdefault(
-                str(item["symbol"]),
-                set(),
-            ).add(
-                (
-                    str(item["quote_snapshot_id"]),
-                    str(item["quote_receipt_relpath"]),
+        if yield_policy.enabled:
+            variant = str(
+                (yield_policy.config or {}).get("variant") or "sp_lc"
+            ).strip().lower()
+            if variant not in _COMBO_CAPTURE_VARIANTS:
+                raise ValueError(
+                    f"invalid configured combo yield variant: {symbol}:{variant or 'missing'}"
                 )
+            expected_scopes_by_owner[variant].add(
+                (symbol, "combo_yield")
             )
-    quote_binding_conflict_symbols = {
-        symbol
-        for symbol, bindings in quote_bindings_by_symbol.items()
-        if len(bindings) != 1
+
+    statuses_by_owner: dict[str, list[dict[str, Any]]] = {
+        "opening": [],
+        "sp_lc": [],
+        "cc_lp": [],
     }
-    for item in normalized_statuses:
-        if (
-            item["symbol"] in quote_binding_conflict_symbols
-            and item["status"] == "completed"
-        ):
-            item["status"] = "incomplete"
-            item["reason"] = "opening_quote_binding_conflict"
-    normalized_statuses.sort(
-        key=lambda item: (str(item["symbol"]), str(item["strategy_mode"]))
+    for raw_status in capture_statuses:
+        item = _normalize_candidate_capture_status(raw_status)
+        statuses_by_owner[str(item["owner"])].append(item)
+    for owner in ("opening", "sp_lc", "cc_lp"):
+        statuses_by_owner[owner] = _complete_capture_owner_statuses(
+            owner=owner,
+            statuses=statuses_by_owner[owner],
+            expected_scopes=expected_scopes_by_owner[owner],
+        )
+    _apply_capture_quote_binding_guard(statuses_by_owner)
+    combo_pairs_by_owner = _partition_combo_pairs(
+        captured_combo_pairs,
+        expected_scopes_by_owner=expected_scopes_by_owner,
     )
+    normalized_statuses = statuses_by_owner["opening"]
     account = str(
         ((cfg.get("portfolio") or {}).get("account"))
         if isinstance(cfg.get("portfolio"), dict)
@@ -885,29 +1039,9 @@ def run_watchlist_pipeline_default(
         candidate_evaluations=captured_candidate_decisions,
         sealed_at=captured_at,
     )
-    combo_statuses = [
-        item
-        for item in capture_statuses
-        if str(item.get("strategy_mode") or "") == "combo_yield"
-    ]
-    if combo_statuses:
-        combo_completed = any(
-            str(item.get("status") or "") == "completed"
-            for item in combo_statuses
-        )
-        combo_failed = any(
-            str(item.get("status") or "") == "failed"
-            for item in combo_statuses
-        )
-        combo_opening_status: str | None = None
-        if combo_completed and not combo_failed:
-            combo_opening_status = None  # derived from pairs
-        elif combo_failed and not combo_completed:
-            combo_opening_status = "data_unavailable"
-        else:
-            combo_opening_status = "partial_data"
+    if expected_scopes_by_owner["sp_lc"]:
         ranked_combo_pairs = select_best_yield_enhancement_per_symbol(
-            captured_combo_pairs
+            combo_pairs_by_owner["sp_lc"]
         )
         seal_combo_yield_candidate_snapshot(
             base=base,
@@ -917,30 +1051,12 @@ def run_watchlist_pipeline_default(
             account_config_sha256=str(account_config_sha256 or ""),
             strategy_policy_sha256=strategy_policy_hash(cfg),
             ranked_pairs=ranked_combo_pairs,
-            opening_status=combo_opening_status,
+            opening_status=_yield_snapshot_status(
+                statuses_by_owner["sp_lc"]
+            ),
             sealed_at=captured_at,
         )
-    cc_lp_statuses = [
-        item
-        for item in capture_statuses
-        if str(item.get("variant") or "").strip().lower() == "cc_lp"
-    ]
-    if cc_lp_statuses:
-        cc_lp_pairs = [
-            dict(item)
-            for item in captured_combo_pairs
-            if str(item.get("variant") or "").strip().lower() == "cc_lp"
-        ]
-        cc_lp_status: str | None = None
-        if not cc_lp_pairs:
-            cc_lp_status = (
-                "not_applicable"
-                if any(
-                    str(item.get("status") or "") == "not_applicable"
-                    for item in cc_lp_statuses
-                )
-                else "no_candidate"
-            )
+    if expected_scopes_by_owner["cc_lp"]:
         seal_cc_lp_candidate_snapshot(
             base=base,
             run_id=account_run_id,
@@ -948,8 +1064,10 @@ def run_watchlist_pipeline_default(
             market=str(authority.get("market") or ""),
             account_config_sha256=str(account_config_sha256 or ""),
             strategy_policy_sha256=strategy_policy_hash(cfg),
-            ranked_pairs=cc_lp_pairs,
-            opening_status=cc_lp_status,
+            ranked_pairs=combo_pairs_by_owner["cc_lp"],
+            opening_status=_yield_snapshot_status(
+                statuses_by_owner["cc_lp"]
+            ),
             sealed_at=captured_at,
         )
     return result

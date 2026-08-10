@@ -286,7 +286,10 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
         run_sell_call_scan_fn=lambda **_kwargs: {},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
         run_combo_yield_scan_fn=lambda **_kwargs: None,
-        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {},
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "combo_yield",
+        },
         materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
     )
 
@@ -297,6 +300,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             symbol_cfg={
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True},
+                "combo_yield": {"enabled": True, "variant": "sp_lc"},
                 "sell_call": {"enabled": False},
             },
             top_n=3,
@@ -324,7 +328,13 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "strategy": "sell_put",
             "candidate_count": 0,
             "note": "行情快照不可用",
-        }
+        },
+        {
+            "symbol": "NVDA",
+            "strategy": "combo_yield",
+            "candidate_count": 0,
+            "note": "行情快照不可用",
+        },
     ]
     assert capture_statuses == [
         {
@@ -334,7 +344,16 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "reason": "required_data_snapshot_unavailable",
             "quote_snapshot_id": "snapshot-failed",
             "quote_receipt_relpath": "quotes/receipt.json",
-        }
+        },
+        {
+            "symbol": "NVDA",
+            "strategy_mode": "combo_yield",
+            "status": "failed",
+            "reason": "required_data_snapshot_unavailable",
+            "quote_snapshot_id": "snapshot-failed",
+            "quote_receipt_relpath": "quotes/receipt.json",
+            "variant": "sp_lc",
+        },
     ]
     status = json.loads(
         (report_dir / "nvda_sell_put_scan_status.json").read_text(
@@ -1037,7 +1056,7 @@ def test_combo_yield_runs_when_sell_put_is_disabled(monkeypatch, tmp_path: Path)
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
 
 
-def test_combo_yield_capture_status_carries_cc_lp_variant(monkeypatch, tmp_path: Path) -> None:
+def test_combo_yield_capture_preserves_cc_lp_not_applicable(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
 
     capture_statuses: list[dict] = []
@@ -1079,8 +1098,8 @@ def test_combo_yield_capture_status_carries_cc_lp_variant(monkeypatch, tmp_path:
             "variant": "cc_lp",
             "symbol": "NVDA",
             "candidate_count": 0,
-            "status": "no_candidate",
-            "reason": "",
+            "status": "not_applicable",
+            "reason": "no_covered_stock",
         },
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
             "strategy": "combo_yield",
@@ -1118,6 +1137,8 @@ def test_combo_yield_capture_status_carries_cc_lp_variant(monkeypatch, tmp_path:
     ]
     assert len(combo_statuses) == 1
     assert combo_statuses[0]["variant"] == "cc_lp"
+    assert combo_statuses[0]["status"] == "not_applicable"
+    assert combo_statuses[0]["reason"] == "no_covered_stock"
 
 
 def test_combo_yield_runs_after_sell_put_failure_without_touching_historical_put_artifacts(monkeypatch, tmp_path: Path) -> None:
