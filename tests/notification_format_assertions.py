@@ -10,10 +10,15 @@ def assert_mobile_flat_markdown(message: str, *, require_title: bool = True) -> 
     lines = str(message or "").splitlines()
     if require_title:
         assert sum(line.startswith("# ") for line in lines) == 1
-    # `### AI建议` is the sanctioned per-strategy submodule heading
-    # (docs/AI_DECISION_ADVICE_DESIGN.md 15.1); other ### remain disallowed.
+    # The only sanctioned per-strategy submodule headings are AI advice and
+    # the candidate list (docs/AI_DECISION_ADVICE_DESIGN.md 15.1).
+    allowed_subheadings = {
+        "### AI建议",
+        "### 策略候选",
+        "### 新增策略候选",
+    }
     assert not any(
-        line.startswith("###") and not line.startswith("### AI建议")
+        line.startswith("###") and line not in allowed_subheadings
         for line in lines
     )
     assert not any(line.startswith(">") for line in lines)

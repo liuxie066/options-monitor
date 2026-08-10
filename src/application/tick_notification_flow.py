@@ -56,6 +56,9 @@ from src.application.position_advice_notification_authority import (
     execute_notification_with_authority,
     read_notification_authority_delivery_state,
 )
+from src.application.prepared_portfolio_distribution import (
+    PreparedPortfolioDistribution,
+)
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
     build_per_account_delivery_batch,
@@ -91,6 +94,36 @@ class TickNotificationRequest:
     commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None
     delivery_only: bool = False
     trigger_kind: str = "manual"
+    opening_candidate_snapshot_by_account: Mapping[
+        str, Mapping[str, Any]
+    ] | None = None
+    opening_candidate_snapshot_unavailable_by_account: Mapping[
+        str, str
+    ] | None = None
+    prepared_portfolio_distribution_by_account: Mapping[
+        str, PreparedPortfolioDistribution
+    ] | None = None
+    prepared_portfolio_distribution_artifact_path_by_account: Mapping[
+        str, Path | None
+    ] | None = None
+    prepared_portfolio_distribution_artifact_sha256_by_account: Mapping[
+        str, str | None
+    ] | None = None
+    prepared_portfolio_distribution_status_by_account: Mapping[
+        str, str
+    ] | None = None
+    prepared_option_positions_context_by_account: Mapping[
+        str, Mapping[str, Any]
+    ] | None = None
+    prepared_option_positions_context_unavailable_by_account: Mapping[
+        str, str
+    ] | None = None
+    prepared_option_positions_context_manifest_by_account: Mapping[
+        str, Path
+    ] | None = None
+    prepared_option_positions_context_manifest_sha256_by_account: Mapping[
+        str, str
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -764,6 +797,10 @@ def _prepare_daily_brief_notification(
             if not ran_scan:
                 continue
             scheduler = _daily_brief_scheduler_decision(request, account)
+            advice_handoff = _advice_handoff_for_account(
+                request,
+                account=account,
+            )
             briefs = assemble_daily_decision_briefs(
                 base=request.base,
                 run_id=request.run_id,
@@ -773,6 +810,7 @@ def _prepare_daily_brief_notification(
                 account_result=result,
                 pipeline_succeeded=account in ran_pipeline_accounts,
                 config=request.base_cfg,
+                **advice_handoff,
             )
             for market in markets:
                 brief = briefs.get(market)
@@ -1180,6 +1218,146 @@ def _prepare_daily_brief_notification(
         markets=markets,
         multi_market_delivery_unsupported=multi_market,
     )
+
+
+def _advice_handoff_for_account(
+    request: TickNotificationRequest,
+    *,
+    account: str,
+) -> dict[str, Any]:
+    """Select one account's verified Advice inputs without serializing them."""
+
+    handoff_maps = (
+        request.opening_candidate_snapshot_by_account,
+        request.opening_candidate_snapshot_unavailable_by_account,
+        request.prepared_portfolio_distribution_by_account,
+        request.prepared_portfolio_distribution_artifact_path_by_account,
+        request.prepared_portfolio_distribution_artifact_sha256_by_account,
+        request.prepared_portfolio_distribution_status_by_account,
+        request.prepared_option_positions_context_by_account,
+        request.prepared_option_positions_context_unavailable_by_account,
+        request.prepared_option_positions_context_manifest_by_account,
+        request.prepared_option_positions_context_manifest_sha256_by_account,
+    )
+    if all(item is None for item in handoff_maps):
+        return {}
+
+    account_norm = str(account or "").strip().lower()
+    candidate_map = request.opening_candidate_snapshot_by_account or {}
+    candidate_reasons = (
+        request.opening_candidate_snapshot_unavailable_by_account or {}
+    )
+    candidate = candidate_map.get(account_norm)
+    candidate_reason = str(
+        candidate_reasons.get(account_norm)
+        or "candidate_snapshot_authority_missing"
+    )
+
+    portfolio: PreparedPortfolioDistribution | None = None
+    portfolio_reason = "portfolio_authority_missing"
+    portfolio_map = request.prepared_portfolio_distribution_by_account or {}
+    candidate_portfolio = portfolio_map.get(account_norm)
+    if isinstance(candidate_portfolio, PreparedPortfolioDistribution):
+        path_map = (
+            request.prepared_portfolio_distribution_artifact_path_by_account
+        )
+        hash_map = (
+            request.prepared_portfolio_distribution_artifact_sha256_by_account
+        )
+        status_map = request.prepared_portfolio_distribution_status_by_account
+        portfolio_authority = candidate_portfolio.envelope.get("authority")
+        artifact_hash = candidate_portfolio.artifact_sha256
+        artifact_binding_valid = bool(
+            (
+                candidate_portfolio.status == "unavailable"
+                and candidate_portfolio.artifact_path is None
+                and artifact_hash is None
+            )
+            or (
+                candidate_portfolio.artifact_path is not None
+                and isinstance(artifact_hash, str)
+                and len(artifact_hash) == 64
+                and all(
+                    character in "0123456789abcdef"
+                    for character in artifact_hash
+                )
+            )
+        )
+        authority_complete = bool(
+            path_map is not None
+            and hash_map is not None
+            and status_map is not None
+            and account_norm in path_map
+            and account_norm in hash_map
+            and account_norm in status_map
+            and isinstance(portfolio_authority, Mapping)
+            and str(portfolio_authority.get("run_id") or "")
+            == request.run_id
+            and str(portfolio_authority.get("account") or "").lower()
+            == account_norm
+            and path_map[account_norm] == candidate_portfolio.artifact_path
+            and hash_map[account_norm] == candidate_portfolio.artifact_sha256
+            and str(status_map[account_norm]) == candidate_portfolio.status
+            and artifact_binding_valid
+        )
+        if authority_complete:
+            portfolio = candidate_portfolio
+            portfolio_reason = candidate_portfolio.reason
+        else:
+            portfolio_reason = "portfolio_authority_handoff_incomplete"
+
+    option_context: Mapping[str, Any] | None = None
+    option_reasons = (
+        request.prepared_option_positions_context_unavailable_by_account
+        or {}
+    )
+    option_reason = str(
+        option_reasons.get(account_norm)
+        or "option_positions_authority_missing"
+    )
+    option_map = request.prepared_option_positions_context_by_account or {}
+    candidate_option = option_map.get(account_norm)
+    if isinstance(candidate_option, Mapping):
+        manifest_map = (
+            request.prepared_option_positions_context_manifest_by_account
+        )
+        manifest_hash_map = (
+            request.prepared_option_positions_context_manifest_sha256_by_account
+        )
+        prepared_authority = candidate_option.get("prepared_authority")
+        manifest_hash = (
+            manifest_hash_map.get(account_norm)
+            if manifest_hash_map is not None
+            else None
+        )
+        authority_complete = bool(
+            manifest_map is not None
+            and manifest_hash_map is not None
+            and account_norm in manifest_map
+            and account_norm in manifest_hash_map
+            and isinstance(prepared_authority, Mapping)
+            and str(prepared_authority.get("run_id") or "")
+            == request.run_id
+            and str(prepared_authority.get("account") or "").lower()
+            == account_norm
+            and isinstance(manifest_hash, str)
+            and len(manifest_hash) == 64
+            and all(character in "0123456789abcdef" for character in manifest_hash)
+        )
+        if authority_complete:
+            option_context = candidate_option
+            option_reason = "option_positions_unavailable"
+        else:
+            option_reason = "option_authority_handoff_incomplete"
+
+    return {
+        "opening_candidate_snapshot": candidate,
+        "candidate_snapshot_unavailable_reason": candidate_reason,
+        "prepared_portfolio_distribution": portfolio,
+        "portfolio_distribution_unavailable_reason": portfolio_reason,
+        "prepared_option_positions_context": option_context,
+        "option_positions_unavailable_reason": option_reason,
+    }
 
 
 def _daily_brief_request_accounts(request: TickNotificationRequest) -> list[str]:

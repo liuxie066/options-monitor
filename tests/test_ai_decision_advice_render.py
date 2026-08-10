@@ -35,6 +35,7 @@ def test_not_applicable_renders_nothing():
 
 def test_zero_candidate_message():
     section = _section(
+        status="not_applicable",
         sell_put=None,
         zero_candidate={"sell_put": True, "covered_call": False},
     )
@@ -95,7 +96,11 @@ def test_switch_copy_includes_contract_and_reason():
     text = "\n".join(lines)
     assert "建议改选策略排序 2：NVDA 09-18 $100 Put。" in text
     assert "财报前下行跳跃风险上升" in text
-    assert "来源｜NVDA 财报日期确认（Reuters · 2026-08-08） https://example.com/nvda" in text
+    assert "改选到期更晚的候选可避开事件" in text
+    assert (
+        "来源｜NVDA 财报日期确认（Reuters · 2026-08-08 · example.com） "
+        "https://example.com/nvda"
+    ) in text
 
 
 def test_defer_copy():
@@ -125,7 +130,38 @@ def test_needs_review_copy():
         }
     )
     lines = render_family_advice_lines(section, family="sell_put")
-    assert "结论｜现有证据冲突，需要人工判断。" in lines
+    assert "结论｜信息不完整或有冲突，需要人工判断。" in lines
+    assert "原因｜支持信息不完整。" in lines
+
+
+def test_needs_review_explains_known_data_gaps():
+    section = _section(
+        sell_put={
+            "action": "needs_review",
+            "baseline_candidate_id": "put-1",
+            "selected_candidate_id": None,
+            "rationale": {},
+            "source_refs": {
+                "internal_fact_refs": [
+                    "gap:portfolio:stale",
+                    "gap:option_positions:missing",
+                ]
+            },
+        }
+    )
+
+    text = "\n".join(render_family_advice_lines(section, family="sell_put"))
+
+    assert "原因｜组合数据不完整；期权持仓数据不完整。" in text
+
+
+def test_heading_level_is_configurable():
+    lines = render_family_advice_lines(
+        _section(),
+        family="sell_put",
+        heading_level=4,
+    )
+    assert lines[0] == "#### AI建议"
 
 
 def test_covered_call_aggregates_per_symbol():
@@ -188,3 +224,81 @@ def test_source_display_capped_at_three():
     lines = render_family_advice_lines(section, family="sell_put", evidence_by_ref=evidence)
     source_lines = [line for line in lines if line.startswith("来源｜")]
     assert len(source_lines) == 3
+
+
+def test_sources_are_sanitized_and_only_valid_https_urls_are_rendered():
+    section = _section(
+        sell_put={
+            "action": "defer",
+            "baseline_candidate_id": "put-1",
+            "selected_candidate_id": None,
+            "rationale": {"risk_mechanism": "风险"},
+            "source_refs": {
+                "external_evidence_refs": ["unsafe", "http", "safe"]
+            },
+        }
+    )
+    evidence = {
+        "unsafe": {
+            "source": {
+                "title": "[伪装标题](https://attacker.invalid)\n## 注入",
+                "publisher": "**媒体**",
+                "url": "https://example.com/path#fragment",
+                "published_at": "2026-08-08",
+            }
+        },
+        "http": {
+            "source": {
+                "title": "不安全链接",
+                "publisher": "媒体",
+                "url": "http://example.com/plain",
+                "published_at": "2026-08-08",
+            }
+        },
+        "safe": {
+            "source": {
+                "title": "可靠来源",
+                "publisher": "媒体",
+                "url": "https://sub.example.org/report",
+                "published_at": "2026-08-08",
+            }
+        },
+    }
+
+    text = "\n".join(
+        render_family_advice_lines(
+            section,
+            family="sell_put",
+            evidence_by_ref=evidence,
+        )
+    )
+
+    assert "伪装标题 注入（媒体 · 2026-08-08 · example.com）" in text
+    assert "https://example.com/path" in text
+    assert "fragment" not in text
+    assert "http://example.com/plain" not in text
+    assert "可靠来源（媒体 · 2026-08-08 · sub.example.org）" in text
+
+
+def test_rationale_is_flattened_before_markdown_rendering():
+    section = _section(
+        sell_put={
+            "action": "defer",
+            "baseline_candidate_id": "put-1",
+            "selected_candidate_id": None,
+            "rationale": {
+                "risk_mechanism": "风险上升\n## 伪造结论",
+                "candidate_effect": "**当前候选**受影响",
+                "decision_reason": "[暂缓](https://attacker.invalid)",
+            },
+            "source_refs": {},
+        }
+    )
+
+    lines = render_family_advice_lines(section, family="sell_put")
+    text = "\n".join(lines)
+
+    assert "## 伪造结论" not in text
+    assert "**当前候选**" not in text
+    assert "attacker.invalid" not in text
+    assert "原因｜风险上升 伪造结论；当前候选 受影响；暂缓。" in text

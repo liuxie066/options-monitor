@@ -186,7 +186,12 @@ def test_render_systemd_bundle_ai_evidence_collector_opt_in(
     enabled_files = {item["relative_path"]: item for item in enabled_bundle["files"]}
     service = enabled_files["systemd/options-monitor-ai-evidence-collector.service"]["content"]
     timer = enabled_files["systemd/options-monitor-ai-evidence-collector.timer"]["content"]
-    assert str(repo / "om") + " ai-evidence-collector --config-key us" in service
+    assert (
+        str(repo / ".venv" / "bin" / "python")
+        + " -m src.interfaces.cli.ai_evidence_collector --config-key us"
+        in service
+    )
+    assert str(repo / "om") + " ai-evidence-collector" not in service
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in service
     assert "OnUnitActiveSec=4h" in timer
     assert "Persistent=true" in timer

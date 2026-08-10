@@ -1070,6 +1070,179 @@ def test_delivery_only_without_envelope_is_read_only_and_skips_assembler(monkeyp
     assert not (tmp_path / "output_runs").exists()
 
 
+def test_advice_handoff_selects_only_current_account(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.prepared_portfolio_distribution import (
+        PreparedPortfolioDistribution,
+    )
+
+    captured: dict[str, dict] = {}
+
+    def assemble(*, base, run_id, account, markets_to_run, **kwargs):
+        captured[account] = kwargs
+        return {
+            market: _brief(
+                base=base,
+                run_id=run_id,
+                account=account,
+                market=market,
+            )
+            for market in markets_to_run
+        }
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    bundle = _request(
+        tmp_path,
+        run_id="account-isolation",
+        accounts=("lx", "sy"),
+    )
+    pm_by_account = {
+        account: PreparedPortfolioDistribution(
+            envelope={
+                "authority": {
+                    "run_id": "account-isolation",
+                    "account": account,
+                    "status": "ready",
+                    "reason": "portfolio_ready",
+                },
+                "payload": {"marker": account},
+            },
+            artifact_path=tmp_path / f"{account}.json",
+            artifact_sha256=("a" if account == "lx" else "b") * 64,
+        )
+        for account in ("lx", "sy")
+    }
+    option_by_account = {
+        account: {
+            "prepared_authority": {
+                "run_id": "account-isolation",
+                "account": account,
+            },
+            "marker": account,
+        }
+        for account in ("lx", "sy")
+    }
+    bundle.request = replace(
+        bundle.request,
+        opening_candidate_snapshot_by_account={
+            account: {"account": account, "marker": account}
+            for account in ("lx", "sy")
+        },
+        opening_candidate_snapshot_unavailable_by_account={},
+        prepared_portfolio_distribution_by_account=pm_by_account,
+        prepared_portfolio_distribution_artifact_path_by_account={
+            account: prepared.artifact_path
+            for account, prepared in pm_by_account.items()
+        },
+        prepared_portfolio_distribution_artifact_sha256_by_account={
+            account: prepared.artifact_sha256
+            for account, prepared in pm_by_account.items()
+        },
+        prepared_portfolio_distribution_status_by_account={
+            account: prepared.status
+            for account, prepared in pm_by_account.items()
+        },
+        prepared_option_positions_context_by_account=option_by_account,
+        prepared_option_positions_context_unavailable_by_account={},
+        prepared_option_positions_context_manifest_by_account={
+            account: tmp_path / f"{account}-option.json"
+            for account in ("lx", "sy")
+        },
+        prepared_option_positions_context_manifest_sha256_by_account={
+            "lx": "c" * 64,
+            "sy": "d" * 64,
+        },
+    )
+
+    mod._prepare_daily_brief_notification(bundle.request)
+
+    assert captured["lx"]["opening_candidate_snapshot"]["marker"] == "lx"
+    assert captured["sy"]["opening_candidate_snapshot"]["marker"] == "sy"
+    assert (
+        captured["lx"]["prepared_portfolio_distribution"]
+        is pm_by_account["lx"]
+    )
+    assert (
+        captured["sy"]["prepared_option_positions_context"]["marker"]
+        == "sy"
+    )
+    assert "prepared_portfolio_distribution_by_account" not in str(
+        bundle.request.tick_metrics
+    )
+
+
+def test_missing_portfolio_authority_map_is_soft_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.prepared_portfolio_distribution import (
+        PreparedPortfolioDistribution,
+    )
+
+    captured: dict = {}
+
+    def assemble(*, base, run_id, account, markets_to_run, **kwargs):
+        captured.update(kwargs)
+        return {
+            market: _brief(base=base, run_id=run_id, account=account)
+            for market in markets_to_run
+        }
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    bundle = _request(tmp_path, run_id="missing-pm-map")
+    prepared = PreparedPortfolioDistribution(
+        envelope={"authority": {"status": "ready"}, "payload": {}},
+        artifact_path=tmp_path / "pm.json",
+        artifact_sha256="a" * 64,
+    )
+    bundle.request = replace(
+        bundle.request,
+        opening_candidate_snapshot_by_account={"lx": {"account": "lx"}},
+        prepared_portfolio_distribution_by_account={"lx": prepared},
+    )
+
+    mod._prepare_daily_brief_notification(bundle.request)
+
+    assert captured["prepared_portfolio_distribution"] is None
+    assert (
+        captured["portfolio_distribution_unavailable_reason"]
+        == "portfolio_authority_handoff_incomplete"
+    )
+
+
+def test_delivery_only_does_not_consume_advice_authority_maps(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    class _ForbiddenMap:
+        def __getattribute__(self, _name):  # pragma: no cover
+            raise AssertionError("delivery-only must not inspect Advice maps")
+
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("delivery-only must not assemble")
+        ),
+    )
+    bundle = _request(
+        tmp_path,
+        run_id="delivery-only-authorities",
+        delivery_only=True,
+    )
+    bundle.request = replace(
+        bundle.request,
+        opening_candidate_snapshot_by_account=_ForbiddenMap(),
+        prepared_portfolio_distribution_by_account=_ForbiddenMap(),
+        prepared_option_positions_context_by_account=_ForbiddenMap(),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+
+
 def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief

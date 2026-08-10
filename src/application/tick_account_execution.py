@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -20,7 +20,10 @@ from src.application.account_run import (
     build_account_runtime_config,
     run_one_account,
 )
-from src.application.account_config import normalize_account_label
+from src.application.account_config import (
+    normalize_account_label,
+    resolve_holdings_account,
+)
 from src.application.config_sections import resolve_watchlist_config
 from src.application.multi_tick.misc import AccountResult
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
@@ -33,7 +36,22 @@ from src.application.prepared_portfolio_context import (
 from src.application.prepared_option_positions_context import (
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PreparedOptionPositionsBatch,
+    load_prepared_option_positions_context,
     prepare_option_positions_contexts,
+)
+from src.application.prepared_portfolio_distribution import (
+    PreparedPortfolioDistribution,
+    PreparedPortfolioDistributionBatch,
+    PreparedPortfolioDistributionError,
+    load_prepared_portfolio_distribution,
+    portfolio_distribution_metric,
+    prepare_portfolio_distributions,
+    unavailable_prepared_portfolio_distribution,
+)
+from src.application.ai_decision_advice.config import (
+    PORTFOLIO_DISTRIBUTION_PROVIDER_NONE,
+    ai_decision_advice_enabled,
+    portfolio_distribution_provider,
 )
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
@@ -173,6 +191,34 @@ class TickAccountExecutionOutcome:
     snapshot_status: str | None = None
     snapshot_manifest_sha256: str | None = None
     prepared_context_metrics: tuple[dict[str, Any], ...] = ()
+    prepared_portfolio_distribution_by_account: dict[
+        str, PreparedPortfolioDistribution
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_artifact_path_by_account: dict[
+        str, Path | None
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_artifact_sha256_by_account: dict[
+        str, str | None
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_status_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
+    prepared_portfolio_distribution_metrics: tuple[
+        dict[str, Any], ...
+    ] = ()
+    portfolio_management_distribution_read_count: int = 0
+    prepared_option_positions_context_by_account: dict[
+        str, dict[str, Any]
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_unavailable_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_manifest_by_account: dict[
+        str, Path
+    ] = field(default_factory=dict)
+    prepared_option_positions_context_manifest_sha256_by_account: dict[
+        str, str
+    ] = field(default_factory=dict)
 
 
 def _build_close_advice_barrier_plan(
@@ -262,6 +308,35 @@ def _build_close_advice_barrier_plan(
         payload=plan,
     )
     return merged_config, plan_path
+
+
+def _portfolio_distribution_provider_for_config(
+    config: Mapping[str, Any],
+) -> str:
+    if not ai_decision_advice_enabled(config):
+        return PORTFOLIO_DISTRIBUTION_PROVIDER_NONE
+    return portfolio_distribution_provider(config)
+
+
+def _soft_unavailable_portfolio_distribution(
+    *,
+    request: TickAccountExecutionRequest,
+    account: str,
+    config: Mapping[str, Any],
+    authority: AccountRunConfigAuthority,
+    reason: str,
+) -> PreparedPortfolioDistribution:
+    mapped_pm_account = str(
+        resolve_holdings_account(dict(config), account=account) or account
+    ).strip()
+    return unavailable_prepared_portfolio_distribution(
+        run_id=request.run_id,
+        account=account,
+        mapped_pm_account=mapped_pm_account,
+        provider=_portfolio_distribution_provider_for_config(config),
+        account_config_sha256=authority.account_config_sha256,
+        reason=reason,
+    )
 
 
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
@@ -364,6 +439,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         str, list[dict[str, Any]]
     ] = {}
     prepared_option_unavailable_by_account: dict[str, str] = {}
+    prepared_option_positions_context_by_account: dict[
+        str, dict[str, Any]
+    ] = {}
+    prepared_option_positions_context_unavailable_by_account: dict[
+        str, str
+    ] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -371,6 +452,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     snapshot_manifest_sha256: str | None = None
     close_advice_required_data_plan_path: Path | None = None
     prepared_context_metrics: list[dict[str, Any]] = []
+    prepared_portfolio_distribution_by_account: dict[
+        str, PreparedPortfolioDistribution
+    ] = {}
+    prepared_portfolio_distribution_metrics: list[dict[str, Any]] = []
+    portfolio_management_distribution_read_count = 0
 
     if scanning_accounts and not request.prefetch_done:
         run_started_at_utc = datetime.now(timezone.utc)
@@ -507,6 +593,61 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 for account, config in scanning_configs.items()
                 if account not in invalid_prepared_accounts
             }
+
+        try:
+            prepared_distributions = prepare_portfolio_distributions(
+                base=request.base,
+                run_id=request.run_id,
+                account_configs=scanning_configs,
+                account_config_authorities={
+                    account: scanning_config_authorities[account]
+                    for account in scanning_configs
+                },
+                timeout_sec=portfolio_timeout_sec,
+            )
+        except Exception:
+            prepared_distributions = PreparedPortfolioDistributionBatch(
+                by_account={
+                    account: _soft_unavailable_portfolio_distribution(
+                        request=request,
+                        account=account,
+                        config=config,
+                        authority=scanning_config_authorities[account],
+                        reason="preparation_failed",
+                    )
+                    for account, config in scanning_configs.items()
+                },
+                pm_read_count=0,
+            )
+        prepared_portfolio_distribution_by_account.update(
+            prepared_distributions.by_account
+        )
+        portfolio_management_distribution_read_count += (
+            prepared_distributions.pm_read_count
+        )
+        prepared_portfolio_distribution_metrics.extend(
+            portfolio_distribution_metric(account, prepared_distribution)
+            for account, prepared_distribution in sorted(
+                prepared_distributions.by_account.items()
+            )
+        )
+        request.runlog.safe_event(
+            "prepared_portfolio_distribution",
+            (
+                "ok"
+                if all(
+                    item.status == "ready"
+                    for item in prepared_distributions.by_account.values()
+                )
+                else "degraded"
+            ),
+            data={
+                "distributions": list(
+                    prepared_portfolio_distribution_metrics
+                ),
+                "pm_read_count": prepared_distributions.pm_read_count,
+            },
+        )
 
         try:
             prepared_options = prepare_option_positions_contexts(
@@ -756,6 +897,69 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 data={"snapshot_status": snapshot_status},
             )
     elif scanning_accounts and request.prefetch_done:
+        for account in scanning_accounts:
+            account_key = str(account).strip().lower()
+            config = account_configs[account_key]
+            authority = account_config_authorities[account_key]
+            provider = _portfolio_distribution_provider_for_config(config)
+            mapped_pm_account = str(
+                resolve_holdings_account(config, account=account_key)
+                or account_key
+            ).strip()
+            try:
+                prepared_distribution = (
+                    load_prepared_portfolio_distribution(
+                        base=request.base,
+                        run_id=request.run_id,
+                        account=account_key,
+                        expected_account_config_sha256=(
+                            authority.account_config_sha256
+                        ),
+                        expected_mapped_pm_account=mapped_pm_account,
+                        expected_provider=provider,
+                    )
+                )
+            except PreparedPortfolioDistributionError:
+                prepared_distribution = (
+                    unavailable_prepared_portfolio_distribution(
+                        run_id=request.run_id,
+                        account=account_key,
+                        mapped_pm_account=mapped_pm_account,
+                        provider=provider,
+                        account_config_sha256=(
+                            authority.account_config_sha256
+                        ),
+                        reason="recovery_artifact_unavailable",
+                    )
+                )
+            prepared_portfolio_distribution_by_account[account_key] = (
+                prepared_distribution
+            )
+            prepared_portfolio_distribution_metrics.append(
+                portfolio_distribution_metric(
+                    account_key,
+                    prepared_distribution,
+                )
+            )
+        request.runlog.safe_event(
+            "prepared_portfolio_distribution_recovery",
+            (
+                "ok"
+                if all(
+                    item.status == "ready"
+                    for item in (
+                        prepared_portfolio_distribution_by_account.values()
+                    )
+                )
+                else "degraded"
+            ),
+            data={
+                "distributions": list(
+                    prepared_portfolio_distribution_metrics
+                ),
+                "pm_read_count": 0,
+            },
+        )
         candidate = (
             run_repo.get_run_state_dir(request.base, request.run_id)
             / "required_data_snapshot_manifest.json"
@@ -831,6 +1035,46 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             barrier_reason = "required_data_snapshot_manifest_unavailable"
             snapshot_status = "unavailable"
             prefetch_done = False
+
+    for account in sorted(set(scanning_accounts)):
+        config = account_configs.get(account)
+        authority = account_config_authorities.get(account)
+        if (
+            not isinstance(config, Mapping)
+            or authority is None
+            or not ai_decision_advice_enabled(config)
+        ):
+            continue
+        manifest_path = prepared_option_manifest_paths.get(account)
+        manifest_sha256 = prepared_option_manifest_sha256_by_account.get(
+            account
+        )
+        if manifest_path is None or not manifest_sha256:
+            prepared_option_positions_context_unavailable_by_account[
+                account
+            ] = prepared_option_unavailable_by_account.get(
+                account,
+                "prepared_option_context_unavailable",
+            )
+            continue
+        try:
+            prepared_option_positions_context_by_account[account] = (
+                load_prepared_option_positions_context(
+                    manifest_path=manifest_path,
+                    expected_base=request.base,
+                    expected_run_id=request.run_id,
+                    expected_account=account,
+                    expected_account_config_sha256=(
+                        authority.account_config_sha256
+                    ),
+                    expected_manifest_sha256=manifest_sha256,
+                    expected_runtime_config=config,
+                )
+            )
+        except Exception:
+            prepared_option_positions_context_unavailable_by_account[
+                account
+            ] = "prepared_option_context_invalid"
 
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip().lower()
@@ -984,6 +1228,45 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         snapshot_status=snapshot_status,
         snapshot_manifest_sha256=snapshot_manifest_sha256,
         prepared_context_metrics=tuple(prepared_context_metrics),
+        prepared_portfolio_distribution_by_account=(
+            prepared_portfolio_distribution_by_account
+        ),
+        prepared_portfolio_distribution_artifact_path_by_account={
+            account: prepared.artifact_path
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
+        prepared_portfolio_distribution_artifact_sha256_by_account={
+            account: prepared.artifact_sha256
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
+        prepared_portfolio_distribution_status_by_account={
+            account: prepared.status
+            for account, prepared in sorted(
+                prepared_portfolio_distribution_by_account.items()
+            )
+        },
+        prepared_portfolio_distribution_metrics=tuple(
+            prepared_portfolio_distribution_metrics
+        ),
+        portfolio_management_distribution_read_count=(
+            portfolio_management_distribution_read_count
+        ),
+        prepared_option_positions_context_by_account=(
+            prepared_option_positions_context_by_account
+        ),
+        prepared_option_positions_context_unavailable_by_account=(
+            prepared_option_positions_context_unavailable_by_account
+        ),
+        prepared_option_positions_context_manifest_by_account=(
+            prepared_option_manifest_paths
+        ),
+        prepared_option_positions_context_manifest_sha256_by_account=(
+            prepared_option_manifest_sha256_by_account
+        ),
     )
 
 
