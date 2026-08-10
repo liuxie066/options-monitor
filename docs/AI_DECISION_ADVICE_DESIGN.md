@@ -415,6 +415,27 @@ Advice 专用 PM preparation 是 soft dependency：失败只能降低 AI 动作�
 移出 Candidate Engine 扫描，也不能阻断原始监控回执。既有期权 prepared context 对
 Candidate Engine/持仓工作流的 fail-closed 语义保持不变。
 
+账户级数据拼接只有下表这一条路径：
+
+| 事实 | 唯一来源 | 账户范围 | 用途 |
+|---|---|---|---|
+| 合格候选与容量 | 当前 OM 账户的 Candidate Engine 封存快照 | 当前 OM 账户 | 保留正式筛选、排序、现金与持股容量结论 |
+| 运营现金与持股 | Candidate Engine 按账户配置使用的 Futu 或 holdings 上下文 | 当前 OM 账户 | 只服务候选容量；不作为 AI 战略组合分布 |
+| 战略组合分布 | 显式启用的 portfolio-management 单账户 distribution | 当前 OM 账户映射出的一个 PM/holdings 账户 | 提供当前资产、币种、现金与货币基金权重，以及投影所需总市值和持股数量 |
+| 开放期权 | OM SQLite ledger 的账户级 prepared projection | 当前 OM 账户 | 提供账户内已有期权义务、方向、期限和已验证组合结构 |
+| 投影汇率 | 同一 run 的 prepared option authority 所绑定的 OpenD 汇率观察 | 当前 run | 只在本地换算 Sell Put 一张合约的名义暴露 |
+
+无论当前 OM 账户的运营来源是 Futu 还是 external holdings，AI 战略组合分布都只认
+显式配置的 PM provider。Futu 只能描述对应券商账户，不能代表用户在 PM/holdings 中的
+完整组合，也不能在 PM 缺失时成为 fallback。反过来，PM 战略分布也不改写 Candidate
+Engine 已经封存的现金、持股或可卖容量。
+
+SQLite ledger 可以是多个账户共用的物理数据库，但 prepared option context 必须先按
+当前 OM 账户投影、校验并封存；共享物理存储不构成跨账户读取授权。PM 的
+`holdings_account` 只是当前 OM 账户到单个 PM 账户的显式映射，也不构成聚合其他账户的
+授权。候选、PM 分布、期权持仓任一 run/account binding 不一致时，该输入失败关闭，
+不得通过标签相似、默认账户或其他账户数据补齐。
+
 ### 7.1 策略候选
 
 候选来源是：
@@ -554,6 +575,13 @@ Advice 运行开始时，从追加日志冻结一份当轮证据索引视图（�
 
 候选阶段不存在实际下单手数，`可开 X 手`只是最大容量。AI Decision Advice 统一按
 “新增一张合约”的边际影响判断，不假设用户会把容量全部开满，也不推荐手数。
+
+每张 AI Advice 投影只拼接同一 OM 账户的候选、该账户映射后的 PM 分布和该账户的
+prepared option context。这里的 Sell Put 组合总市值分母和 Covered Call 持股数量分母均来自
+PM，仅用于 AI Decision Advice 的“新增一张后的组合影响”；Candidate Engine 原策略的容量分母仍按账户
+配置从 Futu 或 holdings 运营上下文取得，两者不互相改写。
+已有期权叠加只来自该账户的 SQLite ledger projection。不得用 Futu 运营持股替代 PM
+分母，也不得借用其他账户的 PM 资产、持股或期权仓位来补全投影。
 
 代码必须在模型调用前为每个候选生成独立 fact ID，并计算：
 
@@ -1278,6 +1306,7 @@ query 只含公开标的身份，可与 cutoff 一起审计；provider 原始响
 | 合法零候选 | 不调用模型、不生成投资动作，仅确定性展示“无可供 AI 评估的策略候选”，不伪造 `defer` |
 | 四类输入完整且证据覆盖完成 | 可以输出 `keep / switch / defer / needs_review` |
 | PM provider 为 `none`、服务缺失或请求失败 | Candidate Engine 正常继续；prepared 组合为明确 unavailable，不传资产行，动作最高 `needs_review` |
+| OM 账户运营来源为 Futu，且 PM provider 可用 | Candidate Engine 容量继续使用 Futu；AI 战略组合与投影分母只使用该账户映射后的 PM 分布，不混用两套持股 |
 | PM 返回的账户不是映射后的当前账户，或行内混入其他账户 | 整份组合 fail closed；禁止跨账户行进入模型 |
 | PM 为 `fresh + trusted` 且合法零资产 | 组合是完整空集合，不误报取数失败；没有正总市值的比例投影以 gap 表达 |
 | PM 为 `stale + trusted` 或 `partial` | 携带 observed time 与 gap，可供理解但动作最高 `needs_review` |
@@ -1288,6 +1317,7 @@ query 只含公开标的身份，可与 cutoff 一起审计；provider 原始响
 | prepared option context 有效且 `open_positions_min=[]` | 视为真实无开放期权，期权上下文完整 |
 | option manifest/hash/account/status 不匹配或 ledger 失败 | 不得解释为空；期权上下文 unavailable，动作最高 `needs_review` |
 | 其他账户存在期权仓位 | 不进入当前账户明细、汇总、投影或模型输入 |
+| 多账户共用同一 SQLite ledger 文件 | 每个账户先生成并校验独立 prepared projection；不得因物理文件相同而合并逻辑持仓 |
 | 同一经济合约存在多行 | 按 `contracts_open` 聚合；到期和同义务风险按张数而非行数计算 |
 | 候选 expiry 前后 7 日已有仓位 | 分别显示 exact 与 near-window 当前张数，并给出新增一张后的 `+1` 事实 |
 | Sell Put 候选投影完整 | 计算一张指派名义金额占当前 PM 组合市值比例，不伪造指派后的权重 |
