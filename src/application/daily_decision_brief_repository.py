@@ -12,6 +12,7 @@ from typing import Any, Iterator, Mapping
 from domain.domain.daily_decision_brief import (
     DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION,
     build_daily_brief_candidate_identity,
+    daily_brief_compatible_digests,
     daily_brief_digest,
     diff_daily_decision_briefs,
     normalize_daily_decision_brief,
@@ -1376,7 +1377,8 @@ def read_combo_candidate_exposures(
             invalid_revisions.append(int(revision))
             continue
         brief = result["brief"]
-        digest = daily_brief_digest(brief)
+        raw_brief = _read_json_strict(result["path"])
+        compatible_digests = set(daily_brief_compatible_digests(raw_brief))
         exposures = derive_combo_candidate_exposures(brief)
         for exposure in exposures:
             item = dict(exposure)
@@ -1387,7 +1389,7 @@ def read_combo_candidate_exposures(
                 and envelope.get("source_kind") == "successful_brief"
                 and envelope.get("revision") is not None
                 and int(envelope["revision"]) == int(revision)
-                and str(envelope.get("source_digest") or "") == digest
+                and str(envelope.get("source_digest") or "") in compatible_digests
                 and str(item["candidate_exposure_id"])
                 in set((envelope.get("render_context") or {}).get("candidate_exposure_ids") or [])
                 and str(item["candidate_occurrence_id"])
@@ -2066,7 +2068,7 @@ def _validate_successful_revision_source(
     brief = _normalize_persisted_brief(raw, path=revision_path, account=account, market=market)
     if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
         raise DailyDecisionBriefStateError(f"daily brief delivery revision identity mismatch: {revision_path}")
-    if daily_brief_digest(brief) != source_digest:
+    if source_digest not in daily_brief_compatible_digests(raw):
         raise DailyDecisionBriefStateError(f"daily brief delivery source digest mismatch: {revision_path}")
     return brief
 
