@@ -1,0 +1,101 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.2",
+  "base": {
+    "tag": "v1.13.1",
+    "commit": "774a75be00cc3649f27d3337d7612efe95300560"
+  },
+  "reviewed_head": "028e79e0dc1b77a2acb3b5f1559593029654e8b2",
+  "commits": [
+    {
+      "sha": "aca09b5376cdc2c9b5424fcf5d2436d493c0a7d0",
+      "subject": "docs(ai-advice): define account-scoped sources"
+    },
+    {
+      "sha": "12ab398f3abfdae7725334d604748bbc43b0b08a",
+      "subject": "fix(ai-advice): enforce prepared account sources"
+    },
+    {
+      "sha": "0a3f39958d01ec93df8a884e21501b29a373a81c",
+      "subject": "test(ai-advice): prove account-isolated inputs"
+    },
+    {
+      "sha": "102ccf0cb8e8897d923255c67f974a013ea74817",
+      "subject": "merge(main): refresh AI advice branch"
+    },
+    {
+      "sha": "d2ca3d64938a9fcffae44dbad6fc90bf5e1efa1c",
+      "subject": "test(ai-advice): preserve verified evidence scope"
+    },
+    {
+      "sha": "ef682503696e19767b78b679640cd2da090fce4a",
+      "subject": "docs(review): record PR deepreview"
+    },
+    {
+      "sha": "410b5d06fee1a417c84b03e6f9ba47339739b339",
+      "subject": "docs(gateflow): close account context work unit"
+    },
+    {
+      "sha": "6007816b7521cd967fc8556ec2c08ddd9e7d5d4c",
+      "subject": "merge(ai-advice): integrate account-scoped input authority"
+    },
+    {
+      "sha": "5bafc1ae628a3a3a12c5998707de5a3d8d69a7b2",
+      "subject": "fix(security): preserve runtime credential traversal"
+    },
+    {
+      "sha": "028e79e0dc1b77a2acb3b5f1559593029654e8b2",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Bound AI Decision Advice account context to the configured portfolio distribution and authoritative prepared option-position source, with run, account, and source receipts preventing cross-account or fallback input drift.",
+      "commits": [
+        "12ab398f3abfdae7725334d604748bbc43b0b08a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed restricted Incus `runtime-files` credential delivery to normalize the root-owned runtime parent to traverse-only mode, so hardened systemd `UMask=0077` cannot make per-service `0400` credential files unreadable by their owning service user after boot or restart.",
+      "commits": [
+        "5bafc1ae628a3a3a12c5998707de5a3d8d69a7b2"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "aca09b5376cdc2c9b5424fcf5d2436d493c0a7d0",
+      "reason": "Design and Gateflow documentation only; the resulting runtime behavior is covered by the mapped account-source implementation commit."
+    },
+    {
+      "commit": "0a3f39958d01ec93df8a884e21501b29a373a81c",
+      "reason": "Regression coverage for the mapped account-source behavior; it adds no independent runtime capability."
+    },
+    {
+      "commit": "102ccf0cb8e8897d923255c67f974a013ea74817",
+      "reason": "Branch refresh merge contains already reviewed baseline and account-source changes with no separate user-facing behavior."
+    },
+    {
+      "commit": "d2ca3d64938a9fcffae44dbad6fc90bf5e1efa1c",
+      "reason": "Regression coverage for verified evidence scope; it adds no independent runtime capability."
+    },
+    {
+      "commit": "ef682503696e19767b78b679640cd2da090fce4a",
+      "reason": "Deep-review evidence only; it introduces no runtime or user-facing behavior."
+    },
+    {
+      "commit": "410b5d06fee1a417c84b03e6f9ba47339739b339",
+      "reason": "Gateflow closeout documentation only; it introduces no runtime or user-facing behavior."
+    },
+    {
+      "commit": "6007816b7521cd967fc8556ec2c08ddd9e7d5d4c",
+      "reason": "Integration merge contains the already mapped account-source behavior and adds no separate user-facing capability."
+    },
+    {
+      "commit": "028e79e0dc1b77a2acb3b5f1559593029654e8b2",
+      "reason": "Generated dependency graph refresh for the already mapped account-source code; it adds no independent runtime behavior."
+    }
+  ]
+}
