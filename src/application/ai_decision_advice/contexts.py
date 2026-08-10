@@ -17,6 +17,9 @@ from domain.domain.combo_identity import (
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from src.application.ai_decision_advice.config import (
+    PORTFOLIO_DISTRIBUTION_PROVIDER_PM,
+)
 from src.application.ai_decision_advice.evidence_store import (
     EvidenceIndex,
     content_fingerprint,
@@ -26,9 +29,11 @@ from src.application.ledger.api import (
     validate_combo_group_membership,
 )
 from src.application.prepared_option_positions_context import (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
     cny_per_currency_rates_from_option_context,
 )
 from src.application.prepared_portfolio_distribution import (
+    PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
     PreparedPortfolioDistribution,
 )
 
@@ -273,6 +278,55 @@ def freeze_option_positions(
         expected_account_config_sha256=expected_account_config_sha256,
         unavailable_reason=unavailable_reason,
     ).model
+
+
+def verified_relevant_symbols(
+    *,
+    snapshot: Mapping[str, Any],
+    portfolio_distribution: (
+        PreparedPortfolioDistribution | Mapping[str, Any] | None
+    ),
+    option_positions_context: Mapping[str, Any] | None,
+    market: str,
+) -> tuple[str, ...]:
+    """Derive evidence scope from the same authorities used by final freeze."""
+
+    run_id = _required_text(snapshot.get("run_id"), "candidate run_id")
+    account = _required_text(snapshot.get("account"), "candidate account").lower()
+    account_config_sha256 = _required_sha256(
+        snapshot.get("account_config_sha256"),
+        "candidate account_config_sha256",
+    )
+    candidates = freeze_candidates(snapshot, market=market)
+    candidate_symbols = {
+        str(row["symbol"])
+        for row in (
+            *candidates["sell_put"],
+            *candidates["covered_call"],
+        )
+    }
+    portfolio_frozen = _freeze_portfolio_distribution(
+        portfolio_distribution,
+        expected_run_id=run_id,
+        expected_account=account,
+        expected_account_config_sha256=account_config_sha256,
+        unavailable_reason="portfolio_unavailable",
+    )
+    option_frozen = _freeze_option_positions(
+        option_positions_context,
+        candidate_symbols=candidate_symbols,
+        expected_run_id=run_id,
+        expected_account=account,
+        expected_account_config_sha256=account_config_sha256,
+        unavailable_reason="option_positions_unavailable",
+    )
+    return tuple(
+        sorted(
+            candidate_symbols
+            | set(portfolio_frozen.searchable_symbols)
+            | set(option_frozen.underlying_symbols)
+        )
+    )
 
 
 def freeze_external_evidence(
@@ -647,6 +701,11 @@ def _freeze_portfolio_distribution(
         expected_account_config_sha256=expected_account_config_sha256,
     ):
         return _unavailable_portfolio("portfolio_authority_mismatch")
+    if (
+        str(authority.get("schema_version") or "")
+        != PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA
+    ):
+        return _unavailable_portfolio("portfolio_prepared_schema_invalid")
 
     status = str(authority.get("status") or "").strip().lower()
     reason = _reason_code(authority.get("reason"), "portfolio_unavailable")
@@ -655,6 +714,9 @@ def _freeze_portfolio_distribution(
         return _unavailable_portfolio(reason, quality=quality)
     if status not in {"ready", "degraded"}:
         return _unavailable_portfolio("portfolio_status_invalid")
+    source_error = _available_portfolio_source_error(authority)
+    if source_error is not None:
+        return _unavailable_portfolio(source_error, quality=quality)
 
     assets = payload.get("assets")
     derived = payload.get("derived")
@@ -793,6 +855,9 @@ def _freeze_option_positions(
         expected_account_config_sha256=expected_account_config_sha256,
     ):
         return _unavailable_options("option_authority_mismatch")
+    source_error = _option_source_error(context, prepared)
+    if source_error is not None:
+        return _unavailable_options(source_error)
     if expected_account is not None and str(
         filters.get("account") or ""
     ).strip().lower() != str(expected_account).strip().lower():
@@ -1250,6 +1315,39 @@ def _authority_mismatch(
         if actual != str(value):
             return True
     return False
+
+
+def _available_portfolio_source_error(
+    authority: Mapping[str, Any],
+) -> str | None:
+    if (
+        str(authority.get("provider") or "").strip().lower()
+        != PORTFOLIO_DISTRIBUTION_PROVIDER_PM
+    ):
+        return "portfolio_provider_invalid"
+    if not str(authority.get("mapped_pm_account") or "").strip():
+        return "portfolio_mapped_account_missing"
+    validation = authority.get("validation")
+    if (
+        not isinstance(validation, Mapping)
+        or str(validation.get("status") or "").strip().lower() != "passed"
+    ):
+        return "portfolio_validation_invalid"
+    return None
+
+
+def _option_source_error(
+    context: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> str | None:
+    if (
+        str(authority.get("schema_version") or "")
+        != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
+    ):
+        return "option_prepared_schema_invalid"
+    if str(context.get("context_source") or "").strip().lower() != "prepared":
+        return "option_source_invalid"
+    return None
 
 
 def _candidate_scope(family: str, row: Mapping[str, Any]) -> str:
