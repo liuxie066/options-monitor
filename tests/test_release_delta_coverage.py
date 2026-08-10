@@ -269,3 +269,28 @@ def test_delta_coverage_rejects_any_second_commit_after_review(tmp_path: Path) -
         )
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_POST_REVIEW_COMMITS"
+
+
+def _run_commit_msg_hook(tmp_path: Path, subject: str) -> subprocess.CompletedProcess[str]:
+    message_path = tmp_path / "COMMIT_EDITMSG"
+    message_path.write_text(f"{subject}\n", encoding="utf-8")
+    hook_path = Path(__file__).resolve().parents[1] / ".githooks" / "commit-msg"
+    return subprocess.run(
+        ["bash", str(hook_path), str(message_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_commit_msg_hook_accepts_canonical_release_subject(tmp_path: Path) -> None:
+    result = _run_commit_msg_hook(tmp_path, "chore: release 1.13.0")
+
+    assert result.returncode == 0
+
+
+def test_commit_msg_hook_still_rejects_other_unscoped_subjects(tmp_path: Path) -> None:
+    result = _run_commit_msg_hook(tmp_path, "fix: unscoped change")
+
+    assert result.returncode == 1
+    assert "<type>(<scope>): <subject> or chore: release <version>" in result.stderr

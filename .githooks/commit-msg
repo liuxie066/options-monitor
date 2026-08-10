@@ -4,10 +4,11 @@ set -euo pipefail
 msg_file="${1:?missing commit message file}"
 first_line="$(sed -n '1p' "$msg_file" | tr -d '\r')"
 
-pattern='^[a-z]+\([a-z0-9._-]+\): .+'
-if [[ ! "$first_line" =~ $pattern ]]; then
+scoped_pattern='^[a-z]+\([a-z0-9._-]+\): .+'
+release_pattern='^chore: release [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+if [[ ! "$first_line" =~ $scoped_pattern && ! "$first_line" =~ $release_pattern ]]; then
   echo "[guardrails] invalid commit message." >&2
-  echo "[guardrails] expected: <type>(<scope>): <subject>" >&2
+  echo "[guardrails] expected: <type>(<scope>): <subject> or chore: release <version>" >&2
   echo "[guardrails] example : chore(config): add deploy guardrails" >&2
   exit 1
 fi
