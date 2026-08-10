@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.13.1 - 2026-08-10
+
+### New Features
+- Added an explicit Linux `runtime-files` secret-delivery profile for restricted Incus/LXC hosts, materializing fixed systemd-encrypted credentials into a root-owned tmpfs runtime directory without exposing secret values through argv, logs, or environment variables.
+
+### Improvements
+- Added a guarded `om service credentials-migrate` workflow with decryptability and consumer preflights, dry-run-first activation, active-service-only restarts, post-apply drift verification, rollback, and legacy shared-environment cleanup only after a successful cutover.
+
+### Bug Fixes
+- Fixed service-profile drift and rollback to compare against the profile persisted on disk, so failed credential migrations restore the previous profile and unit state instead of validating against the requested target profile.
+
 ## 1.13.0 - 2026-08-10
 
 ### New Features
