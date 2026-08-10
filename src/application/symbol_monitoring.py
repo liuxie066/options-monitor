@@ -144,6 +144,9 @@ def run_symbol_monitoring(
         symbol_cfg.pop("yield_enhancement", None)
         symbol_cfg[COMBO_YIELD_CONFIG_KEY] = yield_enhancement_cfg
     yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
+    combo_variant = str(
+        (yield_enhancement_policy.config or {}).get("variant") or "sp_lc"
+    ).strip().lower()
     stock = prefilters.stock
     if want_call and isinstance(stock, dict):
         effective_min_strike = resolve_effective_sell_call_min_strike(
@@ -350,6 +353,18 @@ def run_symbol_monitoring(
                             "quote_receipt_relpath": exc.receipt_relpath,
                         }
                     )
+            if want_yield_enhancement:
+                inputs.candidate_capture_status_sink_fn(
+                    {
+                        "symbol": symbol.upper(),
+                        "strategy_mode": "combo_yield",
+                        "status": "failed",
+                        "reason": "required_data_snapshot_unavailable",
+                        "quote_snapshot_id": exc.snapshot_id,
+                        "quote_receipt_relpath": exc.receipt_relpath,
+                        "variant": combo_variant,
+                    }
+                )
         for family, enabled in (
             ("sell_put", want_put),
             ("combo_yield", want_yield_enhancement),
@@ -559,9 +574,6 @@ def run_symbol_monitoring(
 
     if want_yield_enhancement:
         try:
-            combo_variant = str(
-                (yield_enhancement_policy.config or {}).get("variant") or "sp_lc"
-            ).strip().lower()
             combo_result = deps.run_combo_yield_scan_fn(
                 base=inputs.base,
                 sym=symbol,
@@ -583,20 +595,48 @@ def run_symbol_monitoring(
                 combo_result,
             )
             combo_candidate_count = _summary_candidate_count(combo_result)
+            combo_capture_status = "completed"
+            combo_capture_reason: str | None = None
+            if combo_variant == "cc_lp":
+                if not isinstance(combo_result, dict):
+                    raise ValueError("cc_lp summary result is unavailable")
+                cc_lp_status = str(
+                    combo_result.get("status") or ""
+                ).strip().lower()
+                if cc_lp_status in {"candidates_found", "no_candidate"}:
+                    combo_capture_status = "completed"
+                elif cc_lp_status == "not_applicable":
+                    combo_capture_status = "not_applicable"
+                    combo_capture_reason = str(
+                        combo_result.get("reason") or "cc_lp_not_applicable"
+                    ).strip()
+                else:
+                    raise ValueError(
+                        "unexpected cc_lp summary status: "
+                        f"{cc_lp_status or 'missing'}"
+                    )
             _publish_status(
                 family="combo_yield",
-                status="completed",
+                status=combo_capture_status,
                 candidate_count=combo_candidate_count,
+                reason=combo_capture_reason,
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
-                **_completed_empty_evidence(combo_candidate_count),
+                **(
+                    _completed_empty_evidence(combo_candidate_count)
+                    if combo_capture_status == "completed"
+                    else {"source_outcome": None, "reason_code": None}
+                ),
             )
             _report_capture(
                 strategy_mode="combo_yield",
-                status="completed",
-                reason=_capture_reason(
-                    combo_candidate_count,
-                    None,
+                status=combo_capture_status,
+                reason=(
+                    combo_capture_reason
+                    or _capture_reason(
+                        combo_candidate_count,
+                        None,
+                    )
                 ),
                 variant=combo_variant,
             )

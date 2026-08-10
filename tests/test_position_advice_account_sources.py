@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.opening_candidate_snapshot import (
     dependency_from_hash,
     seal_opening_candidate_snapshot,
@@ -15,7 +16,11 @@ from src.application.position_advice_account_sources import (
     build_cash_capacity,
     build_share_coverage,
     publish_account_position_advice_sources,
+    publish_or_reuse_account_portfolio_source,
     publish_account_run_sources,
+)
+from src.application.position_advice_account_identity_reader import (
+    read_current_run_portfolio_identity,
 )
 from src.application.position_advice_source_receipts import (
     publish_source_receipt,
@@ -318,6 +323,147 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
         ]
         == quote["snapshot_id"]
     )
+
+
+def test_early_portfolio_source_is_reused_by_full_graph_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    state, quotes, _quote, snapshot = _account_run_inputs(tmp_path)
+    context = json.loads((state / "portfolio_context.json").read_text())
+    first = publish_or_reuse_account_portfolio_source(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        portfolio_context=context,
+        completed_at=NOW + timedelta(seconds=1),
+    )
+    first_path = Path(first["receipt_path"])
+    first_bytes = first_path.read_bytes()
+
+    identity = read_current_run_portfolio_identity(
+        account_state_dir=state,
+        account_run_id="run-1",
+        expected_account="lx",
+        expected_market="US",
+        now=NOW + timedelta(seconds=2),
+    )
+    result = publish_account_run_sources(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        required_data_root=quotes,
+        decision_snapshot_reader=lambda: snapshot,
+        portfolio_context_override=context,
+        completed_at=NOW + timedelta(seconds=3),
+    )
+    portfolio = next(
+        item for item in result["receipts"] if item["source_kind"] == "portfolio"
+    )
+
+    assert Path(portfolio["receipt_path"]) == first_path
+    assert first_path.read_bytes() == first_bytes
+    assert portfolio["receipt"]["snapshot_id"] == identity["snapshot_id"]
+    assert portfolio["receipt"]["completed_at"] == first["receipt"]["completed_at"]
+    assert len(list(first_path.parent.parent.iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "tampered",
+        "invalid_utf8",
+        "stale",
+        "wrong_run",
+        "wrong_account",
+        "wrong_broker",
+        "wrong_market",
+        "context_drift",
+    ],
+)
+def test_existing_portfolio_source_conflicts_fail_closed(
+    tmp_path: Path,
+    conflict: str,
+) -> None:
+    state, _quotes, _quote, _snapshot = _account_run_inputs(tmp_path)
+    context = json.loads((state / "portfolio_context.json").read_text())
+    first = publish_or_reuse_account_portfolio_source(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        portfolio_context=context,
+        completed_at=NOW + timedelta(seconds=1),
+    )
+    kwargs = {
+        "account_run_id": "run-1",
+        "normalized_account": "lx",
+        "broker": "futu",
+        "included_markets": ["US"],
+        "account_state_dir": state,
+        "portfolio_context": context,
+        "completed_at": NOW + timedelta(seconds=2),
+    }
+    if conflict == "tampered":
+        Path(first["receipt_path"]).with_name("payload.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+    elif conflict == "invalid_utf8":
+        Path(first["receipt_path"]).write_bytes(b"\xff\xfe")
+    elif conflict == "stale":
+        kwargs["completed_at"] = NOW + timedelta(seconds=1800)
+    elif conflict == "wrong_run":
+        current_run_dir = Path(first["receipt_path"]).parent.parent
+        wrong_run_dir = current_run_dir.parent / canonical_sha256(
+            {"producer_run_id": "run-2"}
+        )
+        current_run_dir.rename(wrong_run_dir)
+        kwargs["account_run_id"] = "run-2"
+    elif conflict == "wrong_account":
+        kwargs["normalized_account"] = "sy"
+    elif conflict == "wrong_broker":
+        kwargs["broker"] = "other"
+    elif conflict == "wrong_market":
+        kwargs["included_markets"] = ["HK"]
+    elif conflict == "context_drift":
+        kwargs["portfolio_context"] = {
+            **context,
+            "cash_by_currency": {"CNY": 9999},
+        }
+
+    with pytest.raises(PositionAdviceAccountSourceError):
+        publish_or_reuse_account_portfolio_source(**kwargs)
+
+
+def test_incomplete_portfolio_run_directory_is_not_repaired(
+    tmp_path: Path,
+) -> None:
+    state, _quotes, _quote, _snapshot = _account_run_inputs(tmp_path)
+    context = json.loads((state / "portfolio_context.json").read_text())
+    run_dir = (
+        state
+        / "position_advice_producers"
+        / "portfolio"
+        / canonical_sha256({"producer_run_id": "run-1"})
+    )
+    run_dir.mkdir(parents=True)
+
+    with pytest.raises(PositionAdviceAccountSourceError):
+        publish_or_reuse_account_portfolio_source(
+            account_run_id="run-1",
+            normalized_account="lx",
+            broker="futu",
+            included_markets=["US"],
+            account_state_dir=state,
+            portfolio_context=context,
+            completed_at=NOW + timedelta(seconds=1),
+        )
+    assert list(run_dir.iterdir()) == []
 
 
 def test_account_run_accepts_prepared_portfolio_context_without_legacy_filename(

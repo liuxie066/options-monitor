@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -681,11 +682,37 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
 
 
 def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
+    from src.application.account_run import (
+        publish_current_run_portfolio_source,
+        run_one_account,
+    )
+    from src.application.position_advice_account_identity_reader import (
+        read_current_run_portfolio_identity,
+    )
 
     request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
+    env["acct_state_dir"].mkdir(parents=True, exist_ok=True)
+    cfg = json.loads(
+        request.account_config_authority.canonical_bytes.decode("utf-8")
+    )
+    portfolio = publish_current_run_portfolio_source(
+        cfg=cfg,
+        account_run_id=request.run_id,
+        account=request.acct,
+        markets_to_run=request.markets_to_run,
+        account_state_dir=env["acct_state_dir"],
+        prepared_portfolio_context={
+            "filters": {"account": "lx"},
+            "portfolio_source_name": "futu",
+            "source_account_identifiers": ["lx"],
+            "source_observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_observation_status": "trusted",
+        },
+    )
+    receipt_path = Path(portfolio["receipt_path"])
+    receipt_bytes = receipt_path.read_bytes()
 
     monkeypatch.setattr(
         env["mod"],
@@ -714,8 +741,17 @@ def test_run_one_account_returns_failed_outcome_when_pipeline_fails(monkeypatch,
 
     assert outcome.ran_pipeline is False
     assert outcome.prefetch_done is True
+    assert outcome.result.should_notify is True
     assert outcome.result.notification_text == ""
     assert outcome.result.decision_reason == "pipeline failed"
+    assert receipt_path.read_bytes() == receipt_bytes
+    assert read_current_run_portfolio_identity(
+        account_state_dir=env["acct_state_dir"],
+        account_run_id=request.run_id,
+        expected_account=request.acct,
+        expected_market="US",
+        now=datetime.now(timezone.utc),
+    )["status"] == "available"
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "error" for evt in runlog.events)
     assert any(evt["action"] == "run_pipeline_result" for evt in env["audit_events"])
 
