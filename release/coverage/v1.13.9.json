@@ -1,0 +1,98 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.9",
+  "base": {
+    "tag": "v1.13.8",
+    "commit": "ccdce12b86ea5c67b136ffefcbae0e4b579437ec"
+  },
+  "reviewed_head": "4ce738c715345fedd8a37bca1ee33029a719816c",
+  "commits": [
+    {
+      "sha": "af6f08d188eb93154cd09538243531f7300cf35e",
+      "subject": "docs(gateflow): accept plan for combo-yield-remove-staggered-ledger"
+    },
+    {
+      "sha": "5d1b4c05725ecee78eb833b3d7ca762f73309bb2",
+      "subject": "chore: release 1.13.8"
+    },
+    {
+      "sha": "cdf81cf92c23db01770a5fdbb74b72571b5c2f81",
+      "subject": "docs(gateflow): accept combo-yield-remove-staggered-ledger slices"
+    },
+    {
+      "sha": "ae43ed9a7c7384cb957346d497310d39aa6825d4",
+      "subject": "fix(combo-yield): fail closed metadata-less staggered groups in attribution"
+    },
+    {
+      "sha": "4418fae379e51c56406f1a2da84ef218f2b3bf3c",
+      "subject": "chore(docs): regenerate dependency graph after combo pairing removal"
+    },
+    {
+      "sha": "1340876f05b52f5fdb0196873aae0a296351d137",
+      "subject": "Merge pull request #145 from liuxie066/combo-yield-remove-staggered-ledger"
+    },
+    {
+      "sha": "ceb7544194f76cfd6745ca28796a9f896404eb9b",
+      "subject": "docs(gateflow): close combo-yield-remove-staggered-ledger"
+    },
+    {
+      "sha": "b1611f6c2ec14d50004dcacdd45150749fbf4a5c",
+      "subject": "fix(health-check): use metadata-only secret status in feishu-ws --check (#146)"
+    },
+    {
+      "sha": "c9940b303ac69b0ab145130c9e96ba9f7cf912cb",
+      "subject": "chore(docs): regenerate dependency graph"
+    },
+    {
+      "sha": "4ce738c715345fedd8a37bca1ee33029a719816c",
+      "subject": "test(smoke): update secret backend unavailable assertion for graceful degradation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed upgrade health check failure for `options-monitor-feishu-ws.service`: `feishu-ws --check` now uses metadata-only secret status (`resolve_secret_status`) instead of resolving the secret value, and `resolve_secret_status` degrades gracefully when the systemd credential backend context is unavailable (e.g. health-check subprocess lacks `CREDENTIALS_DIRECTORY`), preventing `SecretBackendUnavailable` from blocking production upgrades.",
+      "commits": [
+        "b1611f6c2ec14d50004dcacdd45150749fbf4a5c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "af6f08d188eb93154cd09538243531f7300cf35e",
+      "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "5d1b4c05725ecee78eb833b3d7ca762f73309bb2",
+      "reason": "release metadata commit; no user-facing behavioral change"
+    },
+    {
+      "commit": "cdf81cf92c23db01770a5fdbb74b72571b5c2f81",
+      "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "ae43ed9a7c7384cb957346d497310d39aa6825d4",
+      "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "4418fae379e51c56406f1a2da84ef218f2b3bf3c",
+      "reason": "auto-generated dependency graph refresh; no user-facing behavioral change"
+    },
+    {
+      "commit": "1340876f05b52f5fdb0196873aae0a296351d137",
+      "reason": "merge commit; covered by individual commit dispositions"
+    },
+    {
+      "commit": "ceb7544194f76cfd6745ca28796a9f896404eb9b",
+      "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "c9940b303ac69b0ab145130c9e96ba9f7cf912cb",
+      "reason": "auto-generated dependency graph refresh; no user-facing behavioral change"
+    },
+    {
+      "commit": "4ce738c715345fedd8a37bca1ee33029a719816c",
+      "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+    }
+  ]
+}
