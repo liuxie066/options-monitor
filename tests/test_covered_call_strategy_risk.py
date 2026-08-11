@@ -1,8 +1,48 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
+
+
+def _earnings_evidence(*, event_date: str | None = None) -> dict:
+    event = None
+    if event_date is not None:
+        days_before_expiration = (
+            date.fromisoformat("2026-06-19") - date.fromisoformat(event_date)
+        ).days
+        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+        event = {
+            "earnings_date": event_date,
+            "days_before_expiration": days_before_expiration,
+            "classification": "blocking" if blocking else "nonblocking",
+            "blocking": blocking,
+        }
+    events = [] if event is None else [event]
+    blocking_events = [item for item in events if item["blocking"]]
+    nonblocking_events = [item for item in events if not item["blocking"]]
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-05-20",
+        "earnings_hard_window_start": "2026-06-13",
+        "earnings_hard_window_end": "2026-06-19",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": bool(events),
+        "earnings_blocking_has_event": bool(blocking_events),
+        "earnings_events": events,
+        "earnings_blocking_events": blocking_events,
+        "earnings_nonblocking_events": nonblocking_events,
+    }
 
 
 def _candidate(**overrides):
@@ -31,10 +71,8 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
         "strike_above_spot_pct": 0.166667,
-        "earnings_evidence_status": "ready",
-        "earnings_has_event": False,
-        "earnings_event_dates": "",
     }
+    row.update(_earnings_evidence())
     row.update(overrides)
     return row
 
@@ -63,6 +101,35 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     assert top["covered_notional_cny"] > 0
     assert top["strike_upside_margin_pct"] == 0.166667
     assert "call_gap_up_opportunity_cost_cny" not in top
+
+
+def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
+    from src.application.covered_call_strategy_risk import (
+        evaluate_covered_call_underwriting_row,
+        resolve_covered_call_underwriting_config,
+    )
+
+    cfg = resolve_covered_call_underwriting_config(
+        {"strategy": "insurance_underwriting"}
+    )
+    near = evaluate_covered_call_underwriting_row(
+        _candidate(
+            net_income_cny=1_400.0,
+            **_earnings_evidence(event_date="2026-06-13"),
+        ),
+        cfg=cfg,
+    )
+    distant = evaluate_covered_call_underwriting_row(
+        _candidate(
+            net_income_cny=1_400.0,
+            **_earnings_evidence(event_date="2026-06-01"),
+        ),
+        cfg=cfg,
+    )
+
+    assert near["accepted"] is False
+    assert near["rule"] == "risk_earnings_event"
+    assert distant["accepted"] is True
 
 
 def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budget(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_EVIDENCE_UNAVAILABLE,
     REJECT_INPUT_INVALID,
     REJECT_INPUT_MISSING,
+    REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
@@ -284,16 +285,27 @@ def evidence_summary_from_decisions(
 
     ineligible = 0
     evidence_unavailable = 0
+    diagnostic_gap_count = 0
     policy_rejected = 0
     unavailable_by_reason: dict[str, int] = {}
+    diagnostic_gaps_by_reason: dict[str, int] = {}
+    accepted_decisions = 0
+    unavailable_reasons = {
+        REJECT_EVIDENCE_UNAVAILABLE,
+        REJECT_INPUT_INVALID,
+        REJECT_INPUT_MISSING,
+        REJECT_RISK_EARNINGS_UNAVAILABLE,
+    }
     for record in decisions:
         if not isinstance(record, dict):
-            continue
+            raise ValueError("candidate evidence decision must be an object")
         decision = (
             record.get("opening_decision")
             if isinstance(record.get("opening_decision"), dict)
             else record
         )
+        if not isinstance(decision, dict):
+            raise ValueError("candidate opening decision must be an object")
         rejects = (decision or {}).get("rejects") or []
         reasons = [
             str(item.get("reason") or "")
@@ -301,22 +313,21 @@ def evidence_summary_from_decisions(
             if isinstance(item, dict)
         ]
         if bool((decision or {}).get("accepted")):
+            accepted_decisions += 1
             continue
-        unavailable_reasons = {
-            REJECT_EVIDENCE_UNAVAILABLE,
-            REJECT_INPUT_INVALID,
-            REJECT_INPUT_MISSING,
-        }
         matched_unavailable_reasons = unavailable_reasons.intersection(reasons)
+        definitive_reasons = set(reasons) - unavailable_reasons
+        gap_codes: list[str] = []
         if matched_unavailable_reasons:
-            evidence_unavailable += 1
-            metric_values = [
-                item.get("metric_value")
-                for item in rejects
-                if isinstance(item, dict)
-                and str(item.get("reason") or "") in matched_unavailable_reasons
-            ]
-            for value in metric_values:
+            diagnostic_gap_count += 1
+            for item in rejects:
+                if (
+                    not isinstance(item, dict)
+                    or str(item.get("reason") or "")
+                    not in matched_unavailable_reasons
+                ):
+                    continue
+                value = item.get("metric_value")
                 code = None
                 if isinstance(value, dict):
                     raw_codes = value.get("reason_codes")
@@ -324,18 +335,54 @@ def evidence_summary_from_decisions(
                         code = str(raw_codes[0])
                     elif value.get("reason_code"):
                         code = str(value.get("reason_code"))
-                key = code or "evidence_unavailable"
-                unavailable_by_reason[key] = unavailable_by_reason.get(key, 0) + 1
+                gap_codes.append(code or "evidence_unavailable")
+            for code in sorted(set(gap_codes)):
+                diagnostic_gaps_by_reason[code] = (
+                    diagnostic_gaps_by_reason.get(code, 0) + 1
+                )
+        if matched_unavailable_reasons and not definitive_reasons:
+            evidence_unavailable += 1
+            for code in sorted(set(gap_codes or ["evidence_unavailable"])):
+                unavailable_by_reason[code] = unavailable_by_reason.get(code, 0) + 1
         elif REJECT_CONTRACT_INELIGIBLE in reasons:
             ineligible += 1
         else:
             policy_rejected += 1
-    evaluated = len(decisions) + accepted_count
+    if accepted_decisions != accepted_count:
+        raise ValueError("accepted candidate count does not match decision evidence")
+    evaluated = len(decisions)
     return {
         "evaluated_contract_count": evaluated,
         "accepted_count": accepted_count,
         "contract_ineligible_count": ineligible,
         "policy_rejected_count": policy_rejected,
         "evidence_unavailable_count": evidence_unavailable,
+        "eligibility_unresolved_count": evidence_unavailable,
+        "diagnostic_evidence_gap_count": diagnostic_gap_count,
         "unavailable_by_reason": unavailable_by_reason,
+        "diagnostic_gaps_by_reason": diagnostic_gaps_by_reason,
     }
+
+
+def project_evidence_scan_status(
+    *,
+    evidence: dict[str, Any],
+    candidate_count: int,
+) -> tuple[str, str | None]:
+    """Project unresolved eligibility evidence into the shared scan status."""
+
+    unresolved = int(
+        evidence.get(
+            "eligibility_unresolved_count",
+            evidence.get("evidence_unavailable_count") or 0,
+        )
+        or 0
+    )
+    if candidate_count > 0:
+        return "completed", "partial_data" if unresolved > 0 else None
+    if unresolved == 0:
+        return "completed", "no_candidate"
+    evaluated = int(evidence.get("evaluated_contract_count") or 0)
+    if evaluated > 0 and unresolved < evaluated:
+        return "completed", "partial_data"
+    return "unavailable", "data_unavailable"

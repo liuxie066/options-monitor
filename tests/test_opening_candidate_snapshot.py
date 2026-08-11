@@ -6,9 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OpeningCandidateSnapshotError,
+    candidate_universe_summary,
     dependency_from_file,
     dependency_from_hash,
     load_latest_opening_candidate_snapshot,
@@ -16,6 +22,7 @@ from src.application.opening_candidate_snapshot import (
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
     seal_opening_candidate_snapshot,
+    validate_opening_candidate_snapshot,
 )
 
 
@@ -48,7 +55,19 @@ def _candidate(*, contract_symbol: str, period_return: float) -> dict:
         "iv_rv_ratio": 1.4,
         "iv_minus_rv": 0.12,
         "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-08-06",
+        "earnings_hard_window_start": "2026-09-12",
+        "earnings_hard_window_end": "2026-09-18",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
         "earnings_has_event": False,
+        "earnings_blocking_has_event": False,
+        "earnings_events": [],
+        "earnings_blocking_events": [],
+        "earnings_nonblocking_events": [],
         "max_new_contracts": 1,
         "policy_min_dte": 21,
         "policy_max_dte": 60,
@@ -171,6 +190,40 @@ def test_same_snapshot_replay_is_byte_hash_and_order_stable(tmp_path: Path) -> N
     assert second["content_sha256"] == first["content_sha256"]
     assert second["ranked_candidates"] == first["ranked_candidates"]
     assert snapshot_path.read_bytes() == first_bytes
+
+
+@pytest.mark.parametrize(
+    "collection",
+    (
+        "strategy_results",
+        "candidate_decisions",
+        "ranked_candidates",
+        "scope_results",
+    ),
+)
+def test_snapshot_collection_scalar_items_fail_with_domain_error(
+    tmp_path: Path,
+    collection: str,
+) -> None:
+    payload = _seal(tmp_path)
+    malformed = {**payload, collection: [None]}
+    malformed["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in malformed.items()
+            if key != "content_sha256"
+        }
+    )
+
+    with pytest.raises(
+        OpeningCandidateSnapshotError,
+        match="opening candidate (strategy results|snapshot collections) are invalid",
+    ):
+        validate_opening_candidate_snapshot(
+            malformed,
+            expected_run_id="run-1",
+            expected_account="lx",
+        )
 
 
 def test_account_execution_order_does_not_change_market_facts(tmp_path: Path) -> None:
@@ -391,6 +444,10 @@ def test_shared_config_call_without_account_holding_is_a_legal_zero_candidate(
     )
     assert unheld_scope["status"] == "not_applicable"
     assert unheld_scope["reason_code"] == "covered_call_underlying_not_held"
+    assert candidate_universe_summary(payload) == {
+        "status": "complete",
+        "affected_scopes": [],
+    }
 
 
 def test_missing_call_portfolio_context_remains_data_unavailable(
@@ -443,6 +500,16 @@ def test_missing_call_portfolio_context_remains_data_unavailable(
     }
     assert payload["opening_status"] == "partial_data"
     assert results == {"call": "data_unavailable", "put": "no_candidate"}
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "3690.HK",
+                "strategy_mode": "call",
+                "reason_code": "covered_call_portfolio_context_unavailable",
+            }
+        ],
+    }
 
 
 def test_input_invalid_decision_cannot_seal_as_clean_no_candidate(
@@ -522,6 +589,16 @@ def test_input_invalid_decision_cannot_seal_as_clean_no_candidate(
             "scope_count": 1,
         }
     ]
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "reason_code": "input_invalid",
+            }
+        ],
+    }
 
 
 @pytest.mark.parametrize("scan_reason", ["partial_data", "no_candidate"])
@@ -618,6 +695,10 @@ def test_mixed_input_unavailable_decisions_seal_as_partial_data(
             "scope_count": 1,
         }
     ]
+    universe = candidate_universe_summary(payload)
+    assert universe["status"] == "partial"
+    assert universe["affected_scopes"][0]["symbol"] == "NVDA"
+    assert universe["affected_scopes"][0]["strategy_mode"] == "put"
 
 
 def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
@@ -823,11 +904,21 @@ def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(
         sealed_at=NOW,
     )
 
-    assert payload["opening_status"] == "partial_data"
+    assert payload["opening_status"] == "candidates_found"
     result_by_mode = {
         row["strategy_mode"]: row for row in payload["strategy_results"]
     }
     assert result_by_mode["put"]["strategy_status"] == "candidates_found"
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "call",
+                "reason_code": "failed",
+            }
+        ],
+    }
 
 
 def test_tamper_wrong_scope_and_missing_dependency_fail_closed(tmp_path: Path) -> None:
