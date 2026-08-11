@@ -1,0 +1,74 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.11",
+  "base": {
+    "tag": "v1.13.10",
+    "commit": "c9d641296888dc9529f84d5360ae1ef55f910b58"
+  },
+  "reviewed_head": "2a3a1bca88a23a8e68534833f0b0db1646c4e7e8",
+  "commits": [
+    {
+      "sha": "4941e32d2294a4c60418fedc20aaf9ff7b75fca7",
+      "subject": "docs(gateflow): accept plan for perf-e2e-regression"
+    },
+    {
+      "sha": "2bae387abd24ca63cc63becd9caad24d077e60a1",
+      "subject": "docs(gateflow): accept perf-e2e-regression slice-1"
+    },
+    {
+      "sha": "7a5b1e66203347075237c134094bc355290c3207",
+      "subject": "docs(gateflow): accept deepreview for perf-e2e-regression"
+    },
+    {
+      "sha": "801184358c9b0106e5a3c3dd0110187e5abf02e8",
+      "subject": "docs(gateflow): accept PR review for perf-e2e-regression"
+    },
+    {
+      "sha": "3e8ae4098f52346b4c07e563b5bb41a3cc87331b",
+      "subject": "docs(gateflow): record final closeout for perf-e2e-regression"
+    },
+    {
+      "sha": "c187382eb0d75a36c327e09e0ac43ed614d79e7c",
+      "subject": "Merge pull request #147 from liuxie066/perf-e2e-regression"
+    },
+    {
+      "sha": "2a3a1bca88a23a8e68534833f0b0db1646c4e7e8",
+      "subject": "fix(candidate): restore term-matched RV flow"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored Sell Put and Covered Call candidate evaluation for short-history underliers by accepting the canonical term-matched realized-volatility status, keeping term-matched RV authoritative when the legacy DTE-weighted estimate is unavailable, and preserving `partial_data` versus `data_unavailable` in sealed snapshots for fail-closed Advice and Daily Brief handling.",
+      "commits": [
+        "2a3a1bca88a23a8e68534833f0b0db1646c4e7e8"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4941e32d2294a4c60418fedc20aaf9ff7b75fca7",
+      "reason": "Planning and review artifacts only; no runtime or public contract change."
+    },
+    {
+      "commit": "2bae387abd24ca63cc63becd9caad24d077e60a1",
+      "reason": "Adds deterministic end-to-end regression coverage and Gateflow evidence only; no production code change."
+    },
+    {
+      "commit": "7a5b1e66203347075237c134094bc355290c3207",
+      "reason": "DeepReview evidence only; no runtime or public contract change."
+    },
+    {
+      "commit": "801184358c9b0106e5a3c3dd0110187e5abf02e8",
+      "reason": "Pull-request review evidence only; no runtime or public contract change."
+    },
+    {
+      "commit": "3e8ae4098f52346b4c07e563b5bb41a3cc87331b",
+      "reason": "Gateflow closeout documentation only; no runtime or public contract change."
+    },
+    {
+      "commit": "c187382eb0d75a36c327e09e0ac43ed614d79e7c",
+      "reason": "Merge commit for the already-accounted test-and-documentation-only change; no additional release impact."
+    }
+  ]
+}
