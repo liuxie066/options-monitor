@@ -138,3 +138,69 @@ def test_zero_bid_only_scope_projects_no_candidate_not_partial_data() -> None:
         evidence=evidence,
         candidate_count=0,
     ) == ("completed", "no_candidate")
+
+
+def test_input_invalid_only_scope_projects_data_unavailable_not_no_candidate() -> None:
+    from src.application.candidate_scanning import evidence_summary_from_decisions
+    from src.application.sell_put_steps import _evidence_scan_status
+
+    decisions = [
+        {
+            "opening_decision": {
+                "accepted": False,
+                "rejects": [
+                    {
+                        "reason": "input_invalid",
+                        "metric_value": {
+                            "reason_code": "term_matched_rv_unavailable",
+                        },
+                    }
+                ],
+            }
+        }
+    ]
+    evidence = evidence_summary_from_decisions(
+        decisions=decisions,
+        accepted_count=0,
+    )
+
+    assert evidence["evidence_unavailable_count"] == 1
+    assert evidence["policy_rejected_count"] == 0
+    assert evidence["unavailable_by_reason"] == {
+        "term_matched_rv_unavailable": 1,
+    }
+    assert _evidence_scan_status(
+        evidence=evidence,
+        candidate_count=0,
+    ) == ("unavailable", "data_unavailable")
+
+
+def test_mixed_input_invalid_scope_projects_partial_data_not_no_candidate() -> None:
+    from src.application.candidate_scanning import evidence_summary_from_decisions
+    from src.application.sell_call_steps import _evidence_scan_status
+
+    decisions = [
+        {
+            "opening_decision": {
+                "accepted": False,
+                "rejects": [{"reason": "input_missing"}],
+            }
+        },
+        {
+            "opening_decision": {
+                "accepted": False,
+                "rejects": [{"reason": "contract_ineligible"}],
+            }
+        },
+    ]
+    evidence = evidence_summary_from_decisions(
+        decisions=decisions,
+        accepted_count=0,
+    )
+
+    assert evidence["evidence_unavailable_count"] == 1
+    assert evidence["contract_ineligible_count"] == 1
+    assert _evidence_scan_status(
+        evidence=evidence,
+        candidate_count=0,
+    ) == ("completed", "partial_data")

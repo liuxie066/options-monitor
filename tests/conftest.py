@@ -52,7 +52,7 @@ def phase2_opening_row(row: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("underlier_observation_reason_code", None)
     out.setdefault("price_tick", 0.01)
     out.setdefault("term_matched_rv", out.get("realized_volatility_estimate", 0.20))
-    out.setdefault("term_matched_rv_status", "ready")
+    out.setdefault("term_matched_rv_status", "ok")
     out.setdefault("term_matched_rv_reason", None)
     out.setdefault("term_matched_rv_input_hash", "b" * 64)
     out.setdefault("option_standard_type", "STANDARD")

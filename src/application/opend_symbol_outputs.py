@@ -606,7 +606,7 @@ def _validate_required_realized_volatility(
             )
         estimate = _normalize_realized_volatility_value(
             row.get("realized_volatility_estimate"),
-            allow_none=False,
+            allow_none=True,
         )
         from src.application.short_vol_metrics import (
             realized_volatility_estimate_for_dte,
@@ -618,12 +618,19 @@ def _validate_required_realized_volatility(
             rv_60=row_windows["realized_volatility_60"],
             rv_120=row_windows["realized_volatility_120"],
         )
-        if estimate is None or expected is None or not math.isclose(
-            estimate,
-            expected,
-            rel_tol=0.0,
-            abs_tol=1e-9,
+        estimates_disagree = (estimate is None) != (expected is None)
+        if (
+            not estimates_disagree
+            and estimate is not None
+            and expected is not None
         ):
+            estimates_disagree = not math.isclose(
+                estimate,
+                expected,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        if estimates_disagree:
             raise SourceReceiptError(
                 "required-data row realized volatility does not match dte policy"
             )
