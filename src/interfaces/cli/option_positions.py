@@ -44,7 +44,6 @@ from src.application.ledger.api import (
     select_lifecycle_migration_targets,
 )
 from src.application.positions.auto_close import main as run_option_positions_auto_close
-from src.application.positions.combo_pairing import execute_staggered_combo_yield_pairing
 from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_adjust,
@@ -718,17 +717,6 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_adjust, high_risk=True)
 
-    p_pair_combo = sub.add_parser(
-        'pair-combo-yield',
-        help='pair one open short Put and one open long Call as staggered Combo Yield',
-    )
-    _add_runtime_root_arg(p_pair_combo)
-    p_pair_combo.add_argument('--put-record-id', required=True)
-    p_pair_combo.add_argument('--call-record-id', required=True)
-    p_pair_combo.add_argument('--pair-intent-id', required=True)
-    p_pair_combo.add_argument('--format', default='text', choices=['text', 'json'])
-    _add_local_write_flags(p_pair_combo, high_risk=True)
-
     p_adopt_combo_identity = sub.add_parser(
         "adopt-combo-identity",
         help=("insert immutable identity for two exact existing Combo Yield legs"),
@@ -959,7 +947,6 @@ def main(argv: list[str] | None = None) -> int:
         "assigned-stock-sale",
         "void-event",
         "adjust-lot",
-        "pair-combo-yield",
         "adopt-combo-identity",
         "confirm-combo",
         "reject-combo",
@@ -2151,44 +2138,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         res = out["result"]
         print(f"[DONE] adjusted {args.record_id} event_id={res.get('event_id')}")
-        return 0
-
-    if args.cmd == 'pair-combo-yield':
-        control = write_controls["pair-combo-yield"]
-        dry_run = not bool(control["write_requested"])
-        try:
-            out = execute_staggered_combo_yield_pairing(
-                repo,
-                put_record_id=args.put_record_id,
-                call_record_id=args.call_record_id,
-                pair_intent_id=args.pair_intent_id,
-                dry_run=dry_run,
-            )
-        except ValueError as e:
-            raise SystemExit(str(e))
-        payload = attach_write_contract(
-            {**out, "ledger_store": ledger_store},
-            dry_run=dry_run,
-            write_applied=(not dry_run and out.get("mode") == "applied"),
-            rollback_hint=(
-                "void both created manual adjustment events with option-positions void-event --confirm"
-            ),
-        )
-        if _json_or_text_format(args) == "json":
-            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-            return 0
-        prefix = "[NOOP]" if out.get("mode") == "already_paired" else ("[DRY_RUN]" if dry_run else "[DONE]")
-        print(
-            f"{prefix} Combo Yield pair group={out['strategy_group_id']} "
-            f"put={out['put']['record_id']} call={out['call']['record_id']}"
-        )
-        if dry_run or out.get("mode") == "already_paired":
-            print(json.dumps({"put": out["put"]["patch"], "call": out["call"]["patch"]}, ensure_ascii=False, indent=2))
-        else:
-            print(
-                "adjust_events="
-                f"{out['put']['result'].get('event_id')},{out['call']['result'].get('event_id')}"
-            )
         return 0
 
     if args.cmd == "adopt-combo-identity":

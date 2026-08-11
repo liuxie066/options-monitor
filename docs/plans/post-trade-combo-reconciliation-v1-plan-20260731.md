@@ -1,5 +1,9 @@
 # 成交后 Combo 反向归组 V1 实施方案
 
+> 范围收窄说明（2026-08-11）：本计划中的 staggered-expiry（错期）反向归组范围已不再实施。
+> 组合收益策略只保留 same-expiry（同期）结构；错期代码的删除见 work unit
+> `combo-yield-remove-staggered-ledger`。以下历史内容仅作记录，不代表现行行为。
+
 ## 1. 目标与成功标准
 
 本方案把 Combo 识别从“下单前声明组合意图”改为“成交落账后，根据两条已成交 open lot 反向推理，再由用户确认后写入 canonical Combo 身份”。
