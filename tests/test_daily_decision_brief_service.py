@@ -1549,10 +1549,10 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
                 "put_contract_symbol": "NVDA_P95",
                 "call_contract_symbol": "NVDA_C130",
                 "put_expiration": "2026-08-21",
-                "call_expiration": "2026-09-18",
+                "call_expiration": "2026-08-21",
                 "put_strike": 95,
                 "call_strike": 130,
-                "structure_mode": "staggered_expiry_pair",
+                "structure_mode": "same_expiry_pair",
                 "funding_accepted": True,
                 "put_only_annualized_net_return": 0.08,
                 "call_delta": 0.20,
@@ -1564,10 +1564,10 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C125",
                 "put_expiration": "2026-08-21",
-                "call_expiration": "2026-09-18",
+                "call_expiration": "2026-08-21",
                 "put_strike": 100,
                 "call_strike": 125,
-                "structure_mode": "staggered_expiry_pair",
+                "structure_mode": "same_expiry_pair",
                 "funding_accepted": True,
                 "put_only_annualized_net_return": 0.20,
                 "call_delta": 0.15,
@@ -1579,14 +1579,14 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
                 "put_contract_symbol": "AAPL_P180",
                 "call_contract_symbol": "AAPL_C220",
                 "put_expiration": "2026-08-21",
-                "call_expiration": "2026-09-18",
+                "call_expiration": "2026-08-21",
                 "put_strike": 180,
                 "call_strike": 220,
                 "bid": 4.25,
                 "linked_call_ask": 0.55,
                 "cash_required_usd": 18_000,
                 "cash_free_usd": 36_000,
-                "structure_mode": "staggered_expiry_pair",
+                "structure_mode": "same_expiry_pair",
                 "funding_accepted": True,
                 "put_only_annualized_net_return": 0.30,
                 "call_delta": 0.10,
@@ -1614,7 +1614,7 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
 
 
-def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path) -> None:
+def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
@@ -1624,15 +1624,15 @@ def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C125",
                 "put_expiration": "2026-08-21",
-                "call_expiration": "2026-09-18",
+                "call_expiration": "2026-08-21",
                 "put_strike": 100,
                 "call_strike": 125,
                 "annualized_net_credit_yield": 0.20,
                 "earnings_evidence_status": "ready",
                 "earnings_has_event": True,
-                "earnings_event_dates": "2026-08-30",
+                "earnings_event_dates": "2026-08-21",
                 "earnings_events": [
-                    {"earnings_date": "2026-08-30"}
+                    {"earnings_date": "2026-08-21"}
                 ],
                 "earnings_snapshot_hash": "e" * 64,
             }
@@ -1647,13 +1647,13 @@ def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path
     assert candidate["event_risk"]["expiration_relations"] == {
         "put": {
             "expiration": "2026-08-21",
-            "relation": "after_expiration",
-            "days_before_expiration": -9,
+            "relation": "on_expiration",
+            "days_before_expiration": 0,
         },
         "call": {
-            "expiration": "2026-09-18",
-            "relation": "before_expiration",
-            "days_before_expiration": 19,
+            "expiration": "2026-08-21",
+            "relation": "on_expiration",
+            "days_before_expiration": 0,
         },
     }
     assert candidate["event_risk"]["in_attention_window"] is True

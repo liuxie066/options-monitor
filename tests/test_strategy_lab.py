@@ -2390,7 +2390,7 @@ def test_cli_strategy_lab_experiment_run_window(capsys, monkeypatch, tmp_path: P
     assert payload["data"]["evaluation"] is None
 
 
-def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(tmp_path: Path) -> None:
+def test_shadow_replay_capture_and_evaluator_preserve_same_expiry_combo_horizons(tmp_path: Path) -> None:
     from src.application.shadow_replay import build_shadow_replay_dataset
     from src.application.strategy_lab import run_combo_yield_group_experiment
 
@@ -2401,8 +2401,8 @@ def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(t
             "symbol,account,structure_mode,candidate_pair_id,put_expiration,put_dte,call_expiration,call_dte,"
             "spot,multiplier,put_contracts,call_contracts,put_contract_symbol,put_strike,put_bid,"
             "call_contract_symbol,call_strike,call_ask,put_net_credit,call_total_cost,combo_net_credit\n"
-            "TSLA,lx,staggered_expiry_pair,pair-tsla-1,2026-08-21,35,2026-10-16,91,180,100,1,1,"
-            "TSLA260821P00150000,150,6.0,TSLA261016C00220000,220,4.0,600,400,200\n"
+            "TSLA,lx,same_expiry_pair,pair-tsla-1,2026-08-21,35,2026-08-21,35,180,100,1,1,"
+            "TSLA260821P00150000,150,6.0,TSLA260821C00220000,220,4.0,600,400,200\n"
         ),
         encoding="utf-8",
     )
@@ -2410,7 +2410,7 @@ def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(t
     manifest = build_shadow_replay_dataset(
         repo_root=tmp_path,
         run_dir=tmp_path / "output_runs" / "20260717T010000Z-run",
-        dataset_id="staggered-case",
+        dataset_id="same-expiry-case",
     )
     rows = [
         json.loads(line)
@@ -2420,28 +2420,27 @@ def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(t
     ]
     by_role = {row["leg_role"]: row for row in rows}
 
-    assert {row["structure_mode"] for row in rows} == {"staggered_expiry_pair"}
+    assert {row["structure_mode"] for row in rows} == {"same_expiry_pair"}
     assert {row["candidate_pair_id"] for row in rows} == {"pair-tsla-1"}
     assert by_role["funding_put"]["expiration"] == "2026-08-21"
     assert by_role["funding_put"]["dte"] == 35
-    assert by_role["participation_call"]["expiration"] == "2026-10-16"
-    assert by_role["participation_call"]["dte"] == 91
+    assert by_role["participation_call"]["expiration"] == "2026-08-21"
+    assert by_role["participation_call"]["dte"] == 35
 
     result = run_combo_yield_group_experiment(candidate_snapshots=rows, min_sample=1)
     group = result["group_universe"]["groups"][0]
 
-    assert group["structure_mode"] == "staggered_expiry_pair"
+    assert group["structure_mode"] == "same_expiry_pair"
     assert group["ready_for_group_experiment"] is True
     assert "combo_yield_expiration_mismatch" not in group["blockers"]
-    assert "combo_yield_expiration_order_invalid" not in group["blockers"]
     assert group["outcome_evaluation"]["status"] == "not_evaluable"
-    assert (
-        "combo_yield_multi_horizon_outcome_evidence_insufficient"
-        in group["outcome_evaluation"]["blockers"]
+    assert any(
+        str(blocker).startswith("combo_yield_outcome_missing:")
+        for blocker in group["outcome_evaluation"]["blockers"]
     )
 
 
-def test_combo_yield_group_evaluator_rejects_reversed_staggered_expirations() -> None:
+def test_combo_yield_group_evaluator_rejects_expiration_mismatch() -> None:
     from src.application.strategy_lab import run_combo_yield_group_experiment
 
     common = {
@@ -2449,8 +2448,8 @@ def test_combo_yield_group_evaluator_rejects_reversed_staggered_expirations() ->
         "account": "lx",
         "status": "accepted",
         "strategy_family": "combo_yield",
-        "strategy_group_id": "staggered-reversed",
-        "structure_mode": "staggered_expiry_pair",
+        "strategy_group_id": "expiration-mismatch",
+        "structure_mode": "same_expiry_pair",
         "contracts": 1,
         "multiplier": 100,
         "spot": 180,
@@ -2483,8 +2482,7 @@ def test_combo_yield_group_evaluator_rejects_reversed_staggered_expirations() ->
     group = result["group_universe"]["groups"][0]
 
     assert group["ready_for_group_experiment"] is False
-    assert "combo_yield_expiration_order_invalid" in group["blockers"]
-    assert "combo_yield_expiration_mismatch" not in group["blockers"]
+    assert "combo_yield_expiration_mismatch" in group["blockers"]
 
 
 def test_strategy_lab_readiness_excludes_unrelated_marks_and_outcomes(tmp_path: Path) -> None:

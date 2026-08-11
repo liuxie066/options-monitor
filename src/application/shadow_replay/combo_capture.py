@@ -485,15 +485,6 @@ def _variant_combo_config(
     call_cfg["min_delta"] = float(variant["min_abs_call_delta"])
     call_cfg["max_delta"] = float(variant["max_abs_call_delta"])
     cfg["call"] = call_cfg
-    for field in (
-        "min_expiry_gap_days",
-        "target_expiry_gap_days",
-        "max_expiry_gap_days",
-    ):
-        if variant.get(field) is None:
-            cfg.pop(field, None)
-        else:
-            cfg[field] = int(variant[field])
     explicit = {
         str(field)
         for field in cfg.get("_explicit_fields") or []
@@ -509,13 +500,6 @@ def _variant_combo_config(
     )
     if variant.get("max_call_cost_to_put_credit") is not None:
         explicit.add("max_call_cost_to_put_credit")
-    if str(variant["structure_mode"]) == "staggered_expiry_pair":
-        explicit.update(
-            {
-                "min_expiry_gap_days",
-                "max_expiry_gap_days",
-            }
-        )
     cfg["_explicit_fields"] = tuple(sorted(explicit))
     cfg["_explicit_call_fields"] = ("min_delta", "max_delta")
     return cfg

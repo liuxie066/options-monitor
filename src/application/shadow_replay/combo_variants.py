@@ -97,6 +97,16 @@ def normalize_combo_variant_spec(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def combo_research_policy_from_dict(raw: dict[str, Any]) -> ComboYieldResearchPolicy:
+    removed_gap_keys = [
+        key
+        for key in ("min_expiry_gap_days", "target_expiry_gap_days", "max_expiry_gap_days")
+        if key in raw
+    ]
+    if removed_gap_keys:
+        raise ValueError(
+            "Combo variant has removed staggered-expiry gap fields: "
+            f"{', '.join(removed_gap_keys)}; Combo Yield supports same_expiry_pair only"
+        )
     mode = text(raw.get("structure_mode")).lower()
     return ComboYieldResearchPolicy(
         variant_id=text(raw.get("variant_id")),
@@ -110,15 +120,6 @@ def combo_research_policy_from_dict(raw: dict[str, Any]) -> ComboYieldResearchPo
         min_abs_call_delta=float(raw.get("min_abs_call_delta")),
         target_abs_call_delta=float(raw.get("target_abs_call_delta")),
         max_abs_call_delta=float(raw.get("max_abs_call_delta")),
-        min_expiry_gap_days=(
-            None if raw.get("min_expiry_gap_days") in (None, "") else int(raw.get("min_expiry_gap_days"))
-        ),
-        target_expiry_gap_days=(
-            None if raw.get("target_expiry_gap_days") in (None, "") else int(raw.get("target_expiry_gap_days"))
-        ),
-        max_expiry_gap_days=(
-            None if raw.get("max_expiry_gap_days") in (None, "") else int(raw.get("max_expiry_gap_days"))
-        ),
     )
 
 
@@ -236,11 +237,9 @@ def build_combo_pair_decisions(
                     "rank_change_reason": _rank_change_reason(
                         baseline_position,
                         proposed_position,
-                        policy=policy,
                         gate_reasons=gate_reasons,
                     ),
                     "delta_target_distance": _delta_target_distance(row, policy),
-                    "expiry_gap_target_distance": _gap_target_distance(row, policy),
                 }
             )
         decisions.append(
@@ -588,7 +587,6 @@ def _rank_change_reason(
     baseline_rank: int | None,
     proposed_rank: int | None,
     *,
-    policy: ComboYieldResearchPolicy,
     gate_reasons: list[str],
 ) -> str:
     if gate_reasons:
@@ -599,11 +597,7 @@ def _rank_change_reason(
         return "baseline_only"
     if baseline_rank == proposed_rank:
         return "unchanged"
-    return (
-        "funding_put_rank_then_gap_delta_liquidity"
-        if policy.structure_mode == "staggered_expiry_pair"
-        else "funding_put_rank_then_delta_liquidity"
-    )
+    return "funding_put_rank_then_delta_liquidity"
 
 
 def _rank_provenance_reasons(row: dict[str, Any]) -> list[str]:
@@ -637,13 +631,6 @@ def _policy_payload(policy: ComboYieldResearchPolicy) -> dict[str, Any]:
 def _delta_target_distance(row: dict[str, Any], policy: ComboYieldResearchPolicy) -> float | None:
     value = first_float(row, "call_delta")
     return None if value is None else abs(abs(value) - float(policy.target_abs_call_delta))
-
-
-def _gap_target_distance(row: dict[str, Any], policy: ComboYieldResearchPolicy) -> int | None:
-    if policy.target_expiry_gap_days is None:
-        return None
-    gap = _expiry_gap_days(row)
-    return None if gap is None else abs(gap - int(policy.target_expiry_gap_days))
 
 
 def _expiry_gap_days(row: dict[str, Any]) -> int | None:

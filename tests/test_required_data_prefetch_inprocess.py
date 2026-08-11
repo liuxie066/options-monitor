@@ -2540,9 +2540,6 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
             "sell_call": {"enabled": False},
             "combo_yield": {
                 "enabled": True,
-                "structure_mode": "staggered_expiry_pair",
-                "min_expiry_gap_days": 1,
-                "max_expiry_gap_days": 30,
             },
         },
         enabled=True,
@@ -2550,7 +2547,7 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
 
     assert out["option_types"] == "put,call"
     assert out["min_dte"] == 20
-    assert out["max_dte"] == 90
+    assert out["max_dte"] == 60
     assert out["side_strike_windows"]["put"]["min_strike"] == 90.0
     assert out["side_strike_windows"]["put"]["max_strike"] == 96.0
     assert out["include_realized_volatility"] is True

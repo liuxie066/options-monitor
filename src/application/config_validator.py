@@ -217,8 +217,6 @@ YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
     'min_volume',
     'max_spread_ratio',
     'max_combo_spread_ratio',
-    'min_expiry_gap_days',
-    'max_expiry_gap_days',
     'min_dte',
     'max_dte',
     'call',
@@ -620,6 +618,16 @@ def _validate_optional_dte_window(cfg: dict, path: str):
 def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
+    removed_gap_keys = [
+        key
+        for key in ('min_expiry_gap_days', 'max_expiry_gap_days')
+        if key in cfg
+    ]
+    if removed_gap_keys:
+        die(
+            f"{path} has removed staggered-expiry gap fields: {', '.join(removed_gap_keys)}; "
+            "Combo Yield supports same_expiry_pair only"
+        )
     _reject_unknown_keys(cfg, YIELD_ENHANCEMENT_ALLOWED_FIELDS, path)
     removed_funding_keys = [
         key
@@ -678,29 +686,10 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         structure_mode = str(cfg.get('structure_mode') or '').strip().lower()
         if structure_mode not in YIELD_ENHANCEMENT_STRUCTURE_MODES:
             die(f"{path}.structure_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_STRUCTURE_MODES))}")
-    else:
-        structure_mode = str(cfg.get('structure_mode') or 'same_expiry_pair').strip().lower()
     if 'variant' in cfg and cfg.get('variant') is not None:
         variant = str(cfg.get('variant') or '').strip().lower()
         if variant not in YIELD_ENHANCEMENT_VARIANTS:
             die(f"{path}.variant must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_VARIANTS))}")
-    for key in ('min_expiry_gap_days', 'max_expiry_gap_days'):
-        if cfg.get(key) is not None:
-            validate_non_negative_integer(cfg.get(key), f'{path}.{key}')
-            if int(cfg.get(key)) < 1:
-                die(f'{path}.{key} must be >= 1')
-    min_expiry_gap_days = cfg.get('min_expiry_gap_days')
-    max_expiry_gap_days = cfg.get('max_expiry_gap_days')
-    if (
-        min_expiry_gap_days is not None
-        and max_expiry_gap_days is not None
-        and int(min_expiry_gap_days) > int(max_expiry_gap_days)
-    ):
-        die(f'{path}.min_expiry_gap_days > {path}.max_expiry_gap_days')
-    if structure_mode != 'staggered_expiry_pair' and (
-        min_expiry_gap_days is not None or max_expiry_gap_days is not None
-    ):
-        die(f'{path}.min_expiry_gap_days/max_expiry_gap_days require structure_mode=staggered_expiry_pair')
     for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (
@@ -723,7 +712,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             die(
                 f"{path}.call has unsupported absolute DTE fields: "
                 f"{', '.join(redundant_call_dte_keys)}; "
-                "use min_expiry_gap_days/max_expiry_gap_days for staggered expiry"
+                "combo_yield.call DTE is derived from sell_put; use sell_put.min_dte/max_dte instead"
             )
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')

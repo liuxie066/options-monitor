@@ -19,6 +19,7 @@ from src.application.shadow_replay.combo_variants import (
     attach_funding_put_rank_provenance,
     build_combo_pair_decisions,
     combo_entry_quote_quality,
+    combo_research_policy_from_dict,
     normalize_combo_variant_spec,
     publish_combo_pair_facet,
 )
@@ -46,17 +47,14 @@ from src.application.required_data_planning import (
 )
 
 
-def _policy(*, mode: str = "same_expiry_pair", variant_id: str = "same-d20") -> ComboYieldResearchPolicy:
+def _policy(*, variant_id: str = "same-d20") -> ComboYieldResearchPolicy:
     return ComboYieldResearchPolicy(
         variant_id=variant_id,
-        structure_mode=mode,
-        min_net_credit_retention=0.75 if mode == "same_expiry_pair" else 0.80,
+        structure_mode="same_expiry_pair",
+        min_net_credit_retention=0.75,
         min_abs_call_delta=0.10,
         target_abs_call_delta=0.20,
         max_abs_call_delta=0.30,
-        min_expiry_gap_days=14 if mode == "staggered_expiry_pair" else None,
-        target_expiry_gap_days=28 if mode == "staggered_expiry_pair" else None,
-        max_expiry_gap_days=45 if mode == "staggered_expiry_pair" else None,
     )
 
 
@@ -68,18 +66,16 @@ def _pair(
     delta: float = 0.20,
     retention: float = 0.80,
     cost_ratio: float = 0.20,
-    gap: int = 0,
-    mode: str = "same_expiry_pair",
 ) -> dict:
     observed = "2026-07-29T01:00:00Z"
     return {
         "symbol": "NVDA",
-        "structure_mode": mode,
+        "structure_mode": "same_expiry_pair",
         "put_contract_symbol": put,
         "call_contract_symbol": call,
         "put_expiration": "2026-08-21",
-        "call_expiration": "2026-08-21" if gap == 0 else "2026-09-18",
-        "expiry_gap_days": gap,
+        "call_expiration": "2026-08-21",
+        "expiry_gap_days": 0,
         "put_strike": 100,
         "call_strike": 120,
         "currency": "USD",
@@ -145,26 +141,14 @@ def _capture_spec() -> dict:
                     "target_abs_call_delta": 0.20,
                     "max_abs_call_delta": 0.30,
                 },
-                {
-                    "variant_id": "staggered-d20",
-                    "structure_mode": "staggered_expiry_pair",
-                    "min_net_credit_retention": 0.80,
-                    "min_abs_call_delta": 0.10,
-                    "target_abs_call_delta": 0.20,
-                    "max_abs_call_delta": 0.30,
-                    "min_expiry_gap_days": 14,
-                    "target_expiry_gap_days": 28,
-                    "max_expiry_gap_days": 45,
-                },
             ],
         }
     )
 
 
 def _fake_capture_plan(**kwargs) -> RequiredDataFetchPlanBundle:
-    mode = str((kwargs.get("yield_enhancement_cfg") or {}).get("structure_mode") or "same_expiry_pair")
     put_exp = "2026-08-21"
-    call_exp = "2026-09-18" if mode == "staggered_expiry_pair" else put_exp
+    call_exp = put_exp
     window = StrikeWindowPlan(
         min_strike=80,
         max_strike=140,
@@ -238,25 +222,18 @@ def test_proposed_dual_funding_gates_are_independent_and_equality_passes() -> No
     assert "max_call_cost_to_put_credit" in reasons
 
 
-def test_staggered_rank_uses_gap_before_delta_and_rejects_same_expiry() -> None:
-    policy = _policy(mode="staggered_expiry_pair", variant_id="staggered-d20")
-    target_gap = _pair(
-        call="NVDA-C130",
-        mode="staggered_expiry_pair",
-        gap=28,
-        delta=0.28,
-        retention=0.80,
-    )
-    target_delta = _pair(
-        call="NVDA-C125",
-        mode="staggered_expiry_pair",
-        gap=21,
-        delta=0.20,
-        retention=0.80,
-    )
-    ranked = rank_combo_yield_proposed_rows([target_delta, target_gap], policy)
-    assert ranked[0]["call_contract_symbol"] == "NVDA-C130"
-    assert "structure_mode" in combo_yield_proposed_gate_reasons(_pair(), policy)
+def test_combo_research_policy_rejects_removed_expiry_gap_fields() -> None:
+    base = {
+        "variant_id": "same-d20",
+        "structure_mode": "same_expiry_pair",
+        "min_net_credit_retention": 0.75,
+        "min_abs_call_delta": 0.10,
+        "target_abs_call_delta": 0.20,
+        "max_abs_call_delta": 0.30,
+    }
+    for field in ("min_expiry_gap_days", "target_expiry_gap_days", "max_expiry_gap_days"):
+        with pytest.raises(ValueError):
+            combo_research_policy_from_dict({**base, field: 28})
 
 
 def test_rank_provenance_keeps_original_put_rank_after_pair_filtering() -> None:
@@ -341,10 +318,10 @@ def test_variant_capture_failure_is_isolated_to_affected_symbol() -> None:
         "symbols": ["NVDA", "PDD"],
         "variant_completeness": [
             {
-                "variant_id": "staggered-21d",
+                "variant_id": "same-21d",
                 "status": "unavailable",
                 "missing_expirations_or_contracts": [
-                    {"symbol": "NVDA", "expiration": "2026-09-18"}
+                    {"symbol": "NVDA", "expiration": "2026-08-21"}
                 ],
             }
         ],
@@ -352,7 +329,7 @@ def test_variant_capture_failure_is_isolated_to_affected_symbol() -> None:
 
     unavailable = _unavailable_variants_by_symbol(manifest)
 
-    assert unavailable["NVDA"] == {"staggered-21d"}
+    assert unavailable["NVDA"] == {"same-21d"}
     assert unavailable["PDD"] == set()
 
 
@@ -446,8 +423,8 @@ def test_combo_capture_preview_is_read_only_and_write_hashes_union(
         plan_builder=_fake_capture_plan,
     )
     assert preview["written"] is False
-    assert preview["planned_call_expirations_by_variant"]["NVDA"]["staggered-d20"] == [
-        "2026-09-18"
+    assert preview["planned_call_expirations_by_variant"]["NVDA"]["same-d20"] == [
+        "2026-08-21"
     ]
     assert not (dataset_root / "preview").exists()
 
@@ -512,11 +489,6 @@ def test_combo_capture_preview_is_read_only_and_write_hashes_union(
             "status": "complete",
             "missing_expirations_or_contracts": [],
         },
-        {
-            "variant_id": "staggered-d20",
-            "status": "complete",
-            "missing_expirations_or_contracts": [],
-        },
     ]
     assert written["required_data_file_sha256"]
     assert written["source_quote_observations"]["NVDA"]
@@ -573,52 +545,18 @@ def test_combo_capture_fails_before_write_when_budget_exceeds_authored_cap(
     assert not (tmp_path / "datasets" / "over-budget").exists()
 
 
-def test_staggered_combo_settlement_models_assignment_residual_call_and_capital() -> None:
+def test_combo_settlement_models_assignment_capital_at_same_expiry() -> None:
     decision = {
-        **_pair(
-            mode="staggered_expiry_pair",
-            gap=28,
-            retention=0.80,
-        ),
+        **_pair(retention=0.80),
         "shadow_combo_pair_id": "pair-1",
         "dataset_id": "dataset-1",
         "account": "lx",
         "entry_observed_at_utc": "2026-07-29T00:00:00Z",
-        "put_expiration": "2026-08-21",
-        "call_expiration": "2026-09-18",
         "stock_liquidation_fee": 0,
         "baseline_selected": False,
-        "variant_decisions": [{"variant_id": "staggered-d20", "selected": True}],
+        "variant_decisions": [{"variant_id": "same-d20", "selected": True}],
     }
     marks = [
-        {
-            "shadow_combo_pair_id": "pair-1",
-            "horizon": "intermediate",
-            "leg_role": "funding_put",
-            "marked_at_utc": "2026-08-10T00:00:00Z",
-            "ask": 8,
-            "future_close_fee": 0,
-            "spot": 95,
-            "mark_quality": "usable",
-        },
-        {
-            "shadow_combo_pair_id": "pair-1",
-            "horizon": "intermediate",
-            "leg_role": "participation_call",
-            "marked_at_utc": "2026-08-10T00:00:00Z",
-            "bid": 0.5,
-            "future_close_fee": 0,
-            "spot": 95,
-            "mark_quality": "usable",
-        },
-        {
-            "shadow_combo_pair_id": "pair-1",
-            "horizon": "intermediate",
-            "leg_role": "underlying",
-            "marked_at_utc": "2026-08-10T00:00:00Z",
-            "spot": 95,
-            "mark_quality": "usable",
-        },
         {
             "shadow_combo_pair_id": "pair-1",
             "horizon": "put_expiry",
@@ -637,28 +575,18 @@ def test_staggered_combo_settlement_models_assignment_residual_call_and_capital(
             "future_close_fee": 0,
             "mark_quality": "usable",
         },
-        {
-            "shadow_combo_pair_id": "pair-1",
-            "horizon": "call_expiry",
-            "leg_role": "underlying",
-            "marked_at_utc": "2026-09-18T00:00:00Z",
-            "spot": 130,
-            "mark_quality": "settlement",
-            "settlement_authority": True,
-        },
     ]
     outcome = settle_combo_pair_outcomes(decisions=[decision], marks=marks)[0]
     assert outcome["evidence_status"] == "complete"
     assert outcome["put_assignment_state"] == "assigned_stock"
-    assert outcome["post_put_expiry_state"] == "assigned_stock_plus_residual_call"
+    assert outcome["post_put_expiry_state"] == "terminal"
     assert outcome["put_pnl"] == -500
-    assert outcome["call_pnl"] == 900
-    assert outcome["assigned_stock_continuation_pnl"] == 4000
-    assert outcome["full_shadow_group_pnl"] == 4400
-    assert outcome["funding_horizon_pnl"] == -560
-    assert outcome["capital_days"]["assigned_stock_capital_days"] == 280000
-    assert outcome["early_assignment_stress_status"] == "complete"
-    assert len(outcome["early_assignment_stress_envelope"]) == 1
+    assert outcome["call_pnl"] == -100
+    assert outcome["assigned_stock_continuation_pnl"] == 0
+    assert outcome["full_shadow_group_pnl"] == -600
+    assert outcome["funding_horizon_pnl"] == -600
+    assert outcome["capital_days"]["assigned_stock_capital_days"] == 0
+    assert outcome["early_assignment_stress_status"] == "incomplete"
 
 
 def test_combo_settlement_fails_closed_and_scorecards_use_identical_complete_instances() -> None:
@@ -721,13 +649,12 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
         "required_data_file_sha256": {relative: digest},
         "variant_completeness": [
             {"variant_id": "same-d20", "status": "complete"},
-            {"variant_id": "staggered-d20", "status": "complete"},
         ],
         "source_quote_observations": {
             "NVDA": [
                 {
                     "option_types": ["put", "call"],
-                    "expirations": ["2026-08-21", "2026-09-18"],
+                    "expirations": ["2026-08-21"],
                     "observed_at_utc": "2026-07-29T01:00:00Z",
                 }
             ]
@@ -737,31 +664,26 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
 
     def pair_builder(**kwargs):
         cfg = kwargs["yield_enhancement_cfg"]
-        mode = cfg.get("structure_mode")
         is_superset = "_explicit_fields" in cfg
         if not is_superset:
-            calls = [("NVDA-CBASE", 0.24, "2026-08-21", 0)]
-        elif mode == "same_expiry_pair":
-            calls = [
-                ("NVDA-C20", 0.20, "2026-08-21", 0),
-                ("NVDA-C25", 0.25, "2026-08-21", 0),
-            ]
+            calls = [("NVDA-CBASE", 0.24, "2026-08-21")]
         else:
-            calls = [("NVDA-CGAP", 0.20, "2026-09-18", 28)]
+            calls = [
+                ("NVDA-C20", 0.20, "2026-08-21"),
+                ("NVDA-C25", 0.25, "2026-08-21"),
+            ]
         return __import__("pandas").DataFrame(
             [
                 {
                     **_pair(
                         call=contract,
                         delta=delta,
-                        mode=mode,
-                        gap=gap,
                         retention=0.85,
                     ),
                     "call_expiration": expiration,
                     "annualized_net_credit_yield": 0.10,
                 }
-                for contract, delta, expiration, gap in calls
+                for contract, delta, expiration in calls
             ]
         )
 
@@ -792,7 +714,6 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
     }
     assert proposed == {
         "same-d20": "NVDA-C20",
-        "staggered-d20": "NVDA-CGAP",
     }
 
 

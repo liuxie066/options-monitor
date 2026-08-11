@@ -171,53 +171,6 @@ def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkey
     assert call_plan.strike_window.max_strike == 127.5
 
 
-def test_staggered_combo_yield_fetches_call_on_independent_later_dte_window(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
-    import src.application.opend_utils as opend_utils
-
-    monkeypatch.setattr(
-        mod,
-        "list_option_expirations",
-        lambda *args, **kwargs: ["2026-08-21", "2026-10-16", "2026-11-20"],
-    )
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 110.0)
-    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
-
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=10,
-        want_put=True,
-        want_call=False,
-        sell_put_cfg={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 20,
-            "max_dte": 60,
-            "min_strike": 90,
-            "max_strike": 100,
-        },
-        sell_call_cfg={},
-        yield_enhancement_cfg={
-            "enabled": True,
-            "structure_mode": "staggered_expiry_pair",
-            "min_expiry_gap_days": 30,
-            "max_expiry_gap_days": 100,
-        },
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
-    )
-
-    put_plan = next(side for side in plan.side_plans if side.option_type == "put")
-    call_plan = next(side for side in plan.side_plans if side.option_type == "call")
-    assert put_plan.explicit_expirations == ["2026-08-21"]
-    assert call_plan.explicit_expirations == ["2026-10-16", "2026-11-20"]
-    assert (call_plan.min_dte, call_plan.max_dte) == (50, 160)
-    assert "combo_yield.min_expiry_gap_days" in call_plan.source_fields
-    assert "combo_yield.max_expiry_gap_days" in call_plan.source_fields
-
-
 def test_strategy_expiration_plan_is_not_truncated_by_legacy_limit(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_utils as opend_utils
     import src.application.required_data_planning as mod
