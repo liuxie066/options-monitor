@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.10 - 2026-08-11
+
+### Bug Fixes
+- Fixed `feishu-ws --check` validation in metadata-only mode: `validate_for_serve` no longer requires a resolved `app_secret` value when running as a diagnostic check, allowing the upgrade health check to pass in subprocess contexts where the systemd credential directory is unavailable.
+
 ## 1.13.9 - 2026-08-11
 
 ### Bug Fixes
