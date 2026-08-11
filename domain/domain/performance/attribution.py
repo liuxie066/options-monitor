@@ -53,13 +53,14 @@ def resolve_event_attribution(
     lifecycle_id = _lifecycle_id(leg_role=leg_role, source_id=lifecycle_source_id)
     if lifecycle_id is None:
         return AttributionResolution(None, (f"strategy_leg_role_unsupported:{event.event_id}",))
+    expiry_structure = values["expiry_structure"] or resolve_expiry_structure_from_fields(snapshot, payload)
     return AttributionResolution(
         StrategyAttribution(
             strategy=strategy,
             leg_role=leg_role,
             strategy_group_id=group_id,
             lifecycle_id=lifecycle_id,
-            expiry_structure=values["expiry_structure"] or None,
+            expiry_structure=expiry_structure,
         )
     )
 
@@ -102,8 +103,35 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def resolve_expiry_structure_from_fields(
+    snapshot: Mapping[str, Any] | None,
+    payload: Mapping[str, Any] | None,
+) -> str | None:
+    """Resolve Combo expiry structure with the same fallback as the lifecycle layer.
+
+    Explicit ``expiry_structure`` wins; otherwise ``structure_mode`` maps legacy
+    ``staggered_expiry_pair`` to ``diagonal`` and ``same_expiry_pair`` to
+    ``same_expiry``. Missing structure metadata stays ``None`` so production
+    same-expiry rows keep their serialized shape.
+    """
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    payload = payload if isinstance(payload, Mapping) else {}
+    value = _text(snapshot.get("expiry_structure")) or _text(payload.get("expiry_structure"))
+    if value:
+        return value.lower()
+    structure_mode = (
+        _text(snapshot.get("structure_mode")) or _text(payload.get("structure_mode"))
+    ).lower()
+    if structure_mode == "staggered_expiry_pair":
+        return "diagonal"
+    if structure_mode == "same_expiry_pair":
+        return "same_expiry"
+    return None
+
+
 __all__ = [
     "AttributionResolution",
     "resolve_allocation_attribution",
     "resolve_event_attribution",
+    "resolve_expiry_structure_from_fields",
 ]

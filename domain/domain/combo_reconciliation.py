@@ -438,14 +438,10 @@ def _build_edge(
         or put.currency != call.currency
         or put.multiplier != call.multiplier
         or Decimal(put.strike) >= Decimal(call.strike)
-        or put.expiration_ymd > call.expiration_ymd
+        or put.expiration_ymd != call.expiration_ymd
     ):
         return None
-    structure_mode = (
-        "same_expiry_pair"
-        if put.expiration_ymd == call.expiration_ymd
-        else "staggered_expiry_pair"
-    )
+    structure_mode = "same_expiry_pair"
     valid_evidence = tuple(
         item
         for item in exposures

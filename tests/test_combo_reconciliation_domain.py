@@ -222,7 +222,7 @@ def test_partial_or_grouped_lot_fails_closed() -> None:
     assert "combo_lot_already_grouped" in reasons
 
 
-def test_staggered_pair_is_supported_but_cross_day_is_not() -> None:
+def test_put_earlier_than_call_is_not_paired_but_cross_day_is_not() -> None:
     put = _lot(
         "put-1",
         option_type="put",
@@ -238,12 +238,13 @@ def test_staggered_pair_is_supported_but_cross_day_is_not() -> None:
         trade_time_ms=BASE_TIME_MS + 2_000,
     )
 
-    staggered = match_post_trade_combo_pairs(lots=[put, call])
+    differing_expiry = match_post_trade_combo_pairs(lots=[put, call])
     cross_day = match_post_trade_combo_pairs(
         lots=[put, {**call, "market_date": "2026-08-01"}]
     )
 
-    assert staggered["inferences"][0]["structure_mode"] == "staggered_expiry_pair"
+    assert differing_expiry["inferences"] == []
+    assert len(differing_expiry["waiting_for_counterpart"]) == 2
     assert cross_day["inferences"] == []
     assert len(cross_day["waiting_for_counterpart"]) == 2
 

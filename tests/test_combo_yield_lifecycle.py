@@ -5,7 +5,7 @@ import src.application.ledger.repository as ledger_repository
 from domain.domain.combo_yield_lifecycle import build_full_group_lifecycle, build_option_group_inventory
 
 
-def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str = "diagonal") -> dict:
+def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str = "same_expiry") -> dict:
     return {
         "record_id": record_id,
         "account": "lx",
@@ -26,7 +26,7 @@ def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count
 def test_option_group_inventory_aggregates_partial_lots_and_quantities() -> None:
     group_id = "combo_yield:lx:pair-1"
     rows = [
-        _lot("put-1", option_type="put", side="short", opened=2, open_count=2, expiration="2026-08-21", group_id=group_id),
+        _lot("put-1", option_type="put", side="short", opened=2, open_count=2, expiration="2026-09-18", group_id=group_id),
         _lot("call-1", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id),
         _lot("call-2", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id),
     ]
@@ -44,7 +44,7 @@ def test_option_group_inventory_marks_quantity_and_identity_issues_review_requir
     group_id = "combo_yield:lx:pair-2"
     mismatch = build_option_group_inventory(
         [
-            _lot("put-1", option_type="put", side="short", opened=2, open_count=2, expiration="2026-08-21", group_id=group_id),
+            _lot("put-1", option_type="put", side="short", opened=2, open_count=2, expiration="2026-09-18", group_id=group_id),
             _lot("call-1", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id),
         ]
     )[0]
@@ -100,7 +100,22 @@ def test_option_group_inventory_fails_closed_on_malformed_quantity_and_missing_e
     assert "put_expiration_missing" in missing_group["inventory_issues"]
 
 
-def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_path: Path) -> None:
+def test_option_group_inventory_fails_closed_on_legacy_staggered_structure() -> None:
+    group_id = "combo_yield:lx:pair-legacy"
+    rows = [
+        _lot("put-1", option_type="put", side="short", opened=1, open_count=1, expiration="2026-08-21", group_id=group_id, structure="diagonal"),
+        _lot("call-1", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id, structure="diagonal"),
+    ]
+
+    group = build_option_group_inventory(rows)[0]
+
+    assert group["expiry_structure"] == "diagonal"
+    assert group["summary_classification"] == "review_required"
+    assert "unsupported_expiry_structure" in group["inventory_issues"]
+    assert "same_expiry_mismatch" not in group["inventory_issues"]
+
+
+def test_manual_open_preview_projection_restart_reconstructs_same_expiry_group(tmp_path: Path) -> None:
     from src.application.positions.context_builder import build_context
     from src.application.positions.workflows import execute_manual_open
 
@@ -113,7 +128,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
             "strategy": "combo_yield",
             "leg_role": leg_role,
             "strategy_group_id": group_id,
-            "expiry_structure": "diagonal",
+            "expiry_structure": "same_expiry",
             "yield_enhancement_mode": "income_upside",
         }
 
@@ -128,7 +143,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
         currency="USD",
         strike=80.0,
         multiplier=100,
-        expiration_ymd="2026-08-21",
+        expiration_ymd="2026-09-18",
         premium_per_share=1.0,
         underlying_share_locked=None,
         note=None,
@@ -141,7 +156,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
     assert preview["fields"]["strategy"] == "combo_yield"
 
     for option_type, side, strike, expiration, role, opened_at_ms in (
-        ("put", "short", 80.0, "2026-08-21", "sell_put", 1000),
+        ("put", "short", 80.0, "2026-09-18", "sell_put", 1000),
         ("call", "long", 100.0, "2026-09-18", "enhancement_call", 2000),
     ):
         result = execute_manual_open(
@@ -172,7 +187,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
     assert {lot["fields"]["strategy_group_id"] for lot in lots} == {group_id}
     groups = build_context(lots, broker="富途", account="lx")["combo_yield_groups"]
     assert groups[0]["summary_classification"] == "active_combo"
-    assert groups[0]["put_expiration"] == "2026-08-21"
+    assert groups[0]["put_expiration"] == "2026-09-18"
     assert groups[0]["call_expiration"] == "2026-09-18"
 
 
@@ -218,7 +233,7 @@ def test_full_group_lifecycle_classifies_residual_and_assignment_states() -> Non
     group_id = "combo_yield:lx:pair-full"
     residual_options = build_option_group_inventory(
         [
-            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
             _lot("call", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id),
         ]
     )
@@ -257,7 +272,7 @@ def test_full_group_lifecycle_reconciles_partial_assignment_quantities() -> None
     group_id = "combo_yield:lx:pair-partial"
     option_groups = build_option_group_inventory(
         [
-            _lot("put", option_type="put", side="short", opened=2, open_count=1, expiration="2026-08-21", group_id=group_id),
+            _lot("put", option_type="put", side="short", opened=2, open_count=1, expiration="2026-09-18", group_id=group_id),
             _lot("call", option_type="call", side="long", opened=2, open_count=2, expiration="2026-09-18", group_id=group_id),
         ]
     )
@@ -295,7 +310,7 @@ def test_full_group_lifecycle_keeps_assignment_history_after_stock_sale() -> Non
     group_id = "combo_yield:lx:pair-closed"
     option_groups = build_option_group_inventory(
         [
-            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
             _lot("call", option_type="call", side="long", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
         ]
     )
@@ -354,7 +369,7 @@ def test_full_group_lifecycle_classifies_assigned_stock_without_open_call() -> N
     group_id = "combo_yield:lx:assigned-stock-only"
     option_groups = build_option_group_inventory(
         [
-            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
             _lot("call", option_type="call", side="long", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
         ]
     )
