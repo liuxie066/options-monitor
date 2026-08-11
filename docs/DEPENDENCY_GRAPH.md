@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 928 (`src`: 504, `domain`: 73, `scripts`: 8, `tests`: 343)
-- Internal import edges: 5944 total, 2513 production/script edges excluding tests
+- Python files scanned: 929 (`src`: 504, `domain`: 73, `scripts`: 8, `tests`: 344)
+- Internal import edges: 5960 total, 2514 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|391| domain
+  application -->|392| domain
   application -->|4| domain_services
   application -->|143| infrastructure
   application -->|41| storage
@@ -45,8 +45,8 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2575| application
-  tests -->|399| domain
+  tests -->|2586| application
+  tests -->|403| domain
   tests -->|2| domain_services
   tests -->|172| infrastructure
   tests -->|220| interfaces
@@ -58,7 +58,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 391 |
+| application | domain | 392 |
 | application | infrastructure | 143 |
 | interfaces | application | 142 |
 | application | storage | 41 |
@@ -77,8 +77,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2575 |
-| tests | domain | 399 |
+| tests | application | 2586 |
+| tests | domain | 403 |
 | tests | interfaces | 220 |
 | tests | infrastructure | 172 |
 | tests | storage | 18 |
@@ -97,7 +97,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | domain.domain | 49 |
 | src.application | domain.storage | 32 |
 | src.application.ledger | domain.domain.ledger | 32 |
-| src.application | domain.domain.engine | 27 |
+| src.application | domain.domain.engine | 28 |
 | src.application.trades | domain.domain | 25 |
 | src.application | src.application.ledger | 23 |
 | src.application.positions | src.application | 22 |

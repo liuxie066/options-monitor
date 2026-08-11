@@ -32,7 +32,7 @@ def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignor
         "price_tick": 0.01,
         "implied_volatility": 0.30,
         "term_matched_rv": 0.20,
-        "term_matched_rv_status": "ready",
+        "term_matched_rv_status": "ok",
         "underlier_observation_status": "ready",
         "option_standard_type": "STANDARD",
         "stock_owner": owner,

@@ -13,6 +13,10 @@ from domain.domain.engine import (
     rank_candidate_rows,
     validate_candidate_decision_payload,
 )
+from domain.domain.engine.candidate_engine import (
+    REJECT_INPUT_INVALID,
+    REJECT_INPUT_MISSING,
+)
 from domain.domain.symbol_identity import symbol_market
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -138,6 +142,7 @@ def seal_opening_candidate_snapshot(
         modes=modes,
         statuses=statuses,
         ranked=ranked,
+        decisions=decisions,
         authority=authority,
     )
     opening_status = _opening_status(
@@ -721,6 +726,7 @@ def _strategy_results(
     modes: list[str],
     statuses: list[dict[str, Any]],
     ranked: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
     authority: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -733,6 +739,11 @@ def _strategy_results(
             for item in scoped
             if str(item.get("reason") or "")
         }
+        unavailable_input_status = _unavailable_input_strategy_status(
+            decisions,
+            mode=mode,
+        )
+        partial_reasons = _CLEAN_NO_CANDIDATE_REASONS | {"partial_data"}
         if values == {"not_applicable"}:
             status = (
                 "no_candidate"
@@ -742,13 +753,21 @@ def _strategy_results(
             )
         elif (
             values <= {"completed", "not_applicable"}
+            and "partial_data" in reasons
+            and reasons <= partial_reasons
+        ):
+            status = "partial_data" if not counts else "candidates_found"
+        elif not counts and unavailable_input_status is not None:
+            # A contract that could not pass input normalization is missing
+            # decision evidence. It cannot support a clean zero-candidate seal,
+            # even if an upstream scope accidentally reported ``no_candidate``.
+            # Preserve mixed usable/unavailable evidence as ``partial_data``.
+            status = unavailable_input_status
+        elif (
+            values <= {"completed", "not_applicable"}
             and reasons <= _CLEAN_NO_CANDIDATE_REASONS
         ):
             status = "candidates_found" if counts else "no_candidate"
-        elif values <= {"completed", "not_applicable"} and reasons == {
-            "partial_data"
-        }:
-            status = "partial_data" if not counts else "candidates_found"
         elif values <= {"completed", "not_applicable"}:
             # Completed scopes that carry an evidence-availability reason other
             # than a clean no-candidate must not collapse into a silent empty.
@@ -769,6 +788,35 @@ def _strategy_results(
             }
         )
     return out
+
+
+def _unavailable_input_strategy_status(
+    decisions: Iterable[Mapping[str, Any]],
+    *,
+    mode: str,
+) -> str | None:
+    unavailable_reasons = {REJECT_INPUT_INVALID, REJECT_INPUT_MISSING}
+    evaluated_count = 0
+    unavailable_count = 0
+    for decision in decisions:
+        if str(decision.get("strategy_mode") or "") != mode:
+            continue
+        opening = decision.get("opening_decision")
+        if not isinstance(opening, Mapping):
+            continue
+        evaluated_count += 1
+        reasons = {
+            str(reject.get("reason") or "")
+            for reject in opening.get("rejects") or []
+            if isinstance(reject, Mapping)
+        }
+        if reasons & unavailable_reasons:
+            unavailable_count += 1
+    if unavailable_count == 0:
+        return None
+    if unavailable_count < evaluated_count:
+        return "partial_data"
+    return "data_unavailable"
 
 
 def _opening_status(
