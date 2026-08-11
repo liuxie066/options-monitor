@@ -1,0 +1,145 @@
+{
+ "schema_version": "release_delta_coverage.v1",
+ "target_version": "1.13.8",
+ "base": {
+  "tag": "v1.13.7",
+  "commit": "b07b4aad8fbc3c96ecc22d54a087c936798ac14d"
+ },
+ "reviewed_head": "793ef660ebd08fe2285689f4a8034bcee6b984c6",
+ "commits": [
+  {
+   "sha": "5461d56606fb095707d5c36c765e4512fde316d8",
+   "subject": "docs(gateflow): accept plan for combo-yield-remove-staggered"
+  },
+  {
+   "sha": "fe967db96726062923e98c88aab14b514dcafe45",
+   "subject": "docs(gateflow): accept combo-yield-remove-staggered s1"
+  },
+  {
+   "sha": "e8fcd036bd189ef316aca9bde056ebed6d3869ac",
+   "subject": "docs(gateflow): accept combo-yield-remove-staggered s2"
+  },
+  {
+   "sha": "e7d18b12d026779838c621bbd027ba872d2851b5",
+   "subject": "docs(gateflow): accept combo-yield-remove-staggered s2"
+  },
+  {
+   "sha": "afd670b86aed5c25fbd38614cd81339456b687ba",
+   "subject": "refactor(close-advice): simplify strict profit capture"
+  },
+  {
+   "sha": "c9238062f17834e837cc824394e849413f5ade41",
+   "subject": "chore(combo-yield): merge main close-advice refactor"
+  },
+  {
+   "sha": "7cd3f062a942da7797cbf8854f7ec3b3d1e1cf12",
+   "subject": "docs(gateflow): accept combo-yield-remove-staggered s3"
+  },
+  {
+   "sha": "89358283b74613482f33dac7a22d6161b61a0738",
+   "subject": "docs(gateflow): accept deepreview for combo-yield-remove-staggered"
+  },
+  {
+   "sha": "012850226f912d1b5982ca261f370905ae0e5f64",
+   "subject": "docs(gateflow): accept PR review for combo-yield-remove-staggered"
+  },
+  {
+   "sha": "d2429ce9d8fc06a62e8a5d6635d32b6b8dc57cbd",
+   "subject": "docs(gateflow): close combo-yield-remove-staggered"
+  },
+  {
+   "sha": "cd487de044d00e93f5de3ffb2017015424fe4098",
+   "subject": "Merge pull request #144 from liuxie066/design/combo-yield-remove-staggered"
+  },
+  {
+   "sha": "0b26e5304dda71896d3ac78467c2579e16ef8b6c",
+   "subject": "docs(gateflow): mark combo-yield-remove-staggered work unit completed"
+  },
+  {
+   "sha": "abe6ca0ee73d44dc9ee7d533b35952858c075468",
+   "subject": "docs(plans): add controlled production upgrade design and deepreview artifact"
+  },
+  {
+   "sha": "793ef660ebd08fe2285689f4a8034bcee6b984c6",
+   "subject": "chore(docs): regenerate dependency graph after strategy refactor"
+  }
+ ],
+ "release_notes": [
+  {
+   "category": "Breaking Changes",
+   "text": "Removed the Position Advice v2 subsystem (authority service, promotion pipeline, notification authority, source receipts, agent tool, CLI `om position-advice`, and the `position-advice-promotion` service timer) after it was superseded by the strict close-advice policy; daily brief now reads close advice directly from `close_advice.csv`.",
+   "commits": [
+    "afd670b86aed5c25fbd38614cd81339456b687ba",
+    "c9238062f17834e837cc824394e849413f5ade41"
+   ]
+  },
+  {
+   "category": "Breaking Changes",
+   "text": "Removed staggered expiry pair (`staggered_expiry_pair` / diagonal) from the Combo Yield opening path: ranking, metrics, config validation, data-requirement planning, notification rendering, and shadow replay variants now support `same_expiry_pair` only; configs carrying removed keys are rejected with explicit diagnostics.",
+   "commits": [
+    "cd487de044d00e93f5de3ffb2017015424fe4098"
+   ]
+  },
+  {
+   "category": "Improvements",
+   "text": "Simplified close advice to a single strict profit-capture policy (`strict_profit_capture.v1`): close only when the position is OTM, at least 90% of the net premium is captured in the first half of the contract term, and all-in close cost and spread quality pass versioned thresholds; legacy tier thresholds and notify-level configuration are ignored with an explicit config validation warning.",
+   "commits": [
+    "afd670b86aed5c25fbd38614cd81339456b687ba",
+    "c9238062f17834e837cc824394e849413f5ade41"
+   ]
+  },
+  {
+   "category": "Improvements",
+   "text": "Removed the legacy staggered-expiry notification authority gate from scheduled notification delivery, simplifying the per-account send path.",
+   "commits": [
+    "afd670b86aed5c25fbd38614cd81339456b687ba"
+   ]
+  }
+ ],
+ "no_release_note": [
+  {
+   "commit": "793ef660ebd08fe2285689f4a8034bcee6b984c6",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "abe6ca0ee73d44dc9ee7d533b35952858c075468",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "0b26e5304dda71896d3ac78467c2579e16ef8b6c",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "d2429ce9d8fc06a62e8a5d6635d32b6b8dc57cbd",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "012850226f912d1b5982ca261f370905ae0e5f64",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "89358283b74613482f33dac7a22d6161b61a0738",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "7cd3f062a942da7797cbf8854f7ec3b3d1e1cf12",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "e7d18b12d026779838c621bbd027ba872d2851b5",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "e8fcd036bd189ef316aca9bde056ebed6d3869ac",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "fe967db96726062923e98c88aab14b514dcafe45",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  },
+  {
+   "commit": "5461d56606fb095707d5c36c765e4512fde316d8",
+   "reason": "docs-only gateflow/plan/review artifact; no user-facing behavioral change"
+  }
+ ]
+}
