@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.11 - 2026-08-11
+
+### Bug Fixes
+- Restored Sell Put and Covered Call candidate evaluation for short-history underliers by accepting the canonical term-matched realized-volatility status, keeping term-matched RV authoritative when the legacy DTE-weighted estimate is unavailable, and preserving `partial_data` versus `data_unavailable` in sealed snapshots for fail-closed Advice and Daily Brief handling.
+
 ## 1.13.10 - 2026-08-11
 
 ### Bug Fixes
