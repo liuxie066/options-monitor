@@ -142,10 +142,8 @@ def _build_topology(
         if call_event.contract_key.option_type != "call" or call_event.contract_key.position_side != "long":
             bucket["issues"].append("participation_call_contract_invalid")
         structure = str(bucket.get("expiry_structure") or "").strip().lower()
-        if structure in {"diagonal"} and (
-            call_event.contract_key.expiration_ymd <= put_event.contract_key.expiration_ymd
-        ):
-            bucket["issues"].append("invalid_diagonal_expiry_order")
+        if structure and structure != "same_expiry":
+            bucket["issues"].append("unsupported_expiry_structure")
         if bucket["issues"]:
             bucket["status"] = "partial"
             issues.update(f"strategy_group_invalid:{group_id}:{item}" for item in bucket["issues"])

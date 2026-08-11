@@ -78,7 +78,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
         if len(structures) > 1:
             issues.append("mixed_expiry_structure")
         expiry_structure = next(iter(structures), "same_expiry")
-        if expiry_structure not in {"same_expiry", "diagonal"}:
+        if expiry_structure not in {"same_expiry"}:
             issues.append("unsupported_expiry_structure")
 
         put_opened = put_open = put_closed = 0
@@ -159,9 +159,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
         if call_opened > 0 and not call_expiration:
             issues.append("call_expiration_missing")
         if put_expiration and call_expiration:
-            if expiry_structure == "diagonal" and call_expiration <= put_expiration:
-                issues.append("invalid_diagonal_expiry_order")
-            if expiry_structure != "diagonal" and call_expiration != put_expiration:
+            if expiry_structure == "same_expiry" and call_expiration != put_expiration:
                 issues.append("same_expiry_mismatch")
         if put_open > 0 and call_open > 0 and put_open != call_open:
             issues.append("open_quantity_mismatch")

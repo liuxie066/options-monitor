@@ -12,6 +12,7 @@ from domain.domain.option_position_identity import normalize_account, normalize_
 from domain.domain.performance.attribution import (
     resolve_allocation_attribution,
     resolve_event_attribution,
+    resolve_expiry_structure_from_fields,
 )
 from domain.domain.performance.cash_conversion import (
     validate_observed_cash_conversion,
@@ -1371,7 +1372,7 @@ def _assigned_stock_attribution(
             leg_role="assigned_stock",
             strategy_group_id=group_id,
             lifecycle_id=f"assigned_stock:{lifecycle_source_id}",
-            expiry_structure=values["expiry_structure"] or None,
+            expiry_structure=resolve_expiry_structure_from_fields(snapshot, row),
         ),
         (),
     )
