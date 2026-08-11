@@ -367,7 +367,7 @@ DATASET_ID=us-<run-id>
 ./om research shadow-replay analyze --dataset "$DATASET" --min-sample 30
 ```
 
-## Combo Yield 同期/跨期研究变体
+## Combo Yield 同期研究变体
 
 Combo 变体使用独立的 Shadow 数据集和 `shadow_combo_pair_id`，不会创建
 `strategy_group_id`、pair intent、ledger event、通知或生产候选。生产
@@ -442,10 +442,10 @@ baseline 和 proposed 使用同一 pair universe，但调用不同的 rank autho
 ```
 
 Combo mark facet记录 Funding Put、Participation Call 和 underlying。到期结算只接受
-带 settlement authority 的到期 spot；历史缺失不插值。跨期结果分别报告 Put
-funding horizon、Call participation horizon、research-assigned stock continuation、
-完整组合、Put-only baseline、资本天数、路径回撤和非概率加权的提前指派压力包络。
-同期与跨期 scorecard 只比较各 selector 共同完整的 decision instances。
+带 settlement authority 的到期 spot；历史缺失不插值。结算在共享到期日完成，分别报告
+Funding Put / Participation Call 腿、research-assigned stock continuation、完整组合、
+Put-only baseline、资本天数、路径回撤和非概率加权的提前指派压力包络。scorecard
+只比较各 selector 共同完整的 decision instances。
 
 重点看：
 
