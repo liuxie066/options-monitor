@@ -28,7 +28,20 @@ def _event(
     strike: float,
     price: float,
     target_lot_id: str | None = None,
+    structure: str | None = "same_expiry",
+    structure_mode: str | None = None,
+    put_expiration_ymd: str = "2026-05-31",
+    call_expiration_ymd: str = "2026-05-31",
 ) -> TradeEvent:
+    snapshot: dict = {
+        "strategy": "combo_yield",
+        "leg_role": role,
+        "strategy_group_id": "combo_yield:lx:pair-1",
+    }
+    if structure is not None:
+        snapshot["expiry_structure"] = structure
+    if structure_mode is not None:
+        snapshot["structure_mode"] = structure_mode
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -40,7 +53,7 @@ def _event(
             option_type=option_type,
             position_side=side,
             strike=strike,
-            expiration_ymd="2026-05-31" if option_type == "put" else "2026-07-31",
+            expiration_ymd=put_expiration_ymd if option_type == "put" else call_expiration_ymd,
         ),
         contracts=1,
         price=price,
@@ -52,12 +65,7 @@ def _event(
         target_lot_id=target_lot_id,
         raw_payload={
             "fee_provenance": {"basis": "actual", "amount": 0, "source": "test"},
-            "strategy_snapshot": {
-                "strategy": "combo_yield",
-                "leg_role": role,
-                "strategy_group_id": "combo_yield:lx:pair-1",
-                "expiry_structure": "diagonal",
-            },
+            "strategy_snapshot": snapshot,
         },
     )
 
@@ -94,6 +102,85 @@ def test_group_attribution_keeps_call_basis_out_of_put_pnl_and_conserves_group_p
     assert group["pnl"]["realized_gross"]["by_currency"] == {"USD": 800.0}
     assert report["pnl"]["realized_gross"]["by_currency"] == {"USD": 800.0}
     assert attribution["conservation"]["realized_gross"]["residual_by_currency"] == {"USD": 0.0}
+
+
+def test_legacy_diagonal_group_fails_closed_to_partial_attribution() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5, structure="diagonal", put_expiration_ymd="2026-05-31"),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4, structure="diagonal", call_expiration_ymd="2026-07-31"),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+    attribution = report["attribution"]
+
+    assert attribution["coverage"]["status"] == "partial"
+    assert attribution["groups"] == []
+    assert "strategy_group_invalid:combo_yield:lx:pair-1:unsupported_expiry_structure" in attribution["coverage"]["issues"]
+
+
+def test_production_form_without_expiry_structure_is_ready() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5, structure=None),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4, structure=None, call_expiration_ymd="2026-05-31"),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+    attribution = report["attribution"]
+
+    assert attribution["coverage"]["status"] == "observed"
+    assert len(attribution["groups"]) == 1
+    assert attribution["coverage"]["issues"] == []
+
+
+def test_legacy_staggered_structure_mode_fails_closed_to_partial_attribution() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5, structure=None, structure_mode="staggered_expiry_pair", put_expiration_ymd="2026-05-31"),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4, structure=None, structure_mode="staggered_expiry_pair", call_expiration_ymd="2026-07-31"),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+    attribution = report["attribution"]
+
+    assert attribution["coverage"]["status"] == "partial"
+    assert attribution["groups"] == []
+    assert "strategy_group_invalid:combo_yield:lx:pair-1:unsupported_expiry_structure" in attribution["coverage"]["issues"]
+
+
+def test_metadata_missing_staggered_expiries_fails_closed_to_partial_attribution() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5, structure=None, put_expiration_ymd="2026-05-31"),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4, structure=None, call_expiration_ymd="2026-07-31"),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+    attribution = report["attribution"]
+
+    assert attribution["coverage"]["status"] == "partial"
+    assert attribution["groups"] == []
+    assert "strategy_group_invalid:combo_yield:lx:pair-1:same_expiry_mismatch" in attribution["coverage"]["issues"]
+
+
+def test_legacy_same_expiry_structure_mode_is_ready() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5, structure=None, structure_mode="same_expiry_pair"),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4, structure=None, structure_mode="same_expiry_pair"),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+    attribution = report["attribution"]
+
+    assert attribution["coverage"]["status"] == "observed"
+    assert len(attribution["groups"]) == 1
 
 
 def test_group_capital_uses_put_notional_days_plus_call_premium_days() -> None:
@@ -333,18 +420,18 @@ def test_assigned_stock_metadata_conflicts_fail_closed(conflict_key: str) -> Non
         "strategy": "combo_yield",
         "leg_role": "assigned_stock",
         "strategy_group_id": "combo_yield:lx:pair-1",
-        "expiry_structure": "diagonal",
+        "expiry_structure": "same_expiry",
         "strategy_snapshot": {
             "strategy": "combo_yield",
             "leg_role": "assigned_stock",
             "strategy_group_id": "combo_yield:lx:pair-1",
-            "expiry_structure": "diagonal",
+            "expiry_structure": "same_expiry",
         },
     }
     row[conflict_key] = {
         "strategy": "sell_put",
         "leg_role": "funding_put",
-        "expiry_structure": "same_expiry",
+        "expiry_structure": "unsupported",
     }[conflict_key]
 
     result = _assigned_stock_fact_kwargs(row, source_event_id="stock-lot-1")

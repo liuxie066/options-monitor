@@ -89,32 +89,6 @@ def _position_record(
     }
 
 
-def _tag_staggered_combo_lot(
-    row: dict,
-    *,
-    pair_intent_id: str,
-    leg_role: str,
-) -> dict:
-    fields = row["fields"]
-    group_id = f"combo_yield:lx:{pair_intent_id}"
-    fields.update(
-        {
-            "strategy": "combo_yield",
-            "leg_role": leg_role,
-            "strategy_group_id": group_id,
-            "yield_enhancement_mode": "income_upside_enhancement",
-            "strategy_snapshot": {
-                "strategy": "combo_yield",
-                "leg_role": leg_role,
-                "strategy_group_id": group_id,
-                "structure_mode": "staggered_expiry_pair",
-                "pair_intent_id": pair_intent_id,
-            },
-        }
-    )
-    return row
-
-
 def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     result = resolve_trade_deal(_deal(), repo=FakeRepo(), state={}, apply_changes=False)
 
@@ -496,9 +470,9 @@ def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> Non
     assert result.diagnostics["account_mapping_keys"] == ["999999999999999999"]
 
 
-def test_staggered_combo_yield_without_pair_intent_records_unpaired_long_call() -> None:
+def test_combo_yield_without_pair_intent_records_independent_long_call() -> None:
     deal = _deal(
-        deal_id="deal-pdd-staggered-call-unpaired",
+        deal_id="deal-combo-call-unpaired",
         symbol="PDD",
         option_type="call",
         side="buy",
@@ -509,9 +483,9 @@ def test_staggered_combo_yield_without_pair_intent_records_unpaired_long_call() 
         expiration_ymd="2026-10-16",
         currency="USD",
         raw_payload={
-            "deal_id": "deal-pdd-staggered-call-unpaired",
+            "deal_id": "deal-combo-call-unpaired",
             "code": "US.PDD261016C100000",
-            "structure_mode": "staggered_expiry_pair",
+            "structure_mode": "same_expiry_pair",
         },
     )
 
@@ -523,19 +497,20 @@ def test_staggered_combo_yield_without_pair_intent_records_unpaired_long_call() 
     assert "strategy_group_id" not in fields
     assert "strategy" not in fields
     assert result.diagnostics["position_effect_inference"]["combination_relation_pending"] is True
+    assert result.diagnostics["combo_yield_enrichment"]["decision"] == "defer_to_post_trade_reconciliation"
     assert result.diagnostics["combo_yield_enrichment"]["combination_relation_pending"] is True
 
 
-def test_staggered_combo_yield_explicit_pair_intent_groups_different_expirations(tmp_path: Path) -> None:
+def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     pair_payload = {
-        "structure_mode": "staggered_expiry_pair",
+        "structure_mode": "same_expiry_pair",
         "pair_intent_id": "intent-pdd-20260717-1",
     }
 
     put_result = resolve_trade_deal(
         _deal(
-            deal_id="deal-pdd-staggered-put",
+            deal_id="deal-pdd-combo-put",
             symbol="PDD",
             option_type="put",
             side="sell",
@@ -545,7 +520,7 @@ def test_staggered_combo_yield_explicit_pair_intent_groups_different_expirations
             strike=80.0,
             expiration_ymd="2026-08-21",
             currency="USD",
-            raw_payload={**pair_payload, "deal_id": "deal-pdd-staggered-put"},
+            raw_payload={**pair_payload, "deal_id": "deal-pdd-combo-put"},
         ),
         repo=repo,
         state={},
@@ -553,7 +528,7 @@ def test_staggered_combo_yield_explicit_pair_intent_groups_different_expirations
     )
     call_result = resolve_trade_deal(
         _deal(
-            deal_id="deal-pdd-staggered-call",
+            deal_id="deal-pdd-combo-call",
             symbol="PDD",
             option_type="call",
             side="buy",
@@ -565,7 +540,7 @@ def test_staggered_combo_yield_explicit_pair_intent_groups_different_expirations
             currency="USD",
             raw_payload={
                 **pair_payload,
-                "deal_id": "deal-pdd-staggered-call",
+                "deal_id": "deal-pdd-combo-call",
                 "code": "US.PDD261016C100000",
             },
         ),
@@ -579,16 +554,27 @@ def test_staggered_combo_yield_explicit_pair_intent_groups_different_expirations
     lots = repo.list_position_lots()
     put_lot = next(item for item in lots if item["fields"]["option_type"] == "put")
     call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
-    expected_group_id = "combo_yield:lx:intent-pdd-20260717-1"
-    assert put_lot["fields"]["strategy_group_id"] == expected_group_id
-    assert call_lot["fields"]["strategy_group_id"] == expected_group_id
-    assert put_lot["fields"]["leg_role"] == "funding_put"
-    assert call_lot["fields"]["leg_role"] == "participation_call"
-    assert put_lot["fields"]["strategy_snapshot"]["pair_intent_id"] == "intent-pdd-20260717-1"
-    assert call_lot["fields"]["strategy_snapshot"]["structure_mode"] == "staggered_expiry_pair"
+    assert "strategy" not in put_lot["fields"]
+    assert "leg_role" not in put_lot["fields"]
+    assert "strategy_group_id" not in put_lot["fields"]
+    assert "strategy" not in call_lot["fields"]
+    assert "leg_role" not in call_lot["fields"]
+    assert "strategy_group_id" not in call_lot["fields"]
+    put_enrichment = put_result.diagnostics["combo_yield_enrichment"]
+    assert put_enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
+    assert put_enrichment["pair_intent_id"] == "intent-pdd-20260717-1"
+    assert put_enrichment["combination_relation_pending"] is True
+    call_enrichment = call_result.diagnostics["combo_yield_enrichment"]
+    assert call_enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
+    assert call_enrichment["pair_intent_id"] == "intent-pdd-20260717-1"
+    assert call_enrichment["combination_relation_pending"] is True
 
 
-def test_staggered_combo_yield_pair_intent_can_come_from_strategy_snapshot() -> None:
+def test_combo_yield_pair_intent_from_strategy_snapshot_records_independent_open() -> None:
+    snapshot = {
+        "structure_mode": "same_expiry_pair",
+        "pair_intent_id": "intent-from-snapshot",
+    }
     result = resolve_trade_deal(
         _deal(
             symbol="PDD",
@@ -598,25 +584,36 @@ def test_staggered_combo_yield_pair_intent_can_come_from_strategy_snapshot() -> 
             contracts=1,
             expiration_ymd="2026-08-21",
             currency="USD",
-            raw_payload={
-                "strategy_snapshot": {
-                    "structure_mode": "staggered_expiry_pair",
-                    "pair_intent_id": "intent-from-snapshot",
-                }
-            },
+            raw_payload={"strategy_snapshot": snapshot},
         ),
         repo=FakeRepo(),
         state={},
         apply_changes=False,
     )
 
+    assert result.status == "dry_run"
     fields = result.operations[0].to_payload()["fields"]
-    assert fields["strategy_group_id"] == "combo_yield:lx:intent-from-snapshot"
-    assert fields["leg_role"] == "funding_put"
-    assert fields["strategy_snapshot"]["pair_intent_id"] == "intent-from-snapshot"
+    assert "strategy" not in fields
+    assert "leg_role" not in fields
+    assert "strategy_group_id" not in fields
+    assert fields["strategy_snapshot"] == snapshot
+    enrichment = result.diagnostics["combo_yield_enrichment"]
+    assert enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
+    assert enrichment["pair_intent_id"] == "intent-from-snapshot"
+    assert enrichment["combination_relation_pending"] is True
 
 
-def test_staggered_combo_yield_overrides_conflicting_relation_metadata() -> None:
+def test_combo_yield_explicit_pair_intent_preserves_incoming_relation_metadata() -> None:
+    snapshot = {
+        "strategy": "sell_put",
+        "strategy_family": "sell_put",
+        "strategy_source": "attacker-source",
+        "leg_role": "participation_call",
+        "yield_enhancement_mode": "attacker-mode",
+        "structure_mode": "same_expiry_pair",
+        "pair_intent_id": "attacker-intent",
+        "strategy_group_id": "attacker-group",
+    }
     result = resolve_trade_deal(
         _deal(
             symbol="PDD",
@@ -627,22 +624,13 @@ def test_staggered_combo_yield_overrides_conflicting_relation_metadata() -> None
             expiration_ymd="2026-08-21",
             currency="USD",
             raw_payload={
-                "structure_mode": "staggered_expiry_pair",
+                "structure_mode": "same_expiry_pair",
                 "pair_intent_id": "intent-authoritative",
                 "strategy": "sell_put",
                 "leg_role": "participation_call",
                 "yield_enhancement_mode": "attacker-mode",
                 "strategy_group_id": "attacker-group",
-                "strategy_snapshot": {
-                    "strategy": "sell_put",
-                    "strategy_family": "sell_put",
-                    "strategy_source": "attacker-source",
-                    "leg_role": "participation_call",
-                    "yield_enhancement_mode": "attacker-mode",
-                    "structure_mode": "same_expiry_pair",
-                    "pair_intent_id": "attacker-intent",
-                    "strategy_group_id": "attacker-group",
-                },
+                "strategy_snapshot": snapshot,
             },
         ),
         repo=FakeRepo(),
@@ -650,117 +638,14 @@ def test_staggered_combo_yield_overrides_conflicting_relation_metadata() -> None
         apply_changes=False,
     )
 
+    assert result.status == "dry_run"
     fields = result.operations[0].to_payload()["fields"]
-    expected_group_id = "combo_yield:lx:intent-authoritative"
-    assert fields["strategy"] == "combo_yield"
-    assert fields["leg_role"] == "funding_put"
-    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
-    assert fields["strategy_group_id"] == expected_group_id
-    snapshot = fields["strategy_snapshot"]
-    assert snapshot["strategy"] == "combo_yield"
-    assert snapshot["strategy_family"] == "combo_yield"
-    assert snapshot["strategy_source"] == "explicit_trade_intent"
-    assert snapshot["leg_role"] == "funding_put"
-    assert snapshot["yield_enhancement_mode"] == "income_upside_enhancement"
-    assert snapshot["structure_mode"] == "staggered_expiry_pair"
-    assert snapshot["pair_intent_id"] == "intent-authoritative"
-    assert snapshot["strategy_group_id"] == expected_group_id
-
-
-def test_staggered_combo_yield_rejects_pair_intent_reuse_after_put_cycle_consumed() -> None:
-    intent_id = "intent-consumed-cycle"
-    closed_put = _tag_staggered_combo_lot(
-        _position_record(
-            "lot-consumed-put",
-            symbol="PDD",
-            option_type="put",
-            side="short",
-            expiration_ymd="2026-08-21",
-            contracts_open=0,
-        ),
-        pair_intent_id=intent_id,
-        leg_role="funding_put",
-    )
-    closed_put["fields"]["contracts"] = 1
-    closed_put["fields"]["contracts_closed"] = 1
-    residual_call = _tag_staggered_combo_lot(
-        _position_record(
-            "lot-residual-call",
-            symbol="PDD",
-            option_type="call",
-            side="long",
-            strike=100.0,
-            expiration_ymd="2026-10-16",
-            contracts_open=1,
-        ),
-        pair_intent_id=intent_id,
-        leg_role="participation_call",
-    )
-    result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-reused-put",
-            symbol="PDD",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            strike=75.0,
-            expiration_ymd="2026-09-18",
-            currency="USD",
-            raw_payload={
-                "structure_mode": "staggered_expiry_pair",
-                "pair_intent_id": intent_id,
-            },
-        ),
-        repo=FakeRepo([closed_put, residual_call]),
-        state={},
-        apply_changes=False,
-    )
-
-    assert result.status == "unresolved"
-    assert result.reason == "staggered_combo_yield_cycle_reuse"
-    diagnostics = result.diagnostics["combo_yield_enrichment"]
-    assert diagnostics["decision"] == "reject_explicit_pair_intent"
-    assert diagnostics["consumed_record_id"] == "lot-consumed-put"
-
-
-def test_staggered_combo_yield_rejects_quantity_overmatch() -> None:
-    intent_id = "intent-quantity-overmatch"
-    funding_put = _tag_staggered_combo_lot(
-        _position_record(
-            "lot-one-put",
-            symbol="PDD",
-            option_type="put",
-            side="short",
-            expiration_ymd="2026-08-21",
-            contracts_open=1,
-        ),
-        pair_intent_id=intent_id,
-        leg_role="funding_put",
-    )
-    result = resolve_trade_deal(
-        _deal(
-            deal_id="deal-two-calls",
-            symbol="PDD",
-            option_type="call",
-            side="buy",
-            position_effect="open",
-            contracts=2,
-            strike=100.0,
-            expiration_ymd="2026-10-16",
-            currency="USD",
-            raw_payload={
-                "structure_mode": "staggered_expiry_pair",
-                "pair_intent_id": intent_id,
-            },
-        ),
-        repo=FakeRepo([funding_put]),
-        state={},
-        apply_changes=False,
-    )
-
-    assert result.status == "unresolved"
-    assert result.reason == "staggered_combo_yield_quantity_conflict"
-    diagnostics = result.diagnostics["combo_yield_enrichment"]
-    assert diagnostics["companion_contracts_open"] == 1
-    assert diagnostics["incoming_contracts"] == 2
+    assert fields["strategy"] == "sell_put"
+    assert fields["leg_role"] == "participation_call"
+    assert fields["yield_enhancement_mode"] == "attacker-mode"
+    assert fields["strategy_group_id"] == "attacker-group"
+    assert fields["strategy_snapshot"] == snapshot
+    enrichment = result.diagnostics["combo_yield_enrichment"]
+    assert enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
+    assert enrichment["pair_intent_id"] == "intent-authoritative"
+    assert enrichment["combination_relation_pending"] is True
