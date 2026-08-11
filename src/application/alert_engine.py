@@ -645,10 +645,6 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         return 'low', SELL_CALL_NOTIFICATION_LOW
 
     if strategy == STRATEGY_YIELD_ENHANCEMENT:
-        structure_mode = str(row.get('structure_mode') or '').strip().lower()
-        funding_accepted = str(row.get('funding_accepted') or '').strip().lower() in {'1', 'true', 'yes'}
-        if structure_mode == 'staggered_expiry_pair' and funding_accepted:
-            return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
         if annual > 0:
             return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
         return 'low', '当前组合收益推荐未通过优先级阈值，仅供观察。'

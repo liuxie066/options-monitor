@@ -1133,22 +1133,12 @@ def _combo_pair_group_id(
         text(row.get("account") or account).lower(),
         text(row.get("symbol") or row.get("underlying_symbol")).upper(),
     )
-    if text(row.get("structure_mode")).lower() == "staggered_expiry_pair":
-        parts = (
-            *common_parts,
-            text(row.get("candidate_pair_id")),
-            text(row.get("put_expiration") or row.get("expiration") or row.get("exp")),
-            text(row.get("call_expiration") or row.get("expiration") or row.get("exp")),
-            put_contract.upper(),
-            call_contract.upper(),
-        )
-    else:
-        parts = (
-            *common_parts,
-            text(row.get("expiration") or row.get("exp")),
-            put_contract.upper(),
-            call_contract.upper(),
-        )
+    parts = (
+        *common_parts,
+        text(row.get("expiration") or row.get("exp")),
+        put_contract.upper(),
+        call_contract.upper(),
+    )
     return "combo_yield|" + "|".join(parts)
 
 

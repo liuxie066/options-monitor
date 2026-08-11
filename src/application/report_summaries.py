@@ -377,11 +377,7 @@ def summarize_yield_enhancement(df: pd.DataFrame, symbol: str, *, symbol_cfg: di
         'bid': _safe_float(top.get('put_bid')),
         'ask': _safe_float(top.get('call_ask')),
         'option_ccy': top.get('option_ccy') or top.get('currency') or _option_ccy(symbol),
-        'note': (
-            'Put已独立通过接货、现金、事件、收益和流动性门槛'
-            if str(top.get('structure_mode') or '').strip().lower() == 'staggered_expiry_pair'
-            else '已按组合收益筛出推荐Call'
-        ),
+        'note': '已按组合收益筛出推荐Call',
     })
     for key in YIELD_ENHANCEMENT_EMPTY_FIELDS:
         row[key] = top.get(key)
