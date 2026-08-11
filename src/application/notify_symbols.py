@@ -497,112 +497,6 @@ def _build_notification_block_compact(
     return "\n".join(out_lines)
 
 
-def _format_staggered_combo_alert(
-    parsed: ParsedAlertLine,
-    *,
-    account_label: str,
-    compact: bool,
-) -> str:
-    extras = parsed.extras
-    put_strike = extras.get('put_strike', '')
-    call_strike = extras.get('call_strike', '')
-    put_expiration = extras.get('put_expiration', '')
-    call_expiration = extras.get('call_expiration', '')
-    put_dte = extras.get('put_dte', '')
-    call_dte = extras.get('call_dte', '')
-    expiry_gap_days = extras.get('expiry_gap_days', '')
-    put_bid = extras.get('put_bid', '') or extras.get('bid', '')
-    call_ask = extras.get('call_ask', '')
-    call_delta = extras.get('call_delta', '')
-    put_net_credit = extras.get('put_net_credit', '')
-    call_total_cost = extras.get('call_total_cost', '')
-    combo_net_credit = extras.get('combo_net_credit', '') or extras.get('net_credit', '')
-    funding_ratio = extras.get('funding_ratio', '')
-    safety_margin = extras.get('strike_safety_margin_pct', '')
-    cash_required_usd = extras.get('cash_required_usd', '')
-    cash_required_cny = extras.get('cash_required_cny', '')
-    ccy = extras.get('ccy', '') or extras.get('option_ccy', '')
-    def number_text(token: str) -> str:
-        if _is_missing_value(token):
-            return '-'
-        try:
-            return f"{float(str(token).strip()):.4f}".rstrip('0').rstrip('.')
-        except Exception:
-            return str(token).strip()
-
-    def day_text(token: str) -> str:
-        if _is_missing_value(token):
-            return '-'
-        try:
-            return str(int(float(str(token).strip())))
-        except Exception:
-            return str(token).strip()
-
-    def money_text(token: str, prefix: str) -> str:
-        if _is_missing_value(token):
-            return '-'
-        raw = str(token).strip()
-        try:
-            return f"{prefix}{float(raw):,.0f}"
-        except Exception:
-            return f"{prefix}{raw}"
-
-    cash_required = '-'
-    if not _is_missing_value(cash_required_usd):
-        cash_required = money_text(cash_required_usd, '$')
-    elif not _is_missing_value(cash_required_cny):
-        cash_required = money_text(cash_required_cny, '¥')
-
-    def ratio_pct(token: str) -> str:
-        if _is_missing_value(token):
-            return '-'
-        raw = str(token).strip()
-        if '%' in raw:
-            try:
-                return f"{float(raw.replace('%', '').strip()):.2f}%".replace('.00%', '%')
-            except Exception:
-                return raw
-        try:
-            return f"{float(raw) * 100.0:.2f}%".replace('.00%', '%')
-        except Exception:
-            return raw
-
-    coverage_text = ratio_pct(funding_ratio)
-    safety_text = ratio_pct(safety_margin)
-    ccy_tail = f" {ccy}" if ccy else ''
-    put_bid_text = number_text(put_bid)
-    call_ask_text = number_text(call_ask)
-    call_delta_text = number_text(call_delta)
-    put_net_credit_text = number_text(put_net_credit)
-    call_total_cost_text = number_text(call_total_cost)
-    combo_net_credit_text = number_text(combo_net_credit)
-    put_dte_text = day_text(put_dte)
-    call_dte_text = day_text(call_dte)
-    expiry_gap_text = day_text(expiry_gap_days)
-    put_expiration_text = _fmt_date_compact(f"{put_expiration} 0").removeprefix('@ ')
-    call_expiration_text = _fmt_date_compact(f"{call_expiration} 0").removeprefix('@ ')
-    if compact:
-        return "\n".join(
-            [
-                f"**🧩 组合·跨期 {parsed.symbol_name} {put_strike}P+{call_strike}C**",
-                f"Put｜卖 {put_strike}P · {put_expiration_text}/{put_dte_text}天 · bid {put_bid_text} · 估算净收 {put_net_credit_text}{ccy_tail}",
-                f"Call｜买 {call_strike}C · {call_expiration_text}/{call_dte_text}天 · ask {call_ask_text} · Δ {call_delta_text} · 估算成本 {call_total_cost_text}{ccy_tail}",
-                f"组合｜覆盖 {coverage_text} · 净现金流 {combo_net_credit_text}{ccy_tail}",
-                f"风险｜安全边界 {safety_text} · 现金 {cash_required} · Call晚{expiry_gap_text}天",
-            ]
-        )
-
-    return "\n".join(
-        [
-            f"**[{account_label}] {parsed.symbol_name}｜组合收益**",
-            f"Put｜卖 {put_strike}P · {put_expiration}/{put_dte_text}天 · bid={put_bid_text} · 估算净收={put_net_credit_text}{ccy_tail}",
-            f"Call｜买 {call_strike}C · {call_expiration}/{call_dte_text}天 · ask={call_ask_text} · delta={call_delta_text} · 估算成本={call_total_cost_text}{ccy_tail}",
-            f"组合｜覆盖率={coverage_text} · 净现金流={combo_net_credit_text}{ccy_tail}",
-            f"风险｜Put安全边界={safety_text} · 现金={cash_required} · Call晚{expiry_gap_text}天",
-        ]
-    )
-
-
 def _action_emoji(action_label: str, risk_line: str = '') -> str:
     if _is_combo_yield_action(action_label):
         return '💎'
@@ -745,12 +639,6 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         )
 
     if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
-        if parsed.extras.get('structure_mode', '').strip().lower() == 'staggered_expiry_pair':
-            return _format_staggered_combo_alert(
-                parsed,
-                account_label=account_label,
-                compact=False,
-            )
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
@@ -871,12 +759,6 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         )
 
     if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
-        if parsed.extras.get('structure_mode', '').strip().lower() == 'staggered_expiry_pair':
-            return _format_staggered_combo_alert(
-                parsed,
-                account_label=account_label,
-                compact=True,
-            )
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')

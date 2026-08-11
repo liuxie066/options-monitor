@@ -62,25 +62,16 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 | 结构 | 期限关系 | 当前定位 |
 |---|---|---|
 | `same_expiry_pair` | Put 与 Call 同到期 | 默认值；保留既有组合指标、硬筛和排序 |
-| `staggered_expiry_pair` | Put 早到期，Call 晚到期 | 新增错期全额融资结构 |
 
 ### `same_expiry_pair`
 
 该模式继续配对同 symbol、同到期、同 currency、同 multiplier、`put strike < call strike` 的 Short Put + Long Call。现有 `min_net_credit_annualized`、`min_net_credit_retention`、`max_combo_spread_ratio`、scenario/breakeven 输出和原排序保持兼容；本轮不改变其产品定义。
 
-### `staggered_expiry_pair` 的核心关系
+### 错期结构（已移除）
 
-V1 使用严格的一对一关系：
-
-```text
-1 Short Put : 1 Long Call
-put.expiration < call.expiration
-put.strike < call.strike
-put.multiplier == call.multiplier
-put.currency == call.currency
-```
-
-Funding Put 是资金腿，Long Call 是参与腿。不是“多张 Put 共同融资一张 Call”，也不在候选或成交阶段做启发式拆分。这样可以让资金覆盖、风险归因、通知和持仓生命周期都保持可解释。
+V1 的 `staggered_expiry_pair`（Put 早到期、Call 晚到期）已从候选、研究/shadow 与通知面删除，
+新扫描仅支持 `same_expiry_pair`。已存在的历史错期持仓仍由 ledger 生命周期与 `pair-combo-yield`
+精确配对入口管理，不受本轮删除影响。
 
 ### 召回与硬筛
 
@@ -93,16 +84,14 @@ Funding Put：
 Participation Call：
 
 - 从 required-data Call universe 独立召回，不要求启用 Covered Call 扫描。
-- 同到期结构直接复用 Funding Put 到期日。
-- 错期结构使用 `combo_yield.min_expiry_gap_days/max_expiry_gap_days`；对每个 Put 精确校验 `Call DTE - Put DTE`，不再配置一套绝对 Call DTE。
+- 直接复用 Funding Put 到期日（`same_expiry_pair`）。
 - 可配置 `call.min_strike/max_strike` 与 `call.min_delta/max_delta`。
-- 错期模式不强制 `call strike >= spot`，但最终结构仍必须满足 `put strike < call strike`。
 - Call bid/ask、delta、OI、volume、spread 和 multiplier 缺失或不合格时 fail closed。
 
 配对硬约束：
 
 - 同 symbol、currency、multiplier。
-- Put 到期早于 Call；Put strike 低于 Call strike。
+- Put 与 Call 同到期；Put strike 低于 Call strike。
 - `put_net_credit > 0`，`call_total_cost > 0`。
 - `min_net_credit_retention=0.60` 是唯一成本约束：至少保留 Funding Put 60% 的净权利金，即 Participation Call 最多使用 40%。
 - 已废弃 `funding_mode` 与 `max_call_cost_to_put_credit`（后者是 retention 的补数，统一由 retention 表达）。
@@ -120,8 +109,6 @@ funding_ratio = put_net_credit / call_total_cost
 cash_required = put_strike * multiplier - combo_net_credit
 period_net_return = combo_net_credit / cash_required
 ```
-
-错期组合不计算或硬筛组合年化、同到期 breakeven、expected-move scenario、1.5σ/2.0σ payoff multiple。Put 与 Call 的风险期限不同，把它们压成单一到期日指标会制造错误精度。
 
 ### 排序与通知入选
 
@@ -155,7 +142,7 @@ Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield
 - `candidate_pair_id`：扫描推荐身份，用于候选、artifact 和通知追踪，不等于真实成交关系。
 - `pair_intent_id`：操作员或成交入口显式提供的真实组合意图。
 - `strategy_group_id = combo_yield:<account>:<pair_intent_id>`。
-- 有 `pair_intent_id` 的错期成交按 `funding_put` / `participation_call` 自动归组。
+- 有 `pair_intent_id` 的成交按 `funding_put` / `participation_call` 自动归组。
 - 没有 `pair_intent_id` 时照常记录单腿，但不猜测组合关系；回执提示“组合关系待确认”。
 
 已分别入账的两腿可通过精确 lot id 确认：
@@ -195,7 +182,9 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 
 ### 配置示例边界
 
-错期配置只接受相对间隔，例如 `min_expiry_gap_days=30`、`max_expiry_gap_days=90`；该数值是示例，不是通用最优值。`combo_yield.call.min_dte/max_dte` 已拒绝，避免 Put 窗口变化后出现两套期限配置漂移。默认仍是 `same_expiry_pair`。
+Combo Yield 仅支持 `same_expiry_pair`。`min_expiry_gap_days` / `max_expiry_gap_days` 已移除，
+配置校验会显式报错（fail closed），而不是静默忽略或改变语义。`combo_yield.call.min_dte/max_dte`
+同样已拒绝，Call 期限从 Sell Put 窗口派生，避免 Put 窗口变化后出现两套期限配置漂移。
 
 ### required-data 全局计划
 
@@ -203,7 +192,7 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 
 1. 解析所有模板、标的覆盖项和三类策略要求。
 2. 每个唯一标的只发现一次 spot 与到期日目录。
-3. 按策略 DTE、错期间隔、strike 和 option side 生成精确到期日并集。
+3. 按策略 DTE、strike 和 option side 生成精确到期日并集。
 4. 用真实到期日数量估算 API 调用预算并拆 wave。
 5. 所有标的计划完成后才检查缓存和执行抓取。
 
@@ -244,7 +233,7 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 
 ### 跨期收益与资金占用归因
 
-错期 Combo Yield 同时维护三种不同语义：真实现金流、canonical economic PnL 和 management
+Combo Yield 结算维护三种不同语义：真实现金流、canonical economic PnL 和 management
 attribution。三者不能互相替代。
 
 - Funding Put 收到的 premium 可以为 Participation Call 提供 funding，但不会把 Call premium
