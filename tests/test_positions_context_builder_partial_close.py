@@ -697,7 +697,7 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
     group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
     records = []
     for record_id, option_type, side, contracts, expiration, leg_role in (
-        ("put-1", "put", "short", 2, "2026-08-21", "sell_put"),
+        ("put-1", "put", "short", 2, "2026-09-18", "sell_put"),
         ("call-1", "call", "long", 1, "2026-09-18", "enhancement_call"),
         ("call-2", "call", "long", 1, "2026-09-18", "enhancement_call"),
     ):
@@ -725,7 +725,7 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
                         "strategy": "combo_yield",
                     "leg_role": leg_role,
                     "strategy_group_id": group_id,
-                    "strategy_snapshot": {"expiry_structure": "diagonal", "strategy_group_id": group_id},
+                    "strategy_snapshot": {"expiry_structure": "same_expiry", "strategy_group_id": group_id},
                 },
             }
         )

@@ -70,8 +70,9 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 ### 错期结构（已移除）
 
 V1 的 `staggered_expiry_pair`（Put 早到期、Call 晚到期）已从候选、研究/shadow 与通知面删除，
-新扫描仅支持 `same_expiry_pair`。已存在的历史错期持仓仍由 ledger 生命周期与 `pair-combo-yield`
-精确配对入口管理，不受本轮删除影响。
+新扫描仅支持 `same_expiry_pair`。ledger 生命周期、手动配对入口（`pair-combo-yield`）、
+归组推理与绩效归因中的错期/`diagonal` 支持也已一并移除；组合收益仅支持同期（same-expiry）结构，
+错期历史数据落入 `review_required`（fail-closed），不再自动配对或按同期归因。
 
 ### 召回与硬筛
 
@@ -145,17 +146,7 @@ Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield
 - 有 `pair_intent_id` 的成交按 `funding_put` / `participation_call` 自动归组。
 - 没有 `pair_intent_id` 时照常记录单腿，但不猜测组合关系；回执提示“组合关系待确认”。
 
-已分别入账的两腿可通过精确 lot id 确认：
-
-```bash
-./om option-positions pair-combo-yield \
-  --put-record-id <put_lot_id> \
-  --call-record-id <call_lot_id> \
-  --pair-intent-id <intent_id> \
-  --dry-run
-```
-
-该入口校验同账户、同 canonical symbol、Short Put/Long Call 方向、开放合约数、1:1、multiplier、到期顺序和 strike 顺序。确认写入时，两条 immutable adjustment event 在同一 SQLite 事务中提交；不按合约条件搜索或猜测 lot。
+同期组合由生命周期/归组自动处理，无需手动配对入口；错期专用入口 `pair-combo-yield` 已删除。
 
 对于已经带有完整 `combo_yield`、`strategy_group_id` 和两腿角色，
 但尚未建立 immutable identity 的历史持仓（包括同到期组合），必须显式给出
