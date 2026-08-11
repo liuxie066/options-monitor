@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.13.12 - 2026-08-12
+
+### Improvements
+- Limited known earnings-event blocking for Sell Put, Covered Call, and Combo Yield Funding Put to the inclusive six-natural-day window ending at expiration; day 7 and earlier remain non-blocking context, while same-day events remain pending for the full market-local date.
+
+### Bug Fixes
+- Made OpenD earnings-coverage failures contract-scoped and fail closed only when the near-expiry outcome remains unresolved, preserving fully evidenced candidates with a partial-universe warning and preventing unavailable evidence from being reported as clean `no_candidate` Advice.
+- Preserved Combo Yield Funding Put evidence and capacity diagnostics through Candidate Engine and sealed JSON by removing the cash prefilter drop, propagating capture status, validating malformed snapshot rows, and correcting candidate-universe completeness classification.
+
 ## 1.13.11 - 2026-08-11
 
 ### Bug Fixes

@@ -1,0 +1,80 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.12",
+  "base": {
+    "tag": "v1.13.11",
+    "commit": "8902f9fde6b924007bf550ca437ef205a05685b5"
+  },
+  "reviewed_head": "5664827629885399dd9d6479ddc88a19912c4924",
+  "commits": [
+    {
+      "sha": "fa5076f28d6b3000fa43cede1dfe1bec52edbda8",
+      "subject": "chore(gateflow): accept plan for earnings-near-expiry-window"
+    },
+    {
+      "sha": "0da30a107e3ea269bca54129b92cfb9d324b9545",
+      "subject": "feat(candidate): apply six-day earnings window"
+    },
+    {
+      "sha": "a0c2718112401af9b678d8c7fb580073fd4b3657",
+      "subject": "docs(gateflow): accept aggregate earnings review"
+    },
+    {
+      "sha": "caf8f588a049dd21de33e9ac7f2f967f58c81962",
+      "subject": "docs(gateflow): record earnings PR review"
+    },
+    {
+      "sha": "7276d7bcd9c125aaf220a4130f0dfdaeca378f55",
+      "subject": "docs(gateflow): close earnings window work unit"
+    },
+    {
+      "sha": "5664827629885399dd9d6479ddc88a19912c4924",
+      "subject": "Merge pull request #148 from liuxie066/feat/earnings-near-expiry-window"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Limited known earnings-event blocking for Sell Put, Covered Call, and Combo Yield Funding Put to the inclusive six-natural-day window ending at expiration; day 7 and earlier remain non-blocking context, while same-day events remain pending for the full market-local date.",
+      "commits": [
+        "0da30a107e3ea269bca54129b92cfb9d324b9545"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made OpenD earnings-coverage failures contract-scoped and fail closed only when the near-expiry outcome remains unresolved, preserving fully evidenced candidates with a partial-universe warning and preventing unavailable evidence from being reported as clean `no_candidate` Advice.",
+      "commits": [
+        "0da30a107e3ea269bca54129b92cfb9d324b9545"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved Combo Yield Funding Put evidence and capacity diagnostics through Candidate Engine and sealed JSON by removing the cash prefilter drop, propagating capture status, validating malformed snapshot rows, and correcting candidate-universe completeness classification.",
+      "commits": [
+        "0da30a107e3ea269bca54129b92cfb9d324b9545"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fa5076f28d6b3000fa43cede1dfe1bec52edbda8",
+      "reason": "Gateflow planning and review-fix documentation only; no independent runtime or public contract change."
+    },
+    {
+      "commit": "a0c2718112401af9b678d8c7fb580073fd4b3657",
+      "reason": "Aggregate review evidence only; no independent runtime or public contract change."
+    },
+    {
+      "commit": "caf8f588a049dd21de33e9ac7f2f967f58c81962",
+      "reason": "Pull-request review evidence only; no independent runtime or public contract change."
+    },
+    {
+      "commit": "7276d7bcd9c125aaf220a4130f0dfdaeca378f55",
+      "reason": "Gateflow final-closeout documentation only; no independent runtime or public contract change."
+    },
+    {
+      "commit": "5664827629885399dd9d6479ddc88a19912c4924",
+      "reason": "Merge commit for the already-accounted implementation and documentation; no additional release impact."
+    }
+  ]
+}
