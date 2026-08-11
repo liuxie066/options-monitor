@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.10",
+  "base": {
+    "tag": "v1.13.9",
+    "commit": "db2c361e1b63d6643ee54cbdf27c94e854db717a"
+  },
+  "reviewed_head": "f75d469af5ce2f53c5cb3df2f584761cfd5513b0",
+  "commits": [
+    {
+      "sha": "f75d469af5ce2f53c5cb3df2f584761cfd5513b0",
+      "subject": "fix(health-check): skip app_secret validation in metadata-only check mode"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed `feishu-ws --check` validation in metadata-only mode: `validate_for_serve` no longer requires a resolved `app_secret` value when running as a diagnostic check, allowing the upgrade health check to pass in subprocess contexts where the systemd credential directory is unavailable.",
+      "commits": [
+        "f75d469af5ce2f53c5cb3df2f584761cfd5513b0"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
