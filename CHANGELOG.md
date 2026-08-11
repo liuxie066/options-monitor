@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.13.8 - 2026-08-11
+
+### Breaking Changes
+- Removed the Position Advice v2 subsystem (authority service, promotion pipeline, notification authority, source receipts, agent tool, CLI `om position-advice`, and the `position-advice-promotion` service timer) after it was superseded by the strict close-advice policy; daily brief now reads close advice directly from `close_advice.csv`.
+- Removed staggered expiry pair (`staggered_expiry_pair` / diagonal) from the Combo Yield opening path: ranking, metrics, config validation, data-requirement planning, notification rendering, and shadow replay variants now support `same_expiry_pair` only; configs carrying removed keys are rejected with explicit diagnostics.
+
+### Improvements
+- Simplified close advice to a single strict profit-capture policy (`strict_profit_capture.v1`): close only when the position is OTM, at least 90% of the net premium is captured in the first half of the contract term, and all-in close cost and spread quality pass versioned thresholds; legacy tier thresholds and notify-level configuration are ignored with an explicit config validation warning.
+- Removed the legacy staggered-expiry notification authority gate from scheduled notification delivery, simplifying the per-account send path.
+
 ## 1.13.7 - 2026-08-10
 
 ### Improvements
