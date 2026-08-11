@@ -9,7 +9,6 @@ from typing import Any, Literal, MutableMapping
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
-    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     CandidateWindowDefaults,
     resolve_candidate_window,
 )
@@ -25,7 +24,6 @@ from src.application.opend_symbol_chain_fetching import (
 )
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
-    resolve_staggered_expiry_gap_days,
 )
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
@@ -279,13 +277,6 @@ def _filter_expirations_by_dte(
     return out
 
 
-def _expiration_date(value: Any) -> date | None:
-    try:
-        return datetime.fromisoformat(str(value)[:10]).date()
-    except Exception:
-        return None
-
-
 def _strict_iso_expiration(value: Any) -> str | None:
     if not isinstance(value, str) or not value or value != value.strip():
         return None
@@ -306,33 +297,6 @@ def _strict_positive_finite_strike(value: Any) -> float | None:
     if not math.isfinite(parsed) or parsed <= 0:
         return None
     return parsed
-
-
-def _filter_staggered_call_expirations(
-    *,
-    put_expirations: list[str],
-    call_expirations: list[str],
-    min_gap_days: int,
-    max_gap_days: int,
-) -> list[str]:
-    put_dates = [
-        parsed
-        for value in put_expirations
-        if (parsed := _expiration_date(value)) is not None
-    ]
-    if not put_dates:
-        return []
-    out: list[str] = []
-    for value in call_expirations:
-        call_date = _expiration_date(value)
-        if call_date is None:
-            continue
-        if any(
-            int(min_gap_days) <= (call_date - put_date).days <= int(max_gap_days)
-            for put_date in put_dates
-        ):
-            out.append(str(value)[:10])
-    return out
 
 
 def _resolve_put_side_plan(
@@ -548,30 +512,16 @@ def _resolve_combo_yield_call_plan(
 ) -> OptionSideFetchPlan:
     cfg = dict(yield_enhancement_cfg or {})
     call_cfg = dict(cfg.get("call") or {})
-    structure_mode = str(cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
-    if structure_mode == "staggered_expiry_pair":
-        min_gap_days, max_gap_days = resolve_staggered_expiry_gap_days(cfg)
-        put_window = resolve_candidate_window(
-            sell_put_cfg,
-            defaults=DEFAULT_SELL_PUT_WINDOW,
-        )
-        call_cfg.pop("min_dte", None)
-        call_cfg.pop("max_dte", None)
-        call_cfg["min_dte"] = int(put_window.min_dte) + int(min_gap_days)
-        call_cfg["max_dte"] = int(put_window.max_dte) + int(max_gap_days)
-        call_window = resolve_candidate_window(call_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
-        dte_source_prefix = "combo_yield"
-    else:
-        call_cfg.pop("min_dte", None)
-        call_cfg.pop("max_dte", None)
-        for key in ("min_dte", "max_dte"):
-            if key in sell_put_cfg:
-                call_cfg[key] = sell_put_cfg.get(key)
-        call_window = resolve_candidate_window(
-            sell_put_cfg,
-            defaults=DEFAULT_SELL_PUT_WINDOW,
-        )
-        dte_source_prefix = "sell_put"
+    call_cfg.pop("min_dte", None)
+    call_cfg.pop("max_dte", None)
+    for key in ("min_dte", "max_dte"):
+        if key in sell_put_cfg:
+            call_cfg[key] = sell_put_cfg.get(key)
+    call_window = resolve_candidate_window(
+        sell_put_cfg,
+        defaults=DEFAULT_SELL_PUT_WINDOW,
+    )
+    dte_source_prefix = "sell_put"
     plan = _resolve_call_side_plan(
         symbol=symbol,
         sell_call_cfg=call_cfg,
@@ -586,41 +536,7 @@ def _resolve_combo_yield_call_plan(
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
         strike_buffer_pct=DEFAULT_COMBO_YIELD_CALL_STRIKE_BUFFER_PCT,
     )
-    if structure_mode != "staggered_expiry_pair":
-        return plan
-
-    put_expirations = _filter_expirations_by_dte(
-        symbol=symbol,
-        available_expirations=available_expirations,
-        trading_date=trading_date,
-        min_dte=put_window.min_dte,
-        max_dte=put_window.max_dte,
-    )
-    feasible_call_expirations = _filter_staggered_call_expirations(
-        put_expirations=put_expirations,
-        call_expirations=plan.explicit_expirations,
-        min_gap_days=min_gap_days,
-        max_gap_days=max_gap_days,
-    )
-    return replace(
-        plan,
-        explicit_expirations=feasible_call_expirations,
-        planning_reason=(
-            "derive combo_yield Call expirations from Funding Put expirations "
-            "and configured expiry-gap bounds"
-        ),
-        source_fields=[
-            field
-            for field in plan.source_fields
-            if field not in {"combo_yield.min_dte", "combo_yield.max_dte"}
-        ]
-        + [
-            "sell_put.min_dte",
-            "sell_put.max_dte",
-            "combo_yield.min_expiry_gap_days",
-            "combo_yield.max_expiry_gap_days",
-        ],
-    )
+    return plan
 
 
 def _unique_preserve_order(values: list[str]) -> list[str]:

@@ -9,7 +9,6 @@ from domain.domain.sell_call_config import resolve_effective_sell_call_min_strik
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
-    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     resolve_candidate_window,
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
@@ -33,7 +32,6 @@ from src.application.close_advice_required_data import (
 from src.application.required_data_plan_identity import required_data_plan_id
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
-    resolve_staggered_expiry_gap_days,
     resolve_yield_enhancement_cfg,
 )
 
@@ -694,23 +692,12 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
 
     if want_yield_call:
         call_cfg = dict(_as_dict(ye.get("call")))
-        structure_mode = str(ye.get("structure_mode") or "same_expiry_pair").strip().lower()
-        if structure_mode == "staggered_expiry_pair":
-            put_min_dte, put_max_dte = _window_values(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
-            min_gap_days, max_gap_days = resolve_staggered_expiry_gap_days(ye)
-            call_cfg.pop("min_dte", None)
-            call_cfg.pop("max_dte", None)
-            call_cfg["min_dte"] = put_min_dte + min_gap_days
-            call_cfg["max_dte"] = put_max_dte + max_gap_days
-            window_defaults = DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW
-        else:
-            call_cfg.pop("min_dte", None)
-            call_cfg.pop("max_dte", None)
-            for key in ("min_dte", "max_dte"):
-                if key in sp:
-                    call_cfg[key] = sp.get(key)
-            window_defaults = DEFAULT_SELL_PUT_WINDOW
-        min_dte, max_dte = _window_values(call_cfg, defaults=window_defaults)
+        call_cfg.pop("min_dte", None)
+        call_cfg.pop("max_dte", None)
+        for key in ("min_dte", "max_dte"):
+            if key in sp:
+                call_cfg[key] = sp.get(key)
+        min_dte, max_dte = _window_values(call_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
         min_dtes.append(min_dte)
         max_dtes.append(max_dte)
         if "call" not in option_types:

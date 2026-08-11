@@ -238,14 +238,9 @@ def _settle_one(
         horizon="put_expiry",
         expiration=decision.get("put_expiration"),
     )
-    call_horizon = (
-        "put_expiry"
-        if text(decision.get("structure_mode")).lower() == "same_expiry_pair"
-        else "call_expiry"
-    )
     call_spot_mark = _authoritative_spot_mark(
         marks,
-        horizon=call_horizon,
+        horizon="put_expiry",
         expiration=decision.get("call_expiration"),
     )
     if put_spot_mark is None:
@@ -298,22 +293,7 @@ def _settle_one(
         else 0.0
     )
     full_group_pnl = put_pnl + call_pnl + stock_pnl
-    call_put_expiry_mark = _leg_mark(
-        marks,
-        horizon="put_expiry",
-        leg_role="participation_call",
-    )
-    if call_horizon == "put_expiry":
-        funding_call_value = call_intrinsic
-    else:
-        funding_call_value = _executable_long_exit_value(call_put_expiry_mark, multiplier)
-    funding_horizon_pnl = (
-        None
-        if funding_call_value is None
-        else put_pnl + funding_call_value - call_cost
-    )
-    if funding_horizon_pnl is None:
-        return _unavailable(base, ["put_expiry_residual_call_bid_missing"])
+    funding_horizon_pnl = put_pnl + call_intrinsic - call_cost
 
     put_days = _days(entry_at, put_expiry_at)
     call_days = _days(entry_at, call_expiry_at)
@@ -350,13 +330,7 @@ def _settle_one(
         "put_expiry_spot": put_spot,
         "call_expiry_spot": call_spot,
         "put_assignment_state": "assigned_stock" if assigned else "expired_otm",
-        "post_put_expiry_state": (
-            "assigned_stock_plus_residual_call"
-            if assigned and call_horizon != "put_expiry"
-            else "residual_call"
-            if call_horizon != "put_expiry"
-            else "terminal"
-        ),
+        "post_put_expiry_state": "terminal",
         "put_pnl": put_pnl,
         "call_pnl": call_pnl,
         "assigned_stock_continuation_pnl": stock_pnl,
@@ -416,28 +390,6 @@ def _authoritative_spot_mark(
         and _mark_time(row).date().isoformat() == expected_date
     ]
     return min(candidates, key=_mark_time) if candidates else None
-
-
-def _leg_mark(
-    marks: list[dict[str, Any]],
-    *,
-    horizon: str,
-    leg_role: str,
-) -> dict[str, Any] | None:
-    candidates = [
-        row
-        for row in marks
-        if text(row.get("horizon")).lower() == horizon
-        and text(row.get("leg_role")).lower() == leg_role
-        and text(row.get("mark_quality")).lower() in {"usable", "settlement"}
-    ]
-    return min(candidates, key=_mark_time) if candidates else None
-
-
-def _executable_long_exit_value(mark: dict[str, Any] | None, multiplier: float) -> float | None:
-    bid = first_float(mark or {}, "bid")
-    fee = first_float(mark or {}, "future_close_fee")
-    return None if bid is None or bid < 0 or fee is None or fee < 0 else bid * multiplier - fee
 
 
 def _maximum_observed_drawdown(
