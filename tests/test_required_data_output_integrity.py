@@ -9,6 +9,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from conftest import phase2_opening_row
+from domain.domain.engine import calculate_opening_candidate_metrics
+from src.application.candidate_models import CandidateContractInput
 from src.application.close_advice_quote_cache import quote_cache_metadata_path
 from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
@@ -621,6 +624,52 @@ def test_validator_accepts_typed_expiry_scoped_rv_unavailability() -> None:
     )
 
 
+def test_validator_accepts_term_matched_rv_when_legacy_estimate_is_unavailable() -> None:
+    payload = _payload()
+    rows = payload["rows"]
+    meta = payload["meta"]
+    assert isinstance(rows, list) and isinstance(rows[0], dict)
+    assert isinstance(meta, dict)
+    rv_meta = meta["realized_volatility"]
+    assert isinstance(rv_meta, dict)
+    rv_meta.update(
+        {
+            "sample_count": 39,
+            "realized_volatility_60": None,
+            "realized_volatility_120": None,
+            "realized_volatility_estimate": None,
+        }
+    )
+    rows[0].update(
+        {
+            "realized_volatility_60": None,
+            "realized_volatility_120": None,
+            "realized_volatility_estimate": None,
+        }
+    )
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=_contract(),
+    )
+
+
+def test_validator_rejects_missing_legacy_estimate_when_dte_policy_can_compute_it() -> None:
+    payload = _payload()
+    rows = payload["rows"]
+    assert isinstance(rows, list) and isinstance(rows[0], dict)
+    rows[0]["realized_volatility_estimate"] = None
+
+    with pytest.raises(
+        SourceReceiptError,
+        match="realized volatility does not match dte policy",
+    ):
+        validate_required_data_payload_candidate(
+            payload=payload,
+            expected_fetch_contract=_contract(),
+        )
+
+
 @pytest.mark.parametrize("require_realized_volatility", [False, True])
 def test_filtered_empty_payload_honors_realized_volatility_authority(
     require_realized_volatility: bool,
@@ -854,6 +903,31 @@ def test_finalizer_rejects_boolean_required_rv_without_artifacts(
         expected_fetch_contract=_contract(),
         match="lacks required realized volatility",
     )
+
+
+def test_validated_required_data_row_reaches_candidate_engine_with_canonical_rv_status() -> None:
+    payload = _payload()
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=_contract(),
+    )
+    rows = payload["rows"]
+    assert isinstance(rows, list) and len(rows) == 1
+    raw = rows[0]
+    assert isinstance(raw, dict)
+    contract = CandidateContractInput.from_row(
+        phase2_opening_row(raw),
+        mode="put",
+    )
+
+    metrics = calculate_opening_candidate_metrics(
+        contract.to_gate_payload(),
+        mode="put",
+        now_utc="2026-04-01T15:00:00Z",
+    )
+
+    assert contract.term_matched_rv_status == "ok"
+    assert metrics["term_matched_rv"] == pytest.approx(0.183)
 
 
 def test_finalizer_rejects_meta_and_row_rv_mismatch_without_artifacts(

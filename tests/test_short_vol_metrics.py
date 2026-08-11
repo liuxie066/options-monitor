@@ -190,6 +190,42 @@ def test_term_matched_rv_uses_remaining_sessions_and_excludes_current_bar(
     assert gateway.history_calls[0]["autype"] == "QFQ"
 
 
+def test_short_history_can_produce_term_matched_rv_without_legacy_estimate(
+    tmp_path,
+) -> None:
+    from datetime import date
+
+    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
+
+    trading_day = date(2026, 8, 6)
+    past, future = _sessions_around(trading_day, before=39, after=30)
+    expiration = future[19]
+    snapshot = fetch_realized_volatility_snapshot(
+        _Gateway(calendar=[*past, *future], prices=_prices(past)),
+        underlier_code="US.SPCX",
+        trading_day=trading_day,
+        market="US",
+        expirations=[expiration.isoformat()],
+        base_dir=tmp_path,
+    )
+    observation = snapshot.term_matched[expiration.isoformat()]
+    row_fields = snapshot.to_row_fields(
+        dte=(expiration - trading_day).days,
+        expiration=expiration.isoformat(),
+    )
+
+    assert snapshot.sample_count == 39
+    assert snapshot.rv_20 is not None
+    assert snapshot.rv_60 is None
+    assert snapshot.rv_120 is None
+    assert snapshot.status == "ok"
+    assert observation.status == "ok"
+    assert observation.term_matched_rv is not None
+    assert observation.legacy_weighted_rv is None
+    assert row_fields["realized_volatility_estimate"] is None
+    assert row_fields["term_matched_rv_status"] == "ok"
+
+
 def test_term_matched_rv_gap_is_scoped_to_dependent_expiry(tmp_path) -> None:
     from datetime import date
 

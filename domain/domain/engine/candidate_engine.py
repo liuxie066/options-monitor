@@ -386,15 +386,15 @@ def calculate_opening_candidate_metrics(
     spot = _required_positive_float(raw, "spot")
     implied_volatility = _required_positive_float(raw, "implied_volatility")
     rv_status = str(raw.get("term_matched_rv_status") or "").strip().lower()
-    if rv_status != "ready":
+    if rv_status != "ok":
         raise CandidateCalculationError(
             "term_matched_rv_unavailable",
-            "term-matched realized volatility is not ready",
+            "term-matched realized volatility is not available",
             metric_value={
                 "status": rv_status or None,
                 "reason": raw.get("term_matched_rv_reason"),
             },
-            threshold="ready",
+            threshold="ok",
         )
     term_matched_rv = _required_positive_float(raw, "term_matched_rv")
 

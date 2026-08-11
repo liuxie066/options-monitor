@@ -445,6 +445,181 @@ def test_missing_call_portfolio_context_remains_data_unavailable(
     assert results == {"call": "data_unavailable", "put": "no_candidate"}
 
 
+def test_input_invalid_decision_cannot_seal_as_clean_no_candidate(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.engine import (
+        STAGE_INPUT_NORMALIZATION,
+        build_candidate_decision,
+    )
+
+    candidate = _candidate(
+        contract_symbol="NVDA260918P00090000",
+        period_return=0.01,
+    )
+    opening_decision = build_candidate_decision(
+        mode="put",
+        symbol="NVDA",
+        contract_symbol=candidate["contract_symbol"],
+        accepted=False,
+        rejects=[
+            {
+                "stage": STAGE_INPUT_NORMALIZATION,
+                "reason": "input_invalid",
+                "message": "term-matched realized volatility is unavailable",
+                "metric_value": {
+                    "reason_code": "term_matched_rv_unavailable",
+                },
+                "threshold": "ok",
+            }
+        ],
+        normalized_input=candidate,
+    )
+
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-input-invalid",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, "run-input-invalid", "lx"),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason": "no_candidate",
+            }
+        ],
+        final_candidates={"put": []},
+        candidate_evaluations={
+            "put": [
+                {
+                    "normalized_input": candidate,
+                    "opening_decision": opening_decision,
+                }
+            ]
+        },
+        sealed_at=NOW,
+    )
+
+    assert payload["opening_status"] == "data_unavailable"
+    assert payload["strategy_results"] == [
+        {
+            "strategy_mode": "put",
+            "strategy_status": "data_unavailable",
+            "capacity_status": "available",
+            "candidate_count": 0,
+            "scope_count": 1,
+        }
+    ]
+
+
+@pytest.mark.parametrize("scan_reason", ["partial_data", "no_candidate"])
+def test_mixed_input_unavailable_decisions_seal_as_partial_data(
+    tmp_path: Path,
+    scan_reason: str,
+) -> None:
+    from domain.domain.engine import (
+        STAGE_INPUT_NORMALIZATION,
+        build_candidate_decision,
+        evaluate_opening_candidate_policy,
+    )
+
+    unavailable_candidate = _candidate(
+        contract_symbol="NVDA260918P00090000",
+        period_return=0.01,
+    )
+    unavailable_decision = build_candidate_decision(
+        mode="put",
+        symbol="NVDA",
+        contract_symbol=unavailable_candidate["contract_symbol"],
+        accepted=False,
+        rejects=[
+            {
+                "stage": STAGE_INPUT_NORMALIZATION,
+                "reason": "input_missing",
+                "message": "term-matched realized volatility is missing",
+                "metric_value": {
+                    "reason_code": "term_matched_rv_unavailable",
+                },
+                "threshold": "ok",
+            }
+        ],
+        normalized_input=unavailable_candidate,
+    )
+    policy_rejected_candidate = _candidate(
+        contract_symbol="NVDA260918P00085000",
+        period_return=0.01,
+    )
+    policy_rejected_decision = evaluate_opening_candidate_policy(
+        policy_rejected_candidate,
+        mode="put",
+    )
+    assert policy_rejected_decision["accepted"] is False
+
+    run_id = f"run-mixed-{scan_reason}"
+    payload = seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id=run_id,
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(tmp_path, run_id, "lx"),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason": scan_reason,
+            }
+        ],
+        final_candidates={"put": []},
+        candidate_evaluations={
+            "put": [
+                {
+                    "normalized_input": unavailable_candidate,
+                    "opening_decision": unavailable_decision,
+                },
+                {
+                    "normalized_input": policy_rejected_candidate,
+                    "opening_decision": policy_rejected_decision,
+                },
+            ]
+        },
+        sealed_at=NOW,
+    )
+
+    assert payload["opening_status"] == "partial_data"
+    assert payload["strategy_results"] == [
+        {
+            "strategy_mode": "put",
+            "strategy_status": "partial_data",
+            "capacity_status": "available",
+            "candidate_count": 0,
+            "scope_count": 1,
+        }
+    ]
+
+
 def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     tmp_path: Path,
 ) -> None:

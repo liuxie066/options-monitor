@@ -31,7 +31,7 @@ def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # t
         "price_tick": 0.05,
         "implied_volatility": 0.30,
         "term_matched_rv": 0.20,
-        "term_matched_rv_status": "ready",
+        "term_matched_rv_status": "ok",
         "term_matched_rv_reason": None,
         "underlier_observation_status": "ready",
         "underlier_observation_reason_code": None,
@@ -102,6 +102,21 @@ def test_candidate_calculation_never_defaults_multiplier_or_legacy_rv() -> None:
         assert exc.reason == "multiplier_missing_or_invalid"
     else:
         raise AssertionError("missing multiplier must fail closed")
+
+
+def test_candidate_calculation_rejects_unavailable_term_matched_rv() -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(
+                term_matched_rv=None,
+                term_matched_rv_status="data_unavailable",
+                term_matched_rv_reason="qfq_history_session_gap",
+            ),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == "term_matched_rv_unavailable"
+    assert exc_info.value.threshold == "ok"
 
 
 def test_candidate_calculation_fails_only_the_contract_when_fee_schedule_is_unavailable() -> None:

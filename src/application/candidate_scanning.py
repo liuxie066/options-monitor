@@ -14,6 +14,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_CONTRACT_INELIGIBLE,
     REJECT_EVIDENCE_UNAVAILABLE,
     REJECT_INPUT_INVALID,
+    REJECT_INPUT_MISSING,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
@@ -301,13 +302,19 @@ def evidence_summary_from_decisions(
         ]
         if bool((decision or {}).get("accepted")):
             continue
-        if REJECT_EVIDENCE_UNAVAILABLE in reasons:
+        unavailable_reasons = {
+            REJECT_EVIDENCE_UNAVAILABLE,
+            REJECT_INPUT_INVALID,
+            REJECT_INPUT_MISSING,
+        }
+        matched_unavailable_reasons = unavailable_reasons.intersection(reasons)
+        if matched_unavailable_reasons:
             evidence_unavailable += 1
             metric_values = [
                 item.get("metric_value")
                 for item in rejects
                 if isinstance(item, dict)
-                and str(item.get("reason") or "") == REJECT_EVIDENCE_UNAVAILABLE
+                and str(item.get("reason") or "") in matched_unavailable_reasons
             ]
             for value in metric_values:
                 code = None
