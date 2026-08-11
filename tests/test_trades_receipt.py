@@ -709,18 +709,18 @@ def test_build_trade_intake_receipt_message_marks_projection_verification_failur
     assert "projection_verification_failed" in msg
 
 
-def test_build_trade_intake_receipt_message_marks_staggered_combo_relation_pending() -> None:
+def test_build_trade_intake_receipt_message_marks_same_expiry_combo_relation_pending() -> None:
     msg = build_trade_intake_receipt_message(
         deal=None,
         result={
             "status": "applied",
             "reason": "applied_open",
-            "deal_id": "deal-staggered-call-1",
+            "deal_id": "deal-same-expiry-call-1",
             "account": "lx",
             "action": "open",
             "diagnostics": {
                 "combo_yield_enrichment": {
-                    "structure_mode": "staggered_expiry_pair",
+                    "structure_mode": "same_expiry_pair",
                     "pair_intent_id": None,
                     "combination_relation_pending": True,
                 }
