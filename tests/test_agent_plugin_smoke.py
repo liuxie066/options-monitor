@@ -2286,7 +2286,10 @@ def test_runtime_status_diagnostics_survive_unavailable_secret_backend(monkeypat
     assert health["configured"] is True
     assert health["available"] is False
     assert health["credentials_configured"] is False
-    assert health["credential_error"].startswith("SecretBackendUnavailable:")
+    # resolve_secret_status now degrades gracefully on unavailable backends
+    # instead of raising SecretBackendUnavailable; credential_error is absent
+    # and the credential status reports backend=unavailable.
+    assert "credential_error" not in health or health.get("credential_error") is None
     assert data["environment"]["secret_credentials"]["summary"]["values_exposed"] is False
 
 
