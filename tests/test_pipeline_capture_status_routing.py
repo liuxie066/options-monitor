@@ -276,6 +276,54 @@ def test_default_pipeline_aggregates_sp_lc_capture_statuses(
     assert snapshot["opening_status"] == expected_status
 
 
+def test_default_pipeline_preserves_completed_partial_combo_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.combo_yield_candidate_snapshot import (
+        load_combo_yield_candidate_snapshot,
+    )
+
+    symbols = ["0700.HK", "9992.HK"]
+    _run_default_capture(
+        monkeypatch,
+        tmp_path,
+        symbols=[_symbol_config(symbol) for symbol in symbols],
+        statuses=[
+            *[_status(symbol, "put", "completed") for symbol in symbols],
+            _status(
+                "0700.HK",
+                "combo_yield",
+                "completed",
+                variant="sp_lc",
+                reason="partial_data",
+            ),
+            _status(
+                "9992.HK",
+                "combo_yield",
+                "completed",
+                variant="sp_lc",
+            ),
+        ],
+        pairs=[
+            {
+                "candidate_pair_id": "combo_yield:9992.HK:P:C",
+                "symbol": "9992.HK",
+            }
+        ],
+    )
+
+    snapshot = load_combo_yield_candidate_snapshot(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+    )
+    assert snapshot["opening_status"] == "partial_data"
+    assert [item["candidate_pair_id"] for item in snapshot["ranked_pairs"]] == [
+        "combo_yield:9992.HK:P:C"
+    ]
+
+
 @pytest.mark.parametrize(
     ("statuses", "pairs", "error"),
     [

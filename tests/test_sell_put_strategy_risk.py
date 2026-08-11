@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
 
 
 def _risk_context(*, nav: float = 1_000_000.0, nvda_stock: float = 50_000.0, nvda_short_put: float = 50_000.0):
@@ -14,6 +20,40 @@ def _risk_context(*, nav: float = 1_000_000.0, nvda_stock: float = 50_000.0, nvd
         short_put_assignment_cny_by_symbol={"NVDA": nvda_short_put},
         short_put_assignment_total_cny=100_000.0,
     )
+
+
+def _earnings_evidence(*, event_date: str | None = None) -> dict:
+    event = None
+    if event_date is not None:
+        days_before_expiration = (
+            date.fromisoformat("2026-06-19") - date.fromisoformat(event_date)
+        ).days
+        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+        event = {
+            "earnings_date": event_date,
+            "days_before_expiration": days_before_expiration,
+            "classification": "blocking" if blocking else "nonblocking",
+            "blocking": blocking,
+        }
+    events = [] if event is None else [event]
+    blocking_events = [item for item in events if item["blocking"]]
+    nonblocking_events = [item for item in events if not item["blocking"]]
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-05-20",
+        "earnings_hard_window_start": "2026-06-13",
+        "earnings_hard_window_end": "2026-06-19",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": bool(events),
+        "earnings_blocking_has_event": bool(blocking_events),
+        "earnings_events": events,
+        "earnings_blocking_events": blocking_events,
+        "earnings_nonblocking_events": nonblocking_events,
+    }
 
 
 def _candidate(**overrides):
@@ -40,10 +80,8 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
         "otm_pct": 0.10,
-        "earnings_evidence_status": "ready",
-        "earnings_has_event": False,
-        "earnings_event_dates": "",
     }
+    row.update(_earnings_evidence())
     row.update(overrides)
     return row
 
@@ -156,7 +194,7 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    df = pd.DataFrame([_candidate(earnings_has_event=True, earnings_event_dates="2026-06-01")])
+    df = pd.DataFrame([_candidate(**_earnings_evidence(event_date="2026-06-13"))])
 
     filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
@@ -167,6 +205,22 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
     )
 
     assert filtered.empty
+
+
+def test_sell_put_underwriting_retains_distant_pending_earnings_event() -> None:
+    from src.application.sell_put_strategy_risk import (
+        evaluate_sell_put_underwriting_row,
+        resolve_sell_put_underwriting_config,
+    )
+
+    decision = evaluate_sell_put_underwriting_row(
+        _candidate(**_earnings_evidence(event_date="2026-06-01")),
+        cfg=resolve_sell_put_underwriting_config(
+            {"strategy": "insurance_underwriting"}
+        ),
+    )
+
+    assert decision["accepted"] is True
 
 
 def test_sell_put_underwriting_emits_all_decisions_and_resolved_policy() -> None:

@@ -18,7 +18,6 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
-from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain.symbol_identity import symbol_market
 from src.application.cc_lp_steps import (
@@ -32,8 +31,15 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
+from src.application.candidate_scanning import (
+    evidence_summary_from_decisions,
+    project_evidence_scan_status,
+)
 from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
-from src.application.report_labels import add_sell_put_labels
+from src.application.report_labels import (
+    add_sell_put_labels,
+    label_sell_put_candidates,
+)
 from src.application.report_summaries import summarize_yield_enhancement
 from src.application.scan_sell_put import run_sell_put_scan
 from src.application.sell_put_call_helper import (
@@ -119,16 +125,7 @@ def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
     return float(value)
 
 
-def _has_text(value: Any) -> bool:
-    try:
-        if pd.isna(value):
-            return False
-    except Exception:
-        pass
-    return bool(str(value or "").strip())
-
-
-def enrich_and_filter_combo_funding_cash(
+def enrich_combo_funding_cash(
     *,
     df_labeled: pd.DataFrame,
     symbol: str,
@@ -137,36 +134,23 @@ def enrich_and_filter_combo_funding_cash(
     out_path: Path | None = None,
     **_compat: Any,
 ) -> pd.DataFrame:
-    """Combo-owned cash gate; opening Sell Put no longer owns this stage."""
+    """Attach Funding Put cash facts without pre-empting Candidate Engine."""
 
-    enriched = enrich_sell_put_candidates_with_cash(
+    # ``out_path`` retains the historical ``*_cash_filtered.csv`` audit name.
+    # Its rows are a cash-enriched universe, not a formal candidate authority;
+    # Candidate Engine underwriting below owns the only capacity rejection.
+    return enrich_sell_put_candidates_with_cash(
         df_labeled=df_labeled,
         symbol=symbol,
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
+        out_path=out_path,
     )
-    if enriched is None or enriched.empty:
-        filtered = enriched
-    else:
-        keep = enriched.apply(
-            lambda row: compute_sell_put_cash_capacity(
-                cash_required_native=row.get("cash_required_native"),
-                cash_free_effective_native=row.get("cash_free_effective_native"),
-                cash_native_currency=row.get("cash_native_currency"),
-                cash_required_cny=row.get("cash_required_cny"),
-                cash_free_cny=row.get("cash_free_cny"),
-                cash_free_total_cny=row.get("cash_free_total_cny"),
-                cash_required_usd=row.get("cash_required_usd"),
-                cash_free_usd=row.get("cash_free_usd"),
-            ).accepted
-            and not _has_text(row.get("cash_secured_unavailable_reason"))
-            and not _has_text(row.get("cash_requirement_unavailable_reason")),
-            axis=1,
-        ).astype(bool)
-        filtered = enriched.loc[keep].copy()
-    if out_path is not None:
-        filtered.to_csv(out_path, index=False)
-    return filtered
+
+
+# Read-only Shadow Replay imports the historical name. Keep the import surface
+# stable while making both paths use the same enrichment-only authority model.
+enrich_and_filter_combo_funding_cash = enrich_combo_funding_cash
 
 
 def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
@@ -204,7 +188,7 @@ def run_combo_yield_scan_and_summarize(
     select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_yield_enhancement_pairs,
     attach_calls_fn: Callable[..., pd.DataFrame] = attach_best_linked_calls,
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
-    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
     combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
@@ -219,7 +203,9 @@ def run_combo_yield_scan_and_summarize(
     symbol_yield_put_universe_labeled = (
         report_dir / f"{symbol_lower}_combo_yield_put_universe_labeled.csv"
     ).resolve()
-    symbol_yield_put_universe_cash_filtered = (
+    # Compatibility-only audit filename. The formal Funding Put path remains
+    # typed and in memory, and Candidate Engine owns the capacity filter.
+    symbol_yield_put_universe_cash_audit = (
         report_dir / f"{symbol_lower}_combo_yield_put_universe_cash_filtered.csv"
     ).resolve()
     symbol_yield_put_universe_underwritten = (
@@ -228,8 +214,9 @@ def run_combo_yield_scan_and_summarize(
     funding_put_min_annualized_return = resolve_min_annualized_net_return(
         symbol_cfg={"sell_put": yield_sp},
     )
+    funding_put_decisions: list[dict[str, Any]] = []
 
-    run_put_scan_fn(
+    scanned_put_universe = run_put_scan_fn(
         symbols=[sym],
         input_root=required_data_dir,
         output=symbol_yield_put_universe,
@@ -245,9 +232,17 @@ def run_combo_yield_scan_and_summarize(
         strategy_family=COMBO_YIELD_FAMILY,
         strategy_profile=yield_enhancement_policy.mode,
         quiet=True,
+        calculation_decision_sink_fn=funding_put_decisions.extend,
     )
     label_put_candidates_fn(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
-    df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+    if not isinstance(scanned_put_universe, pd.DataFrame):
+        raise RuntimeError(
+            "Combo Yield funding-put scan did not return a typed candidate universe"
+        )
+    # Candidate evidence includes typed lists and booleans. Keep the formal
+    # underwriting path in memory so an audit CSV can never become a
+    # calculation authority or coerce complete evidence into strings.
+    df_yield_put_universe = label_sell_put_candidates(scanned_put_universe)
     if not df_yield_put_universe.empty:
         df_yield_put_universe["funding_put_eligible"] = True
         df_yield_put_universe["funding_put_min_annualized_return"] = funding_put_min_annualized_return
@@ -257,25 +252,26 @@ def run_combo_yield_scan_and_summarize(
         df_yield_put_universe["put_only_period_net_return"] = df_yield_put_universe.get(
             "period_net_return_on_cash_basis"
         )
-    df_yield_put_cash_filtered = df_yield_put_universe
+    df_yield_put_cash_enriched = df_yield_put_universe
     if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
-        df_yield_put_cash_filtered = cash_filter_put_candidates_fn(
+        df_yield_put_cash_enriched = cash_filter_put_candidates_fn(
             df_labeled=df_yield_put_universe.copy(),
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            out_path=symbol_yield_put_universe_cash_filtered,
+            out_path=symbol_yield_put_universe_cash_audit,
             strategy_family=COMBO_YIELD_FAMILY,
             strategy_profile=yield_enhancement_policy.mode,
         )
-    df_yield_put_candidates_for_pairs = df_yield_put_cash_filtered
-    if not df_yield_put_cash_filtered.empty:
+    df_yield_put_candidates_for_pairs = df_yield_put_cash_enriched
+    if not df_yield_put_cash_enriched.empty:
         df_yield_put_candidates_for_pairs = underwriting_filter_put_candidates_fn(
-            df_labeled=df_yield_put_cash_filtered.copy(),
+            df_labeled=df_yield_put_cash_enriched.copy(),
             symbol=symbol,
             sell_put_cfg=yield_sp,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
+            decision_sink_fn=funding_put_decisions.extend,
         )
         _atomic_write_dataframe(
             symbol_yield_put_universe_underwritten,
@@ -348,8 +344,8 @@ def run_combo_yield_scan_and_summarize(
         yield_rule = "combo_yield_no_funding_put_eligible"
         yield_status = "post_filtered"
         yield_threshold = funding_put_min_annualized_return
-    elif df_yield_put_cash_filtered.empty:
-        yield_rule = "combo_yield_put_cash_filtered"
+    elif df_yield_put_cash_enriched.empty:
+        yield_rule = "combo_yield_put_cash_enrichment_empty"
         yield_status = "post_filtered"
     elif df_yield_put_candidates_for_pairs.empty:
         yield_rule = "combo_yield_put_underwriting_filtered"
@@ -418,9 +414,20 @@ def run_combo_yield_scan_and_summarize(
             base_dir=base,
         )
 
+    evidence = evidence_summary_from_decisions(
+        decisions=funding_put_decisions,
+        accepted_count=len(df_yield_put_candidates_for_pairs),
+    )
+    strategy_status, strategy_reason = project_evidence_scan_status(
+        evidence=evidence,
+        candidate_count=len(final_result.recommended_pairs),
+    )
     summary = None
     if final_result.separate_enabled:
         summary = summarize_yield_enhancement(final_result.recommended_pairs, symbol, symbol_cfg=symbol_cfg)
+        summary["_evidence_summary"] = evidence
+        summary["_strategy_status"] = strategy_status
+        summary["_strategy_reason"] = strategy_reason
     if inline_enabled:
         attach_calls_fn(
             df_candidates=df_sell_put_labeled,
@@ -488,7 +495,7 @@ def run_combo_yield_for_symbol_and_summarize(
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
-    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_and_filter_combo_funding_cash,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
