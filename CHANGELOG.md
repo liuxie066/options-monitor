@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.9 - 2026-08-11
+
+### Bug Fixes
+- Fixed upgrade health check failure for `options-monitor-feishu-ws.service`: `feishu-ws --check` now uses metadata-only secret status (`resolve_secret_status`) instead of resolving the secret value, and `resolve_secret_status` degrades gracefully when the systemd credential backend context is unavailable (e.g. health-check subprocess lacks `CREDENTIALS_DIRECTORY`), preventing `SecretBackendUnavailable` from blocking production upgrades.
+
 ## 1.13.8 - 2026-08-11
 
 ### Breaking Changes
