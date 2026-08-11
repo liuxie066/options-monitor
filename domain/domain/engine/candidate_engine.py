@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
@@ -19,6 +20,8 @@ OPENING_CANDIDATE_MIN_IV_RV_RATIO = 1.10
 OPENING_CANDIDATE_MIN_IV_MINUS_RV = 0.05
 OPENING_CANDIDATE_MAX_SPREAD_RATIO = 0.40
 SELL_PUT_NEAR_RETURN_THRESHOLD = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD
+EARNINGS_NEAR_EXPIRY_WINDOW_DAYS = 6
+EARNINGS_NEAR_EXPIRY_POLICY_VERSION = "earnings_near_expiry.v1"
 
 STAGE_INPUT_NORMALIZATION = "stage0_input_normalization"
 STAGE_HARD_CONSTRAINTS = "stage1_hard_constraints"
@@ -118,6 +121,91 @@ class CandidateCalculationError(ValueError):
             "metric_value": self.metric_value,
             "threshold": self.threshold,
         }
+
+
+def classify_earnings_event_date(
+    *,
+    market_date: str | date,
+    expiration: str | date,
+    earnings_date: str | date,
+) -> dict[str, Any]:
+    """Classify one earnings date under the shared date-only opening policy."""
+
+    market_day = _strict_earnings_date(market_date, field="market_date")
+    expiration_day = _strict_earnings_date(expiration, field="expiration")
+    event_day = _strict_earnings_date(earnings_date, field="earnings_date")
+    if expiration_day < market_day:
+        raise ValueError("earnings policy expiration precedes market date")
+
+    days_before_expiration = (expiration_day - event_day).days
+    pending = event_day >= market_day
+    if not pending:
+        classification = "historical"
+        blocking = False
+    elif event_day > expiration_day:
+        classification = "after_expiry"
+        blocking = False
+    elif days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS:
+        classification = "blocking"
+        blocking = True
+    else:
+        classification = "nonblocking"
+        blocking = False
+    return {
+        "earnings_date": event_day.isoformat(),
+        "market_date": market_day.isoformat(),
+        "expiration": expiration_day.isoformat(),
+        "days_before_expiration": days_before_expiration,
+        "pending": pending,
+        "classification": classification,
+        "blocking": blocking,
+    }
+
+
+def classify_pending_earnings_events(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    market_date: str | date,
+    expiration: str | date,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return canonical pending, blocking, and non-blocking event payloads."""
+
+    pending: list[dict[str, Any]] = []
+    blocking: list[dict[str, Any]] = []
+    nonblocking: list[dict[str, Any]] = []
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            raise ValueError("earnings event must be an object")
+        classification = classify_earnings_event_date(
+            market_date=market_date,
+            expiration=expiration,
+            earnings_date=raw.get("earnings_date"),
+        )
+        if classification["classification"] not in {"blocking", "nonblocking"}:
+            raise ValueError("candidate earnings event is outside the pending holding period")
+        event = dict(raw)
+        event.update(
+            {
+                "earnings_date": classification["earnings_date"],
+                "days_before_expiration": classification["days_before_expiration"],
+                "classification": classification["classification"],
+                "blocking": classification["blocking"],
+            }
+        )
+        pending.append(event)
+        if classification["blocking"]:
+            blocking.append(event)
+        else:
+            nonblocking.append(event)
+
+    pending.sort(key=_earnings_event_sort_key)
+    blocking.sort(key=_earnings_event_sort_key)
+    nonblocking.sort(key=_earnings_event_sort_key)
+    return {
+        "events": pending,
+        "blocking_events": blocking,
+        "nonblocking_events": nonblocking,
+    }
 
 
 def _opening_not_ready_reason(status: str, reason_codes: set[str]) -> str:
@@ -741,27 +829,28 @@ def evaluate_opening_candidate_policy(
         )
 
     if require_earnings_evidence:
-        earnings_status = str(src.get("earnings_evidence_status") or "").strip().lower()
-        if earnings_status != "ready":
+        earnings_evidence = _evaluate_earnings_policy_evidence(src)
+        if not earnings_evidence["ready"]:
             _reject(
                 rejects,
                 stage=STAGE_RISK_FILTER,
                 reason=REJECT_RISK_EARNINGS_UNAVAILABLE,
-                message="OpenD earnings coverage is unavailable for the holding period",
-                metric_value={
-                    "status": earnings_status or None,
-                    "reason": src.get("earnings_reason_code"),
-                },
+                message="OpenD earnings coverage is unavailable for the near-expiry window",
+                metric_value=earnings_evidence["metric_value"],
                 threshold="ready",
             )
-        elif reject_known_earnings and bool(src.get("earnings_has_event")):
+        elif reject_known_earnings and earnings_evidence["blocking"]:
             _reject(
                 rejects,
                 stage=STAGE_RISK_FILTER,
                 reason=REJECT_RISK_EARNINGS_EVENT,
-                message="known earnings event falls within the holding period",
-                metric_value=src.get("earnings_event_dates"),
-                threshold="no event through expiration",
+                message="known earnings event falls within six calendar days of expiration",
+                metric_value={
+                    "event_dates": earnings_evidence["blocking_event_dates"],
+                    "policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+                    "window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+                },
+                threshold="no pending event within six calendar days of expiration",
             )
 
     return build_candidate_decision(
@@ -771,6 +860,157 @@ def evaluate_opening_candidate_policy(
         accepted=not rejects,
         rejects=rejects,
         normalized_input=src,
+    )
+
+
+def _evaluate_earnings_policy_evidence(src: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(src.get("earnings_evidence_status") or "").strip().lower()
+    reason_code = str(src.get("earnings_reason_code") or "").strip() or None
+    base_metric = {
+        "status": status or None,
+        "reason_code": reason_code,
+        "policy_version": src.get("earnings_policy_version"),
+        "hard_coverage_status": src.get("earnings_hard_coverage_status"),
+    }
+    if status != "ready":
+        return {
+            "ready": False,
+            "blocking": False,
+            "blocking_event_dates": [],
+            "metric_value": base_metric,
+        }
+
+    try:
+        if src.get("earnings_policy_version") != EARNINGS_NEAR_EXPIRY_POLICY_VERSION:
+            raise ValueError("earnings policy version mismatch")
+        raw_window = src.get("earnings_window_days")
+        if isinstance(raw_window, bool) or int(raw_window) != EARNINGS_NEAR_EXPIRY_WINDOW_DAYS:
+            raise ValueError("earnings policy window mismatch")
+
+        market_day = _strict_earnings_date(
+            src.get("earnings_market_date"),
+            field="earnings_market_date",
+        )
+        expiration_day = _strict_earnings_date(
+            src.get("expiration"),
+            field="expiration",
+        )
+        hard_start = max(
+            market_day,
+            expiration_day - timedelta(days=EARNINGS_NEAR_EXPIRY_WINDOW_DAYS),
+        )
+        if _strict_earnings_date(
+            src.get("earnings_hard_window_start"),
+            field="earnings_hard_window_start",
+        ) != hard_start:
+            raise ValueError("earnings hard-window start mismatch")
+        if _strict_earnings_date(
+            src.get("earnings_hard_window_end"),
+            field="earnings_hard_window_end",
+        ) != expiration_day:
+            raise ValueError("earnings hard-window end mismatch")
+
+        raw_events = src.get("earnings_events")
+        if not isinstance(raw_events, list):
+            raise ValueError("earnings events must be a list")
+        classified = classify_pending_earnings_events(
+            raw_events,
+            market_date=market_day,
+            expiration=expiration_day,
+        )
+        if _canonical_earnings_event_list(raw_events) != classified["events"]:
+            raise ValueError("earnings events are not canonically classified")
+        if _canonical_earnings_event_list(
+            src.get("earnings_blocking_events")
+        ) != classified["blocking_events"]:
+            raise ValueError("earnings blocking events mismatch")
+        if _canonical_earnings_event_list(
+            src.get("earnings_nonblocking_events")
+        ) != classified["nonblocking_events"]:
+            raise ValueError("earnings non-blocking events mismatch")
+
+        has_event = src.get("earnings_has_event")
+        blocking_has_event = src.get("earnings_blocking_has_event")
+        if not isinstance(has_event, bool) or has_event != bool(classified["events"]):
+            raise ValueError("earnings event presence mismatch")
+        if (
+            not isinstance(blocking_has_event, bool)
+            or blocking_has_event != bool(classified["blocking_events"])
+        ):
+            raise ValueError("earnings blocking presence mismatch")
+
+        hard_coverage = str(
+            src.get("earnings_hard_coverage_status") or ""
+        ).strip().lower()
+        if hard_coverage not in {"complete", "partial"}:
+            raise ValueError("earnings hard coverage status is invalid")
+        soft_coverage = str(
+            src.get("earnings_soft_coverage_status") or ""
+        ).strip().lower()
+        if soft_coverage not in {"complete", "partial", "not_applicable"}:
+            raise ValueError("earnings soft coverage status is invalid")
+        if not classified["blocking_events"] and hard_coverage != "complete":
+            raise ValueError("earnings ready status lacks complete hard coverage")
+    except (TypeError, ValueError, OverflowError) as exc:
+        return {
+            "ready": False,
+            "blocking": False,
+            "blocking_event_dates": [],
+            "metric_value": {
+                **base_metric,
+                "reason_code": "earnings_policy_evidence_invalid",
+                "error": str(exc),
+            },
+        }
+
+    blocking_dates = [
+        str(item["earnings_date"]) for item in classified["blocking_events"]
+    ]
+    return {
+        "ready": True,
+        "blocking": bool(blocking_dates),
+        "blocking_event_dates": blocking_dates,
+        "metric_value": base_metric,
+    }
+
+
+def _strict_earnings_date(value: Any, *, field: str) -> date:
+    if isinstance(value, datetime):
+        raise ValueError(f"invalid {field}")
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or value != value.strip():
+        raise ValueError(f"invalid {field}")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid {field}") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"invalid {field}")
+    return parsed
+
+
+def _canonical_earnings_event_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, Mapping) for item in value
+    ):
+        raise ValueError("earnings event collection is invalid")
+    events = [dict(item) for item in value]
+    events.sort(key=_earnings_event_sort_key)
+    return events
+
+
+def _earnings_event_sort_key(item: Mapping[str, Any]) -> tuple[str, str, float, str]:
+    timestamp = item.get("earnings_timestamp")
+    try:
+        timestamp_value = float(timestamp) if timestamp is not None else 0.0
+    except (TypeError, ValueError):
+        timestamp_value = 0.0
+    return (
+        str(item.get("earnings_date") or ""),
+        str(item.get("security") or ""),
+        timestamp_value,
+        str(item.get("pub_type") or ""),
     )
 
 

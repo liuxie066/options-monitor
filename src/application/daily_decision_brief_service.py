@@ -19,6 +19,10 @@ from domain.domain.close_advice import (
     safe_int,
     select_close_advice_notification_rows,
 )
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
@@ -43,6 +47,7 @@ from src.application.prepared_portfolio_distribution import (
 )
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
+    candidate_universe_summary,
     load_opening_candidate_snapshot,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
@@ -147,7 +152,11 @@ def assemble_daily_decision_brief(
             unavailable_reason=candidate_snapshot_unavailable_reason,
         )
     )
-    combo_rows, combo_available = _load_combo_yield_snapshot_family(
+    (
+        combo_rows,
+        combo_available,
+        combo_snapshot_status,
+    ) = _load_combo_yield_snapshot_family(
         base=base_path,
         run_id=run_id_norm,
         account=account_norm,
@@ -197,12 +206,55 @@ def assemble_daily_decision_brief(
         for item in indexed_strategy_statuses
         if str(item.get("status") or "").strip().lower() == "completed"
     }
+    indexed_combo_statuses = [
+        item
+        for item in indexed_strategy_statuses
+        if str(item.get("strategy_family") or "").strip().lower()
+        == "combo_yield"
+    ]
+    indexed_combo_partial = any(
+        str(item.get("status") or "").strip().lower() == "completed"
+        and str(item.get("reason") or "").strip().lower() == "partial_data"
+        for item in indexed_combo_statuses
+    )
     if "sell_put" in indexed_expected_families:
         put_available = "sell_put" in indexed_completed_families
     if "covered_call" in indexed_expected_families:
         call_available = "covered_call" in indexed_completed_families
     if "combo_yield" in indexed_expected_families:
-        combo_available = "combo_yield" in indexed_completed_families
+        # The sealed Combo snapshot remains the candidate authority. The
+        # optional status index may further downgrade it, never overwrite an
+        # unavailable snapshot with a clean completed status.
+        combo_available = (
+            combo_available
+            and "combo_yield" in indexed_completed_families
+        )
+    if combo_snapshot_status == "partial_data" and not indexed_combo_partial:
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "severity": "warning",
+                "actionable": False,
+                "reason": "opening_candidate_strategy_partial_data",
+            }
+        )
+    elif (
+        combo_snapshot_status
+        and not combo_available
+        and (
+            not indexed_combo_statuses
+            or "combo_yield" in indexed_completed_families
+        )
+    ):
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "combo_yield",
+                "reason": "opening_candidate_strategy_data_unavailable",
+                "source_status": combo_snapshot_status,
+            }
+        )
 
     put_rows = _dedupe_rows(put_rows, family="sell_put")
     call_rows = _dedupe_rows(call_rows, family="covered_call")
@@ -252,6 +304,11 @@ def assemble_daily_decision_brief(
             family="sell_put",
             market_date=market_date,
         )
+        _append_candidate_earnings_context_gap(
+            row,
+            family="sell_put",
+            data_gaps=data_gaps,
+        )
         required_context_rows += 1
         if cap is None:
             required_context_missing += 1
@@ -283,6 +340,11 @@ def assemble_daily_decision_brief(
             row,
             family="covered_call",
             market_date=market_date,
+        )
+        _append_candidate_earnings_context_gap(
+            row,
+            family="covered_call",
+            data_gaps=data_gaps,
         )
         required_context_rows += 1
         if cap is None:
@@ -319,6 +381,11 @@ def assemble_daily_decision_brief(
             row,
             family="combo_yield",
             market_date=market_date,
+        )
+        _append_candidate_earnings_context_gap(
+            row,
+            family="combo_yield",
+            data_gaps=data_gaps,
         )
         candidate_payloads["combo_yield"].append(
             _candidate_view(row, family="combo_yield", rank=rank, event_risk=event_risk)
@@ -688,10 +755,32 @@ def _load_opening_candidate_families(
         row["_source_row"] = item.get("rank")
         rows_by_mode[mode].append(row)
 
+    universe = candidate_universe_summary(accepted_snapshot)
+    partial_modes: set[str] = set()
+    for affected in universe.get("affected_scopes") or []:
+        if not isinstance(affected, Mapping):
+            continue
+        mode = str(affected.get("strategy_mode") or "")
+        family = {"put": "sell_put", "call": "covered_call"}.get(mode)
+        if family is None:
+            continue
+        partial_modes.add(mode)
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": family,
+                "symbol": str(affected.get("symbol") or ""),
+                "severity": "warning",
+                "actionable": False,
+                "reason": "opening_candidate_strategy_partial_data",
+                "reason_code": affected.get("reason_code"),
+            }
+        )
+
     available: dict[str, bool] = {}
     for mode, family in (("put", "sell_put"), ("call", "covered_call")):
         status = str(result_by_mode.get(mode, {}).get("strategy_status") or "")
-        if status == "partial_data":
+        if status == "partial_data" and mode not in partial_modes:
             data_gaps.append(
                 {
                     "scope": "strategy",
@@ -723,77 +812,6 @@ def _load_opening_candidate_families(
     )
 
 
-def _load_candidate_family(
-    *,
-    run_account_dir: Path,
-    market: str,
-    family: str,
-    paths_to_try: list[Path],
-    source_artifacts: list[dict[str, Any]],
-    data_gaps: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
-    rows: list[dict[str, Any]] = []
-    available = False
-    if not paths_to_try:
-        data_gaps.append({"scope": "strategy", "strategy_family": family, "reason": "source_artifact_missing"})
-        return rows, available
-
-    for path in paths_to_try:
-        try:
-            frame = pd.read_csv(path)
-        except pd.errors.EmptyDataError as exc:
-            available = True
-            source_artifacts.append(
-                {
-                    "kind": f"{family}_candidates",
-                    "path": _source_path(run_account_dir, path),
-                    "row_count": 0,
-                }
-            )
-            continue
-        except (OSError, pd.errors.ParserError, UnicodeError) as exc:
-            data_gaps.append(
-                {
-                    "scope": "source",
-                    "strategy_family": family,
-                    "path": _source_path(run_account_dir, path),
-                    "reason": "csv_unavailable",
-                    "error_type": type(exc).__name__,
-                }
-            )
-            continue
-        available = True
-        market_rows: list[dict[str, Any]] = []
-        for source_row, raw in enumerate(frame.to_dict("records"), start=1):
-            row = _json_safe(dict(raw))
-            row_market = _row_market(row)
-            if row_market is None:
-                data_gaps.append(
-                    {
-                        "scope": "row",
-                        "strategy_family": family,
-                        "path": _source_path(run_account_dir, path),
-                        "source_row": source_row,
-                        "reason": "symbol_market_unavailable",
-                    }
-                )
-                continue
-            if row_market != market:
-                continue
-            row["_source_path"] = _source_path(run_account_dir, path)
-            row["_source_row"] = source_row
-            market_rows.append(row)
-        source_artifacts.append(
-            {
-                "kind": f"{family}_candidates",
-                "path": _source_path(run_account_dir, path),
-                "row_count": len(market_rows),
-            }
-        )
-        rows.extend(market_rows)
-    return rows, available
-
-
 def _load_combo_yield_snapshot_family(
     *,
     base: Path,
@@ -802,7 +820,7 @@ def _load_combo_yield_snapshot_family(
     market: str,
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, str | None]:
     """Load Combo Yield pairs from the sealed account-run snapshot."""
 
     try:
@@ -820,7 +838,7 @@ def _load_combo_yield_snapshot_family(
                 "error_type": type(exc).__name__,
             }
         )
-        return [], False
+        return [], False, None
     snapshot_market = str(snapshot.get("market") or "").strip().lower()
     if snapshot_market and snapshot_market != str(market).strip().lower():
         data_gaps.append(
@@ -830,7 +848,7 @@ def _load_combo_yield_snapshot_family(
                 "reason": "combo_snapshot_market_mismatch",
             }
         )
-        return [], False
+        return [], False, None
     pairs = snapshot.get("ranked_pairs") or []
     market_rows: list[dict[str, Any]] = []
     for source_row, raw in enumerate(pairs, start=1):
@@ -849,7 +867,13 @@ def _load_combo_yield_snapshot_family(
             "opening_status": snapshot.get("opening_status"),
         }
     )
-    return market_rows, True
+    opening_status = str(snapshot.get("opening_status") or "").strip().lower()
+    available = bool(market_rows) or opening_status in {
+        "candidates_found",
+        "no_candidate",
+        "partial_data",
+    }
+    return market_rows, available, opening_status
 
 
 def _load_cc_lp_snapshot_family(
@@ -1789,6 +1813,31 @@ def _row_gap(row: Mapping[str, Any], family: str, reason: str) -> dict[str, Any]
     }
 
 
+def _append_candidate_earnings_context_gap(
+    row: Mapping[str, Any],
+    *,
+    family: str,
+    data_gaps: list[dict[str, Any]],
+) -> None:
+    if _text(row.get("earnings_soft_coverage_status")).lower() != "partial":
+        return
+    raw_reason_codes = row.get("earnings_soft_reason_codes")
+    reason_codes = (
+        [str(item) for item in raw_reason_codes]
+        if isinstance(raw_reason_codes, (list, tuple))
+        else []
+    )
+    gap = _row_gap(row, family, "earnings_soft_coverage_partial")
+    gap.update(
+        {
+            "severity": "warning",
+            "actionable": False,
+            "reason_codes": reason_codes,
+        }
+    )
+    data_gaps.append(gap)
+
+
 def _source_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "path": _text(row.get("_source_path")),
@@ -1820,7 +1869,37 @@ def _candidate_event_risk(
             "symbol": symbol,
             "selected_provider": "opend",
             "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
-            "coverage": {"earnings": status or "unavailable"},
+            "coverage": {
+                "earnings": status or "unavailable",
+                "earnings_hard": _text(
+                    row.get("earnings_hard_coverage_status")
+                ).lower()
+                or "unavailable",
+                "earnings_soft": _text(
+                    row.get("earnings_soft_coverage_status")
+                ).lower()
+                or "unavailable",
+            },
+            "nearest_event": None,
+            "events": [],
+            "days_to_event": None,
+            "expiration_relations": {},
+            "in_attention_window": False,
+        }
+    if (
+        _text(row.get("earnings_policy_version"))
+        != EARNINGS_NEAR_EXPIRY_POLICY_VERSION
+        or int(_number(row.get("earnings_window_days")) or -1)
+        != EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+    ):
+        return {
+            "user_state": "unknown",
+            "reason_code": "earnings_policy_evidence_legacy_or_invalid",
+            "reliable": False,
+            "symbol": symbol,
+            "selected_provider": "opend",
+            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "coverage": {"earnings": "unavailable"},
             "nearest_event": None,
             "events": [],
             "days_to_event": None,
@@ -1862,7 +1941,29 @@ def _candidate_event_risk(
             }
         )
     normalized_events.sort(key=lambda item: _text(item.get("event_date")))
-    if not bool(row.get("earnings_has_event")) or not normalized_events:
+    has_event = row.get("earnings_has_event")
+    blocking_has_event = row.get("earnings_blocking_has_event")
+    if (
+        not isinstance(has_event, bool)
+        or not isinstance(blocking_has_event, bool)
+        or has_event != bool(normalized_events)
+        or (blocking_has_event and not has_event)
+    ):
+        return {
+            "user_state": "unknown",
+            "reason_code": "earnings_event_evidence_inconsistent",
+            "reliable": False,
+            "symbol": symbol,
+            "selected_provider": "opend",
+            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "coverage": {"earnings": "unavailable"},
+            "nearest_event": None,
+            "events": [],
+            "days_to_event": None,
+            "expiration_relations": {},
+            "in_attention_window": False,
+        }
+    if not has_event:
         return {
             "user_state": "confirmed_none",
             "reason_code": "confirmed_no_upcoming_earnings",
@@ -1870,14 +1971,21 @@ def _candidate_event_risk(
             "symbol": symbol,
             "selected_provider": "opend",
             "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
-            "coverage": {"earnings": "complete"},
+            "coverage": {
+                "earnings": "complete",
+                "earnings_hard": _text(
+                    row.get("earnings_hard_coverage_status")
+                ).lower(),
+                "earnings_soft": _text(
+                    row.get("earnings_soft_coverage_status")
+                ).lower(),
+            },
             "nearest_event": None,
             "events": [],
             "days_to_event": None,
             "expiration_relations": {},
             "in_attention_window": False,
         }
-
     nearest = normalized_events[0]
     try:
         event_date = datetime.fromisoformat(_text(nearest["event_date"])).date()
@@ -1904,14 +2012,27 @@ def _candidate_event_risk(
                 else None
             ),
         }
+    blocking = blocking_has_event
     return {
         "user_state": "confirmed_event",
-        "reason_code": "confirmed_earnings_event",
+        "reason_code": (
+            "confirmed_near_expiry_earnings_event"
+            if blocking
+            else "confirmed_distant_earnings_event"
+        ),
         "reliable": True,
         "symbol": symbol,
         "selected_provider": "opend",
         "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
-        "coverage": {"earnings": "complete"},
+        "coverage": {
+            "earnings": "complete",
+            "earnings_hard": _text(
+                row.get("earnings_hard_coverage_status")
+            ).lower(),
+            "earnings_soft": _text(
+                row.get("earnings_soft_coverage_status")
+            ).lower(),
+        },
         "nearest_event": nearest,
         "events": normalized_events,
         "days_to_event": (
@@ -1920,10 +2041,7 @@ def _candidate_event_risk(
             else None
         ),
         "expiration_relations": relations,
-        "in_attention_window": any(
-            item["relation"] in {"before_expiration", "on_expiration"}
-            for item in relations.values()
-        ),
+        "in_attention_window": blocking,
     }
 
 
