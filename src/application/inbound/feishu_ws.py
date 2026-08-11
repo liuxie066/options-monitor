@@ -83,6 +83,7 @@ class FeishuWsSettings:
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     assistant_default_market_scope: str = ""
     assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
+    metadata_only: bool = False
 
     def validate_for_serve(self) -> None:
         if not (self.config_path or self.config_key):
@@ -98,6 +99,11 @@ class FeishuWsSettings:
                 hint="Set OM_FEISHU_BOT_USER_OPEN_ID or OM_FEISHU_BOT_ALLOWED_OPEN_IDS.",
             )
         if not (self.app_id and self.app_secret):
+            if self.metadata_only and self.app_id:
+                # Check/diagnostic mode: app_secret may be unresolvable in this
+                # subprocess context (e.g. missing CREDENTIALS_DIRECTORY).
+                # Report the status without blocking on value resolution.
+                return
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing Feishu app credentials for long-connection inbound",
@@ -189,6 +195,7 @@ def build_feishu_ws_settings(
         assistant_context_window_messages=assistant_settings.context_window_messages,
         assistant_default_market_scope=assistant_settings.default_market_scope,
         assistant_llm=assistant_settings.llm,
+        metadata_only=metadata_only,
     )
 
 
