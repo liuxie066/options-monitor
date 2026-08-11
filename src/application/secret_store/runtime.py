@@ -6,7 +6,12 @@ import os
 from threading import RLock
 from typing import Iterator, Mapping
 
-from src.application.secret_store.contracts import SecretProvider, SecretStatus, SnapshotSecretProvider
+from src.application.secret_store.contracts import (
+    SecretBackendUnavailable,
+    SecretProvider,
+    SecretStatus,
+    SnapshotSecretProvider,
+)
 
 
 _provider_override: ContextVar[SecretProvider | None] = ContextVar("options_monitor_secret_provider", default=None)
@@ -89,10 +94,25 @@ def resolve_secret_status(
     environ: Mapping[str, str] | None = None,
     legacy_env_name: str | None = None,
 ) -> SecretStatus:
-    return _provider_for(provider=provider, environ=environ).status(
-        logical_name,
-        legacy_env_name=legacy_env_name,
-    )
+    try:
+        return _provider_for(provider=provider, environ=environ).status(
+            logical_name,
+            legacy_env_name=legacy_env_name,
+        )
+    except SecretBackendUnavailable:
+        # Diagnostic path must not crash when the backend context is unavailable
+        # (e.g. health-check subprocess lacks systemd CREDENTIALS_DIRECTORY).
+        # Fall back to checking the legacy env name directly.
+        env = environ if environ is not None else os.environ
+        configured = bool(
+            legacy_env_name and str(env.get(legacy_env_name) or "").strip()
+        )
+        return SecretStatus(
+            logical_name=logical_name,
+            configured=configured,
+            backend="unavailable",
+            source="legacy_env_fallback" if configured else "missing",
+        )
 
 
 __all__ = [

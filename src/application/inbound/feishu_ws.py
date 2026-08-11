@@ -145,6 +145,7 @@ def build_feishu_ws_settings(
     environ: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
     credential_env_file: str | Path | None = None,
+    metadata_only: bool = False,
 ) -> FeishuWsSettings:
     effective_env = build_effective_env(environ=environ, env_file=env_file)
     if credential_env_file is not None and str(credential_env_file).strip():
@@ -153,7 +154,7 @@ def build_feishu_ws_settings(
             env_file=credential_env_file,
         )
     env = effective_env.values
-    bot_cfg = resolve_feishu_bot_config(environ=env)
+    bot_cfg = resolve_feishu_bot_config(environ=env, metadata_only=metadata_only)
     assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
     behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))
     assistant_settings = AssistantSettings.from_runtime_config(assistant_cfg)

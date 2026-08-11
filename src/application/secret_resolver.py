@@ -8,6 +8,7 @@ from src.application.secret_store import (
     FEISHU_HOLDINGS_APP_SECRET,
     SecretProvider,
     resolve_secret,
+    resolve_secret_status,
 )
 from src.application.settings import build_effective_env
 
@@ -184,6 +185,7 @@ def resolve_feishu_bot_config(
     *,
     environ: Mapping[str, str] | None = None,
     secret_provider: SecretProvider | None = None,
+    metadata_only: bool = False,
 ) -> FeishuBotConfig:
     del notifications
     app_id_env = DEFAULT_FEISHU_BOT_APP_ID_ENV
@@ -192,14 +194,26 @@ def resolve_feishu_bot_config(
     allowed_open_ids_env = DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV
     user_open_id = _env(environ, user_open_id_env)
     allowed_open_ids = _split_csv(_env(environ, allowed_open_ids_env)) or ((user_open_id,) if user_open_id else ())
-    return FeishuBotConfig(
-        app_id=_env(environ, app_id_env),
-        app_secret=_secret(
+    if metadata_only:
+        # Check/diagnostic path: report credential presence without resolving the value.
+        # Falls back to legacy env check so the health check works in any backend context.
+        status = resolve_secret_status(
+            FEISHU_BOT_APP_SECRET,
+            provider=secret_provider,
+            environ=environ if secret_provider is None else None,
+            legacy_env_name=app_secret_env,
+        )
+        app_secret = "configured" if status.configured else ""
+    else:
+        app_secret = _secret(
             FEISHU_BOT_APP_SECRET,
             environ=environ,
             provider=secret_provider,
             legacy_env_name=app_secret_env,
-        ),
+        )
+    return FeishuBotConfig(
+        app_id=_env(environ, app_id_env),
+        app_secret=app_secret,
         user_open_id=user_open_id,
         allowed_open_ids=allowed_open_ids,
         app_id_env=app_id_env,

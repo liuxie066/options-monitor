@@ -133,6 +133,7 @@ def handle_inbound_command(
             environ=os.environ,
             env_file=args.env_file,
             credential_env_file=args.credential_env_file,
+            metadata_only=bool(args.check),
         )
         if args.check:
             return _print(check_feishu_ws_settings_fn(settings))
