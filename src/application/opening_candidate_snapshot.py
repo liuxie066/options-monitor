@@ -14,8 +14,12 @@ from domain.domain.engine import (
     validate_candidate_decision_payload,
 )
 from domain.domain.engine.candidate_engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    REJECT_EVIDENCE_UNAVAILABLE,
     REJECT_INPUT_INVALID,
     REJECT_INPUT_MISSING,
+    REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from domain.domain.symbol_identity import symbol_market
 from src.application.tick_run_workspace import (
@@ -70,7 +74,11 @@ def strategy_policy_hash(config: Mapping[str, Any]) -> str:
     cfg = dict(config or {})
     return canonical_sha256(
         {
-            "schema": "opening_candidate_strategy_policy.v1",
+            "schema": "opening_candidate_strategy_policy.v2",
+            "earnings_policy": {
+                "version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+                "near_expiry_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+            },
             "templates": cfg.get("templates"),
             "profiles": cfg.get("profiles"),
             "symbols": cfg.get("symbols"),
@@ -395,15 +403,28 @@ def validate_opening_candidate_snapshot(
     ):
         raise OpeningCandidateSnapshotError("opening candidate strategy modes are invalid")
     results = item.get("strategy_results")
-    if not isinstance(results, list) or {row.get("strategy_mode") for row in results} != set(modes):
-        raise OpeningCandidateSnapshotError("opening candidate strategy results are invalid")
+    if (
+        not isinstance(results, list)
+        or any(not isinstance(row, Mapping) for row in results)
+        or {row.get("strategy_mode") for row in results} != set(modes)
+    ):
+        raise OpeningCandidateSnapshotError(
+            "opening candidate strategy results are invalid"
+        )
     for row in results:
         if row.get("strategy_status") not in STRATEGY_STATUSES:
             raise OpeningCandidateSnapshotError("opening candidate strategy status is invalid")
     ranked = item.get("ranked_candidates")
     decisions = item.get("candidate_decisions")
     scopes = item.get("scope_results")
-    if not isinstance(ranked, list) or not isinstance(decisions, list) or not isinstance(scopes, list):
+    if (
+        not isinstance(ranked, list)
+        or not isinstance(decisions, list)
+        or not isinstance(scopes, list)
+        or any(not isinstance(row, Mapping) for row in ranked)
+        or any(not isinstance(row, Mapping) for row in decisions)
+        or any(not isinstance(row, Mapping) for row in scopes)
+    ):
         raise OpeningCandidateSnapshotError("opening candidate snapshot collections are invalid")
     candidate_ids = [str(row.get("candidate_id") or "") for row in decisions]
     if any(not value for value in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
@@ -412,10 +433,6 @@ def validate_opening_candidate_snapshot(
     validated_decision_ids: set[str] = set()
     accepted_decision_ids: set[str] = set()
     for raw_decision in decisions:
-        if not isinstance(raw_decision, Mapping):
-            raise OpeningCandidateSnapshotError(
-                "opening candidate decision is invalid"
-            )
         decision = dict(raw_decision)
         candidate_id = str(decision.get("candidate_id") or "")
         decision_by_id[candidate_id] = decision
@@ -508,6 +525,171 @@ def validate_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "opening candidate contract scopes do not match decisions"
         )
+    has_strategy_scopes = any(
+        isinstance(row, Mapping) and row.get("scope") == "strategy"
+        for row in scopes
+    )
+    full_current_contract = has_strategy_scopes and all(
+        isinstance(row, Mapping)
+        and {
+            "strategy_mode",
+            "strategy_status",
+            "capacity_status",
+            "candidate_count",
+            "scope_count",
+        }
+        <= set(row)
+        for row in results
+    ) and (not decision_ids or validated_decision_ids == decision_ids)
+    if full_current_contract:
+        strategy_scopes = [
+            row
+            for row in scopes
+            if isinstance(row, Mapping) and row.get("scope") == "strategy"
+        ]
+        try:
+            reconstructed_statuses = _scan_statuses(
+                {
+                    "symbol": row.get("symbol"),
+                    "strategy_mode": row.get("strategy_mode"),
+                    "status": row.get("status"),
+                    "reason": row.get("reason_code"),
+                    "quote_snapshot_id": row.get("quote_snapshot_id"),
+                    "quote_receipt_relpath": row.get("quote_receipt_relpath"),
+                }
+                for row in strategy_scopes
+            )
+        except (TypeError, ValueError) as exc:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate strategy scopes are invalid"
+            ) from exc
+        expected_scopes = _scope_results(
+            statuses=reconstructed_statuses,
+            decisions=[dict(row) for row in decisions],
+        )
+        if scopes != expected_scopes:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate scope results are inconsistent"
+            )
+        expected_results = _strategy_results(
+            modes=[str(mode) for mode in modes],
+            statuses=reconstructed_statuses,
+            ranked=[dict(row) for row in ranked],
+            decisions=[dict(row) for row in decisions],
+            authority=authority,
+        )
+        if results != expected_results:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate strategy results are inconsistent"
+            )
+        if item.get("opening_status") != _opening_status(
+            expected_results,
+            scan_statuses=reconstructed_statuses,
+        ):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate aggregate status is inconsistent"
+            )
+
+
+def candidate_universe_summary(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive model/report completeness from frozen strategy scope facts."""
+
+    scopes = snapshot.get("scope_results")
+    if scopes is None:
+        # Read-only compatibility for legacy/minimal callers. Canonical current
+        # snapshots are validated before this projection and always carry the
+        # complete scope collection.
+        scopes = []
+    if not isinstance(scopes, list):
+        raise OpeningCandidateSnapshotError(
+            "opening candidate scope results are invalid"
+        )
+    affected_by_scope: dict[tuple[str, str], dict[str, Any]] = {}
+    seen: set[tuple[str, str]] = set()
+    for raw in scopes:
+        if not isinstance(raw, Mapping) or raw.get("scope") != "strategy":
+            continue
+        symbol = _required_text(raw.get("symbol"), "scope symbol").upper()
+        mode = _mode(raw.get("strategy_mode"))
+        key = (symbol, mode)
+        if key in seen:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate strategy scope is duplicated"
+            )
+        seen.add(key)
+        status = _required_text(raw.get("status"), "scope status")
+        if status not in {
+            "completed",
+            "not_applicable",
+            "failed",
+            "incomplete",
+            "unavailable",
+        }:
+            raise OpeningCandidateSnapshotError(
+                "opening candidate strategy scope status is invalid"
+            )
+        reason = str(raw.get("reason_code") or "").strip() or None
+        incomplete = status in {"failed", "incomplete", "unavailable"}
+        if status == "completed":
+            incomplete = (reason or "") not in _CLEAN_NO_CANDIDATE_REASONS
+        elif status == "not_applicable":
+            incomplete = bool(
+                reason
+                and reason not in _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS
+            )
+        if incomplete:
+            affected_by_scope[key] = {
+                "symbol": symbol,
+                "strategy_mode": mode,
+                "reason_code": reason or status,
+            }
+    unavailable_reasons = {
+        REJECT_EVIDENCE_UNAVAILABLE,
+        REJECT_INPUT_INVALID,
+        REJECT_INPUT_MISSING,
+        REJECT_RISK_EARNINGS_UNAVAILABLE,
+    }
+    for raw in scopes:
+        if not isinstance(raw, Mapping) or raw.get("scope") != "contract":
+            continue
+        raw_reason_codes = raw.get("reason_codes")
+        if not isinstance(raw_reason_codes, (list, tuple)):
+            raise OpeningCandidateSnapshotError(
+                "opening candidate contract scope reasons are invalid"
+            )
+        reasons = {
+            str(item)
+            for item in raw_reason_codes
+            if str(item)
+        }
+        unresolved_reasons = reasons & unavailable_reasons
+        if not unresolved_reasons or reasons - unavailable_reasons:
+            continue
+        symbol = _required_text(raw.get("symbol"), "scope symbol").upper()
+        mode = _mode(raw.get("strategy_mode"))
+        key = (symbol, mode)
+        affected_by_scope.setdefault(
+            key,
+            {
+                "symbol": symbol,
+                "strategy_mode": mode,
+                "reason_code": sorted(unresolved_reasons)[0],
+            },
+        )
+    affected = list(affected_by_scope.values())
+    affected.sort(
+        key=lambda row: (
+            str(row["strategy_mode"]),
+            str(row["symbol"]),
+            str(row["reason_code"]),
+        )
+    )
+    return {
+        "status": "partial" if affected else "complete",
+        "affected_scopes": affected,
+    }
 
 
 def dependency_from_file(
@@ -834,6 +1016,13 @@ def _opening_status(
         for item in observed_scopes
     ):
         return "market_closed"
+    if any(int(item.get("candidate_count") or 0) > 0 for item in results):
+        # Accepted rows are fully evaluated Candidate Engine outcomes. A
+        # failed sibling scope makes the universe partial, but must not erase
+        # those candidates or turn the account-wide opening result into an
+        # unavailable input. Completeness is projected separately from the
+        # content-hashed strategy scope rows.
+        return "candidates_found"
     scope_states = {str(item.get("status") or "") for item in scan_statuses}
     if scope_states & {"completed", "not_applicable"} and scope_states & {
         "failed",
@@ -848,8 +1037,6 @@ def _opening_status(
         return "partial_data"
     if statuses <= {"data_unavailable", "not_applicable"}:
         return "data_unavailable"
-    if any(int(item.get("candidate_count") or 0) > 0 for item in results):
-        return "candidates_found"
     return "no_candidate"
 
 
@@ -1127,6 +1314,7 @@ __all__ = [
     "OPENING_CANDIDATE_SNAPSHOT_FILE",
     "OPENING_CANDIDATE_SNAPSHOT_SCHEMA",
     "OpeningCandidateSnapshotError",
+    "candidate_universe_summary",
     "dependency_from_file",
     "dependency_from_hash",
     "load_latest_opening_candidate_snapshot",

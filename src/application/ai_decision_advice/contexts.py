@@ -28,6 +28,10 @@ from src.application.ai_decision_advice.projection import project_all_candidates
 from src.application.ledger.api import (
     validate_combo_group_membership,
 )
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    candidate_universe_summary,
+)
 from src.application.prepared_option_positions_context import (
     PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
     cny_per_currency_rates_from_option_context,
@@ -121,6 +125,10 @@ def freeze_candidates(
     ranked = snapshot.get("ranked_candidates")
     if not isinstance(ranked, list):
         raise FrozenInputError("candidate snapshot ranked_candidates is invalid")
+    try:
+        universe = candidate_universe_summary(snapshot)
+    except OpeningCandidateSnapshotError as exc:
+        raise FrozenInputError("candidate universe summary is invalid") from exc
     families: dict[str, list[dict[str, Any]]] = {
         "sell_put": [],
         "covered_call": [],
@@ -156,6 +164,12 @@ def freeze_candidates(
         currency = str(
             facts.get("currency") or symbol_currency(symbol) or ""
         ).strip().upper()
+        raw_soft_reasons = facts.get("earnings_soft_reason_codes")
+        soft_reason_codes = (
+            [str(item) for item in raw_soft_reasons]
+            if isinstance(raw_soft_reasons, (list, tuple))
+            else []
+        )
         row = {
             "candidate_id": candidate_id,
             "rank": rank,
@@ -220,6 +234,34 @@ def freeze_candidates(
                 if isinstance(facts.get("earnings_has_event"), bool)
                 else None
             ),
+            "earnings_policy_version": (
+                str(facts.get("earnings_policy_version"))
+                if facts.get("earnings_policy_version") is not None
+                else None
+            ),
+            "earnings_window_days": (
+                int(facts.get("earnings_window_days"))
+                if isinstance(facts.get("earnings_window_days"), int)
+                and not isinstance(facts.get("earnings_window_days"), bool)
+                else None
+            ),
+            "earnings_blocking_has_event": (
+                facts.get("earnings_blocking_has_event")
+                if isinstance(facts.get("earnings_blocking_has_event"), bool)
+                else None
+            ),
+            "earnings_blocking_event_dates": str(
+                facts.get("earnings_blocking_event_dates") or ""
+            ),
+            "earnings_nonblocking_event_dates": str(
+                facts.get("earnings_nonblocking_event_dates") or ""
+            ),
+            "earnings_soft_coverage_status": (
+                str(facts.get("earnings_soft_coverage_status"))
+                if facts.get("earnings_soft_coverage_status") is not None
+                else None
+            ),
+            "earnings_soft_reason_codes": soft_reason_codes,
         }
         families[family].append(row)
 
@@ -228,7 +270,11 @@ def freeze_candidates(
             raise FrozenInputError(
                 f"candidate family {family} rank sequence is invalid"
             )
-    return {"market": market_norm, **families}
+    return {
+        "market": market_norm,
+        "candidate_universe": universe,
+        **families,
+    }
 
 
 def freeze_portfolio_distribution(

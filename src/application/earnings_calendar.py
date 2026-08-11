@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    classify_pending_earnings_events,
+)
 from domain.domain.symbol_identity import resolve_symbol_identity
 from src.infrastructure.futu_gateway import (
     FutuGatewayCapabilityUnavailableError,
@@ -17,7 +22,7 @@ from src.infrastructure.futu_gateway import (
 from src.infrastructure.io_utils import atomic_write_json
 
 
-EARNINGS_CALENDAR_SCHEMA_VERSION = "opend_earnings_calendar.v1"
+EARNINGS_CALENDAR_SCHEMA_VERSION = "opend_earnings_calendar.v2"
 EARNINGS_CALENDAR_MAX_INTERVAL_DAYS = 7
 _MARKET_TIMEZONES = {
     "US": ZoneInfo("America/New_York"),
@@ -161,6 +166,8 @@ def fetch_market_earnings_calendar(
     snapshot: dict[str, Any] = {
         "schema_version": EARNINGS_CALENDAR_SCHEMA_VERSION,
         "source": "opend",
+        "policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
         "market": market_norm,
         "scan_date": scan_date.isoformat(),
         "scan_at_utc": _iso_utc(scan_at),
@@ -181,9 +188,10 @@ def fetch_market_earnings_calendar(
             for code, expirations in normalized_expirations.items()
         },
     }
+    _validate_earnings_calendar_source(snapshot)
     snapshot["evidence_by_underlier"] = {
         code: {
-            expiration.isoformat(): project_earnings_for_expiry(
+            expiration.isoformat(): _project_earnings_for_expiry(
                 snapshot,
                 underlier_code=code,
                 expiration=expiration,
@@ -193,6 +201,7 @@ def fetch_market_earnings_calendar(
         for code, expirations in normalized_expirations.items()
     }
     snapshot["snapshot_hash"] = _payload_hash(snapshot)
+    validate_earnings_calendar_snapshot(snapshot, expected_market=market_norm)
     return snapshot
 
 
@@ -202,10 +211,77 @@ def project_earnings_for_expiry(
     underlier_code: str,
     expiration: str | date,
 ) -> dict[str, Any]:
-    """Project market interval evidence to one underlier and expiry."""
+    """Reproject validated source facts to one underlier and expiry."""
 
+    validate_earnings_calendar_snapshot(snapshot)
+    projected = _project_earnings_for_expiry(
+        snapshot,
+        underlier_code=underlier_code,
+        expiration=expiration,
+    )
+    code = _normalize_underlier_code(
+        underlier_code,
+        expected_market=str(snapshot.get("market") or ""),
+    )
+    stored = (
+        snapshot.get("evidence_by_underlier", {})
+        .get(code, {})
+        .get(_strict_date(expiration, field="expiration").isoformat())
+    )
+    if not isinstance(stored, Mapping) or dict(stored) != projected:
+        raise ValueError("earnings calendar stored projection mismatch")
+    return projected
+
+
+def validate_earnings_calendar_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    expected_market: str | None = None,
+) -> None:
+    """Validate source partition, identity, and every stored v2 projection."""
+
+    _validate_earnings_calendar_source(snapshot)
+    market = str(snapshot.get("market") or "").strip().upper()
+    if expected_market is not None and market != str(expected_market).strip().upper():
+        raise ValueError("earnings calendar market mismatch")
+
+    recorded_hash = str(snapshot.get("snapshot_hash") or "")
+    hash_input = {key: value for key, value in snapshot.items() if key != "snapshot_hash"}
+    if not _is_sha256(recorded_hash) or recorded_hash != _payload_hash(hash_input):
+        raise ValueError("earnings calendar snapshot hash mismatch")
+
+    expirations_by_underlier = snapshot.get("expirations_by_underlier")
+    stored_by_underlier = snapshot.get("evidence_by_underlier")
+    if not isinstance(expirations_by_underlier, Mapping) or not isinstance(
+        stored_by_underlier, Mapping
+    ):
+        raise ValueError("earnings calendar projections are invalid")
+    if set(stored_by_underlier) != set(expirations_by_underlier):
+        raise ValueError("earnings calendar projection underliers mismatch")
+    for code, expirations in expirations_by_underlier.items():
+        stored_expirations = stored_by_underlier.get(code)
+        if not isinstance(stored_expirations, Mapping) or set(stored_expirations) != set(
+            expirations
+        ):
+            raise ValueError("earnings calendar projection expirations mismatch")
+        for expiration in expirations:
+            expected = _project_earnings_for_expiry(
+                snapshot,
+                underlier_code=str(code),
+                expiration=str(expiration),
+            )
+            stored = stored_expirations.get(expiration)
+            if not isinstance(stored, Mapping) or dict(stored) != expected:
+                raise ValueError("earnings calendar stored projection mismatch")
+
+
+def _project_earnings_for_expiry(
+    snapshot: Mapping[str, Any],
+    *,
+    underlier_code: str,
+    expiration: str | date,
+) -> dict[str, Any]:
     scan_date = _strict_date(snapshot.get("scan_date"), field="scan_date")
-    scan_at = _strict_datetime(snapshot.get("scan_at_utc"), field="scan_at_utc")
     expiration_date = _strict_date(expiration, field="expiration")
     code = _normalize_underlier_code(
         underlier_code,
@@ -214,75 +290,292 @@ def project_earnings_for_expiry(
     if expiration_date < scan_date:
         raise ValueError("earnings projection expiration precedes scan date")
 
-    matching_events: list[dict[str, Any]] = []
-    scan_day_timestamp_unavailable = False
-    for raw_event in snapshot.get("events", []):
-        if not isinstance(raw_event, Mapping):
-            continue
-        if raw_event.get("security") != code:
-            continue
-        event_date = _strict_date(
-            raw_event.get("earnings_date"),
-            field="earnings_date",
-        )
-        if event_date < scan_date or event_date > expiration_date:
-            continue
-        if event_date == scan_date:
-            raw_timestamp = raw_event.get("earnings_timestamp")
-            if raw_timestamp is None:
-                scan_day_timestamp_unavailable = True
-                continue
-            event_at = datetime.fromtimestamp(float(raw_timestamp), tz=timezone.utc)
-            if event_at <= scan_at:
-                continue
-        matching_events.append(dict(raw_event))
+    hard_start = max(
+        scan_date,
+        expiration_date - timedelta(days=EARNINGS_NEAR_EXPIRY_WINDOW_DAYS),
+    )
+    soft_end = hard_start - timedelta(days=1) if hard_start > scan_date else None
+    matching_events = [
+        dict(raw_event)
+        for raw_event in snapshot.get("events", [])
+        if isinstance(raw_event, Mapping)
+        and raw_event.get("security") == code
+        and scan_date
+        <= _strict_date(raw_event.get("earnings_date"), field="earnings_date")
+        <= expiration_date
+    ]
+    classified = classify_pending_earnings_events(
+        matching_events,
+        market_date=scan_date,
+        expiration=expiration_date,
+    )
 
     failed_intervals = [
         dict(item)
         for item in snapshot.get("intervals", [])
-        if isinstance(item, Mapping)
-        and item.get("status") != "ok"
-        and _strict_date(item.get("start"), field="interval.start")
-        <= expiration_date
-        and _strict_date(item.get("end"), field="interval.end") >= scan_date
+        if isinstance(item, Mapping) and item.get("status") != "ok"
     ]
-    if matching_events:
-        return {
-            "status": "ready",
-            "reason_code": None,
-            "absence_authoritative": not failed_intervals,
-            "has_earnings_event": True,
-            "events": matching_events,
-            "failed_intervals": failed_intervals,
-        }
-    if scan_day_timestamp_unavailable:
-        return {
-            "status": "data_unavailable",
-            "reason_code": "scan_day_earnings_timestamp_unavailable",
-            "absence_authoritative": False,
-            "events": [],
-            "failed_intervals": failed_intervals,
-        }
-    if failed_intervals:
-        return {
-            "status": "data_unavailable",
-            "reason_code": str(
-                failed_intervals[0].get("reason_code")
-                or "earnings_calendar_coverage_incomplete"
-            ),
-            "absence_authoritative": False,
-            "events": [],
-            "failed_intervals": failed_intervals,
-        }
+    hard_failed = [
+        item
+        for item in failed_intervals
+        if _interval_overlaps(item, start=hard_start, end=expiration_date)
+    ]
+    soft_failed = (
+        [
+            item
+            for item in failed_intervals
+            if _interval_overlaps(item, start=scan_date, end=soft_end)
+        ]
+        if soft_end is not None
+        else []
+    )
+    blocking_events = classified["blocking_events"]
+    hard_complete = not hard_failed
+    if blocking_events or hard_complete:
+        status = "ready"
+        reason_code = None
+    else:
+        status = "data_unavailable"
+        reason_code = _first_interval_reason(hard_failed)
 
     return {
-        "status": "ready",
-        "reason_code": None,
-        "absence_authoritative": True,
-        "has_earnings_event": bool(matching_events),
-        "events": matching_events,
-        "failed_intervals": [],
+        "status": status,
+        "reason_code": reason_code,
+        "absence_authoritative": hard_complete,
+        "policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "market_date": scan_date.isoformat(),
+        "expiration": expiration_date.isoformat(),
+        "hard_window_start": hard_start.isoformat(),
+        "hard_window_end": expiration_date.isoformat(),
+        "hard_coverage_status": "complete" if hard_complete else "partial",
+        "hard_reason_codes": _interval_reason_codes(hard_failed),
+        "hard_failed_intervals": hard_failed,
+        "soft_window_start": scan_date.isoformat() if soft_end is not None else None,
+        "soft_window_end": soft_end.isoformat() if soft_end is not None else None,
+        "soft_coverage_status": (
+            "not_applicable"
+            if soft_end is None
+            else ("partial" if soft_failed else "complete")
+        ),
+        "soft_reason_codes": _interval_reason_codes(soft_failed),
+        "soft_failed_intervals": soft_failed,
+        "has_earnings_event": bool(classified["events"]),
+        "has_blocking_earnings_event": bool(blocking_events),
+        "events": classified["events"],
+        "blocking_events": blocking_events,
+        "nonblocking_events": classified["nonblocking_events"],
+        "failed_intervals": sorted(
+            {json.dumps(item, sort_keys=True): item for item in [*hard_failed, *soft_failed]}.values(),
+            key=lambda item: (str(item.get("start") or ""), str(item.get("end") or "")),
+        ),
     }
+
+
+def _validate_earnings_calendar_source(snapshot: Mapping[str, Any]) -> None:
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("earnings calendar snapshot must be an object")
+    if snapshot.get("schema_version") != EARNINGS_CALENDAR_SCHEMA_VERSION:
+        raise ValueError("earnings calendar schema mismatch")
+    if snapshot.get("source") != "opend":
+        raise ValueError("earnings calendar source mismatch")
+    if snapshot.get("policy_version") != EARNINGS_NEAR_EXPIRY_POLICY_VERSION:
+        raise ValueError("earnings calendar policy version mismatch")
+    window_days = snapshot.get("window_days")
+    if isinstance(window_days, bool) or window_days != EARNINGS_NEAR_EXPIRY_WINDOW_DAYS:
+        raise ValueError("earnings calendar window mismatch")
+
+    market = str(snapshot.get("market") or "").strip().upper()
+    timezone_info = _MARKET_TIMEZONES.get(market)
+    if timezone_info is None:
+        raise ValueError("earnings calendar market is invalid")
+    scan_date = _strict_date(snapshot.get("scan_date"), field="scan_date")
+    scan_at = _strict_datetime(snapshot.get("scan_at_utc"), field="scan_at_utc")
+    if scan_at.astimezone(timezone_info).date() != scan_date:
+        raise ValueError("earnings calendar scan date mismatch")
+    coverage_start = _strict_date(
+        snapshot.get("coverage_start"),
+        field="coverage_start",
+    )
+    coverage_end = _strict_date(snapshot.get("coverage_end"), field="coverage_end")
+    if coverage_start != scan_date or coverage_end < coverage_start:
+        raise ValueError("earnings calendar coverage bounds are invalid")
+
+    raw_expirations = snapshot.get("expirations_by_underlier")
+    if not isinstance(raw_expirations, Mapping) or not raw_expirations:
+        raise ValueError("earnings calendar expirations are invalid")
+    normalized_expirations: dict[str, list[str]] = {}
+    for raw_code, raw_dates in raw_expirations.items():
+        code = _normalize_underlier_code(raw_code, expected_market=market)
+        if code != raw_code or not isinstance(raw_dates, list) or not raw_dates:
+            raise ValueError("earnings calendar expiration identity is invalid")
+        dates = [_strict_date(item, field="expiration") for item in raw_dates]
+        if dates != sorted(set(dates)) or any(
+            item < scan_date or item > coverage_end for item in dates
+        ):
+            raise ValueError("earnings calendar expiration set is invalid")
+        normalized_expirations[code] = [item.isoformat() for item in dates]
+    if dict(raw_expirations) != normalized_expirations:
+        raise ValueError("earnings calendar expirations are not canonical")
+    if max(
+        _strict_date(item, field="expiration")
+        for dates in normalized_expirations.values()
+        for item in dates
+    ) != coverage_end:
+        raise ValueError("earnings calendar coverage end mismatch")
+
+    raw_intervals = snapshot.get("intervals")
+    if not isinstance(raw_intervals, list) or not raw_intervals:
+        raise ValueError("earnings calendar intervals are invalid")
+    interval_rows: list[tuple[date, date, Mapping[str, Any]]] = []
+    cursor = coverage_start
+    for raw in raw_intervals:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "start",
+            "end",
+            "status",
+            "reason_code",
+            "error",
+            "observed_at_utc",
+            "row_count",
+            "result_hash",
+        }:
+            raise ValueError("earnings calendar interval shape is invalid")
+        start = _strict_date(raw.get("start"), field="interval.start")
+        end = _strict_date(raw.get("end"), field="interval.end")
+        if start != cursor or end < start or (end - start).days + 1 > EARNINGS_CALENDAR_MAX_INTERVAL_DAYS:
+            raise ValueError("earnings calendar interval partition is invalid")
+        if end > coverage_end:
+            raise ValueError("earnings calendar interval exceeds coverage")
+        _strict_datetime(raw.get("observed_at_utc"), field="interval.observed_at_utc")
+        status = str(raw.get("status") or "")
+        if status == "ok":
+            row_count = raw.get("row_count")
+            if (
+                isinstance(row_count, bool)
+                or not isinstance(row_count, int)
+                or row_count < 0
+                or raw.get("reason_code") is not None
+                or raw.get("error") is not None
+                or not _is_sha256(raw.get("result_hash"))
+            ):
+                raise ValueError("earnings calendar successful interval is invalid")
+        elif status == "data_unavailable":
+            if (
+                not str(raw.get("reason_code") or "").strip()
+                or not str(raw.get("error") or "").strip()
+                or raw.get("row_count") is not None
+                or raw.get("result_hash") is not None
+            ):
+                raise ValueError("earnings calendar unavailable interval is invalid")
+        else:
+            raise ValueError("earnings calendar interval status is invalid")
+        interval_rows.append((start, end, raw))
+        cursor = end + timedelta(days=1)
+    if cursor != coverage_end + timedelta(days=1):
+        raise ValueError("earnings calendar interval coverage is incomplete")
+
+    raw_events = snapshot.get("events")
+    if not isinstance(raw_events, list):
+        raise ValueError("earnings calendar events are invalid")
+    normalized_events: list[dict[str, Any]] = []
+    for raw in raw_events:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "security",
+            "earnings_date",
+            "earnings_timestamp",
+            "pub_type",
+        }:
+            raise ValueError("earnings calendar event shape is invalid")
+        code = _normalize_underlier_code(raw.get("security"), expected_market=market)
+        event_date = _strict_date(raw.get("earnings_date"), field="earnings_date")
+        if not coverage_start <= event_date <= coverage_end:
+            raise ValueError("earnings calendar event is outside coverage")
+        timestamp = _normalize_timestamp(
+            raw.get("earnings_timestamp"),
+            market=market,
+            event_date=event_date,
+        )
+        if raw.get("earnings_timestamp") is not None and timestamp is None:
+            raise ValueError("earnings calendar event timestamp is invalid")
+        event = {
+            "security": code,
+            "earnings_date": event_date.isoformat(),
+            "earnings_timestamp": timestamp,
+            "pub_type": _clean_optional_text(raw.get("pub_type")),
+        }
+        if dict(raw) != event:
+            raise ValueError("earnings calendar event is not canonical")
+        source_interval = next(
+            (
+                interval
+                for start, end, interval in interval_rows
+                if start <= event_date <= end
+            ),
+            None,
+        )
+        if source_interval is None or source_interval.get("status") != "ok":
+            raise ValueError("earnings calendar event lacks successful source interval")
+        normalized_events.append(event)
+    if raw_events != _deduplicate_events(normalized_events):
+        raise ValueError("earnings calendar events are duplicated or unsorted")
+
+    for start, end, interval in interval_rows:
+        if interval.get("status") != "ok":
+            continue
+        interval_events = [
+            item
+            for item in normalized_events
+            if start
+            <= _strict_date(item.get("earnings_date"), field="earnings_date")
+            <= end
+        ]
+        if interval.get("row_count") != len(interval_events) or interval.get(
+            "result_hash"
+        ) != _payload_hash(interval_events):
+            raise ValueError("earnings calendar interval result identity mismatch")
+
+    all_ok = all(interval.get("status") == "ok" for _, _, interval in interval_rows)
+    if snapshot.get("status") != ("ready" if all_ok else "data_unavailable"):
+        raise ValueError("earnings calendar aggregate status mismatch")
+    if snapshot.get("absence_authoritative") is not all_ok:
+        raise ValueError("earnings calendar aggregate absence status mismatch")
+
+
+def _interval_overlaps(
+    item: Mapping[str, Any],
+    *,
+    start: date,
+    end: date | None,
+) -> bool:
+    if end is None:
+        return False
+    return (
+        _strict_date(item.get("start"), field="interval.start") <= end
+        and _strict_date(item.get("end"), field="interval.end") >= start
+    )
+
+
+def _interval_reason_codes(items: Iterable[Mapping[str, Any]]) -> list[str]:
+    return sorted(
+        {
+            str(item.get("reason_code") or "earnings_calendar_coverage_incomplete")
+            for item in items
+        }
+    )
+
+
+def _first_interval_reason(items: list[Mapping[str, Any]]) -> str:
+    if not items:
+        return "earnings_calendar_coverage_incomplete"
+    return str(
+        items[0].get("reason_code") or "earnings_calendar_coverage_incomplete"
+    )
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def prefetch_market_earnings_calendars(
@@ -383,27 +676,26 @@ def load_earnings_evidence_for_candidate(
             artifact_path=path,
         )
     recorded_hash = str(snapshot.get("snapshot_hash") or "")
-    hash_input = {key: value for key, value in snapshot.items() if key != "snapshot_hash"}
-    if (
-        snapshot.get("schema_version") != EARNINGS_CALENDAR_SCHEMA_VERSION
-        or snapshot.get("source") != "opend"
-        or str(snapshot.get("market") or "").upper() != market_norm
-        or not recorded_hash
-        or recorded_hash != _payload_hash(hash_input)
-    ):
+    try:
+        validate_earnings_calendar_snapshot(
+            snapshot,
+            expected_market=market_norm,
+        )
+    except Exception as exc:
         return _candidate_earnings_unavailable(
             "earnings_calendar_snapshot_identity_invalid",
             artifact_path=path,
             snapshot_hash=recorded_hash or None,
+            error=f"{type(exc).__name__}: {exc}",
         )
     try:
         identity = resolve_symbol_identity(symbol)
         if identity is None or identity.market != market_norm:
             raise ValueError("symbol market mismatch")
-        projection = (
-            snapshot.get("evidence_by_underlier", {})
-            .get(identity.futu_code, {})
-            .get(str(expiration or "").strip())
+        projection = _project_earnings_for_expiry(
+            snapshot,
+            underlier_code=identity.futu_code,
+            expiration=str(expiration or "").strip(),
         )
     except Exception as exc:
         return _candidate_earnings_unavailable(
@@ -412,29 +704,57 @@ def load_earnings_evidence_for_candidate(
             snapshot_hash=recorded_hash,
             error=f"{type(exc).__name__}: {exc}",
         )
-    if not isinstance(projection, Mapping):
-        return _candidate_earnings_unavailable(
-            "earnings_calendar_projection_missing",
-            artifact_path=path,
-            snapshot_hash=recorded_hash,
-        )
     status = str(projection.get("status") or "").strip().lower()
-    events = [dict(item) for item in projection.get("events", []) if isinstance(item, Mapping)]
+    events = [
+        dict(item)
+        for item in projection.get("events", [])
+        if isinstance(item, Mapping)
+    ]
     has_event = bool(projection.get("has_earnings_event"))
     if status != "ready":
         return _candidate_earnings_unavailable(
             str(projection.get("reason_code") or "earnings_calendar_coverage_incomplete"),
             artifact_path=path,
             snapshot_hash=recorded_hash,
+            projection=projection,
         )
     return {
         "earnings_evidence_status": "ready",
         "earnings_reason_code": None,
+        "earnings_policy_version": projection["policy_version"],
+        "earnings_window_days": projection["window_days"],
+        "earnings_market_date": projection["market_date"],
+        "earnings_hard_window_start": projection["hard_window_start"],
+        "earnings_hard_window_end": projection["hard_window_end"],
+        "earnings_hard_coverage_status": projection["hard_coverage_status"],
+        "earnings_hard_reason_codes": list(projection["hard_reason_codes"]),
+        "earnings_hard_failed_intervals": list(
+            projection["hard_failed_intervals"]
+        ),
+        "earnings_soft_window_start": projection["soft_window_start"],
+        "earnings_soft_window_end": projection["soft_window_end"],
+        "earnings_soft_coverage_status": projection["soft_coverage_status"],
+        "earnings_soft_reason_codes": list(projection["soft_reason_codes"]),
+        "earnings_soft_failed_intervals": list(
+            projection["soft_failed_intervals"]
+        ),
         "earnings_has_event": has_event,
+        "earnings_blocking_has_event": bool(
+            projection["has_blocking_earnings_event"]
+        ),
         "earnings_event_dates": ",".join(
             sorted({str(item.get("earnings_date") or "") for item in events if item.get("earnings_date")})
         ),
+        "earnings_blocking_event_dates": ",".join(
+            str(item["earnings_date"]) for item in projection["blocking_events"]
+        ),
+        "earnings_nonblocking_event_dates": ",".join(
+            str(item["earnings_date"])
+            for item in projection["nonblocking_events"]
+        ),
         "earnings_events": events,
+        "earnings_blocking_events": list(projection["blocking_events"]),
+        "earnings_nonblocking_events": list(projection["nonblocking_events"]),
         "earnings_snapshot_hash": recorded_hash,
         "earnings_artifact_path": path.as_posix(),
     }
@@ -472,13 +792,47 @@ def _candidate_earnings_unavailable(
     artifact_path: Path,
     snapshot_hash: str | None = None,
     error: str | None = None,
+    projection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    projected = dict(projection or {})
     return {
         "earnings_evidence_status": "data_unavailable",
         "earnings_reason_code": str(reason_code),
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": projected.get("market_date"),
+        "earnings_hard_window_start": projected.get("hard_window_start"),
+        "earnings_hard_window_end": projected.get("hard_window_end"),
+        "earnings_hard_coverage_status": projected.get(
+            "hard_coverage_status",
+            "unavailable",
+        ),
+        "earnings_hard_reason_codes": list(
+            projected.get("hard_reason_codes") or [str(reason_code)]
+        ),
+        "earnings_hard_failed_intervals": list(
+            projected.get("hard_failed_intervals") or []
+        ),
+        "earnings_soft_window_start": projected.get("soft_window_start"),
+        "earnings_soft_window_end": projected.get("soft_window_end"),
+        "earnings_soft_coverage_status": projected.get(
+            "soft_coverage_status",
+            "unavailable",
+        ),
+        "earnings_soft_reason_codes": list(
+            projected.get("soft_reason_codes") or []
+        ),
+        "earnings_soft_failed_intervals": list(
+            projected.get("soft_failed_intervals") or []
+        ),
         "earnings_has_event": None,
+        "earnings_blocking_has_event": None,
         "earnings_event_dates": "",
+        "earnings_blocking_event_dates": "",
+        "earnings_nonblocking_event_dates": "",
         "earnings_events": [],
+        "earnings_blocking_events": [],
+        "earnings_nonblocking_events": [],
         "earnings_snapshot_hash": snapshot_hash,
         "earnings_artifact_path": Path(artifact_path).as_posix(),
         "earnings_error": error,

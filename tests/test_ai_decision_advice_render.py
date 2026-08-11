@@ -43,6 +43,29 @@ def test_zero_candidate_message():
     assert lines == ["### AI建议", "本轮无可供 AI 评估的策略候选。"]
 
 
+def test_partial_zero_candidate_does_not_claim_complete_empty_scan():
+    section = _section(
+        sell_put=None,
+        zero_candidate={"sell_put": True, "covered_call": False},
+        candidate_universe={
+            "status": "partial",
+            "affected_scopes": [
+                {
+                    "symbol": "NVDA",
+                    "strategy_mode": "put",
+                    "reason_code": "partial_data",
+                }
+            ],
+        },
+    )
+
+    text = "\n".join(
+        render_family_advice_lines(section, family="sell_put")
+    )
+    assert "没有证据完整" in text
+    assert "不代表完整扫描没有候选" in text
+
+
 def test_unavailable_message():
     section = _section(status="unavailable", unavailable_reason="timeout", sell_put=None)
     lines = render_family_advice_lines(section, family="sell_put")

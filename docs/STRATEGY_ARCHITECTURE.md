@@ -80,6 +80,7 @@ Funding Put：
 
 - 使用 Sell Put 自己的 DTE 窗口和接货 strike 边界。
 - 在组合构造前先复用完整 Sell Put underwriting 候选；现金、事件、收益、IV/RV、流动性及愿意接货边界均不得因 Long Call 而放宽。
+- 财报事件与 Sell Put/Covered Call 共用同一 `expiry-6天..expiry` 自然日硬窗口；第 7 天及更早仅作软语境，不单设 Combo 窗口。
 - Combo Yield 自己启用时即可独立构造 Funding Put，不依赖 Sell Put step 是否启用或成功。
 
 Participation Call：
@@ -136,7 +137,7 @@ period_net_return = combo_net_credit / cash_required
 
 因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
 
-Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent 与 Daily Brief 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
+Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算；`*_combo_yield_put_universe*.csv` 只是审计报表，不得回读为计算权威。Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent 与 Daily Brief 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
 
 ### 候选身份、成交意图与回执
 

@@ -202,6 +202,9 @@ def run_or_reuse_ai_decision_advice(
     except Exception:
         return unavailable_brief_view("advice_execution_failed")
     view = result.to_brief_view()
+    universe = frozen.candidates.get("candidate_universe")
+    if isinstance(universe, Mapping):
+        view["candidate_universe"] = dict(universe)
     evidence_index_view = result.to_evidence_index_view(frozen)
     if evidence_index_view is not None:
         view["evidence_index"] = evidence_index_view
@@ -211,12 +214,14 @@ def run_or_reuse_ai_decision_advice(
 def _require_advice_evaluable_candidate_snapshot(
     snapshot: Mapping[str, Any],
 ) -> None:
-    """Accept only complete Candidate Engine outcomes for Advice.
+    """Accept fully evaluated candidates, including a partial sibling scope.
 
     An empty family is a legal zero candidate only when Candidate Engine
     explicitly sealed it as ``no_candidate``. Market closure, unavailable or
     partial strategy data must not collapse into a synthetic zero-candidate
-    Advice result.
+    Advice result. When another family still has accepted candidates, its
+    partial sibling remains a disclosure in the frozen candidate universe and
+    does not invalidate those fully evaluated rows.
     """
 
     ranked = snapshot.get("ranked_candidates")
@@ -250,18 +255,34 @@ def _require_advice_evaluable_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "opening candidate snapshot advice strategies are incomplete"
         )
-    for mode, count in counts.items():
-        expected = "candidates_found" if count else "no_candidate"
-        if statuses[mode] != expected:
+    has_candidates = any(counts.values())
+    if has_candidates:
+        for mode, count in counts.items():
+            status = statuses[mode]
+            if count and status != "candidates_found":
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate snapshot is not advice-evaluable"
+                )
+            if not count and status not in {
+                "no_candidate",
+                "not_applicable",
+                "partial_data",
+                "data_unavailable",
+            }:
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate snapshot is not advice-evaluable"
+                )
+        expected_opening = "candidates_found"
+    else:
+        if any(status != "no_candidate" for status in statuses.values()):
             raise OpeningCandidateSnapshotError(
                 "opening candidate snapshot is not advice-evaluable"
             )
+        expected_opening = "no_candidate"
 
-    expected_opening = (
-        "candidates_found" if any(counts.values()) else "no_candidate"
-    )
-    if str(snapshot.get("opening_status") or "").strip().lower() != (
-        expected_opening
+    if (
+        str(snapshot.get("opening_status") or "").strip().lower()
+        != expected_opening
     ):
         raise OpeningCandidateSnapshotError(
             "opening candidate snapshot is not advice-evaluable"

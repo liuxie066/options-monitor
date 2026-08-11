@@ -1,16 +1,52 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from domain.domain.engine import (
     CandidateCalculationError,
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
     calculate_opening_candidate_metrics,
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
     rank_candidate_rows,
 )
+
+
+def _earnings_evidence(*, event_date: str | None = None) -> dict:
+    event = None
+    if event_date is not None:
+        days_before_expiration = (
+            date.fromisoformat("2026-09-18") - date.fromisoformat(event_date)
+        ).days
+        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+        event = {
+            "earnings_date": event_date,
+            "days_before_expiration": days_before_expiration,
+            "classification": "blocking" if blocking else "nonblocking",
+            "blocking": blocking,
+        }
+    events = [] if event is None else [event]
+    blocking_events = [item for item in events if item["blocking"]]
+    nonblocking_events = [item for item in events if not item["blocking"]]
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-08-06",
+        "earnings_hard_window_start": "2026-09-12",
+        "earnings_hard_window_end": "2026-09-18",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": bool(events),
+        "earnings_blocking_has_event": bool(blocking_events),
+        "earnings_events": events,
+        "earnings_blocking_events": blocking_events,
+        "earnings_nonblocking_events": nonblocking_events,
+    }
 
 
 def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # type: ignore[no-untyped-def]
@@ -188,13 +224,12 @@ def test_common_policy_uses_cny_iv_rv_spread_and_opend_earnings_only() -> None:
     row = {
         **_opening_row(bid=2.0, ask=2.2, price_tick=0.01),
         **metrics,
-        "earnings_evidence_status": "ready",
-        "earnings_has_event": False,
+        **_earnings_evidence(),
     }
     assert evaluate_opening_candidate_policy(row, mode="put")["accepted"] is True
 
     rejected = evaluate_opening_candidate_policy(
-        {**row, "earnings_has_event": True, "earnings_event_dates": "2026-09-01"},
+        {**row, **_earnings_evidence(event_date="2026-09-12")},
         mode="put",
     )
     assert rejected["rejects"][0]["reason"] == "risk_earnings_event"
@@ -236,8 +271,7 @@ def test_opening_policy_matrix_accepts_us_hk_put_and_call(
         {
             **source,
             **metrics,
-            "earnings_evidence_status": "ready",
-            "earnings_has_event": False,
+            **_earnings_evidence(),
         },
         mode=mode,
     )
@@ -356,8 +390,7 @@ def test_offline_shadow_classifies_every_approved_policy_difference() -> None:
     opening = {
         **source,
         **metrics,
-        "earnings_evidence_status": "ready",
-        "earnings_has_event": False,
+        **_earnings_evidence(),
         "earnings_source": "opend",
         "rank": 1,
     }
@@ -414,8 +447,7 @@ def test_offline_shadow_blocks_unexplained_acceptance_change() -> None:
     opening = {
         **source,
         **metrics,
-        "earnings_evidence_status": "ready",
-        "earnings_has_event": False,
+        **_earnings_evidence(),
         "spread_ratio": 0.50,
     }
 

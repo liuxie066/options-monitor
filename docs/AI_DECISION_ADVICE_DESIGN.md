@@ -449,10 +449,12 @@ output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json
 - 候选 ID、策略、标的、合约身份、到期日、行权价和 multiplier；
 - Candidate Engine 原始排序；
 - 持有周期非年化净收益、年化硬门槛值、净权利金和容量；
-- Candidate Engine 已生成、与本决策有关的其他指标。
+- Candidate Engine 已生成、与本决策有关的其他指标；
+- 由同一份已封存 `scope_results` 确定性投影的 `candidate_universe`，指明各策略范围是完整还是部分可用。
 
 模型不能恢复快照中已拒绝的候选，也不能把兼容 CSV 当作候选事实源。
 它不独立读取或扣除待成交挂单；资金和持仓容量直接引用候选快照的正式结果。
+任一策略范围仍有结果未决的硬证据缺口时，`candidate_universe` 标记为部分可用：已完整证明的候选仍可建议，但必须显示非穷尽性提示；若该范围候选为零且仍存在未决缺口，Advice 不得把它解释为“确认无候选”。
 
 ### 7.2 组合分布
 

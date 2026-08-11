@@ -599,8 +599,10 @@ def run_symbol_monitoring(
                 combo_result,
             )
             combo_candidate_count = _summary_candidate_count(combo_result)
-            combo_capture_status = "completed"
-            combo_capture_reason: str | None = None
+            combo_capture_status, combo_capture_reason = _completed_scan_status(
+                combo_candidate_count,
+                strategy_result=combo_result,
+            )
             if combo_variant == "cc_lp":
                 if not isinstance(combo_result, dict):
                     raise ValueError("cc_lp summary result is unavailable")

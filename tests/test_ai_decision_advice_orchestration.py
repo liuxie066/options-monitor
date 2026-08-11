@@ -354,6 +354,73 @@ def test_completed_run_flows_through_to_brief_view(tmp_path):
     assert '"shares"' not in text
 
 
+def test_nonbenign_not_applicable_sibling_is_disclosed_with_valid_candidate(
+    tmp_path,
+) -> None:
+    snapshot = _snapshot()
+    snapshot["strategy_results"][1]["strategy_status"] = "data_unavailable"
+    snapshot["scope_results"] = [
+        {
+            "scope": "strategy",
+            "symbol": "NVDA",
+            "strategy_mode": "put",
+            "status": "completed",
+            "reason_code": None,
+        },
+        {
+            "scope": "strategy",
+            "symbol": "AAPL",
+            "strategy_mode": "call",
+            "status": "not_applicable",
+            "reason_code": "covered_call_portfolio_context_unavailable",
+        },
+    ]
+    _rehash_snapshot(snapshot)
+    captured: dict = {}
+
+    def runner(instructions, payload, schema, timeout):
+        captured["payload"] = payload
+        output = _model_output(
+            payload["input_bindings"],
+            run_id=payload["run_id"],
+            account_ref=payload["account_ref"],
+        )
+        return ModelCallResult(
+            output_text=json.dumps(output, ensure_ascii=False),
+            usage={},
+            response_sha256="c" * 64,
+        )
+
+    view = run_or_reuse_ai_decision_advice(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        config={"ai_decision_advice": {"enabled": True}},
+        candidate_snapshot=snapshot,
+        portfolio_distribution=_portfolio(),
+        option_positions_context=_option_context(),
+        model_runner=runner,
+        now=NOW,
+    )
+
+    expected_universe = {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "reason_code": "covered_call_portfolio_context_unavailable",
+            }
+        ],
+    }
+    assert view["status"] == "completed"
+    assert view["candidate_universe"] == expected_universe
+    assert captured["payload"]["candidates"]["candidate_universe"] == (
+        expected_universe
+    )
+
+
 def test_rejected_context_sources_cannot_change_external_evidence_identity(
     tmp_path,
 ) -> None:

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
 from src.application.combo_yield_steps import (
+    enrich_combo_funding_cash,
     run_combo_yield_for_symbol_and_summarize,
     run_combo_yield_scan_and_summarize,
 )
@@ -38,6 +44,69 @@ def _candidate(**overrides) -> dict:
     return row
 
 
+def _earnings_evidence(*, event_date: str) -> dict:
+    market_day = date(2026, 7, 17)
+    expiration_day = date(2026, 8, 21)
+    hard_start = expiration_day - timedelta(
+        days=EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+    )
+    days_before_expiration = (
+        expiration_day - date.fromisoformat(event_date)
+    ).days
+    blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+    event = {
+        "earnings_date": event_date,
+        "days_before_expiration": days_before_expiration,
+        "classification": "blocking" if blocking else "nonblocking",
+        "blocking": blocking,
+    }
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": market_day.isoformat(),
+        "earnings_hard_window_start": hard_start.isoformat(),
+        "earnings_hard_window_end": expiration_day.isoformat(),
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": True,
+        "earnings_blocking_has_event": blocking,
+        "earnings_events": [event],
+        "earnings_blocking_events": [event] if blocking else [],
+        "earnings_nonblocking_events": [] if blocking else [event],
+    }
+
+
+def _emit_accepted_underwriting_decisions(
+    frame: pd.DataFrame,
+    sink,
+) -> None:
+    if sink is None:
+        return
+    sink(
+        [
+            {
+                "normalized_input": dict(row),
+                "opening_decision": {
+                    "accepted": True,
+                    "rejects": [],
+                },
+            }
+            for row in frame.to_dict("records")
+        ]
+    )
+
+
+def _accept_all_underwriting(**kwargs) -> pd.DataFrame:
+    out = kwargs["df_labeled"].copy()
+    _emit_accepted_underwriting_decisions(
+        out,
+        kwargs.get("decision_sink_fn"),
+    )
+    return out
+
+
 def _run(
     tmp_path: Path,
     *,
@@ -45,6 +114,8 @@ def _run(
     find_pairs_fn,
     yield_sp: dict | None = None,
     underwriting_filter_put_candidates_fn=None,
+    cash_filter_put_candidates_fn=None,
+    portfolio_ctx: dict | None = None,
     output_mode: str = "separate",
     is_scheduled: bool = True,
     attach_calls_fn=None,
@@ -56,7 +127,9 @@ def _run(
 
     def run_put_scan_fn(**kwargs):
         captured["scan_kwargs"] = kwargs
-        pd.DataFrame(candidates).to_csv(kwargs["output"], index=False)
+        frame = pd.DataFrame(candidates)
+        frame.to_csv(kwargs["output"], index=False)
+        return frame
 
     def label_put_candidates_fn(_base, input_path, output_path):
         Path(output_path).write_bytes(Path(input_path).read_bytes())
@@ -67,7 +140,7 @@ def _run(
 
     yield_cfg = {"enabled": True, "output_mode": output_mode}
     policy = derive_yield_enhancement_policy(yield_cfg)
-    run_combo_yield_scan_and_summarize(
+    _result, summary = run_combo_yield_scan_and_summarize(
         base=tmp_path,
         sym="NVDA",
         symbol="NVDA",
@@ -87,17 +160,17 @@ def _run(
         yield_window=CandidateWindowDefaults(min_dte=7, max_dte=60),
         liquidity=CandidateLiquidityDefaults(),
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        portfolio_ctx=None,
+        portfolio_ctx=portfolio_ctx,
         top_n=3,
         is_scheduled=is_scheduled,
         run_put_scan_fn=run_put_scan_fn,
         label_put_candidates_fn=label_put_candidates_fn,
         find_pairs_fn=capture_pairs,
         select_pairs_fn=lambda df: df,
-        cash_filter_put_candidates_fn=None,
+        cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
         underwriting_filter_put_candidates_fn=(
             underwriting_filter_put_candidates_fn
-            or (lambda **kwargs: kwargs["df_labeled"])
+            or _accept_all_underwriting
         ),
         **({"attach_calls_fn": attach_calls_fn} if attach_calls_fn is not None else {}),
         **({"render_alerts_fn": render_alerts_fn} if render_alerts_fn is not None else {}),
@@ -107,7 +180,7 @@ def _run(
         for line in (report_dir / "candidate_filter_trace.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    return captured["df"], trace, captured["scan_kwargs"]
+    return captured["df"], trace, captured["scan_kwargs"], summary
 
 
 def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path) -> None:
@@ -118,9 +191,13 @@ def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path)
         out = kwargs["df_labeled"].copy()
         out["premium_edge_score"] = 0.25
         out["strike_safety_margin_pct"] = 0.12
+        _emit_accepted_underwriting_decisions(
+            out,
+            kwargs.get("decision_sink_fn"),
+        )
         return out
 
-    captured, _trace, _scan_kwargs = _run(
+    captured, _trace, _scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
         find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
@@ -140,7 +217,12 @@ def test_combo_yield_put_underwriting_inherits_sell_put_hard_gates(tmp_path: Pat
 
     def underwriting_gate(**kwargs):
         captured_underwriting.update(kwargs)
-        return kwargs["df_labeled"].copy()
+        out = kwargs["df_labeled"].copy()
+        _emit_accepted_underwriting_decisions(
+            out,
+            kwargs.get("decision_sink_fn"),
+        )
+        return out
 
     _run(
         tmp_path,
@@ -165,6 +247,240 @@ def test_combo_yield_put_underwriting_inherits_sell_put_hard_gates(tmp_path: Pat
     assert sell_put_cfg["min_strike"] == 90.0
     assert sell_put_cfg["max_strike"] == 105.0
     assert sell_put_cfg["max_spread_ratio"] == 0.40
+
+
+def test_combo_funding_put_uses_same_six_day_earnings_window_in_memory(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+
+    common = {
+        "annualized_net_return_on_cash_basis": 0.18,
+        "period_net_return_on_cash_basis": 0.02,
+        "net_income": 200.0,
+        "spread_ratio": 0.05,
+        "implied_volatility": 0.36,
+        "term_matched_rv": 0.24,
+        "max_new_contracts": 1,
+    }
+    near, _trace, _scan, near_summary = _run(
+        tmp_path / "near",
+        candidates=[
+            _candidate(
+                **common,
+                **_earnings_evidence(event_date="2026-08-15"),
+            )
+        ],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+    distant, _trace, _scan, distant_summary = _run(
+        tmp_path / "distant",
+        candidates=[
+            _candidate(
+                **common,
+                **_earnings_evidence(event_date="2026-08-14"),
+            )
+        ],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+
+    assert near.empty
+    assert list(distant["contract_symbol"]) == ["NVDA260821P00100000"]
+    assert near_summary["_strategy_status"] == "completed"
+    assert near_summary["_strategy_reason"] == "no_candidate"
+    assert distant_summary["_strategy_status"] == "completed"
+    assert distant_summary["_strategy_reason"] == "no_candidate"
+
+
+def test_combo_funding_put_only_hard_evidence_gap_is_data_unavailable(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+
+    captured, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.18,
+                period_net_return_on_cash_basis=0.02,
+                net_income=200.0,
+                spread_ratio=0.05,
+                implied_volatility=0.36,
+                term_matched_rv=0.24,
+                max_new_contracts=1,
+                earnings_evidence_status="data_unavailable",
+                earnings_reason_code="opend_earnings_calendar_interval_failed",
+            )
+        ],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+
+    assert captured.empty
+    assert summary["_strategy_status"] == "unavailable"
+    assert summary["_strategy_reason"] == "data_unavailable"
+    assert summary["_evidence_summary"]["eligibility_unresolved_count"] == 1
+
+
+def test_combo_funding_put_keeps_valid_pair_with_unresolved_sibling(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+
+    common = {
+        "annualized_net_return_on_cash_basis": 0.18,
+        "period_net_return_on_cash_basis": 0.02,
+        "net_income": 200.0,
+        "spread_ratio": 0.05,
+        "implied_volatility": 0.36,
+        "term_matched_rv": 0.24,
+        "max_new_contracts": 1,
+    }
+
+    def pair_valid_put(**kwargs):
+        assert list(kwargs["df_candidates"]["contract_symbol"]) == [
+            "NVDA260821P00100000"
+        ]
+        return pd.DataFrame(
+            [
+                {
+                    "candidate_pair_id": "combo_yield:NVDA:P:C",
+                    "symbol": "NVDA",
+                    "put_contract_symbol": "NVDA260821P00100000",
+                    "call_contract_symbol": "NVDA260821C00120000",
+                    "annualized_net_credit_yield": 0.11,
+                }
+            ]
+        )
+
+    captured, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                **common,
+                **_earnings_evidence(event_date="2026-08-14"),
+            ),
+            _candidate(
+                contract_symbol="NVDA260821P00095000",
+                strike=95.0,
+                **common,
+                earnings_evidence_status="data_unavailable",
+                earnings_reason_code="opend_earnings_calendar_interval_failed",
+            ),
+        ],
+        find_pairs_fn=pair_valid_put,
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+
+    assert list(captured["contract_symbol"]) == ["NVDA260821P00100000"]
+    assert summary["candidate_count"] == 1
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] == "partial_data"
+    assert summary["_evidence_summary"]["eligibility_unresolved_count"] == 1
+
+
+def test_combo_funding_put_gap_plus_definitive_reject_is_clean_no_candidate(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+
+    captured, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.01,
+                period_net_return_on_cash_basis=0.001,
+                net_income=10.0,
+                spread_ratio=0.05,
+                implied_volatility=0.36,
+                term_matched_rv=0.24,
+                max_new_contracts=1,
+                earnings_evidence_status="data_unavailable",
+                earnings_reason_code="opend_earnings_calendar_interval_failed",
+            )
+        ],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+
+    assert captured.empty
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] == "no_candidate"
+    assert summary["_evidence_summary"]["eligibility_unresolved_count"] == 0
+    assert summary["_evidence_summary"]["diagnostic_evidence_gap_count"] == 1
+
+
+def test_combo_cash_enrichment_preserves_gap_plus_capacity_reject_decision(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_strategy_risk import (
+        enrich_and_filter_sell_put_underwriting,
+    )
+
+    captured, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.18,
+                period_net_return_on_cash_basis=0.02,
+                net_income=200.0,
+                spread_ratio=0.05,
+                implied_volatility=0.36,
+                term_matched_rv=0.24,
+                max_new_contracts=9,
+                earnings_evidence_status="data_unavailable",
+                earnings_reason_code="opend_earnings_calendar_interval_failed",
+            )
+        ],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        cash_filter_put_candidates_fn=enrich_combo_funding_cash,
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 0.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_total_cny": 0.0,
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+        underwriting_filter_put_candidates_fn=(
+            enrich_and_filter_sell_put_underwriting
+        ),
+    )
+
+    assert captured.empty
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] == "no_candidate"
+    evidence = summary["_evidence_summary"]
+    assert evidence["evaluated_contract_count"] == 1
+    assert evidence["eligibility_unresolved_count"] == 0
+    assert evidence["diagnostic_evidence_gap_count"] == 1
+    cash_audit = pd.read_csv(
+        tmp_path
+        / "reports"
+        / "nvda_combo_yield_put_universe_cash_filtered.csv"
+    )
+    assert list(cash_audit["contract_symbol"]) == ["NVDA260821P00100000"]
+    assert int(cash_audit.iloc[0]["max_new_contracts"]) == 0
 
 
 def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_disabled(
@@ -229,7 +545,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
         )
         return out
 
-    captured, trace, _scan_kwargs = _run(
+    captured, trace, _scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[_candidate()],
         find_pairs_fn=rejected_pairs,
@@ -294,7 +610,7 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
 
 
 def test_combo_yield_uses_standalone_sell_put_return_floor_and_annotations(tmp_path: Path) -> None:
-    captured, trace, scan_kwargs = _run(
+    captured, trace, scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
         find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
@@ -312,7 +628,7 @@ def test_combo_yield_uses_standalone_sell_put_return_floor_and_annotations(tmp_p
 
 
 def test_combo_yield_traces_when_no_funding_put_is_eligible(tmp_path: Path) -> None:
-    _captured, trace, scan_kwargs = _run(
+    _captured, trace, scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[],
         find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
@@ -370,7 +686,7 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
     def find_pairs(**_kwargs):
         return pairs.copy()
 
-    _captured, _trace, _scan_kwargs = _run(
+    _captured, _trace, _scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.14)],
         find_pairs_fn=find_pairs,

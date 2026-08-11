@@ -5,6 +5,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
 from src.application.cc_lp_steps import (
     CC_LP_FAMILY,
     run_cc_lp_scan,
@@ -112,6 +116,19 @@ def _scan_call_row(**overrides) -> dict:
         "event_source_status": "ok",
         "event_status": "ready",
         "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-08-08",
+        "earnings_hard_window_start": "2026-08-22",
+        "earnings_hard_window_end": "2026-08-28",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": False,
+        "earnings_blocking_has_event": False,
+        "earnings_events": [],
+        "earnings_blocking_events": [],
+        "earnings_nonblocking_events": [],
         "event_flag": False,
         "event_types": "",
         "event_dates": "",
