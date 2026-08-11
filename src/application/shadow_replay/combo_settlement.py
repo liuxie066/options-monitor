@@ -238,11 +238,7 @@ def _settle_one(
         horizon="put_expiry",
         expiration=decision.get("put_expiration"),
     )
-    call_horizon = (
-        "put_expiry"
-        if text(decision.get("structure_mode")).lower() == "same_expiry_pair"
-        else "call_expiry"
-    )
+    call_horizon = "put_expiry"
     call_spot_mark = _authoritative_spot_mark(
         marks,
         horizon=call_horizon,

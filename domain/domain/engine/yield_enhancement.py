@@ -398,16 +398,13 @@ class ComboYieldResearchPolicy:
     target_abs_call_delta: float
     max_abs_call_delta: float
     max_call_cost_to_put_credit: float | None = None
-    min_expiry_gap_days: int | None = None
-    target_expiry_gap_days: int | None = None
-    max_expiry_gap_days: int | None = None
 
     def __post_init__(self) -> None:
         variant_id = str(self.variant_id or "").strip()
         if not variant_id:
             raise ValueError("variant_id is required")
         mode = str(self.structure_mode or "").strip().lower()
-        if mode not in {"same_expiry_pair", "staggered_expiry_pair"}:
+        if mode != "same_expiry_pair":
             raise ValueError(f"unsupported Combo Yield research structure_mode: {mode or '<empty>'}")
         retention = float(self.min_net_credit_retention)
         if not 0.0 <= retention <= 1.0:
@@ -423,20 +420,6 @@ class ComboYieldResearchPolicy:
             max_cost = float(self.max_call_cost_to_put_credit)
             if not 0.0 <= max_cost <= 1.0:
                 raise ValueError("max_call_cost_to_put_credit must be between 0 and 1")
-        gaps = (
-            self.min_expiry_gap_days,
-            self.target_expiry_gap_days,
-            self.max_expiry_gap_days,
-        )
-        if mode == "same_expiry_pair":
-            if any(value is not None for value in gaps):
-                raise ValueError("same_expiry_pair must not author expiry-gap targets")
-        else:
-            if any(value is None for value in gaps):
-                raise ValueError("staggered_expiry_pair requires min/target/max expiry-gap days")
-            normalized = tuple(int(value) for value in gaps if value is not None)
-            if not 1 <= normalized[0] <= normalized[1] <= normalized[2]:
-                raise ValueError("expiry-gap bounds must satisfy 1 <= min <= target <= max")
 
 
 def combo_yield_proposed_gate_reasons(
@@ -520,21 +503,10 @@ def combo_yield_proposed_gate_reasons(
             reasons.append(field)
 
     gap = _expiry_gap_days(row)
-    if policy.structure_mode == "same_expiry_pair":
-        if gap is None or gap != 0:
-            reasons.append("same_expiry")
-        if spot is None or call_strike is None or call_strike < spot:
-            reasons.append("call_strike_below_spot")
-    else:
-        if gap is None:
-            reasons.append("expiry_gap_days")
-        else:
-            assert policy.min_expiry_gap_days is not None
-            assert policy.max_expiry_gap_days is not None
-            if gap < int(policy.min_expiry_gap_days):
-                reasons.append("min_expiry_gap_days")
-            if gap > int(policy.max_expiry_gap_days):
-                reasons.append("max_expiry_gap_days")
+    if gap is None or gap != 0:
+        reasons.append("same_expiry")
+    if spot is None or call_strike is None or call_strike < spot:
+        reasons.append("call_strike_below_spot")
     return tuple(dict.fromkeys(reasons))
 
 
@@ -551,10 +523,6 @@ def combo_yield_proposed_rank_key(
     call_spread = _safe_float(row.get("call_spread_ratio"))
     call_oi = _safe_float(row.get("call_open_interest"))
     key: list[Any] = [funding_rank]
-    if policy.structure_mode == "staggered_expiry_pair":
-        gap = _expiry_gap_days(row)
-        assert policy.target_expiry_gap_days is not None
-        key.append(abs((gap if gap is not None else 2**31 - 1) - int(policy.target_expiry_gap_days)))
     key.extend(
         [
             abs(call_delta - float(policy.target_abs_call_delta)),

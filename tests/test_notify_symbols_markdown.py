@@ -31,38 +31,6 @@ def _render_legacy(changes: str, alerts: str, *, account_label: str) -> str:
         return build_notification(changes, alerts, account_label=account_label, render_style="legacy")
 
 
-def _staggered_combo_summary() -> dict:
-    return {
-        "symbol": "NVDA",
-        "strategy": "combo_yield",
-        "candidate_count": 1,
-        "top_contract": "2026-08-21 100P + 2026-10-16 120C",
-        "structure_mode": "staggered_expiry_pair",
-        "put_expiration": "2026-08-21",
-        "put_dte": 35,
-        "call_expiration": "2026-10-16",
-        "call_dte": 91,
-        "expiry_gap_days": 56,
-        "put_strike": 100.0,
-        "call_strike": 120.0,
-        "put_bid": 2.35,
-        "call_ask": 2.10,
-        "call_delta": 0.31,
-        "put_net_credit": 228.0,
-        "call_total_cost": 218.0,
-        "combo_net_credit": 10.0,
-        "net_credit": 10.0,
-        "call_cost_to_put_credit": 218.0 / 228.0,
-        "funding_ratio": 228.0 / 218.0,
-        "funding_accepted": True,
-        "strike_safety_margin_pct": 0.18,
-        "cash_required_usd": 10000.0,
-        "option_ccy": "USD",
-        "annualized_return": None,
-        "net_income": 10.0,
-    }
-
-
 def test_notify_symbols_markdown_put_layout() -> None:
     from src.application.notify_symbols import build_notification
 
@@ -650,32 +618,3 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
     assert "MSFT" in out
     assert out.index("Put") < out.index("Call")
 
-
-def test_notify_symbols_staggered_combo_is_high_priority_and_uses_separate_leg_copy() -> None:
-    out = _render_via_alert_engine(_staggered_combo_summary())
-
-    assert "**[sy] NVDA｜组合收益**" in out
-    assert "Put｜卖 100P · 2026-08-21/35天 · bid=2.35 · 估算净收=228 USD" in out
-    assert "Call｜买 120C · 2026-10-16/91天 · ask=2.1 · delta=0.31 · 估算成本=218 USD" in out
-    assert "覆盖率=104.59%" in out
-    assert "净现金流=10 USD" in out
-    assert "风险｜Put安全边界=18% · 现金=$10,000 · Call晚56天" in out
-    assert "备注｜" not in out
-    assert "资金利用率" not in out
-    assert "两腿各1张" not in out
-    assert "当前组合收益推荐未通过优先级阈值" not in out
-    assert "场景评分" not in out
-    assert "预期波动" not in out
-
-
-def test_notify_symbols_staggered_combo_compact_copy_is_concise() -> None:
-    out = _render_via_alert_engine(_staggered_combo_summary(), render_style="compact")
-
-    assert "🧩 组合·跨期 NVDA 100P+120C" in out
-    assert "Put｜卖 100P · 08-21/35天 · bid 2.35 · 估算净收 228 USD" in out
-    assert "Call｜买 120C · 10-16/91天 · ask 2.1 · Δ 0.31 · 估算成本 218 USD" in out
-    assert "组合｜覆盖 104.59% · 净现金流 10 USD" in out
-    assert "风险｜安全边界 18% · 现金 $10,000 · Call晚56天" in out
-    assert "备注｜" not in out
-    assert "资金利用率" not in out
-    assert "两腿各1张" not in out

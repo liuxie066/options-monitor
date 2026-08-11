@@ -226,13 +226,6 @@ def _superset_combo_config(
     call_cfg["min_delta"] = min(float(item["min_abs_call_delta"]) for item in variants)
     call_cfg["max_delta"] = max(float(item["max_abs_call_delta"]) for item in variants)
     cfg["call"] = call_cfg
-    if structure_mode == "staggered_expiry_pair":
-        cfg["min_expiry_gap_days"] = min(
-            int(item["min_expiry_gap_days"]) for item in variants
-        )
-        cfg["max_expiry_gap_days"] = max(
-            int(item["max_expiry_gap_days"]) for item in variants
-        )
     explicit = {
         "enabled",
         "structure_mode",
@@ -242,8 +235,6 @@ def _superset_combo_config(
     }
     if "max_call_cost_to_put_credit" in cfg:
         explicit.add("max_call_cost_to_put_credit")
-    if structure_mode == "staggered_expiry_pair":
-        explicit.update({"min_expiry_gap_days", "max_expiry_gap_days"})
     cfg["_explicit_fields"] = tuple(sorted(explicit))
     cfg["_explicit_call_fields"] = ("min_delta", "max_delta")
     return cfg
