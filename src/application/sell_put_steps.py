@@ -21,7 +21,10 @@ from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.report_labels import label_sell_put_candidates
 from src.application.report_summaries import summarize_sell_put
 from src.application.scan_sell_put import run_sell_put_scan
-from src.application.candidate_scanning import evidence_summary_from_decisions
+from src.application.candidate_scanning import (
+    evidence_summary_from_decisions,
+    project_evidence_scan_status,
+)
 from src.application.sell_put_cash import (
     enrich_sell_put_candidates_with_cash,
 )
@@ -169,15 +172,10 @@ def _evidence_scan_status(
     empty result.
     """
 
-    if candidate_count > 0:
-        return "completed", None
-    unavailable = int(evidence.get("evidence_unavailable_count") or 0)
-    if unavailable == 0:
-        return "completed", "no_candidate"
-    evaluated = int(evidence.get("evaluated_contract_count") or 0)
-    if evaluated > 0 and unavailable < evaluated:
-        return "completed", "partial_data"
-    return "unavailable", "data_unavailable"
+    return project_evidence_scan_status(
+        evidence=evidence,
+        candidate_count=candidate_count,
+    )
 
 
 def empty_sell_put_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,7 +10,11 @@ import pandas as pd
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import rank_candidate_rows
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    rank_candidate_rows,
+)
 from src.application.multi_tick.misc import AccountResult
 from src.application.close_advice_report_manifest import (
     publish_close_advice_report_manifest,
@@ -450,6 +454,29 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
     )
 
 
+def _seal_combo_status_snapshot(
+    base: Path,
+    *,
+    opening_status: str,
+    ranked_pairs: list[dict[str, Any]] | None = None,
+) -> None:
+    from src.application.combo_yield_candidate_snapshot import (
+        seal_combo_yield_candidate_snapshot,
+    )
+
+    seal_combo_yield_candidate_snapshot(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        market="us",
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        ranked_pairs=ranked_pairs or [],
+        opening_status=opening_status,
+        sealed_at="2026-07-17T13:59:59Z",
+    )
+
+
 def _put_row(
     *,
     symbol: str = "NVDA",
@@ -473,16 +500,80 @@ def _put_row(
         "volume": 20,
         "cash_required_cny": 10_000,
         "cash_free_cny": 25_000,
-        "earnings_evidence_status": "ready",
-        "earnings_reason_code": "",
-        "earnings_has_event": False,
-        "earnings_event_dates": "",
-        "earnings_events": [],
         "earnings_snapshot_hash": "e" * 64,
     }
+    row.update(_earnings_evidence())
     if priority is not None:
         row["tier"] = priority
     return row
+
+
+def _earnings_evidence(
+    *,
+    event_date: str | None = None,
+    expiration: str = "2026-08-21",
+    event_extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    market_day = date.fromisoformat("2026-07-17")
+    expiration_day = date.fromisoformat(expiration)
+    hard_start = max(
+        market_day,
+        expiration_day - timedelta(days=EARNINGS_NEAR_EXPIRY_WINDOW_DAYS),
+    )
+    event = None
+    if event_date is not None:
+        days_before_expiration = (
+            expiration_day - date.fromisoformat(event_date)
+        ).days
+        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+        event = {
+            **dict(event_extra or {}),
+            "earnings_date": event_date,
+            "days_before_expiration": days_before_expiration,
+            "classification": "blocking" if blocking else "nonblocking",
+            "blocking": blocking,
+        }
+    events = [] if event is None else [event]
+    blocking_events = [item for item in events if item["blocking"]]
+    nonblocking_events = [item for item in events if not item["blocking"]]
+    soft_end = hard_start - timedelta(days=1) if hard_start > market_day else None
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": market_day.isoformat(),
+        "earnings_hard_window_start": hard_start.isoformat(),
+        "earnings_hard_window_end": expiration_day.isoformat(),
+        "earnings_hard_coverage_status": "complete",
+        "earnings_hard_reason_codes": [],
+        "earnings_hard_failed_intervals": [],
+        "earnings_soft_window_start": (
+            market_day.isoformat() if soft_end is not None else None
+        ),
+        "earnings_soft_window_end": (
+            soft_end.isoformat() if soft_end is not None else None
+        ),
+        "earnings_soft_coverage_status": (
+            "complete" if soft_end is not None else "not_applicable"
+        ),
+        "earnings_soft_reason_codes": [],
+        "earnings_soft_failed_intervals": [],
+        "earnings_has_event": bool(events),
+        "earnings_blocking_has_event": bool(blocking_events),
+        "earnings_event_dates": ",".join(
+            item["earnings_date"] for item in events
+        ),
+        "earnings_blocking_event_dates": ",".join(
+            item["earnings_date"] for item in blocking_events
+        ),
+        "earnings_nonblocking_event_dates": ",".join(
+            item["earnings_date"] for item in nonblocking_events
+        ),
+        "earnings_events": events,
+        "earnings_blocking_events": blocking_events,
+        "earnings_nonblocking_events": nonblocking_events,
+    }
 
 
 def _install_success_empty_strategy_evidence(
@@ -1066,21 +1157,14 @@ def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> Non
     assert brief["candidate_index"] == []
 
 
-def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_path: Path) -> None:
+def test_distant_candidate_event_is_retained_without_attention_filter(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     row = _put_row()
     row.update(
-        {
-            "earnings_has_event": True,
-            "earnings_event_dates": "2026-08-05",
-            "earnings_events": [
-                {
-                    "earnings_date": "2026-08-05",
-                    "fiscal_year": "2026",
-                    "financial_type": "Q2",
-                }
-            ],
-        }
+        _earnings_evidence(
+            event_date="2026-08-05",
+            event_extra={"fiscal_year": "2026", "financial_type": "Q2"},
+        )
     )
     pd.DataFrame([row]).to_csv(
         account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
@@ -1093,13 +1177,14 @@ def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_p
 
     assert action["event_risk"] == risk
     assert risk["user_state"] == "confirmed_event"
+    assert risk["reason_code"] == "confirmed_distant_earnings_event"
     assert risk["days_to_event"] == 19
     assert risk["expiration_relations"]["contract"] == {
         "expiration": "2026-08-21",
         "relation": "before_expiration",
         "days_before_expiration": 16,
     }
-    assert risk["in_attention_window"] is True
+    assert risk["in_attention_window"] is False
     assert brief["events"] == [
         {
             **risk["events"][0],
@@ -1110,6 +1195,24 @@ def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_p
             "strategy_group_id": "",
         }
     ]
+
+
+def test_candidate_event_presence_mismatch_fails_closed(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    row = _put_row()
+    row.update(_earnings_evidence(event_date="2026-08-05"))
+    row["earnings_has_event"] = False
+    pd.DataFrame([row]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+
+    brief = _assemble(tmp_path)
+    risk = brief["candidates"]["sell_put"][0]["event_risk"]
+
+    assert risk["user_state"] == "unknown"
+    assert risk["reason_code"] == "earnings_event_evidence_inconsistent"
+    assert risk["reliable"] is False
 
 
 def test_candidate_event_projection_confirms_complete_primary_absence(tmp_path: Path) -> None:
@@ -1165,13 +1268,7 @@ def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp
         _put_row(contract="NVDA_LOW", annualized=0.10),
         _put_row(contract="NVDA_HIGH", annualized=0.25),
     ):
-        row.update(
-            {
-                "earnings_has_event": True,
-                "earnings_event_dates": "2026-08-05",
-                "earnings_events": [{"earnings_date": "2026-08-05"}],
-            }
-        )
+        row.update(_earnings_evidence(event_date="2026-08-05"))
         with_events.append(row)
     pd.DataFrame(with_events).to_csv(
         account_dir / "nvda_sell_put_candidates_labeled.csv",
@@ -1614,6 +1711,59 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
 
 
+def test_combo_snapshot_partial_status_warns_without_csv_authority(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    _seal_combo_status_snapshot(tmp_path, opening_status="partial_data")
+
+    brief = _assemble(tmp_path)
+
+    combo_partial_gaps = [
+        item
+        for item in brief["data_gaps"]
+        if item.get("strategy_family") == "combo_yield"
+        and item.get("reason") == "opening_candidate_strategy_partial_data"
+    ]
+    assert len(combo_partial_gaps) == 1
+    assert brief["candidates"]["combo_yield"] == []
+    assert "相关标的 组合增强｜本轮部分行情证据不可用，候选结果不完整" in (
+        render_full_brief(brief)
+    )
+
+
+def test_combo_snapshot_data_unavailable_is_not_clean_no_candidate(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    _seal_combo_status_snapshot(tmp_path, opening_status="data_unavailable")
+
+    brief = _assemble(tmp_path)
+
+    assert any(
+        item.get("strategy_family") == "combo_yield"
+        and item.get("reason") == "opening_candidate_strategy_data_unavailable"
+        and item.get("source_status") == "data_unavailable"
+        for item in brief["data_gaps"]
+    )
+    combo_source = next(
+        item
+        for item in brief["source_artifacts"]
+        if item.get("kind") == "combo_yield_snapshot"
+    )
+    assert combo_source["opening_status"] == "data_unavailable"
+
+
 def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
@@ -1628,12 +1778,7 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
                 "put_strike": 100,
                 "call_strike": 125,
                 "annualized_net_credit_yield": 0.20,
-                "earnings_evidence_status": "ready",
-                "earnings_has_event": True,
-                "earnings_event_dates": "2026-08-21",
-                "earnings_events": [
-                    {"earnings_date": "2026-08-21"}
-                ],
+                **_earnings_evidence(event_date="2026-08-21"),
                 "earnings_snapshot_hash": "e" * 64,
             }
         ]
@@ -1673,6 +1818,80 @@ def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(t
     assert any(
         item["reason"] == "opening_candidate_strategy_data_unavailable"
         for item in brief["data_gaps"]
+    )
+
+
+def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    _materialize_opening_snapshot_fixture(tmp_path, market="US")
+    snapshot_path = account_dir / "state" / "opening_candidate_snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    for result in snapshot["strategy_results"]:
+        if result["strategy_mode"] == "call":
+            result["strategy_status"] = "data_unavailable"
+    snapshot["opening_status"] = "candidates_found"
+    snapshot["scope_results"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason_code": None,
+            },
+            {
+                "scope": "strategy",
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "status": "unavailable",
+                "reason_code": "partial_data",
+            },
+        ]
+    )
+    snapshot["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in snapshot.items()
+            if key != "content_sha256"
+        }
+    )
+
+    brief = assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result=_result(),
+        pipeline_succeeded=True,
+        config=_config(),
+        now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+        opening_candidate_snapshot=snapshot,
+    )
+
+    assert [
+        item["contract_symbol"]
+        for item in brief["candidates"]["sell_put"]
+    ] == ["NVDA260821P00100000"]
+    assert any(
+        item.get("symbol") == "AAPL"
+        and item.get("strategy_family") == "covered_call"
+        and item.get("reason") == "opening_candidate_strategy_partial_data"
+        for item in brief["data_gaps"]
+    )
+    assert "AAPL Covered Call｜本轮部分行情证据不可用，候选结果不完整" in (
+        render_full_brief(brief)
     )
 
 

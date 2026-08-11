@@ -1225,6 +1225,11 @@ def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
     if not event_label:
         return "近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。"
     relation_text = f"，{relation}" if relation else ""
+    if risk.get("in_attention_window") is False:
+        return (
+            f"预计 {event_label}{relation_text}，位于到期前 6 个自然日硬窗口之外，"
+            "不触发财报过滤；执行前仍需复核事件和报价。"
+        )
     return f"预计 {event_label}{relation_text}；执行前需要重新确认事件窗口和报价。"
 
 
@@ -1504,21 +1509,32 @@ def _strategy_data_gap_reminders(
     brief: Mapping[str, Any],
 ) -> list[str]:
     reminders: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
     for item in brief.get("data_gaps") or []:
         if not isinstance(item, Mapping):
             continue
         reason = _lower(item.get("reason"))
+        symbol = _upper(item.get("symbol")) or "相关标的"
+        family = _STRATEGY_LABELS.get(
+            _lower(item.get("strategy_family")),
+            "策略",
+        )
+        identity = (symbol, family, reason)
+        if reason == "earnings_soft_coverage_partial":
+            if identity not in seen:
+                reminders.append(
+                    f"{symbol} {family}：较远财报日历上下文部分不可用；6 个自然日硬窗口证据完整，候选资格不受此缺口影响"
+                )
+                seen.add(identity)
+            continue
         if (
             _lower(item.get("scope")) != "strategy"
             or _lower(item.get("severity")) != "warning"
             or item.get("actionable") is not False
         ):
             continue
-        symbol = _upper(item.get("symbol")) or "相关标的"
-        family = _STRATEGY_LABELS.get(
-            _lower(item.get("strategy_family")),
-            "策略",
-        )
+        if identity in seen:
+            continue
         if (
             _lower(item.get("outcome")) == "success_empty"
             and reason in {"no_expirations", "no_contract_rows"}
@@ -1539,6 +1555,7 @@ def _strategy_data_gap_reminders(
             reminders.append(
                 f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
             )
+        seen.add(identity)
     return reminders
 
 

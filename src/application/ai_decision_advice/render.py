@@ -41,7 +41,12 @@ def render_family_advice_lines(
     heading_mark = "#" * max(1, min(int(heading_level), 6))
     lines: list[str] = [f"{heading_mark} AI建议"]
     if zero:
-        lines.append("本轮无可供 AI 评估的策略候选。")
+        if _family_universe_partial(section, family=family):
+            lines.append(
+                "本轮没有证据完整、可供 AI 评估的策略候选；部分合约因硬证据缺失未纳入，不代表完整扫描没有候选。"
+            )
+        else:
+            lines.append("本轮无可供 AI 评估的策略候选。")
         return lines
     if status == "not_applicable":
         return []
@@ -49,6 +54,11 @@ def render_family_advice_lines(
     if status == "unavailable":
         lines.append("AI建议未完成；以下仅展示策略原始排序，不代表已经完成综合判断。")
         return lines
+
+    if _family_universe_partial(section, family=family):
+        lines.append(
+            "候选范围｜部分合约因硬证据缺失未纳入；以下判断仅基于证据完整的候选，不代表完整扫描全集。"
+        )
 
     evidence_as_of = str(section.get("evidence_as_of") or "").strip()
     evidence_line = f"外部信息｜截至 {evidence_as_of}" if evidence_as_of else ""
@@ -214,6 +224,22 @@ def _review_gap_text(decision: Mapping[str, Any]) -> str:
                 labels.append(label)
                 break
     return "；".join(labels) + "。" if labels else ""
+
+
+def _family_universe_partial(
+    section: Mapping[str, Any],
+    *,
+    family: str,
+) -> bool:
+    universe = section.get("candidate_universe")
+    if not isinstance(universe, Mapping) or universe.get("status") != "partial":
+        return False
+    expected_mode = "put" if family == "sell_put" else "call"
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("strategy_mode") or "") == expected_mode
+        for item in universe.get("affected_scopes") or []
+    )
 
 
 def _source_lines(

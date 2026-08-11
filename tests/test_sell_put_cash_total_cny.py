@@ -4,6 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from domain.domain.engine import (
+    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+)
+
 
 def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> None:
     from src.application.sell_put_cash import sell_put_opening_capacity_inputs
@@ -90,7 +95,19 @@ def test_enrich_sell_put_candidates_fails_closed_when_option_context_is_missing(
         "iv_rv_ratio": 1.20,
         "iv_minus_rv": 0.10,
         "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": "2026-08-06",
+        "earnings_hard_window_start": "2026-09-12",
+        "earnings_hard_window_end": "2026-09-18",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
         "earnings_has_event": False,
+        "earnings_blocking_has_event": False,
+        "earnings_events": [],
+        "earnings_blocking_events": [],
+        "earnings_nonblocking_events": [],
     }
     enriched = enrich_sell_put_candidates_with_cash(
         df_labeled=pd.DataFrame([candidate]),
