@@ -893,7 +893,37 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
     assert captured_scan["sell_put_cfg"]["max_strike"] == 50
 
 
-def test_symbol_monitoring_reports_combo_capture_status(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("combo_summary", "expected_status", "expected_reason"),
+    [
+        ({"strategy": "combo_yield"}, "completed", None),
+        (
+            {
+                "strategy": "combo_yield",
+                "_strategy_status": "unavailable",
+                "_strategy_reason": "data_unavailable",
+            },
+            "unavailable",
+            "data_unavailable",
+        ),
+        (
+            {
+                "strategy": "combo_yield",
+                "candidate_count": 1,
+                "_strategy_status": "completed",
+                "_strategy_reason": "partial_data",
+            },
+            "completed",
+            "partial_data",
+        ),
+    ],
+)
+def test_symbol_monitoring_reports_combo_capture_status(
+    tmp_path: Path,
+    combo_summary: dict,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
     from src.application import symbol_monitoring as mod
 
     captured_statuses: list[dict] = []
@@ -921,7 +951,7 @@ def test_symbol_monitoring_reports_combo_capture_status(tmp_path: Path) -> None:
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
-        run_combo_yield_scan_fn=lambda **kwargs: {"strategy": "combo_yield"},
+        run_combo_yield_scan_fn=lambda **kwargs: combo_summary,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
         materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
@@ -958,7 +988,8 @@ def test_symbol_monitoring_reports_combo_capture_status(tmp_path: Path) -> None:
         if str(item.get("strategy_mode") or "") == "combo_yield"
     ]
     assert combo_statuses
-    assert combo_statuses[0]["status"] == "completed"
+    assert combo_statuses[0]["status"] == expected_status
+    assert combo_statuses[0]["reason"] == expected_reason
 
 
 

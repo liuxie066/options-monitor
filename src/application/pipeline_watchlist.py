@@ -297,7 +297,11 @@ def _yield_snapshot_status(
         return "market_closed"
     states = {str(item["status"]) for item in statuses}
     if states == {"completed"}:
-        return None
+        return (
+            "partial_data"
+            if any(str(item.get("reason") or "") == "partial_data" for item in statuses)
+            else None
+        )
     if states == {"not_applicable"}:
         return "not_applicable"
     if "completed" in states:
