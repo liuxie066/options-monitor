@@ -10,10 +10,8 @@ def assert_mobile_flat_markdown(message: str, *, require_title: bool = True) -> 
     lines = str(message or "").splitlines()
     if require_title:
         assert sum(line.startswith("# ") for line in lines) == 1
-    # The only sanctioned per-strategy submodule headings are AI advice and
-    # the candidate list (docs/AI_DECISION_ADVICE_DESIGN.md 15.1).
+    # Current per-strategy submodules are deterministic candidate lists only.
     allowed_subheadings = {
-        "### AI建议",
         "### 策略候选",
         "### 新增策略候选",
     }
