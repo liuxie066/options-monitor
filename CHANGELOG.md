@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.13.15 - 2026-08-13
+
+### Bug Fixes
+- Reconciled completed lifecycle intake state from the canonical v2 terminal summary when legacy `decision_type` fields are absent, including the exact resolved lot IDs.
+- Allowed guarded historical receipt compensation for applied open trades whose original delivery was provably skipped because no route was available, while preserving duplicate and outbox evidence checks.
+
 ## 1.13.14 - 2026-08-13
 
 ### Improvements
