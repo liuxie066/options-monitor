@@ -7,6 +7,7 @@
 - Initial review: `docs/reviews/code-review-20260812-093929.md`
 - Fix artifact: `docs/gateflow/candidate-brief-evidence-integrity/pr-review-fix.md`
 - Re-review: `docs/reviews/code-review-20260812-094359.md`
+- Post-CI incremental re-review: `docs/reviews/code-review-20260812-095904.md`
 - Artifact path: `docs/gateflow/candidate-brief-evidence-integrity/pr-review.md`
 - Decision: `pass`
 
@@ -17,6 +18,8 @@
 - CR-PR-03: accepted, fixed, re-reviewed — only explicit opening-ready contracts may seal a definitive economic
   rejection.
 - Prior Slice/Aggregate findings CR-S1-01, CR-S1-02, CR-S2-01, and CR-AGG-01 remain fixed.
+- CI-GR-01: accepted, fixed, incrementally re-reviewed — audit commands use the portable repository-relative
+  virtual-environment entry and both required GitHub workflows pass.
 
 No finding remains open or deferred inside this work unit.
 
@@ -27,6 +30,7 @@ No finding remains open or deferred inside this work unit.
 - compileall: passed.
 - Ruff: passed.
 - `git diff --check`: passed.
+- GitHub Guardrails and Agent Plugin workflows on the post-CI-fix head `85b885be`: passed.
 - Latest `main` compact-report + `1.13.13` release commits are integrated as base context; this branch did not create
   a release, deployment, runtime write, or notification replay.
 
@@ -45,6 +49,7 @@ These risks are classified and do not block the Draft PR.
 
 ## Completion status / next entry point
 
-PR re-review passed. Current gate / next entry point: `accepted PR review commit -> push -> draft-PR-pass`.
+Full PR re-review and the post-CI incremental re-review passed. Current gate / next entry point:
+`accepted supplemental PR review commit -> push -> draft-PR-pass`.
 The PR must remain Draft. Merge, Ready transition, reviewer request, approval, release, deployment, runtime mutation,
 and notification replay remain outside this Gateflow run.
