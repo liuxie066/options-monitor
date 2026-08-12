@@ -249,6 +249,67 @@ def test_hk_covered_call_non_positive_net_premium_is_a_definitive_reject() -> No
         ) == ("completed", "no_candidate")
 
 
+def test_non_positive_net_premium_requires_explicit_ready_opening_status() -> None:
+    from src.application.candidate_scanning import (
+        CandidateScanConfig,
+        _calculation_decision_record,
+        evidence_summary_from_decisions,
+    )
+    from src.application.candidate_models import CandidateContractInput
+
+    contract = CandidateContractInput.from_row(
+        pd.Series(
+            phase2_opening_row(
+                {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "expiration": "2026-05-01",
+                    "contract_symbol": "MISSING_OPENING_STATUS",
+                    "strike": 90.0,
+                    "spot": 100.0,
+                    "bid": 0.01,
+                    "ask": 0.01,
+                    "implied_volatility": 0.30,
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "opening_contract_status": "",
+                }
+            )
+        ),
+        mode="put",
+    )
+    decision = _calculation_decision_record(
+        contract=contract,
+        config=CandidateScanConfig(
+            mode="put",
+            symbols=["NVDA"],
+            input_root=Path("."),
+            output=None,
+            empty_output_columns=[],
+            min_dte=0,
+            max_dte=0,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=None,
+            min_volume=None,
+            max_spread_ratio=None,
+            min_annualized_net_return=None,
+            min_net_income=0,
+        ),
+        reason={"rule": "net_premium_non_positive"},
+    )
+
+    reject = decision["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "input_invalid"
+    assert reject["metric_value"]["reason_code"] == "net_premium_non_positive"
+    evidence = evidence_summary_from_decisions(
+        decisions=[decision],
+        accepted_count=0,
+    )
+    assert evidence["eligibility_unresolved_count"] == 1
+    assert evidence["policy_rejected_count"] == 0
+
+
 def test_zero_bid_only_scope_projects_no_candidate_not_partial_data() -> None:
     from src.application.candidate_scanning import evidence_summary_from_decisions
     from src.application.sell_put_steps import _evidence_scan_status
