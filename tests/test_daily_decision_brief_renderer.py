@@ -1349,6 +1349,61 @@ def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
     assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
 
 
+def test_unavailable_ai_copy_uses_raw_family_presence_when_render_budget_omits_rows() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["candidates"]["sell_put"] = [
+        _candidate(
+            rank=index + 1,
+            symbol=f"P{index}",
+            option_type="put",
+            expiration="2026-08-21",
+            strike=100 + index,
+        )
+        for index in range(41)
+    ]
+    brief["ai_decision_advice"] = {
+        "status": "unavailable",
+        "unavailable_reason": "timeout",
+        "evidence_as_of": None,
+        "sell_put": None,
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": None,
+    }
+    diff = {
+        "changes": [
+            {
+                "change_type": "candidate_added",
+                "action": {
+                    "action_type": "open_candidate",
+                    "strategy_family": "sell_put",
+                    "symbol": f"P{index}",
+                    "option_type": "put",
+                    "expiration": "2026-08-21",
+                    "strike": 100 + index,
+                },
+            }
+            for index in range(41)
+        ]
+    }
+
+    message = render_delta_brief(
+        brief,
+        diff,
+        limits={"max_candidates_per_strategy": 1},
+    )
+    covered_call_block = message[
+        message.index("## Covered Call") : message.index("## 持仓")
+    ]
+
+    assert "补充｜另有 1 个策略候选未展开" in covered_call_block
+    assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
+    assert "本轮没有可展示的策略原始排序" not in covered_call_block
+
+
 def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,

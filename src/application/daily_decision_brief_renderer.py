@@ -117,6 +117,18 @@ def build_daily_brief_user_view(
         brief,
         market=market,
     )
+    raw_candidates = brief.get("candidates")
+    ai_raw_candidate_presence = {
+        family: any(
+            isinstance(item, Mapping)
+            for item in (
+                raw_candidates.get(family) or []
+                if isinstance(raw_candidates, Mapping)
+                else []
+            )
+        )
+        for family in ("sell_put", "covered_call")
+    }
     strategy_failure_items = _strategy_failure_items(brief)
     reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
@@ -186,6 +198,7 @@ def build_daily_brief_user_view(
         "ai_decision_advice_evidence_index": brief.get("ai_decision_advice_evidence_index"),
         "_ai_candidate_contract_by_id": ai_candidate_contracts,
         "_ai_candidate_rank_by_id": ai_candidate_ranks,
+        "_ai_raw_candidate_presence": ai_raw_candidate_presence,
     }
     return view
 
@@ -936,19 +949,25 @@ def _ai_advice_lines_for_family(
         return []
     contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
     evidence_by_ref = _ai_evidence_ref_map(brief)
-    candidates = brief.get("candidates")
-    if isinstance(candidates, Mapping):
-        has_raw_candidates = any(
-            isinstance(item, Mapping)
-            for item in candidates.get(family) or []
-        )
+    raw_presence = brief.get("_ai_raw_candidate_presence")
+    if isinstance(raw_presence, Mapping) and isinstance(
+        raw_presence.get(family), bool
+    ):
+        has_raw_candidates = raw_presence[family]
     else:
-        candidate_rows = candidates if isinstance(candidates, list) else []
-        has_raw_candidates = any(
-            isinstance(item, Mapping)
-            and _lower(item.get("family")) == family
-            for item in candidate_rows
-        )
+        candidates = brief.get("candidates")
+        if isinstance(candidates, Mapping):
+            has_raw_candidates = any(
+                isinstance(item, Mapping)
+                for item in candidates.get(family) or []
+            )
+        else:
+            candidate_rows = candidates if isinstance(candidates, list) else []
+            has_raw_candidates = any(
+                isinstance(item, Mapping)
+                and _lower(item.get("family")) == family
+                for item in candidate_rows
+            )
     return render_family_advice_lines(
         section,
         family=family,
