@@ -153,6 +153,7 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
         index=False,
     )
     _materialize_opening_snapshot_fixture(tmp_path, market="US")
+    _materialize_candidate_bundle_fixture(tmp_path)
     snapshot = json.loads(
         (account_dir / "state" / "opening_candidate_snapshot.json").read_text(
             encoding="utf-8"
@@ -161,13 +162,14 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
     portfolio = {"envelope": {"marker": "verified-pm"}}
     option_context = {"marker": "verified-option"}
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        service,
-        "load_opening_candidate_snapshot",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("explicit candidate snapshot must not be reread")
-        ),
-    )
+    bundle_loads: list[dict[str, Any]] = []
+    original_load_bundle = service.load_candidate_snapshot_bundle
+
+    def load_bundle(**kwargs):
+        bundle_loads.append(dict(kwargs))
+        return original_load_bundle(**kwargs)
+
+    monkeypatch.setattr(service, "load_candidate_snapshot_bundle", load_bundle)
 
     def advice(**kwargs):
         captured.update(kwargs)
@@ -203,7 +205,12 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
     )
 
     assert brief["candidates"]["sell_put"]
+    assert len(bundle_loads) == 1
     assert captured["candidate_snapshot"] is not None
+    assert (
+        captured["candidate_snapshot"]["content_sha256"]
+        == snapshot["content_sha256"]
+    )
     assert captured["portfolio_distribution"] is portfolio
     assert captured["option_positions_context"] is option_context
 
@@ -221,6 +228,7 @@ def _assemble(
 
     _materialize_opening_snapshot_fixture(base, market=market)
     _materialize_combo_snapshot_fixture(base, market=market)
+    _materialize_candidate_bundle_fixture(base)
     return assemble_daily_decision_brief(
         base=base,
         run_id="run-1",
@@ -235,6 +243,23 @@ def _assemble(
     )
 
 
+def _fixture_dependencies() -> list[dict[str, Any]]:
+    return [
+        {"kind": kind, "relpath": None, "sha256": char * 64}
+        for kind, char in (
+            ("required_data", "a"),
+            ("portfolio", "b"),
+            ("ledger", "c"),
+            ("fx", "d"),
+            ("earnings_rv", "e"),
+        )
+    ]
+
+
+def _fixture_symbol_from_path(path: Path, marker: str) -> str:
+    return path.name.split(marker, 1)[0].upper()
+
+
 def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
     """Translate legacy test setup into the current sealed-source contract.
 
@@ -245,6 +270,10 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
     account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
     if not account_dir.is_dir():
         return
+    if (
+        account_dir / "state" / "candidate_snapshot_manifest.v1.json"
+    ).is_file():
+        return
     path_groups = {
         "put": sorted(account_dir.glob("*_sell_put_candidates_labeled.csv")),
         "call": sorted(account_dir.glob("*_sell_call_candidates.csv")),
@@ -253,9 +282,26 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
         return
 
     rows_by_mode: dict[str, list[dict]] = {"put": [], "call": []}
-    mode_failed: dict[str, bool] = {"put": False, "call": False}
+    scopes_by_mode: dict[str, dict[str, dict[str, Any]]] = {
+        "put": {},
+        "call": {},
+    }
+    markers = {
+        "put": "_sell_put_candidates_labeled.csv",
+        "call": "_sell_call_candidates.csv",
+    }
     for mode, paths in path_groups.items():
         for path in paths:
+            path_symbol = _fixture_symbol_from_path(path, markers[mode])
+            scope = {
+                "scope": "strategy",
+                "symbol": path_symbol,
+                "strategy_mode": mode,
+                "status": "completed",
+                "reason_code": None,
+                "quote_snapshot_id": None,
+                "quote_receipt_relpath": None,
+            }
             try:
                 raw = path.read_bytes()
                 if raw in {b"\n", b"\r\n"}:
@@ -263,9 +309,12 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                 else:
                     frame = pd.read_csv(path)
             except Exception:
-                mode_failed[mode] = True
+                scope["status"] = "unavailable"
+                scope["reason_code"] = "candidate_fixture_parse_failed"
+                scopes_by_mode[mode][path_symbol] = scope
                 continue
-            for item in json.loads(frame.to_json(orient="records")):
+            frame_rows = json.loads(frame.to_json(orient="records"))
+            for item in frame_rows:
                 row = dict(item)
                 raw_events = row.get("earnings_events")
                 if isinstance(raw_events, str):
@@ -279,8 +328,24 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                         else []
                     )
                 rows_by_mode[mode].append(row)
+                row_symbol = str(row.get("symbol") or path_symbol).upper()
+                scopes_by_mode[mode].setdefault(
+                    row_symbol,
+                    {
+                        **scope,
+                        "symbol": row_symbol,
+                    },
+                )
+            if not frame_rows:
+                scopes_by_mode[mode].setdefault(path_symbol, scope)
 
     market_norm = market.upper()
+    for mode in scopes_by_mode:
+        scopes_by_mode[mode] = {
+            symbol: scope
+            for symbol, scope in scopes_by_mode[mode].items()
+            if ("HK" if symbol.endswith(".HK") else "US") == market_norm
+        }
     for mode, rows in rows_by_mode.items():
         deduped: dict[tuple[str, str, str, str], dict] = {}
         for row in rows:
@@ -300,35 +365,65 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
             mode=mode,
         )
 
+    for mode, scopes in scopes_by_mode.items():
+        family = "sell_put" if mode == "put" else "covered_call"
+        for scope in scopes.values():
+            status_path = account_dir / f"{str(scope['symbol']).lower()}_{family}_scan_status.json"
+            try:
+                status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                status_payload.get("run_id") == "run-1"
+                and status_payload.get("account") == "lx"
+                and status_payload.get("strategy_family") == family
+            ):
+                scope["status"] = status_payload.get("status")
+                scope["reason_code"] = (
+                    status_payload.get("reason_code")
+                    or status_payload.get("reason")
+                )
+                scope["quote_snapshot_id"] = status_payload.get("snapshot_id")
+                scope["quote_receipt_relpath"] = status_payload.get("receipt_relpath")
+
     strategy_results: list[dict] = []
     ranked_candidates: list[dict] = []
     candidate_decisions: list[dict] = []
-    scope_results: list[dict] = []
+    strategy_scope_results: list[dict] = []
+    contract_scope_results: list[dict] = []
+    observed_modes = [
+        mode for mode in ("put", "call") if scopes_by_mode[mode]
+    ]
     any_complete = False
     any_failed = False
-    for mode in ("put", "call"):
-        observed = bool(path_groups[mode])
-        failed = mode_failed[mode]
+    for mode in observed_modes:
         rows = rows_by_mode[mode]
-        if failed:
-            status = "data_unavailable"
-            any_failed = True
-        elif observed:
-            status = "candidates_found" if rows else "no_candidate"
-            any_complete = True
+        scope_rows = list(scopes_by_mode[mode].values())
+        scope_states = {str(item["status"]) for item in scope_rows}
+        if rows:
+            status = "candidates_found"
+        elif scope_states == {"completed"}:
+            status = "no_candidate"
         else:
-            status = "not_applicable"
+            status = (
+                "partial_data"
+                if "completed" in scope_states
+                else "data_unavailable"
+            )
+        any_complete = any_complete or "completed" in scope_states
+        any_failed = any_failed or bool(scope_states - {"completed"})
         strategy_results.append(
             {
                 "strategy_mode": mode,
                 "strategy_status": status,
                 "capacity_status": (
-                    "not_applicable" if status == "not_applicable" else "available"
+                    "available"
                 ),
                 "candidate_count": len(rows),
-                "scope_count": max(1, len(rows)) if observed else 0,
+                "scope_count": len(scope_rows),
             }
         )
+        strategy_scope_results.extend(scope_rows)
         for rank, facts in enumerate(rows, start=1):
             candidate_id = canonical_sha256(
                 {
@@ -353,7 +448,7 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                     "ranking": {},
                 }
             )
-            scope_results.append(
+            contract_scope_results.append(
                 {
                     "scope": "contract",
                     "candidate_id": candidate_id,
@@ -367,24 +462,24 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                 }
             )
 
-    if any_failed and any_complete:
+    if ranked_candidates:
+        opening_status = "candidates_found"
+    elif any_failed and any_complete:
         opening_status = "partial_data"
     elif any_failed:
         opening_status = "data_unavailable"
-    elif ranked_candidates:
-        opening_status = "candidates_found"
     else:
         opening_status = "no_candidate"
-    dependencies = [
-        {"kind": kind, "relpath": None, "sha256": char * 64}
-        for kind, char in (
-            ("required_data", "a"),
-            ("portfolio", "b"),
-            ("ledger", "c"),
-            ("fx", "d"),
-            ("earnings_rv", "e"),
-        )
-    ]
+    scope_results = sorted(
+        [*strategy_scope_results, *contract_scope_results],
+        key=lambda row: (
+            str(row.get("scope")),
+            str(row.get("strategy_mode")),
+            str(row.get("symbol")),
+            str(row.get("expiration")),
+            str(row.get("contract_symbol")),
+        ),
+    )
     snapshot = {
         "schema_version": "opening_candidate_snapshot.v1",
         "run_id": "run-1",
@@ -392,11 +487,11 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
         "futu_account_id": "12345",
         "trade_env": "REAL",
         "market": market_norm,
-        "strategy_modes": ["put", "call"],
+        "strategy_modes": observed_modes,
         "account_config_sha256": "f" * 64,
         "strategy_policy_sha256": "1" * 64,
         "required_data_manifest_sha256": "a" * 64,
-        "dependencies": dependencies,
+        "dependencies": _fixture_dependencies(),
         "sealed_at_utc": "2026-07-17T13:59:59Z",
         "opening_status": opening_status,
         "strategy_results": strategy_results,
@@ -424,8 +519,15 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
     combo_paths = sorted(account_dir.glob("*_combo_yield_candidates.csv"))
     if not combo_paths:
         return
+    snapshot_path = account_dir / "state" / "combo_yield_candidate_snapshot.json"
+    if snapshot_path.is_file():
+        return
     pairs: list[dict[str, Any]] = []
+    scope_symbols: set[str] = set()
     for path in combo_paths:
+        scope_symbols.add(
+            _fixture_symbol_from_path(path, "_combo_yield_candidates.csv")
+        )
         try:
             raw = path.read_bytes()
             if raw in {b"\n", b"\r\n"}:
@@ -440,17 +542,53 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
             row_market = "HK" if symbol.endswith(".HK") else "US"
             if row_market != market.upper():
                 continue
+            scope_symbols.add(symbol)
             row.setdefault("candidate_pair_id", row.get("strategy_group_id") or "")
             pairs.append(row)
     ranked_pairs = select_best_yield_enhancement_per_symbol(pairs)
+    rank_records = [
+        {
+            **pair,
+            "baseline_rank": rank,
+            "shadow_rank": rank,
+            "baseline_selected": True,
+            "shadow_selected": True,
+            "rank_changed": False,
+        }
+        for rank, pair in enumerate(ranked_pairs, start=1)
+    ]
     seal_combo_yield_candidate_snapshot(
         base=base,
         run_id="run-1",
         account="lx",
         market=market.lower(),
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
+        account_config_sha256="f" * 64,
+        strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(),
+        scan_statuses=[
+            {
+                "symbol": symbol,
+                "strategy_mode": "combo_yield",
+                "variant": "sp_lc",
+                "status": "completed",
+                "quote_snapshot_id": None,
+                "quote_receipt_relpath": None,
+            }
+            for symbol in sorted(scope_symbols)
+        ],
+        pair_evaluations=[
+            {
+                **pair,
+                "diagnostic_scope": "pair",
+                "diagnostic_stage": "pair_filter",
+                "accepted": True,
+                "reject_reasons": "",
+            }
+            for pair in ranked_pairs
+        ],
+        rank_records=rank_records,
         ranked_pairs=ranked_pairs,
+        sealed_at="2026-07-17T13:59:59Z",
     )
 
 
@@ -464,15 +602,197 @@ def _seal_combo_status_snapshot(
         seal_combo_yield_candidate_snapshot,
     )
 
+    status_map = {
+        "partial_data": ("completed", "partial_data"),
+        "data_unavailable": ("unavailable", "data_unavailable"),
+        "not_applicable": ("not_applicable", "not_applicable_for_test"),
+        "no_candidate": ("completed", None),
+        "candidates_found": ("completed", None),
+    }
+    scope_status, scope_reason = status_map[opening_status]
+    pairs = list(ranked_pairs or [])
     seal_combo_yield_candidate_snapshot(
         base=base,
         run_id="run-1",
         account="lx",
         market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        ranked_pairs=ranked_pairs or [],
+        account_config_sha256="f" * 64,
+        strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "combo_yield",
+                "variant": "sp_lc",
+                "status": scope_status,
+                "reason": scope_reason,
+            }
+        ],
+        pair_evaluations=[
+            {
+                **pair,
+                "diagnostic_scope": "pair",
+                "diagnostic_stage": "pair_filter",
+                "accepted": True,
+                "reject_reasons": "",
+            }
+            for pair in pairs
+        ],
+        rank_records=[
+            {
+                **pair,
+                "baseline_rank": rank,
+                "shadow_rank": rank,
+                "baseline_selected": True,
+                "shadow_selected": True,
+                "rank_changed": False,
+            }
+            for rank, pair in enumerate(pairs, start=1)
+        ],
+        ranked_pairs=pairs,
         opening_status=opening_status,
+        sealed_at="2026-07-17T13:59:59Z",
+    )
+
+
+def _materialize_candidate_bundle_fixture(base: Path) -> None:
+    from src.application.candidate_snapshot_manifest import (
+        CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+        publish_candidate_snapshot_manifest,
+    )
+    from src.application.strategy_scan_status import (
+        publish_strategy_scan_status,
+        publish_strategy_scan_status_index,
+        publish_strategy_scan_status_index_v2,
+        strategy_status_path,
+    )
+
+    account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
+    if not account_dir.is_dir():
+        return
+    manifest_path = account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_FILE
+    if manifest_path.is_file():
+        return
+    snapshot_paths = {
+        "opening": account_dir / "state" / "opening_candidate_snapshot.json",
+        "sp_lc": account_dir / "state" / "combo_yield_candidate_snapshot.json",
+        "cc_lp": account_dir / "state" / "cc_lp_candidate_snapshot.json",
+    }
+    snapshots: dict[str, dict[str, Any]] = {}
+    for owner, path in snapshot_paths.items():
+        if path.is_file():
+            snapshots[owner] = json.loads(path.read_text(encoding="utf-8"))
+
+    expected: list[dict[str, str]] = []
+    for owner, snapshot in snapshots.items():
+        counts: dict[tuple[str, str], int] = {}
+        selected = (
+            snapshot.get("ranked_candidates")
+            if owner == "opening"
+            else snapshot.get("ranked_pairs")
+        ) or []
+        for row in selected:
+            facts = row.get("facts") if owner == "opening" else row
+            facts = facts if isinstance(facts, dict) else {}
+            key = (
+                str(facts.get("symbol") or row.get("symbol") or "").upper(),
+                str(row.get("strategy_mode") or "combo_yield").lower(),
+            )
+            counts[key] = counts.get(key, 0) + 1
+        for scope in snapshot.get("scope_results") or []:
+            if not isinstance(scope, dict) or scope.get("scope") != "strategy":
+                continue
+            symbol = str(scope.get("symbol") or "").upper()
+            mode = str(scope.get("strategy_mode") or "").lower()
+            family = {
+                "put": "sell_put",
+                "call": "covered_call",
+                "combo_yield": "combo_yield",
+            }[mode]
+            status = str(scope.get("status") or "").lower()
+            reason = str(scope.get("reason_code") or "").strip() or None
+            if family == "combo_yield":
+                (account_dir / f"{symbol.lower()}_combo_yield_candidates.csv").touch()
+            status_path = strategy_status_path(
+                report_dir=account_dir,
+                symbol=symbol,
+                strategy_family=family,
+            )
+            keep_existing = False
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+                keep_existing = (
+                    existing.get("run_id") == "run-1"
+                    and existing.get("account") == "lx"
+                    and existing.get("market") == str(snapshot.get("market") or "").upper()
+                    and existing.get("symbol") == symbol
+                    and existing.get("strategy_family") == family
+                    and existing.get("status") == status
+                    and (
+                        status != "completed"
+                        or int(existing.get("candidate_count", -1))
+                        == counts.get((symbol, mode), 0)
+                    )
+                )
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                keep_existing = False
+            if not keep_existing:
+                publish_strategy_scan_status(
+                    report_dir=account_dir,
+                    run_id="run-1",
+                    account="lx",
+                    market=str(snapshot.get("market") or "").upper(),
+                    symbol=symbol,
+                    strategy_family=family,
+                    status=status,
+                    candidate_count=(
+                        counts.get((symbol, mode), 0)
+                        if status == "completed"
+                        else None
+                    ),
+                    reason=reason or (
+                        f"{owner}_fixture_{status}"
+                        if status != "completed"
+                        else None
+                    ),
+                    snapshot_id=scope.get("quote_snapshot_id"),
+                    receipt_relpath=scope.get("quote_receipt_relpath"),
+                )
+            expected.append(
+                {
+                    "market": str(snapshot.get("market") or "").upper(),
+                    "symbol": symbol,
+                    "strategy_family": family,
+                    "strategy_mode": mode,
+                    "candidate_owner": owner,
+                    "account_config_sha256": "f" * 64,
+                }
+            )
+    publish_strategy_scan_status_index(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        expected=(
+            {
+                "market": row["market"],
+                "symbol": row["symbol"],
+                "strategy_family": row["strategy_family"],
+            }
+            for row in expected
+        ),
+    )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        account_config_sha256="f" * 64,
+        expected=expected,
+    )
+    publish_candidate_snapshot_manifest(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        strategy_policy_sha256="1" * 64,
         sealed_at="2026-07-17T13:59:59Z",
     )
 
@@ -1642,7 +1962,7 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
         [
             {
                 "symbol": "NVDA",
-                "candidate_pair_id": "pair-b",
+                    "candidate_pair_id": "combo_yield:NVDA:NVDA_P95:NVDA_C130",
                 "put_contract_symbol": "NVDA_P95",
                 "call_contract_symbol": "NVDA_C130",
                 "put_expiration": "2026-08-21",
@@ -1657,7 +1977,7 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
             },
             {
                 "symbol": "NVDA",
-                "candidate_pair_id": "pair-a",
+                    "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C125",
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C125",
                 "put_expiration": "2026-08-21",
@@ -1672,7 +1992,7 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
             },
             {
                 "symbol": "AAPL",
-                "candidate_pair_id": "pair-c",
+                    "candidate_pair_id": "combo_yield:AAPL:AAPL_P180:AAPL_C220",
                 "put_contract_symbol": "AAPL_P180",
                 "call_contract_symbol": "AAPL_C220",
                 "put_expiration": "2026-08-21",
@@ -1695,7 +2015,10 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     brief = _assemble(tmp_path)
     combos = brief["candidates"]["combo_yield"]
 
-    assert [item["strategy_group_id"] for item in combos] == ["pair-c", "pair-a"]
+    assert [item["strategy_group_id"] for item in combos] == [
+        "combo_yield:AAPL:AAPL_P180:AAPL_C220",
+        "combo_yield:NVDA:NVDA_P100:NVDA_C125",
+    ]
     assert combos[0]["put_leg_role"] == "funding_put"
     assert combos[0]["call_leg_role"] == "participation_call"
     assert combos[0]["put_sell_reference"] == 4.25
@@ -1708,7 +2031,10 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert combo_index["AAPL"]["put_sell_reference"] == 4.25
     assert combo_index["AAPL"]["call_buy_reference"] == 0.55
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
-    assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
+    assert [item["strategy_group_id"] for item in combo_actions] == [
+        "combo_yield:AAPL:AAPL_P180:AAPL_C220",
+        "combo_yield:NVDA:NVDA_P100:NVDA_C125",
+    ]
 
 
 def test_combo_snapshot_partial_status_warns_without_csv_authority(
@@ -1733,7 +2059,7 @@ def test_combo_snapshot_partial_status_warns_without_csv_authority(
     ]
     assert len(combo_partial_gaps) == 1
     assert brief["candidates"]["combo_yield"] == []
-    assert "相关标的 组合增强｜本轮部分行情证据不可用，候选结果不完整" in (
+    assert "NVDA 组合增强｜本轮部分行情证据不可用，候选结果不完整" in (
         render_full_brief(brief)
     )
 
@@ -1752,8 +2078,8 @@ def test_combo_snapshot_data_unavailable_is_not_clean_no_candidate(
 
     assert any(
         item.get("strategy_family") == "combo_yield"
-        and item.get("reason") == "opening_candidate_strategy_data_unavailable"
-        and item.get("source_status") == "data_unavailable"
+        and item.get("reason") == "data_unavailable"
+        and item.get("symbol") == "NVDA"
         for item in brief["data_gaps"]
     )
     combo_source = next(
@@ -1770,7 +2096,7 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
         [
             {
                 "symbol": "NVDA",
-                "candidate_pair_id": "pair-a",
+                    "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C125",
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C125",
                 "put_expiration": "2026-08-21",
@@ -1816,7 +2142,8 @@ def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(t
     assert brief["actionability"] == "live_actionable"
     assert any(item["contract_symbol"] == "PDD_VALID" for item in brief["actions"])
     assert any(
-        item["reason"] == "opening_candidate_strategy_data_unavailable"
+        item.get("symbol") == "AAA"
+        and item.get("reason") == "candidate_fixture_parse_failed"
         for item in brief["data_gaps"]
     )
 
@@ -1825,8 +2152,8 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
     tmp_path: Path,
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
-    from src.application.daily_decision_brief_service import (
-        assemble_daily_decision_brief,
+    from src.application.strategy_scan_status import (
+        publish_strategy_scan_status,
     )
 
     account_dir = _account_dir(tmp_path)
@@ -1834,51 +2161,19 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         account_dir / "nvda_sell_put_candidates_labeled.csv",
         index=False,
     )
-    _materialize_opening_snapshot_fixture(tmp_path, market="US")
-    snapshot_path = account_dir / "state" / "opening_candidate_snapshot.json"
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    for result in snapshot["strategy_results"]:
-        if result["strategy_mode"] == "call":
-            result["strategy_status"] = "data_unavailable"
-    snapshot["opening_status"] = "candidates_found"
-    snapshot["scope_results"].extend(
-        [
-            {
-                "scope": "strategy",
-                "symbol": "NVDA",
-                "strategy_mode": "put",
-                "status": "completed",
-                "reason_code": None,
-            },
-            {
-                "scope": "strategy",
-                "symbol": "AAPL",
-                "strategy_mode": "call",
-                "status": "unavailable",
-                "reason_code": "partial_data",
-            },
-        ]
-    )
-    snapshot["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in snapshot.items()
-            if key != "content_sha256"
-        }
-    )
-
-    brief = assemble_daily_decision_brief(
-        base=tmp_path,
+    (account_dir / "aapl_sell_call_candidates.csv").write_bytes(b"\n")
+    publish_strategy_scan_status(
+        report_dir=account_dir,
         run_id="run-1",
         account="lx",
         market="US",
-        scheduler_decision={"in_run_window": True},
-        account_result=_result(),
-        pipeline_succeeded=True,
-        config=_config(),
-        now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
-        opening_candidate_snapshot=snapshot,
+        symbol="AAPL",
+        strategy_family="covered_call",
+        status="unavailable",
+        reason="partial_data",
     )
+
+    brief = _assemble(tmp_path)
 
     assert [
         item["contract_symbol"]
@@ -1949,16 +2244,18 @@ def test_missing_capacity_suppresses_only_affected_candidate_and_blocks_when_all
 
 
 def test_market_partition_excludes_other_market_rows_and_uses_market_date(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(
-        [
-            _put_row(symbol="NVDA", contract="US_NVDA"),
-            _put_row(symbol="0700.HK", contract="HK_0700"),
-        ]
-    ).to_csv(account_dir / "mixed_sell_put_candidates_labeled.csv", index=False)
+    roots = {market: tmp_path / market.lower() for market in ("US", "HK")}
+    for root in roots.values():
+        account_dir = _account_dir(root)
+        pd.DataFrame(
+            [
+                _put_row(symbol="NVDA", contract="US_NVDA"),
+                _put_row(symbol="0700.HK", contract="HK_0700"),
+            ]
+        ).to_csv(account_dir / "mixed_sell_put_candidates_labeled.csv", index=False)
 
-    us = _assemble(tmp_path, market="US")
-    hk = _assemble(tmp_path, market="HK")
+    us = _assemble(roots["US"], market="US")
+    hk = _assemble(roots["HK"], market="HK")
 
     assert [item["contract_symbol"] for item in us["candidates"]["sell_put"]] == ["US_NVDA"]
     assert [item["contract_symbol"] for item in hk["candidates"]["sell_put"]] == ["HK_0700"]
@@ -2033,39 +2330,33 @@ def test_canonical_prefetch_shape_projects_one_symbol_gap_without_duplicate_aggr
 def test_status_index_treats_completed_zero_as_available_with_partial_failure(
     tmp_path: Path,
 ) -> None:
+    from src.application.strategy_scan_status import publish_strategy_scan_status
+
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(columns=["symbol", "contract_symbol"]).to_csv(
         account_dir / "nvda_sell_put_candidates_labeled.csv",
         index=False,
     )
     (account_dir / "nvda_sell_call_candidates.csv").write_bytes(b"\n")
-    (account_dir / "strategy_scan_status_index.v1.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "strategy_scan_status_index.v1",
-                "run_id": "run-1",
-                "account": "lx",
-                "items": [
-                    {
-                        "market": "US",
-                        "symbol": "NVDA",
-                        "strategy_family": "sell_put",
-                        "status": "completed",
-                        "candidate_count": 0,
-                        "source_status_path": "nvda_sell_put_scan_status.json",
-                    },
-                    {
-                        "market": "US",
-                        "symbol": "NVDA",
-                        "strategy_family": "covered_call",
-                        "status": "unavailable",
-                        "reason": "empty_chain",
-                        "source_status_path": "nvda_covered_call_scan_status.json",
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="sell_put",
+        status="completed",
+        candidate_count=0,
+    )
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="covered_call",
+        status="unavailable",
+        reason="empty_chain",
     )
 
     brief = _assemble(tmp_path)
@@ -2197,9 +2488,12 @@ def test_sell_put_raw_only_artifact_reports_canonical_missing_without_fallback(t
     assert brief["candidates"]["sell_put"] == []
     assert "RAW_ONLY" not in json.dumps(brief, sort_keys=True)
     assert any(
-        item.get("strategy_family") == "sell_put"
-        and item.get("reason") == "opening_candidate_snapshot_unavailable"
-        for item in brief["data_gaps"]
+        item.get("kind") == "candidate_snapshot_manifest"
+        for item in brief["source_artifacts"]
+    )
+    assert not any(
+        item.get("kind") == "opening_candidate_snapshot"
+        for item in brief["source_artifacts"]
     )
 
 

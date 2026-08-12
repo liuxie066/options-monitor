@@ -344,6 +344,23 @@ def ranked_opening_candidate_decisions(
     return out
 
 
+def rejected_opening_candidate_decisions(
+    snapshot: Mapping[str, Any],
+    *,
+    mode: str | None = None,
+) -> list[dict[str, Any]]:
+    """Project rejected evaluations in the immutable snapshot order."""
+
+    mode_norm = _mode(mode) if mode is not None else None
+    return [
+        dict(item)
+        for item in snapshot.get("candidate_decisions") or []
+        if isinstance(item, Mapping)
+        and (mode_norm is None or item.get("strategy_mode") == mode_norm)
+        and (item.get("opening_decision") or {}).get("accepted") is False
+    ]
+
+
 def validate_opening_candidate_snapshot(
     payload: Mapping[str, Any],
     *,
@@ -1319,6 +1336,9 @@ __all__ = [
     "dependency_from_hash",
     "load_latest_opening_candidate_snapshot",
     "load_opening_candidate_snapshot",
+    "ranked_opening_candidate_decisions",
+    "ranked_opening_candidates",
+    "rejected_opening_candidate_decisions",
     "seal_opening_candidate_snapshot",
     "strategy_policy_hash",
     "validate_opening_candidate_snapshot",
