@@ -418,7 +418,7 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
         if not isinstance(case, dict):
             continue
         status = str(case.get("status") or "").strip().lower()
-        decision_type = str(case.get("decision_type") or "").strip().lower()
+        decision_type = _completed_lifecycle_decision_type(case)
         if status != "ledger_written" or decision_type not in {"assignment", "exercise", "expire_close"}:
             continue
         case_id = str(case.get("case_id") or "").strip()
@@ -435,12 +435,39 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
             if not deal_ids:
                 continue
             entry = {
-                "case": dict(case),
+                "case": {**dict(case), "decision_type": decision_type},
                 "evidence": dict(evidence),
             }
             for deal_id in deal_ids:
                 out.setdefault(deal_id, []).append(entry)
     return out
+
+
+def _completed_lifecycle_decision_type(case: dict[str, Any]) -> str:
+    explicit = str(case.get("decision_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    summary = (
+        dict(case.get("derived_summary") or {})
+        if isinstance(case.get("derived_summary"), dict)
+        else {}
+    )
+    resolved = summary.get("resolved_contracts_by_terminal_type")
+    if not isinstance(resolved, dict):
+        return ""
+    terminal_types = {
+        str(key or "").strip().lower()
+        for key, value in resolved.items()
+        if _positive_contract_count(value) > 0
+    }
+    return next(iter(terminal_types)) if len(terminal_types) == 1 else ""
+
+
+def _positive_contract_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
@@ -661,6 +688,20 @@ def _processed_payload_from_lifecycle(
         if isinstance(raw_target_lot_ids, list)
         else []
     )
+    if not target_lot_ids:
+        summary = (
+            dict(case.get("derived_summary") or {})
+            if isinstance(case.get("derived_summary"), dict)
+            else {}
+        )
+        resolved_by_lot = summary.get("resolved_contracts_by_lot")
+        if isinstance(resolved_by_lot, dict):
+            target_lot_ids = sorted(
+                str(lot_id).strip()
+                for lot_id, contracts in resolved_by_lot.items()
+                if str(lot_id or "").strip()
+                and _positive_contract_count(contracts) > 0
+            )
     action = str(state_item.get("action") or "").strip() or decision_type or None
     return {
         "status": "reconciled",
