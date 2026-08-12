@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from domain.domain.ledger.position_fields import normalize_trade_price
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
@@ -420,7 +421,17 @@ def _build_member(
         )
     first = matched[0]
     contracts = sum(_positive_int(event.get("contracts"), field="contracts") for event in matched)
-    prices = {_decimal(event.get("price"), field="price") for event in matched}
+    prices = {
+        Decimal(
+            str(
+                normalize_trade_price(
+                    event.get("price"),
+                    field_name="price",
+                )
+            )
+        )
+        for event in matched
+    }
     if len(prices) != 1:
         raise ValueError(f"ledger event prices disagree for deal_id={deal_id}")
     price = next(iter(prices))
