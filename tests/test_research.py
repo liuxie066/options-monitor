@@ -8,6 +8,136 @@ from typing import Any, Callable, TypedDict
 
 import pytest
 
+from domain.domain.engine import build_candidate_decision
+from src.application.candidate_snapshot_manifest import (
+    publish_candidate_snapshot_manifest,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    seal_combo_yield_candidate_snapshot,
+)
+from src.application.strategy_scan_status import (
+    publish_strategy_scan_status,
+    publish_strategy_scan_status_index_v2,
+)
+from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+
+def _seal_combo_diagnostic_fixture(
+    base: Path,
+    *,
+    account: str,
+    pair_evaluations: list[dict[str, Any]],
+) -> None:
+    run_id = "run-1"
+    account_dir = base / "output_runs" / run_id / "accounts" / account
+    account_dir.mkdir(parents=True, exist_ok=True)
+    (account_dir / "nvda_combo_yield_candidates.csv").write_text(
+        "compatibility artifact bytes are not candidate evidence\n",
+        encoding="utf-8",
+    )
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id=run_id,
+        account=account,
+        market="US",
+        symbol="NVDA",
+        strategy_family="combo_yield",
+        status="completed",
+        candidate_count=1,
+        snapshot_id="quote-1",
+        receipt_relpath="quotes/quote-1/receipt.json",
+    )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id=run_id,
+        account=account,
+        account_config_sha256="a" * 64,
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "combo_yield",
+                "strategy_mode": "combo_yield",
+                "candidate_owner": "sp_lc",
+                "account_config_sha256": "a" * 64,
+            }
+        ],
+    )
+    accepted = [
+        row
+        for row in pair_evaluations
+        if row.get("diagnostic_scope") == "pair" and row.get("accepted") is True
+    ]
+    selected = accepted[:1]
+    rank_records = [
+        {
+            **row,
+            "baseline_rank": rank,
+            "shadow_rank": rank,
+            "baseline_selected": rank == 1,
+            "shadow_selected": rank == 1,
+            "rank_changed": False,
+        }
+        for rank, row in enumerate(accepted, start=1)
+    ]
+    normalized = {
+        "symbol": "NVDA",
+        "contract_symbol": "NVDA-P140",
+        "expiration": "2026-08-21",
+        "strike": 140,
+    }
+    seal_combo_yield_candidate_snapshot(
+        base=base,
+        run_id=run_id,
+        account=account,
+        market="us",
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=[
+            {"kind": kind, "relpath": None, "sha256": char * 64}
+            for kind, char in (
+                ("required_data", "1"),
+                ("portfolio", "2"),
+                ("ledger", "3"),
+                ("fx", "4"),
+                ("earnings_rv", "5"),
+            )
+        ],
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "combo_yield",
+                "variant": "sp_lc",
+                "status": "completed",
+                "quote_snapshot_id": "quote-1",
+                "quote_receipt_relpath": "quotes/quote-1/receipt.json",
+            }
+        ],
+        funding_put_decisions=[
+            {
+                "normalized_input": normalized,
+                "opening_decision": build_candidate_decision(
+                    mode="put",
+                    symbol="NVDA",
+                    contract_symbol="NVDA-P140",
+                    accepted=True,
+                    normalized_input=normalized,
+                ),
+            }
+        ],
+        pair_evaluations=pair_evaluations,
+        rank_records=rank_records,
+        ranked_pairs=selected,
+        sealed_at="2026-07-16T08:00:00Z",
+    )
+    publish_candidate_snapshot_manifest(
+        base=base,
+        run_id=run_id,
+        account=account,
+        strategy_policy_sha256="b" * 64,
+        sealed_at="2026-07-16T08:00:01Z",
+    )
+
 
 class _ToolKwargs(TypedDict):
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
@@ -519,6 +649,45 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
         + "\n",
         encoding="utf-8",
     )
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA-P140",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 140,
+                "spot": 150,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "net_income": 120,
+                "otm_pct": 0.066667,
+                "iv_rv_ratio": 1.25,
+                "spread_ratio": 0.12,
+                "single_trade_concentration": 0.04,
+                "open_interest": 500,
+                "volume": 20,
+                "cash_required_usd": 14_000,
+                "cash_free_usd": 28_000,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA-P135",
+                "expiration": "2026-06-19",
+                "strike": 135,
+                "spot": 150,
+                "rule": "risk_spread",
+            }
+        ],
+    )
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
@@ -541,40 +710,42 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     )
 
     summary = data["bundle"]["candidate_evidence"]["summary"]
-    reject_logs = data["bundle"]["candidate_evidence"]["reject_logs"]
+    reject_logs = data["bundle"]["candidate_evidence"]["rejection_evidence"]
     ranking = data["bundle"]["candidate_evidence"]["ranking_evidence"]
     shadow_replay = data["bundle"]["candidate_evidence"]["shadow_replay"]
     ranking_row = ranking["reports"][0]["top_rows"][0]
     account_candidate = data["bundle"]["account_candidate_matrix"]["accounts"]["lx"]["candidate_evidence"]
     assert data["status"] == "ok"
-    assert summary["candidate_row_count"] == 1
-    assert summary["candidate_file_count"] == 1
-    assert summary["reject_log_row_count"] == 1
+    assert summary["candidate_row_count"] == 2
+    assert summary["candidate_snapshot_file_count"] == 1
+    assert summary["rejection_decision_count"] == 2
     assert summary["ranking_report_count"] == 1
     assert summary["ranking_top_row_count"] == 1
     assert summary["shadow_replay_status"] == "not_ready"
-    assert reject_logs[0]["reason_counts"] == {"risk_spread": 1}
-    assert reject_logs[0]["sample_rows"][0]["engine_reject_reason"] == "risk_spread"
+    assert reject_logs[0]["reason_counts"] == {"risk_spread": 1, "risk_volume": 1}
+    assert reject_logs[0]["sample_rows"][0]["rule"] == "risk_spread"
     assert ranking["summary"]["strategy_counts"] == {"sell_put": 1}
     assert ranking_row["metrics"]["annualized_return"] == 0.12
     assert ranking_row["metrics"]["otm_pct"] == 0.066667
     assert ranking_row["cash_constraint"]["cash_headroom_ratio"] == 2.0
     assert ranking_row["rank_explanation"]["ranking_policy"] == "candidate_engine"
-    assert ranking_row["rank_explanation"]["primary_drivers"] == ["period_net_return_on_cash_basis"]
+    assert ranking_row["rank_explanation"]["primary_drivers"] == [
+        "period_net_return_on_cash_basis"
+    ]
     assert shadow_replay["schema_version"] == "shadow_replay_readiness.v1"
-    assert shadow_replay["summary"]["candidate_snapshot_count"] == 3
-    assert shadow_replay["summary"]["counterfactual_candidate_count"] == 2
+    assert shadow_replay["summary"]["candidate_snapshot_count"] == 2
+    assert shadow_replay["summary"]["counterfactual_candidate_count"] == 1
     assert shadow_replay["summary"]["reason"] == "candidate_snapshot_count_below_min_sample"
-    assert shadow_replay["bucket_stats"]["dte"]["30-44"]["count"] == 1
-    assert shadow_replay["bucket_stats"]["dte"]["missing"]["count"] == 2
+    assert shadow_replay["bucket_stats"]["dte"]["30-44"]["count"] == 2
+    assert "missing" not in shadow_replay["bucket_stats"]["dte"]
     assert shadow_replay["evidence_checks"]["survivorship_bias_risk"] == "medium"
     assert shadow_replay["safety"]["writes_runtime_config"] is False
-    assert account_candidate["candidate_rows"] == 1
-    assert account_candidate["reject_log_rows"] == 1
+    assert account_candidate["candidate_rows"] == 2
+    assert account_candidate["rejection_decision_rows"] == 2
     assert account_candidate["trace_rows"] == 1
     assert account_candidate["trace_status_counts"] == {"rejected": 1}
-    assert "candidate_rows: 1" in data["handoff_markdown"]
-    assert "reject_log_rows: 1" in data["handoff_markdown"]
+    assert "candidate_rows: 2" in data["handoff_markdown"]
+    assert "rejection_decision_rows: 2" in data["handoff_markdown"]
     assert "## Ranking Evidence" in data["handoff_markdown"]
     assert "cash_headroom=2" in data["handoff_markdown"]
 
@@ -629,6 +800,38 @@ def test_research_shadow_replay_uses_mark_and_outcome_paths(tmp_path: Path) -> N
         )
         + "\n",
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "iv_rv_ratio": 1.25,
+                "spread_ratio": 0.10,
+                "net_income": 100,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "spot": 95,
+                "rule": "risk_spread",
+            }
+        ],
     )
 
     def _runtime_status(_payload):
@@ -688,6 +891,43 @@ def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path
         json.dumps({"run_id": "run-1", "account": "lx", "status": "rejected", "rule": "risk_volume"}) + "\n",
         encoding="utf-8",
     )
+    seal_opening_candidate_fixture(
+        runtime_root,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA-P140",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 140,
+                "spot": 150,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "net_income": 120,
+                "otm_pct": 0.066667,
+                "spread_ratio": 0.12,
+                "open_interest": 500,
+                "volume": 20,
+                "cash_required_usd": 14_000,
+                "cash_free_usd": 28_000,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA-P135",
+                "expiration": "2026-06-19",
+                "strike": 135,
+                "spot": 150,
+                "rule": "risk_spread",
+            }
+        ],
+    )
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(
         json.dumps(
@@ -737,12 +977,12 @@ def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path
 
     summary = data["bundle"]["candidate_evidence"]["summary"]
     account_candidate = data["bundle"]["account_candidate_matrix"]["accounts"]["lx"]["candidate_evidence"]
-    assert summary["candidate_row_count"] == 1
-    assert summary["reject_log_row_count"] == 1
+    assert summary["candidate_row_count"] == 2
+    assert summary["rejection_decision_count"] == 2
     assert summary["filter_trace_file_count"] == 1
     assert summary["ranking_report_count"] == 1
-    assert account_candidate["candidate_rows"] == 1
-    assert account_candidate["reject_log_rows"] == 1
+    assert account_candidate["candidate_rows"] == 2
+    assert account_candidate["rejection_decision_rows"] == 2
     assert account_candidate["trace_rows"] == 1
 
 
@@ -1188,6 +1428,97 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
                 "0.03,100,10,0.10,,,,,,0.05,0.20,20,0,0.30,,,,\n"
             )
         (account_dir / "nvda_combo_yield_pair_diagnostics.csv").write_text(header + rows, encoding="utf-8")
+        pair_evaluations = [
+            {
+                "run_id": "run-1",
+                "account": account,
+                "diagnostic_scope": "call",
+                "diagnostic_stage": "call_filter",
+                "accepted": False,
+                "reject_reasons": ["call_delta_below_min"],
+                "symbol": "NVDA",
+                "expiration": "2026-08-21",
+                "call_contract_symbol": "NVDA-C170",
+                "call_delta": 0.04,
+                "call_open_interest": 100,
+                "call_volume": 10,
+                "call_spread_ratio": 0.10,
+                "policy_call_min_delta": 0.05,
+                "policy_call_max_delta": 0.20,
+                "policy_call_min_open_interest": 20,
+                "policy_call_min_volume": 0,
+                "policy_call_max_spread_ratio": 0.30,
+            },
+            {
+                "run_id": "run-1",
+                "account": account,
+                "diagnostic_scope": "pair",
+                "diagnostic_stage": "pair_filter",
+                "accepted": False,
+                "reject_reasons": [
+                    "annualized_net_credit_yield",
+                    "min_net_credit_retention",
+                    "combo_spread_ratio",
+                ],
+                "symbol": "NVDA",
+                "expiration": "2026-08-21",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA-P140:NVDA-C170",
+                "put_contract_symbol": "NVDA-P140",
+                "call_contract_symbol": "NVDA-C170",
+                "call_delta": 0.10,
+                "call_open_interest": 100,
+                "call_volume": 10,
+                "call_spread_ratio": 0.10,
+                "combo_net_credit": 1.0,
+                "net_debit": 0,
+                "net_credit_retention": 0.78,
+                "annualized_net_credit_yield": 0.075,
+                "combo_spread_ratio": 0.31,
+                "policy_call_min_delta": 0.05,
+                "policy_call_max_delta": 0.20,
+                "policy_call_min_open_interest": 20,
+                "policy_call_min_volume": 0,
+                "policy_call_max_spread_ratio": 0.30,
+                "policy_min_net_credit_retention": 0.80,
+                "policy_min_net_credit_annualized": 0.08,
+                "policy_max_combo_spread_ratio": 0.30,
+            },
+            {
+                "run_id": "run-1",
+                "account": account,
+                "diagnostic_scope": "pair",
+                "diagnostic_stage": "pair_filter",
+                "accepted": True,
+                "reject_reasons": [],
+                "symbol": "NVDA",
+                "expiration": "2026-08-21",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA-P140:NVDA-C175",
+                "put_contract_symbol": "NVDA-P140",
+                "call_contract_symbol": "NVDA-C175",
+                "call_delta": 0.08,
+                "call_open_interest": 100,
+                "call_volume": 10,
+                "call_spread_ratio": 0.10,
+                "combo_net_credit": 1.2,
+                "net_debit": 0,
+                "net_credit_retention": 0.85,
+                "annualized_net_credit_yield": 0.09,
+                "combo_spread_ratio": 0.20,
+                "policy_call_min_delta": 0.05,
+                "policy_call_max_delta": 0.20,
+                "policy_call_min_open_interest": 20,
+                "policy_call_min_volume": 0,
+                "policy_call_max_spread_ratio": 0.30,
+                "policy_min_net_credit_retention": 0.80,
+                "policy_min_net_credit_annualized": 0.08,
+                "policy_max_combo_spread_ratio": 0.30,
+            },
+        ]
+        _seal_combo_diagnostic_fixture(
+            tmp_path,
+            account=account,
+            pair_evaluations=pair_evaluations,
+        )
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
@@ -1216,12 +1547,12 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
     diagnostics = candidate["combo_yield_pair_diagnostics"]
     summary = diagnostics["summary"]
     assert summary["file_count"] == 2
-    assert summary["row_count"] == 7
-    assert summary["unique_market_row_count"] == 4
-    assert summary["status_counts"] == {"rejected": 5, "accepted": 2}
-    assert summary["unique_status_counts"] == {"rejected": 3, "accepted": 1}
+    assert summary["row_count"] == 6
+    assert summary["unique_market_row_count"] == 3
+    assert summary["status_counts"] == {"rejected": 4, "accepted": 2}
+    assert summary["unique_status_counts"] == {"rejected": 2, "accepted": 1}
     assert summary["unique_reject_reason_counts"] == {
-        "call_delta_below_min": 2,
+        "call_delta_below_min": 1,
         "annualized_net_credit_yield": 1,
         "min_net_credit_retention": 1,
         "combo_spread_ratio": 1,
@@ -1229,11 +1560,11 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
     assert summary["unique_rejection_funnel"] == [
         {
             "stage": "call_filter",
-            "row_count": 2,
+            "row_count": 1,
             "accepted_count": 0,
-            "rejected_count": 2,
+            "rejected_count": 1,
             "unknown_count": 0,
-            "reject_reason_counts": {"call_delta_below_min": 2},
+            "reject_reason_counts": {"call_delta_below_min": 1},
         },
         {
             "stage": "pair_filter",
@@ -1248,8 +1579,8 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
             },
         },
     ]
-    assert candidate["summary"]["evidence_level"] == "pair_diagnostics"
-    assert candidate["summary"]["combo_yield_pair_diagnostic_unique_market_row_count"] == 4
+    assert candidate["summary"]["evidence_level"] == "candidate_only"
+    assert candidate["summary"]["combo_yield_pair_diagnostic_unique_market_row_count"] == 3
     delta_miss = diagnostics["nearest_misses"]["call_delta_below_min"][0]
     assert round(delta_miss["gap"], 6) == 0.01
     assert delta_miss["accounts"] == ["lx", "sy"]
@@ -1257,8 +1588,8 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
     assert round(diagnostics["nearest_misses"]["min_net_credit_retention"][0]["gap"], 6) == 0.02
     assert round(diagnostics["nearest_misses"]["combo_spread_ratio"][0]["gap"], 6) == 0.01
     assert "## Combo Yield Pair Diagnostics" in data["handoff_markdown"]
-    assert "unique_market_rows: 4" in data["handoff_markdown"]
-    assert "call_filter: rows=2 accepted=0 rejected=2" in data["handoff_markdown"]
+    assert "unique_market_rows: 3" in data["handoff_markdown"]
+    assert "call_filter: rows=1 accepted=0 rejected=1" in data["handoff_markdown"]
 
 
 def test_research_redaction_covers_private_keys_cookies_and_free_text_credentials() -> None:
@@ -1301,7 +1632,7 @@ def test_research_redaction_covers_private_keys_cookies_and_free_text_credential
 def test_research_historical_attribution_disables_current_ranker_on_mismatch() -> None:
     from src.application.research.evidence import (
         _historical_attribution_status,
-        _ranking_row_evidence,
+        _sealed_ranking_evidence,
     )
 
     attribution = _historical_attribution_status(
@@ -1316,23 +1647,30 @@ def test_research_historical_attribution_disables_current_ranker_on_mismatch() -
             "config_digest": "new-config",
         },
     )
-    ranking = _ranking_row_evidence(
-        {
-            "symbol": "NVDA",
-            "annualized_return": "0.2",
-        },
-        rank=1,
-        strategy="sell_put",
-        account_hint="lx",
-        cfg={},
-        configured_attribution_allowed=attribution["configured_ranking_allowed"],
+    ranking = _sealed_ranking_evidence(
+        [
+            {
+                "account": "lx",
+                "strategy": "sell_put",
+                "mode": "put",
+                "rank": 1,
+                "symbol": "NVDA",
+                "contract_symbol": "NVDA-P100",
+                "sealed_facts": {"annualized_return": 0.2},
+                "rank_explanation": {"sealed_rank": 1},
+            }
+        ],
+        limit=1,
+        attribution=attribution,
     )
 
     assert attribution["status"] == "unknown_or_mismatch"
     assert attribution["configured_ranking_allowed"] is False
-    assert ranking["rank_explanation"] == {
-        "status": "unavailable",
-        "reason": "historical_producer_policy_unavailable_or_mismatched",
+    assert ranking["attribution"]["configured_ranking_allowed"] is False
+    assert ranking["attribution"]["rank_source"] == "sealed_candidate_snapshot"
+    assert ranking["attribution"]["recomputed"] is False
+    assert ranking["reports"][0]["top_rows"][0]["rank_explanation"] == {
+        "sealed_rank": 1
     }
 
 

@@ -154,7 +154,7 @@ With a readiness snapshot:
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
 | `full` | Combined default |
 
-Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
+Research reads candidate facts only from manifest-bound opening/Combo/CC+LP snapshots. `candidate_filter_trace.jsonl` may supplement rejection evidence but cannot create a candidate universe. Historical CSV-only runs are reported as unsupported and their CSV bytes are never parsed.
 
 For offline strategy evidence review, inspect `candidate_evidence.shadow_replay` in the Research bundle, especially `review_readiness`. It is a readiness and analysis surface only; it cannot mutate scanner config. To compare how a concrete threshold hypothesis would change the observed candidate set, use `./om research shadow-replay candidate-impact-report --params <params.json>` or `--params-dir <dir>` against either an existing dataset or a `--profile-path` / date window; it writes paired JSON and Markdown candidate-impact reports. The underlying comparison stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
 

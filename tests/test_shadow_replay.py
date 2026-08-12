@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -40,6 +42,55 @@ def _seal_dataset(dataset_dir: Path) -> None:
         if not path.exists():
             path.write_text("", encoding="utf-8")
     refresh_dataset_manifest(dataset_dir)
+
+
+def _seal_standard_candidate_run(
+    root: Path,
+    *,
+    run_id: str = "run-1",
+    include_rejected: bool = True,
+) -> None:
+    rejected = (
+        [
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.28,
+                "strike": 80,
+                "spot": 95,
+                "net_income": 90,
+                "multiplier": 100,
+                "spread_ratio": 0.45,
+                "rule": "risk_spread",
+            }
+        ]
+        if include_rejected
+        else []
+    )
+    seal_opening_candidate_fixture(
+        root,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "net_income": 120,
+                "multiplier": 100,
+            }
+        ],
+        rejected_rows=rejected,
+    )
 
 
 def test_shadow_replay_builds_universe_and_analyzes_outcome_incomplete(tmp_path: Path) -> None:
@@ -119,19 +170,72 @@ def test_shadow_replay_builds_universe_and_analyzes_outcome_incomplete(tmp_path:
         encoding="utf-8",
     )
 
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "iv_rv_ratio": 1.25,
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
+                "annualized_net_return_on_cash_basis": 0.12,
+                "net_income": 120,
+                "otm_pct": 0.09,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.04,
+                "multiplier": 100,
+                "open_interest": 500,
+                "volume": 20,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "spot": 95,
+                "dte": 30,
+                "delta": -0.28,
+                "iv_rv_ratio": 0.9,
+                "event_risk_status": "source_unavailable",
+                "spread_ratio": 0.45,
+                "net_income": 60,
+                "multiplier": 100,
+                "strategy_profile": "short_vol",
+                "rule": "risk_spread",
+            }
+        ],
+    )
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-1")
     dataset_dir = Path(manifest["dataset_dir"])
     analysis = analyze_shadow_replay_dataset(dataset=dataset_dir, min_sample=2)
+    snapshots = _jsonl(dataset_dir / "candidate_snapshots.jsonl")
     readiness = summarize_shadow_replay_readiness(
-        candidate_paths=[candidate_path],
+        candidate_snapshots=snapshots,
+        filter_decisions=_jsonl(dataset_dir / "filter_decisions.jsonl"),
         trace_paths=[trace_path],
         mark_paths=[mark_path],
         outcome_paths=[outcome_path],
+        source_paths=[dataset_dir / "candidate_snapshots.jsonl"],
+        candidate_evidence_coverage=manifest["source"][
+            "candidate_evidence_coverage"
+        ],
         base=tmp_path,
         min_sample=2,
     )
 
-    snapshots = _jsonl(dataset_dir / "candidate_snapshots.jsonl")
     assert manifest["schema_version"] == "shadow_replay_dataset.v1"
     assert manifest["summary"]["candidate_snapshot_count"] == 2
     assert manifest["summary"]["rejected_count"] == 1
@@ -201,19 +305,31 @@ def test_shadow_replay_evidence_level_requires_complete_closed_lifecycle() -> No
 def test_shadow_replay_readiness_flags_final_candidates_only_survivorship_bias(tmp_path: Path) -> None:
     from src.application.shadow_replay import summarize_shadow_replay_readiness
 
-    candidate_path = tmp_path / "sell_put_candidates.csv"
-    candidate_path.write_text(
-        (
-            "symbol,account,option_type,contract_symbol,dte,delta,strike,iv_rv_ratio,spread_ratio\n"
-            "NVDA,lx,put,NVDA260619P00100000,30,-0.2,100,1.25,0.10\n"
-        ),
-        encoding="utf-8",
-    )
-
     readiness = summarize_shadow_replay_readiness(
-        candidate_paths=[candidate_path],
+        candidate_snapshots=[
+            {
+                "schema_version": "shadow_replay_candidate_snapshot.v1",
+                "source_kind": "sealed_candidate_snapshot",
+                "source_path": "output_runs/run-1/accounts/lx/state/opening_candidate_snapshot.json",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "iv_rv_ratio": 1.25,
+                "spread_ratio": 0.10,
+                "status": "accepted",
+            }
+        ],
+        filter_decisions=[],
         trace_paths=[],
         base=tmp_path,
+        candidate_evidence_coverage={
+            "strict_replay_authority": True,
+            "reason_code": "all_accounts_manifest_supported",
+        },
         min_sample=1,
     )
 
@@ -364,6 +480,42 @@ def test_shadow_replay_preserves_and_summarizes_wheel_capacity_context(tmp_path:
         ),
         encoding="utf-8",
     )
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-wheel",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "spot": 110,
+                "multiplier": 100,
+                "portfolio_nav_cny": 1_000_000,
+                "assignment_notional_cny": 10_000,
+                "cash_required_cny": 10_000,
+                "cash_free_total_cny": 50_000,
+                "existing_stock_value_cny_symbol": 20_000,
+                "existing_short_put_assignment_cny_symbol": 10_000,
+                "existing_short_put_assignment_cny_total": 30_000,
+            },
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "contract_symbol": "NVDA260619C00120000",
+                "expiration": "2026-06-19",
+                "strike": 120,
+                "spot": 110,
+                "multiplier": 100,
+                "shares_total": 300,
+                "shares_can_sell": 300,
+                "shares_locked": 100,
+                "shares_available_for_cover": 200,
+                "covered_contracts_available": 2,
+            },
+        ],
+    )
 
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-wheel", dataset_id="wheel")
     dataset_dir = Path(manifest["dataset_dir"])
@@ -373,7 +525,7 @@ def test_shadow_replay_preserves_and_summarizes_wheel_capacity_context(tmp_path:
     put = next(
         row
         for row in snapshots
-        if row["option_type"] == "put" and "_candidates_labeled.csv" in row["source_path"]
+        if row["option_type"] == "put"
     )
     call = next(row for row in snapshots if row["option_type"] == "call")
     assert put["portfolio_nav_cny"] == 1_000_000
@@ -846,6 +998,34 @@ def test_shadow_replay_build_selects_latest_runtime_run_with_evidence(tmp_path: 
         )
         + "\n",
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        runtime_root,
+        run_id="run-evidence",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "net_income": 120,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "rule": "risk_spread",
+            }
+        ],
     )
     os.utime(runs_root / "run-evidence", (100, 100))
     os.utime(runs_root / "run-empty", (200, 200))
@@ -1486,6 +1666,7 @@ def test_shadow_replay_settle_derives_outcomes_from_mark_path(tmp_path: Path) ->
         encoding="utf-8",
     )
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-settle")
     dataset_dir = Path(manifest["dataset_dir"])
     before = analyze_shadow_replay_dataset(dataset=dataset_dir, min_sample=2)
@@ -1650,6 +1831,7 @@ def test_shadow_replay_settle_derives_expiration_outcomes_from_spot_marks(tmp_pa
         encoding="utf-8",
     )
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-expiry")
     dataset_dir = Path(manifest["dataset_dir"])
     settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True)
@@ -1717,6 +1899,7 @@ def test_shadow_replay_mark_generates_required_data_marks_and_settles(tmp_path: 
         encoding="utf-8",
     )
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-mark")
     dataset_dir = Path(manifest["dataset_dir"])
     marking = mark_shadow_replay_dataset(
@@ -1848,6 +2031,7 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
 
     monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-collect")
     dataset_dir = Path(manifest["dataset_dir"])
     result = collect_shadow_replay_marks(
@@ -2029,6 +2213,7 @@ def test_shadow_replay_collect_marks_does_not_reuse_stale_cache_after_partial_op
 
     monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(
         repo_root=tmp_path,
         run_id="run-1",
@@ -2173,6 +2358,7 @@ def test_shadow_replay_collect_marks_opend_preview_does_not_persist(monkeypatch,
 
     monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
 
+    _seal_standard_candidate_run(tmp_path, include_rejected=False)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-preview")
     dataset_dir = Path(manifest["dataset_dir"])
     result = collect_shadow_replay_marks(
@@ -2250,6 +2436,7 @@ def test_shadow_replay_mark_uses_expiration_spot_when_mid_is_missing(tmp_path: P
         encoding="utf-8",
     )
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-expiry-mark")
     dataset_dir = Path(manifest["dataset_dir"])
     marking = mark_shadow_replay_dataset(
@@ -2317,6 +2504,7 @@ def test_shadow_replay_mark_missing_quote_is_not_usable_evidence(tmp_path: Path)
         encoding="utf-8",
     )
 
+    _seal_standard_candidate_run(tmp_path)
     manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-missing-mark")
     dataset_dir = Path(manifest["dataset_dir"])
     marking = mark_shadow_replay_dataset(
@@ -2510,6 +2698,7 @@ def test_shadow_replay_build_refuses_existing_dataset_without_erasing_evidence(
         ),
         encoding="utf-8",
     )
+    _seal_standard_candidate_run(tmp_path, include_rejected=False)
     first = build_shadow_replay_dataset(
         repo_root=tmp_path,
         run_id="run-1",
