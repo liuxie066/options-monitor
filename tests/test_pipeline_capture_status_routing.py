@@ -33,11 +33,14 @@ def _status(
     quote: str = "quote-1",
     reason: str | None = None,
 ) -> dict[str, Any]:
+    resolved_reason = reason
+    if status != "completed" and resolved_reason is None:
+        resolved_reason = f"{status}_for_test"
     payload: dict[str, Any] = {
         "symbol": symbol,
         "strategy_mode": mode,
         "status": status,
-        "reason": reason,
+        "reason": resolved_reason,
         "quote_snapshot_id": quote,
         "quote_receipt_relpath": f"quotes/{quote}/receipt.json",
     }
@@ -53,17 +56,19 @@ def _run_default_capture(
     symbols: list[dict[str, Any]],
     statuses: list[dict[str, Any]],
     pairs: list[dict[str, Any]] | None = None,
+    emit_combo_evidence: bool = True,
+    emit_status_capture: bool = True,
 ) -> None:
     from src.application import pipeline_watchlist as mod
 
     required_manifest = tmp_path / "required_data_manifest.json"
     portfolio_manifest = tmp_path / "prepared_portfolio_context.json"
     ledger_manifest = tmp_path / "prepared_option_positions_context.json"
-    (
-        tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
-    ).mkdir(parents=True)
+    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
     for path in (required_manifest, portfolio_manifest, ledger_manifest):
         path.write_text("{}\n", encoding="utf-8")
+    report_dir = account_dir
 
     monkeypatch.setattr(
         mod,
@@ -72,10 +77,153 @@ def _run_default_capture(
     )
 
     def _fake_pipeline(**kwargs: Any) -> list[dict[str, Any]]:
+        from src.application.strategy_scan_status import (
+            publish_strategy_scan_status,
+            publish_strategy_scan_status_index,
+            publish_strategy_scan_status_index_v2,
+        )
+
+        selected_pairs = [dict(item) for item in (pairs or [])]
+        combo_counts: dict[str, int] = {}
+        for item in selected_pairs:
+            symbol = str(item.get("symbol") or "").strip().upper()
+            combo_counts[symbol] = combo_counts.get(symbol, 0) + 1
+
+        expected: list[dict[str, str]] = []
+        for configured in symbols:
+            symbol = str(configured["symbol"]).upper()
+            expected.append(
+                {
+                    "market": "HK",
+                    "symbol": symbol,
+                    "strategy_family": "sell_put",
+                    "strategy_mode": "put",
+                    "candidate_owner": "opening",
+                    "account_config_sha256": ACCOUNT_CONFIG_SHA256,
+                }
+            )
+            combo_cfg = dict(configured.get("combo_yield") or {})
+            if combo_cfg.get("enabled"):
+                variant = str(combo_cfg.get("variant") or "sp_lc")
+                expected.append(
+                    {
+                        "market": "HK",
+                        "symbol": symbol,
+                        "strategy_family": "combo_yield",
+                        "strategy_mode": "combo_yield",
+                        "candidate_owner": variant,
+                        "account_config_sha256": ACCOUNT_CONFIG_SHA256,
+                    }
+                )
+                (report_dir / f"{symbol.lower()}_combo_yield_candidates.csv").write_text(
+                    "\n",
+                    encoding="utf-8",
+                )
+
+        expected_keys = {
+            (str(item["symbol"]), str(item["strategy_family"]))
+            for item in expected
+        }
+        published: set[tuple[str, str]] = set()
         for item in statuses:
-            kwargs["candidate_capture_status_sink_fn"](item)
-        if pairs:
-            kwargs["combo_pairs_sink_fn"](pairs)
+            if emit_status_capture:
+                kwargs["candidate_capture_status_sink_fn"](item)
+            mode = str(item.get("strategy_mode") or "").strip().lower()
+            family = {
+                "put": "sell_put",
+                "call": "covered_call",
+                "combo_yield": "combo_yield",
+            }.get(mode)
+            symbol = str(item.get("symbol") or "").strip().upper()
+            key = (symbol, str(family or ""))
+            if family is None or key not in expected_keys or key in published:
+                continue
+            published.add(key)
+            status = str(item.get("status") or "").strip().lower()
+            publish_strategy_scan_status(
+                report_dir=report_dir,
+                run_id=RUN_ID,
+                account="lx",
+                market="HK",
+                symbol=symbol,
+                strategy_family=family,
+                status=status,
+                candidate_count=(
+                    combo_counts.get(symbol, 0)
+                    if family == "combo_yield" and status == "completed"
+                    else 0 if status == "completed" else None
+                ),
+                reason=str(item.get("reason") or "").strip() or None,
+                snapshot_id=str(item.get("quote_snapshot_id") or "").strip() or None,
+                receipt_relpath=str(item.get("quote_receipt_relpath") or "").strip() or None,
+            )
+        publish_strategy_scan_status_index(
+            report_dir=report_dir,
+            run_id=RUN_ID,
+            account="lx",
+            expected=(
+                {
+                    "market": item["market"],
+                    "symbol": item["symbol"],
+                    "strategy_family": item["strategy_family"],
+                }
+                for item in expected
+            ),
+        )
+        publish_strategy_scan_status_index_v2(
+            report_dir=report_dir,
+            run_id=RUN_ID,
+            account="lx",
+            account_config_sha256=ACCOUNT_CONFIG_SHA256,
+            expected=expected,
+        )
+
+        evidence_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for pair in selected_pairs:
+            evidence_by_symbol.setdefault(
+                str(pair.get("symbol") or "").strip().upper(), []
+            ).append(pair)
+        for item in statuses:
+            if str(item.get("strategy_mode") or "").strip().lower() != "combo_yield":
+                continue
+            if not emit_combo_evidence:
+                continue
+            symbol = str(item.get("symbol") or "").strip().upper()
+            pair_rows = evidence_by_symbol.get(symbol, [])
+            variant = str(item.get("variant") or "").strip().lower()
+            if pair_rows and str(pair_rows[0].get("variant") or "").strip():
+                variant = str(pair_rows[0].get("variant") or "").strip().lower()
+            rank_records = [
+                {
+                    **pair,
+                    "baseline_rank": rank,
+                    "shadow_rank": rank,
+                    "baseline_selected": True,
+                    "shadow_selected": True,
+                    "rank_changed": False,
+                }
+                for rank, pair in enumerate(pair_rows, start=1)
+            ]
+            kwargs["combo_evidence_sink_fn"](
+                {
+                    "schema_version": "combo_yield_scan_evidence.v1",
+                    "variant": variant,
+                    "symbol": symbol,
+                    "funding_put_decisions": [],
+                    "pair_evaluations": [
+                        {
+                            **pair,
+                            "diagnostic_scope": "pair",
+                            "diagnostic_stage": "pair_filter",
+                            "accepted": True,
+                            "reject_reasons": "",
+                        }
+                        for pair in pair_rows
+                    ],
+                    "rank_records": rank_records,
+                    "ranked_pairs": pair_rows,
+                }
+            )
         kwargs["opening_runtime_context_sink_fn"](
             {
                 "capacity_authority": {
@@ -97,7 +245,7 @@ def _run_default_capture(
         py="python3",
         base=tmp_path,
         cfg={"portfolio": {"account": "lx"}, "symbols": symbols},
-        report_dir=tmp_path / "reports",
+        report_dir=report_dir,
         state_dir=tmp_path / "state",
         shared_state_dir=tmp_path / "shared_state",
         required_data_dir=tmp_path / "required_data",
@@ -343,7 +491,7 @@ def test_default_pipeline_preserves_completed_partial_combo_reason(
         (
             [_status("9992.HK", "combo_yield", "completed", variant="sp_lc")],
             [],
-            "unexpected combo yield scan scopes",
+            "unexpected combo yield scan scope",
         ),
         (
             [_status("0700.HK", "combo_yield", "completed", variant="other")],
@@ -359,7 +507,7 @@ def test_default_pipeline_preserves_completed_partial_combo_reason(
                     "variant": "other",
                 }
             ],
-            "invalid combo yield pair variant",
+            "invalid combo yield evidence variant",
         ),
     ],
 )
@@ -395,11 +543,74 @@ def test_default_pipeline_rejects_cross_owner_quote_binding_conflict(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    symbol = "0700.HK"
+    with pytest.raises(ValueError, match="quote bindings conflict"):
+        _run_default_capture(
+            monkeypatch,
+            tmp_path,
+            symbols=[_symbol_config(symbol)],
+            statuses=[
+                _status(symbol, "put", "completed", quote="quote-opening"),
+                _status(
+                    symbol,
+                    "combo_yield",
+                    "completed",
+                    variant="sp_lc",
+                    quote="quote-combo",
+                ),
+            ],
+        )
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / "lx"
+        / "state"
+        / "candidate_snapshot_manifest.v1.json"
+    ).exists()
+
+
+def test_default_pipeline_rejects_completed_combo_without_typed_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    symbol = "0700.HK"
+    with pytest.raises(ValueError, match="completed combo yield evidence is missing"):
+        _run_default_capture(
+            monkeypatch,
+            tmp_path,
+            symbols=[_symbol_config(symbol)],
+            statuses=[
+                _status(symbol, "put", "completed"),
+                _status(
+                    symbol,
+                    "combo_yield",
+                    "completed",
+                    variant="sp_lc",
+                ),
+            ],
+            emit_combo_evidence=False,
+        )
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / "lx"
+        / "state"
+        / "candidate_snapshot_manifest.v1.json"
+    ).exists()
+
+
+def test_default_pipeline_allows_failed_combo_without_typed_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     from src.application.combo_yield_candidate_snapshot import (
         load_combo_yield_candidate_snapshot,
-    )
-    from src.application.opening_candidate_snapshot import (
-        load_opening_candidate_snapshot,
     )
 
     symbol = "0700.HK"
@@ -408,32 +619,47 @@ def test_default_pipeline_rejects_cross_owner_quote_binding_conflict(
         tmp_path,
         symbols=[_symbol_config(symbol)],
         statuses=[
-            _status(symbol, "put", "completed", quote="quote-opening"),
-            _status(
-                symbol,
-                "combo_yield",
-                "completed",
-                variant="sp_lc",
-                quote="quote-combo",
-            ),
+            _status(symbol, "put", "completed"),
+            _status(symbol, "combo_yield", "failed", variant="sp_lc"),
         ],
+        emit_combo_evidence=False,
     )
 
-    opening = load_opening_candidate_snapshot(
+    snapshot = load_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id=RUN_ID,
         account="lx",
     )
-    assert opening["opening_status"] == "data_unavailable"
-    strategy_scope = next(
-        row for row in opening["scope_results"] if row["scope"] == "strategy"
-    )
-    assert strategy_scope["status"] == "incomplete"
-    assert strategy_scope["reason_code"] == "opening_quote_binding_conflict"
+    assert snapshot["opening_status"] == "data_unavailable"
 
-    combo = load_combo_yield_candidate_snapshot(
-        base=tmp_path,
-        run_id=RUN_ID,
-        account="lx",
-    )
-    assert combo["opening_status"] == "data_unavailable"
+
+def test_default_pipeline_rejects_completed_scope_without_status_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    symbol = "0700.HK"
+    with pytest.raises(
+        ValueError,
+        match="completed candidate capture status is missing",
+    ):
+        _run_default_capture(
+            monkeypatch,
+            tmp_path,
+            symbols=[_symbol_config(symbol)],
+            statuses=[
+                _status(symbol, "put", "completed"),
+                _status(symbol, "combo_yield", "failed", variant="sp_lc"),
+            ],
+            emit_combo_evidence=False,
+            emit_status_capture=False,
+        )
+
+    assert not (
+        tmp_path
+        / "output_runs"
+        / RUN_ID
+        / "accounts"
+        / "lx"
+        / "state"
+        / "candidate_snapshot_manifest.v1.json"
+    ).exists()

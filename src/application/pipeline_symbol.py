@@ -64,8 +64,8 @@ def process_symbol(
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
-    combo_pairs_sink_fn: (
-        Callable[[list[dict[str, Any]]], None] | None
+    combo_evidence_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
     ) = None,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
@@ -98,7 +98,7 @@ def process_symbol(
             ),
             final_candidates_sink_fn=final_candidates_sink_fn,
             candidate_decisions_sink_fn=candidate_decisions_sink_fn,
-            combo_pairs_sink_fn=combo_pairs_sink_fn,
+            combo_evidence_sink_fn=combo_evidence_sink_fn,
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,
