@@ -118,6 +118,95 @@ markets:
     assert "min_annualized_net_return" in message
 
 
+def test_yaml_config_rejects_retired_ai_decision_advice_at_root(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml()
+        + """\
+ai_decision_advice:
+  enabled: false
+""",
+    )
+
+    with pytest.raises(AgentToolError) as exc_info:
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+    assert (
+        str(exc_info.value)
+        == "CONFIG_ERROR: config.yaml.ai_decision_advice is retired and must be removed"
+    )
+
+
+@pytest.mark.parametrize("market", ("us", "hk"))
+def test_yaml_config_rejects_retired_ai_decision_advice_in_market(
+    tmp_path: Path,
+    market: str,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            f"  {market}:\n",
+            f"  {market}:\n"
+            "    ai_decision_advice:\n"
+            "      enabled: true\n",
+            1,
+        ),
+    )
+
+    with pytest.raises(AgentToolError) as exc_info:
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market=market,
+            config_path=config_path,
+        )
+
+    assert (
+        str(exc_info.value)
+        == f"CONFIG_ERROR: markets.{market}.ai_decision_advice is retired and must be removed"
+    )
+
+
+def test_yaml_config_keeps_generic_error_for_nearby_unknown_ai_key(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml()
+        + """\
+ai_decision_advise:
+  enabled: true
+""",
+    )
+
+    with pytest.raises(AgentToolError) as exc_info:
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+    assert (
+        str(exc_info.value)
+        == "CONFIG_ERROR: config.yaml.ai_decision_advise is not supported in config.yaml"
+    )
+
+
+def test_runtime_config_rejects_retired_ai_decision_advice_key() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        validate_config({"ai_decision_advice": {"enabled": False}})
+
+    assert (
+        str(exc_info.value)
+        == "[CONFIG_ERROR] ai_decision_advice is retired and must be removed"
+    )
+
+
 def _write_migration_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
     common_path = tmp_path / "user.common.json"
     common_path.write_text(

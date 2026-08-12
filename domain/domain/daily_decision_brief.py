@@ -49,13 +49,10 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "event_risk",
 )
 
-# These optional sections were introduced as normalizer-owned defaults after
-# Daily Brief revisions had already been persisted in production.  A revision
-# written before a field existed must keep the digest that was computed from
-# its original shape.  Compatibility is permitted only when the source JSON
-# truly lacks the field; a present value is always covered by the current
-# digest contract.
-_DIGEST_ABSENT_OPTIONAL_FIELDS = (
+# Retired fields are never part of the current normalized/write contract.  Raw
+# persisted values are consulted only when reconstructing an exact historical
+# digest candidate for immutable overlay-era revisions.
+RETIRED_DAILY_BRIEF_FIELDS = (
     "ai_decision_advice",
     "ai_decision_advice_evidence_index",
 )
@@ -211,7 +208,11 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             raise ValueError(f"duplicate daily brief action_id: {action_id}")
         action_ids.add(action_id)
 
-    out = dict(src)
+    out = {
+        key: value
+        for key, value in src.items()
+        if key not in RETIRED_DAILY_BRIEF_FIELDS
+    }
     out.update(
         {
             "schema_version": schema_version,
@@ -247,173 +248,9 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "events": _mapping_list(src.get("events"), field="events"),
             "data_gaps": _mapping_list(src.get("data_gaps"), field="data_gaps"),
             "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
-            "ai_decision_advice": _normalize_ai_decision_advice(
-                src.get("ai_decision_advice")
-            ),
-            "ai_decision_advice_evidence_index": _mapping(
-                src.get("ai_decision_advice_evidence_index"),
-                field="ai_decision_advice_evidence_index",
-            ),
         }
     )
     return out
-
-
-_AI_DECISION_ADVICE_STATUSES = frozenset({"completed", "unavailable", "not_applicable"})
-_AI_DECISION_ADVICE_ACTIONS = frozenset({"keep", "switch", "defer", "needs_review"})
-
-
-def _normalize_ai_decision_advice(value: Any) -> dict[str, Any] | None:
-    """Normalize the optional AI Decision Advice section (design 14.1).
-
-    The section is absent (``None``) for briefs assembled before this feature
-    or when the module is disabled; when present, only the envelope status,
-    per-scope action state, and zero-candidate flags are normalized. Rationale
-    and source refs are rendering concerns and do not participate in diffs.
-    """
-
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        raise ValueError("ai_decision_advice must be an object")
-    status = str(value.get("status") or "").strip().lower()
-    if status not in _AI_DECISION_ADVICE_STATUSES:
-        raise ValueError(f"unsupported ai_decision_advice status: {status}")
-
-    def _decision(row: Any, *, family: str) -> dict[str, Any] | None:
-        if not isinstance(row, Mapping):
-            return None
-        action = row.get("action")
-        action = str(action).strip().lower() if action is not None else None
-        if action is not None and action not in _AI_DECISION_ADVICE_ACTIONS:
-            raise ValueError(f"unsupported ai_decision_advice action: {action}")
-        out = {
-            "action": action,
-            "baseline_candidate_id": row.get("baseline_candidate_id"),
-            "selected_candidate_id": row.get("selected_candidate_id"),
-        }
-        if family == "covered_call":
-            out["symbol"] = _upper(row.get("symbol"))
-        rationale = row.get("rationale")
-        out["rationale"] = dict(rationale) if isinstance(rationale, Mapping) else None
-        source_refs = row.get("source_refs")
-        out["source_refs"] = dict(source_refs) if isinstance(source_refs, Mapping) else None
-        return out
-
-    zero_candidate_raw = value.get("zero_candidate")
-    zero_candidate = (
-        {
-            "sell_put": bool(zero_candidate_raw.get("sell_put")),
-            "covered_call": bool(zero_candidate_raw.get("covered_call")),
-        }
-        if isinstance(zero_candidate_raw, Mapping)
-        else {"sell_put": False, "covered_call": False}
-    )
-    covered_call_rows = value.get("covered_call")
-    covered_call = (
-        [
-            row
-            for row in (_decision(item, family="covered_call") for item in covered_call_rows)
-            if row is not None
-        ]
-        if isinstance(covered_call_rows, list)
-        else None
-    )
-    return {
-        "status": status,
-        "unavailable_reason": (
-            str(value.get("unavailable_reason")).strip() or None
-            if value.get("unavailable_reason") is not None
-            else None
-        ),
-        "evidence_as_of": _iso_or_empty(value.get("evidence_as_of")) or None,
-        "sell_put": _decision(value.get("sell_put"), family="sell_put"),
-        "covered_call": covered_call,
-        "zero_candidate": zero_candidate,
-        "reused": bool(value.get("reused")),
-        "advice_record_id": (
-            str(value.get("advice_record_id")).strip() or None
-            if value.get("advice_record_id") is not None
-            else None
-        ),
-    }
-
-
-def _ai_decision_advice_state_map(
-    section: Mapping[str, Any] | None,
-) -> dict[str, tuple[str, str | None]]:
-    """Scope -> (action, selected candidate) map for diffing (design 14.1).
-
-    Only ``completed`` sections contribute action state; ``unavailable`` and
-    ``not_applicable`` never generate material changes.
-    """
-
-    if not isinstance(section, Mapping) or section.get("status") != "completed":
-        return {}
-    out: dict[str, tuple[str, str | None]] = {}
-    sell_put = section.get("sell_put")
-    if isinstance(sell_put, Mapping) and sell_put.get("action"):
-        out["sell_put"] = (
-            str(sell_put["action"]),
-            str(sell_put.get("selected_candidate_id") or "").strip() or None,
-        )
-    for row in section.get("covered_call") or []:
-        if isinstance(row, Mapping) and row.get("action"):
-            symbol = _upper(row.get("symbol"))
-            out[f"covered_call:{symbol}"] = (
-                str(row["action"]),
-                str(row.get("selected_candidate_id") or "").strip() or None,
-            )
-    return out
-
-
-def _diff_ai_decision_advice(
-    prev: Mapping[str, Any],
-    cur: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    """Material action migrations between keep/switch/defer/needs_review.
-
-    ``unavailable`` appearance, disappearance, or reason changes are rendered
-    in receipts but never material (design 14.1).
-    """
-
-    prev_states = _ai_decision_advice_state_map(prev.get("ai_decision_advice"))
-    cur_states = _ai_decision_advice_state_map(cur.get("ai_decision_advice"))
-    changes: list[dict[str, Any]] = []
-    for scope in sorted(set(prev_states) | set(cur_states)):
-        before = prev_states.get(scope)
-        after = cur_states.get(scope)
-        if before is None or after is None:
-            continue
-        before_action, before_selected = before
-        after_action, after_selected = after
-        if before_action != after_action:
-            changes.append(
-                _change(
-                    "ai_decision_advice_action_changed",
-                    priority="P1",
-                    material=True,
-                    ai_advice_scope=scope,
-                    before=before_action,
-                    after=after_action,
-                )
-            )
-            continue
-        if (
-            before_action == "switch"
-            and before_selected != after_selected
-        ):
-            changes.append(
-                _change(
-                    "ai_decision_advice_selected_candidate_changed",
-                    priority="P1",
-                    material=True,
-                    ai_advice_scope=scope,
-                    before=before_selected,
-                    after=after_selected,
-                )
-            )
-    return changes
 
 
 def reconcile_daily_decision_brief_evidence(
@@ -980,7 +817,6 @@ def diff_daily_decision_briefs(
                 )
             )
 
-    changes.extend(_diff_ai_decision_advice(prev, cur))
     changes.sort(key=_change_sort_key)
     material = any(bool(item.get("material")) for item in changes)
     canonical_changes = [_canonical_change(item) for item in changes]
@@ -1003,12 +839,11 @@ def daily_brief_digest(brief: Mapping[str, Any]) -> str:
 
 
 def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return current and source-shape-compatible Daily Brief digests.
+    """Return the current digest plus an exact overlay-era digest candidate.
 
-    The first value is always the digest used for new writes.  A second value
-    is emitted only for a persisted source that predates one or more known
-    optional normalizer defaults.  This preserves strict historical integrity
-    without treating arbitrary digest mismatches as compatible.
+    New writes always use the stripped current contract.  When immutable raw
+    input contains retired fields, their exact values are reattached only for
+    historical integrity verification; they are never normalized or exposed.
     """
 
     source = dict(brief or {})
@@ -1019,12 +854,12 @@ def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
         if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
     }
     current = _digest(payload)
-    historical_payload = dict(payload)
-    for field in _DIGEST_ABSENT_OPTIONAL_FIELDS:
-        if field not in source:
-            historical_payload.pop(field, None)
-    historical = _digest(historical_payload)
-    return (current,) if historical == current else (current, historical)
+    legacy_payload = dict(payload)
+    for field in RETIRED_DAILY_BRIEF_FIELDS:
+        if field in source:
+            legacy_payload[field] = source[field]
+    legacy = _digest(legacy_payload)
+    return (current,) if legacy == current else (current, legacy)
 
 
 def _ensure_same_brief_identity(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
@@ -1250,6 +1085,7 @@ __all__ = [
     "ACTION_STATES",
     "DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION",
     "DAILY_DECISION_BRIEF_SCHEMA_VERSION",
+    "RETIRED_DAILY_BRIEF_FIELDS",
     "build_daily_brief_action_id",
     "build_daily_brief_candidate_identity",
     "decide_daily_brief_notification",
