@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 899 (`src`: 487, `domain`: 73, `scripts`: 8, `tests`: 331)
-- Internal import edges: 5815 total, 2434 production/script edges excluding tests
+- Internal import edges: 5829 total, 2437 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -45,8 +45,8 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2525| application
-  tests -->|411| domain
+  tests -->|2534| application
+  tests -->|413| domain
   tests -->|2| domain_services
   tests -->|164| infrastructure
   tests -->|216| interfaces
@@ -77,8 +77,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2525 |
-| tests | domain | 411 |
+| tests | application | 2534 |
+| tests | domain | 413 |
 | tests | interfaces | 216 |
 | tests | infrastructure | 164 |
 | tests | storage | 18 |
@@ -190,7 +190,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.settings | 23 |
 | domain.domain.trade_contract_identity | 23 |
 | src.application.agent_tools.runtime_helpers | 22 |
-| src.application.config_sections | 20 |
+| src.application.config_sections | 21 |
 | src.application.opend_fetch_config | 20 |
 
 ### Highest Fan-Out Production Modules
@@ -206,12 +206,12 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.queries | 24 |
 | src.application.agent_tools.diagnostics | 23 |
 | src.application.channels.wechat_clawbot.inbound | 23 |
+| src.application.daily_decision_brief_service | 23 |
 | src.application.ledger.writer | 23 |
 | src.application.multi_tick.required_data_prefetch | 23 |
 | src.application.close_advice_runner | 22 |
 | src.application.pipeline_runtime | 22 |
 | src.application.agent_tools.runtime_status_impl | 21 |
-| src.application.tick_notification_flow | 21 |
 
 ## Reading
 
