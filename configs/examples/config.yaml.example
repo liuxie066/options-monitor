@@ -74,13 +74,6 @@ assistant:
       timeout_seconds: 90
       max_output_tokens: 2048
 
-# Explicit opt-in: when true, the minimized data contract documented in
-# docs/AI_DECISION_ADVICE_DESIGN.md section 18 is sent to DeepSeek.
-ai_decision_advice:
-  enabled: false
-  portfolio_distribution:
-    provider: none  # none | portfolio_management
-
 inbound:
   feishu_ws:
     ack_reaction: THUMBSUP

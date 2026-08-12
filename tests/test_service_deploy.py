@@ -136,73 +136,41 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "UMask=0077" in intake
 
 
-def test_render_systemd_bundle_ai_evidence_collector_opt_in(
+def test_render_systemd_bundle_omits_retired_ai_evidence_collector(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.application.service_deploy import render_service_bundle
-
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-
-    def _write_config(root: Path, *, enabled: bool) -> Path:
-        root.mkdir(parents=True, exist_ok=True)
-        config_yaml = root / "config.yaml"
-        lines = [
-            "accounts:",
-            "  lx:",
-            "    type: futu",
-            "    futu:",
-            '      account_id: "REAL_12345678"',
-            "      host: 127.0.0.1",
-            "      port: 11111",
-            "markets:",
-            "  us:",
-            "    accounts: [lx]",
-            "    symbols: [NVDA]",
-        ]
-        if enabled:
-            lines.extend(["ai_decision_advice:", "  enabled: true"])
-        config_yaml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return config_yaml
 
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
-
-    enabled_bundle = render_service_bundle(
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        "accounts:\n"
+        "  lx:\n"
+        "    type: futu\n"
+        "    futu:\n"
+        '      account_id: "REAL_12345678"\n'
+        "      host: 127.0.0.1\n"
+        "      port: 11111\n"
+        "markets:\n"
+        "  us:\n"
+        "    accounts: [lx]\n"
+        "    symbols: [NVDA]\n",
+        encoding="utf-8",
+    )
+    bundle = render_service_bundle(
         target="systemd",
         repo_root=repo,
         runtime_root=runtime,
         accounts=["lx"],
         markets=["us"],
-        config_yaml=_write_config(tmp_path / "enabled", enabled=True),
+        config_yaml=config_yaml,
     )
-    enabled_files = {item["relative_path"]: item for item in enabled_bundle["files"]}
-    service = enabled_files["systemd/options-monitor-ai-evidence-collector.service"]["content"]
-    timer = enabled_files["systemd/options-monitor-ai-evidence-collector.timer"]["content"]
-    assert (
-        str(repo / ".venv" / "bin" / "python")
-        + " -m src.interfaces.cli.ai_evidence_collector --config-key us"
-        in service
-    )
-    assert str(repo / "om") + " ai-evidence-collector" not in service
-    assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in service
-    assert "OnUnitActiveSec=24h" in timer
-    assert "OnUnitActiveSec=4h" not in timer
-    assert "Persistent=true" in timer
-    assert "Unit=options-monitor-ai-evidence-collector.service" in timer
-
-    disabled_bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_yaml=_write_config(tmp_path / "disabled", enabled=False),
-    )
-    disabled_paths = {item["relative_path"] for item in disabled_bundle["files"]}
-    assert "systemd/options-monitor-ai-evidence-collector.service" not in disabled_paths
-    assert "systemd/options-monitor-ai-evidence-collector.timer" not in disabled_paths
+    paths = {item["relative_path"] for item in bundle["files"]}
+    assert "systemd/options-monitor-ai-evidence-collector.service" not in paths
+    assert "systemd/options-monitor-ai-evidence-collector.timer" not in paths
+    assert "ai_evidence_collector" not in str(bundle)
 
 
 def test_render_systemd_bundle_service_hardening() -> None:
@@ -424,6 +392,59 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
     assert profile["secret_credentials"]["delivery"] == "load-credential-encrypted"
     assert profile["secret_credentials"]["legacy_env_materializer_enabled"] is False
     assert "options-monitor-opend.service" not in profile["secret_credentials"]["service_credentials"]
+
+
+def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runtime = tmp_path / "runtime"
+    store = tmp_path / "credstore.encrypted"
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        "accounts: {}\n"
+        "markets: {}\n"
+        "assistant:\n"
+        "  enabled: true\n"
+        "  copilot:\n"
+        "    enabled: true\n"
+        "  active_model: deepseek-default\n"
+        "  models:\n"
+        "    deepseek-default:\n"
+        "      provider: deepseek\n"
+        "      model: deepseek-chat\n"
+        "      api_key_env: DEEPSEEK_API_KEY\n",
+        encoding="utf-8",
+    )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        config_yaml=config_yaml,
+        include_feishu_ws=True,
+        include_secret_credentials=True,
+        secret_credential_store_root=store,
+        deploy_user="liuxie",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files[
+        "systemd/options-monitor-tick-us.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+    assistant = files[
+        "systemd/options-monitor-feishu-ws.service.d/zzzz-secret-credentials.conf"
+    ]["content"]
+
+    assert "om-llm-deepseek-api-key" not in tick
+    assert (
+        f"om-llm-deepseek-api-key:{store}/om-llm-deepseek-api-key"
+        in assistant
+    )
 
 
 def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: Path) -> None:
