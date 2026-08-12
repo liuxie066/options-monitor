@@ -8,10 +8,10 @@ from typing import Any, Callable
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
-from src.application.opening_candidate_snapshot import (
-    OpeningCandidateSnapshotError,
-    load_latest_opening_candidate_snapshot,
-    load_opening_candidate_snapshot,
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError,
+    load_candidate_snapshot_bundle,
+    load_latest_candidate_snapshot_bundle,
 )
 
 
@@ -47,17 +47,22 @@ def candidate_filter_explain_tool(
     base = Path(payload.get("runtime_root") or repo_base()).resolve()
     try:
         if str(payload.get("run_id") or "").strip():
-            snapshot = load_opening_candidate_snapshot(
+            bundle = load_candidate_snapshot_bundle(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
             )
         else:
-            snapshot = load_latest_opening_candidate_snapshot(
+            bundle = load_latest_candidate_snapshot_bundle(
                 base=base,
                 account=account,
             )
-    except OpeningCandidateSnapshotError as exc:
+        snapshot = (bundle.get("owners") or {}).get("opening")
+        if not isinstance(snapshot, dict):
+            raise CandidateSnapshotManifestError(
+                "manifest-bound opening candidate snapshot is unavailable"
+            )
+    except CandidateSnapshotManifestError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
@@ -99,6 +104,10 @@ def candidate_filter_explain_tool(
         "rows": len(scoped),
         "run_ids": [snapshot.get("run_id")],
         "content_sha256": snapshot.get("content_sha256"),
+        "manifest_content_sha256": (bundle.get("manifest") or {}).get(
+            "content_sha256"
+        ),
+        "authority": "terminal_manifest_bound_opening_candidate_snapshot",
     }
     return (
         {

@@ -45,30 +45,30 @@ from src.application.prepared_portfolio_context import (
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     candidate_universe_summary,
-    load_opening_candidate_snapshot,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
     validate_opening_candidate_snapshot,
 )
 from src.application.combo_yield_candidate_snapshot import (
     ComboYieldCandidateSnapshotError,
-    load_combo_yield_candidate_snapshot,
+    validate_combo_yield_candidate_snapshot,
 )
 from src.application.cc_lp_candidate_snapshot import (
     CcLpCandidateSnapshotError,
-    load_cc_lp_candidate_snapshot,
+    validate_cc_lp_candidate_snapshot,
+)
+from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CandidateSnapshotManifestError,
+    load_candidate_snapshot_bundle,
+)
+from src.application.strategy_scan_status import (
+    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
 )
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
-from src.application.config_profiles import apply_profiles
-from src.application.config_sections import resolve_templates_config
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
-)
-
-
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -123,6 +123,110 @@ def assemble_daily_decision_brief(
     )
     close_advice_max_items = _close_advice_max_items_per_account(config_map)
 
+    candidate_bundle: dict[str, Any] | None = None
+    candidate_bundle_unavailable_reason: str | None = None
+    try:
+        candidate_bundle = load_candidate_snapshot_bundle(
+            base=base_path,
+            run_id=run_id_norm,
+            account=account_norm,
+        )
+    except CandidateSnapshotManifestError as exc:
+        candidate_bundle_unavailable_reason = (
+            str(candidate_snapshot_unavailable_reason or "").strip()
+            or "candidate_snapshot_manifest_unavailable"
+        )
+        data_gaps.append(
+            {
+                "scope": "source",
+                "kind": "candidate_snapshot_manifest",
+                "reason": candidate_bundle_unavailable_reason,
+                "error_type": type(exc).__name__,
+            }
+        )
+
+    bundle_owners: dict[str, dict[str, Any]] = {}
+    strategy_status_index: dict[str, Any] = {}
+    expected_owner_modes: dict[str, set[str]] = {
+        "opening": set(),
+        "sp_lc": set(),
+        "cc_lp": set(),
+    }
+    if candidate_bundle is not None:
+        manifest = dict(candidate_bundle["manifest"])
+        strategy_status_index = dict(candidate_bundle["status_index"])
+        bundle_owners = {
+            str(owner): dict(snapshot)
+            for owner, snapshot in dict(candidate_bundle["owners"]).items()
+        }
+        for item in strategy_status_index.get("items") or []:
+            if (
+                isinstance(item, Mapping)
+                and str(item.get("market") or "").strip().upper() == market_norm
+            ):
+                owner = str(item.get("candidate_owner") or "").strip().lower()
+                if owner in expected_owner_modes:
+                    expected_owner_modes[owner].add(
+                        str(item.get("strategy_mode") or "").strip().lower()
+                    )
+        source_artifacts.extend(
+            (
+                {
+                    "kind": "candidate_snapshot_manifest",
+                    "path": f"state/{CANDIDATE_SNAPSHOT_MANIFEST_FILE}",
+                    "row_count": len(manifest.get("owner_snapshots") or []),
+                    "content_sha256": manifest.get("content_sha256"),
+                },
+                {
+                    "kind": "strategy_scan_status_index",
+                    "path": STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+                    "row_count": len(strategy_status_index.get("items") or []),
+                    "content_sha256": strategy_status_index.get("content_sha256"),
+                },
+            )
+        )
+        manifest_opening = bundle_owners.get("opening")
+        if opening_candidate_snapshot is not None:
+            try:
+                validate_opening_candidate_snapshot(
+                    opening_candidate_snapshot,
+                    expected_run_id=run_id_norm,
+                    expected_account=account_norm,
+                    require_current_contract=True,
+                )
+                if (
+                    manifest_opening is None
+                    or opening_candidate_snapshot.get("content_sha256")
+                    != manifest_opening.get("content_sha256")
+                ):
+                    raise OpeningCandidateSnapshotError(
+                        "opening candidate handoff does not match terminal manifest"
+                    )
+            except OpeningCandidateSnapshotError as exc:
+                candidate_bundle_unavailable_reason = (
+                    "candidate_snapshot_handoff_mismatch"
+                )
+                data_gaps.append(
+                    {
+                        "scope": "source",
+                        "kind": "opening_candidate_snapshot_handoff",
+                        "reason": "candidate_snapshot_handoff_mismatch",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                strategy_status_index = {}
+                bundle_owners = {}
+                expected_owner_modes = {
+                    "opening": set(),
+                    "sp_lc": set(),
+                    "cc_lp": set(),
+                }
+                candidate_bundle = None
+
+    opening_applicable = bool(expected_owner_modes["opening"])
+    sp_lc_applicable = bool(expected_owner_modes["sp_lc"])
+    cc_lp_applicable = bool(expected_owner_modes["cc_lp"])
+
     (
         put_rows,
         put_available,
@@ -137,8 +241,10 @@ def assemble_daily_decision_brief(
             market=market_norm,
             source_artifacts=source_artifacts,
             data_gaps=data_gaps,
-            snapshot=opening_candidate_snapshot,
-            unavailable_reason=candidate_snapshot_unavailable_reason,
+            snapshot=bundle_owners.get("opening"),
+            unavailable_reason=candidate_bundle_unavailable_reason,
+            not_applicable=(candidate_bundle is not None and not opening_applicable),
+            applicable_modes=expected_owner_modes["opening"],
         )
     )
     (
@@ -152,16 +258,21 @@ def assemble_daily_decision_brief(
         market=market_norm,
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
+        snapshot=bundle_owners.get("sp_lc"),
+        unavailable_reason=candidate_bundle_unavailable_reason,
+        not_applicable=(candidate_bundle is not None and not sp_lc_applicable),
     )
-    if _cc_lp_snapshot_required(config_map, market=market_norm):
-        _load_cc_lp_snapshot_family(
-            base=base_path,
-            run_id=run_id_norm,
-            account=account_norm,
-            market=market_norm,
-            source_artifacts=source_artifacts,
-            data_gaps=data_gaps,
-        )
+    _cc_lp_rows, _cc_lp_available = _load_cc_lp_snapshot_family(
+        base=base_path,
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        snapshot=bundle_owners.get("cc_lp"),
+        unavailable_reason=candidate_bundle_unavailable_reason,
+        not_applicable=(candidate_bundle is not None and not cc_lp_applicable),
+    )
     close_rows, close_available = _load_close_advice(
         path=run_account_dir / "close_advice.csv",
         run_account_dir=run_account_dir,
@@ -172,14 +283,6 @@ def assemble_daily_decision_brief(
         data_gaps=data_gaps,
     )
 
-    strategy_status_index = _load_json_artifact(
-        path=run_account_dir / "strategy_scan_status_index.v1.json",
-        run_account_dir=run_account_dir,
-        source_kind="strategy_scan_status_index",
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-        required=False,
-    )
     indexed_strategy_statuses = _append_strategy_status_gaps(
         strategy_status_index,
         run_id=run_id_norm,
@@ -486,9 +589,7 @@ def assemble_daily_decision_brief(
         indexed_expected_families and not indexed_completed_families
     )
     if indexed_candidate_sources_failed or (
-        not indexed_expected_families
-        and strategy_failures
-        and not (put_rows or call_rows or combo_rows)
+        strategy_failures and not (put_rows or call_rows or combo_rows)
     ):
         blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
@@ -615,6 +716,8 @@ def _load_opening_candidate_families(
     data_gaps: list[dict[str, Any]],
     snapshot: Mapping[str, Any] | None = None,
     unavailable_reason: str | None = None,
+    not_applicable: bool = False,
+    applicable_modes: set[str] | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     bool,
@@ -622,25 +725,28 @@ def _load_opening_candidate_families(
     bool,
     dict[str, Any] | None,
 ]:
+    if not_applicable:
+        return [], False, [], False, None
+    modes = set(applicable_modes or ())
     accepted_snapshot: dict[str, Any] | None = None
     try:
         if snapshot is None:
-            if unavailable_reason:
-                raise OpeningCandidateSnapshotError(unavailable_reason)
-            accepted_snapshot = load_opening_candidate_snapshot(
-                base=base,
-                run_id=run_id,
-                account=account,
+            raise OpeningCandidateSnapshotError(
+                unavailable_reason or "opening candidate snapshot is not manifest-bound"
             )
         else:
             validate_opening_candidate_snapshot(
                 snapshot,
                 expected_run_id=run_id,
                 expected_account=account,
+                require_current_contract=True,
             )
             accepted_snapshot = dict(snapshot)
     except OpeningCandidateSnapshotError as exc:
-        for family in ("sell_put", "covered_call"):
+        gap_modes = modes or {"put", "call"}
+        for mode, family in (("put", "sell_put"), ("call", "covered_call")):
+            if mode not in gap_modes:
+                continue
             data_gaps.append(
                 {
                     "scope": "strategy",
@@ -651,7 +757,10 @@ def _load_opening_candidate_families(
             )
         return [], False, [], False, None
     if str(accepted_snapshot.get("market") or "").upper() != market:
-        for family in ("sell_put", "covered_call"):
+        gap_modes = modes or {"put", "call"}
+        for mode, family in (("put", "sell_put"), ("call", "covered_call")):
+            if mode not in gap_modes:
+                continue
             data_gaps.append(
                 {
                     "scope": "strategy",
@@ -714,6 +823,9 @@ def _load_opening_candidate_families(
 
     available: dict[str, bool] = {}
     for mode, family in (("put", "sell_put"), ("call", "covered_call")):
+        if modes and mode not in modes:
+            available[mode] = False
+            continue
         status = str(result_by_mode.get(mode, {}).get("strategy_status") or "")
         if status == "partial_data" and mode not in partial_modes:
             data_gaps.append(
@@ -755,14 +867,23 @@ def _load_combo_yield_snapshot_family(
     market: str,
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
+    snapshot: Mapping[str, Any] | None = None,
+    unavailable_reason: str | None = None,
+    not_applicable: bool = False,
 ) -> tuple[list[dict[str, Any]], bool, str | None]:
     """Load Combo Yield pairs from the sealed account-run snapshot."""
 
+    if not_applicable:
+        return [], False, None
     try:
-        snapshot = load_combo_yield_candidate_snapshot(
-            base=base,
-            run_id=run_id,
-            account=account,
+        if snapshot is None:
+            raise ComboYieldCandidateSnapshotError(
+                unavailable_reason or "combo snapshot is not manifest-bound"
+            )
+        validate_combo_yield_candidate_snapshot(
+            snapshot,
+            expected_run_id=run_id,
+            expected_account=account,
         )
     except ComboYieldCandidateSnapshotError as exc:
         data_gaps.append(
@@ -819,14 +940,23 @@ def _load_cc_lp_snapshot_family(
     market: str,
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
+    snapshot: Mapping[str, Any] | None = None,
+    unavailable_reason: str | None = None,
+    not_applicable: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Load CC+LP pairs from the sealed account-run snapshot (data source only, no render)."""
 
+    if not_applicable:
+        return [], False
     try:
-        snapshot = load_cc_lp_candidate_snapshot(
-            base=base,
-            run_id=run_id,
-            account=account,
+        if snapshot is None:
+            raise CcLpCandidateSnapshotError(
+                unavailable_reason or "cc_lp snapshot is not manifest-bound"
+            )
+        validate_cc_lp_candidate_snapshot(
+            snapshot,
+            expected_run_id=run_id,
+            expected_account=account,
         )
     except CcLpCandidateSnapshotError as exc:
         data_gaps.append(
@@ -869,32 +999,6 @@ def _load_cc_lp_snapshot_family(
         }
     )
     return market_rows, True
-
-
-def _cc_lp_snapshot_required(
-    config: Mapping[str, Any],
-    *,
-    market: str,
-) -> bool:
-    symbols = config.get("symbols")
-    if not isinstance(symbols, list):
-        return False
-    market_norm = str(market or "").strip().upper()
-    templates = resolve_templates_config(dict(config))
-    for raw in symbols:
-        if not isinstance(raw, Mapping):
-            continue
-        symbol_config = apply_profiles(dict(raw), templates)
-        symbol = canonical_symbol(symbol_config.get("symbol"))
-        if not symbol or symbol_market(symbol) != market_norm:
-            continue
-        policy = derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(symbol_config),
-            market=market_norm,
-        )
-        if policy.enabled and _text(policy.config.get("variant")).lower() == "cc_lp":
-            return True
-    return False
 
 
 def _load_close_advice(
@@ -2116,7 +2220,7 @@ def _append_strategy_status_gaps(
     if not index:
         return []
     if (
-        index.get("schema_version") != "strategy_scan_status_index.v1"
+        index.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA
         or _text(index.get("run_id")) != run_id
         or _text(index.get("account")).lower() != account
         or not isinstance(index.get("items"), list)

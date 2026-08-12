@@ -12,10 +12,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.candidate_evidence_history import (
+    NOT_SCANNED,
+    summarize_run_candidate_evidence,
+)
 from src.application.shadow_replay import build_shadow_replay_dataset, mark_shadow_replay_dataset
 
 
-SCHEMA_VERSION = "research_archive.v1"
+SCHEMA_VERSION = "research_archive.v2"
 DEFAULT_REMOTE = "prod"
 DEFAULT_REMOTE_RUNTIME_ROOT = "/var/lib/options-monitor"
 DEFAULT_REMOTE_REPO_ROOT = "/opt/options-monitor/current"
@@ -53,16 +57,28 @@ def read_json(path):
     return payload if isinstance(payload, dict) else {}
 
 def critical_files(run_dir):
-    candidate_files = relative_matches(run_dir, ("*_candidates.csv", "*_candidates_labeled.csv"))
+    candidate_manifests = relative_matches(run_dir, ("candidate_snapshot_manifest.v1.json",))
+    candidate_snapshots = relative_matches(run_dir, ("opening_candidate_snapshot.json", "combo_yield_candidate_snapshot.json", "cc_lp_candidate_snapshot.json"))
+    candidate_status = relative_matches(run_dir, ("strategy_scan_status_index.v1.json", "strategy_scan_status_index.v2.json"))
     trace_files = relative_matches(run_dir, ("candidate_filter_trace.jsonl",))
-    reject_logs = relative_matches(run_dir, ("*_reject_log.csv", "*_candidates_reject_log.csv"))
+    legacy_candidate_files = relative_matches(run_dir, ("*_candidates.csv", "*_candidates_labeled.csv", "*_candidates_reject_log.csv", "*_reject_log.csv", "*_pair_diagnostics.csv", "*_rank_shadow.csv", "*_put_universe.csv", "*_put_universe_labeled.csv", "*_put_universe_cash_filtered.csv", "*_put_universe_underwritten.csv"))
     state_files = relative_matches(run_dir, ("last_run.json", "tick_metrics.json", "scheduler_decision.json"))
     return {
-        "candidate_files": candidate_files,
+        "candidate_manifest_files": candidate_manifests,
+        "candidate_snapshot_files": candidate_snapshots,
+        "candidate_status_files": candidate_status,
         "trace_files": trace_files,
-        "reject_log_files": reject_logs,
+        "legacy_candidate_files": legacy_candidate_files,
         "state_files": state_files,
     }
+
+def has_replay_evidence(critical):
+    return bool(
+        critical["candidate_manifest_files"]
+        or critical["candidate_snapshot_files"]
+        or critical["candidate_status_files"]
+        or critical["trace_files"]
+    )
 
 def file_manifest(run_dir):
     rows = []
@@ -120,13 +136,14 @@ if runs_root.exists() and runs_root.is_dir():
             continue
         critical = critical_files(item)
         files = file_manifest(item)
-        has_replay = bool(critical["candidate_files"] or critical["trace_files"] or critical["reject_log_files"])
+        has_replay = has_replay_evidence(critical)
         if require_replay and not has_replay:
             continue
         runs.append({
             "run_id": item.name,
             "mtime": st.st_mtime,
             "has_replay_evidence": has_replay,
+            "has_legacy_candidate_metadata": bool(critical["legacy_candidate_files"]),
             "ran_scan": ran_scan(item),
             "scheduler": scheduler_summary(item),
             "critical_files": critical,
@@ -913,7 +930,7 @@ def _source_run_dirs(
             continue
         critical = _critical_files(item)
         files = _file_manifest(item)
-        has_replay = bool(critical["candidate_files"] or critical["trace_files"] or critical["reject_log_files"])
+        has_replay = _has_replay_evidence(critical)
         if require_replay_evidence and not has_replay:
             continue
         out.append(
@@ -921,6 +938,9 @@ def _source_run_dirs(
                 "run_id": item.name,
                 "mtime": mtime,
                 "has_replay_evidence": has_replay,
+                "has_legacy_candidate_metadata": bool(
+                    critical["legacy_candidate_files"]
+                ),
                 "critical_files": critical,
                 "file_manifest": files,
                 "content_digest": _content_digest(files),
@@ -1008,7 +1028,17 @@ def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
         files = [path for path in run_dir.rglob("*") if path.is_file() and not path.is_symlink()]
         file_manifest = _file_manifest(run_dir)
         critical = _critical_files(run_dir)
-        has_replay = bool(critical["candidate_files"] or critical["trace_files"] or critical["reject_log_files"])
+        classification = summarize_run_candidate_evidence(
+            base=runs_root.parent,
+            run_id=run_dir.name,
+            runs_root=runs_root,
+        )
+        has_replay = _has_replay_evidence(critical)
+        has_candidate_history_metadata = any(
+            row.get("status") != NOT_SCANNED
+            for row in classification.get("accounts") or []
+            if isinstance(row, dict)
+        )
         has_partial = any(
             part.startswith(".") and ("partial" in part or "tmp" in part)
             for path in files
@@ -1028,6 +1058,11 @@ def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
                 "verified": bool(files) and not has_partial,
                 "partial_artifact_detected": has_partial,
                 "has_replay_evidence": has_replay,
+                "has_candidate_history_metadata": has_candidate_history_metadata,
+                "has_legacy_candidate_metadata": bool(
+                    critical["legacy_candidate_files"]
+                ),
+                "candidate_evidence": classification,
                 "critical_files": critical,
             }
         )
@@ -1035,16 +1070,62 @@ def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
 
 
 def _critical_files(run_dir: Path) -> dict[str, Any]:
-    candidate_files = _relative_matches(run_dir, ("*_candidates.csv", "*_candidates_labeled.csv"))
+    candidate_manifests = _relative_matches(
+        run_dir,
+        ("candidate_snapshot_manifest.v1.json",),
+    )
+    candidate_snapshots = _relative_matches(
+        run_dir,
+        (
+            "opening_candidate_snapshot.json",
+            "combo_yield_candidate_snapshot.json",
+            "cc_lp_candidate_snapshot.json",
+        ),
+    )
+    candidate_status = _relative_matches(
+        run_dir,
+        (
+            "strategy_scan_status_index.v1.json",
+            "strategy_scan_status_index.v2.json",
+        ),
+    )
     trace_files = _relative_matches(run_dir, ("candidate_filter_trace.jsonl",))
-    reject_logs = _relative_matches(run_dir, ("*_reject_log.csv", "*_candidates_reject_log.csv"))
+    legacy_candidate_files = _relative_matches(
+        run_dir,
+        (
+            "*_candidates.csv",
+            "*_candidates_labeled.csv",
+            "*_candidates_reject_log.csv",
+            "*_reject_log.csv",
+            "*_pair_diagnostics.csv",
+            "*_rank_shadow.csv",
+            "*_put_universe.csv",
+            "*_put_universe_labeled.csv",
+            "*_put_universe_cash_filtered.csv",
+            "*_put_universe_underwritten.csv",
+        ),
+    )
     state_files = _relative_matches(run_dir, ("last_run.json", "tick_metrics.json", "scheduler_decision.json"))
     return {
-        "candidate_files": candidate_files,
+        "candidate_manifest_files": candidate_manifests,
+        "candidate_snapshot_files": candidate_snapshots,
+        "candidate_status_files": candidate_status,
         "trace_files": trace_files,
-        "reject_log_files": reject_logs,
+        "legacy_candidate_files": legacy_candidate_files,
         "state_files": state_files,
     }
+
+
+def _has_replay_evidence(critical: dict[str, Any]) -> bool:
+    return any(
+        bool(critical.get(key))
+        for key in (
+            "candidate_manifest_files",
+            "candidate_snapshot_files",
+            "candidate_status_files",
+            "trace_files",
+        )
+    )
 
 
 def _relative_matches(root: Path, patterns: tuple[str, ...]) -> list[str]:
@@ -1130,24 +1211,17 @@ def _normalize_market(market: str | None) -> str | None:
 
 def _infer_run_market(item: dict[str, Any], *, run_dir: Path) -> str:
     critical = item.get("critical_files") if isinstance(item.get("critical_files"), dict) else _critical_files(run_dir)
-    file_names: list[str] = []
-    for key in ("candidate_files", "reject_log_files"):
-        raw = critical.get(key) if isinstance(critical, dict) else None
-        if isinstance(raw, list):
-            file_names.extend(str(value).lower() for value in raw)
     markets: set[str] = set()
-    has_hk = any(".hk_" in name or ".hk-" in name or ".hk." in name for name in file_names)
-    has_us = any(
-        ("_sell_put_candidates" in name or "_sell_call_candidates" in name or "_combo_yield" in name or "_yield_enhancement" in name)
-        and ".hk_" not in name
-        and ".hk-" not in name
-        and ".hk." not in name
-        for name in file_names
-    )
-    if has_hk:
-        markets.add("hk")
-    if has_us:
-        markets.add("us")
+    candidate_evidence = item.get("candidate_evidence")
+    if isinstance(candidate_evidence, dict):
+        for account in candidate_evidence.get("accounts") or []:
+            if not isinstance(account, dict):
+                continue
+            markets.update(
+                str(value).strip().lower()
+                for value in account.get("markets") or []
+                if str(value).strip().lower() in {"us", "hk"}
+            )
     raw_trace_files = critical.get("trace_files") if isinstance(critical, dict) else None
     if isinstance(raw_trace_files, list):
         markets.update(_infer_markets_from_trace_files(run_dir, raw_trace_files))

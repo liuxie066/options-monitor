@@ -348,8 +348,7 @@ def _wheel_candidate_scenarios(candidates: list[dict[str, Any]]) -> list[dict[st
         ].append(row)
     out: list[dict[str, Any]] = []
     for rows in grouped.values():
-        labeled = [row for row in rows if "_candidates_labeled.csv" in text(row.get("source_path")).lower()]
-        out.extend(labeled or rows)
+        out.extend(rows)
     return out
 
 
@@ -677,11 +676,9 @@ def parameter_advice_gate(quality: dict[str, Any]) -> dict[str, Any]:
     has_bad_decision_signal = bad_decision_count > 0
     inconclusive_too_high = bool(inconclusive_rate is not None and inconclusive_rate > 0.50)
     candidate_universe_missing = sample_count <= 0
-    trace_only_evidence = (
-        sample_count > 0
-        and int(source_kind_counts.get("candidate_csv") or 0) == 0
-        and int(source_kind_counts.get("filter_decision") or 0) > 0
-    )
+    trace_only_evidence = sample_count > 0 and set(source_kind_counts) <= {
+        "filter_decision"
+    }
     blockers: list[str] = []
     if candidate_universe_missing:
         blockers.append("candidate_universe_missing")
@@ -779,6 +776,64 @@ def review_readiness_gate(
             "legacy_allowed": ready,
         },
     }
+
+
+def apply_candidate_evidence_gate(
+    analysis: dict[str, Any],
+    coverage: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fail closed when candidate evidence does not prove a complete universe."""
+
+    if not isinstance(coverage, dict) or not coverage:
+        return analysis
+    if "strict_backtest_allowed" in coverage:
+        strict = coverage.get("strict_backtest_allowed") is True
+        reason = text(coverage.get("reason"))
+    else:
+        strict = coverage.get("strict_replay_authority") is True
+        reason = text(coverage.get("reason_code"))
+    checks = analysis.get("evidence_checks")
+    if isinstance(checks, dict):
+        checks["candidate_evidence_strict_replay_authority"] = strict
+        checks["candidate_evidence_coverage_reason"] = reason or None
+    if strict:
+        return analysis
+
+    blocker = "candidate_evidence_coverage_incomplete"
+    summary = analysis.get("summary")
+    if isinstance(summary, dict):
+        summary["status"] = "evidence_incomplete"
+        summary["reason"] = reason or blocker
+        summary["parameter_advice_allowed"] = False
+        summary["manual_strategy_review_ready"] = False
+        summary["review_readiness_status"] = "not_ready_for_manual_strategy_review"
+        summary["decision_quality_status"] = "not_ready_for_parameter_review"
+    advice_gate = analysis.get("parameter_advice_gate")
+    if isinstance(advice_gate, dict):
+        advice_gate["parameter_advice_allowed"] = False
+        advice_gate["status"] = "not_ready_for_parameter_review"
+        advice_gate["blockers"] = _append_unique(advice_gate.get("blockers"), blocker)
+        advice_gate["candidate_evidence_coverage_reason"] = reason or None
+    review_gate = analysis.get("review_readiness")
+    if isinstance(review_gate, dict):
+        review_gate["manual_strategy_review_ready"] = False
+        review_gate["status"] = "not_ready_for_manual_strategy_review"
+        review_gate["blockers"] = _append_unique(review_gate.get("blockers"), blocker)
+        review_gate["candidate_evidence_coverage_reason"] = reason or None
+    recommendations = analysis.get("recommendations")
+    if isinstance(recommendations, list) and recommendations and isinstance(
+        recommendations[0], dict
+    ):
+        recommendations[0]["status"] = "evidence_incomplete"
+        recommendations[0]["reason"] = reason or blocker
+    return analysis
+
+
+def _append_unique(value: Any, item: str) -> list[str]:
+    rows = [str(entry) for entry in value or [] if str(entry)]
+    if item not in rows:
+        rows.append(item)
+    return rows
 
 
 def _decision_quality_sample(

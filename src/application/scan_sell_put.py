@@ -25,74 +25,6 @@ from src.application.candidate_scanning import (
     run_candidate_scan,
 )
 
-SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
-    "symbol",
-    "market",
-    "expiration",
-    "dte",
-    "contract_symbol",
-    "multiplier",
-    "currency",
-    "strike",
-    "spot",
-    "bid",
-    "ask",
-    "last_price",
-    "raw_mid",
-    "mid",
-    "raw_spread",
-    "price_tick",
-    "sell_limit",
-    "last_price_update_time",
-    "last_price_observed_at_utc",
-    "last_price_age_seconds",
-    "last_price_activity_status",
-    "snapshot_received_at_utc",
-    "snapshot_age_seconds",
-    "quote_freshness_status",
-    "open_interest",
-    "volume",
-    "implied_volatility",
-    "realized_volatility_20",
-    "realized_volatility_60",
-    "realized_volatility_120",
-    "term_matched_rv",
-    "term_matched_rv_status",
-    "term_matched_rv_reason",
-    "term_matched_rv_input_hash",
-    "iv_rv_ratio",
-    "iv_minus_rv",
-    "delta",
-    "spread",
-    "spread_ratio",
-    "gross_premium",
-    "gross_income",
-    "estimated_full_sell_fees",
-    "futu_fee",
-    "fee_schedule_version",
-    "fee_basis",
-    "fee_schedule_url",
-    "net_premium",
-    "net_income",
-    "net_premium_cny",
-    "assignment_notional",
-    "net_cash_basis",
-    "period_net_return",
-    "otm_pct",
-    "cash_basis",
-    "period_net_return_on_cash_basis",
-    "breakeven",
-    "annualized_net_return_on_strike",
-    "annualized_net_return_on_cash_basis",
-    "earnings_evidence_status",
-    "earnings_reason_code",
-    "earnings_has_event",
-    "earnings_event_dates",
-    "earnings_snapshot_hash",
-    "earnings_artifact_path",
-    "reject_stage_candidate",
-]
-
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 
@@ -161,31 +93,10 @@ def _build_candidate_row(
     return payload
 
 
-def _print_summary(out: pd.DataFrame, out_path: Path, reject_out_path: Path) -> None:
-    print(f"[DONE] sell put scan -> {out_path}")
-    print(f"[DONE] reject log -> {reject_out_path}")
-    print(f"[DONE] candidates: {len(out)}")
-    if not out.empty:
-        display_cols = [
-            "symbol",
-            "expiration",
-            "dte",
-            "strike",
-            "spot",
-            "mid",
-            "futu_fee",
-            "net_income",
-            "otm_pct",
-            "annualized_net_return_on_cash_basis",
-        ]
-        print(out[display_cols].head(20).to_string(index=False))
-
-
 def run_sell_put_scan(
     *,
     symbols: list[str],
     input_root: Path,
-    output: Path | None,
     min_dte: int = DEFAULT_SELL_PUT_WINDOW.min_dte,
     max_dte: int = DEFAULT_SELL_PUT_WINDOW.max_dte,
     min_annualized_net_return: float | None = None,
@@ -195,16 +106,14 @@ def run_sell_put_scan(
     min_open_interest: float | None = None,
     min_volume: float | None = None,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
-    reject_log_output: Path | None = None,
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
-    quiet: bool = False,
     quote_freshness_now_utc: datetime | None = None,
     calculation_decision_sink_fn: (
         Callable[[list[dict[str, Any]]], None] | None
     ) = None,
 ) -> pd.DataFrame:
-    """执行卖出看跌期权扫描并写出候选 CSV。"""
+    """计算卖出看跌期权候选，并返回类型化内存结果。"""
     # Kept in the public Python/CLI surface for compatibility only. Sell Put
     # deliberately treats OI as ranking evidence and volume as display-only;
     # neither value is a hard eligibility gate.
@@ -220,8 +129,6 @@ def run_sell_put_scan(
             mode="put",
             symbols=symbols,
             input_root=Path(input_root),
-            output=(Path(output) if output is not None else None),
-            empty_output_columns=SELL_PUT_EMPTY_OUTPUT_COLUMNS,
             min_dte=int(min_dte),
             max_dte=int(max_dte),
             min_strike=min_strike,
@@ -233,7 +140,6 @@ def run_sell_put_scan(
             min_net_income=float(min_net_income),
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
-            quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=lambda contract: compute_metrics(
@@ -241,13 +147,11 @@ def run_sell_put_scan(
                 now_utc=scan_now_utc,
             ),
             build_row_fn=_build_candidate_row,
-            print_summary_fn=_print_summary,
             metric_reject_reason_fn=lambda contract: explain_metrics_rejection(
                 contract,
                 now_utc=scan_now_utc,
             ),
         ),
-        reject_log_output=reject_log_output,
         calculation_decision_sink_fn=calculation_decision_sink_fn,
     )
 
@@ -264,9 +168,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
     parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
-    parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
-    parser.add_argument("--output", default=None, help="Output CSV path (default: output_shared/reports/sell_put_candidates.csv)")
-    parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
     parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: output_shared/required_data)")
     return parser.parse_args(argv)
 
@@ -276,13 +177,10 @@ def main(argv: list[str] | None = None) -> int:
 
     base = Path(__file__).resolve().parents[2]
     input_root = Path(args.input_root).resolve() if args.input_root else (base / "output_shared" / "required_data").resolve()
-    out_path = Path(args.output).resolve() if args.output else (base / "output_shared" / "reports" / "sell_put_candidates.csv")
-
     try:
-        run_sell_put_scan(
+        out = run_sell_put_scan(
             symbols=args.symbols,
             input_root=input_root,
-            output=out_path,
             min_dte=args.min_dte,
             max_dte=args.max_dte,
             min_annualized_net_return=args.min_annualized_net_return,
@@ -292,12 +190,11 @@ def main(argv: list[str] | None = None) -> int:
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,
             max_spread_ratio=args.max_spread_ratio,
-            reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
-            quiet=args.quiet,
         )
     except ValueError as e:
         raise SystemExit(f"[ARG_ERROR] {e}")
 
+    print(out.to_json(orient="records", force_ascii=False))
     return 0
 
 

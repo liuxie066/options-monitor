@@ -159,3 +159,46 @@ markets:
 
     assert result["ok"] is False
     assert any(item["code"] == "inline_source_changed" for item in result["errors"])
+
+
+def test_old_runtime_with_retired_output_mode_requires_rebuild(tmp_path: Path) -> None:
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
+    runtime_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_yaml,
+        output_config_path=runtime_path,
+    )
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    payload["symbols"][0]["combo_yield"]["output_mode"] = "separate"
+    system_source = next(
+        item
+        for item in payload[GENERATED_KEY]["sources"]
+        if item.get("role") == "system"
+    )
+    system_source["sha256"] = "old-defaults-before-candidate-csv-retirement"
+
+    result = check_runtime_config_freshness(
+        payload,
+        repo_root=REPO_ROOT,
+        market="us",
+        runtime_config_path=runtime_path,
+    )
+
+    assert result["ok"] is False
+    assert any(item["code"] == "inline_source_changed" for item in result["errors"])
+    assert "./om config build" in str(result["rebuild_command"])

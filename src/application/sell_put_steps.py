@@ -30,7 +30,6 @@ from src.application.sell_put_cash import (
 )
 from src.application.sell_put_strategy_risk import (
     enrich_and_filter_sell_put_underwriting,
-    resolve_sell_put_underwriting_config,
 )
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 
@@ -61,79 +60,61 @@ def _enrich_sell_put_cash(
 
 def run_sell_put_scan_and_summarize(
     *,
-    py: str,
-    base: Path,
-    sym: str,
     symbol: str,
-    symbol_lower: str,
     symbol_cfg: dict[str, Any],
     sp: dict[str, Any],
-    top_n: int,
     required_data_dir: Path,
-    report_dir: Path,
-    timeout_sec: int | None,
-    is_scheduled: bool,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
-    run_sell_put: bool = True,
-    yield_enhancement_sell_put_cfg: dict[str, Any] | None = None,
     final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
 ) -> list[dict[str, Any]]:
-    del py, base, top_n, report_dir, timeout_sec, yield_enhancement_sell_put_cfg
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
     candidate_decisions: list[dict[str, Any]] = []
 
-    if run_sell_put:
-        underwriting_cfg = resolve_sell_put_underwriting_config(sp)
-        df_sp_lab = run_sell_put_scan(
-            symbols=[sym],
-            input_root=required_data_dir,
-            output=None,
-            min_dte=window.min_dte,
-            max_dte=window.max_dte,
-            # Underwriting applies return/income thresholds once, after CNY enrichment.
-            min_annualized_net_return=0.0,
-            min_net_income=0.0,
-            min_strike=_optional_float(sp, 'min_strike'),
-            max_strike=_optional_float(sp, 'max_strike'),
-            min_open_interest=None,
-            min_volume=None,
-            max_spread_ratio=liquidity.max_spread_ratio,
-            strategy_family=sell_put_semantics.strategy_family,
-            strategy_profile=sell_put_semantics.scan_strategy_profile,
-            quiet=True,
-            calculation_decision_sink_fn=candidate_decisions.extend,
+    df_sp_lab = run_sell_put_scan(
+        symbols=[symbol],
+        input_root=required_data_dir,
+        min_dte=window.min_dte,
+        max_dte=window.max_dte,
+        # Underwriting applies return/income thresholds once, after CNY enrichment.
+        min_annualized_net_return=0.0,
+        min_net_income=0.0,
+        min_strike=_optional_float(sp, 'min_strike'),
+        max_strike=_optional_float(sp, 'max_strike'),
+        min_open_interest=None,
+        min_volume=None,
+        max_spread_ratio=liquidity.max_spread_ratio,
+        strategy_family=sell_put_semantics.strategy_family,
+        strategy_profile=sell_put_semantics.scan_strategy_profile,
+        calculation_decision_sink_fn=candidate_decisions.extend,
+    )
+    df_sp_lab = label_sell_put_candidates(df_sp_lab)
+    if not df_sp_lab.empty:
+        df_sp_lab = _enrich_sell_put_cash(
+            df_labeled=df_sp_lab,
+            symbol=symbol,
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=exchange_rate_converter,
         )
-        df_sp_lab = label_sell_put_candidates(df_sp_lab)
-        if not df_sp_lab.empty:
-            df_sp_lab = _enrich_sell_put_cash(
-                df_labeled=df_sp_lab,
-                symbol=symbol,
-                portfolio_ctx=portfolio_ctx,
-                exchange_rate_converter=exchange_rate_converter,
-            )
-        if not df_sp_lab.empty:
-            df_sp_lab = enrich_and_filter_sell_put_underwriting(
-                df_labeled=df_sp_lab,
-                symbol=symbol,
-                sell_put_cfg={
-                    **sp,
-                    "max_spread_ratio": liquidity.max_spread_ratio,
-                },
-                portfolio_ctx=portfolio_ctx,
-                exchange_rate_converter=exchange_rate_converter,
-                decision_sink_fn=candidate_decisions.extend,
-            )
-    else:
-        df_sp_lab = pd.DataFrame()
-
+    if not df_sp_lab.empty:
+        df_sp_lab = enrich_and_filter_sell_put_underwriting(
+            df_labeled=df_sp_lab,
+            symbol=symbol,
+            sell_put_cfg={
+                **sp,
+                "max_spread_ratio": liquidity.max_spread_ratio,
+            },
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=exchange_rate_converter,
+            decision_sink_fn=candidate_decisions.extend,
+        )
 
     if final_candidates_sink_fn is not None:
         final_candidates_sink_fn(

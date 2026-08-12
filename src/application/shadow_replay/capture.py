@@ -22,12 +22,34 @@ from domain.domain.close_advice import (
     RECOMMENDATION_NOT_EVALUABLE,
     STRICT_CLOSE_POLICY_VERSION,
 )
-from domain.domain.engine import explain_candidate_rank
-
 from src.application.candidate_filter_trace import (
-    build_candidate_replay_fields,
     infer_trace_scope_from_path,
     read_candidate_filter_trace,
+)
+from src.application.candidate_evidence_history import (
+    AccountCandidateEvidence,
+    CANDIDATE_EVIDENCE_CLASSIFICATION_SCHEMA,
+    CANDIDATE_EVIDENCE_STATES,
+    NOT_SCANNED,
+    SUPPORTED,
+    load_run_candidate_evidence,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+    project_combo_yield_candidates,
+    project_combo_yield_funding_put_decisions,
+    project_combo_yield_pair_diagnostics,
+    project_combo_yield_rank_evidence,
+)
+from src.application.cc_lp_candidate_snapshot import (
+    CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    project_cc_lp_candidates,
+)
+from src.application.opening_candidate_snapshot import (
+    OPENING_CANDIDATE_SNAPSHOT_FILE,
+    ranked_opening_candidates,
+    ranked_opening_candidate_decisions,
+    rejected_opening_candidate_decisions,
 )
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
@@ -60,7 +82,6 @@ from src.application.shadow_replay.common import (
     resolve_optional,
     safe_rel,
     safety_payload,
-    strategy_hint,
     strategy_mode,
     text,
     unique,
@@ -78,9 +99,7 @@ class ShadowReplaySourceSelection:
     runs_root: Path | None = None
     run_dir: Path | None = None
     report_dir: Path | None = None
-    candidate_paths: tuple[Path, ...] = ()
     trace_paths: tuple[Path, ...] = ()
-    reject_log_paths: tuple[Path, ...] = ()
     mark_paths: tuple[Path, ...] = ()
     outcome_paths: tuple[Path, ...] = ()
     close_advice_paths: tuple[Path, ...] = ()
@@ -95,9 +114,7 @@ def build_shadow_replay_dataset(
     runs_root: str | Path | None = None,
     run_dir: str | Path | None = None,
     report_dir: str | Path | None = None,
-    candidate_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     trace_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
-    reject_log_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     mark_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     outcome_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     close_advice_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
@@ -134,32 +151,46 @@ def build_shadow_replay_dataset(
     elif run_dir_path is None and run_id_text:
         root = runs_root_path or (base / "output_runs").resolve()
         run_dir_path = (root / run_id_text).resolve()
+    elif run_dir_path is not None:
+        run_id_text = run_id_text or run_dir_path.name
     selection = ShadowReplaySourceSelection(
         repo_root=base,
         run_id=run_id_text,
         runs_root=runs_root_path,
         run_dir=run_dir_path,
         report_dir=resolve_optional(report_dir, base=base),
-        candidate_paths=tuple(resolve_many(candidate_paths, base=base)),
         trace_paths=tuple(resolve_many(trace_paths, base=base)),
-        reject_log_paths=tuple(resolve_many(reject_log_paths, base=base)),
         mark_paths=tuple(resolve_many(mark_paths, base=base)),
         outcome_paths=tuple(resolve_many(outcome_paths, base=base)),
         close_advice_paths=tuple(resolve_many(close_advice_paths, base=base)),
         position_context_paths=tuple(resolve_many(position_context_paths, base=base)),
         run_audit_paths=tuple(resolve_many(run_audit_paths, base=base)),
     )
-    resolved_candidates = candidate_paths_from_selection(selection)
-    resolved_traces = trace_paths_from_selection(selection)
-    resolved_reject_logs = reject_log_paths_from_selection(selection)
-    resolved_marks = mark_paths_from_selection(selection)
-    resolved_outcomes = outcome_paths_from_selection(selection)
+    candidate_observations = candidate_replay_observations_from_selection(
+        selection,
+    )
+    coverage = candidate_observations["coverage"]
     close_facet_requested = bool(
         include_close_decisions
         or close_advice_paths
         or position_context_paths
         or run_audit_paths
     )
+    contributing_accounts = sum(
+        int(coverage.get("counts", {}).get(status) or 0)
+        for status in ("supported", "supported_limited_legacy_snapshot")
+    )
+    if contributing_accounts <= 0 and not close_facet_requested:
+        statuses = sorted(
+            status
+            for status, count in (coverage.get("counts") or {}).items()
+            if int(count or 0) > 0
+        )
+        detail = ",".join(statuses) or "no_account_candidate_evidence"
+        raise ValueError(f"candidate_evidence_unsupported:{detail}")
+    resolved_traces = candidate_observations["trace_paths"]
+    resolved_marks = mark_paths_from_selection(selection)
+    resolved_outcomes = outcome_paths_from_selection(selection)
     resolved_close_advice: list[Path] = []
     resolved_position_contexts: list[Path] = []
     resolved_run_audits: list[Path] = []
@@ -181,13 +212,10 @@ def build_shadow_replay_dataset(
             base=base,
         )
 
-    candidate_rows = accepted_candidate_snapshots(resolved_candidates, base=base)
-    filter_decisions = filter_decision_rows(resolved_traces, resolved_reject_logs, base=base)
-    rejected_rows = candidate_snapshots_from_filter_decisions(filter_decisions)
-    candidate_snapshots = dedupe_snapshots(
-        _attach_parameter_snapshots(candidate_rows + rejected_rows, filter_decisions)
-    )
-    rank_snapshots = rank_snapshots_for_candidates(candidate_snapshots)
+    candidate_rows = candidate_observations["candidate_snapshots"]
+    filter_decisions = candidate_observations["filter_decisions"]
+    candidate_snapshots = dedupe_snapshots(_attach_parameter_snapshots(candidate_rows, filter_decisions))
+    rank_snapshots = candidate_observations["rank_snapshots"]
     mark_snapshots = read_replay_rows(resolved_marks, schema_version=MARK_PATH_SCHEMA_VERSION, base=base)
     outcome_facts = read_replay_rows(resolved_outcomes, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base)
     mark_snapshots = bind_legacy_decision_evidence(candidate_snapshots, mark_snapshots)
@@ -219,9 +247,8 @@ def build_shadow_replay_dataset(
             "latest_scanned_run": bool(latest_scanned_run),
             "latest_scanned_run_selection": latest_selection,
             "report_dir": safe_rel(selection.report_dir, base=base),
-            "candidate_paths": [safe_rel(path, base=base) for path in resolved_candidates],
+            "candidate_evidence_coverage": coverage,
             "trace_paths": [safe_rel(path, base=base) for path in resolved_traces],
-            "reject_log_paths": [safe_rel(path, base=base) for path in resolved_reject_logs],
             "mark_paths": [safe_rel(path, base=base) for path in resolved_marks],
             "outcome_paths": [safe_rel(path, base=base) for path in resolved_outcomes],
         },
@@ -234,15 +261,11 @@ def build_shadow_replay_dataset(
         manifest["source"].update(
             {
                 "close_advice_paths": [safe_rel(path, base=base) for path in resolved_close_advice],
-                "position_context_paths": [
-                    safe_rel(path, base=base) for path in resolved_position_contexts
-                ],
+                "position_context_paths": [safe_rel(path, base=base) for path in resolved_position_contexts],
                 "run_audit_paths": [safe_rel(path, base=base) for path in resolved_run_audits],
             }
         )
-        manifest["files"].update(
-            {name: str((target / name).resolve()) for name in OPTIONAL_CLOSE_DATASET_FILES}
-        )
+        manifest["files"].update({name: str((target / name).resolve()) for name in OPTIONAL_CLOSE_DATASET_FILES})
         manifest["summary"]["close_decision_episode_count"] = len(close_decision_episodes)
         manifest["close_decision_facet"] = {
             "episode_schema_version": CLOSE_DECISION_EPISODE_SCHEMA_VERSION,
@@ -325,43 +348,21 @@ def capture_close_decision_episodes(
             close_path,
             expected_run_id=run_id,
         )
-        report_accounts = {
-            text(value).lower()
-            for value in report_validation.get("accounts") or []
-            if text(value)
-        }
-        report_context_sha256 = text(
-            report_validation.get("context_sha256")
-        ).lower()
-        report_snapshot_sha256 = text(
-            report_validation.get(
-                "required_data_snapshot_manifest_sha256"
-            )
-        ).lower()
-        report_plan_sha256 = text(
-            report_validation.get(
-                "close_advice_required_data_plan_sha256"
-            )
-        ).lower()
+        report_accounts = {text(value).lower() for value in report_validation.get("accounts") or [] if text(value)}
+        report_context_sha256 = text(report_validation.get("context_sha256")).lower()
+        report_snapshot_sha256 = text(report_validation.get("required_data_snapshot_manifest_sha256")).lower()
+        report_plan_sha256 = text(report_validation.get("close_advice_required_data_plan_sha256")).lower()
         for row_number, source_row in enumerate(close_rows, start=1):
             row = dict(source_row)
             account = text(row.get("account")).lower() or source_account
             if not account:
                 raise ValueError(f"close advice account missing: {close_path}:{row_number}")
             if source_account and account != source_account:
-                raise ValueError(
-                    f"close advice account conflicts with source directory: {close_path}:{row_number}"
-                )
+                raise ValueError(f"close advice account conflicts with source directory: {close_path}:{row_number}")
             if account not in report_accounts:
-                raise ValueError(
-                    "close advice account conflicts with report manifest: "
-                    f"{close_path}:{row_number}"
-                )
+                raise ValueError(f"close advice account conflicts with report manifest: {close_path}:{row_number}")
             if text(row.get("quote_mode")).lower() != "frozen_snapshot":
-                raise ValueError(
-                    "close advice row is not bound to frozen inputs: "
-                    f"{close_path}:{row_number}"
-                )
+                raise ValueError(f"close advice row is not bound to frozen inputs: {close_path}:{row_number}")
             for field, expected_digest in (
                 (
                     "required_data_snapshot_manifest_sha256",
@@ -374,8 +375,7 @@ def capture_close_decision_episodes(
             ):
                 if text(row.get(field)).lower() != expected_digest:
                     raise ValueError(
-                        "close advice row conflicts with report manifest: "
-                        f"{close_path}:{row_number} field={field}"
+                        f"close advice row conflicts with report manifest: {close_path}:{row_number} field={field}"
                     )
             lot_id = text(row.get("position_lot_id"))
             if not lot_id:
@@ -393,19 +393,14 @@ def capture_close_decision_episodes(
                 )
             audit_path, observed_at = decision_time
             if observed_at < run_started_at:
-                raise ValueError(
-                    f"close_advice audit timestamp precedes run start: run_id={run_id} account={account}"
-                )
+                raise ValueError(f"close_advice audit timestamp precedes run start: run_id={run_id} account={account}")
             context_entry = contexts.get((run_id, account))
             if context_entry is None:
-                raise ValueError(
-                    f"position context missing for run/account: run_id={run_id} account={account}"
-                )
+                raise ValueError(f"position context missing for run/account: run_id={run_id} account={account}")
             context_path, context = context_entry
             if _sha256_json(context) != report_context_sha256:
                 raise ValueError(
-                    "close advice position context conflicts with report manifest: "
-                    f"run_id={run_id} account={account}"
+                    f"close advice position context conflicts with report manifest: run_id={run_id} account={account}"
                 )
             _validate_context_time(context, observed_at=observed_at, path=context_path)
             position = _exact_position_lot(
@@ -485,9 +480,7 @@ def _validated_close_report_rows(
         or report_row_count != len(close_rows)
     ):
         raise ValueError(
-            "close advice report row count mismatch: "
-            f"{close_path} manifest={report_row_count} "
-            f"actual={len(close_rows)}"
+            f"close advice report row count mismatch: {close_path} manifest={report_row_count} actual={len(close_rows)}"
         )
     for field in (
         "context_sha256",
@@ -495,18 +488,13 @@ def _validated_close_report_rows(
         "close_advice_required_data_plan_sha256",
     ):
         if not _is_sha256(report_validation.get(field)):
-            raise ValueError(
-                "close advice report manifest binding is invalid: "
-                f"{close_path} field={field}"
-            )
+            raise ValueError(f"close advice report manifest binding is invalid: {close_path} field={field}")
     return close_rows, report_validation
 
 
 def _is_sha256(value: Any) -> bool:
     digest = text(value).lower()
-    return len(digest) == 64 and all(
-        character in "0123456789abcdef" for character in digest
-    )
+    return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
 
 
 def dedupe_close_decision_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -624,24 +612,16 @@ def _close_episode_observation(
 def _normalized_close_decision_facts(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "recommendation_state": text(row.get("recommendation_state")).lower(),
-        "decision_evidence_status": text(
-            row.get("decision_evidence_status")
-        ).lower(),
+        "decision_evidence_status": text(row.get("decision_evidence_status")).lower(),
         "strategy_family": text(row.get("strategy_family")).lower(),
         "strategy_profile": text(row.get("strategy_profile")).lower(),
         "option_type": text(row.get("option_type")).lower(),
         "is_otm": _optional_bool(row.get("is_otm")),
         "dte": _rounded_number(row.get("dte"), digits=0),
         "original_dte": _rounded_number(row.get("original_dte"), digits=0),
-        "remaining_term_ratio": _rounded_number(
-            row.get("remaining_term_ratio"), digits=12
-        ),
-        "net_capture_ratio": _rounded_number(
-            row.get("net_capture_ratio"), digits=12
-        ),
-        "close_cost_ratio": _rounded_number(
-            row.get("close_cost_ratio"), digits=12
-        ),
+        "remaining_term_ratio": _rounded_number(row.get("remaining_term_ratio"), digits=12),
+        "net_capture_ratio": _rounded_number(row.get("net_capture_ratio"), digits=12),
+        "close_cost_ratio": _rounded_number(row.get("close_cost_ratio"), digits=12),
         "spread_ratio": _rounded_number(row.get("spread_ratio"), digits=12),
     }
 
@@ -663,18 +643,14 @@ def _formal_policy_result(row: dict[str, Any], *, path: Path, row_number: int) -
     evidence_status = text(row.get("decision_evidence_status")).lower()
     evaluation_status = text(row.get("evaluation_status")).lower()
     if policy_version != STRICT_CLOSE_POLICY_VERSION:
-        raise ValueError(
-            "unsupported close policy version: "
-            f"{path}:{row_number} policy_version={policy_version}"
-        )
+        raise ValueError(f"unsupported close policy version: {path}:{row_number} policy_version={policy_version}")
     if recommendation not in {
         RECOMMENDATION_CLOSE,
         RECOMMENDATION_HOLD,
         RECOMMENDATION_NOT_EVALUABLE,
     }:
         raise ValueError(
-            "invalid strict close recommendation: "
-            f"{path}:{row_number} recommendation_state={recommendation}"
+            f"invalid strict close recommendation: {path}:{row_number} recommendation_state={recommendation}"
         )
     expected_evidence_status = (
         DECISION_EVIDENCE_NOT_EVALUABLE
@@ -687,19 +663,13 @@ def _formal_policy_result(row: dict[str, Any], *, path: Path, row_number: int) -
             f"{path}:{row_number} recommendation_state={recommendation} "
             f"decision_evidence_status={evidence_status}"
         )
-    if (
-        recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD}
-        and evaluation_status != "priced"
-    ):
+    if recommendation in {RECOMMENDATION_CLOSE, RECOMMENDATION_HOLD} and evaluation_status != "priced":
         raise ValueError(
             "strict close recommendation is not priced: "
             f"{path}:{row_number} recommendation_state={recommendation} "
             f"evaluation_status={evaluation_status}"
         )
-    if (
-        recommendation == RECOMMENDATION_NOT_EVALUABLE
-        and evaluation_status == "priced"
-    ):
+    if recommendation == RECOMMENDATION_NOT_EVALUABLE and evaluation_status == "priced":
         raise ValueError(
             "strict not-evaluable recommendation is marked priced: "
             f"{path}:{row_number} evaluation_status={evaluation_status}"
@@ -707,11 +677,7 @@ def _formal_policy_result(row: dict[str, Any], *, path: Path, row_number: int) -
     return {
         "policy_version": policy_version,
         "recommendation_state": recommendation,
-        "decision_basis": [
-            token.strip()
-            for token in text(row.get("decision_basis")).split(";")
-            if token.strip()
-        ],
+        "decision_basis": [token.strip() for token in text(row.get("decision_basis")).split(";") if token.strip()],
         "decision_evidence_status": evidence_status,
     }
 
@@ -734,15 +700,9 @@ def _threshold_inputs(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "dte": _rounded_number(row.get("dte"), digits=0),
         "original_dte": _rounded_number(row.get("original_dte"), digits=0),
-        "remaining_term_ratio": _rounded_number(
-            row.get("remaining_term_ratio"), digits=12
-        ),
-        "net_capture_ratio": _rounded_number(
-            row.get("net_capture_ratio"), digits=12
-        ),
-        "close_cost_ratio": _rounded_number(
-            row.get("close_cost_ratio"), digits=12
-        ),
+        "remaining_term_ratio": _rounded_number(row.get("remaining_term_ratio"), digits=12),
+        "net_capture_ratio": _rounded_number(row.get("net_capture_ratio"), digits=12),
+        "close_cost_ratio": _rounded_number(row.get("close_cost_ratio"), digits=12),
         "spread_ratio": _rounded_number(row.get("spread_ratio"), digits=12),
         "is_otm": _optional_bool(row.get("is_otm")),
     }
@@ -780,9 +740,7 @@ def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dic
         "decision_close_fee": _rounded_number(fee, digits=6),
         "decision_close_slippage": _rounded_number(close_slippage, digits=6),
         "close_now_cost": _rounded_number(close_cost, digits=6),
-        "opening_net_credit": _rounded_number(
-            row.get("opening_net_credit"), digits=6
-        ),
+        "opening_net_credit": _rounded_number(row.get("opening_net_credit"), digits=6),
         "fee_calc_status": text(row.get("fee_calc_status")).lower(),
         "fee_calc_basis": text(row.get("fee_calc_basis")) or None,
         "currency": text(row.get("currency") or position.get("currency")).upper() or None,
@@ -796,11 +754,7 @@ def _position_identity(position: dict[str, Any], *, row: dict[str, Any]) -> dict
         "symbol": text(position.get("symbol") or row.get("symbol")).upper(),
         "option_type": text(position.get("option_type") or row.get("option_type")).lower(),
         "side": text(position.get("side") or row.get("position_side") or row.get("side")).lower(),
-        "expiration": text(
-            position.get("expiration")
-            or position.get("expiration_ymd")
-            or row.get("expiration")
-        ),
+        "expiration": text(position.get("expiration") or position.get("expiration_ymd") or row.get("expiration")),
         "strike": _rounded_number(position.get("strike") or row.get("strike"), digits=4),
         "contract_symbol": text(
             position.get("contract_symbol")
@@ -998,53 +952,560 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def accepted_candidate_snapshots(paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for path in paths:
-        strategy = strategy_hint(path)
-        mode = strategy_mode(strategy)
-        scope = infer_trace_scope_from_path(path)
-        account = account_hint(path) or text(scope.get("account")).lower() or None
-        source_path = safe_rel(path, base=base)
-        for row_number, row in enumerate(read_csv_rows(path), start=1):
-            candidate_rows = _combo_pair_rows(
-                row,
-                strategy=strategy,
-                source_path=source_path,
-                run_id=text(row.get("run_id") or scope.get("run_id")) or None,
-                account=account,
+def candidate_evidence_from_selection(
+    selection: ShadowReplaySourceSelection,
+) -> list[AccountCandidateEvidence]:
+    run_dir = selection.run_dir
+    run_id = text(selection.run_id) or None
+    runs_root = selection.runs_root
+    if run_dir is None and run_id:
+        runs_root = runs_root or (selection.repo_root / "output_runs").resolve()
+        run_dir = (runs_root / run_id).resolve()
+    elif run_dir is not None:
+        run_dir = run_dir.resolve()
+        run_id = run_id or run_dir.name
+        runs_root = runs_root or run_dir.parent
+    if run_dir is None or not run_id:
+        inferred = _canonical_run_dir_from_report(selection.report_dir)
+        if inferred is None:
+            return []
+        run_dir = inferred
+        run_id = inferred.name
+        runs_root = inferred.parent
+    if runs_root is None or Path(runs_root).resolve().name != "output_runs":
+        raise ValueError("Shadow Replay candidate evidence requires canonical output_runs")
+    return load_run_candidate_evidence(
+        base=selection.repo_root,
+        run_id=run_id,
+        runs_root=Path(runs_root).resolve(),
+    )
+
+
+def _canonical_run_dir_from_report(report_dir: Path | None) -> Path | None:
+    if report_dir is None:
+        return None
+    resolved = report_dir.resolve()
+    for parent in (resolved, *resolved.parents):
+        if parent.parent.name == "output_runs":
+            return parent
+    return None
+
+
+def candidate_evidence_coverage(
+    evidence: list[AccountCandidateEvidence],
+) -> dict[str, Any]:
+    counts = {
+        state: sum(item.classification["status"] == state for item in evidence)
+        for state in sorted(CANDIDATE_EVIDENCE_STATES)
+    }
+    strict = bool(evidence) and all(item.classification["status"] == SUPPORTED for item in evidence)
+    return {
+        "schema_version": CANDIDATE_EVIDENCE_CLASSIFICATION_SCHEMA,
+        "accounts": [dict(item.classification) for item in evidence],
+        "counts": counts,
+        "strict_replay_authority": strict,
+        "reason_code": (
+            "all_accounts_manifest_supported"
+            if strict
+            else "candidate_evidence_coverage_incomplete"
+            if evidence
+            else "run_has_no_account_candidate_evidence"
+        ),
+    }
+
+
+def candidate_replay_observations_from_selection(
+    selection: ShadowReplaySourceSelection,
+) -> dict[str, Any]:
+    base = selection.repo_root.resolve()
+    evidence = candidate_evidence_from_selection(selection)
+    trace_paths = trace_paths_from_selection(selection)
+    candidates, sealed_decisions = candidate_snapshot_rows_from_evidence(
+        evidence,
+        base=base,
+    )
+    rank_snapshots = rank_snapshot_rows_from_evidence(evidence, base=base)
+    trace_decisions = filter_decision_rows(trace_paths, base=base)
+    return {
+        "account_evidence": evidence,
+        "candidate_snapshots": candidates,
+        "rank_snapshots": rank_snapshots,
+        "filter_decisions": _merge_filter_decision_rows(
+            sealed_decisions + trace_decisions
+        ),
+        "trace_paths": trace_paths,
+        "coverage": candidate_evidence_coverage(evidence),
+    }
+
+
+def candidate_snapshot_rows_from_evidence(
+    evidence: list[AccountCandidateEvidence],
+    *,
+    base: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    candidates: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    for item in evidence:
+        if not item.contributes_evidence:
+            continue
+        for owner, snapshot in item.owners.items():
+            source_path = _owner_snapshot_source_path(
+                item,
+                owner=owner,
+                base=base,
             )
-            for candidate_row in candidate_rows:
-                item = snapshot_from_row(
-                    candidate_row,
-                    schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
-                    source_kind="candidate_csv",
+            if owner == "opening":
+                owner_candidates, owner_decisions = _opening_snapshot_rows(
+                    snapshot,
                     source_path=source_path,
-                    source_row_number=row_number,
-                    status="accepted",
-                    strategy=strategy,
-                    mode=mode,
-                    account_hint=account,
                 )
-                out.append(item)
-    return out
+            elif owner == "sp_lc":
+                owner_candidates, owner_decisions = _sp_lc_snapshot_rows(
+                    snapshot,
+                    source_path=source_path,
+                )
+            elif owner == "cc_lp":
+                owner_candidates, owner_decisions = _cc_lp_snapshot_rows(
+                    snapshot,
+                    source_path=source_path,
+                )
+            else:
+                raise ValueError(f"unsupported candidate evidence owner: {owner}")
+            candidates.extend(owner_candidates)
+            decisions.extend(owner_decisions)
+    return dedupe_snapshots(candidates), _merge_filter_decision_rows(decisions)
 
 
-def _combo_pair_rows(
+def rank_snapshot_rows_from_evidence(
+    evidence: list[AccountCandidateEvidence],
+    *,
+    base: Path,
+) -> list[dict[str, Any]]:
+    """Project rank facts exactly as sealed by each candidate owner."""
+
+    rows: list[dict[str, Any]] = []
+    for item in evidence:
+        if not item.contributes_evidence:
+            continue
+        for owner, snapshot in item.owners.items():
+            source_path = _owner_snapshot_source_path(item, owner=owner, base=base)
+            if owner == "opening":
+                rows.extend(
+                    _opening_rank_snapshot_rows(snapshot, source_path=source_path)
+                )
+            elif owner == "sp_lc":
+                rows.extend(
+                    _sp_lc_rank_snapshot_rows(snapshot, source_path=source_path)
+                )
+            elif owner == "cc_lp":
+                rows.extend(
+                    _cc_lp_rank_snapshot_rows(snapshot, source_path=source_path)
+                )
+            else:
+                raise ValueError(f"unsupported candidate evidence owner: {owner}")
+    return rows
+
+
+def _opening_rank_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> list[dict[str, Any]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    rows: list[dict[str, Any]] = []
+    for row_number, ranked in enumerate(ranked_opening_candidates(snapshot), start=1):
+        facts = dict(ranked.get("facts") or {})
+        mode = text(ranked.get("strategy_mode")).lower()
+        rows.append(
+            {
+                "schema_version": RANK_SNAPSHOT_SCHEMA_VERSION,
+                "source_kind": "sealed_candidate_snapshot",
+                "source_path": source_path,
+                "source_row_number": row_number,
+                "run_id": run_id,
+                "account": account,
+                "strategy": _opening_strategy(mode),
+                "strategy_family": _opening_strategy_family(mode),
+                "strategy_profile": text(facts.get("strategy_profile"))
+                or "insurance_underwriting",
+                "candidate_id": ranked.get("candidate_id"),
+                "decision_hash": ranked.get("decision_hash"),
+                "symbol": text(facts.get("symbol")).upper() or None,
+                "contract_symbol": text(facts.get("contract_symbol")) or None,
+                "mode": mode,
+                "rank": ranked.get("rank"),
+                "rank_explanation": dict(ranked.get("ranking") or {}),
+                "sealed_facts": facts,
+            }
+        )
+    return rows
+
+
+def _sp_lc_rank_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> list[dict[str, Any]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    rows: list[dict[str, Any]] = []
+    for row_number, record in enumerate(
+        project_combo_yield_rank_evidence(snapshot), start=1
+    ):
+        rank_facts = {
+            key: record.get(key)
+            for key in (
+                "baseline_rank",
+                "shadow_rank",
+                "baseline_selected",
+                "shadow_selected",
+                "rank_changed",
+            )
+        }
+        rows.append(
+            {
+                "schema_version": RANK_SNAPSHOT_SCHEMA_VERSION,
+                "source_kind": "sealed_candidate_snapshot",
+                "source_path": source_path,
+                "source_row_number": row_number,
+                "run_id": run_id,
+                "account": account,
+                "strategy": "combo_yield",
+                "strategy_family": "combo_yield",
+                "strategy_profile": "combo_yield",
+                "candidate_pair_id": record.get("candidate_pair_id"),
+                "symbol": text(record.get("symbol")).upper() or None,
+                "put_contract_symbol": record.get("put_contract_symbol"),
+                "call_contract_symbol": record.get("call_contract_symbol"),
+                "rank": record.get("baseline_rank"),
+                "rank_explanation": rank_facts,
+            }
+        )
+    return rows
+
+
+def _cc_lp_rank_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> list[dict[str, Any]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    rows: list[dict[str, Any]] = []
+    for row_number, pair in enumerate(project_cc_lp_candidates(snapshot), start=1):
+        rows.append(
+            {
+                "schema_version": RANK_SNAPSHOT_SCHEMA_VERSION,
+                "source_kind": "sealed_candidate_snapshot",
+                "source_path": source_path,
+                "source_row_number": row_number,
+                "run_id": run_id,
+                "account": account,
+                "strategy": "combo_yield",
+                "strategy_family": "combo_yield",
+                "strategy_profile": text(pair.get("strategy_profile"))
+                or "cc_lp_funding_call",
+                "candidate_pair_id": pair.get("candidate_pair_id"),
+                "symbol": text(pair.get("symbol")).upper() or None,
+                "put_contract_symbol": pair.get("put_contract_symbol"),
+                "call_contract_symbol": pair.get("call_contract_symbol"),
+                "rank": row_number,
+                "rank_explanation": {"sealed_pair_order": row_number},
+                "sealed_facts": dict(pair),
+            }
+        )
+    return rows
+
+
+def _owner_snapshot_source_path(
+    evidence: AccountCandidateEvidence,
+    *,
+    owner: str,
+    base: Path,
+) -> str:
+    filenames = {
+        "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
+        "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+        "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    }
+    return text(safe_rel(evidence.account_dir / "state" / filenames[owner], base=base))
+
+
+def _opening_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    candidates: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    for row_number, decision in enumerate(
+        ranked_opening_candidate_decisions(snapshot),
+        start=1,
+    ):
+        mode = text(decision.get("strategy_mode")).lower()
+        row = {
+            **dict(decision.get("normalized_input") or {}),
+            "run_id": run_id,
+            "account": account,
+            "strategy_family": _opening_strategy_family(mode),
+            "strategy_profile": text(
+                (decision.get("normalized_input") or {}).get("strategy_profile")
+            )
+            or "insurance_underwriting",
+            "candidate_id": decision.get("candidate_id"),
+            "decision_hash": decision.get("decision_hash"),
+            "opening_snapshot_rank": decision.get("opening_snapshot_rank"),
+        }
+        candidates.append(
+            snapshot_from_row(
+                row,
+                schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+                source_kind="sealed_candidate_snapshot",
+                source_path=source_path,
+                source_row_number=row_number,
+                status="accepted",
+                strategy=_opening_strategy(mode),
+                mode=mode,
+                account_hint=account,
+            )
+        )
+    for decision_number, decision in enumerate(
+        rejected_opening_candidate_decisions(snapshot),
+        start=1,
+    ):
+        mode = text(decision.get("strategy_mode")).lower()
+        normalized = dict(decision.get("normalized_input") or {})
+        opening = dict(decision.get("opening_decision") or {})
+        strategy_profile = text(normalized.get("strategy_profile")) or (
+            "insurance_underwriting"
+        )
+        rejects = [dict(row) for row in opening.get("rejects") or []]
+        for reject_number, reject in enumerate(rejects, start=1):
+            decision_row = {
+                **normalized,
+                "schema_version": FILTER_DECISION_SCHEMA_VERSION,
+                "source_kind": "sealed_candidate_snapshot",
+                "source_path": source_path,
+                "source_row_number": f"{decision_number}.{reject_number}",
+                "run_id": run_id,
+                "account": account,
+                "strategy_family": _opening_strategy_family(mode),
+                "strategy_profile": strategy_profile,
+                "function": _opening_strategy(mode),
+                "mode": mode,
+                "status": "rejected",
+                "stage": reject.get("stage"),
+                "rule": reject.get("reason"),
+                "metric_value": reject.get("metric_value"),
+                "threshold": reject.get("threshold"),
+                "message": reject.get("message"),
+                "candidate_id": decision.get("candidate_id"),
+                "decision_hash": decision.get("decision_hash"),
+            }
+            decisions.append(decision_row)
+        candidates.append(
+            _rejected_candidate_snapshot(
+                {
+                    **normalized,
+                    "run_id": run_id,
+                    "account": account,
+                    "strategy_family": _opening_strategy_family(mode),
+                    "strategy_profile": strategy_profile,
+                    "candidate_id": decision.get("candidate_id"),
+                    "decision_hash": decision.get("decision_hash"),
+                },
+                source_path=source_path,
+                source_row_number=decision_number,
+                strategy=_opening_strategy(mode),
+                mode=mode,
+                account=account,
+                rejects=rejects,
+            )
+        )
+    return candidates, decisions
+
+
+def _opening_strategy(mode: str) -> str:
+    if mode == "put":
+        return "sell_put"
+    if mode == "call":
+        return "sell_call"
+    raise ValueError(f"unsupported opening strategy mode: {mode}")
+
+
+def _opening_strategy_family(mode: str) -> str:
+    return "sell_put" if mode == "put" else "covered_call"
+
+
+def _rejected_candidate_snapshot(
     row: dict[str, Any],
     *,
-    strategy: str | None,
-    source_path: str | None,
+    source_path: str,
+    source_row_number: Any,
+    strategy: str,
+    mode: str,
+    account: str | None,
+    rejects: list[dict[str, Any]],
+) -> dict[str, Any]:
+    item = snapshot_from_row(
+        row,
+        schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        source_kind="sealed_candidate_snapshot",
+        source_path=source_path,
+        source_row_number=source_row_number,
+        status="rejected",
+        strategy=strategy,
+        mode=mode,
+        account_hint=account,
+    )
+    if rejects:
+        item["filter_stage"] = rejects[0].get("stage")
+        item["filter_rule"] = rejects[0].get("reason")
+        item["filter_metric_value"] = rejects[0].get("metric_value")
+        item["filter_threshold"] = rejects[0].get("threshold")
+    return item
+
+
+def _sp_lc_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    candidates: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    selected_by_id = {text(row.get("candidate_pair_id")): dict(row) for row in project_combo_yield_candidates(snapshot)}
+    diagnostics = project_combo_yield_pair_diagnostics(snapshot)
+    if diagnostics:
+        for row_number, diagnostic in enumerate(diagnostics, start=1):
+            pair_id = text(diagnostic.get("candidate_pair_id"))
+            selection_state = text(diagnostic.get("selection_state")).lower()
+            has_pair_legs = bool(
+                pair_id
+                and text(diagnostic.get("put_contract_symbol"))
+                and text(diagnostic.get("call_contract_symbol"))
+            )
+            if selection_state == "selected" and pair_id in selected_by_id:
+                pair = {**diagnostic, **selected_by_id[pair_id]}
+                status = "accepted"
+            elif selection_state == "ranked_below" and has_pair_legs:
+                pair = dict(diagnostic)
+                status = "ranked_below"
+            else:
+                pair = dict(diagnostic)
+                status = "rejected"
+            if has_pair_legs or status == "accepted":
+                candidates.extend(
+                    _combo_pair_candidate_rows(
+                        pair,
+                        owner="sp_lc",
+                        source_path=source_path,
+                        source_row_number=row_number,
+                        run_id=run_id,
+                        account=account,
+                        status=status,
+                    )
+                )
+            decisions.extend(
+                _combo_pair_filter_decisions(
+                    pair,
+                    owner="sp_lc",
+                    source_path=source_path,
+                    source_row_number=row_number,
+                    run_id=run_id,
+                    account=account,
+                    status=status,
+                )
+            )
+    else:
+        for row_number, pair in enumerate(selected_by_id.values(), start=1):
+            candidates.extend(
+                _combo_pair_candidate_rows(
+                    pair,
+                    owner="sp_lc",
+                    source_path=source_path,
+                    source_row_number=row_number,
+                    run_id=run_id,
+                    account=account,
+                    status="accepted",
+                )
+            )
+    observed_selected = {
+        text(row.get("candidate_pair_id"))
+        for row in candidates
+        if row.get("status") == "accepted"
+    }
+    for row_number, pair_id in enumerate(
+        sorted(set(selected_by_id) - observed_selected),
+        start=len(diagnostics) + 1,
+    ):
+        candidates.extend(
+            _combo_pair_candidate_rows(
+                selected_by_id[pair_id],
+                owner="sp_lc",
+                source_path=source_path,
+                source_row_number=row_number,
+                run_id=run_id,
+                account=account,
+                status="accepted",
+            )
+        )
+    decisions.extend(
+        _funding_put_filter_decisions(
+            project_combo_yield_funding_put_decisions(snapshot),
+            source_path=source_path,
+            run_id=run_id,
+            account=account,
+        )
+    )
+    return candidates, decisions
+
+
+def _cc_lp_snapshot_rows(
+    snapshot: dict[str, Any],
+    *,
+    source_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    run_id = text(snapshot.get("run_id")) or None
+    account = text(snapshot.get("account")).lower() or None
+    candidates: list[dict[str, Any]] = []
+    for row_number, pair in enumerate(project_cc_lp_candidates(snapshot), start=1):
+        candidates.extend(
+            _combo_pair_candidate_rows(
+                pair,
+                owner="cc_lp",
+                source_path=source_path,
+                source_row_number=row_number,
+                run_id=run_id,
+                account=account,
+                status="accepted",
+            )
+        )
+    return candidates, []
+
+
+def _combo_pair_candidate_rows(
+    row: dict[str, Any],
+    *,
+    owner: str,
+    source_path: str,
+    source_row_number: Any,
     run_id: str | None,
     account: str | None,
+    status: str,
 ) -> list[dict[str, Any]]:
     put_contract = text(row.get("put_contract_symbol"))
     call_contract = text(row.get("call_contract_symbol"))
-    family = text(row.get("strategy_family") or strategy).lower().replace("-", "_")
-    if family != "combo_yield" or not put_contract or not call_contract:
-        return [row]
+    if not put_contract or not call_contract:
+        return []
 
-    group_id = text(row.get("strategy_group_id") or row.get("group_id")) or _combo_pair_group_id(
+    group_id = text(
+        row.get("strategy_group_id") or row.get("group_id") or row.get("candidate_pair_id")
+    ) or _combo_pair_group_id(
         row,
         source_path=source_path,
         run_id=run_id,
@@ -1055,8 +1516,10 @@ def _combo_pair_rows(
     contracts = first_float(row, "contracts", "contract_count", "quantity", "qty") or 1.0
     put_contracts = first_float(row, "put_contracts") or contracts
     call_contracts = first_float(row, "call_contracts") or contracts
-    put_credit = first_float(row, "put_net_credit")
+    put_credit = first_float(row, "put_net_credit", "put_only_net_credit")
     call_cost = first_float(row, "call_total_cost")
+    call_credit = first_float(row, "call_net_credit")
+    put_cost = first_float(row, "put_total_cost")
     structure_mode = text(row.get("structure_mode")).lower() or "same_expiry_pair"
     common = {
         **row,
@@ -1064,7 +1527,10 @@ def _combo_pair_rows(
         "run_id": text(row.get("run_id") or run_id) or None,
         "account": text(row.get("account") or account).lower() or None,
         "strategy_family": "combo_yield",
-        "strategy_profile": text(row.get("strategy_profile") or row.get("yield_enhancement_mode")) or "combo_yield",
+        "strategy_profile": text(
+            row.get("strategy_profile") or row.get("yield_enhancement_mode") or row.get("put_strategy_profile")
+        )
+        or ("cc_lp_funding_call" if owner == "cc_lp" else "combo_yield"),
         "strategy_group_id": group_id,
         "candidate_pair_id": text(row.get("candidate_pair_id")) or None,
         "structure_mode": structure_mode,
@@ -1073,50 +1539,251 @@ def _combo_pair_rows(
         "call_expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
         "call_dte": first_float(row, "call_dte", "dte"),
     }
+    if owner == "cc_lp":
+        leg_rows = [
+            {
+                **common,
+                "contract_symbol": call_contract,
+                "option_type": "call",
+                "mode": "call",
+                "side": "short",
+                "leg_role": "funding_call",
+                "expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
+                "dte": first_float(row, "call_dte", "dte"),
+                "contracts": call_contracts,
+                "strike": first_float(row, "call_strike"),
+                "bid": first_float(row, "call_bid"),
+                "ask": first_float(row, "call_ask"),
+                "mid": first_float(row, "call_mid"),
+                "delta": first_float(row, "call_delta"),
+                "open_interest": first_float(row, "call_open_interest"),
+                "volume": first_float(row, "call_volume"),
+                "spread_ratio": first_float(row, "call_spread_ratio"),
+                "net_income": call_credit,
+                "entry_credit": call_credit,
+            },
+            {
+                **common,
+                "contract_symbol": put_contract,
+                "option_type": "put",
+                "mode": "put",
+                "side": "long",
+                "leg_role": "protective_put",
+                "expiration": text(row.get("put_expiration") or row.get("expiration") or row.get("exp")) or None,
+                "dte": first_float(row, "put_dte", "dte"),
+                "contracts": put_contracts,
+                "strike": first_float(row, "put_strike"),
+                "bid": first_float(row, "put_bid"),
+                "ask": first_float(row, "put_ask"),
+                "mid": first_float(row, "put_mid"),
+                "delta": first_float(row, "put_delta"),
+                "open_interest": first_float(row, "put_open_interest"),
+                "volume": first_float(row, "put_volume"),
+                "spread_ratio": first_float(row, "put_spread_ratio"),
+                "net_income": -abs(put_cost) if put_cost is not None else None,
+                "entry_cost": abs(put_cost) if put_cost is not None else None,
+            },
+        ]
+    else:
+        leg_rows = [
+            {
+                **common,
+                "contract_symbol": put_contract,
+                "option_type": "put",
+                "mode": "put",
+                "side": "short",
+                "leg_role": "funding_put",
+                "expiration": text(row.get("put_expiration") or row.get("expiration") or row.get("exp")) or None,
+                "dte": first_float(row, "put_dte", "dte"),
+                "contracts": put_contracts,
+                "strike": first_float(row, "put_strike"),
+                "bid": first_float(row, "put_bid"),
+                "ask": first_float(row, "put_ask"),
+                "mid": first_float(row, "put_mid"),
+                "delta": first_float(row, "put_delta"),
+                "open_interest": first_float(row, "put_open_interest"),
+                "volume": first_float(row, "put_volume"),
+                "spread_ratio": first_float(row, "put_spread_ratio"),
+                "net_income": put_credit,
+                "entry_credit": put_credit,
+            },
+            {
+                **common,
+                "contract_symbol": call_contract,
+                "option_type": "call",
+                "mode": "call",
+                "side": "long",
+                "leg_role": "participation_call",
+                "expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
+                "dte": first_float(row, "call_dte", "dte"),
+                "contracts": call_contracts,
+                "strike": first_float(row, "call_strike"),
+                "bid": first_float(row, "call_bid"),
+                "ask": first_float(row, "call_ask"),
+                "mid": first_float(row, "call_mid"),
+                "delta": first_float(row, "call_delta"),
+                "open_interest": first_float(row, "call_open_interest"),
+                "volume": first_float(row, "call_volume"),
+                "spread_ratio": first_float(row, "call_spread_ratio"),
+                "net_income": -abs(call_cost) if call_cost is not None else None,
+                "entry_cost": abs(call_cost) if call_cost is not None else None,
+            },
+        ]
     return [
-        {
-            **common,
-            "contract_symbol": put_contract,
-            "option_type": "put",
-            "mode": "put",
-            "side": "short",
-            "leg_role": "funding_put",
-            "expiration": text(row.get("put_expiration") or row.get("expiration") or row.get("exp")) or None,
-            "dte": first_float(row, "put_dte", "dte"),
-            "contracts": put_contracts,
-            "strike": first_float(row, "put_strike"),
-            "bid": first_float(row, "put_bid"),
-            "ask": first_float(row, "put_ask"),
-            "mid": first_float(row, "put_mid"),
-            "delta": first_float(row, "put_delta"),
-            "open_interest": first_float(row, "put_open_interest"),
-            "volume": first_float(row, "put_volume"),
-            "spread_ratio": first_float(row, "put_spread_ratio"),
-            "net_income": put_credit,
-            "entry_credit": put_credit,
-        },
-        {
-            **common,
-            "contract_symbol": call_contract,
-            "option_type": "call",
-            "mode": "call",
-            "side": "long",
-            "leg_role": "participation_call",
-            "expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
-            "dte": first_float(row, "call_dte", "dte"),
-            "contracts": call_contracts,
-            "strike": first_float(row, "call_strike"),
-            "bid": first_float(row, "call_bid"),
-            "ask": first_float(row, "call_ask"),
-            "mid": first_float(row, "call_mid"),
-            "delta": first_float(row, "call_delta"),
-            "open_interest": first_float(row, "call_open_interest"),
-            "volume": first_float(row, "call_volume"),
-            "spread_ratio": first_float(row, "call_spread_ratio"),
-            "net_income": -abs(call_cost) if call_cost is not None else None,
-            "entry_cost": abs(call_cost) if call_cost is not None else None,
-        },
+        snapshot_from_row(
+            leg,
+            schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+            source_kind="sealed_candidate_snapshot",
+            source_path=source_path,
+            source_row_number=f"{source_row_number}.{leg_number}",
+            status=status,
+            strategy="combo_yield",
+            mode=text(leg.get("mode")).lower() or None,
+            account_hint=account,
+        )
+        for leg_number, leg in enumerate(leg_rows, start=1)
     ]
+
+
+def _combo_pair_filter_decisions(
+    row: dict[str, Any],
+    *,
+    owner: str,
+    source_path: str,
+    source_row_number: Any,
+    run_id: str | None,
+    account: str | None,
+    status: str,
+) -> list[dict[str, Any]]:
+    if status == "accepted":
+        return []
+    reasons = row.get("reject_reasons") or []
+    if isinstance(reasons, str):
+        reasons = [item for item in reasons.split("|") if item]
+    if status == "ranked_below" and not reasons:
+        reasons = ["ranked_below"]
+    out: list[dict[str, Any]] = []
+    for reason_number, reason in enumerate(reasons, start=1):
+        for leg_number, leg in enumerate(
+            _combo_pair_raw_legs(row, owner=owner, run_id=run_id, account=account),
+            start=1,
+        ):
+            out.append(
+                {
+                    **leg,
+                    "schema_version": FILTER_DECISION_SCHEMA_VERSION,
+                    "source_kind": "sealed_candidate_snapshot",
+                    "source_path": source_path,
+                    "source_row_number": f"{source_row_number}.{reason_number}.{leg_number}",
+                    "run_id": run_id,
+                    "account": account,
+                    "function": "combo_yield",
+                    "status": status,
+                    "stage": row.get("diagnostic_stage") or "ranking",
+                    "rule": text(reason),
+                    "metric_value": None,
+                    "threshold": None,
+                }
+            )
+    return out
+
+
+def _combo_pair_raw_legs(
+    row: dict[str, Any],
+    *,
+    owner: str,
+    run_id: str | None,
+    account: str | None,
+) -> list[dict[str, Any]]:
+    put_contract = text(row.get("put_contract_symbol"))
+    call_contract = text(row.get("call_contract_symbol"))
+    common = {
+        **row,
+        "run_id": run_id,
+        "account": account,
+        "strategy_family": "combo_yield",
+        "strategy_group_id": row.get("candidate_pair_id"),
+    }
+    if owner == "cc_lp":
+        rows = [
+            {
+                **common,
+                "contract_symbol": call_contract,
+                "mode": "call",
+                "option_type": "call",
+                "side": "short",
+                "leg_role": "funding_call",
+            },
+            {
+                **common,
+                "contract_symbol": put_contract,
+                "mode": "put",
+                "option_type": "put",
+                "side": "long",
+                "leg_role": "protective_put",
+            },
+        ]
+    else:
+        rows = [
+            {
+                **common,
+                "contract_symbol": put_contract,
+                "mode": "put",
+                "option_type": "put",
+                "side": "short",
+                "leg_role": "funding_put",
+            },
+            {
+                **common,
+                "contract_symbol": call_contract,
+                "mode": "call",
+                "option_type": "call",
+                "side": "long",
+                "leg_role": "participation_call",
+            },
+        ]
+    return [row for row in rows if text(row.get("contract_symbol"))]
+
+
+def _funding_put_filter_decisions(
+    rows: list[dict[str, Any]],
+    *,
+    source_path: str,
+    run_id: str | None,
+    account: str | None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for decision_number, record in enumerate(rows, start=1):
+        opening = dict(record.get("opening_decision") or {})
+        if opening.get("accepted") is True:
+            continue
+        normalized = dict(record.get("normalized_input") or {})
+        for reject_number, reject in enumerate(opening.get("rejects") or [], start=1):
+            out.append(
+                {
+                    **normalized,
+                    "schema_version": FILTER_DECISION_SCHEMA_VERSION,
+                    "source_kind": "sealed_candidate_snapshot",
+                    "source_path": source_path,
+                    "source_row_number": f"funding.{decision_number}.{reject_number}",
+                    "run_id": run_id,
+                    "account": account,
+                    "strategy_family": "combo_yield",
+                    "strategy_profile": normalized.get("strategy_profile") or "insurance_underwriting",
+                    "function": "combo_yield",
+                    "mode": "put",
+                    "option_type": "put",
+                    "side": "short",
+                    "leg_role": "funding_put",
+                    "status": "rejected",
+                    "stage": reject.get("stage"),
+                    "rule": reject.get("reason"),
+                    "metric_value": reject.get("metric_value"),
+                    "threshold": reject.get("threshold"),
+                    "message": reject.get("message"),
+                }
+            )
+    return out
 
 
 def _combo_pair_group_id(
@@ -1142,7 +1809,11 @@ def _combo_pair_group_id(
     return "combo_yield|" + "|".join(parts)
 
 
-def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
+def filter_decision_rows(
+    trace_paths: list[Path],
+    *,
+    base: Path,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in trace_paths:
         scope = infer_trace_scope_from_path(path)
@@ -1157,32 +1828,6 @@ def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], 
             item["status"] = normal_status(item.get("status") or "rejected")
             item["symbol"] = text(item.get("symbol") or item.get("underlying_symbol")).upper() or None
             item["rule"] = text(item.get("rule") or item.get("reject_rule") or item.get("reject_reason")) or None
-            out.append(item)
-    for path in reject_log_paths:
-        strategy = strategy_hint(path)
-        mode = strategy_mode(strategy)
-        scope = infer_trace_scope_from_path(path)
-        account = account_hint(path)
-        for row_number, row in enumerate(read_csv_rows(path), start=1):
-            item = {
-                "schema_version": FILTER_DECISION_SCHEMA_VERSION,
-                "source_kind": "reject_log_csv",
-                "source_path": safe_rel(path, base=base),
-                "source_row_number": row_number,
-                "run_id": text(row.get("run_id") or scope.get("run_id")) or None,
-                "account": text(row.get("account") or account or scope.get("account")).lower() or None,
-                "symbol": text(row.get("symbol") or row.get("underlying_symbol")).upper() or None,
-                "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
-                "function": text(row.get("function") or strategy) or None,
-                "mode": text(row.get("mode") or row.get("option_type")).lower() or mode,
-                "status": normal_status(row.get("status") or "rejected"),
-                "stage": text(row.get("engine_reject_stage") or row.get("reject_stage") or row.get("stage")) or None,
-                "rule": text(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or row.get("rule")) or None,
-                "metric_value": text(row.get("metric_value")) or None,
-                "threshold": text(row.get("threshold")) or None,
-                "message": text(row.get("message")) or None,
-            }
-            item.update(build_candidate_replay_fields(row))
             out.append(item)
     return _merge_filter_decision_rows(out)
 
@@ -1237,31 +1882,6 @@ def _decision_value_missing(value: Any) -> bool:
     return False
 
 
-def candidate_snapshots_from_filter_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for idx, row in enumerate(decisions, start=1):
-        status = normal_status(row.get("status") or "rejected")
-        if status not in {"rejected", "post_filtered", "ranked_below"}:
-            continue
-        item = snapshot_from_row(
-            row,
-            schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
-            source_kind="filter_decision",
-            source_path=row.get("source_path"),
-            source_row_number=row.get("source_row_number") or idx,
-            status=status,
-            strategy=text(row.get("function")) or None,
-            mode=text(row.get("mode")).lower() or strategy_mode(text(row.get("function")) or None),
-            account_hint=text(row.get("account")).lower() or None,
-        )
-        item["filter_stage"] = row.get("stage")
-        item["filter_rule"] = row.get("rule")
-        item["filter_metric_value"] = row.get("metric_value")
-        item["filter_threshold"] = row.get("threshold")
-        out.append(item)
-    return out
-
-
 def snapshot_from_row(
     row: dict[str, Any],
     *,
@@ -1288,13 +1908,12 @@ def snapshot_from_row(
         "strategy_family": family,
         "strategy_profile": profile,
         "parameter_snapshot": parameter_snapshot or None,
-        "parameter_snapshot_sha256": (
-            _payload_digest(parameter_snapshot) if parameter_snapshot else None
-        ),
-        "parameter_snapshot_source": (
-            "decision_trace_config_values" if parameter_snapshot else None
-        ),
+        "parameter_snapshot_sha256": (_payload_digest(parameter_snapshot) if parameter_snapshot else None),
+        "parameter_snapshot_source": ("decision_trace_config_values" if parameter_snapshot else None),
         "strategy_group_id": text(row.get("strategy_group_id") or row.get("group_id")) or None,
+        "candidate_id": text(row.get("candidate_id")) or None,
+        "decision_hash": text(row.get("decision_hash")) or None,
+        "opening_snapshot_rank": first_float(row, "opening_snapshot_rank"),
         "candidate_pair_id": text(row.get("candidate_pair_id")) or None,
         "structure_mode": text(row.get("structure_mode")).lower() or None,
         "leg_role": text(row.get("leg_role") or row.get("strategy_leg_role")) or None,
@@ -1365,7 +1984,9 @@ def snapshot_from_row(
             "covered_contracts_available",
         ),
         "cost_basis": first_float(row, "cost_basis", "underlying_cost_basis", "avg_cost", "average_cost"),
-        "cost_basis_floor": first_float(row, "cost_basis_floor", "min_strike_cost_multiplier", "strike_cost_multiplier"),
+        "cost_basis_floor": first_float(
+            row, "cost_basis_floor", "min_strike_cost_multiplier", "strike_cost_multiplier"
+        ),
         "underlying_notional_cny": first_float(row, "underlying_notional_cny"),
         "capital_at_risk_cny": first_float(row, "capital_at_risk_cny"),
         "annualized_return": first_float(
@@ -1511,31 +2132,6 @@ def _has_short_vol_replay_fields(row: dict[str, Any]) -> bool:
     )
 
 
-def rank_snapshots_for_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for idx, row in enumerate(candidates, start=1):
-        if str(row.get("status") or "") != "accepted":
-            continue
-        mode = str(row.get("mode") or "").strip()
-        if mode not in {"put", "call"}:
-            continue
-        try:
-            explanation = explain_candidate_rank(row, mode=mode)
-        except Exception as exc:
-            explanation = {"error": f"{type(exc).__name__}: {exc}"}
-        out.append(
-            {
-                "schema_version": RANK_SNAPSHOT_SCHEMA_VERSION,
-                "source_candidate_index": idx,
-                "symbol": row.get("symbol"),
-                "contract_symbol": row.get("contract_symbol"),
-                "mode": mode,
-                "rank_explanation": explanation,
-            }
-        )
-    return out
-
-
 def read_replay_rows(paths: list[Path], *, schema_version: str, base: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in paths:
@@ -1552,41 +2148,15 @@ def read_replay_rows(paths: list[Path], *, schema_version: str, base: Path) -> l
     return out
 
 
-def candidate_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
-    explicit = [path for path in selection.candidate_paths if path.exists()]
-    if explicit:
-        return unique(explicit)
-    out: list[Path] = []
-    for directory in source_dirs(selection):
-        out.extend(
-            glob_many(
-                directory,
-                (
-                    "*sell_put_candidates*.csv",
-                    "*sell_call_candidates*.csv",
-                    "*combo_yield_candidates*.csv",
-                    "*yield_enhancement_candidates*.csv",
-                ),
-            )
-        )
-    return unique(path for path in out if "reject_log" not in path.name.lower())
-
-
 def trace_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
     explicit = [path for path in selection.trace_paths if path.exists()]
     if explicit:
         return unique(explicit)
-    return unique(directory / "candidate_filter_trace.jsonl" for directory in source_dirs(selection) if (directory / "candidate_filter_trace.jsonl").exists())
-
-
-def reject_log_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
-    explicit = [path for path in selection.reject_log_paths if path.exists()]
-    if explicit:
-        return unique(explicit)
-    out: list[Path] = []
-    for directory in source_dirs(selection):
-        out.extend(glob_many(directory, ("*candidates_reject_log*.csv", "*reject_log*.csv")))
-    return unique(out)
+    return unique(
+        directory / "candidate_filter_trace.jsonl"
+        for directory in source_dirs(selection)
+        if (directory / "candidate_filter_trace.jsonl").exists()
+    )
 
 
 def mark_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
@@ -1595,7 +2165,12 @@ def mark_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Pa
         return unique(explicit)
     out: list[Path] = []
     for directory in source_dirs(selection):
-        out.extend(glob_many(directory, ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv")))
+        out.extend(
+            glob_many(
+                directory,
+                ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv"),
+            )
+        )
     return unique(out)
 
 
@@ -1605,7 +2180,9 @@ def outcome_paths_from_selection(selection: ShadowReplaySourceSelection) -> list
         return unique(explicit)
     out: list[Path] = []
     for directory in source_dirs(selection):
-        out.extend(glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv")))
+        out.extend(
+            glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv"))
+        )
     return unique(out)
 
 
@@ -1676,7 +2253,9 @@ def source_dirs(selection: ShadowReplaySourceSelection) -> list[Path]:
     return unique(dirs)
 
 
-def latest_shadow_replay_run_dir(*, repo_root: Path, runs_root: Path | None = None) -> tuple[Path | None, dict[str, Any]]:
+def latest_shadow_replay_run_dir(
+    *, repo_root: Path, runs_root: Path | None = None
+) -> tuple[Path | None, dict[str, Any]]:
     root = (runs_root or (repo_root / "output_runs")).resolve()
     searched_count = 0
     skipped_without_evidence_count = 0
@@ -1698,11 +2277,15 @@ def latest_shadow_replay_run_dir(*, repo_root: Path, runs_root: Path | None = No
     )
     for run_dir in run_dirs:
         searched_count += 1
-        probe = ShadowReplaySourceSelection(repo_root=repo_root, run_dir=run_dir, runs_root=root)
-        candidate_count = len(candidate_paths_from_selection(probe))
+        probe = ShadowReplaySourceSelection(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            runs_root=root,
+        )
+        evidence = candidate_evidence_from_selection(probe)
+        scanned = [item for item in evidence if item.classification["status"] != NOT_SCANNED]
         trace_count = len(trace_paths_from_selection(probe))
-        reject_log_count = len(reject_log_paths_from_selection(probe))
-        if candidate_count or trace_count or reject_log_count:
+        if scanned:
             return run_dir, {
                 "requested": True,
                 "found": True,
@@ -1712,9 +2295,9 @@ def latest_shadow_replay_run_dir(*, repo_root: Path, runs_root: Path | None = No
                 "run_id": run_dir.name,
                 "searched_count": searched_count,
                 "skipped_without_evidence_count": skipped_without_evidence_count,
-                "candidate_path_count": candidate_count,
+                "candidate_evidence_account_count": len(scanned),
+                "candidate_evidence_status_counts": candidate_evidence_coverage(evidence)["counts"],
                 "trace_path_count": trace_count,
-                "reject_log_path_count": reject_log_count,
             }
         skipped_without_evidence_count += 1
     return None, {

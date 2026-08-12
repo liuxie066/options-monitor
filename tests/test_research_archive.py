@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
 
 def _write_run(root: Path, run_id: str = "run-1") -> Path:
     run_dir = root / "output_runs" / run_id
@@ -37,6 +39,40 @@ def _write_run(root: Path, run_id: str = "run-1") -> Path:
         )
         + "\n",
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        root,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 120,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "spread_ratio": 0.10,
+                "open_interest": 500,
+                "volume": 20,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "spot": 95,
+                "rule": "risk_spread",
+                "spread_ratio": 0.45,
+            }
+        ],
     )
     return run_dir
 
@@ -89,6 +125,28 @@ def _write_hk_run(root: Path, run_id: str = "run-hk") -> Path:
         )
         + "\n",
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        root,
+        run_id=run_id,
+        market="HK",
+        accepted_rows=[
+            {
+                "symbol": "0700.HK",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "HK.TCH260619P400000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 400,
+                "spot": 450,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "spread_ratio": 0.10,
+                "open_interest": 500,
+                "volume": 20,
+            }
+        ],
     )
     return run_dir
 
@@ -245,7 +303,11 @@ def test_archive_pull_can_auto_select_remote_replay_evidence_runs_without_stdout
                 "run_id": "run-scan",
                 "mtime": 1,
                 "has_replay_evidence": True,
-                "critical_files": {"candidate_files": ["accounts/lx/sell_put_candidates.csv"]},
+                "critical_files": {
+                    "candidate_manifest_files": [
+                        "accounts/lx/state/candidate_snapshot_manifest.v1.json"
+                    ]
+                },
             }
         ],
     }
