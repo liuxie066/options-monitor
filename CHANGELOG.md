@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.17 - 2026-08-13
+
+### Bug Fixes
+- Normalized binary floating-point transport noise when rendering guarded historical trade receipts, so the displayed fill price matches the broker price already accepted by the ledger without weakening price validation.
+
 ## 1.13.16 - 2026-08-13
 
 ### Bug Fixes
