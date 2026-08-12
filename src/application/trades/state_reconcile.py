@@ -569,6 +569,12 @@ def _deal_ids_from_lifecycle_evidence(evidence: dict[str, Any]) -> list[str]:
         for key in ("deal_id", "source_deal_id", "futu_deal_id"):
             if nested.get(key) not in (None, ""):
                 values.append(str(nested.get(key)))
+    observation = evidence.get("observation")
+    if isinstance(observation, dict):
+        anchor_key = str(
+            observation.get("anchor_option_deal_key") or ""
+        ).strip()
+        values.extend(_deal_ids_from_source_key(anchor_key))
     return _normalize_deal_ids(values)
 
 

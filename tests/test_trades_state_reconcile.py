@@ -832,10 +832,14 @@ def test_reconcile_trade_intake_state_derives_v2_terminal_summary(tmp_path: Path
             {
                 "case_id": "lc_0700_v2_expire_close",
                 "evidence_id": "ev_0700_v2_option_zero",
-                "evidence_type": "settlement_observation",
-                "source_event_id": deal_id,
+                "evidence_type": "expire_close",
+                "source_event_id": "observation_0700_v2_terminal",
                 "account": "lx",
                 "symbol": "0700.HK",
+                "observation": {
+                    "anchor_option_deal_key": deal_id,
+                    "complete": True,
+                },
             }
         ],
     )
