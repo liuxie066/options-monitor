@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.16 - 2026-08-13
+
+### Bug Fixes
+- Reconciled terminal lifecycle intake rows from the canonical frozen observation anchor when the evidence event ID identifies the observation itself rather than the original broker deal.
+
 ## 1.13.15 - 2026-08-13
 
 ### Bug Fixes
