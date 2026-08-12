@@ -2030,6 +2030,38 @@ def test_canonical_prefetch_shape_projects_one_symbol_gap_without_duplicate_aggr
     )
 
 
+def test_successfully_fetched_prefetch_symbols_do_not_create_data_gaps(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "errors": 0,
+                "symbols": [
+                    {"symbol": "GOOGL", "status": "fetched"},
+                    {"symbol": "NVDA", "status": "fetched"},
+                ],
+                "results": {"GOOGL": "ok", "NVDA": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert not any(
+        item.get("source") == "required_data_prefetch_summary"
+        and item.get("symbol") in {"GOOGL", "NVDA"}
+        for item in brief["data_gaps"]
+    )
+
+
 def test_status_index_treats_completed_zero_as_available_with_partial_failure(
     tmp_path: Path,
 ) -> None:
