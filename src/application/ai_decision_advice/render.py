@@ -25,6 +25,7 @@ def render_family_advice_lines(
     candidate_rank_by_id: Mapping[str, int] | None = None,
     evidence_by_ref: Mapping[str, Mapping[str, Any]] | None = None,
     heading_level: int = 3,
+    has_raw_candidates: bool | None = None,
 ) -> list[str]:
     """Render the per-strategy AI建议 block (design 15.1 / 15.2 / 15.3 / 15.4).
 
@@ -52,7 +53,10 @@ def render_family_advice_lines(
         return []
 
     if status == "unavailable":
-        lines.append("AI建议未完成；以下仅展示策略原始排序，不代表已经完成综合判断。")
+        if has_raw_candidates is False:
+            lines.append("AI建议未完成；本轮没有可展示的策略原始排序。")
+        else:
+            lines.append("AI建议未完成；以下仅展示策略原始排序，不代表已经完成综合判断。")
         return lines
 
     if _family_universe_partial(section, family=family):

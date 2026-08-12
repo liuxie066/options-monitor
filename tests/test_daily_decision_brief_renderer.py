@@ -1415,6 +1415,134 @@ def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
     assert "quote_fetch_timeout" not in message
 
 
+def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "GOOGL",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "reason_code": "term_matched_rv_unavailable",
+                "severity": "warning",
+                "actionable": False,
+            },
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            },
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert message.count("提醒｜") == 1
+    assert (
+        "提醒｜GOOGL Sell Put：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
+        in message
+    )
+    assert "提醒｜NVDA" not in message
+
+
+def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["candidates"]["sell_put"] = []
+    brief["ai_decision_advice"] = {
+        "status": "unavailable",
+        "unavailable_reason": "timeout",
+        "evidence_as_of": None,
+        "sell_put": None,
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": None,
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+    sell_put_block = message[
+        message.index("## Sell Put") : message.index("## Covered Call")
+    ]
+    covered_call_block = message[
+        message.index("## Covered Call") : message.index("## 组合增强")
+    ]
+
+    assert message.count("AI｜未完成；以下仅为策略排序，未经综合判断。") == 1
+    assert "本轮无可展示的策略排序。" in sell_put_block
+    assert "以下仅展示策略原始排序" not in sell_put_block
+    assert "AI建议未完成" not in covered_call_block
+
+
+def test_unavailable_ai_copy_uses_raw_family_presence_when_render_budget_omits_rows() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["candidates"]["sell_put"] = [
+        _candidate(
+            rank=index + 1,
+            symbol=f"P{index}",
+            option_type="put",
+            expiration="2026-08-21",
+            strike=100 + index,
+        )
+        for index in range(41)
+    ]
+    brief["ai_decision_advice"] = {
+        "status": "unavailable",
+        "unavailable_reason": "timeout",
+        "evidence_as_of": None,
+        "sell_put": None,
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": None,
+    }
+    diff = {
+        "changes": [
+            {
+                "change_type": "candidate_added",
+                "action": {
+                    "action_type": "open_candidate",
+                    "strategy_family": "sell_put",
+                    "symbol": f"P{index}",
+                    "option_type": "put",
+                    "expiration": "2026-08-21",
+                    "strike": 100 + index,
+                },
+            }
+            for index in range(41)
+        ]
+    }
+
+    message = render_delta_brief(
+        brief,
+        diff,
+        limits={"max_candidates_per_strategy": 1},
+    )
+    covered_call_block = message[
+        message.index("## Covered Call") : message.index("## 持仓")
+    ]
+
+    assert "补充｜另有 1 个策略候选未展开" in covered_call_block
+    assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
+    assert "本轮没有可展示的策略原始排序" not in covered_call_block
+
+
 def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,

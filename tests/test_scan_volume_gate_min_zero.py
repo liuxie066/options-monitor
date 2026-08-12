@@ -106,6 +106,209 @@ def test_sell_put_scan_emits_calculation_reject_without_csv_authority() -> None:
             "option_multiplier_conflict"
         )
 
+        from src.application.candidate_scanning import evidence_summary_from_decisions
+
+        evidence = evidence_summary_from_decisions(
+            decisions=captured,
+            accepted_count=0,
+        )
+        assert evidence["eligibility_unresolved_count"] == 1
+        assert evidence["policy_rejected_count"] == 0
+
+
+def test_us_sell_put_non_positive_net_premium_is_a_definitive_reject() -> None:
+    from domain.domain.engine import validate_candidate_decision_payload
+    from src.application.candidate_scanning import (
+        evidence_summary_from_decisions,
+        project_evidence_scan_status,
+    )
+    from src.application.scan_sell_put import run_sell_put_scan
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        parsed_dir = root / "parsed"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                phase2_opening_row(
+                    {
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "expiration": "2026-05-01",
+                        "dte": 14,
+                        "contract_symbol": "TINY_PREMIUM_PUT",
+                        "strike": 90.0,
+                        "spot": 100.0,
+                        "bid": 0.01,
+                        "ask": 0.01,
+                        "implied_volatility": 0.30,
+                        "multiplier": 100,
+                        "currency": "USD",
+                    }
+                )
+            ]
+        ).to_csv(parsed_dir / "NVDA_required_data.csv", index=False)
+        captured: list[dict] = []
+
+        out = run_sell_put_scan(
+            symbols=["NVDA"],
+            input_root=root,
+            output=None,
+            min_net_income=0,
+            min_annualized_net_return=0,
+            quiet=True,
+            calculation_decision_sink_fn=captured.extend,
+            quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
+        )
+
+        assert out.empty
+        assert len(captured) == 1
+        decision = captured[0]["opening_decision"]
+        assert validate_candidate_decision_payload(decision) == decision
+        assert decision["rejects"][0]["reason"] == "policy_rejected"
+        assert decision["rejects"][0]["metric_value"]["reason_code"] == (
+            "net_premium_non_positive"
+        )
+        evidence = evidence_summary_from_decisions(
+            decisions=captured,
+            accepted_count=0,
+        )
+        assert evidence["policy_rejected_count"] == 1
+        assert evidence["eligibility_unresolved_count"] == 0
+        assert project_evidence_scan_status(
+            evidence=evidence,
+            candidate_count=0,
+        ) == ("completed", "no_candidate")
+
+
+def test_hk_covered_call_non_positive_net_premium_is_a_definitive_reject() -> None:
+    from domain.domain.engine import validate_candidate_decision_payload
+    from src.application.candidate_scanning import (
+        evidence_summary_from_decisions,
+        project_evidence_scan_status,
+    )
+    from src.application.scan_sell_call import run_sell_call_scan
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        parsed_dir = root / "parsed"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                phase2_opening_row(
+                    {
+                        "symbol": "0700.HK",
+                        "market": "HK",
+                        "option_type": "call",
+                        "expiration": "2026-05-01",
+                        "dte": 14,
+                        "contract_symbol": "TINY_PREMIUM_CALL",
+                        "strike": 110.0,
+                        "spot": 100.0,
+                        "bid": 0.01,
+                        "ask": 0.01,
+                        "implied_volatility": 0.30,
+                        "multiplier": 100,
+                        "currency": "HKD",
+                    }
+                )
+            ]
+        ).to_csv(parsed_dir / "0700.HK_required_data.csv", index=False)
+        captured: list[dict] = []
+
+        out = run_sell_call_scan(
+            symbols=["0700.HK"],
+            input_root=root,
+            output=None,
+            avg_cost=90.0,
+            shares=100,
+            min_net_income=0,
+            min_annualized_net_return=0,
+            quiet=True,
+            calculation_decision_sink_fn=captured.extend,
+            quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
+        )
+
+        assert out.empty
+        assert len(captured) == 1
+        decision = captured[0]["opening_decision"]
+        assert validate_candidate_decision_payload(decision) == decision
+        assert decision["rejects"][0]["reason"] == "policy_rejected"
+        assert decision["rejects"][0]["metric_value"]["reason_code"] == (
+            "net_premium_non_positive"
+        )
+        evidence = evidence_summary_from_decisions(
+            decisions=captured,
+            accepted_count=0,
+        )
+        assert evidence["policy_rejected_count"] == 1
+        assert evidence["eligibility_unresolved_count"] == 0
+        assert project_evidence_scan_status(
+            evidence=evidence,
+            candidate_count=0,
+        ) == ("completed", "no_candidate")
+
+
+def test_non_positive_net_premium_requires_explicit_ready_opening_status() -> None:
+    from src.application.candidate_scanning import (
+        CandidateScanConfig,
+        _calculation_decision_record,
+        evidence_summary_from_decisions,
+    )
+    from src.application.candidate_models import CandidateContractInput
+
+    contract = CandidateContractInput.from_row(
+        pd.Series(
+            phase2_opening_row(
+                {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "expiration": "2026-05-01",
+                    "contract_symbol": "MISSING_OPENING_STATUS",
+                    "strike": 90.0,
+                    "spot": 100.0,
+                    "bid": 0.01,
+                    "ask": 0.01,
+                    "implied_volatility": 0.30,
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "opening_contract_status": "",
+                }
+            )
+        ),
+        mode="put",
+    )
+    decision = _calculation_decision_record(
+        contract=contract,
+        config=CandidateScanConfig(
+            mode="put",
+            symbols=["NVDA"],
+            input_root=Path("."),
+            output=None,
+            empty_output_columns=[],
+            min_dte=0,
+            max_dte=0,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=None,
+            min_volume=None,
+            max_spread_ratio=None,
+            min_annualized_net_return=None,
+            min_net_income=0,
+        ),
+        reason={"rule": "net_premium_non_positive"},
+    )
+
+    reject = decision["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "input_invalid"
+    assert reject["metric_value"]["reason_code"] == "net_premium_non_positive"
+    evidence = evidence_summary_from_decisions(
+        decisions=[decision],
+        accepted_count=0,
+    )
+    assert evidence["eligibility_unresolved_count"] == 1
+    assert evidence["policy_rejected_count"] == 0
+
 
 def test_zero_bid_only_scope_projects_no_candidate_not_partial_data() -> None:
     from src.application.candidate_scanning import evidence_summary_from_decisions
