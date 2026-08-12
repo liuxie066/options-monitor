@@ -21,20 +21,6 @@ from src.application.candidate_models import CandidateBaseValues, CandidateContr
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 
 
-_REJECT_LOG_COLUMNS = (
-    "reject_stage",
-    "reject_rule",
-    "metric_value",
-    "threshold",
-    "symbol",
-    "contract_symbol",
-    "expiration",
-    "strike",
-    "mode",
-    "message",
-)
-
-
 @dataclass(frozen=True)
 class CandidateScanConfig:
     """Application inputs for building a calculable opening-candidate universe.
@@ -48,8 +34,6 @@ class CandidateScanConfig:
     mode: str
     symbols: list[str]
     input_root: Path
-    output: Path | None
-    empty_output_columns: list[str]
     min_dte: int
     max_dte: int
     min_strike: float | None
@@ -62,7 +46,6 @@ class CandidateScanConfig:
     reject_stage: str = "candidate_calculation"
     strategy_family: str | None = None
     strategy_profile: str | None = None
-    quiet: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,7 +55,6 @@ class CandidateScanDependencies:
         [CandidateContractInput, CandidateBaseValues, dict[str, Any]],
         dict[str, Any] | None,
     ]
-    print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
     metric_reject_reason_fn: Callable[[CandidateContractInput], dict[str, Any] | None] | None = None
 
 
@@ -109,27 +91,6 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed == parsed else None
-
-
-def _calculation_reject_row(
-    *,
-    contract: CandidateContractInput,
-    config: CandidateScanConfig,
-    reason: dict[str, Any] | None,
-) -> dict[str, Any]:
-    detail = dict(reason or {})
-    return {
-        "reject_stage": config.reject_stage,
-        "reject_rule": str(detail.get("rule") or "candidate_metrics_unavailable"),
-        "metric_value": detail.get("metric_value"),
-        "threshold": detail.get("threshold"),
-        "symbol": contract.symbol,
-        "contract_symbol": contract.contract_symbol,
-        "expiration": contract.expiration,
-        "strike": contract.strike,
-        "mode": config.mode,
-        "message": str(detail.get("message") or "candidate metrics unavailable"),
-    }
 
 
 def _calculation_decision_record(
@@ -181,30 +142,13 @@ def run_candidate_scan(
     *,
     config: CandidateScanConfig,
     deps: CandidateScanDependencies,
-    reject_log_output: Path | None = None,
     calculation_decision_sink_fn: (
         Callable[[list[dict[str, Any]]], None] | None
     ) = None,
 ) -> pd.DataFrame:
     """Build normalized, calculable rows; do not filter or rank strategy policy."""
 
-    out_path = Path(config.output).resolve() if config.output is not None else None
-    reject_out_path = (
-        Path(reject_log_output).resolve()
-        if reject_log_output is not None
-        else (
-            out_path.with_name(f"{out_path.stem}_reject_log.csv")
-            if out_path is not None
-            else None
-        )
-    )
-    if out_path is not None:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    if reject_out_path is not None:
-        reject_out_path.parent.mkdir(parents=True, exist_ok=True)
-
     rows: list[dict[str, Any]] = []
-    reject_rows: list[dict[str, Any]] = []
     calculation_decisions: list[dict[str, Any]] = []
     for symbol in config.symbols:
         data = _load_required_data_rows(
@@ -223,13 +167,6 @@ def run_candidate_scan(
                         detail = deps.metric_reject_reason_fn(contract)
                     except Exception:
                         detail = None
-                reject_rows.append(
-                    _calculation_reject_row(
-                        contract=contract,
-                        config=config,
-                        reason=detail,
-                    )
-                )
                 calculation_decisions.append(
                     _calculation_decision_record(
                         contract=contract,
@@ -249,19 +186,6 @@ def run_candidate_scan(
             input_root=config.input_root,
         )
 
-    if out_path is not None:
-        if out.empty:
-            pd.DataFrame(columns=config.empty_output_columns).to_csv(out_path, index=False)
-        else:
-            out.to_csv(out_path, index=False)
-    if reject_out_path is not None:
-        reject_log = pd.DataFrame(reject_rows)
-        if reject_log.empty:
-            pd.DataFrame(columns=_REJECT_LOG_COLUMNS).to_csv(reject_out_path, index=False)
-        else:
-            reject_log.to_csv(reject_out_path, index=False)
-    if not config.quiet and out_path is not None and reject_out_path is not None:
-        deps.print_summary_fn(out, out_path, reject_out_path)
     if calculation_decision_sink_fn is not None:
         calculation_decision_sink_fn(calculation_decisions)
     return out

@@ -34,6 +34,26 @@ def test_validate_config_accepts_minimal_sell_put_combo_yield_symbol() -> None:
     validate_config(cfg)
 
 
+def test_validate_config_rejects_removed_combo_yield_output_mode() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True},
+                "combo_yield": {"enabled": True, "output_mode": "separate"},
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    with pytest.raises(SystemExit, match="output_mode has been removed") as exc_info:
+        validate_config(cfg)
+    assert "./om config build" in str(exc_info.value)
+
+
 def test_validate_config_rejects_removed_combo_yield_funding_mode_fields() -> None:
     from src.application.config_validator import validate_config
 

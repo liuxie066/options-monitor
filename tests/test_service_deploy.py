@@ -5815,6 +5815,7 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
 
 
 def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
     from src.application.service_upgrade import service_upgrade
 
     install = tmp_path / "opt" / "options-monitor"
@@ -5826,7 +5827,22 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     config_yaml = runtime / "config.yaml"
-    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  hk:
+    accounts: [lx]
+    symbols: ["0700.HK"]
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
     hk_runtime = runtime / "config.hk.json"
     us_runtime = runtime / "config.us.json"
     (runtime / "service.profile.json").write_text(
@@ -5858,14 +5874,21 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
-            assert not hk_runtime.exists()
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built hk\n", stderr="")
-        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "us"]:
-            assert not us_runtime.exists()
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built us\n", stderr="")
+        if command[:6] == ["./om", "config", "build", "--source", "yaml", "--market"]:
+            output_path = Path(command[-1])
+            assert not output_path.exists()
+            build_yaml_runtime_config_file(
+                repo_root=Path(__file__).resolve().parents[1],
+                market=command[6],
+                config_path=command[8],
+                output_config_path=output_path,
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"built {command[6]}\n",
+                stderr="",
+            )
         if command[:4] == ["./om", "config", "build-assistant", "--source"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
@@ -5894,6 +5917,9 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
     )
     assert hk_runtime.exists()
     assert us_runtime.exists()
+    for runtime_config in (hk_runtime, us_runtime):
+        payload = json.loads(runtime_config.read_text(encoding="utf-8"))
+        assert '"output_mode"' not in json.dumps(payload, sort_keys=True)
     assert (runtime / "resolved" / "config.assistant.json").exists()
     assert not (releases / "1.0.1" / "configs" / "user.hk.json").exists()
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))

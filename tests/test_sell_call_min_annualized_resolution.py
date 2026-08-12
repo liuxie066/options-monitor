@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 BASE = Path(__file__).resolve().parents[1]
-VPY = BASE / '.venv' / 'bin' / 'python'
+VPY = Path(sys.executable)
 
 
 def _add_repo_to_syspath() -> None:
@@ -103,9 +103,6 @@ def test_scan_sell_call_requires_min_annualized_arg() -> None:
             '100',
             '--shares',
             '100',
-            '--quiet',
-            '--output',
-            '/tmp/sell_call_candidates_test.csv',
         ],
         cwd=str(BASE),
         capture_output=True,
@@ -132,9 +129,6 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
             '100',
             '--min-annualized-net-return',
             '1.2',
-            '--quiet',
-            '--output',
-            '/tmp/sell_call_candidates_test.csv',
         ],
         cwd=str(BASE),
         capture_output=True,
@@ -164,17 +158,10 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
     steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         out = steps.run_sell_call_scan_and_summarize(
-            py='python',
-            base=BASE,
             symbol='AAPL',
-            symbol_lower='aapl',
             symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
             cc={'enabled': True, 'min_annualized_net_premium_return': 0.123, 'min_strike_cost_multiplier': 1.02},
-            top_n=3,
             required_data_dir=BASE / 'output',
-            report_dir=BASE / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
             stock={'shares': 300, 'can_sell_qty': 300, 'avg_cost': 100},
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 100},
@@ -206,17 +193,10 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: P
     steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         out = steps.run_sell_call_scan_and_summarize(
-            py='python',
-            base=BASE,
             symbol='0700.HK',
-            symbol_lower='0700.hk',
             symbol_cfg={'symbol': '0700.HK', 'sell_call': {}},
             cc={'enabled': True, 'min_net_income': 100},
-            top_n=3,
             required_data_dir=tmp_path / 'required_data',
-            report_dir=tmp_path / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
             stock={'shares': 500, 'can_sell_qty': 500, 'avg_cost': 400},
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={},
@@ -244,17 +224,10 @@ def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
     stale_path.write_text("stale\n1\n", encoding="utf-8")
 
     out = steps.run_sell_call_scan_and_summarize(
-        py="python",
-        base=BASE,
         symbol="AAPL",
-        symbol_lower="aapl",
         symbol_cfg={"symbol": "AAPL", "sell_call": {}},
         cc={"enabled": True},
-        top_n=3,
         required_data_dir=tmp_path / "required_data",
-        report_dir=tmp_path / "reports",
-        timeout_sec=10,
-        is_scheduled=True,
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 100},
         exchange_rate_converter=CurrencyConverter(
             ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
