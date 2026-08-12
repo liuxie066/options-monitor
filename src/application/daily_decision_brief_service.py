@@ -2113,6 +2113,7 @@ def _append_prefetch_gaps(prefetch: Mapping[str, Any], *, market: str, data_gaps
             "available",
             "completed",
             "cached",
+            "fetched",
         }:
             failed_symbols.add(symbol)
             data_gaps.append(
