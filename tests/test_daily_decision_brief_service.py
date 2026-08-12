@@ -1822,12 +1822,11 @@ def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(t
 
 
 def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from src.application import daily_decision_brief_service as service
     from src.application.daily_decision_brief_renderer import render_full_brief
-    from src.application.daily_decision_brief_service import (
-        assemble_daily_decision_brief,
-    )
 
     account_dir = _account_dir(tmp_path)
     pd.DataFrame([_put_row()]).to_csv(
@@ -1866,8 +1865,22 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
             if key != "content_sha256"
         }
     )
+    monkeypatch.setattr(
+        service,
+        "candidate_universe_summary",
+        lambda _snapshot: {
+            "status": "partial",
+            "affected_scopes": [
+                {
+                    "symbol": "AAPL",
+                    "strategy_mode": "call",
+                    "reason_code": "term_matched_rv_unavailable",
+                }
+            ],
+        },
+    )
 
-    brief = assemble_daily_decision_brief(
+    brief = service.assemble_daily_decision_brief(
         base=tmp_path,
         run_id="run-1",
         account="lx",
@@ -1888,9 +1901,10 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         item.get("symbol") == "AAPL"
         and item.get("strategy_family") == "covered_call"
         and item.get("reason") == "opening_candidate_strategy_partial_data"
+        and item.get("reason_code") == "term_matched_rv_unavailable"
         for item in brief["data_gaps"]
     )
-    assert "AAPL Covered Call｜本轮部分行情证据不可用，候选结果不完整" in (
+    assert "AAPL Covered Call｜期限匹配的已实现波动率（RV）证据不可用，候选结果不完整" in (
         render_full_brief(brief)
     )
 
@@ -2026,6 +2040,147 @@ def test_canonical_prefetch_shape_projects_one_symbol_gap_without_duplicate_aggr
     assert len(matching) == 1
     assert not any(
         item.get("reason") == "required_data_prefetch_errors"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_successfully_fetched_prefetch_symbols_do_not_create_data_gaps(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "errors": 0,
+                "symbols": [
+                    {"symbol": "GOOGL", "status": "fetched"},
+                    {"symbol": "NVDA", "status": "fetched"},
+                ],
+                "results": {"GOOGL": "ok", "NVDA": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert not any(
+        item.get("source") == "required_data_prefetch_summary"
+        and item.get("symbol") in {"GOOGL", "NVDA"}
+        for item in brief["data_gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol_cfg",
+    [
+        {"symbol": "NVDA", "combo_yield": {"enabled": True, "variant": "sp_lc"}},
+        {"symbol": "NVDA", "combo_yield": {"enabled": False, "variant": "cc_lp"}},
+        {"symbol": "0700.HK", "combo_yield": {"enabled": True, "variant": "cc_lp"}},
+    ],
+)
+def test_cc_lp_snapshot_is_not_required_without_enabled_current_market_cc_lp(
+    tmp_path: Path,
+    symbol_cfg: dict,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["symbols"] = [symbol_cfg]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert not any(
+        item.get("reason")
+        in {"cc_lp_snapshot_unavailable", "cc_lp_snapshot_market_mismatch"}
+        for item in brief["data_gaps"]
+    )
+
+
+def test_cc_lp_snapshot_is_required_for_enabled_current_market_cc_lp(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["symbols"] = [
+        {"symbol": "NVDA", "combo_yield": {"enabled": True, "variant": "cc_lp"}}
+    ]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert any(
+        item.get("strategy_family") == "combo_yield"
+        and item.get("variant") == "cc_lp"
+        and item.get("reason") == "cc_lp_snapshot_unavailable"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_cc_lp_snapshot_is_required_when_enabled_by_symbol_template(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["templates"] = {
+        "cc_lp_base": {
+            "combo_yield": {"enabled": True, "variant": "cc_lp"},
+        }
+    }
+    config["symbols"] = [{"symbol": "NVDA", "use": "cc_lp_base"}]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert any(
+        item.get("strategy_family") == "combo_yield"
+        and item.get("variant") == "cc_lp"
+        and item.get("reason") == "cc_lp_snapshot_unavailable"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_symbol_override_can_disable_template_cc_lp_snapshot_requirement(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["templates"] = {
+        "cc_lp_base": {
+            "combo_yield": {"enabled": True, "variant": "cc_lp"},
+        }
+    }
+    config["symbols"] = [
+        {
+            "symbol": "NVDA",
+            "use": "cc_lp_base",
+            "combo_yield": {"enabled": False},
+        }
+    ]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert not any(
+        item.get("reason")
+        in {"cc_lp_snapshot_unavailable", "cc_lp_snapshot_market_mismatch"}
         for item in brief["data_gaps"]
     )
 

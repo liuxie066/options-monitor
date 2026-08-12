@@ -1320,6 +1320,35 @@ def test_fixed_report_card_places_ai_advice_inside_strategy_module() -> None:
     assert "结论｜维持策略排序 1。" in message
 
 
+def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["candidates"]["sell_put"] = []
+    brief["ai_decision_advice"] = {
+        "status": "unavailable",
+        "unavailable_reason": "timeout",
+        "evidence_as_of": None,
+        "sell_put": None,
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": False},
+        "reused": False,
+        "advice_record_id": None,
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+    sell_put_block = message[
+        message.index("## Sell Put") : message.index("## Covered Call")
+    ]
+    covered_call_block = message[
+        message.index("## Covered Call") : message.index("## 组合增强")
+    ]
+
+    assert "AI建议未完成；本轮没有可展示的策略原始排序。" in sell_put_block
+    assert "以下仅展示策略原始排序" not in sell_put_block
+    assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
+
+
 def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,
