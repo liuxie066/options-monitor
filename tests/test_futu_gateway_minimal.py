@@ -88,6 +88,55 @@ def test_futu_api_client_stock_basicinfo_unwraps_quote_result() -> None:
     ]
 
 
+def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> None:
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    base_row = {
+        "order_id": "synthetic-expiry-order",
+        "code": "HK.TCH260730P440000",
+        "trd_side": "BUY_BACK",
+        "order_type": "NORMAL",
+        "order_status": "FILLED_ALL",
+        "qty": 2.0,
+        "price": 0.0,
+        "dealt_qty": 2.0,
+        "dealt_avg_price": 0.0,
+        "last_err_msg": "",
+        "remark": "",
+        "create_time": "2026-07-30 19:25:32",
+    }
+
+    class FakeTrade:
+        def history_order_list_query(self, **_kwargs):
+            positive_row = dict(base_row, order_id="manual", price=0.01)
+            wrong_day_row = dict(
+                base_row,
+                order_id="wrong-day",
+                create_time="2026-07-29 16:00:00",
+            )
+            return 0, [base_row, positive_row, wrong_day_row], None
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.trade = FakeTrade()
+
+        def _ensure_trade_client(self):
+            return self.trade
+
+    client = _FutuAPIClient(FakeBackend(), is_option_chain_cache_enabled=False)
+
+    receipt = client.get_history_orders(acc_id="1001", trd_env="REAL")
+
+    assert receipt["rows"][0]["order_origin"] == "broker_auto"
+    assert (
+        receipt["rows"][0]["order_origin_evidence"]
+        == "futu_zero_price_expiry_shape.v1"
+    )
+    assert "order_origin" not in receipt["rows"][1]
+    assert "order_origin" not in receipt["rows"][2]
+    assert "order_origin" not in base_row
+
+
 def test_get_trading_days_normalizes_market_label() -> None:
     import sys
 
