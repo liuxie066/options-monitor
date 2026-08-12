@@ -210,7 +210,7 @@ output_shared/research/remote_archive/prod/
 ./om research archive inventory --remote prod
 ```
 
-`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。`--require-replay-evidence` 会在源端只选择含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，避免把 scheduler skip / tick 心跳当 replay 样本。
+`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。`--require-replay-evidence` 会在源端只选择含 sealed candidate snapshot/status 或 `candidate_filter_trace.jsonl` 的 run，避免把 scheduler skip / tick 心跳当 replay 样本。历史候选 CSV 名称只作为兼容状态元数据；工具不会打开其内容来构造 replay universe。
 
 `archive verify` 会核对归档并写本地
 `manifests/inventory.latest.json`；`archive inventory` 只读取该 inventory。两者都不
@@ -229,7 +229,7 @@ output_shared/research/remote_archive/prod/
 ./om research archive build-datasets --remote prod --market us --write
 ```
 
-`build-datasets --market us|hk --write` 会按归档 run 的候选/reject 文件名推断市场并过滤样本；不传 `--market` 才会保留所有市场。dataset build 默认会尝试读取每个归档 run 内的 `required_data/parsed/*_required_data.csv`，给 dataset 生成第一批本地 `mark_path_snapshots.jsonl`。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
+`build-datasets --market us|hk --write` 会按已验证 candidate manifest/snapshot 的 market 过滤样本，必要时用 trace metadata 补充 market 识别；不传 `--market` 才会保留所有市场。CSV-only、缺失 snapshot 或 schema 无法验证的历史 run 会被分类为 unsupported，不会被转换成空的成功 dataset。dataset build 默认会尝试读取每个归档 run 内的 `required_data/parsed/*_required_data.csv`，给 dataset 生成第一批本地 `mark_path_snapshots.jsonl`。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
 
 远端清理必须独立执行。默认只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
 
@@ -401,15 +401,14 @@ manifest 中的 `source_quote_observations` 明确采用
   --write
 ```
 
-用与该数据集绑定的 portfolio context 运行 canonical
-scan/event/cash/insurance-underwriting。默认仍是预览，只有 `--write` 才在数据集内
-生成带 source receipt 的 `combo_owned_underwritten_puts.csv`：
+从一个 manifest-bound production run 投影 Funding Put Candidate Engine 决策。默认仍是预览，只有 `--write` 才在数据集内生成带 source receipt 的
+`combo_owned_funding_put_decisions.v1.jsonl`；该步骤不重新运行 underwriting，也不读取候选 CSV：
 
 ```bash
 ./om research shadow-replay prepare-combo-funding-puts \
   --dataset output_shared/research/shadow_replay/datasets/combo-nvda-20260729 \
-  --portfolio-context <prepared-portfolio-context.json> \
-  --usd-per-cny <rate> \
+  --source-run-id <manifest-bound-run-id> \
+  --runs-root output_runs \
   --write
 ```
 
@@ -421,9 +420,7 @@ scan/event/cash/insurance-underwriting。默认仍是预览，只有 `--write` �
   --write
 ```
 
-评估会校验 Put source receipt、捕获文件 hash，并保留原始一基 Funding Put
-underwriting rank。`--underwritten-put-path` 仅用于显式指定同一个 dataset-owned
-canonical artifact；不接受外部或未绑定的 CSV。
+评估会校验 Funding Put JSONL schema、source receipt、候选 manifest 与 Combo snapshot hash，并只消费 sealed snapshot 中已接受的 Funding Put 决策。外部 CSV 和未绑定的本地文件不能成为该 facet 的来源。
 baseline 和 proposed 使用同一 pair universe，但调用不同的 rank authority；研究排序
 不读取 `premium_funding_score`。显式 `min_net_credit_retention` 和
 `max_call_cost_to_put_credit` 同时存在时必须分别通过。
