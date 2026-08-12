@@ -107,41 +107,13 @@ def _result(*, ran_scan: bool = True, reason: str = "ok") -> AccountResult:
     return AccountResult("lx", ran_scan, True, reason, "legacy markdown must not be parsed")
 
 
-def test_brief_carries_ai_decision_advice_section(tmp_path: Path) -> None:
-    # Module not configured: the section is a deterministic not_applicable
-    # view, and the normalized brief exposes it for diffing/rendering.
+def test_brief_omits_retired_ai_decision_advice_section(tmp_path: Path) -> None:
     brief = _assemble(tmp_path)
-    section = brief.get("ai_decision_advice")
-    assert isinstance(section, dict)
-    assert section["status"] == "not_applicable"
-    assert section["zero_candidate"] == {"sell_put": False, "covered_call": False}
-    assert "evidence_index" not in section
-    assert brief.get("ai_decision_advice_evidence_index") == {}
+    assert "ai_decision_advice" not in brief
+    assert "ai_decision_advice_evidence_index" not in brief
 
 
-def test_advice_failure_does_not_block_daily_brief(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    monkeypatch.setattr(
-        service,
-        "run_or_reuse_ai_decision_advice",
-        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError("slow")),
-    )
-
-    brief = _assemble(tmp_path)
-
-    assert brief["run_id"] == "run-1"
-    assert brief["ai_decision_advice"]["status"] == "unavailable"
-    assert (
-        brief["ai_decision_advice"]["unavailable_reason"]
-        == "advice_execution_failed"
-    )
-
-
-def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
+def test_brief_uses_explicit_candidate_snapshot_and_ignores_retired_handoffs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -160,7 +132,6 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
     )
     portfolio = {"envelope": {"marker": "verified-pm"}}
     option_context = {"marker": "verified-option"}
-    captured: dict[str, Any] = {}
     monkeypatch.setattr(
         service,
         "load_opening_candidate_snapshot",
@@ -168,24 +139,6 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
             AssertionError("explicit candidate snapshot must not be reread")
         ),
     )
-
-    def advice(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "not_applicable",
-            "unavailable_reason": None,
-            "evidence_as_of": None,
-            "sell_put": None,
-            "covered_call": None,
-            "zero_candidate": {
-                "sell_put": False,
-                "covered_call": False,
-            },
-            "reused": False,
-            "advice_record_id": None,
-        }
-
-    monkeypatch.setattr(service, "run_or_reuse_ai_decision_advice", advice)
 
     brief = service.assemble_daily_decision_brief(
         base=tmp_path,
@@ -203,9 +156,8 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
     )
 
     assert brief["candidates"]["sell_put"]
-    assert captured["candidate_snapshot"] is not None
-    assert captured["portfolio_distribution"] is portfolio
-    assert captured["option_positions_context"] is option_context
+    assert "ai_decision_advice" not in brief
+    assert "ai_decision_advice_evidence_index" not in brief
 
 
 def _assemble(

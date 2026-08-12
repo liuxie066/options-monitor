@@ -537,24 +537,30 @@ def test_daily_brief_digest_handles_non_finite_nested_values_deterministically()
     assert daily_brief_digest(with_nan) == daily_brief_digest(with_none)
 
 
-def test_daily_brief_digest_compatibility_is_limited_to_absent_optional_defaults() -> None:
+def test_daily_brief_digest_compatibility_preserves_exact_retired_overlay_shape() -> None:
     from domain.domain.daily_decision_brief import (
         daily_brief_compatible_digests,
         normalize_daily_decision_brief,
     )
 
     historical = _brief(revision=0)
+    historical["ai_decision_advice"] = {"status": "completed", "opaque": {"value": 1}}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
     compatible = daily_brief_compatible_digests(historical)
     assert len(compatible) == 2
 
     materialized = normalize_daily_decision_brief(historical)
-    assert "ai_decision_advice" in materialized
-    assert "ai_decision_advice_evidence_index" in materialized
+    assert "ai_decision_advice" not in materialized
+    assert "ai_decision_advice_evidence_index" not in materialized
     assert daily_brief_compatible_digests(materialized) == (compatible[0],)
 
     tampered = deepcopy(historical)
     tampered["strategy_summary"] = "different strategy facts"
     assert compatible[1] not in daily_brief_compatible_digests(tampered)
+
+    tampered_overlay = deepcopy(historical)
+    tampered_overlay["ai_decision_advice"]["opaque"]["value"] = 2
+    assert compatible[1] not in daily_brief_compatible_digests(tampered_overlay)
 
 
 def test_diff_emits_candidate_bound_event_material_changes() -> None:

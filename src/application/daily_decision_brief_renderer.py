@@ -6,9 +6,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.application.ai_decision_advice.render import render_family_advice_lines
-
-
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_MAX_REJECTIONS = 5
@@ -28,12 +25,6 @@ _STRATEGY_LABELS = {
     "short_put": "Sell Put",
     "covered_call": "Covered Call",
     "combo_yield": "组合增强",
-}
-_AI_ADVICE_ACTION_LABELS = {
-    "keep": "维持",
-    "switch": "改选",
-    "defer": "暂缓",
-    "needs_review": "需人工判断",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
 _EVENT_TYPE_LABELS = {"earnings": "财报", "ex_dividend": "除息", "split": "拆股"}
@@ -115,22 +106,6 @@ def build_daily_brief_user_view(
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
     fixed_report_reminders = list(reminders)
     funds = _fund_views(brief)
-    ai_candidate_contracts, ai_candidate_ranks = _ai_candidate_fact_maps(
-        brief,
-        market=market,
-    )
-    raw_candidates = brief.get("candidates")
-    ai_raw_candidate_presence = {
-        family: any(
-            isinstance(item, Mapping)
-            for item in (
-                raw_candidates.get(family) or []
-                if isinstance(raw_candidates, Mapping)
-                else []
-            )
-        )
-        for family in ("sell_put", "covered_call")
-    }
     strategy_failure_items = _strategy_failure_items(brief)
     reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
@@ -203,11 +178,6 @@ def build_daily_brief_user_view(
         "capacity": capacity,
         "reminders": reminders,
         "fixed_report_reminders": fixed_report_reminders,
-        "ai_decision_advice": brief.get("ai_decision_advice"),
-        "ai_decision_advice_evidence_index": brief.get("ai_decision_advice_evidence_index"),
-        "_ai_candidate_contract_by_id": ai_candidate_contracts,
-        "_ai_candidate_rank_by_id": ai_candidate_ranks,
-        "_ai_raw_candidate_presence": ai_raw_candidate_presence,
     }
     return view
 
@@ -480,36 +450,8 @@ def _render_user_view(
         lines.extend([_VISIBLE_BLANK_LINE, "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    market = _upper(view.get("market"))
-    ai_section = view.get("ai_decision_advice")
-    ai_zero = (
-        ai_section.get("zero_candidate")
-        if isinstance(ai_section, Mapping) and isinstance(ai_section.get("zero_candidate"), Mapping)
-        else {}
-    )
-    ai_status = str(ai_section.get("status") or "") if isinstance(ai_section, Mapping) else ""
-    ai_visible_families = {
-        family
-        for family in ("sell_put", "covered_call")
-        if isinstance(ai_section, Mapping)
-        and (
-            bool(ai_zero.get(family))
-            or ai_status != "not_applicable"
-        )
-    }
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families | ai_visible_families
-    global_ai_notice = (
-        _fixed_report_ai_notice(
-            ai_section,
-            candidates=candidates,
-            raw_candidate_presence=view.get("_ai_raw_candidate_presence"),
-        )
-        if projection == "fixed_report"
-        else ""
-    )
-    if global_ai_notice:
-        lines.extend([_VISIBLE_BLANK_LINE, global_ai_notice])
+    visible_families = candidate_families
     if projection == "candidate_alert":
         if not candidates:
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
@@ -520,14 +462,6 @@ def _render_user_view(
                 if not family_rows:
                     continue
                 lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
-                advice_lines = _ai_advice_lines_for_family(
-                    view,
-                    family=family,
-                    market=market,
-                    heading_level=heading_level + 2,
-                )
-                if advice_lines:
-                    lines.extend(advice_lines)
                 lines.extend([_VISIBLE_BLANK_LINE, f"{subsection_mark} 新增策略候选"])
                 for item in family_rows:
                     lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
@@ -555,17 +489,6 @@ def _render_user_view(
             if family not in visible_families:
                 continue
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
-            advice_lines = _ai_advice_lines_for_family(
-                view,
-                family=family,
-                market=market,
-                heading_level=heading_level + 2,
-            )
-            if projection == "fixed_report":
-                advice_lines = _compact_fixed_report_advice(advice_lines)
-            if advice_lines:
-                lines.extend(advice_lines)
-                lines.append(_VISIBLE_BLANK_LINE)
             if family_rows:
                 if projection != "fixed_report":
                     lines.append(f"{subsection_mark} 策略候选")
@@ -662,38 +585,10 @@ def _render_user_view_card(
         lines.extend(["", "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    market = _upper(view.get("market"))
-    ai_section = view.get("ai_decision_advice")
-    ai_zero = (
-        ai_section.get("zero_candidate")
-        if isinstance(ai_section, Mapping) and isinstance(ai_section.get("zero_candidate"), Mapping)
-        else {}
-    )
-    ai_status = str(ai_section.get("status") or "") if isinstance(ai_section, Mapping) else ""
-    ai_visible_families = {
-        family
-        for family in ("sell_put", "covered_call")
-        if isinstance(ai_section, Mapping)
-        and (
-            bool(ai_zero.get(family))
-            or ai_status != "not_applicable"
-        )
-    }
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families | ai_visible_families
+    visible_families = candidate_families
     if projection == "candidate_alert":
         visible_families = candidate_families
-    global_ai_notice = (
-        _fixed_report_ai_notice(
-            ai_section,
-            candidates=candidates,
-            raw_candidate_presence=view.get("_ai_raw_candidate_presence"),
-        )
-        if projection == "fixed_report"
-        else ""
-    )
-    if global_ai_notice:
-        lines.extend(["", global_ai_notice])
     if not visible_families:
         lines.extend(["", "## 策略候选"])
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
@@ -703,19 +598,10 @@ def _render_user_view_card(
             if family not in visible_families:
                 continue
             family_rows = [item for item in candidates if item.get("family") == family]
-            advice_lines = _ai_advice_lines_for_family(
-                view,
-                family=family,
-                market=market,
-                heading_level=3,
-            )
-            if projection == "fixed_report":
-                advice_lines = _compact_fixed_report_advice(advice_lines)
             lines.extend(
                 _render_candidate_family_card(
                     family,
                     family_rows,
-                    advice_lines=advice_lines,
                     candidate_heading=candidate_heading,
                 )
             )
@@ -811,14 +697,10 @@ def _render_candidate_family_card(
     family: str,
     rows: list[Mapping[str, Any]],
     *,
-    advice_lines: Iterable[str] = (),
     candidate_heading: str = "策略候选",
 ) -> list[str]:
     heading = _STRATEGY_LABELS.get(family, family)
     lines = ["", f"## {heading}"]
-    advice = [str(item) for item in advice_lines if str(item).strip()]
-    if advice:
-        lines.extend(["", *advice])
     if rows and candidate_heading:
         lines.extend(["", f"### {candidate_heading}"])
     for item in rows:
@@ -861,44 +743,6 @@ def _render_candidate_event_card(
         f"事件｜{'、'.join(labels)}：{event_line}"
         for event_line, labels in grouped.items()
     ]
-
-
-def _fixed_report_ai_notice(
-    section: Any,
-    *,
-    candidates: list[Mapping[str, Any]],
-    raw_candidate_presence: Any = None,
-) -> str:
-    if not isinstance(section, Mapping) or _lower(section.get("status")) != "unavailable":
-        return ""
-    if isinstance(raw_candidate_presence, Mapping):
-        has_ranked_candidates = any(
-            raw_candidate_presence.get(family) is True
-            for family in ("sell_put", "covered_call")
-        )
-    else:
-        has_ranked_candidates = any(
-            str(item.get("family") or "") in {"sell_put", "covered_call"}
-            for item in candidates
-        )
-    if has_ranked_candidates:
-        return "AI｜未完成；以下仅为策略排序，未经综合判断。"
-    return "AI｜未完成。"
-
-
-def _compact_fixed_report_advice(lines: Iterable[str]) -> list[str]:
-    rendered = [str(item) for item in lines if str(item).strip()]
-    if len(rendered) != 2 or rendered[0].lstrip("# ").strip() != "AI建议":
-        return rendered
-    if rendered[1] == "本轮无可供 AI 评估的策略候选。":
-        return ["本轮无策略候选。"]
-    if rendered[1].startswith("本轮没有证据完整、可供 AI 评估的策略候选"):
-        return ["本轮无证据完整候选；部分合约因硬证据缺失未纳入。"]
-    if rendered[1] == "AI建议未完成；本轮没有可展示的策略原始排序。":
-        return ["本轮无可展示的策略排序。"]
-    if rendered[1].startswith("AI建议未完成；以下仅展示策略原始排序"):
-        return []
-    return rendered
 
 
 def _compact_fixed_report_event(value: str) -> str:
@@ -944,157 +788,6 @@ def _candidate_detail_label(value: Any) -> str:
     return "指标"
 
 
-def _ai_referenced_candidate_ids(brief: Mapping[str, Any]) -> set[str]:
-    """Candidate ids referenced by AI decisions (design 15.6)."""
-
-    section = brief.get("ai_decision_advice")
-    if not isinstance(section, Mapping):
-        return set()
-    ids: set[str] = set()
-    rows = []
-    sell_put = section.get("sell_put")
-    if isinstance(sell_put, Mapping):
-        rows.append(sell_put)
-    for row in section.get("covered_call") or []:
-        if isinstance(row, Mapping):
-            rows.append(row)
-    for row in rows:
-        for key in ("baseline_candidate_id", "selected_candidate_id"):
-            value = str(row.get(key) or "").strip()
-            if value:
-                ids.add(value)
-    return ids
-
-
-def _ai_candidate_fact_maps(
-    brief: Mapping[str, Any],
-    *,
-    market: str,
-) -> tuple[dict[str, str], dict[str, int]]:
-    """candidate_id -> (human contract label, strategy rank) for AI rendering."""
-
-    prepared_contracts = brief.get("_ai_candidate_contract_by_id")
-    prepared_ranks = brief.get("_ai_candidate_rank_by_id")
-    if isinstance(prepared_contracts, Mapping) and isinstance(prepared_ranks, Mapping):
-        return (
-            {
-                str(key): str(value)
-                for key, value in prepared_contracts.items()
-                if str(key).strip() and str(value).strip()
-            },
-            {
-                str(key): int(value)
-                for key, value in prepared_ranks.items()
-                if str(key).strip() and isinstance(value, int) and not isinstance(value, bool)
-            },
-        )
-
-    candidates = (
-        brief.get("_ai_candidate_catalog")
-        if isinstance(brief.get("_ai_candidate_catalog"), Mapping)
-        else brief.get("candidates")
-    )
-    if isinstance(candidates, Mapping):
-        by_family: dict[str, list[Mapping[str, Any]]] = {}
-        for family in ("sell_put", "covered_call"):
-            by_family[family] = [
-                row for row in candidates.get(family) or [] if isinstance(row, Mapping)
-            ]
-    else:
-        # view-shaped input: flat candidate views carry `family`.
-        by_family = {"sell_put": [], "covered_call": []}
-        for row in candidates if isinstance(candidates, list) else []:
-            if not isinstance(row, Mapping):
-                continue
-            family = str(row.get("family") or "")
-            if family in by_family:
-                by_family[family].append(row)
-    source = by_family
-    contracts: dict[str, str] = {}
-    ranks: dict[str, int] = {}
-    for family in ("sell_put", "covered_call"):
-        for row in source.get(family) or []:
-            if not isinstance(row, Mapping):
-                continue
-            candidate_id = str(row.get("candidate_id") or "").strip()
-            if not candidate_id:
-                continue
-            symbol = _upper(row.get("symbol")) or "未知标的"
-            contract = _human_contract(
-                expiration=row.get("expiration"),
-                strike=row.get("strike"),
-                option_type=row.get("option_type"),
-                market=market,
-            )
-            contracts[candidate_id] = f"{symbol} {contract}".strip()
-            rank = _positive_rank(row.get("rank"), fallback=0)
-            if rank:
-                ranks[candidate_id] = rank
-    return contracts, ranks
-
-
-def _ai_advice_lines_for_family(
-    brief: Mapping[str, Any],
-    *,
-    family: str,
-    market: str,
-    heading_level: int = 3,
-) -> list[str]:
-    if family not in {"sell_put", "covered_call"}:
-        return []
-    section = brief.get("ai_decision_advice")
-    if not isinstance(section, Mapping):
-        return []
-    contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
-    evidence_by_ref = _ai_evidence_ref_map(brief)
-    raw_presence = brief.get("_ai_raw_candidate_presence")
-    if isinstance(raw_presence, Mapping) and isinstance(
-        raw_presence.get(family), bool
-    ):
-        has_raw_candidates = raw_presence[family]
-    else:
-        candidates = brief.get("candidates")
-        if isinstance(candidates, Mapping):
-            has_raw_candidates = any(
-                isinstance(item, Mapping)
-                for item in candidates.get(family) or []
-            )
-        else:
-            candidate_rows = candidates if isinstance(candidates, list) else []
-            has_raw_candidates = any(
-                isinstance(item, Mapping)
-                and _lower(item.get("family")) == family
-                for item in candidate_rows
-            )
-    return render_family_advice_lines(
-        section,
-        family=family,
-        candidate_contract_by_id=contracts,
-        candidate_rank_by_id=ranks,
-        evidence_by_ref=evidence_by_ref,
-        heading_level=heading_level,
-        has_raw_candidates=has_raw_candidates,
-    )
-
-
-def _ai_evidence_ref_map(brief: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    """Resolve frozen external evidence refs for AI advice source lines (15.4)."""
-
-    view = brief.get("ai_decision_advice_evidence_index")
-    symbols = view.get("symbols") if isinstance(view, Mapping) else None
-    out: dict[str, Mapping[str, Any]] = {}
-    for symbol_row in symbols or []:
-        if not isinstance(symbol_row, Mapping):
-            continue
-        for row in symbol_row.get("evidence") or []:
-            if not isinstance(row, Mapping):
-                continue
-            ref = str(row.get("ref") or "")
-            if ref:
-                out[ref] = row
-    return out
-
-
 def _candidate_views(
     brief: Mapping[str, Any],
     *,
@@ -1104,7 +797,6 @@ def _candidate_views(
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     changed_keys = _changed_candidate_keys(diff)
-    ai_referenced_ids = _ai_referenced_candidate_ids(brief)
     budget = _RenderBudget()
     out: list[dict[str, Any]] = []
     omissions: list[str] = []
@@ -1114,20 +806,10 @@ def _candidate_views(
     for family in ("sell_put", "covered_call", "combo_yield"):
         rows = [item for item in source.get(family) or [] if isinstance(item, Mapping)]
         changed_rows = [row for row in rows if _candidate_row_keys(family, row) & changed_keys]
-        # design 15.6: AI-referenced candidates must be shown even beyond the
-        # ordinary top-N budget, without changing their true strategy rank.
-        ai_rows = [
-            row
-            for row in rows
-            if row not in changed_rows
-            and str(row.get("candidate_id") or "") in ai_referenced_ids
-        ]
-        unchanged_rows = [
-            row for row in rows if row not in changed_rows and row not in ai_rows
-        ]
+        unchanged_rows = [row for row in rows if row not in changed_rows]
         selected = budget.take(
-            [*changed_rows, *ai_rows, *unchanged_rows],
-            max(limit, len(changed_rows) + len(ai_rows)),
+            [*changed_rows, *unchanged_rows],
+            max(limit, len(changed_rows)),
         )
         selected_by_family[family] = selected
         omitted = len(rows) - len(selected)
@@ -2068,22 +1750,6 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
             after = _whole_number(change.get("after"))
             if label and before is not None and after is not None:
                 capacity_changes.append(f"较上一轮：{label} 条件容量 {before} → {after} 手")
-        elif change_type == "ai_decision_advice_action_changed":
-            scope_label = _ai_advice_scope_label(change.get("ai_advice_scope"))
-            before_label = _AI_ADVICE_ACTION_LABELS.get(
-                _lower(change.get("before")),
-                str(change.get("before") or "原建议"),
-            )
-            after_label = _AI_ADVICE_ACTION_LABELS.get(
-                _lower(change.get("after")),
-                str(change.get("after") or "新建议"),
-            )
-            summaries.append(
-                f"较上一轮：{scope_label} AI建议由{before_label}变为{after_label}"
-            )
-        elif change_type == "ai_decision_advice_selected_candidate_changed":
-            scope_label = _ai_advice_scope_label(change.get("ai_advice_scope"))
-            summaries.append(f"较上一轮：{scope_label} AI改选目标已变化")
         elif action_type == "close_position":
             symbol = _upper(action.get("symbol"))
             if symbol and symbol not in position_symbols:
@@ -2124,16 +1790,6 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     if len(summaries) <= 2:
         return summaries
     return [*summaries[:2], f"另有 {len(summaries) - 2} 项变化"]
-
-
-def _ai_advice_scope_label(value: Any) -> str:
-    scope = str(value or "").strip()
-    if scope == "sell_put":
-        return "Sell Put"
-    if scope.startswith("covered_call:"):
-        symbol = _upper(scope.split(":", 1)[1])
-        return f"Covered Call {symbol}".strip()
-    return "AI建议"
 
 
 def _event_change_summary(change: Mapping[str, Any], *, market: str) -> str:
@@ -2363,11 +2019,6 @@ def _candidate_alert_brief(
         if family in candidates and isinstance(representative, Mapping):
             candidates[family].append(representative)
     filtered = dict(brief)
-    filtered["_ai_candidate_catalog"] = (
-        brief.get("_ai_candidate_catalog")
-        if isinstance(brief.get("_ai_candidate_catalog"), Mapping)
-        else brief.get("candidates")
-    )
     filtered["candidates"] = candidates
     filtered["positions"] = []
     return filtered, max(0, len(selected) - len(shown))

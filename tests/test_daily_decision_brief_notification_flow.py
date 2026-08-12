@@ -773,6 +773,190 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     assert retry_calls[0]["idempotency_key"] == calls[0]["idempotency_key"]
 
 
+@pytest.mark.parametrize("retry_status", ("pending", "ambiguous"))
+def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
+    monkeypatch,
+    tmp_path: Path,
+    retry_status: str,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+
+    _patch_assembler(monkeypatch)
+    first_calls: list[dict] = []
+    _patch_sender(
+        monkeypatch,
+        calls=first_calls,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    first = _request(tmp_path, run_id="retired-ai-seed")
+    assert mod.run_tick_notification_flow(first.request) == 1
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    envelope = retry["envelope"]
+    assert envelope["status"] == "pending"
+
+    revision_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / f"daily_decision_brief.US.{MARKET_DATE}.r{envelope['revision']:04d}.json"
+    )
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    legacy_digest = daily_brief_compatible_digests(historical)[-1]
+
+    delivery_path = retry["path"]
+    delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "source_digest"
+    ] = legacy_digest
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "status"
+    ] = retry_status
+    delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
+    state_before = delivery_path.read_bytes()
+
+    retry_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=retry_calls)
+    second = _request(tmp_path, run_id="retired-ai-delivery-only", delivery_only=True)
+
+    assert mod.run_tick_notification_flow(second.request) == 2
+    assert retry_calls == []
+    assert delivery_path.read_bytes() == state_before
+    audit = second.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert audit["delivery_key"] == envelope["delivery_key"]
+    assert audit["error_code"] == "legacy_ai_payload_retired"
+    assert audit["blocked"] is True
+    assert second.request.audit_helper.failures == [
+        ("legacy_ai_payload_retired", "daily_brief_retry_guard")
+    ]
+    assert second.completions == [
+        {
+            "status": "unsupported_failed",
+            "message": "legacy_ai_payload_retired",
+            "ok": False,
+            "error_code": "legacy_ai_payload_retired",
+        }
+    ]
+
+    post_scan_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=post_scan_calls)
+    post_scan = _request(tmp_path, run_id="retired-ai-post-scan")
+    assert mod.run_tick_notification_flow(post_scan.request) == 2
+    assert post_scan_calls == []
+    assert delivery_path.read_bytes() == state_before
+    current_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / "daily_decision_brief.US.current.json"
+    )
+    assert json.loads(current_path.read_text(encoding="utf-8"))["run_id"] == (
+        "retired-ai-post-scan"
+    )
+    post_scan_audit = post_scan.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert post_scan_audit["delivery_key"] == envelope["delivery_key"]
+    assert post_scan_audit["error_code"] == "legacy_ai_payload_retired"
+
+
+def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(
+        monkeypatch,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    seed = _request(
+        tmp_path,
+        run_id="retired-ai-mixed-seed",
+        accounts=("lx", "sy"),
+    )
+    assert mod.run_tick_notification_flow(seed.request) == 1
+
+    lx_retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    lx_envelope = lx_retry["envelope"]
+    revision_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / f"daily_decision_brief.US.{MARKET_DATE}.r{lx_envelope['revision']:04d}.json"
+    )
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    delivery = json.loads(lx_retry["path"].read_text(encoding="utf-8"))
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "source_digest"
+    ] = daily_brief_compatible_digests(historical)[-1]
+    lx_retry["path"].write_text(json.dumps(delivery), encoding="utf-8")
+    lx_state_before = lx_retry["path"].read_bytes()
+
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    retry = _request(
+        tmp_path,
+        run_id="retired-ai-mixed-retry",
+        accounts=("lx", "sy"),
+        delivery_only=True,
+    )
+
+    assert mod.run_tick_notification_flow(retry.request) == 1
+    assert len(calls) == 1
+    assert "sy" in calls[0]["message"]
+    assert "lx" not in calls[0]["message"]
+    assert lx_retry["path"].read_bytes() == lx_state_before
+    assert retry.completions == [
+        {
+            "status": "unsupported_failed",
+            "message": "legacy_ai_payload_retired",
+            "ok": False,
+            "error_code": "legacy_ai_payload_retired",
+        }
+    ]
+    assert retry.request.audit_helper.failures == [
+        ("legacy_ai_payload_retired", "daily_brief_retry_guard")
+    ]
+
+
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import (
