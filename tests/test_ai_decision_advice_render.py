@@ -74,6 +74,22 @@ def test_unavailable_message():
     assert "原始排序" in lines[1]
 
 
+def test_unavailable_without_raw_candidates_does_not_claim_ranking_follows():
+    section = _section(status="unavailable", unavailable_reason="timeout", sell_put=None)
+
+    lines = render_family_advice_lines(
+        section,
+        family="sell_put",
+        has_raw_candidates=False,
+    )
+
+    assert lines == [
+        "### AI建议",
+        "AI建议未完成；本轮没有可展示的策略原始排序。",
+    ]
+    assert "以下仅展示" not in lines[1]
+
+
 def test_keep_copy_uses_no_fabricated_safety_language():
     lines = render_family_advice_lines(_section(), family="sell_put")
     text = "\n".join(lines)
