@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.13.13 - 2026-08-12
+
+### Improvements
+- Condensed the scheduled Daily Brief by removing repeated AI and candidate headings, shortening event copy, and showing shared-cash guidance only when per-candidate capacity is visible.
+
+### Bug Fixes
+- Limited fixed-report reminders to confirmed quote-prefetch, strategy-scan, or candidate-snapshot failures, while keeping ordinary no-bid and partial-data outcomes in structured audit evidence and treating successful `fetched` prefetch results as available.
+
 ## 1.13.12 - 2026-08-12
 
 ### Improvements
