@@ -308,6 +308,32 @@ def test_resolve_trade_close_retries_failed_deal_when_explicitly_allowed() -> No
     assert result.reason == "preview_close"
 
 
+def test_resolve_trade_open_accepts_futu_float_transport_noise() -> None:
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-float-transport-noise",
+            order_id="order-float-transport-noise",
+            symbol="3690.HK",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.5699999999999998,
+            strike=80.0,
+            multiplier=500,
+            expiration_ymd="2026-09-29",
+            trade_time_ms=1_786_512_490_000,
+        ),
+        repo=FakeRepo([]),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "dry_run"
+    assert result.action == "open"
+    assert result.reason == "preview_open"
+    assert result.operations[0].to_payload()["fields"]["premium"] == 1.57
+
+
 def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
     repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
 

@@ -2,8 +2,13 @@
 
 ## Unreleased
 
-### Breaking Changes
+### Improvements
 - Retired AI Decision Advice end to end: removed model generation, external-news collection, portfolio-distribution preparation, configuration, managed collector services, and current Daily Brief/Agent rendering. Deterministic candidate, position, funds, Close Advice, and Daily Brief authorities remain unchanged; legacy frozen deliveries containing AI content fail closed until separately resolved.
+
+### Bug Fixes
+- Preserved candidate and Daily Brief evidence integrity by treating deterministic non-positive premiums as policy rejections, retaining specific sealed RV gaps, accepting successful prefetch receipts, and requiring CC+LP snapshots only when that variant is effectively enabled.
+- Normalized binary floating-point transport noise at the three-decimal trade-price boundary, so broker fills such as `1.5699999999999998` resolve as `1.570` while genuinely over-precise prices remain rejected.
+- Classified only exact zero-price, fully filled Futu option orders recorded on contract expiration as broker-generated expiry receipts, allowing due lifecycle cases to settle while ambiguous orders continue to fail closed for review.
 
 ## 1.13.13 - 2026-08-12
 
