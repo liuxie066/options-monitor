@@ -42,9 +42,6 @@ from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
 )
-from src.application.prepared_portfolio_distribution import (
-    PreparedPortfolioDistribution,
-)
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     candidate_universe_summary,
@@ -97,16 +94,6 @@ def assemble_daily_decision_brief(
     now_utc: datetime | None = None,
     opening_candidate_snapshot: Mapping[str, Any] | None = None,
     candidate_snapshot_unavailable_reason: str | None = None,
-    prepared_portfolio_distribution: (
-        PreparedPortfolioDistribution | Mapping[str, Any] | None
-    ) = None,
-    portfolio_distribution_unavailable_reason: str = (
-        "portfolio_unavailable"
-    ),
-    prepared_option_positions_context: Mapping[str, Any] | None = None,
-    option_positions_unavailable_reason: str = (
-        "option_positions_unavailable"
-    ),
 ) -> dict[str, Any]:
     """Assemble one market-qualified brief from structured run artifacts only."""
 
@@ -594,16 +581,6 @@ def assemble_daily_decision_briefs(
     now_utc: datetime | None = None,
     opening_candidate_snapshot: Mapping[str, Any] | None = None,
     candidate_snapshot_unavailable_reason: str | None = None,
-    prepared_portfolio_distribution: (
-        PreparedPortfolioDistribution | Mapping[str, Any] | None
-    ) = None,
-    portfolio_distribution_unavailable_reason: str = (
-        "portfolio_unavailable"
-    ),
-    prepared_option_positions_context: Mapping[str, Any] | None = None,
-    option_positions_unavailable_reason: str = (
-        "option_positions_unavailable"
-    ),
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for raw_market in markets_to_run:
@@ -623,18 +600,6 @@ def assemble_daily_decision_briefs(
             opening_candidate_snapshot=opening_candidate_snapshot,
             candidate_snapshot_unavailable_reason=(
                 candidate_snapshot_unavailable_reason
-            ),
-            prepared_portfolio_distribution=(
-                prepared_portfolio_distribution
-            ),
-            portfolio_distribution_unavailable_reason=(
-                portfolio_distribution_unavailable_reason
-            ),
-            prepared_option_positions_context=(
-                prepared_option_positions_context
-            ),
-            option_positions_unavailable_reason=(
-                option_positions_unavailable_reason
             ),
         )
     return out

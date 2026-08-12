@@ -8,7 +8,7 @@ YAML、JSON、JSONL、命令参数、日志、support bundle 或聊天记录。
 | 逻辑名 | 用途 | 旧 env 名（仅兼容） |
 |---|---|---|
 | `llm.default.api_key` | OpenAI/default LLM | `OM_LLM_API_KEY` |
-| `llm.deepseek.api_key` | DeepSeek / AI Decision Advice | `DEEPSEEK_API_KEY` |
+| `llm.deepseek.api_key` | DeepSeek Assistant provider | `DEEPSEEK_API_KEY` |
 | `llm.moonshot.api_key` | Moonshot/Kimi | `MOONSHOT_API_KEY` |
 | `llm.kimi.api_key` | Kimi Code | `KIMI_API_KEY` |
 | `feishu.holdings.app_secret` | Feishu holdings app | `OM_FEISHU_APP_SECRET` |

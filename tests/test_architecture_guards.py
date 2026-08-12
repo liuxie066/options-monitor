@@ -321,6 +321,49 @@ def test_tool_contracts_do_not_carry_planner_routing_metadata() -> None:
         assert field_name not in tool_fields
 
 
+def test_retired_ai_advice_handoff_fields_are_absent_from_runtime_contracts() -> None:
+    from dataclasses import fields
+    from inspect import signature
+
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+        assemble_daily_decision_briefs,
+    )
+    from src.application.tick_account_execution import TickAccountExecutionOutcome
+    from src.application.tick_notification_flow import TickNotificationRequest
+
+    retired_brief_parameters = {
+        "prepared_portfolio_distribution",
+        "portfolio_distribution_unavailable_reason",
+        "prepared_option_positions_context",
+        "option_positions_unavailable_reason",
+    }
+    retired_tick_fields = {
+        "opening_candidate_snapshot_by_account",
+        "opening_candidate_snapshot_unavailable_by_account",
+        "prepared_portfolio_distribution_by_account",
+        "prepared_portfolio_distribution_artifact_path_by_account",
+        "prepared_portfolio_distribution_artifact_sha256_by_account",
+        "prepared_portfolio_distribution_status_by_account",
+        "prepared_option_positions_context_by_account",
+        "prepared_option_positions_context_unavailable_by_account",
+        "prepared_option_positions_context_manifest_by_account",
+        "prepared_option_positions_context_manifest_sha256_by_account",
+    }
+
+    for assembler in (
+        assemble_daily_decision_brief,
+        assemble_daily_decision_briefs,
+    ):
+        assert retired_brief_parameters.isdisjoint(signature(assembler).parameters)
+    assert retired_tick_fields.isdisjoint(
+        field.name for field in fields(TickNotificationRequest)
+    )
+    assert retired_tick_fields.isdisjoint(
+        field.name for field in fields(TickAccountExecutionOutcome)
+    )
+
+
 def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
     from src.application.agent_tool_registry import tool_names
     from src.application.assistant.capability_catalog import command_specs

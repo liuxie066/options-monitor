@@ -43,7 +43,7 @@ def _secure_store(tmp_path: Path, credential_id: str) -> tuple[Path, Path]:
 
 def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> None:
     helper = _load_helper()
-    credential_id = "om-llm-deepseek-api-key"
+    credential_id = "om-quality-read-token"
     store, source = _secure_store(tmp_path, credential_id)
     runtime_root = tmp_path / "run" / "options-monitor" / "credentials"
     observed: list[tuple[str, Path, Path]] = []
@@ -53,7 +53,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
         output_path.write_text("test-secret-value\n", encoding="utf-8")
 
     result = helper.materialize_credentials(
-        unit_name="options-monitor-ai-evidence-collector.service",
+        unit_name="options-monitor-quality-http.service",
         credential_ids=(credential_id,),
         store_root=store,
         runtime_root=runtime_root,
@@ -64,7 +64,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
         decrypt_credential=fake_decrypt,
     )
 
-    target_dir = runtime_root / "options-monitor-ai-evidence-collector.service"
+    target_dir = runtime_root / "options-monitor-quality-http.service"
     target = target_dir / credential_id
     assert target.read_text(encoding="utf-8") == "test-secret-value\n"
     assert stat.S_IMODE(target_dir.stat().st_mode) == 0o510
@@ -74,14 +74,14 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     assert observed[0][2].parent != target_dir
     assert result == {
         "action": "materialize",
-        "unit": "options-monitor-ai-evidence-collector.service",
+        "unit": "options-monitor-quality-http.service",
         "credential_count": 1,
         "values_exposed": False,
     }
     assert "test-secret-value" not in json.dumps(result)
 
     rotated = helper.materialize_credentials(
-        unit_name="options-monitor-ai-evidence-collector.service",
+        unit_name="options-monitor-quality-http.service",
         credential_ids=(credential_id,),
         store_root=store,
         runtime_root=runtime_root,
@@ -101,7 +101,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     assert not any(path.name.startswith(".options-monitor-") for path in runtime_root.iterdir())
 
     cleaned = helper.cleanup_credentials(
-        unit_name="options-monitor-ai-evidence-collector.service",
+        unit_name="options-monitor-quality-http.service",
         credential_ids=(credential_id,),
         runtime_root=runtime_root,
         required_owner_uid=os.getuid(),

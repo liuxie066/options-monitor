@@ -113,7 +113,7 @@ def test_brief_omits_retired_ai_decision_advice_section(tmp_path: Path) -> None:
     assert "ai_decision_advice_evidence_index" not in brief
 
 
-def test_brief_uses_explicit_candidate_snapshot_and_ignores_retired_handoffs(
+def test_brief_uses_explicit_candidate_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -130,8 +130,6 @@ def test_brief_uses_explicit_candidate_snapshot_and_ignores_retired_handoffs(
             encoding="utf-8"
         )
     )
-    portfolio = {"envelope": {"marker": "verified-pm"}}
-    option_context = {"marker": "verified-option"}
     monkeypatch.setattr(
         service,
         "load_opening_candidate_snapshot",
@@ -151,8 +149,6 @@ def test_brief_uses_explicit_candidate_snapshot_and_ignores_retired_handoffs(
         config=_config(),
         now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
         opening_candidate_snapshot=snapshot,
-        prepared_portfolio_distribution=portfolio,
-        prepared_option_positions_context=option_context,
     )
 
     assert brief["candidates"]["sell_put"]

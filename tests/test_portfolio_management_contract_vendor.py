@@ -62,17 +62,3 @@ def test_vendored_pm_openapi_requires_core_success_and_freshness_fields() -> Non
         "freshness",
         "retrieved_at_utc",
     } <= set(schemas["HoldingsResponse"]["required"])
-
-
-def test_distribution_openapi_does_not_claim_row_level_value_currency() -> None:
-    """Keep the CNY unit assumption explicit at the OM consumer boundary."""
-
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    document = json.loads((ROOT / manifest["contract_path"]).read_text(encoding="utf-8"))
-    schema = document["components"]["schemas"]["DistributionResponse"]
-    by_asset = schema["properties"]["by_asset"]["anyOf"][0]
-    assert by_asset["items"] == {
-        "additionalProperties": True,
-        "type": "object",
-    }
-    assert "valuation_currency" not in schema["properties"]
