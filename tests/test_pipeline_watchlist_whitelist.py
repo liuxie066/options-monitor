@@ -60,18 +60,40 @@ def test_watchlist_whitelist_filters_symbols() -> None:
     assert len(out) == 1
 
 
-def test_watchlist_combo_sink_receives_pairs(tmp_path: Path) -> None:
+def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.strategy_scan_status import publish_strategy_scan_status
 
-    received: list[list[dict]] = []
+    received: list[dict] = []
 
     def _apply_profiles(item: dict, profiles: dict) -> dict:
         return dict(item)
 
     def _process_symbol(*args, **kwargs):
-        sink = kwargs.get("combo_pairs_sink_fn")
+        report_dir = tmp_path / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        publish_strategy_scan_status(
+            report_dir=report_dir,
+            run_id="run-1",
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family="sell_put",
+            status="completed",
+            candidate_count=0,
+            snapshot_id="quote-1",
+            receipt_relpath="quotes/quote-1/receipt.json",
+        )
+        sink = kwargs.get("combo_evidence_sink_fn")
         if sink is not None:
-            sink([])
+            sink(
+                {
+                    "schema_version": "combo_yield_scan_evidence.v1",
+                    "variant": "sp_lc",
+                    "symbol": "NVDA",
+                    "ranked_pairs": [],
+                }
+            )
         return [{'symbol': 'NVDA', 'strategy': 'combo_yield', 'candidate_count': 1}]
 
     def _build_ctx(**kwargs):
@@ -80,8 +102,8 @@ def test_watchlist_combo_sink_receives_pairs(tmp_path: Path) -> None:
     def _noop(*args, **kwargs):
         return None
 
-    def _combo_sink(rows: list[dict]) -> None:
-        received.append(list(rows))
+    def _combo_sink(payload: dict) -> None:
+        received.append(dict(payload))
 
     cfg = {
         'symbols': [
@@ -115,10 +137,17 @@ def test_watchlist_combo_sink_receives_pairs(tmp_path: Path) -> None:
         candidate_capture_status_sink_fn=_noop,
         required_data_snapshot_manifest=tmp_path / 'required.json',
         account_config_sha256='a' * 64,
-        combo_pairs_sink_fn=_combo_sink,
+        combo_evidence_sink_fn=_combo_sink,
     )
 
-    assert received == [[]]
+    assert received == [
+        {
+            "schema_version": "combo_yield_scan_evidence.v1",
+            "variant": "sp_lc",
+            "symbol": "NVDA",
+            "ranked_pairs": [],
+        }
+    ]
 
 
 def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:

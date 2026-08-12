@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.candidate_evidence_helpers import (
+    seal_opening_candidate_fixture,
+    seal_strict_dataset_fixture,
+)
+
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -25,13 +30,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     if path.name == "outcome_facts.jsonl":
-        from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
-
-        for name in DATASET_FILES:
-            candidate = path.parent / name
-            if not candidate.exists():
-                candidate.write_text("", encoding="utf-8")
-        refresh_dataset_manifest(path.parent)
+        seal_strict_dataset_fixture(path.parent)
 
 
 def _params() -> dict:
@@ -52,6 +51,7 @@ def _params() -> dict:
 
 
 def _write_cli_candidate_run(root: Path) -> None:
+    run_id = "20260602T010000Z-run"
     account_dir = root / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
     account_dir.mkdir(parents=True, exist_ok=True)
     (account_dir / "sell_put_candidates.csv").write_text(
@@ -62,6 +62,29 @@ def _write_cli_candidate_run(root: Path) -> None:
             "short_vol,1.25,0.08,0.10,0.02,120\n"
         ),
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        root,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.25,
+                "iv_minus_rv": 0.08,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            }
+        ],
     )
 
 
@@ -702,6 +725,169 @@ def test_candidate_impact_uses_canonical_schema(tmp_path: Path) -> None:
     assert result["candidate_impact"]["allowed"] is True
 
 
+def test_candidate_impact_recomputes_coverage_for_requested_account(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    _write_cli_candidate_run(tmp_path)
+    sy_dir = (
+        tmp_path
+        / "output_runs"
+        / "20260602T010000Z-run"
+        / "accounts"
+        / "sy"
+    )
+    _write_jsonl(
+        sy_dir / "candidate_filter_trace.jsonl",
+        [
+            {
+                "schema_version": "candidate_filter_trace.v1",
+                "run_id": "20260602T010000Z-run",
+                "account": "sy",
+                "symbol": "0700.HK",
+                "status": "rejected",
+                "rule": "fixture",
+            }
+        ],
+    )
+
+    unscoped = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        runs_root=tmp_path / "output_runs",
+        start_date="2026-06-02",
+        end_date="2026-06-02",
+        params=_params(),
+        min_sample=1,
+    )
+    scoped = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        runs_root=tmp_path / "output_runs",
+        start_date="2026-06-02",
+        end_date="2026-06-02",
+        accounts=["lx"],
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert unscoped["coverage"]["strict_backtest_allowed"] is False
+    assert scoped["coverage"]["strict_backtest_allowed"] is True
+    assert {
+        row["account"]
+        for row in scoped["coverage"]["candidate_evidence_coverage"]["accounts"]
+    } == {"lx"}
+
+
+def test_candidate_coverage_market_scope_excludes_only_known_other_market() -> None:
+    from src.application.shadow_replay.candidate_impact import (
+        _scope_candidate_evidence_coverage,
+    )
+
+    coverage = {
+        "accounts": [
+            {"account": "lx", "status": "supported", "markets": ["us"]},
+            {
+                "account": "sy",
+                "status": "supported_limited_legacy_snapshot",
+                "markets": ["hk"],
+            },
+        ]
+    }
+
+    scoped = _scope_candidate_evidence_coverage(
+        coverage,
+        accounts=set(),
+        market="us",
+    )
+    assert scoped["strict_replay_authority"] is True
+    assert [row["account"] for row in scoped["accounts"]] == ["lx"]
+
+    coverage["accounts"].append(
+        {"account": "unknown", "status": "unsupported_snapshot_schema"}
+    )
+    unknown_market = _scope_candidate_evidence_coverage(
+        coverage,
+        accounts=set(),
+        market="us",
+    )
+    assert unknown_market["strict_replay_authority"] is False
+    assert {row["account"] for row in unknown_market["accounts"]} == {
+        "lx",
+        "unknown",
+    }
+
+
+def test_candidate_impact_recomputes_dataset_coverage_for_requested_scope(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+    from src.application.shadow_replay.common import refresh_dataset_manifest, write_json
+
+    dataset = tmp_path / "scoped-dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.25,
+                "iv_minus_rv": 0.08,
+                "dte": 30,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+    manifest = json.loads((dataset / "manifest.json").read_text())
+    manifest["source"]["candidate_evidence_coverage"]["accounts"].append(
+        {
+            "account": "sy",
+            "status": "unsupported_snapshot_missing",
+            "reason_code": "candidate_snapshot_manifest_missing",
+            "strict_replay_authority": False,
+            "markets": ["hk"],
+        }
+    )
+    manifest["source"]["candidate_evidence_coverage"]["counts"].update(
+        {"supported": 1, "unsupported_snapshot_missing": 1}
+    )
+    manifest["source"]["candidate_evidence_coverage"][
+        "strict_replay_authority"
+    ] = False
+    write_json(dataset / "manifest.json", manifest)
+    refresh_dataset_manifest(dataset)
+
+    unscoped = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params=_params(),
+        min_sample=1,
+    )
+    scoped = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        accounts=["lx"],
+        market="us",
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert unscoped["coverage"]["strict_backtest_allowed"] is False
+    assert scoped["coverage"]["strict_backtest_allowed"] is True
+    assert [
+        row["account"]
+        for row in scoped["coverage"]["candidate_evidence_coverage"]["accounts"]
+    ] == ["lx"]
+
+
 def test_candidate_impact_merges_reject_log_replay_fields_into_trace_rows(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_candidate_impact
 
@@ -722,7 +908,7 @@ def test_candidate_impact_merges_reject_log_replay_fields_into_trace_rows(tmp_pa
                 "strategy_profile": "short_vol",
                 "status": "rejected",
                 "stage": "stage3_risk_filter",
-                "rule": "vol_edge_ratio_below_min",
+                "rule": "risk_iv_rv_ratio",
                 "contract_symbol": "NVDA260619P00100000",
                 "expiration": "2026-06-19",
                 "strike": 100,
@@ -741,6 +927,36 @@ def test_candidate_impact_merges_reject_log_replay_fields_into_trace_rows(tmp_pa
             "stage3_risk_filter,vol_edge_ratio_below_min\n"
         ),
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="20260602T010000Z-run",
+        rejected_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "dte": 30,
+                "delta": -0.2,
+                "abs_delta": 0.2,
+                "iv_rv_ratio": 1.12,
+                "iv_minus_rv": 0.06,
+                "annualized_net_return_on_cash_basis": 0.20,
+                "spread_ratio": 0.10,
+                "open_interest": 120,
+                "volume": 20,
+                "net_income": 100,
+                "multiplier": 100,
+                "strategy_profile": "short_vol",
+                "stage": "stage3_risk_filter",
+                "rule": "risk_iv_rv_ratio",
+                "metric_value": 1.12,
+                "threshold": 1.25,
+            }
+        ],
     )
 
     result = run_shadow_replay_candidate_impact(
@@ -803,6 +1019,28 @@ def test_candidate_impact_maps_legacy_short_vol_candidate_profile_to_underwritin
             "1.25,0.08,0.10,0.02,120\n"
         ),
         encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="20260602T010000Z-run",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "iv_rv_ratio": 1.25,
+                "iv_minus_rv": 0.08,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            }
+        ],
     )
 
     result = run_shadow_replay_candidate_impact(

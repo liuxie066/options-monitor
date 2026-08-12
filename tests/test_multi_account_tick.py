@@ -140,6 +140,84 @@ def test_explicit_empty_cli_account_fails_before_run_artifacts(
     assert not (tmp_path / "output_runs").exists()
 
 
+def test_allow_stale_config_still_rejects_removed_runtime_fields_before_run_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from src.application import multi_account_tick as mod
+
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "symbols": [
+                    {
+                        "symbol": "NVDA",
+                        "sell_put": {"enabled": False},
+                        "sell_call": {"enabled": False},
+                        "combo_yield": {
+                            "enabled": True,
+                            "output_mode": "separate",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_runtime_root",
+        lambda **_kwargs: SimpleNamespace(runtime_root=tmp_path, source="test"),
+    )
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_canonical_config",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_config_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_schedule_matches_market",
+        lambda *_args, **_kwargs: {"market": "us"},
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_config_freshness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("allow-stale-config must skip freshness only")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "RunLogger",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("run logger must not start")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="output_mode has been removed"):
+        mod.main(
+            [
+                "--config",
+                str(config_path),
+                "--market-config",
+                "us",
+                "--allow-stale-config",
+            ]
+        )
+
+    assert not (tmp_path / "output_runs").exists()
+
+
 def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> None:
     from src.application import tick_account_execution as mod
 

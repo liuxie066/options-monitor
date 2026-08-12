@@ -25,7 +25,6 @@ from src.application.sell_put_steps import (
 )
 from src.application.combo_yield_steps import (
     empty_combo_yield_summary,
-    materialize_empty_combo_yield_artifacts,
     run_combo_yield_for_symbol_and_summarize,
 )
 from src.application.symbol_monitoring import (
@@ -64,8 +63,8 @@ def process_symbol(
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
-    combo_pairs_sink_fn: (
-        Callable[[list[dict[str, Any]]], None] | None
+    combo_evidence_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
     ) = None,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
@@ -98,7 +97,7 @@ def process_symbol(
             ),
             final_candidates_sink_fn=final_candidates_sink_fn,
             candidate_decisions_sink_fn=candidate_decisions_sink_fn,
-            combo_pairs_sink_fn=combo_pairs_sink_fn,
+            combo_evidence_sink_fn=combo_evidence_sink_fn,
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,
@@ -111,6 +110,5 @@ def process_symbol(
             empty_sell_call_summary_fn=empty_sell_call_summary,
             run_combo_yield_scan_fn=run_combo_yield_for_symbol_and_summarize,
             empty_combo_yield_summary_fn=empty_combo_yield_summary,
-            materialize_empty_combo_yield_artifacts_fn=materialize_empty_combo_yield_artifacts,
         ),
     )

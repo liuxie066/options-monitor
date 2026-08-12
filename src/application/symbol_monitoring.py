@@ -61,8 +61,8 @@ class SymbolMonitoringInputs:
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
-    combo_pairs_sink_fn: (
-        Callable[[list[dict[str, Any]]], None] | None
+    combo_evidence_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
     ) = None
 
 
@@ -78,7 +78,6 @@ class SymbolMonitoringDependencies:
     empty_sell_call_summary_fn: Callable[..., object]
     run_combo_yield_scan_fn: Callable[..., object]
     empty_combo_yield_summary_fn: Callable[..., object]
-    materialize_empty_combo_yield_artifacts_fn: Callable[..., object]
 
 
 def _append_summary_result(summary_rows: list[dict[str, Any]], result: object) -> None:
@@ -328,10 +327,6 @@ def run_symbol_monitoring(
                     strategy_family=family,
                     error=exc,
                 )
-        deps.materialize_empty_combo_yield_artifacts_fn(
-            report_dir=inputs.report_dir,
-            symbol_lower=symbol_lower,
-        )
         if want_put:
             _unavailable_summary(
                 deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
@@ -345,13 +340,13 @@ def run_symbol_monitoring(
                 deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
         if inputs.candidate_capture_status_sink_fn is not None:
-            for strategy_mode, enabled in (("put", configured_put), ("call", configured_call)):
+            for strategy_mode, enabled in (("put", want_put), ("call", want_call)):
                 if enabled:
                     inputs.candidate_capture_status_sink_fn(
                         {
                             "symbol": symbol.upper(),
                             "strategy_mode": strategy_mode,
-                            "status": "failed",
+                            "status": "unavailable",
                             "reason": "required_data_snapshot_unavailable",
                             "quote_snapshot_id": exc.snapshot_id,
                             "quote_receipt_relpath": exc.receipt_relpath,
@@ -362,7 +357,7 @@ def run_symbol_monitoring(
                     {
                         "symbol": symbol.upper(),
                         "strategy_mode": "combo_yield",
-                        "status": "failed",
+                        "status": "unavailable",
                         "reason": "required_data_snapshot_unavailable",
                         "quote_snapshot_id": exc.snapshot_id,
                         "quote_receipt_relpath": exc.receipt_relpath,
@@ -500,22 +495,13 @@ def run_symbol_monitoring(
     if want_put:
         try:
             put_result = deps.run_sell_put_scan_fn(
-                py=inputs.py,
-                base=inputs.base,
-                sym=symbol,
                 symbol=symbol,
-                symbol_lower=symbol_lower,
                 symbol_cfg=symbol_cfg,
                 sp=sp,
-                top_n=inputs.top_n,
                 required_data_dir=inputs.required_data_dir,
-                report_dir=inputs.report_dir,
-                timeout_sec=inputs.timeout_sec,
-                is_scheduled=bool(inputs.is_scheduled),
                 exchange_rate_converter=exchange_rate_converter,
                 portfolio_ctx=inputs.portfolio_ctx,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
-                run_sell_put=True,
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
             )
@@ -569,17 +555,10 @@ def run_symbol_monitoring(
                 )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
-        if configured_put:
-            _report_capture(
-                strategy_mode="put",
-                status="not_applicable",
-                reason="sell_put_prefilter_not_applicable",
-            )
 
     if want_yield_enhancement:
         try:
             combo_result = deps.run_combo_yield_scan_fn(
-                base=inputs.base,
                 sym=symbol,
                 symbol=symbol,
                 symbol_lower=symbol_lower,
@@ -592,7 +571,7 @@ def run_symbol_monitoring(
                 exchange_rate_converter=exchange_rate_converter,
                 portfolio_ctx=inputs.portfolio_ctx,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
-                combo_pairs_sink_fn=inputs.combo_pairs_sink_fn,
+                combo_evidence_sink_fn=inputs.combo_evidence_sink_fn,
             )
             _append_summary_result(
                 summary_rows,
@@ -654,9 +633,6 @@ def run_symbol_monitoring(
                 strategy_family="combo_yield",
                 error=exc,
             )
-            deps.materialize_empty_combo_yield_artifacts_fn(
-                report_dir=inputs.report_dir, symbol_lower=symbol_lower
-            )
             _append_summary_result(
                 summary_rows,
                 deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
@@ -674,26 +650,14 @@ def run_symbol_monitoring(
                 reason="combo_yield_scan_failed",
                 variant=combo_variant,
             )
-    elif not want_yield_enhancement:
-        deps.materialize_empty_combo_yield_artifacts_fn(
-            report_dir=inputs.report_dir, symbol_lower=symbol_lower
-        )
-
     if want_call:
         option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}
         try:
             call_result = deps.run_sell_call_scan_fn(
-                py=inputs.py,
-                base=inputs.base,
                 symbol=symbol,
-                symbol_lower=symbol_lower,
                 symbol_cfg=symbol_cfg,
                 cc=cc,
-                top_n=inputs.top_n,
                 required_data_dir=inputs.required_data_dir,
-                report_dir=inputs.report_dir,
-                timeout_sec=inputs.timeout_sec,
-                is_scheduled=bool(inputs.is_scheduled),
                 stock=stock,
                 portfolio_ctx=inputs.portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
@@ -772,14 +736,5 @@ def run_symbol_monitoring(
                 )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
-        if configured_call:
-            _report_capture(
-                strategy_mode="call",
-                status="not_applicable",
-                reason=(
-                    call_skip_reason
-                    or "covered_call_prefilter_not_applicable"
-                ),
-            )
 
     return summary_rows

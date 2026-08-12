@@ -5,12 +5,12 @@ from typing import Any, Callable
 
 from domain.domain.engine import normalize_strategy_mode
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.opening_candidate_snapshot import (
-    OpeningCandidateSnapshotError,
-    load_latest_opening_candidate_snapshot,
-    load_opening_candidate_snapshot,
-    ranked_opening_candidates,
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError,
+    load_candidate_snapshot_bundle,
+    load_latest_candidate_snapshot_bundle,
 )
+from src.application.opening_candidate_snapshot import ranked_opening_candidates
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
@@ -30,7 +30,7 @@ def _snapshot(
     payload: dict[str, Any],
     *,
     repo_base: Callable[[], Path],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     account = str(payload.get("account") or "").strip().lower()
     if not account:
         raise AgentToolError(
@@ -41,13 +41,28 @@ def _snapshot(
     base = Path(payload.get("runtime_root") or repo_base()).resolve()
     try:
         if str(payload.get("run_id") or "").strip():
-            return load_opening_candidate_snapshot(
+            bundle = load_candidate_snapshot_bundle(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
             )
-        return load_latest_opening_candidate_snapshot(base=base, account=account)
-    except OpeningCandidateSnapshotError as exc:
+        else:
+            bundle = load_latest_candidate_snapshot_bundle(
+                base=base,
+                account=account,
+            )
+        snapshot = (bundle.get("owners") or {}).get("opening")
+        if not isinstance(snapshot, dict):
+            raise CandidateSnapshotManifestError(
+                "manifest-bound opening candidate snapshot is unavailable"
+            )
+        manifest = bundle.get("manifest")
+        if not isinstance(manifest, dict):
+            raise CandidateSnapshotManifestError(
+                "candidate snapshot manifest is unavailable"
+            )
+        return snapshot, manifest
+    except CandidateSnapshotManifestError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
@@ -67,7 +82,7 @@ def candidate_rank_explain_tool(
     _ = resolve_output_root
     mode_filter = _mode(payload.get("mode"))
     top_n = _as_int(payload.get("top_n"), default=10, low=1, high=100)
-    snapshot = _snapshot(payload, repo_base=repo_base)
+    snapshot, manifest = _snapshot(payload, repo_base=repo_base)
     modes = ["put", "call"] if mode_filter == "all" else [mode_filter]
     groups: list[dict[str, Any]] = []
     for mode in modes:
@@ -111,7 +126,8 @@ def candidate_rank_explain_tool(
         "run_id": snapshot.get("run_id"),
         "account": snapshot.get("account"),
         "content_sha256": snapshot.get("content_sha256"),
-        "authority": "sealed_opening_candidate_snapshot",
+        "manifest_content_sha256": manifest.get("content_sha256"),
+        "authority": "terminal_manifest_bound_opening_candidate_snapshot",
     }
     data = {
         "mode": mode_filter,

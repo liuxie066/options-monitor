@@ -24,7 +24,7 @@ from src.application.shadow_replay.common import dataset_dir_from_arg, text
 def evaluate_combo_variant_pairs(
     *,
     dataset: str | Path,
-    underwritten_put_rows: Iterable[dict[str, Any]],
+    funding_put_rows: Iterable[dict[str, Any]],
     sell_put_cfg_by_symbol: dict[str, dict[str, Any]] | None = None,
     global_liquidity_by_symbol: dict[str, dict[str, Any]] | None = None,
     write: bool = False,
@@ -56,10 +56,21 @@ def evaluate_combo_variant_pairs(
     )
 
     puts_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    for row in underwritten_put_rows:
+    put_observations_by_contract: dict[str, dict[str, str | None]] = {}
+    for row in funding_put_rows:
         symbol = text(row.get("symbol")).upper()
         if symbol:
             puts_by_symbol.setdefault(symbol, []).append(dict(row))
+        contract = text(row.get("contract_symbol"))
+        if contract:
+            put_observations_by_contract[contract] = {
+                "put": text(
+                    row.get("snapshot_received_at_utc")
+                    or row.get("last_price_observed_at_utc")
+                )
+                or None,
+                "spot": text(row.get("spot_observed_at_utc")) or None,
+            }
 
     all_decisions: list[dict[str, Any]] = []
     pair_counts: dict[str, int] = {}
@@ -80,7 +91,6 @@ def evaluate_combo_variant_pairs(
             global_yield_enhancement_liquidity=dict(
                 global_liquidity_by_symbol.get(symbol) or {}
             ),
-            output_path=None,
         )
         baseline_keys = {
             _pair_key(row)
@@ -106,7 +116,6 @@ def evaluate_combo_variant_pairs(
                 global_yield_enhancement_liquidity=dict(
                     global_liquidity_by_symbol.get(symbol) or {}
                 ),
-                output_path=None,
             )
             pair_rows.extend(pairs.to_dict("records"))
         pair_rows = _dedupe_pairs(pair_rows)
@@ -114,6 +123,10 @@ def evaluate_combo_variant_pairs(
             _attach_entry_observation_times(
                 row,
                 observations=observations.get(symbol) or [],
+                funding_put_observation=put_observations_by_contract.get(
+                    text(row.get("put_contract_symbol")),
+                    {},
+                ),
                 captured_at=text(manifest.get("capture_observed_at_utc")),
                 unavailable_variants=unavailable_variants_by_symbol.get(symbol, set()),
                 baseline_eligible=_pair_key(row) in baseline_keys,
@@ -174,31 +187,33 @@ def evaluate_combo_variant_pairs(
 def evaluate_combo_variant_dataset(
     *,
     dataset: str | Path,
-    underwritten_put_path: str | Path,
+    funding_put_path: str | Path,
     write: bool = False,
 ) -> dict[str, Any]:
-    source = Path(underwritten_put_path).expanduser().resolve()
+    source = Path(funding_put_path).expanduser().resolve()
     if not source.is_file():
-        raise ValueError(f"Combo-owned underwritten Put artifact does not exist: {source}")
+        raise ValueError(f"Combo-owned Funding Put decision artifact does not exist: {source}")
     from src.application.shadow_replay.combo_funding import (
-        validate_combo_funding_put_source,
+        load_combo_funding_put_source,
     )
 
-    validate_combo_funding_put_source(
+    receipt, decisions, source_sha256 = load_combo_funding_put_source(
         dataset=dataset,
-        underwritten_put_path=source,
+        funding_put_path=source,
     )
-    try:
-        rows = pd.read_csv(source).to_dict("records")
-    except Exception as exc:
-        raise ValueError(f"failed to read Combo-owned underwritten Put artifact: {source}") from exc
+    rows = [
+        dict(item["normalized_input"])
+        for item in decisions
+        if item.get("accepted") is True
+    ]
     result = evaluate_combo_variant_pairs(
         dataset=dataset,
-        underwritten_put_rows=rows,
+        funding_put_rows=rows,
         write=write,
     )
-    result["underwritten_put_path"] = str(source)
-    result["underwritten_put_sha256"] = _file_sha256(source)
+    result["funding_put_path"] = str(source)
+    result["funding_put_sha256"] = source_sha256
+    result["funding_put_source"] = receipt
     return result
 
 
@@ -244,26 +259,22 @@ def _attach_entry_observation_times(
     row: dict[str, Any],
     *,
     observations: list[dict[str, Any]],
+    funding_put_observation: dict[str, str | None],
     captured_at: str,
     unavailable_variants: set[str],
     baseline_eligible: bool,
     baseline_cfg: dict[str, Any],
 ) -> dict[str, Any]:
     out = dict(row)
-    put_at = _observation_for(
-        observations,
-        option_type="put",
-        expiration=text(row.get("put_expiration"))[:10],
-    )
+    put_at = text(funding_put_observation.get("put")) or None
     call_at = _observation_for(
         observations,
         option_type="call",
         expiration=text(row.get("call_expiration"))[:10],
     )
-    times = [value for value in (put_at, call_at) if value]
     out["put_quote_observed_at_utc"] = put_at
     out["call_quote_observed_at_utc"] = call_at
-    out["spot_observed_at_utc"] = max(times) if len(times) == 2 else None
+    out["spot_observed_at_utc"] = text(funding_put_observation.get("spot")) or None
     out["unavailable_variant_ids"] = sorted(unavailable_variants)
     out["baseline_eligible"] = bool(baseline_eligible)
     threshold = baseline_cfg.get("min_net_credit_annualized")

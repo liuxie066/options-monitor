@@ -10,6 +10,7 @@ import pytest
 
 from domain.domain.engine import (
     ComboYieldResearchPolicy,
+    build_candidate_decision,
     combo_yield_proposed_gate_reasons,
     rank_combo_yield_proposed_rows,
     select_best_combo_yield_proposed_pairs,
@@ -26,9 +27,11 @@ from src.application.shadow_replay.combo_variants import (
 from src.application.shadow_replay.combo_capture import capture_combo_variants
 from src.application.shadow_replay.combo_evaluation import (
     _unavailable_variants_by_symbol,
+    evaluate_combo_variant_dataset,
     evaluate_combo_variant_pairs,
 )
 from src.application.shadow_replay.combo_funding import (
+    COMBO_FUNDING_PUT_FILE,
     prepare_combo_funding_puts,
     validate_combo_funding_put_source,
 )
@@ -44,6 +47,12 @@ from src.application.required_data_planning import (
     OptionSideFetchPlan,
     RequiredDataFetchPlanBundle,
     StrikeWindowPlan,
+)
+from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest
+from src.application.combo_yield_candidate_snapshot import seal_combo_yield_candidate_snapshot
+from src.application.strategy_scan_status import (
+    publish_strategy_scan_status,
+    publish_strategy_scan_status_index_v2,
 )
 
 
@@ -689,7 +698,7 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
 
     result = evaluate_combo_variant_pairs(
         dataset=dataset,
-        underwritten_put_rows=[
+        funding_put_rows=[
             {
                 "symbol": "NVDA",
                 "contract_symbol": "NVDA-P100",
@@ -700,6 +709,8 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
                 "spread_ratio": 0.10,
                 "open_interest": 100,
                 "net_income": 500,
+                "snapshot_received_at_utc": "2026-07-29T01:00:00Z",
+                "spot_observed_at_utc": "2026-07-29T01:00:00Z",
             }
         ],
         pair_builder=pair_builder,
@@ -719,9 +730,7 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
 
 def test_combo_funding_put_preparation_binds_canonical_output_to_capture(
     tmp_path,
-    monkeypatch,
 ) -> None:
-    from src.application.shadow_replay import combo_funding
     from src.application.shadow_replay.combo_variants import COMBO_PAIR_DATASET_FILES
 
     dataset = tmp_path / "dataset"
@@ -731,6 +740,8 @@ def test_combo_funding_put_preparation_binds_canonical_output_to_capture(
     manifest = {
         "schema_version": "shadow_combo_capture_manifest.v1",
         "dataset_id": "dataset-1",
+        "market": "us",
+        "account": "lx",
         "symbols": ["NVDA"],
         "normalized_effective_combo_policy": {
             "NVDA": {"enabled": True, "structure_mode": "same_expiry_pair"}
@@ -743,48 +754,257 @@ def test_combo_funding_put_preparation_binds_canonical_output_to_capture(
     }
     (dataset / "manifest.json").write_text(json.dumps(manifest))
     refresh_dataset_manifest(dataset)
-    context = tmp_path / "portfolio.json"
-    context.write_text(json.dumps({"cash": {"USD": 100000}}))
-
-    def fake_pipeline(**kwargs):
-        report_dir = Path(kwargs["report_dir"])
-        output = report_dir / "nvda_combo_yield_put_universe_underwritten.csv"
-        output.write_text(
-            "symbol,contract_symbol,annualized_net_return_on_cash_basis,"
-            "net_assignment_discount_pct,spread_ratio,open_interest,net_income\n"
-            "NVDA,NVDA-P100,0.2,0.1,0.05,100,500\n"
-        )
-        return None, None
-
-    monkeypatch.setattr(
-        combo_funding,
-        "run_combo_yield_scan_and_summarize",
-        fake_pipeline,
-    )
+    runs_root = tmp_path / "runtime" / "output_runs"
+    _publish_combo_funding_source(runs_root.parent)
     preview = prepare_combo_funding_puts(
         dataset=dataset,
-        portfolio_context_path=context,
+        source_run_id="run-1",
+        source_runs_root=runs_root,
     )
     assert preview["written"] is False
-    assert not (dataset / "combo_owned_underwritten_puts.csv").exists()
+    assert not (dataset / COMBO_FUNDING_PUT_FILE).exists()
 
     result = prepare_combo_funding_puts(
         dataset=dataset,
-        portfolio_context_path=context,
-        usd_per_cny_exchange_rate=0.14,
+        source_run_id="run-1",
+        source_runs_root=runs_root,
         write=True,
     )
-    source = dataset / "combo_owned_underwritten_puts.csv"
-    assert result["row_count"] == 1
+    source = dataset / COMBO_FUNDING_PUT_FILE
+    assert result["row_count"] == 2
+    assert result["accepted_row_count"] == 1
     receipt = validate_combo_funding_put_source(
         dataset=dataset,
-        underwritten_put_path=source,
+        funding_put_path=source,
     )
-    assert receipt["stages"][-1] == "insurance_underwriting"
+    assert receipt["projection"] == "manifest_bound_combo_v2_terminal_decisions"
+    assert receipt["source_run_id"] == "run-1"
 
-    source.write_text(source.read_text() + "tamper\n")
-    with pytest.raises(ValueError, match="hash mismatch"):
+    adopted = prepare_combo_funding_puts(
+        dataset=dataset,
+        source_run_id="run-1",
+        source_runs_root=runs_root,
+        write=True,
+    )
+    assert adopted["funding_put_jsonl_sha256"] == result["funding_put_jsonl_sha256"]
+
+    source.write_text(source.read_text() + "\n")
+    with pytest.raises(ValueError, match="integrity mismatch"):
         validate_combo_funding_put_source(
             dataset=dataset,
-            underwritten_put_path=source,
+            funding_put_path=source,
         )
+
+
+def test_combo_funding_put_validation_binds_receipt_to_manifest_facet(
+    tmp_path,
+) -> None:
+    dataset = _combo_evaluation_dataset(tmp_path)
+    source = dataset / COMBO_FUNDING_PUT_FILE
+    receipt_path = dataset / "combo_owned_funding_put_decisions.v1.source.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source_run_id"] = "forged-run"
+    receipt_path.write_text(json.dumps(receipt))
+
+    with pytest.raises(ValueError, match="manifest facet mismatch"):
+        validate_combo_funding_put_source(
+            dataset=dataset,
+            funding_put_path=source,
+        )
+
+
+def test_combo_funding_put_validation_rejects_synchronized_jsonl_receipt_tamper(
+    tmp_path,
+) -> None:
+    dataset = _combo_evaluation_dataset(tmp_path)
+    source = dataset / COMBO_FUNDING_PUT_FILE
+    receipt_path = dataset / "combo_owned_funding_put_decisions.v1.source.json"
+    rows = [json.loads(line) for line in source.read_text().splitlines() if line]
+    rows[0]["accepted"] = not rows[0]["accepted"]
+    rows[0]["opening_decision"]["accepted"] = rows[0]["accepted"]
+    source.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+    )
+    receipt = json.loads(receipt_path.read_text())
+    receipt["funding_put_jsonl_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    receipt["accepted_row_count"] = sum(row["accepted"] is True for row in rows)
+    receipt_path.write_text(json.dumps(receipt))
+
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        validate_combo_funding_put_source(
+            dataset=dataset,
+            funding_put_path=source,
+        )
+
+
+def test_combo_evaluation_uses_only_accepted_sealed_funding_puts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    dataset = _combo_evaluation_dataset(tmp_path)
+    source = dataset / COMBO_FUNDING_PUT_FILE
+    captured: list[dict] = []
+
+    def fake_evaluation(**kwargs):
+        captured.extend(kwargs["funding_put_rows"])
+        return {"decision_count": 0}
+
+    from src.application.shadow_replay import combo_evaluation
+
+    monkeypatch.setattr(
+        combo_evaluation,
+        "evaluate_combo_variant_pairs",
+        fake_evaluation,
+    )
+    result = evaluate_combo_variant_dataset(
+        dataset=dataset,
+        funding_put_path=source,
+    )
+
+    assert result["decision_count"] == 0
+    assert {row["contract_symbol"] for row in captured} == {"NVDA-P100"}
+
+
+def _combo_evaluation_dataset(tmp_path: Path) -> Path:
+    from src.application.shadow_replay.combo_variants import COMBO_PAIR_DATASET_FILES
+
+    dataset = tmp_path / "evaluation-dataset"
+    dataset.mkdir()
+    for name in DATASET_FILES + COMBO_PAIR_DATASET_FILES:
+        (dataset / name).write_text("")
+    raw = dataset / "required_data" / "raw" / "NVDA.json"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("{}")
+    manifest = {
+        "schema_version": "shadow_combo_capture_manifest.v1",
+        "dataset_id": "dataset-1",
+        "capture_observed_at_utc": "2026-08-12T01:00:01Z",
+        "market": "us",
+        "account": "lx",
+        "symbols": ["NVDA"],
+        "normalized_effective_combo_policy": {
+            "NVDA": {"enabled": True, "structure_mode": "same_expiry_pair"}
+        },
+        "normalized_sell_put_policy": {"NVDA": {}},
+        "normalized_global_combo_liquidity": {"NVDA": {}},
+        "effective_combo_policy_hash": "policy-hash",
+        "normalized_variant_spec": _capture_spec(),
+        "variant_spec_hash": "variant-hash",
+        "required_data_file_sha256": {
+            str(raw.relative_to(dataset)): hashlib.sha256(raw.read_bytes()).hexdigest()
+        },
+        "variant_completeness": [{"variant_id": "same-d20", "status": "complete"}],
+        "source_quote_observations": {"NVDA": []},
+    }
+    (dataset / "manifest.json").write_text(json.dumps(manifest))
+    refresh_dataset_manifest(dataset)
+    runtime = tmp_path / "evaluation-runtime"
+    _publish_combo_funding_source(runtime)
+    prepare_combo_funding_puts(
+        dataset=dataset,
+        source_run_id="run-1",
+        source_runs_root=runtime / "output_runs",
+        write=True,
+    )
+    return dataset
+
+
+def _publish_combo_funding_source(base: Path) -> None:
+    account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
+    (account_dir / "state").mkdir(parents=True, exist_ok=True)
+    (account_dir / "nvda_combo_yield_candidates.csv").write_text("symbol\n")
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="combo_yield",
+        status="completed",
+        candidate_count=0,
+        snapshot_id="quote-1",
+        receipt_relpath="quotes/quote-1/receipt.json",
+    )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        account_config_sha256="a" * 64,
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "combo_yield",
+                "strategy_mode": "combo_yield",
+                "candidate_owner": "sp_lc",
+                "account_config_sha256": "a" * 64,
+            }
+        ],
+    )
+    decisions = []
+    for contract, accepted in (("NVDA-P100", True), ("NVDA-P90", False)):
+        normalized = {
+            "symbol": "NVDA",
+            "contract_symbol": contract,
+            "expiration": "2026-08-21",
+            "strike": 100.0 if accepted else 90.0,
+            "annualized_net_return_on_cash_basis": 0.20,
+            "period_net_return_on_cash_basis": 0.02,
+            "net_assignment_discount_pct": 0.10,
+            "spread_ratio": 0.10,
+            "open_interest": 100,
+            "net_income": 500,
+            "snapshot_received_at_utc": "2026-08-12T01:00:00Z",
+            "spot_observed_at_utc": "2026-08-12T01:00:00Z",
+        }
+        decisions.append(
+            {
+                "normalized_input": normalized,
+                "opening_decision": build_candidate_decision(
+                    mode="put",
+                    symbol="NVDA",
+                    contract_symbol=contract,
+                    accepted=accepted,
+                    rejects=[] if accepted else [{"stage": "stage3_risk_filter", "reason": "policy_rejected"}],
+                    normalized_input=normalized,
+                ),
+            }
+        )
+    seal_combo_yield_candidate_snapshot(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        market="us",
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=[
+            {"kind": kind, "relpath": None, "sha256": character * 64}
+            for kind, character in (
+                ("required_data", "1"),
+                ("portfolio", "2"),
+                ("ledger", "3"),
+                ("fx", "4"),
+                ("earnings_rv", "5"),
+            )
+        ],
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "combo_yield",
+                "variant": "sp_lc",
+                "status": "completed",
+                "quote_snapshot_id": "quote-1",
+                "quote_receipt_relpath": "quotes/quote-1/receipt.json",
+            }
+        ],
+        funding_put_decisions=decisions,
+        ranked_pairs=[],
+        sealed_at="2026-08-12T01:00:00Z",
+    )
+    publish_candidate_snapshot_manifest(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        strategy_policy_sha256="b" * 64,
+        sealed_at="2026-08-12T01:00:01Z",
+    )

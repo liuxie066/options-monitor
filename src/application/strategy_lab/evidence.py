@@ -63,19 +63,33 @@ def load_strategy_lab_evidence(
     if dataset is not None and str(dataset).strip() and repo_root is None and not _has_scope_filters(accounts=accounts, market=market):
         evidence = load_strategy_lab_dataset(dataset)
         evidence["source"] = {"mode": "dataset", "dataset_dir": evidence["dataset_dir"]}
+        source = evidence["manifest"].get("source")
+        source = source if isinstance(source, dict) else {}
+        candidate_coverage = source.get("candidate_evidence_coverage")
+        candidate_coverage = candidate_coverage if isinstance(candidate_coverage, dict) else None
+        integrity_ready = evidence["integrity"].get("status") == "verified"
+        authority_ready = bool(
+            candidate_coverage
+            and candidate_coverage.get("strict_replay_authority") is True
+        )
+        candidate_ready = bool(evidence["candidate_snapshots"])
+        strict_ready = integrity_ready and authority_ready and candidate_ready
+        if not integrity_ready:
+            reason = "dataset_integrity_unverified"
+        elif candidate_coverage is None:
+            reason = "candidate_evidence_coverage_missing"
+        elif not authority_ready:
+            reason = "candidate_evidence_coverage_incomplete"
+        elif not candidate_ready:
+            reason = "candidate_universe_missing"
+        else:
+            reason = "dataset_candidate_universe_ready"
         evidence["coverage"] = {
             "mode": "dataset",
             "dataset_dir": evidence["dataset_dir"],
-            "strict_backtest_allowed": bool(evidence["candidate_snapshots"])
-            and evidence["integrity"].get("status") == "verified",
-            "reason": (
-                "dataset_candidate_universe_ready"
-                if evidence["candidate_snapshots"]
-                and evidence["integrity"].get("status") == "verified"
-                else "dataset_integrity_unverified"
-                if evidence["candidate_snapshots"]
-                else "candidate_universe_missing"
-            ),
+            "strict_backtest_allowed": strict_ready,
+            "reason": reason,
+            "candidate_evidence_coverage": candidate_coverage,
             "dataset_integrity": evidence["integrity"],
         }
         evidence["filters"] = {"accounts": [], "market": None, "market_filter_applied": False}
@@ -110,7 +124,7 @@ def load_strategy_lab_evidence(
         "manifest": manifest,
         "candidate_snapshots": candidates,
         "filter_decisions": list(observed["filter_decisions"]),
-        "rank_snapshots": [],
+        "rank_snapshots": list(observed.get("rank_snapshots") or []),
         "mark_snapshots": marks,
         "outcome_facts": outcomes,
         "source": observed.get("source") or {},

@@ -229,7 +229,7 @@ Feishu / WeChat / Inbound
 证据链路：
 
 ```text
-output_runs / required_data / candidate trace / reject logs / marks / outcomes
+output_runs / required_data / sealed candidate snapshot / candidate trace / marks / outcomes
   -> Research archive / evidence bundle
   -> Shadow Replay dataset
   -> readiness / candidate-impact
@@ -240,7 +240,7 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 边界：
 
 - 研究与复盘只产出建议和证据，不直接修改生产配置。
-- 参数假设讨论必须基于 replay / trace / outcome 证据，而不是只看最终候选 CSV。
+- 参数假设讨论必须基于 replay / snapshot / trace / outcome 证据，而不是只看终态候选。
 - Research 是证据基础设施；Shadow Replay 是反事实复盘引擎；Strategy Lab 是策略进化产品入口。
 - Shadow Replay 只提供候选影响和复盘证据；Strategy Lab 当前提供 evidence update facade、decision-instance readiness、hypotheses、candidate-impact experiment、Combo Yield group experiment、轻量 scorecard、advisory-only dry-run proposal 和脱敏 LLM context。
 - Strategy Lab 以策略域适配器组织 Sell Put、Covered Call 和 Combo Yield；实验对象是 `decision_instance`，不是单一 candidate row。

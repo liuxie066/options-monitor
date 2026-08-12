@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from collections import Counter
 from typing import Any
 
 from src.application.shadow_replay.candidate_analysis import *  # noqa: F403
-from src.application.shadow_replay.candidate_analysis import _evidence_level, analyze_rows
+from src.application.shadow_replay.candidate_analysis import (
+    _evidence_level,
+    analyze_rows,
+    apply_candidate_evidence_gate,
+)
 from src.application.shadow_replay.common import (
     ANALYSIS_SCHEMA_VERSION,
     OPTIONAL_CLOSE_DATASET_FILES,
@@ -52,6 +57,20 @@ def _analyze_shadow_replay_dataset_unlocked(
         outcome_facts=read_jsonl(dataset_dir / "outcome_facts.jsonl"),
         min_sample=max(1, int(min_sample)),
     )
+    manifest_path = dataset_dir / "manifest.json"
+    source_coverage: dict[str, Any] | None = None
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if isinstance(manifest, dict):
+            source = manifest.get("source")
+            if isinstance(source, dict) and isinstance(
+                source.get("candidate_evidence_coverage"), dict
+            ):
+                source_coverage = dict(source["candidate_evidence_coverage"])
+    apply_candidate_evidence_gate(analysis, source_coverage)
     analysis.update(
         {
             "schema_version": ANALYSIS_SCHEMA_VERSION,

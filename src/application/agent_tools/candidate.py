@@ -122,14 +122,14 @@ def _candidate_filter_explain_tool(
 CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_rank_explain",
     description=(
-        "Explain the recorded order in a sealed account opening-candidate snapshot. The tool never re-ranks rows."
+        "Explain the recorded order in a terminal manifest-bound account opening-candidate snapshot. The tool never re-ranks rows."
     ),
-    requires=("opening_candidate_snapshot",),
+    requires=("candidate_snapshot_manifest", "opening_candidate_snapshot"),
     capabilities=("ranking_explain", "read_only"),
     input_schema={
         "mode": "optional put|call|all; defaults to all",
         "top_n": "optional int, max 100; defaults to 10",
-        "run_id": "optional output_runs run id; omitted resolves the latest sealed snapshot",
+        "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
         "account": {
             "type": "string",
             "required": True,
@@ -150,9 +150,9 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     description=(
-        "Explain the recorded opening decision for a symbol from a sealed account snapshot. The tool never re-filters rows."
+        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows."
     ),
-    requires=("opening_candidate_snapshot",),
+    requires=("candidate_snapshot_manifest", "opening_candidate_snapshot"),
     capabilities=("opening_candidate_snapshot", "filter_explain", "read_only"),
     input_schema={
         "symbol": {
@@ -181,7 +181,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
                 )
             )
         ),
-        "run_id": "optional output_runs run id; omitted resolves the latest sealed snapshot",
+        "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
     },
     handler=_candidate_filter_explain_tool,
     pure_read=True,

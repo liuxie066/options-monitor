@@ -48,19 +48,6 @@ TRACE_REPLAY_FIELD_KEYS: tuple[str, ...] = (
 )
 
 
-def trace_function_for_mode(mode: Any) -> str:
-    mode_norm = str(mode or "").strip().lower()
-    if mode_norm == "call":
-        return FUNCTION_SELL_CALL
-    return FUNCTION_SELL_PUT
-
-
-def candidate_trace_path_for_output(output_path: Path | str | None) -> Path | None:
-    if output_path is None:
-        return None
-    return Path(output_path).resolve().parent / "candidate_filter_trace.jsonl"
-
-
 def infer_trace_scope_from_path(path: Path | str | None) -> dict[str, str | None]:
     if path is None:
         return {"run_id": None, "account": None}
@@ -146,49 +133,6 @@ def build_candidate_filter_trace_row(
         "evidence_path": _clean_optional_text(evidence_path),
         "config_values": config_values_json,
     }
-
-
-def build_candidate_filter_trace_rows_from_decision(
-    *,
-    decision: dict[str, Any],
-    function: str,
-    status: str,
-    reject_stage: str,
-    evidence_path: str | None,
-    config_values: dict[str, Any],
-    output_path: Path | str | None = None,
-    replay_fields: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    scope = infer_trace_scope_from_path(output_path)
-    normalized = dict(decision.get("normalized_input") or {})
-    replay_payload = build_candidate_replay_fields(normalized, replay_fields)
-    rows: list[dict[str, Any]] = []
-    for reject in list(decision.get("rejects") or []):
-        reason = str(reject.get("reason") or "").strip()
-        if not reason:
-            continue
-        rows.append(
-            build_candidate_filter_trace_row(
-                run_id=scope.get("run_id"),
-                account=scope.get("account"),
-                symbol=decision.get("symbol") or normalized.get("symbol"),
-                function=function,
-                mode=decision.get("mode"),
-                status=status,
-                stage=reject.get("stage") or reject_stage,
-                rule=reason,
-                metric_value=reject.get("metric_value"),
-                threshold=reject.get("threshold"),
-                contract_symbol=decision.get("contract_symbol") or normalized.get("contract_symbol"),
-                expiration=normalized.get("expiration"),
-                strike=normalized.get("strike"),
-                message=reject.get("message") or "",
-                evidence_path=evidence_path,
-                config_values=config_values,
-                replay_fields=replay_payload,
-            )
-        )
-    return rows
 
 
 def append_candidate_filter_trace_rows(path: Path | str | None, rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> None:

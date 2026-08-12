@@ -1,25 +1,13 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import sys
 from pathlib import Path
-
-repo_base = Path(__file__).resolve().parents[2]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
+from typing import Any
 
 import pandas as pd
-from pandas.errors import EmptyDataError
 
 from domain.domain.engine import rank_yield_enhancement_rows
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.report_formatting import num, pct
-
-
-COMBO_YIELD_CANDIDATES_BASENAME = "combo_yield_candidates.csv"
-COMBO_YIELD_ALERTS_BASENAME = "combo_yield_alerts.txt"
-LEGACY_YIELD_ENHANCEMENT_CANDIDATES_BASENAME = "yield_enhancement_candidates.csv"
 
 
 def _safe_float(value) -> float | None:
@@ -36,12 +24,6 @@ def _strike_token(value) -> str:
     if float(number).is_integer():
         return str(int(number))
     return str(number)
-
-
-def _default_report_file(report_dir_path: Path, basename: str, *, symbol: str | None = None) -> Path:
-    if symbol:
-        return (report_dir_path / f"{symbol.lower()}_{basename}").resolve()
-    return (report_dir_path / basename).resolve()
 
 
 def render_one(row: pd.Series) -> str:
@@ -101,57 +83,13 @@ def render_one(row: pd.Series) -> str:
 
 def render_yield_enhancement_alerts(
     *,
-    input_path: str | Path | None = None,
-    report_dir: str | Path = 'output_shared/reports',
+    candidates: pd.DataFrame | list[dict[str, Any]],
     top: int = 5,
-    symbol: str | None = None,
-    output_path: str | Path | None = None,
-    base_dir: Path | None = None,
+    output_path: str | Path,
 ) -> str:
-    base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
-
-    report_dir_path = Path(report_dir)
-    if not report_dir_path.is_absolute():
-        report_dir_path = (base / report_dir_path).resolve()
-
-    if input_path:
-        input_file = Path(input_path)
-        if not input_file.is_absolute():
-            input_file = (base / input_file).resolve()
-    else:
-        input_file = _default_report_file(
-            report_dir_path,
-            COMBO_YIELD_CANDIDATES_BASENAME,
-            symbol=symbol,
-        )
-        legacy_input_file = _default_report_file(
-            report_dir_path,
-            LEGACY_YIELD_ENHANCEMENT_CANDIDATES_BASENAME,
-            symbol=symbol,
-        )
-        if not input_file.exists() and legacy_input_file.exists():
-            input_file = legacy_input_file
-
-    if output_path:
-        output_file = Path(output_path)
-        if not output_file.is_absolute():
-            output_file = (base / output_file).resolve()
-    else:
-        output_file = _default_report_file(
-            report_dir_path,
-            COMBO_YIELD_ALERTS_BASENAME,
-            symbol=symbol,
-        )
-
+    output_file = Path(output_path).resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        df = pd.read_csv(input_file)
-    except (FileNotFoundError, EmptyDataError):
-        df = pd.DataFrame()
-
-    if symbol and not df.empty:
-        df = df[df["symbol"] == symbol].copy()
+    df = candidates.copy() if isinstance(candidates, pd.DataFrame) else pd.DataFrame(candidates)
 
     if df.empty:
         text = "无候选提醒。"
@@ -168,40 +106,4 @@ def render_yield_enhancement_alerts(
     blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"
     atomic_write_text(output_file, text)
-    print(text)
-    print(f"[DONE] alerts -> {output_file}")
     return text
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Render Combo Yield alert text from candidate CSV')
-    parser.add_argument(
-        '--input',
-        default=None,
-        help='Input CSV path (default: <report-dir>/<symbol>_combo_yield_candidates.csv when --symbol is set; otherwise <report-dir>/combo_yield_candidates.csv)',
-    )
-    parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
-    parser.add_argument('--top', type=int, default=5)
-    parser.add_argument('--symbol', default=None)
-    parser.add_argument(
-        '--output',
-        default=None,
-        help='Output txt path (default: <report-dir>/<symbol>_combo_yield_alerts.txt when --symbol is set; otherwise <report-dir>/combo_yield_alerts.txt)',
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    render_yield_enhancement_alerts(
-        input_path=args.input,
-        report_dir=args.report_dir,
-        top=args.top,
-        symbol=args.symbol,
-        output_path=args.output,
-    )
-    return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())

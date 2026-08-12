@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.candidate_evidence_helpers import (
+    seal_combo_candidate_fixture,
+    seal_opening_candidate_fixture,
+    seal_strict_dataset_fixture,
+)
+
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     if path.name == "mark_path_snapshots.jsonl":
@@ -61,13 +67,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     if path.name == "outcome_facts.jsonl":
-        from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
-
-        for name in DATASET_FILES:
-            candidate = path.parent / name
-            if not candidate.exists():
-                candidate.write_text("", encoding="utf-8")
-        refresh_dataset_manifest(path.parent)
+        seal_strict_dataset_fixture(path.parent)
 
 
 def _trusted_experiment_path(
@@ -274,15 +274,38 @@ def _write_latest_scanned_run(runs_root: Path) -> Path:
 
 
 def _write_candidate_run(runs_root: Path, run_id: str) -> Path:
-    run_account = runs_root / run_id / "accounts" / "lx"
-    run_account.mkdir(parents=True, exist_ok=True)
-    (run_account / "sell_put_candidates.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
-            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
-        ),
-        encoding="utf-8",
+    seal_opening_candidate_fixture(
+        runs_root.parent,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "net_income": 120,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.22,
+                "strike": 80,
+                "spread_ratio": 0.45,
+                "rule": "risk_spread",
+            }
+        ],
     )
+    run_account = runs_root / run_id / "accounts" / "lx"
     (run_account / "candidate_filter_trace.jsonl").write_text(
         json.dumps(
             {
@@ -292,7 +315,7 @@ def _write_candidate_run(runs_root: Path, run_id: str) -> Path:
                 "mode": "put",
                 "contract_symbol": "AMD260619P00080000",
                 "status": "rejected",
-                "rule": "spread_too_wide",
+                "rule": "risk_spread",
             }
         )
         + "\n",
@@ -422,18 +445,47 @@ def _write_close_run(
 
 
 def _write_strategy_lab_window_run(root: Path) -> Path:
-    account_dir = root / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
-    account_dir.mkdir(parents=True, exist_ok=True)
-    (account_dir / "sell_put_candidates.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,"
-            "strategy_profile,iv_rv_ratio,iv_minus_rv,annualized_return,spread_ratio,"
-            "single_trade_concentration,net_income\n"
-            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,"
-            "insurance_underwriting,1.25,0.08,0.22,0.10,0.02,120\n"
-        ),
-        encoding="utf-8",
+    run_id = "20260602T010000Z-run"
+    seal_opening_candidate_fixture(
+        root,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "strategy_profile": "insurance_underwriting",
+                "iv_rv_ratio": 1.25,
+                "iv_minus_rv": 0.08,
+                "annualized_return": 0.22,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.22,
+                "strike": 80,
+                "iv_rv_ratio": 1.10,
+                "iv_minus_rv": 0.04,
+                "annualized_return": 0.18,
+                "rule": "risk_spread",
+            }
+        ],
     )
+    account_dir = root / "output_runs" / run_id / "accounts" / "lx"
     (account_dir / "candidate_filter_trace.jsonl").write_text(
         json.dumps(
             {
@@ -443,7 +495,7 @@ def _write_strategy_lab_window_run(root: Path) -> Path:
                 "mode": "put",
                 "contract_symbol": "AMD260619P00080000",
                 "status": "rejected",
-                "rule": "spread_too_wide",
+                "rule": "risk_spread",
                 "dte": 30,
                 "delta": -0.22,
                 "iv_rv_ratio": 1.10,
@@ -546,20 +598,42 @@ def test_strategy_lab_readiness_blocks_covered_call_without_holding_context(tmp_
 def test_shadow_replay_capture_expands_real_combo_pair_row_once_per_leg(tmp_path: Path) -> None:
     from src.application.shadow_replay import build_shadow_replay_dataset
 
-    run_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
-    run_dir.mkdir(parents=True)
-    (run_dir / "combo_yield_candidates.csv").write_text(
-        (
-            "symbol,account,expiration,dte,spot,multiplier,put_contract_symbol,put_strike,"
-            "put_bid,put_ask,put_mid,put_delta,put_open_interest,put_volume,put_spread_ratio,"
-            "call_contract_symbol,call_strike,call_bid,call_ask,call_mid,call_delta,"
-            "call_open_interest,call_volume,call_spread_ratio,put_net_credit,call_total_cost,"
-            "combo_net_credit,net_credit_retention,call_cost_to_put_credit\n"
-            "TSLA,lx,2026-06-19,30,180,100,TSLA260619P00150000,150,6.0,6.2,6.1,-0.24,"
-            "500,100,0.03,TSLA260619C00220000,220,3.8,4.0,3.9,0.30,400,80,0.05,600,400,"
-            "200,0.333333,0.666667\n"
-        ),
-        encoding="utf-8",
+    run_id = "20260602T010000Z-run"
+    seal_combo_candidate_fixture(
+        tmp_path,
+        run_id=run_id,
+        ranked_pairs=[
+            {
+                "symbol": "TSLA",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "spot": 180,
+                "multiplier": 100,
+                "put_contract_symbol": "TSLA260619P00150000",
+                "put_strike": 150,
+                "put_bid": 6.0,
+                "put_ask": 6.2,
+                "put_mid": 6.1,
+                "put_delta": -0.24,
+                "put_open_interest": 500,
+                "put_volume": 100,
+                "put_spread_ratio": 0.03,
+                "call_contract_symbol": "TSLA260619C00220000",
+                "call_strike": 220,
+                "call_bid": 3.8,
+                "call_ask": 4.0,
+                "call_mid": 3.9,
+                "call_delta": 0.30,
+                "call_open_interest": 400,
+                "call_volume": 80,
+                "call_spread_ratio": 0.05,
+                "put_net_credit": 600,
+                "call_total_cost": 400,
+                "combo_net_credit": 200,
+                "net_credit_retention": 0.333333,
+                "call_cost_to_put_credit": 0.666667,
+            }
+        ],
     )
 
     manifest = build_shadow_replay_dataset(
@@ -574,8 +648,8 @@ def test_shadow_replay_capture_expands_real_combo_pair_row_once_per_leg(tmp_path
 
     assert len(rows) == 2
     assert len({row["strategy_group_id"] for row in rows}) == 1
-    assert rows[0]["strategy_group_id"].startswith(
-        "combo_yield|20260602T010000Z-run|lx|TSLA|2026-06-19|"
+    assert rows[0]["strategy_group_id"] == (
+        "combo_yield:TSLA:TSLA260619P00150000:TSLA260619C00220000"
     )
     assert {row["leg_role"] for row in rows} == {"funding_put", "participation_call"}
     by_role = {row["leg_role"]: row for row in rows}
@@ -594,16 +668,23 @@ def test_shadow_replay_capture_does_not_copy_pair_net_credit_into_combo_legs(tmp
     from src.application.shadow_replay import build_shadow_replay_dataset
     from src.application.strategy_lab import run_combo_yield_group_experiment
 
-    run_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
-    run_dir.mkdir(parents=True)
-    (run_dir / "combo_yield_candidates.csv").write_text(
-        (
-            "symbol,account,expiration,spot,multiplier,put_contract_symbol,put_strike,"
-            "call_contract_symbol,call_strike,net_credit\n"
-            "TSLA,lx,2026-06-19,180,100,TSLA260619P00150000,150,"
-            "TSLA260619C00220000,220,200\n"
-        ),
-        encoding="utf-8",
+    run_id = "20260602T010000Z-run"
+    seal_combo_candidate_fixture(
+        tmp_path,
+        run_id=run_id,
+        ranked_pairs=[
+            {
+                "symbol": "TSLA",
+                "expiration": "2026-06-19",
+                "spot": 180,
+                "multiplier": 100,
+                "put_contract_symbol": "TSLA260619P00150000",
+                "put_strike": 150,
+                "call_contract_symbol": "TSLA260619C00220000",
+                "call_strike": 220,
+                "net_credit": 200,
+            }
+        ],
     )
 
     manifest = build_shadow_replay_dataset(
@@ -630,17 +711,29 @@ def test_shadow_replay_capture_does_not_copy_pair_net_credit_into_combo_legs(tmp
 def test_shadow_replay_capture_preserves_underwriting_ranking_fields(tmp_path: Path) -> None:
     from src.application.shadow_replay import build_shadow_replay_dataset
 
-    run_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
-    run_dir.mkdir(parents=True)
-    (run_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,status,strategy_profile,strike,max_strike,"
-            "premium_edge_score,strike_safety_margin_pct,annualized_return,iv_rv_ratio,iv_minus_rv,"
-            "spread_ratio,open_interest,net_income_cny\n"
-            "NVDA,lx,put,NVDA260619P00100000,accepted,insurance_underwriting,100,110,"
-            "1.2,0.090909,0.20,1.30,0.08,0.05,500,1200\n"
-        ),
-        encoding="utf-8",
+    run_id = "20260602T010000Z-run"
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id=run_id,
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "strategy_profile": "insurance_underwriting",
+                "strike": 100,
+                "max_strike": 110,
+                "premium_edge_score": 1.2,
+                "strike_safety_margin_pct": 0.090909,
+                "annualized_return": 0.20,
+                "iv_rv_ratio": 1.30,
+                "iv_minus_rv": 0.08,
+                "spread_ratio": 0.05,
+                "open_interest": 500,
+                "net_income_cny": 1200,
+            }
+        ],
     )
 
     manifest = build_shadow_replay_dataset(
@@ -2394,17 +2487,33 @@ def test_shadow_replay_capture_and_evaluator_preserve_same_expiry_combo_horizons
     from src.application.shadow_replay import build_shadow_replay_dataset
     from src.application.strategy_lab import run_combo_yield_group_experiment
 
-    run_dir = tmp_path / "output_runs" / "20260717T010000Z-run" / "accounts" / "lx"
-    run_dir.mkdir(parents=True)
-    (run_dir / "combo_yield_candidates.csv").write_text(
-        (
-            "symbol,account,structure_mode,candidate_pair_id,put_expiration,put_dte,call_expiration,call_dte,"
-            "spot,multiplier,put_contracts,call_contracts,put_contract_symbol,put_strike,put_bid,"
-            "call_contract_symbol,call_strike,call_ask,put_net_credit,call_total_cost,combo_net_credit\n"
-            "TSLA,lx,same_expiry_pair,pair-tsla-1,2026-08-21,35,2026-08-21,35,180,100,1,1,"
-            "TSLA260821P00150000,150,6.0,TSLA260821C00220000,220,4.0,600,400,200\n"
-        ),
-        encoding="utf-8",
+    run_id = "20260717T010000Z-run"
+    seal_combo_candidate_fixture(
+        tmp_path,
+        run_id=run_id,
+        ranked_pairs=[
+            {
+                "symbol": "TSLA",
+                "structure_mode": "same_expiry_pair",
+                "put_expiration": "2026-08-21",
+                "put_dte": 35,
+                "call_expiration": "2026-08-21",
+                "call_dte": 35,
+                "spot": 180,
+                "multiplier": 100,
+                "put_contracts": 1,
+                "call_contracts": 1,
+                "put_contract_symbol": "TSLA260821P00150000",
+                "put_strike": 150,
+                "put_bid": 6.0,
+                "call_contract_symbol": "TSLA260821C00220000",
+                "call_strike": 220,
+                "call_ask": 4.0,
+                "put_net_credit": 600,
+                "call_total_cost": 400,
+                "combo_net_credit": 200,
+            }
+        ],
     )
 
     manifest = build_shadow_replay_dataset(
@@ -2421,7 +2530,9 @@ def test_shadow_replay_capture_and_evaluator_preserve_same_expiry_combo_horizons
     by_role = {row["leg_role"]: row for row in rows}
 
     assert {row["structure_mode"] for row in rows} == {"same_expiry_pair"}
-    assert {row["candidate_pair_id"] for row in rows} == {"pair-tsla-1"}
+    assert {row["candidate_pair_id"] for row in rows} == {
+        "combo_yield:TSLA:TSLA260821P00150000:TSLA260821C00220000"
+    }
     assert by_role["funding_put"]["expiration"] == "2026-08-21"
     assert by_role["funding_put"]["dte"] == 35
     assert by_role["participation_call"]["expiration"] == "2026-08-21"

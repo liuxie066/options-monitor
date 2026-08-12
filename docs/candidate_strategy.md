@@ -492,7 +492,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | A07 | 开仓候选与已有持仓处置彻底分离，不生成 replacement/reallocate | §10 |
 | A08 | Combo Yield 只共享标准化证据，保留独立策略和 snapshot | §2 |
 | A09 | 人工不依赖 CSV 导出；Agent 是正式分析入口 | §10 |
-| A10 | 删除 runtime CSV/JSONL 候选流水线、重复候选 artifact 和旧字段 | §12 |
+| A10 | 删除 runtime 候选 CSV 流水线、重复候选 artifact 和旧字段；JSONL 仅作审计追踪 | §12 |
 | A11 | 开仓候选不考虑自动下单、自动换汇或自动归属 Wheel 批次 | §10 |
 | A12 | 当前代码与目标合同的差距必须明确，不能把文档目标声称为已上线 | §13 |
 
@@ -508,7 +508,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
   gamma、vega、gap-up/gap-down 等旧开仓评分；
 - OI / volume / delta 硬门槛；
 - 第二套 application 排序；
-- runtime CSV/JSONL 候选流水线和重复候选 artifact；
+- runtime 候选 CSV 流水线和重复候选 artifact；JSONL 只保留为非权威审计证据；
 - multiplier `100` 默认值、旧 spot/last/CSV fallback；
 - 旧字段、旧 CLI 参数和只为已删除决策保留的兼容读取。
 
@@ -526,11 +526,12 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - Sell Put / Covered Call 的计算、硬筛和排序由 Candidate Engine 唯一所有；
 - 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
-- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，Agent 和 Daily Brief
-  读取同一封存事实；
-- yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV/JSONL 权威路径和重复
-  候选 artifact 已退出当前开仓路径；历史读取只保留在明确的
-  Combo Yield、research/archive/shadow 兼容边界。
+- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，并由最后发布的
+  `candidate_snapshot_manifest.v1` 绑定完整 owner/scope；Agent 和 Daily Brief 只通过
+  terminal manifest gate 读取同一封存事实，不会挽救未完成运行中的单个 owner；
+- yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV 权威路径和重复候选
+  artifact 已退出当前开仓路径；JSONL 只保留为当前决策追踪证据，历史候选文件只在
+  research/archive/shadow 的受限元数据分类边界中识别且不再解析。
 
 上述结论证明当前 `main` 源码与 v1.10.17 发布产物已按本合同运行。受控远程升级是
 独立授权边界；在完成升级和运行时验证前，不得宣称生产环境已按本合同运行。

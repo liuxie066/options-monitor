@@ -5,10 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 BASE = Path(__file__).resolve().parents[1]
-VPY = BASE / '.venv' / 'bin' / 'python'
+VPY = Path(sys.executable)
 TEST_ROOT = BASE / 'output' / 'state' / 'test_cli_domain_split_step4'
 
 
@@ -33,94 +31,6 @@ def test_stage4_domain_files_without_argparse_or_main() -> None:
         text = path.read_text(encoding='utf-8')
         assert 'import argparse' not in text
         assert '__main__' not in text
-
-
-def test_render_alerts_domain_and_cli() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
-
-    from src.application.render_sell_put_alerts import render_sell_put_alerts
-    from src.application.render_sell_call_alerts import render_sell_call_alerts
-
-    root = TEST_ROOT / 'render'
-    _clean_dir(root)
-    put_in = root / 'put.csv'
-    call_in = root / 'call.csv'
-    put_out = root / 'put.txt'
-    call_out = root / 'call.txt'
-
-    pd.DataFrame([
-        {
-            'symbol': 'AAPL',
-            'expiration': '2026-12-18',
-            'strike': 150.0,
-            'spot': 170.0,
-            'dte': 30,
-            'mid': 2.5,
-            'net_income': 250.0,
-            'annualized_net_return_on_cash_basis': 0.2,
-            'otm_pct': 0.1,
-            'risk_label': '中性',
-            'open_interest': 100,
-            'volume': 10,
-            'spread_ratio': 0.1,
-            'currency': 'USD',
-        }
-    ]).to_csv(put_in, index=False)
-
-    pd.DataFrame([
-        {
-            'symbol': 'AAPL',
-            'expiration': '2026-12-18',
-            'strike': 190.0,
-            'spot': 170.0,
-            'dte': 30,
-            'mid': 1.5,
-            'avg_cost': 120.0,
-            'shares_total': 100,
-            'shares_locked': 0,
-            'shares_available_for_cover': 100,
-            'covered_contracts_available': 1,
-            'is_fully_covered_available': True,
-            'net_income': 150.0,
-            'annualized_net_premium_return': 0.12,
-            'if_exercised_total_return': 0.2,
-            'strike_above_spot_pct': 0.1,
-            'strike_above_cost_pct': 0.58,
-            'risk_label': '中性',
-            'open_interest': 100,
-            'volume': 10,
-            'spread_ratio': 0.1,
-            'currency': 'USD',
-        }
-    ]).to_csv(call_in, index=False)
-
-    put_result = render_sell_put_alerts(input_path=str(put_in), output_path=str(put_out), symbol='AAPL')
-    call_result = render_sell_call_alerts(input_path=str(call_in), output_path=str(call_out), symbol='AAPL')
-
-    assert '[Sell Put 候选]' in put_result
-    assert '[Covered Call 候选]' in call_result
-    assert put_out.exists()
-    assert call_out.exists()
-
-    p = subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.application.render_sell_put_alerts',
-            '--input',
-            str(put_in),
-            '--output',
-            str(put_out),
-            '--symbol',
-            'AAPL',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert '[DONE] alerts ->' in p.stdout
 
 
 def test_scan_scheduler_domain_and_cli() -> None:
@@ -211,18 +121,6 @@ def test_query_sell_put_cash_domain_minimal() -> None:
 
 
 def test_new_cli_modules_help_ok() -> None:
-    cli_modules = [
-        'src.application.render_sell_put_alerts',
-        'src.application.render_sell_call_alerts',
-    ]
-    for module in cli_modules:
-        p = subprocess.run(
-            [str(VPY), '-m', module, '--help'],
-            cwd=str(BASE),
-            capture_output=True,
-            text=True,
-        )
-        assert p.returncode == 0
     for argv in (
         ['-m', 'src.interfaces.cli.main', 'scheduler', '--help'],
         ['-m', 'src.interfaces.cli.main', 'sell-put-cash', '--help'],

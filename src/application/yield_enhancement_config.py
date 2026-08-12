@@ -10,7 +10,6 @@ from src.application.strategy_policy import (
 )
 
 
-YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair"}
 YIELD_ENHANCEMENT_VARIANTS: set[str] = {"sp_lc", "cc_lp"}
@@ -46,7 +45,6 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "structure_mode": "same_expiry_pair",
     "objective": "premium_funded_long_call",
     "variant": "sp_lc",
-    "output_mode": "separate",
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
     "min_net_credit_retention": 0.60,
@@ -189,8 +187,6 @@ def derive_yield_enhancement_policy(
     # underwriting gate, so realized volatility is required by the strategy.
     cfg["yield_enhancement_requires_rv"] = True
     cfg["yield_enhancement_uses_short_vol_gate"] = False
-    output_mode = str(cfg.get("output_mode") or "").strip().lower()
-    cfg["output_mode"] = output_mode if output_mode in YIELD_ENHANCEMENT_OUTPUT_MODES else "separate"
     return YieldEnhancementPolicy(
         enabled=bool(enabled),
         mode=mode,
@@ -234,31 +230,7 @@ def resolve_yield_enhancement_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str
     top_level["_explicit_fields"] = explicit_fields
     if explicit_call_fields:
         top_level["_explicit_call_fields"] = explicit_call_fields
-    output_mode = str(top_level.get("output_mode") or "").strip().lower()
-    if not output_mode:
-        output_mode = "separate"
-    top_level["output_mode"] = output_mode
-
     if "enabled" in top_level:
         top_level["enabled"] = bool(top_level.get("enabled"))
 
     return top_level
-
-
-def yield_enhancement_output_mode(cfg: dict[str, Any] | None, *, default: str = "separate") -> str:
-    mode = str((cfg or {}).get("output_mode") or "").strip().lower()
-    if mode in YIELD_ENHANCEMENT_OUTPUT_MODES:
-        return mode
-    return default
-
-
-def wants_yield_enhancement_inline(cfg: dict[str, Any] | None) -> bool:
-    if not bool((cfg or {}).get("enabled", False)):
-        return False
-    return yield_enhancement_output_mode(cfg) in {"inline", "both"}
-
-
-def wants_yield_enhancement_separate(cfg: dict[str, Any] | None) -> bool:
-    if not bool((cfg or {}).get("enabled", False)):
-        return False
-    return yield_enhancement_output_mode(cfg) in {"separate", "both"}
