@@ -1231,7 +1231,7 @@ def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> No
     assert "### AI建议" in message
     assert "建议改选策略排序 4：C4 08-21 $104 Put。" in message
     assert "## Covered Call" in message
-    assert "本轮无可供 AI 评估的策略候选。" in message
+    assert "本轮无策略候选。" in message
 
 
 def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
@@ -1315,9 +1315,147 @@ def test_fixed_report_card_places_ai_advice_inside_strategy_module() -> None:
 
     sell_put = message.index("## Sell Put")
     advice = message.index("### AI建议", sell_put)
-    candidates = message.index("### 策略候选", advice)
+    candidates = message.index("**MSFT｜Sell Put｜", advice)
     assert sell_put < advice < candidates
+    assert "### 策略候选" not in message
     assert "结论｜维持策略排序 1。" in message
+    assert "提醒｜多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
+
+
+def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    brief["candidates"]["covered_call"] = []
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["ai_decision_advice"] = {
+        "status": "unavailable",
+        "unavailable_reason": "model_unavailable",
+        "sell_put": None,
+        "covered_call": None,
+        "zero_candidate": {"sell_put": False, "covered_call": True},
+    }
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": symbol,
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            }
+            for symbol in ("GOOGL", "NVDA")
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    notice = "AI｜未完成；以下仅为策略排序，未经综合判断。"
+    assert message.count(notice) == 1
+    assert "### AI建议" not in message
+    assert "### 策略候选" not in message
+    assert "## Covered Call\n\n本轮无策略候选。" in message
+    assert "多个 Sell Put 候选共享同一现金额度" not in message
+    assert "## 提醒" not in message
+    assert "提醒｜" not in message
+    assert "GOOGL Sell Put：本轮部分行情证据不可用" not in message
+    assert "事件数据不完整，无法排除近期重要事件；下单前复核。" in message
+    assert "当前无法确认没有重要事件" not in message
+
+
+def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "GOOGL",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            },
+            {
+                "scope": "symbol",
+                "symbol": "GOOGL",
+                "reason": "ok",
+                "source": "required_data_prefetch_summary",
+            },
+            {
+                "scope": "symbol",
+                "symbol": "NVDA",
+                "reason": "quote_fetch_timeout",
+                "source": "required_data_prefetch_summary",
+            },
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert message.count("提醒｜") == 1
+    assert "提醒｜NVDA：行情获取失败，本轮候选结果不完整" in message
+    assert "提醒｜GOOGL" not in message
+    assert "opening_candidate_strategy_partial_data" not in message
+    assert "quote_fetch_timeout" not in message
+
+
+def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "GOOGL",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "reason_code": "term_matched_rv_unavailable",
+                "severity": "warning",
+                "actionable": False,
+            },
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            },
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert message.count("提醒｜") == 1
+    assert (
+        "提醒｜GOOGL Sell Put：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
+        in message
+    )
+    assert "提醒｜NVDA" not in message
 
 
 def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
@@ -1344,9 +1482,10 @@ def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
         message.index("## Covered Call") : message.index("## 组合增强")
     ]
 
-    assert "AI建议未完成；本轮没有可展示的策略原始排序。" in sell_put_block
+    assert message.count("AI｜未完成；以下仅为策略排序，未经综合判断。") == 1
+    assert "本轮无可展示的策略排序。" in sell_put_block
     assert "以下仅展示策略原始排序" not in sell_put_block
-    assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
+    assert "AI建议未完成" not in covered_call_block
 
 
 def test_unavailable_ai_copy_uses_raw_family_presence_when_render_budget_omits_rows() -> None:
@@ -1511,7 +1650,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
     assert "## Sell Put" in message
-    assert "### 策略候选" in message
+    assert "### 策略候选" not in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）**" in message
     assert (
@@ -1598,7 +1737,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "| 项目 | 数值 |" not in message
 
 
-def test_evidence_hold_is_rendered_as_waiting_not_current_recommendation() -> None:
+def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report
 
     brief = _brief()
@@ -1627,5 +1766,5 @@ def test_evidence_hold_is_rendered_as_waiting_not_current_recommendation() -> No
 
     rendered = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "行情证据不可用，待恢复（不是当前推荐）" in rendered
     assert "原候选仅保留待恢复身份，不是当前推荐" in rendered
+    assert "提醒｜" not in rendered
