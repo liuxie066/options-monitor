@@ -21,6 +21,7 @@ from src.application.opening_candidate_snapshot import (
     load_opening_candidate_snapshot,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
+    rejected_opening_candidate_decisions,
     seal_opening_candidate_snapshot,
     validate_opening_candidate_snapshot,
 )
@@ -760,6 +761,13 @@ def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     assert contract_scope["rejects"][0]["metric_value"] == opening_decision[
         "rejects"
     ][0]["metric_value"]
+    projected_rejections = rejected_opening_candidate_decisions(
+        payload,
+        mode="put",
+    )
+    assert len(projected_rejections) == 1
+    assert projected_rejections[0]["candidate_id"] == contract_scope["candidate_id"]
+    assert projected_rejections[0]["opening_decision"]["accepted"] is False
 
     data, warnings, _meta = candidate_filter_explain_tool(
         {

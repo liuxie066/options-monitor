@@ -340,7 +340,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
         {
             "symbol": "NVDA",
             "strategy_mode": "put",
-            "status": "failed",
+            "status": "unavailable",
             "reason": "required_data_snapshot_unavailable",
             "quote_snapshot_id": "snapshot-failed",
             "quote_receipt_relpath": "quotes/receipt.json",
@@ -348,7 +348,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
         {
             "symbol": "NVDA",
             "strategy_mode": "combo_yield",
-            "status": "failed",
+            "status": "unavailable",
             "reason": "required_data_snapshot_unavailable",
             "quote_snapshot_id": "snapshot-failed",
             "quote_receipt_relpath": "quotes/receipt.json",
@@ -1277,7 +1277,7 @@ def test_sell_call_not_applicable_does_not_touch_historical_call_artifacts(
     assert out[-1]["strategy"] == "sell_call"
 
 
-def test_sell_call_shared_symbol_without_holding_reports_benign_scope_reason(
+def test_sell_call_shared_symbol_without_holding_is_outside_candidate_capture_scope(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1355,13 +1355,4 @@ def test_sell_call_shared_symbol_without_holding_reports_benign_scope_reason(
         deps=deps,
     )
 
-    assert capture_statuses == [
-        {
-            "symbol": "3690.HK",
-            "strategy_mode": "call",
-            "status": "not_applicable",
-            "reason": "covered_call_underlying_not_held",
-            "quote_snapshot_id": None,
-            "quote_receipt_relpath": None,
-        }
-    ]
+    assert capture_statuses == []

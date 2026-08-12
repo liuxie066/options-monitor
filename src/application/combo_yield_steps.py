@@ -191,7 +191,7 @@ def run_combo_yield_scan_and_summarize(
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
-    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -309,9 +309,10 @@ def run_combo_yield_scan_and_summarize(
             run_id=occurrence_run_id,
             generated_at_utc=now_utc_fn(),
         )
+    rank_shadow = build_yield_enhancement_rank_shadow(raw_yield_pairs_df)
     rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
     try:
-        _atomic_write_dataframe(rank_shadow_path, build_yield_enhancement_rank_shadow(raw_yield_pairs_df))
+        _atomic_write_dataframe(rank_shadow_path, rank_shadow)
     except Exception as exc:
         raise RuntimeError(f"failed to persist Combo Yield rank shadow: {rank_shadow_path}") from exc
 
@@ -397,12 +398,26 @@ def run_combo_yield_scan_and_summarize(
         candidates_path=result.candidates_path,
         alerts_path=result.alerts_path,
     )
-    if combo_pairs_sink_fn is not None:
-        combo_pairs_sink_fn(
-            [
-                dict(item)
-                for item in final_result.recommended_pairs.to_dict("records")
-            ]
+    if combo_evidence_sink_fn is not None:
+        combo_evidence_sink_fn(
+            {
+                "schema_version": "combo_yield_scan_evidence.v1",
+                "variant": "sp_lc",
+                "symbol": symbol,
+                "funding_put_decisions": [
+                    dict(item) for item in funding_put_decisions
+                ],
+                "pair_evaluations": [
+                    dict(item) for item in pair_diagnostics.to_dict("records")
+                ],
+                "rank_records": [
+                    dict(item) for item in rank_shadow.to_dict("records")
+                ],
+                "ranked_pairs": [
+                    dict(item)
+                    for item in final_result.recommended_pairs.to_dict("records")
+                ],
+            }
         )
 
     if not is_scheduled and final_result.separate_enabled:
@@ -496,7 +511,7 @@ def run_combo_yield_for_symbol_and_summarize(
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
-    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
@@ -520,7 +535,7 @@ def run_combo_yield_for_symbol_and_summarize(
             report_dir=report_dir,
             exchange_rate_converter=exchange_rate_converter,
             portfolio_ctx=portfolio_ctx,
-            combo_pairs_sink_fn=combo_pairs_sink_fn,
+            combo_evidence_sink_fn=combo_evidence_sink_fn,
         )
 
     materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
@@ -555,7 +570,7 @@ def run_combo_yield_for_symbol_and_summarize(
         top_n=top_n,
         is_scheduled=is_scheduled,
         cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
-        combo_pairs_sink_fn=combo_pairs_sink_fn,
+        combo_evidence_sink_fn=combo_evidence_sink_fn,
     )
     return summary
 
@@ -574,7 +589,7 @@ def run_cc_lp_variant(
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
-    combo_pairs_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
@@ -593,6 +608,15 @@ def run_cc_lp_variant(
         global_sell_call_liquidity=global_sell_call_liquidity,
         strategy_profile=policy.mode,
     )
+    if combo_evidence_sink_fn is not None:
+        combo_evidence_sink_fn(
+            {
+                "schema_version": "combo_yield_scan_evidence.v1",
+                "variant": "cc_lp",
+                "symbol": symbol,
+                "ranked_pairs": [dict(item) for item in df.to_dict("records")],
+            }
+        )
     if df.empty:
         summary = summarize_cc_lp_result(
             df=df,
@@ -601,8 +625,6 @@ def run_cc_lp_variant(
             reason="" if stock else "stock_context_missing",
         )
         return summary
-    if combo_pairs_sink_fn is not None:
-        combo_pairs_sink_fn([dict(item) for item in df.to_dict("records")])
     return summarize_cc_lp_result(
         df=df,
         symbol=symbol,

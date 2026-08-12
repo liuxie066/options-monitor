@@ -120,6 +120,8 @@ def _run(
     is_scheduled: bool = True,
     attach_calls_fn=None,
     render_alerts_fn=None,
+    combo_evidence_sink_fn=None,
+    select_pairs_fn=None,
 ):
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +168,7 @@ def _run(
         run_put_scan_fn=run_put_scan_fn,
         label_put_candidates_fn=label_put_candidates_fn,
         find_pairs_fn=capture_pairs,
-        select_pairs_fn=lambda df: df,
+        select_pairs_fn=select_pairs_fn or (lambda df: df),
         cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
         underwriting_filter_put_candidates_fn=(
             underwriting_filter_put_candidates_fn
@@ -174,6 +176,11 @@ def _run(
         ),
         **({"attach_calls_fn": attach_calls_fn} if attach_calls_fn is not None else {}),
         **({"render_alerts_fn": render_alerts_fn} if render_alerts_fn is not None else {}),
+        **(
+            {"combo_evidence_sink_fn": combo_evidence_sink_fn}
+            if combo_evidence_sink_fn is not None
+            else {}
+        ),
     )
     trace = [
         json.loads(line)
@@ -527,6 +534,8 @@ def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_dis
 
 
 def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -> None:
+    evidence: list[dict] = []
+
     def rejected_pairs(**_kwargs):
         out = pd.DataFrame()
         out.attrs["reject_counts"] = {"min_net_credit_retention": 3}
@@ -549,6 +558,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
         tmp_path,
         candidates=[_candidate()],
         find_pairs_fn=rejected_pairs,
+        combo_evidence_sink_fn=evidence.append,
     )
 
     assert len(captured) == 1
@@ -565,6 +575,15 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     ]
     assert diagnostics.loc[0, "reject_reasons"] == "min_net_credit_retention"
     assert {"run_id", "account"}.issubset(diagnostics.columns)
+    assert len(evidence) == 1
+    assert evidence[0]["schema_version"] == "combo_yield_scan_evidence.v1"
+    assert evidence[0]["variant"] == "sp_lc"
+    assert evidence[0]["symbol"] == "NVDA"
+    assert evidence[0]["pair_evaluations"] == json.loads(
+        diagnostics.to_json(orient="records")
+    )
+    assert evidence[0]["rank_records"] == []
+    assert evidence[0]["ranked_pairs"] == []
 
 
 def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pairs(tmp_path: Path) -> None:
@@ -642,9 +661,15 @@ def test_combo_yield_traces_when_no_funding_put_is_eligible(tmp_path: Path) -> N
 
 
 def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import (
+        select_best_yield_enhancement_pairs,
+    )
+
     pairs = pd.DataFrame(
         [
             {
+                "symbol": "NVDA",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C110",
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C110",
                 "funding_accepted": True,
@@ -663,6 +688,8 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
                 "residual_premium_ratio": 0.80,
             },
             {
+                "symbol": "NVDA",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C115",
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C115",
                 "funding_accepted": True,
@@ -684,18 +711,51 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
     )
 
     def find_pairs(**_kwargs):
-        return pairs.copy()
+        out = pairs.copy()
+        out.attrs["pair_diagnostics"] = pd.DataFrame(
+            [
+                {
+                    **row,
+                    "diagnostic_scope": "pair",
+                    "diagnostic_stage": "pair_filter",
+                    "accepted": True,
+                    "reject_reasons": "",
+                }
+                for row in pairs.to_dict("records")
+            ]
+        )
+        return out
 
+    evidence: list[dict] = []
     _captured, _trace, _scan_kwargs, _summary = _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.14)],
         find_pairs_fn=find_pairs,
+        combo_evidence_sink_fn=evidence.append,
+        select_pairs_fn=select_best_yield_enhancement_pairs,
     )
 
     artifact = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_rank_shadow.csv")
     assert artifact.loc[artifact["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
     assert artifact.loc[artifact["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
     assert artifact["rank_changed"].all()
+    assert len(evidence) == 1
+    pd.testing.assert_frame_equal(
+        pd.DataFrame(evidence[0]["rank_records"]),
+        artifact,
+        check_dtype=False,
+    )
+    selected = evidence[0]["ranked_pairs"]
+    assert [row["call_contract_symbol"] for row in selected] == ["NVDA_C115"]
+    diagnostics = evidence[0]["pair_evaluations"]
+    assert {
+        row["candidate_pair_id"]
+        for row in diagnostics
+        if row["diagnostic_scope"] == "pair" and bool(row["accepted"])
+    } == {
+        "combo_yield:NVDA:NVDA_P100:NVDA_C110",
+        "combo_yield:NVDA:NVDA_P100:NVDA_C115",
+    }
 
 
 def test_combo_yield_candidate_write_error_is_not_swallowed(

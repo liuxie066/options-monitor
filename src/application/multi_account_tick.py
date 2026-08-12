@@ -63,9 +63,9 @@ from src.application.ai_decision_advice.identity import (
     candidate_symbols_from_snapshot,
     publish_observation_partition,
 )
-from src.application.opening_candidate_snapshot import (
-    OpeningCandidateSnapshotError,
-    load_opening_candidate_snapshot,
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError,
+    load_candidate_snapshot_bundle,
 )
 from src.application.tick_run_context import (
     build_tick_idempotency_context,
@@ -131,13 +131,18 @@ def _load_advice_candidate_snapshots(
         if not account:
             continue
         try:
-            snapshots[account] = load_opening_candidate_snapshot(
+            bundle = load_candidate_snapshot_bundle(
                 base=base,
                 run_id=run_id,
                 account=account,
             )
-        except OpeningCandidateSnapshotError:
-            unavailable[account] = "candidate_snapshot_unavailable"
+            opening = (bundle.get("owners") or {}).get("opening")
+            if isinstance(opening, dict):
+                snapshots[account] = opening
+            else:
+                unavailable[account] = "candidate_snapshot_not_applicable"
+        except CandidateSnapshotManifestError:
+            unavailable[account] = "candidate_snapshot_manifest_unavailable"
     return snapshots, unavailable
 
 
