@@ -11,6 +11,7 @@ Centralizes:
 
 import ast
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
 import logging
@@ -20,6 +21,7 @@ import random
 import time
 from typing import Any, Iterable
 
+from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 
 
@@ -28,6 +30,97 @@ LOG = logging.getLogger(__name__)
 FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
 FUTU_EARNINGS_CALENDAR_CAPABILITY = "get_earnings_calendar"
 FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON = "opend_earnings_calendar_unsupported"
+FUTU_EXPIRY_ORDER_ORIGIN_EVIDENCE = "futu_zero_price_expiry_shape.v1"
+
+
+def _futu_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _is_native_futu_expiry_order(row: dict[str, Any]) -> bool:
+    """Identify Futu's zero-price option close generated at expiration."""
+
+    code = str(
+        row.get("code")
+        or row.get("stock_code")
+        or row.get("symbol")
+        or ""
+    ).strip().upper()
+    match = OPTION_CODE_RE.fullmatch(code)
+    if match is None or match.group("market") not in {"HK", "US"}:
+        return False
+    expiration_ymd = (
+        f"20{match.group('yy')}-{match.group('mm')}-{match.group('dd')}"
+    )
+    created_ymd = str(row.get("create_time") or "").strip()[:10]
+    quantity = _futu_decimal(row.get("qty") or row.get("quantity"))
+    dealt_quantity = _futu_decimal(
+        row.get("dealt_qty")
+        or row.get("fill_qty")
+        or row.get("filled_qty")
+    )
+    return (
+        bool(str(row.get("order_id") or "").strip())
+        and created_ymd == expiration_ymd
+        and str(
+            row.get("trd_side")
+            or row.get("side")
+            or row.get("trade_side")
+            or ""
+        ).strip().upper()
+        in {"BUY_BACK", "SELL"}
+        and str(row.get("order_type") or "").strip().upper() == "NORMAL"
+        and str(row.get("order_status") or "").strip().upper()
+        == "FILLED_ALL"
+        and _futu_decimal(row.get("price")) == 0
+        and _futu_decimal(row.get("dealt_avg_price")) == 0
+        and quantity is not None
+        and quantity > 0
+        and dealt_quantity == quantity
+        and not str(row.get("last_err_msg") or "").strip()
+        and not str(row.get("remark") or "").strip()
+    )
+
+
+def _annotate_futu_history_order_receipt(result: Any) -> Any:
+    """Add an auditable internal origin only to exact native expiry rows."""
+
+    if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+        return result
+    changed = False
+    rows: list[Any] = []
+    for item in result["rows"]:
+        if not isinstance(item, dict):
+            rows.append(item)
+            continue
+        row = item
+        explicit_origin = str(
+            row.get("order_origin")
+            or row.get("source")
+            or row.get("order_source")
+            or ""
+        ).strip()
+        if (
+            not isinstance(row.get("is_broker_auto"), bool)
+            and not explicit_origin
+            and _is_native_futu_expiry_order(row)
+        ):
+            row = dict(row)
+            row["order_origin"] = "broker_auto"
+            row["order_origin_evidence"] = FUTU_EXPIRY_ORDER_ORIGIN_EVIDENCE
+            changed = True
+        rows.append(row)
+    if not changed:
+        return result
+    annotated = dict(result)
+    annotated["rows"] = rows
+    return annotated
 
 
 def _numeric_version(value: Any) -> tuple[int, ...]:
@@ -399,10 +492,12 @@ class _FutuAPIClient:
     def get_history_orders(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "history_order_list_query"):
-            return self._query_with_coverage(
-                trade.history_order_list_query,
-                paginated=True,
-                kwargs=kwargs,
+            return _annotate_futu_history_order_receipt(
+                self._query_with_coverage(
+                    trade.history_order_list_query,
+                    paginated=True,
+                    kwargs=kwargs,
+                )
             )
         raise AttributeError("history_order_list_query unavailable")
 

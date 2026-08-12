@@ -794,6 +794,48 @@ class _Gateway:
         return _complete_receipt(self.calendar_rows)
 
 
+class _NativeFutuExpiryOrderGateway(_Gateway):
+    def get_history_orders(self, **kwargs: object) -> dict:
+        from src.infrastructure.futu_gateway import (
+            _annotate_futu_history_order_receipt,
+        )
+
+        return _annotate_futu_history_order_receipt(_complete_receipt(
+            [
+                {
+                    "order_id": "option-order-1",
+                    "code": OPTION_CODE,
+                    "trd_side": "BUY_BACK",
+                    "order_type": "NORMAL",
+                    "order_status": "FILLED_ALL",
+                    "qty": 1.0,
+                    "price": 0.0,
+                    "dealt_qty": 1.0,
+                    "dealt_avg_price": 0.0,
+                    "last_err_msg": "",
+                    "remark": "",
+                    "create_time": "2026-08-21 16:00:00",
+                }
+            ]
+        ))
+
+
+class _NativeFutuPositiveOrderGateway(
+    _NativeFutuExpiryOrderGateway
+):
+    def get_history_orders(self, **kwargs: object) -> dict:
+        from src.infrastructure.futu_gateway import (
+            _annotate_futu_history_order_receipt,
+        )
+
+        receipt = super().get_history_orders(**kwargs)
+        receipt["rows"][0].pop("order_origin", None)
+        receipt["rows"][0].pop("order_origin_evidence", None)
+        receipt["rows"][0]["price"] = 0.01
+        receipt["rows"][0]["dealt_avg_price"] = 0.01
+        return _annotate_futu_history_order_receipt(receipt)
+
+
 class _IncompleteGateway(_Gateway):
     def get_positions_with_receipt(
         self,
@@ -873,6 +915,28 @@ def test_complete_observation_revalidates_frozen_calendar_window(
         }
     ]
     assert "account_cash_flows" not in observation["source_receipts"]
+
+
+def test_complete_observation_classifies_native_futu_zero_price_expiry_order(
+    tmp_path: Path,
+) -> None:
+    observation = _collect(tmp_path, _NativeFutuExpiryOrderGateway())
+
+    assert observation["complete"] is True
+    assert observation["normal_order_present"] is False
+    assert observation["incomplete_reason_codes"] == []
+
+
+def test_native_futu_positive_price_order_remains_ambiguous(
+    tmp_path: Path,
+) -> None:
+    observation = _collect(tmp_path, _NativeFutuPositiveOrderGateway())
+
+    assert observation["complete"] is False
+    assert observation["normal_order_present"] is False
+    assert observation["incomplete_reason_codes"] == [
+        "anchor_order_classification_ambiguous"
+    ]
 
 
 def test_provider_collection_and_reconciliation_reuse_account_snapshot(

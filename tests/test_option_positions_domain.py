@@ -21,6 +21,7 @@ from domain.domain.ledger.position_fields import (
     normalize_option_type,
     normalize_side,
     normalize_status,
+    normalize_trade_price,
 )
 from domain.domain.option_position_identity import (
     infer_currency_from_symbol,
@@ -450,6 +451,39 @@ def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_d
             assert expected in str(exc)
         else:
             raise AssertionError(f"expected ValueError: {expected}")
+
+
+def test_build_open_fields_accepts_float_transport_noise_without_relaxing_price_precision() -> None:
+    command = OpenPositionCommand(
+        broker="富途",
+        account="lx",
+        symbol="3690.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=80,
+        multiplier=500,
+        expiration_ymd="2026-09-29",
+        premium_per_share=1.5699999999999998,
+        opened_at_ms=1_786_512_490_000,
+    )
+
+    fields = build_open_fields(command)
+
+    assert fields["premium"] == 1.57
+    assert normalize_trade_price(1.5700000000000003) == 1.57
+
+    for precise_value in (1.2345, "1.2345", 5e-324):
+        bad_command = command.__class__(**{**command.__dict__, "premium_per_share": precise_value})
+        try:
+            build_open_fields(bad_command)
+        except ValueError as exc:
+            assert "premium_per_share supports at most 3 decimal places" in str(exc)
+        else:
+            raise AssertionError("expected genuine four-decimal price to remain invalid")
+
+    assert normalize_trade_price(1e100) == 1e100
 
 
 def test_build_buy_to_close_patch_supports_partial_close() -> None:
