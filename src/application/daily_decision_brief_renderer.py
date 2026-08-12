@@ -6,14 +6,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.application.ai_decision_advice.render import render_family_advice_lines
-
-
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_MAX_REJECTIONS = 5
 _MAX_TOTAL_ITEMS = 40
 _MAX_MESSAGE_CHARS = 12_000
+_SHARED_SELL_PUT_CAPACITY_REMINDER = "多个 Sell Put 候选共享同一现金额度，手数不能相加"
 
 # 飞书 post 消息的 md 标签会把纯空行折叠掉，段落之间没有可视间距；
 # 用零宽空格撑出可见空行（不是空白字符，不会被渲染端或 str.strip() 移除）。
@@ -27,12 +25,6 @@ _STRATEGY_LABELS = {
     "short_put": "Sell Put",
     "covered_call": "Covered Call",
     "combo_yield": "组合增强",
-}
-_AI_ADVICE_ACTION_LABELS = {
-    "keep": "维持",
-    "switch": "改选",
-    "defer": "暂缓",
-    "needs_review": "需人工判断",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
 _EVENT_TYPE_LABELS = {"earnings": "财报", "ex_dividend": "除息", "split": "拆股"}
@@ -48,6 +40,9 @@ _CLOSE_RECOMMENDATION_LABELS = {
     "close": "建议平仓",
     "hold": "继续观察",
     "not_evaluable": "暂无法评估（证据不足）",
+}
+_PARTIAL_DATA_REASON_TEXT = {
+    "term_matched_rv_unavailable": "期限匹配的已实现波动率（RV）证据不可用",
 }
 
 
@@ -109,11 +104,8 @@ def build_daily_brief_user_view(
         limits=cfg,
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    fixed_report_reminders = list(reminders)
     funds = _fund_views(brief)
-    ai_candidate_contracts, ai_candidate_ranks = _ai_candidate_fact_maps(
-        brief,
-        market=market,
-    )
     strategy_failure_items = _strategy_failure_items(brief)
     reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
@@ -143,6 +135,12 @@ def build_daily_brief_user_view(
         reminders.append(
             f"{symbol} {strategy} 行情证据不可用，待恢复（不是当前推荐）"
         )
+    fixed_report_reminders.extend(
+        _fixed_report_error_reminders(
+            brief,
+            strategy_failure_items=strategy_failure_items,
+        )
+    )
     view = {
         "account": account,
         "market": market,
@@ -179,10 +177,7 @@ def build_daily_brief_user_view(
         "funds": funds,
         "capacity": capacity,
         "reminders": reminders,
-        "ai_decision_advice": brief.get("ai_decision_advice"),
-        "ai_decision_advice_evidence_index": brief.get("ai_decision_advice_evidence_index"),
-        "_ai_candidate_contract_by_id": ai_candidate_contracts,
-        "_ai_candidate_rank_by_id": ai_candidate_ranks,
+        "fixed_report_reminders": fixed_report_reminders,
     }
     return view
 
@@ -455,24 +450,8 @@ def _render_user_view(
         lines.extend([_VISIBLE_BLANK_LINE, "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    market = _upper(view.get("market"))
-    ai_section = view.get("ai_decision_advice")
-    ai_zero = (
-        ai_section.get("zero_candidate")
-        if isinstance(ai_section, Mapping) and isinstance(ai_section.get("zero_candidate"), Mapping)
-        else {}
-    )
-    ai_visible_families = {
-        family
-        for family in ("sell_put", "covered_call")
-        if isinstance(ai_section, Mapping)
-        and (
-            bool(ai_zero.get(family))
-            or str(ai_section.get("status") or "") != "not_applicable"
-        )
-    }
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families | ai_visible_families
+    visible_families = candidate_families
     if projection == "candidate_alert":
         if not candidates:
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
@@ -483,14 +462,6 @@ def _render_user_view(
                 if not family_rows:
                     continue
                 lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
-                advice_lines = _ai_advice_lines_for_family(
-                    view,
-                    family=family,
-                    market=market,
-                    heading_level=heading_level + 2,
-                )
-                if advice_lines:
-                    lines.extend(advice_lines)
                 lines.extend([_VISIBLE_BLANK_LINE, f"{subsection_mark} 新增策略候选"])
                 for item in family_rows:
                     lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
@@ -518,17 +489,9 @@ def _render_user_view(
             if family not in visible_families:
                 continue
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
-            advice_lines = _ai_advice_lines_for_family(
-                view,
-                family=family,
-                market=market,
-                heading_level=heading_level + 2,
-            )
-            if advice_lines:
-                lines.extend(advice_lines)
-                lines.append(_VISIBLE_BLANK_LINE)
             if family_rows:
-                lines.append(f"{subsection_mark} 策略候选")
+                if projection != "fixed_report":
+                    lines.append(f"{subsection_mark} 策略候选")
                 for item in family_rows:
                     lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
                     for leg in item.get("legs") or []:
@@ -583,7 +546,8 @@ def _render_user_view(
     lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 资金"])
     lines.extend(_flat_field_line(item) for item in [*funds, *capacity])
 
-    reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
+    reminder_key = "fixed_report_reminders" if projection == "fixed_report" else "reminders"
+    reminders = [str(item) for item in view.get(reminder_key) or [] if str(item).strip()]
     if reminders:
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 提醒"])
         lines.extend(_flat_field_line(item) for item in reminders)
@@ -621,51 +585,31 @@ def _render_user_view_card(
         lines.extend(["", "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    market = _upper(view.get("market"))
-    ai_section = view.get("ai_decision_advice")
-    ai_zero = (
-        ai_section.get("zero_candidate")
-        if isinstance(ai_section, Mapping) and isinstance(ai_section.get("zero_candidate"), Mapping)
-        else {}
-    )
-    ai_visible_families = {
-        family
-        for family in ("sell_put", "covered_call")
-        if isinstance(ai_section, Mapping)
-        and (
-            bool(ai_zero.get(family))
-            or str(ai_section.get("status") or "") != "not_applicable"
-        )
-    }
     candidate_families = {str(item.get("family") or "") for item in candidates}
-    visible_families = candidate_families | ai_visible_families
+    visible_families = candidate_families
     if projection == "candidate_alert":
         visible_families = candidate_families
     if not visible_families:
         lines.extend(["", "## 策略候选"])
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
-        candidate_heading = "新增策略候选" if projection == "candidate_alert" else "策略候选"
+        candidate_heading = "新增策略候选" if projection == "candidate_alert" else ""
         for family in ("sell_put", "covered_call", "combo_yield"):
             if family not in visible_families:
                 continue
             family_rows = [item for item in candidates if item.get("family") == family]
-            advice_lines = _ai_advice_lines_for_family(
-                view,
-                family=family,
-                market=market,
-                heading_level=3,
-            )
             lines.extend(
                 _render_candidate_family_card(
                     family,
                     family_rows,
-                    advice_lines=advice_lines,
                     candidate_heading=candidate_heading,
                 )
             )
         if candidates:
-            event_lines = _render_candidate_event_card(candidates)
+            event_lines = _render_candidate_event_card(
+                candidates,
+                compact=projection == "fixed_report",
+            )
             if event_lines:
                 lines.extend(["", *event_lines])
     for note in view.get("candidate_omissions") or []:
@@ -738,10 +682,14 @@ def _render_user_view_card(
     else:
         lines.append("资金数据暂不可用。")
 
-    reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
+    reminder_key = "fixed_report_reminders" if projection == "fixed_report" else "reminders"
+    reminders = [str(item) for item in view.get(reminder_key) or [] if str(item).strip()]
     if reminders:
-        lines.extend(["", "## 提醒"])
-        lines.extend(f"提醒｜{item}" for item in reminders)
+        if projection == "fixed_report":
+            lines.extend(["", *(f"提醒｜{item}" for item in reminders)])
+        else:
+            lines.extend(["", "## 提醒"])
+            lines.extend(f"提醒｜{item}" for item in reminders)
     return "\n".join(lines).strip()
 
 
@@ -749,15 +697,11 @@ def _render_candidate_family_card(
     family: str,
     rows: list[Mapping[str, Any]],
     *,
-    advice_lines: Iterable[str] = (),
     candidate_heading: str = "策略候选",
 ) -> list[str]:
     heading = _STRATEGY_LABELS.get(family, family)
     lines = ["", f"## {heading}"]
-    advice = [str(item) for item in advice_lines if str(item).strip()]
-    if advice:
-        lines.extend(["", *advice])
-    if rows:
+    if rows and candidate_heading:
         lines.extend(["", f"### {candidate_heading}"])
     for item in rows:
         lines.extend(
@@ -779,7 +723,11 @@ def _render_candidate_family_card(
     return lines
 
 
-def _render_candidate_event_card(candidates: list[Mapping[str, Any]]) -> list[str]:
+def _render_candidate_event_card(
+    candidates: list[Mapping[str, Any]],
+    *,
+    compact: bool = False,
+) -> list[str]:
     grouped: dict[str, list[str]] = {}
     family_counts: dict[str, int] = {}
     for item in candidates:
@@ -787,12 +735,22 @@ def _render_candidate_event_card(candidates: list[Mapping[str, Any]]) -> list[st
         family_counts[family] = family_counts.get(family, 0) + 1
         label = f"{_STRATEGY_LABELS.get(family, family)} #{family_counts[family]}"
         event_line = str(item.get("event_line") or "").strip()
+        if compact:
+            event_line = _compact_fixed_report_event(event_line)
         if event_line:
             grouped.setdefault(event_line, []).append(label)
     return [
         f"事件｜{'、'.join(labels)}：{event_line}"
         for event_line, labels in grouped.items()
     ]
+
+
+def _compact_fixed_report_event(value: str) -> str:
+    if value == "已确认当前期权到期前没有近期重要事件；执行前仍需复核报价。":
+        return "已确认到期前无近期重要事件；下单前复核报价。"
+    if value == "近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。":
+        return "事件数据不完整，无法排除近期重要事件；下单前复核。"
+    return value
 
 
 def _table_cell(value: Any) -> str:
@@ -830,137 +788,6 @@ def _candidate_detail_label(value: Any) -> str:
     return "指标"
 
 
-def _ai_referenced_candidate_ids(brief: Mapping[str, Any]) -> set[str]:
-    """Candidate ids referenced by AI decisions (design 15.6)."""
-
-    section = brief.get("ai_decision_advice")
-    if not isinstance(section, Mapping):
-        return set()
-    ids: set[str] = set()
-    rows = []
-    sell_put = section.get("sell_put")
-    if isinstance(sell_put, Mapping):
-        rows.append(sell_put)
-    for row in section.get("covered_call") or []:
-        if isinstance(row, Mapping):
-            rows.append(row)
-    for row in rows:
-        for key in ("baseline_candidate_id", "selected_candidate_id"):
-            value = str(row.get(key) or "").strip()
-            if value:
-                ids.add(value)
-    return ids
-
-
-def _ai_candidate_fact_maps(
-    brief: Mapping[str, Any],
-    *,
-    market: str,
-) -> tuple[dict[str, str], dict[str, int]]:
-    """candidate_id -> (human contract label, strategy rank) for AI rendering."""
-
-    prepared_contracts = brief.get("_ai_candidate_contract_by_id")
-    prepared_ranks = brief.get("_ai_candidate_rank_by_id")
-    if isinstance(prepared_contracts, Mapping) and isinstance(prepared_ranks, Mapping):
-        return (
-            {
-                str(key): str(value)
-                for key, value in prepared_contracts.items()
-                if str(key).strip() and str(value).strip()
-            },
-            {
-                str(key): int(value)
-                for key, value in prepared_ranks.items()
-                if str(key).strip() and isinstance(value, int) and not isinstance(value, bool)
-            },
-        )
-
-    candidates = (
-        brief.get("_ai_candidate_catalog")
-        if isinstance(brief.get("_ai_candidate_catalog"), Mapping)
-        else brief.get("candidates")
-    )
-    if isinstance(candidates, Mapping):
-        by_family: dict[str, list[Mapping[str, Any]]] = {}
-        for family in ("sell_put", "covered_call"):
-            by_family[family] = [
-                row for row in candidates.get(family) or [] if isinstance(row, Mapping)
-            ]
-    else:
-        # view-shaped input: flat candidate views carry `family`.
-        by_family = {"sell_put": [], "covered_call": []}
-        for row in candidates if isinstance(candidates, list) else []:
-            if not isinstance(row, Mapping):
-                continue
-            family = str(row.get("family") or "")
-            if family in by_family:
-                by_family[family].append(row)
-    source = by_family
-    contracts: dict[str, str] = {}
-    ranks: dict[str, int] = {}
-    for family in ("sell_put", "covered_call"):
-        for row in source.get(family) or []:
-            if not isinstance(row, Mapping):
-                continue
-            candidate_id = str(row.get("candidate_id") or "").strip()
-            if not candidate_id:
-                continue
-            symbol = _upper(row.get("symbol")) or "未知标的"
-            contract = _human_contract(
-                expiration=row.get("expiration"),
-                strike=row.get("strike"),
-                option_type=row.get("option_type"),
-                market=market,
-            )
-            contracts[candidate_id] = f"{symbol} {contract}".strip()
-            rank = _positive_rank(row.get("rank"), fallback=0)
-            if rank:
-                ranks[candidate_id] = rank
-    return contracts, ranks
-
-
-def _ai_advice_lines_for_family(
-    brief: Mapping[str, Any],
-    *,
-    family: str,
-    market: str,
-    heading_level: int = 3,
-) -> list[str]:
-    if family not in {"sell_put", "covered_call"}:
-        return []
-    section = brief.get("ai_decision_advice")
-    if not isinstance(section, Mapping):
-        return []
-    contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
-    evidence_by_ref = _ai_evidence_ref_map(brief)
-    return render_family_advice_lines(
-        section,
-        family=family,
-        candidate_contract_by_id=contracts,
-        candidate_rank_by_id=ranks,
-        evidence_by_ref=evidence_by_ref,
-        heading_level=heading_level,
-    )
-
-
-def _ai_evidence_ref_map(brief: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    """Resolve frozen external evidence refs for AI advice source lines (15.4)."""
-
-    view = brief.get("ai_decision_advice_evidence_index")
-    symbols = view.get("symbols") if isinstance(view, Mapping) else None
-    out: dict[str, Mapping[str, Any]] = {}
-    for symbol_row in symbols or []:
-        if not isinstance(symbol_row, Mapping):
-            continue
-        for row in symbol_row.get("evidence") or []:
-            if not isinstance(row, Mapping):
-                continue
-            ref = str(row.get("ref") or "")
-            if ref:
-                out[ref] = row
-    return out
-
-
 def _candidate_views(
     brief: Mapping[str, Any],
     *,
@@ -970,7 +797,6 @@ def _candidate_views(
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     changed_keys = _changed_candidate_keys(diff)
-    ai_referenced_ids = _ai_referenced_candidate_ids(brief)
     budget = _RenderBudget()
     out: list[dict[str, Any]] = []
     omissions: list[str] = []
@@ -980,20 +806,10 @@ def _candidate_views(
     for family in ("sell_put", "covered_call", "combo_yield"):
         rows = [item for item in source.get(family) or [] if isinstance(item, Mapping)]
         changed_rows = [row for row in rows if _candidate_row_keys(family, row) & changed_keys]
-        # design 15.6: AI-referenced candidates must be shown even beyond the
-        # ordinary top-N budget, without changing their true strategy rank.
-        ai_rows = [
-            row
-            for row in rows
-            if row not in changed_rows
-            and str(row.get("candidate_id") or "") in ai_referenced_ids
-        ]
-        unchanged_rows = [
-            row for row in rows if row not in changed_rows and row not in ai_rows
-        ]
+        unchanged_rows = [row for row in rows if row not in changed_rows]
         selected = budget.take(
-            [*changed_rows, *ai_rows, *unchanged_rows],
-            max(limit, len(changed_rows) + len(ai_rows)),
+            [*changed_rows, *unchanged_rows],
+            max(limit, len(changed_rows)),
         )
         selected_by_family[family] = selected
         omitted = len(rows) - len(selected)
@@ -1475,6 +1291,89 @@ def _strategy_failure_reminders(items: list[dict[str, str]]) -> list[str]:
     return reminders
 
 
+def _fixed_report_error_reminders(
+    brief: Mapping[str, Any],
+    *,
+    strategy_failure_items: list[dict[str, str]],
+) -> list[str]:
+    """Keep the fixed-report reminder surface for confirmed operational errors."""
+
+    reminders = _strategy_failure_reminders(strategy_failure_items)
+    fetch_symbols: list[str] = []
+    prefetch_error_count = 0
+    snapshot_failures: dict[str, list[str]] = {}
+    prefetch_success_reasons = {
+        "",
+        "ok",
+        "ready",
+        "success",
+        "available",
+        "completed",
+        "cached",
+        "fetched",
+    }
+    snapshot_error_labels = {
+        "opening_candidate_snapshot_unavailable": "候选快照不可用",
+        "opening_candidate_snapshot_market_mismatch": "候选快照校验失败",
+    }
+    for item in brief.get("data_gaps") or []:
+        if not isinstance(item, Mapping):
+            continue
+        reason = _lower(item.get("reason"))
+        source = _lower(item.get("source"))
+        scope = _lower(item.get("scope"))
+        if source == "required_data_prefetch_summary":
+            if reason in prefetch_success_reasons:
+                continue
+            symbol = _upper(item.get("symbol")) or "相关标的"
+            if symbol not in fetch_symbols:
+                fetch_symbols.append(symbol)
+            continue
+        if scope == "prefetch" and reason == "required_data_prefetch_errors":
+            prefetch_error_count = max(
+                prefetch_error_count,
+                int(_number(item.get("count")) or 0),
+            )
+            continue
+        if reason == "opening_candidate_strategy_partial_data":
+            detail = _PARTIAL_DATA_REASON_TEXT.get(
+                _lower(item.get("reason_code"))
+            )
+            if detail:
+                symbol = _upper(item.get("symbol")) or "相关标的"
+                family = _STRATEGY_LABELS.get(
+                    _lower(item.get("strategy_family")),
+                    "策略",
+                )
+                reminders.append(
+                    f"{symbol} {family}：{detail}，候选结果不完整"
+                )
+            continue
+        if reason not in snapshot_error_labels:
+            continue
+        family = _STRATEGY_LABELS.get(
+            _lower(item.get("strategy_family")),
+            "开仓策略",
+        )
+        snapshot_failures.setdefault(snapshot_error_labels[reason], [])
+        if family not in snapshot_failures[snapshot_error_labels[reason]]:
+            snapshot_failures[snapshot_error_labels[reason]].append(family)
+
+    if fetch_symbols:
+        reminders.append(
+            f"{'、'.join(fetch_symbols)}：行情获取失败，本轮候选结果不完整"
+        )
+    elif prefetch_error_count > 0:
+        reminders.append(
+            f"行情获取出现 {prefetch_error_count} 项失败，本轮候选结果不完整"
+        )
+    for label, families in snapshot_failures.items():
+        reminders.append(
+            f"{'、'.join(families)}：{label}，本轮无可靠结果"
+        )
+    return list(dict.fromkeys(reminders))
+
+
 def _strategy_failure_subject(items: list[dict[str, str]]) -> str:
     """Group failed symbols per strategy family, preserving first-seen order."""
     grouped: dict[str, list[str]] = {}
@@ -1552,8 +1451,13 @@ def _strategy_data_gap_reminders(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
             )
         elif reason == "opening_candidate_strategy_partial_data":
+            detail = _PARTIAL_DATA_REASON_TEXT.get(
+                _lower(item.get("reason_code"))
+            )
             reminders.append(
-                f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
+                f"{symbol} {family}：{detail}，候选结果不完整"
+                if detail
+                else f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
             )
         seen.add(identity)
     return reminders
@@ -1584,7 +1488,7 @@ def _capacity_views(
         out.append(f"{symbol} {contract}：按当前现金最多 {contracts} 手")
     reminders = []
     if len(all_sell_put_rows) > 1 and out:
-        reminders.append("多个 Sell Put 候选共享同一现金额度，手数不能相加")
+        reminders.append(_SHARED_SELL_PUT_CAPACITY_REMINDER)
 
     covered_call_rows = list(selected_rows.get("covered_call") or [])
     for row in covered_call_rows:
@@ -1846,22 +1750,6 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
             after = _whole_number(change.get("after"))
             if label and before is not None and after is not None:
                 capacity_changes.append(f"较上一轮：{label} 条件容量 {before} → {after} 手")
-        elif change_type == "ai_decision_advice_action_changed":
-            scope_label = _ai_advice_scope_label(change.get("ai_advice_scope"))
-            before_label = _AI_ADVICE_ACTION_LABELS.get(
-                _lower(change.get("before")),
-                str(change.get("before") or "原建议"),
-            )
-            after_label = _AI_ADVICE_ACTION_LABELS.get(
-                _lower(change.get("after")),
-                str(change.get("after") or "新建议"),
-            )
-            summaries.append(
-                f"较上一轮：{scope_label} AI建议由{before_label}变为{after_label}"
-            )
-        elif change_type == "ai_decision_advice_selected_candidate_changed":
-            scope_label = _ai_advice_scope_label(change.get("ai_advice_scope"))
-            summaries.append(f"较上一轮：{scope_label} AI改选目标已变化")
         elif action_type == "close_position":
             symbol = _upper(action.get("symbol"))
             if symbol and symbol not in position_symbols:
@@ -1902,16 +1790,6 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     if len(summaries) <= 2:
         return summaries
     return [*summaries[:2], f"另有 {len(summaries) - 2} 项变化"]
-
-
-def _ai_advice_scope_label(value: Any) -> str:
-    scope = str(value or "").strip()
-    if scope == "sell_put":
-        return "Sell Put"
-    if scope.startswith("covered_call:"):
-        symbol = _upper(scope.split(":", 1)[1])
-        return f"Covered Call {symbol}".strip()
-    return "AI建议"
 
 
 def _event_change_summary(change: Mapping[str, Any], *, market: str) -> str:
@@ -2141,11 +2019,6 @@ def _candidate_alert_brief(
         if family in candidates and isinstance(representative, Mapping):
             candidates[family].append(representative)
     filtered = dict(brief)
-    filtered["_ai_candidate_catalog"] = (
-        brief.get("_ai_candidate_catalog")
-        if isinstance(brief.get("_ai_candidate_catalog"), Mapping)
-        else brief.get("candidates")
-    )
     filtered["candidates"] = candidates
     filtered["positions"] = []
     return filtered, max(0, len(selected) - len(shown))

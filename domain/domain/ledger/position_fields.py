@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import math
 from typing import Any
 
 from domain.domain.option_position_identity import (
@@ -31,6 +32,7 @@ class _Unset:
 _UNSET = _Unset()
 _PatchValue = int | float | str | dict[str, Any] | None | _Unset
 PRICE_DECIMAL_PLACES = 3
+_PRICE_QUANTUM = Decimal(1).scaleb(-PRICE_DECIMAL_PLACES)
 
 POSITION_LOT_STRATEGY_PATCH_FIELDS = (
     "strategy",
@@ -110,6 +112,21 @@ def normalize_trade_price(value: Any, field_name: str = "premium_per_share", *, 
     if price < 0 or (price == 0 and not allow_zero):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{field_name} must be {comparator}")
+    if isinstance(value, float):
+        try:
+            rounded = price.quantize(_PRICE_QUANTUM)
+        except InvalidOperation:
+            # Quantizing very large, otherwise valid values can exceed the
+            # active decimal context. Preserve the pre-existing validation
+            # behavior for those values instead of leaking InvalidOperation.
+            pass
+        else:
+            if (
+                (rounded != 0 or allow_zero)
+                and abs(price - rounded)
+                <= Decimal(str(math.ulp(value))) * 2
+            ):
+                price = rounded
     exponent = price.normalize().as_tuple().exponent
     decimal_places = max(0, -exponent) if isinstance(exponent, int) else 0
     if decimal_places > PRICE_DECIMAL_PLACES:

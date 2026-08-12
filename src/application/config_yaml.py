@@ -48,7 +48,6 @@ RESOLVED_KEY = "_resolved"
 
 PASSTHROUGH_KEYS = {
     "alert_policy",
-    "ai_decision_advice",
     "close_advice",
     "notifications",
     "option_positions",
@@ -152,6 +151,11 @@ def load_yaml_config_file(path: str | Path) -> dict[str, Any]:
 def _reject_unknown_keys(data: dict[str, Any], *, allowed: set[str], path: str) -> None:
     for raw_key in data:
         key = str(raw_key or "").strip()
+        if key == "ai_decision_advice" and path in {"config.yaml", "markets.us", "markets.hk"}:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path}.ai_decision_advice is retired and must be removed",
+            )
         if key in WRITE_GATE_KEYS:
             raise AgentToolError(
                 code="CONFIG_ERROR",
@@ -677,11 +681,6 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
 
     out = _copy_passthrough(raw_cfg, path="config.yaml")
     out = _deep_merge(out, _copy_passthrough(market_cfg, path=f"markets.{normalized_market}"))
-    # ai_decision_advice is an operator-owned opt-in section: system/user
-    # defaults must not resurrect it, so enabled/provider are resolved only
-    # from authored config.yaml content (root then market override).
-    if "ai_decision_advice" not in raw_cfg and "ai_decision_advice" not in market_cfg:
-        out.pop("ai_decision_advice", None)
     if "trade_intake" in raw_cfg:
         out["trade_intake"] = _normalize_trade_intake_authoring(
             raw_cfg.get("trade_intake"),

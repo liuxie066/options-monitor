@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.17",
+  "base": {
+    "tag": "v1.13.16",
+    "commit": "fbd8a986c9d51bec6a312e79e438422753423727"
+  },
+  "reviewed_head": "9a3e788e5b5bb6f510fb9e5f10be43f864c8303b",
+  "commits": [
+    {
+      "sha": "9a3e788e5b5bb6f510fb9e5f10be43f864c8303b",
+      "subject": "fix(trades): normalize compensation receipt prices"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Normalized binary floating-point transport noise when rendering guarded historical trade receipts, so the displayed fill price matches the broker price already accepted by the ledger without weakening price validation.",
+      "commits": [
+        "9a3e788e5b5bb6f510fb9e5f10be43f864c8303b"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

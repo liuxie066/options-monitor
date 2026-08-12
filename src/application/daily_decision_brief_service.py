@@ -42,19 +42,12 @@ from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
 )
-from src.application.prepared_portfolio_distribution import (
-    PreparedPortfolioDistribution,
-)
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     candidate_universe_summary,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
     validate_opening_candidate_snapshot,
-)
-from src.application.ai_decision_advice.orchestration import (
-    run_or_reuse_ai_decision_advice,
-    unavailable_brief_view,
 )
 from src.application.combo_yield_candidate_snapshot import (
     ComboYieldCandidateSnapshotError,
@@ -76,8 +69,6 @@ from src.application.strategy_scan_status import (
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
-
-
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -103,16 +94,6 @@ def assemble_daily_decision_brief(
     now_utc: datetime | None = None,
     opening_candidate_snapshot: Mapping[str, Any] | None = None,
     candidate_snapshot_unavailable_reason: str | None = None,
-    prepared_portfolio_distribution: (
-        PreparedPortfolioDistribution | Mapping[str, Any] | None
-    ) = None,
-    portfolio_distribution_unavailable_reason: str = (
-        "portfolio_unavailable"
-    ),
-    prepared_option_positions_context: Mapping[str, Any] | None = None,
-    option_positions_unavailable_reason: str = (
-        "option_positions_unavailable"
-    ),
 ) -> dict[str, Any]:
     """Assemble one market-qualified brief from structured run artifacts only."""
 
@@ -211,6 +192,7 @@ def assemble_daily_decision_brief(
                     opening_candidate_snapshot,
                     expected_run_id=run_id_norm,
                     expected_account=account_norm,
+                    require_current_contract=True,
                 )
                 if (
                     manifest_opening is None
@@ -250,7 +232,7 @@ def assemble_daily_decision_brief(
         put_available,
         call_rows,
         call_available,
-        accepted_candidate_snapshot,
+        _accepted_candidate_snapshot,
     ) = (
         _load_opening_candidate_families(
             base=base_path,
@@ -553,42 +535,6 @@ def assemble_daily_decision_brief(
         data_gaps=data_gaps,
         required=False,
     )
-    try:
-        ai_decision_advice_view = _json_safe(
-            run_or_reuse_ai_decision_advice(
-                base=base_path,
-                run_id=run_id_norm,
-                account=account_norm,
-                market=market_norm,
-                config=config_map,
-                candidate_snapshot=accepted_candidate_snapshot,
-                portfolio_distribution=prepared_portfolio_distribution,
-                option_positions_context=prepared_option_positions_context,
-                candidate_unavailable_reason=(
-                    candidate_bundle_unavailable_reason
-                    or (
-                        "candidate_snapshot_not_applicable"
-                        if accepted_candidate_snapshot is None
-                        else None
-                    )
-                    or "candidate_snapshot_missing"
-                ),
-                portfolio_unavailable_reason=(
-                    portfolio_distribution_unavailable_reason
-                ),
-                option_positions_unavailable_reason=(
-                    option_positions_unavailable_reason
-                ),
-                now=effective_now,
-            )
-        )
-    except Exception:
-        ai_decision_advice_view = _json_safe(
-            unavailable_brief_view("advice_execution_failed")
-        )
-    ai_decision_advice_evidence_index = _json_safe(
-        ai_decision_advice_view.pop("evidence_index", None) or {}
-    )
     prefetch = _load_json_artifact(
         path=state_dir / "required_data_prefetch_summary.json",
         run_account_dir=run_account_dir,
@@ -715,8 +661,6 @@ def assemble_daily_decision_brief(
             "funds": funds,
             "candidates": candidate_payloads,
             "candidate_index": candidate_index,
-            "ai_decision_advice": ai_decision_advice_view,
-            "ai_decision_advice_evidence_index": ai_decision_advice_evidence_index,
             "rejections": _json_safe(rejections),
             "events": events,
             "data_gaps": deduped_data_gaps,
@@ -738,16 +682,6 @@ def assemble_daily_decision_briefs(
     now_utc: datetime | None = None,
     opening_candidate_snapshot: Mapping[str, Any] | None = None,
     candidate_snapshot_unavailable_reason: str | None = None,
-    prepared_portfolio_distribution: (
-        PreparedPortfolioDistribution | Mapping[str, Any] | None
-    ) = None,
-    portfolio_distribution_unavailable_reason: str = (
-        "portfolio_unavailable"
-    ),
-    prepared_option_positions_context: Mapping[str, Any] | None = None,
-    option_positions_unavailable_reason: str = (
-        "option_positions_unavailable"
-    ),
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for raw_market in markets_to_run:
@@ -767,18 +701,6 @@ def assemble_daily_decision_briefs(
             opening_candidate_snapshot=opening_candidate_snapshot,
             candidate_snapshot_unavailable_reason=(
                 candidate_snapshot_unavailable_reason
-            ),
-            prepared_portfolio_distribution=(
-                prepared_portfolio_distribution
-            ),
-            portfolio_distribution_unavailable_reason=(
-                portfolio_distribution_unavailable_reason
-            ),
-            prepared_option_positions_context=(
-                prepared_option_positions_context
-            ),
-            option_positions_unavailable_reason=(
-                option_positions_unavailable_reason
             ),
         )
     return out
@@ -817,6 +739,7 @@ def _load_opening_candidate_families(
                 snapshot,
                 expected_run_id=run_id,
                 expected_account=account,
+                require_current_contract=True,
             )
             accepted_snapshot = dict(snapshot)
     except OpeningCandidateSnapshotError as exc:
@@ -1076,7 +999,6 @@ def _load_cc_lp_snapshot_family(
         }
     )
     return market_rows, True
-
 
 
 def _load_close_advice(
@@ -2255,6 +2177,7 @@ def _append_prefetch_gaps(prefetch: Mapping[str, Any], *, market: str, data_gaps
             "available",
             "completed",
             "cached",
+            "fetched",
         }:
             failed_symbols.add(symbol)
             data_gaps.append(

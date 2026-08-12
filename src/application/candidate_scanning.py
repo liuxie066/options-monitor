@@ -15,10 +15,13 @@ from domain.domain.engine.candidate_engine import (
     REJECT_EVIDENCE_UNAVAILABLE,
     REJECT_INPUT_INVALID,
     REJECT_INPUT_MISSING,
+    REJECT_POLICY_REJECTED,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
+
+_DEFINITIVE_CALCULATION_REASONS = frozenset({"net_premium_non_positive"})
 
 
 @dataclass(frozen=True)
@@ -107,8 +110,12 @@ def _calculation_decision_record(
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
-    if opening_status and opening_status != "ready":
+    if opening_status != "ready":
         reject_reason = specific_reason
+        if not opening_status:
+            reject_reason = REJECT_INPUT_INVALID
+    elif specific_reason in _DEFINITIVE_CALCULATION_REASONS:
+        reject_reason = REJECT_POLICY_REJECTED
     else:
         reject_reason = REJECT_INPUT_INVALID
     opening_decision = build_candidate_decision(

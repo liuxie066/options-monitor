@@ -22,9 +22,6 @@ from src.application.account_config import (
     normalize_accounts,
     parse_lossless_integer,
 )
-from src.application.ai_decision_advice.config import (
-    PORTFOLIO_DISTRIBUTION_PROVIDERS,
-)
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -138,8 +135,6 @@ NOTIFICATION_DAILY_BRIEF_KEYS = {
     'max_candidates_per_strategy',
     'max_rejection_reasons',
 }
-AI_DECISION_ADVICE_CONFIG_KEYS = {'enabled', 'portfolio_distribution'}
-AI_DECISION_ADVICE_PORTFOLIO_DISTRIBUTION_KEYS = {'provider'}
 RETIRED_AI_ADVICE_CONFIG_KEYS = ('ai_interpretation', 'ai_strategy_advice')
 WATCHDOG_CONFIG_KEYS = {
     'retry_enabled',
@@ -322,29 +317,6 @@ def _validate_optional_bool(cfg: dict, key: str, path: str):
         return
     if not isinstance(cfg.get(key), bool):
         die(f'{path}.{key} must be a boolean')
-
-
-def _validate_ai_decision_advice_config(cfg: dict, *, path: str = 'ai_decision_advice') -> None:
-    _reject_unknown_keys(cfg, AI_DECISION_ADVICE_CONFIG_KEYS, path)
-    _validate_optional_bool(cfg, 'enabled', path)
-    if 'portfolio_distribution' in cfg:
-        distribution = cfg.get('portfolio_distribution')
-        if not isinstance(distribution, dict):
-            die(f'{path}.portfolio_distribution must be an object')
-        distribution_path = f'{path}.portfolio_distribution'
-        _reject_unknown_keys(
-            distribution,
-            AI_DECISION_ADVICE_PORTFOLIO_DISTRIBUTION_KEYS,
-            distribution_path,
-        )
-        provider = distribution.get('provider', 'none')
-        if not isinstance(provider, str) or provider not in PORTFOLIO_DISTRIBUTION_PROVIDERS:
-            allowed = ', '.join(
-                sorted(PORTFOLIO_DISTRIBUTION_PROVIDERS)
-            )
-            die(
-                f'{distribution_path}.provider must be one of: {allowed}'
-            )
 
 
 def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_reason: str) -> None:
@@ -920,11 +892,13 @@ def validate_config(cfg: dict):
         die('profiles is no longer supported; use templates')
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
+    if 'ai_decision_advice' in cfg:
+        die('ai_decision_advice is retired and must be removed')
 
     for retired_key in RETIRED_AI_ADVICE_CONFIG_KEYS:
         if retired_key in cfg:
             die(
-                f'{retired_key} is no longer supported; use ai_decision_advice.enabled'
+                f'{retired_key} is retired and must be removed'
             )
 
     if 'accounts' in cfg:
@@ -945,12 +919,6 @@ def validate_config(cfg: dict):
 
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
     _validate_watchdog_config(cfg.get('watchdog'))
-
-    if 'ai_decision_advice' in cfg:
-        ai_advice = cfg.get('ai_decision_advice')
-        if not isinstance(ai_advice, dict):
-            die('ai_decision_advice must be an object')
-        _validate_ai_decision_advice_config(ai_advice)
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
     _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')

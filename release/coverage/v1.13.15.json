@@ -1,0 +1,32 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.15",
+  "base": {
+    "tag": "v1.13.14",
+    "commit": "4c1aaafdaa3a5d0c676361d406c56c048c02c5d5"
+  },
+  "reviewed_head": "d316c95211d53d92ebc2057b0ef247c6a426b2af",
+  "commits": [
+    {
+      "sha": "d316c95211d53d92ebc2057b0ef247c6a426b2af",
+      "subject": "fix(trades): reconcile terminal intake receipts"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Reconciled completed lifecycle intake state from the canonical v2 terminal summary when legacy `decision_type` fields are absent, including the exact resolved lot IDs.",
+      "commits": [
+        "d316c95211d53d92ebc2057b0ef247c6a426b2af"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed guarded historical receipt compensation for applied open trades whose original delivery was provably skipped because no route was available, while preserving duplicate and outbox evidence checks.",
+      "commits": [
+        "d316c95211d53d92ebc2057b0ef247c6a426b2af"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

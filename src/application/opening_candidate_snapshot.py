@@ -577,6 +577,42 @@ def validate_opening_candidate_snapshot(
             )
 
 
+_GENERIC_STRATEGY_GAP_REASONS = frozenset(
+    {"partial_data", "data_unavailable", "failed", "incomplete", "unavailable"}
+)
+
+
+def _contract_scope_reason_code(scope: Mapping[str, Any]) -> str | None:
+    plural_codes: set[str] = set()
+    singular_codes: set[str] = set()
+    top_level_reasons: set[str] = set()
+    rejects = scope.get("rejects")
+    if isinstance(rejects, list):
+        for reject in rejects:
+            if not isinstance(reject, Mapping):
+                continue
+            value = reject.get("metric_value")
+            if isinstance(value, Mapping):
+                raw_codes = value.get("reason_codes")
+                if isinstance(raw_codes, (list, tuple)) and raw_codes:
+                    first_code = next(
+                        (str(item).strip() for item in raw_codes if str(item).strip()),
+                        "",
+                    )
+                    if first_code:
+                        plural_codes.add(first_code)
+                reason_code = str(value.get("reason_code") or "").strip()
+                if reason_code:
+                    singular_codes.add(reason_code)
+            top_level_reason = str(reject.get("reason") or "").strip()
+            if top_level_reason:
+                top_level_reasons.add(top_level_reason)
+    for candidates in (plural_codes, singular_codes, top_level_reasons):
+        if candidates:
+            return sorted(candidates)[0]
+    return None
+
+
 def candidate_universe_summary(
     snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -637,6 +673,7 @@ def candidate_universe_summary(
         REJECT_INPUT_MISSING,
         REJECT_RISK_EARNINGS_UNAVAILABLE,
     }
+    contract_reasons_by_scope: dict[tuple[str, str], set[str]] = {}
     for raw in scopes:
         if not isinstance(raw, Mapping) or raw.get("scope") != "contract":
             continue
@@ -656,14 +693,21 @@ def candidate_universe_summary(
         symbol = _required_text(raw.get("symbol"), "scope symbol").upper()
         mode = _mode(raw.get("strategy_mode"))
         key = (symbol, mode)
-        affected_by_scope.setdefault(
-            key,
-            {
+        reason_code = _contract_scope_reason_code(raw) or sorted(unresolved_reasons)[0]
+        contract_reasons_by_scope.setdefault(key, set()).add(reason_code)
+    for key, reason_codes in contract_reasons_by_scope.items():
+        existing = affected_by_scope.get(key)
+        if (
+            existing is None
+            or str(existing.get("reason_code") or "")
+            in _GENERIC_STRATEGY_GAP_REASONS
+        ):
+            symbol, mode = key
+            affected_by_scope[key] = {
                 "symbol": symbol,
                 "strategy_mode": mode,
-                "reason_code": sorted(unresolved_reasons)[0],
-            },
-        )
+                "reason_code": sorted(reason_codes)[0],
+            }
     affected = list(affected_by_scope.values())
     affected.sort(
         key=lambda row: (

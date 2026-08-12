@@ -12,6 +12,7 @@ import pytest
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    STAGE_INPUT_NORMALIZATION,
     build_candidate_decision,
 )
 from src.application.multi_tick.misc import AccountResult
@@ -109,41 +110,13 @@ def _result(*, ran_scan: bool = True, reason: str = "ok") -> AccountResult:
     return AccountResult("lx", ran_scan, True, reason, "legacy markdown must not be parsed")
 
 
-def test_brief_carries_ai_decision_advice_section(tmp_path: Path) -> None:
-    # Module not configured: the section is a deterministic not_applicable
-    # view, and the normalized brief exposes it for diffing/rendering.
+def test_brief_omits_retired_ai_decision_advice_section(tmp_path: Path) -> None:
     brief = _assemble(tmp_path)
-    section = brief.get("ai_decision_advice")
-    assert isinstance(section, dict)
-    assert section["status"] == "not_applicable"
-    assert section["zero_candidate"] == {"sell_put": False, "covered_call": False}
-    assert "evidence_index" not in section
-    assert brief.get("ai_decision_advice_evidence_index") == {}
+    assert "ai_decision_advice" not in brief
+    assert "ai_decision_advice_evidence_index" not in brief
 
 
-def test_advice_failure_does_not_block_daily_brief(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import daily_decision_brief_service as service
-
-    monkeypatch.setattr(
-        service,
-        "run_or_reuse_ai_decision_advice",
-        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError("slow")),
-    )
-
-    brief = _assemble(tmp_path)
-
-    assert brief["run_id"] == "run-1"
-    assert brief["ai_decision_advice"]["status"] == "unavailable"
-    assert (
-        brief["ai_decision_advice"]["unavailable_reason"]
-        == "advice_execution_failed"
-    )
-
-
-def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
+def test_brief_uses_explicit_candidate_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -161,9 +134,6 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
             encoding="utf-8"
         )
     )
-    portfolio = {"envelope": {"marker": "verified-pm"}}
-    option_context = {"marker": "verified-option"}
-    captured: dict[str, Any] = {}
     bundle_loads: list[dict[str, Any]] = []
     original_load_bundle = service.load_candidate_snapshot_bundle
 
@@ -172,24 +142,6 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
         return original_load_bundle(**kwargs)
 
     monkeypatch.setattr(service, "load_candidate_snapshot_bundle", load_bundle)
-
-    def advice(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "not_applicable",
-            "unavailable_reason": None,
-            "evidence_as_of": None,
-            "sell_put": None,
-            "covered_call": None,
-            "zero_candidate": {
-                "sell_put": False,
-                "covered_call": False,
-            },
-            "reused": False,
-            "advice_record_id": None,
-        }
-
-    monkeypatch.setattr(service, "run_or_reuse_ai_decision_advice", advice)
 
     brief = service.assemble_daily_decision_brief(
         base=tmp_path,
@@ -202,19 +154,12 @@ def test_brief_reuses_explicit_candidate_pm_and_option_authorities(
         config=_config(),
         now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
         opening_candidate_snapshot=snapshot,
-        prepared_portfolio_distribution=portfolio,
-        prepared_option_positions_context=option_context,
     )
 
     assert brief["candidates"]["sell_put"]
     assert len(bundle_loads) == 1
-    assert captured["candidate_snapshot"] is not None
-    assert (
-        captured["candidate_snapshot"]["content_sha256"]
-        == snapshot["content_sha256"]
-    )
-    assert captured["portfolio_distribution"] is portfolio
-    assert captured["option_positions_context"] is option_context
+    assert "ai_decision_advice" not in brief
+    assert "ai_decision_advice_evidence_index" not in brief
 
 
 def _assemble(
@@ -2020,25 +1965,78 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
     tmp_path: Path,
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
-    from src.application.strategy_scan_status import (
-        publish_strategy_scan_status,
-    )
 
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
-    (account_dir / "aapl_sell_call_candidates.csv").write_bytes(b"\n")
-    publish_strategy_scan_status(
-        report_dir=account_dir,
+    _account_dir(tmp_path)
+    put_row = _put_row()
+    call_row = _call_row(symbol="AAPL", contract="AAPL_CALL_UNAVAILABLE")
+    seal_opening_candidate_snapshot(
+        base=tmp_path,
         run_id="run-1",
         account="lx",
         market="US",
-        symbol="AAPL",
-        strategy_family="covered_call",
-        status="unavailable",
-        reason="partial_data",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        account_config_sha256="f" * 64,
+        strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(),
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+            },
+            {
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "status": "unavailable",
+                "reason": "partial_data",
+            },
+        ],
+        final_candidates={"put": [put_row], "call": []},
+        candidate_evaluations={
+            "put": [
+                {
+                    "normalized_input": put_row,
+                    "opening_decision": build_candidate_decision(
+                        mode="put",
+                        symbol="NVDA",
+                        contract_symbol=str(put_row["contract_symbol"]),
+                        accepted=True,
+                        normalized_input=put_row,
+                    ),
+                }
+            ],
+            "call": [
+                {
+                    "normalized_input": call_row,
+                    "opening_decision": build_candidate_decision(
+                        mode="call",
+                        symbol="AAPL",
+                        contract_symbol=str(call_row["contract_symbol"]),
+                        accepted=False,
+                        rejects=[
+                            {
+                                "stage": STAGE_INPUT_NORMALIZATION,
+                                "reason": "input_invalid",
+                                "message": "term-matched realized volatility is unavailable",
+                                "metric_value": {
+                                    "reason_code": "term_matched_rv_unavailable",
+                                },
+                                "threshold": "ready",
+                            }
+                        ],
+                        normalized_input=call_row,
+                    ),
+                }
+            ],
+        },
+        sealed_at="2026-07-17T13:59:59Z",
     )
 
     brief = _assemble(tmp_path)
@@ -2051,9 +2049,10 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         item.get("symbol") == "AAPL"
         and item.get("strategy_family") == "covered_call"
         and item.get("reason") == "opening_candidate_strategy_partial_data"
+        and item.get("reason_code") == "term_matched_rv_unavailable"
         for item in brief["data_gaps"]
     )
-    assert "AAPL Covered Call｜本轮部分行情证据不可用，候选结果不完整" in (
+    assert "AAPL Covered Call｜期限匹配的已实现波动率（RV）证据不可用，候选结果不完整" in (
         render_full_brief(brief)
     )
 
@@ -2191,6 +2190,139 @@ def test_canonical_prefetch_shape_projects_one_symbol_gap_without_duplicate_aggr
     assert len(matching) == 1
     assert not any(
         item.get("reason") == "required_data_prefetch_errors"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_successfully_fetched_prefetch_symbols_do_not_create_data_gaps(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "errors": 0,
+                "symbols": [
+                    {"symbol": "GOOGL", "status": "fetched"},
+                    {"symbol": "NVDA", "status": "fetched"},
+                ],
+                "results": {"GOOGL": "ok", "NVDA": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert not any(
+        item.get("source") == "required_data_prefetch_summary"
+        and item.get("symbol") in {"GOOGL", "NVDA"}
+        for item in brief["data_gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol_cfg",
+    [
+        {"symbol": "NVDA", "combo_yield": {"enabled": True, "variant": "sp_lc"}},
+        {"symbol": "NVDA", "combo_yield": {"enabled": False, "variant": "cc_lp"}},
+        {"symbol": "0700.HK", "combo_yield": {"enabled": True, "variant": "cc_lp"}},
+    ],
+)
+def test_cc_lp_snapshot_is_not_required_without_enabled_current_market_cc_lp(
+    tmp_path: Path,
+    symbol_cfg: dict,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["symbols"] = [symbol_cfg]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert not any(
+        item.get("reason")
+        in {"cc_lp_snapshot_unavailable", "cc_lp_snapshot_market_mismatch"}
+        for item in brief["data_gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    "config_overlay",
+    [
+        {
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "combo_yield": {"enabled": True, "variant": "cc_lp"},
+                }
+            ]
+        },
+        {
+            "templates": {
+                "cc_lp_base": {
+                    "combo_yield": {"enabled": True, "variant": "cc_lp"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "use": "cc_lp_base"}],
+        },
+    ],
+)
+def test_cc_lp_applicability_comes_from_terminal_manifest_not_live_config(
+    tmp_path: Path,
+    config_overlay: dict,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config.update(config_overlay)
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert not any(
+        item.get("variant") == "cc_lp"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_symbol_override_can_disable_template_cc_lp_snapshot_requirement(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    config = _config()
+    config["templates"] = {
+        "cc_lp_base": {
+            "combo_yield": {"enabled": True, "variant": "cc_lp"},
+        }
+    }
+    config["symbols"] = [
+        {
+            "symbol": "NVDA",
+            "use": "cc_lp_base",
+            "combo_yield": {"enabled": False},
+        }
+    ]
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert not any(
+        item.get("reason")
+        in {"cc_lp_snapshot_unavailable", "cc_lp_snapshot_market_mismatch"}
         for item in brief["data_gaps"]
     )
 

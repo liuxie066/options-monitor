@@ -115,13 +115,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Send one guarded historical receipt for canonical open deal IDs "
-            "that carry the legacy false outbox marker"
+            "that carry an explicitly supported unsent marker"
         ),
     )
     ap.add_argument(
         "--compensation-reason",
         default=LEGACY_FALSE_OUTBOX_REASON,
-        help="Fixed audit reason for --compensate-receipts",
+        help="Explicit unsent-marker reason for --compensate-receipts",
     )
     ap.add_argument(
         "--expected-payload-hash",
