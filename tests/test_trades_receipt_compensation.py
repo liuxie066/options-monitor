@@ -8,6 +8,7 @@ import pytest
 
 from src.application.trades.receipt_compensation import (
     LEGACY_FALSE_OUTBOX_REASON,
+    SKIPPED_NO_ROUTE_REASON,
     compensate_trade_intake_receipts,
 )
 
@@ -283,6 +284,58 @@ def test_receipt_compensation_rejects_real_outbox_evidence(
             account=ACCOUNT,
             deal_ids=list(DEAL_IDS),
             apply_changes=False,
+            route_resolver=_route,
+        )
+
+
+def test_receipt_compensation_accepts_explicit_unsent_no_route_marker(
+    tmp_path: Path,
+) -> None:
+    sources, repo = _fixture(tmp_path)
+    state_path = Path(sources[0]["state_path"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for deal_id in DEAL_IDS:
+        state["processed_deal_ids"][deal_id]["receipt"] = {
+            "enabled": True,
+            "status": "skipped",
+            "reason": SKIPPED_NO_ROUTE_REASON,
+            "target_set": False,
+            "delivery_confirmed": False,
+            "message_id": None,
+        }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    out = compensate_trade_intake_receipts(
+        base=tmp_path,
+        config={},
+        sources=sources,
+        repo=repo,
+        account=ACCOUNT,
+        deal_ids=list(DEAL_IDS),
+        apply_changes=False,
+        reason=SKIPPED_NO_ROUTE_REASON,
+        route_resolver=_route,
+    )
+
+    assert out["status"] == "ready"
+    assert out["reason"] == SKIPPED_NO_ROUTE_REASON
+
+
+def test_receipt_compensation_rejects_no_route_reason_without_exact_marker(
+    tmp_path: Path,
+) -> None:
+    sources, repo = _fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="unsent no-route marker"):
+        compensate_trade_intake_receipts(
+            base=tmp_path,
+            config={},
+            sources=sources,
+            repo=repo,
+            account=ACCOUNT,
+            deal_ids=list(DEAL_IDS),
+            apply_changes=False,
+            reason=SKIPPED_NO_ROUTE_REASON,
             route_resolver=_route,
         )
 
