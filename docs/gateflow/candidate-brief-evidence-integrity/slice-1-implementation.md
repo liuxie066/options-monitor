@@ -51,7 +51,7 @@ Implemented outcome:
 Command:
 
 ```text
-/Volumes/liuxie的硬盘/workspace/options-monitor/.venv/bin/python -m pytest -q tests/test_scan_volume_gate_min_zero.py tests/test_candidate_scanning_evidence.py tests/test_opening_candidate_snapshot.py
+./.venv/bin/python -m pytest -q tests/test_scan_volume_gate_min_zero.py tests/test_candidate_scanning_evidence.py tests/test_opening_candidate_snapshot.py
 ```
 
 Initial implementation result: `36 passed`. Final result after accepted review fixes: `39 passed`.

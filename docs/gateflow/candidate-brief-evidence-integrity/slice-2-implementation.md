@@ -50,7 +50,7 @@ Implemented outcome:
 Command:
 
 ```text
-/Volumes/liuxie的硬盘/workspace/options-monitor/.venv/bin/python -m pytest -q tests/test_daily_decision_brief_service.py tests/test_daily_decision_brief_renderer.py tests/test_ai_decision_advice_render.py
+./.venv/bin/python -m pytest -q tests/test_daily_decision_brief_service.py tests/test_daily_decision_brief_renderer.py tests/test_ai_decision_advice_render.py
 ```
 
 Initial result after correcting one generator-expression syntax error and one test import: `114 passed`. Result after
