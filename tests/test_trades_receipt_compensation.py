@@ -179,6 +179,36 @@ def test_receipt_compensation_preview_combines_two_ledger_trades_without_writes(
     assert not Path(out["audit_path"]).exists()
 
 
+def test_receipt_compensation_formats_float_transport_noise_as_broker_price(
+    tmp_path: Path,
+) -> None:
+    sources, repo = _fixture(tmp_path)
+    state_path = Path(sources[0]["state_path"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["processed_deal_ids"] = {
+        DEAL_IDS[0]: state["processed_deal_ids"][DEAL_IDS[0]]
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    repo.events = [repo.events[0]]
+    repo.events[0]["price"] = 1.5699999999999998
+
+    out = compensate_trade_intake_receipts(
+        base=tmp_path,
+        config={},
+        sources=sources,
+        repo=repo,
+        account=ACCOUNT,
+        deal_ids=[DEAL_IDS[0]],
+        apply_changes=False,
+        reason=LEGACY_FALSE_OUTBOX_REASON,
+        route_resolver=_route,
+    )
+
+    assert "成交｜1.57 HKD" in out["message"]
+    assert "权利金毛流入 HKD 157.00" in out["message"]
+    assert "1.5699999999999998" not in out["message"]
+
+
 def test_receipt_compensation_sends_once_and_suppresses_confirmed_duplicate(
     tmp_path: Path,
 ) -> None:
