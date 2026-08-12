@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.16",
+  "base": {
+    "tag": "v1.13.15",
+    "commit": "aef7c95ca498fd7e4b4f9db451c959aaa689b811"
+  },
+  "reviewed_head": "59bd992cd7bf1b5ba4d5f35542e269c1c5a75651",
+  "commits": [
+    {
+      "sha": "59bd992cd7bf1b5ba4d5f35542e269c1c5a75651",
+      "subject": "fix(trades): reconcile lifecycle anchor keys"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Reconciled terminal lifecycle intake rows from the canonical frozen observation anchor when the evidence event ID identifies the observation itself rather than the original broker deal.",
+      "commits": [
+        "59bd992cd7bf1b5ba4d5f35542e269c1c5a75651"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
