@@ -7,8 +7,6 @@ from pathlib import Path
 import pytest
 
 from domain.domain.option_position_lots import OpenPositionCommand
-from src.application.ai_decision_advice.contexts import build_frozen_inputs
-from src.application.ai_decision_advice.evidence_store import EvidenceIndex
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
@@ -79,92 +77,6 @@ def _authorities(
         for account, authority in authorities.items()
     }
     return retained, authorities
-
-
-def _candidate_snapshot(
-    *,
-    run_id: str,
-    account: str,
-    account_config_sha256: str,
-    mode: str,
-    symbol: str,
-    strike: float,
-    expiry: str,
-) -> dict:
-    return {
-        "run_id": run_id,
-        "account": account,
-        "account_config_sha256": account_config_sha256,
-        "ranked_candidates": [
-            {
-                "candidate_id": f"{account}-{mode}",
-                "strategy_mode": mode,
-                "rank": 1,
-                "facts": {
-                    "symbol": symbol,
-                    "option_type": mode,
-                    "strike": strike,
-                    "expiration": expiry,
-                    "multiplier": 100,
-                    "currency": "USD",
-                },
-            }
-        ],
-    }
-
-
-def _prepared_portfolio(
-    *,
-    run_id: str,
-    account: str,
-    account_config_sha256: str,
-    symbol: str,
-    shares: int,
-    total_value: float,
-) -> dict:
-    from src.application.prepared_portfolio_distribution import (
-        PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
-    )
-
-    return {
-        "authority": {
-            "schema_version": PREPARED_PORTFOLIO_DISTRIBUTION_SCHEMA,
-            "run_id": run_id,
-            "account": account,
-            "mapped_pm_account": f"PM {account.upper()}",
-            "provider": "portfolio_management",
-            "account_config_sha256": account_config_sha256,
-            "status": "ready",
-            "reason": "portfolio_ready",
-            "fetched_at_utc": NOW.isoformat(),
-            "validation": {"status": "passed"},
-        },
-        "payload": {
-            "observed_at_utc": NOW.isoformat(),
-            "retrieved_at_utc": NOW.isoformat(),
-            "freshness_status": "fresh",
-            "trust_status": "trusted",
-            "dataset_ids": ["pm.holdings", "pm.prices"],
-            "reason_codes": [],
-            "valuation_currency": "CNY",
-            "assets": [
-                {
-                    "code": symbol,
-                    "normalized_type": "stock",
-                    "currency": "USD",
-                    "quantity": float(shares),
-                    "value": total_value,
-                }
-            ],
-            "derived": {
-                "total_value": total_value,
-                "asset_weights": {symbol: 1.0},
-                "currency_weights": {"USD": 1.0},
-                "cash_and_mmf_weight": 0.0,
-            },
-        },
-        "integrity": {},
-    }
 
 
 def _open_position(
@@ -340,7 +252,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         )
 
 
-def test_one_ledger_freezes_account_isolated_option_contexts_and_projections(
+def test_one_ledger_freezes_account_isolated_option_contexts(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -443,121 +355,6 @@ def test_one_ledger_freezes_account_isolated_option_contexts_and_projections(
         "ledger_generation_sha256"
     ]
 
-    snapshots = {
-        "lx": _candidate_snapshot(
-            run_id=run_id,
-            account="lx",
-            account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            mode="put",
-            symbol="NVDA",
-            strike=95,
-            expiry="2099-09-18",
-        ),
-        "sy": _candidate_snapshot(
-            run_id=run_id,
-            account="sy",
-            account_config_sha256=authorities[
-                "sy"
-            ].account_config_sha256,
-            mode="call",
-            symbol="AAPL",
-            strike=210,
-            expiry="2099-09-23",
-        ),
-    }
-    portfolios = {
-        "lx": _prepared_portfolio(
-            run_id=run_id,
-            account="lx",
-            account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            symbol="NVDA",
-            shares=200,
-            total_value=100_000,
-        ),
-        "sy": _prepared_portfolio(
-            run_id=run_id,
-            account="sy",
-            account_config_sha256=authorities[
-                "sy"
-            ].account_config_sha256,
-            symbol="AAPL",
-            shares=400,
-            total_value=200_000,
-        ),
-    }
-    frozen = {
-        account: build_frozen_inputs(
-            snapshot=snapshots[account],
-            portfolio_distribution=portfolios[account],
-            option_positions_context=loaded[account],
-            evidence_index=EvidenceIndex(frozen_at=NOW.isoformat()),
-            market="US",
-        )
-        for account in ("lx", "sy")
-    }
-
-    assert frozen["lx"].option_positions["summary"][
-        "total_open_contracts"
-    ] == 2
-    assert frozen["sy"].option_positions["summary"][
-        "total_open_contracts"
-    ] == 3
-    assert frozen["lx"].option_positions["candidate_contracts"] == [
-        {
-            "symbol": "NVDA",
-            "option_type": "put",
-            "side": "short",
-            "strike": 95.0,
-            "expiry": "2099-09-18",
-            "multiplier": 100.0,
-            "contracts": 2,
-        }
-    ]
-    assert frozen["sy"].option_positions["candidate_contracts"] == [
-        {
-            "symbol": "AAPL",
-            "option_type": "call",
-            "side": "short",
-            "strike": 210.0,
-            "expiry": "2099-09-23",
-            "multiplier": 100.0,
-            "contracts": 3,
-        }
-    ]
-    assert frozen["lx"].projections["lx-put"][
-        "assignment_exposure_ratio"
-    ] == 0.684
-    assert frozen["lx"].projections["lx-put"][
-        "same_obligation_current_contracts"
-    ] == 2
-    assert frozen["lx"].projections["lx-put"][
-        "exact_expiry_current_contracts"
-    ] == 2
-    assert frozen["lx"].projections["lx-put"][
-        "near_expiry_7d_current_contracts"
-    ] == 0
-    assert frozen["sy"].projections["sy-call"][
-        "call_away_fraction"
-    ] == 0.25
-    assert frozen["sy"].projections["sy-call"][
-        "same_obligation_current_contracts"
-    ] == 3
-    assert frozen["sy"].projections["sy-call"][
-        "exact_expiry_current_contracts"
-    ] == 3
-    assert frozen["sy"].projections["sy-call"][
-        "near_expiry_7d_current_contracts"
-    ] == 0
-    assert [
-        row["symbol"] for row in frozen["lx"].external_evidence["symbols"]
-    ] == ["NVDA"]
-    assert [
-        row["symbol"] for row in frozen["sy"].external_evidence["symbols"]
-    ] == ["AAPL"]
 
     lx_manifest = batch.manifests["lx"]
     with pytest.raises(

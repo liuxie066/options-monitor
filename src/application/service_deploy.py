@@ -13,10 +13,8 @@ from typing import Any, Callable, Literal, cast
 
 from src.application.account_config import AccountRuntimePlan, build_account_runtime_plan
 from src.application.config_yaml import (
-    load_yaml_config_file,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
-    yaml_to_market_user_config,
 )
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.llm_provider_registry import provider_spec
@@ -24,7 +22,6 @@ from src.application.secret_store import (
     FEISHU_BOT_APP_SECRET,
     FEISHU_HOLDINGS_APP_SECRET,
     INBOUND_OPERATION_HMAC_KEY,
-    LLM_DEEPSEEK_API_KEY,
     QUALITY_READ_TOKEN,
     credential_spec,
     legacy_secret_env_names,
@@ -324,29 +321,6 @@ def _first_yaml_runtime_config(*, repo_root: Path, config_yaml_path: Path, marke
         if cfg:
             return cfg
     return {}
-
-
-def _ai_decision_advice_enabled_from_authoring_config(
-    *,
-    repo_root: Path,
-    config_yaml_path: Path | None,
-    config_by_market: dict[str, Path],
-    market_values: list[str],
-) -> bool:
-    from src.application.agent_tool_contracts import AgentToolError
-    from src.application.ai_decision_advice.config import ai_decision_advice_enabled
-
-    if config_yaml_path is not None and config_yaml_path.exists():
-        try:
-            raw_config = load_yaml_config_file(config_yaml_path)
-            config = yaml_to_market_user_config(raw_config, market=market_values[0])
-        except AgentToolError:
-            # The collector unit is an optional add-on; a partial authoring
-            # config must not fail the whole service bundle render.
-            config = _first_existing_config(config_by_market, market_values)
-    else:
-        config = _first_existing_config(config_by_market, market_values)
-    return ai_decision_advice_enabled(config)
 
 
 def _opend_service_plans_from_authoring_config(
@@ -790,7 +764,6 @@ def _assistant_llm_credential_name(*, repo_root: Path, config_yaml_path: Path | 
 def _systemd_secret_bindings(
     *,
     service_names: list[str],
-    ai_decision_advice_enabled: bool,
     assistant_credential_name: str | None,
 ) -> dict[str, tuple[str, ...]]:
     available = set(service_names)
@@ -807,13 +780,10 @@ def _systemd_secret_bindings(
     for service_name in sorted(available):
         if service_name.startswith("options-monitor-tick-") and service_name.endswith(".service"):
             bind(service_name, FEISHU_HOLDINGS_APP_SECRET, FEISHU_BOT_APP_SECRET)
-            if ai_decision_advice_enabled:
-                bind(service_name, LLM_DEEPSEEK_API_KEY)
         elif service_name.startswith("options-monitor-auto-close-") and service_name.endswith(".service"):
             bind(service_name, FEISHU_BOT_APP_SECRET)
 
     bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
-    bind("options-monitor-ai-evidence-collector.service", LLM_DEEPSEEK_API_KEY)
     bind("options-monitor-quality-http.service", QUALITY_READ_TOKEN)
     bind(
         "options-monitor-feishu-ws.service",
@@ -1269,12 +1239,6 @@ def render_service_bundle(
         if config_yaml_path is not None
         else None
     )
-    ai_advice_enabled = _ai_decision_advice_enabled_from_authoring_config(
-        repo_root=repo,
-        config_yaml_path=config_yaml_path,
-        config_by_market=config_by_market,
-        market_values=market_values,
-    )
     assistant_credential_name = (
         _assistant_llm_credential_name(repo_root=repo, config_yaml_path=config_yaml_path)
         if include_feishu_ws or include_wechat_clawbot
@@ -1609,42 +1573,6 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
-        if ai_advice_enabled:
-            collector_service = "options-monitor-ai-evidence-collector.service"
-            collector_timer = "options-monitor-ai-evidence-collector.timer"
-            collector_args = [
-                str(repo / ".venv" / "bin" / "python"),
-                "-m",
-                "src.interfaces.cli.ai_evidence_collector",
-                *[arg for market in market_values for arg in ("--config-key", market)],
-            ]
-            add(
-                f"systemd/{collector_service}",
-                _systemd_unit(
-                    description="Options Monitor AI Decision Advice external evidence collector",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=collector_args,
-                    timeout_start_sec=600,
-                ),
-                install_path=f"/etc/systemd/system/{collector_service}",
-                kind="systemd_service",
-                service_name=collector_service,
-            )
-            add(
-                f"systemd/{collector_timer}",
-                _systemd_timer(
-                    description="Options Monitor AI Decision Advice external evidence collector timer",
-                    unit_name=collector_service,
-                    interval="24h",
-                ),
-                install_path=f"/etc/systemd/system/{collector_timer}",
-                kind="systemd_timer",
-                service_name=collector_timer,
-            )
         if include_quality_monitoring:
             quality_config_args = [
                 arg
@@ -2071,7 +1999,6 @@ def render_service_bundle(
         if include_secret_credentials:
             secret_credential_bindings = _systemd_secret_bindings(
                 service_names=service_names,
-                ai_decision_advice_enabled=ai_advice_enabled,
                 assistant_credential_name=assistant_credential_name,
             )
             secret_deploy_user = str(systemd_user or "root")
