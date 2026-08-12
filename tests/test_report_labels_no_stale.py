@@ -1,30 +1,23 @@
-"""Regression: prevent stale labeled CSV reuse when upstream candidates are empty."""
+"""Regression coverage for pure Sell Put display labeling."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import pandas as pd
 
 
-def test_add_sell_put_labels_overwrites_on_empty() -> None:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
+def test_label_sell_put_candidates_preserves_empty_frame_without_file_io() -> None:
+    from src.application.report_labels import label_sell_put_candidates
 
-    from src.application.report_labels import add_sell_put_labels
+    source = pd.DataFrame(columns=["symbol", "strike", "otm_pct"])
 
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        input_path = root / 'input.csv'
-        output_path = root / 'out.csv'
+    labeled = label_sell_put_candidates(source)
 
-        # Seed output with stale content.
-        output_path.write_text('symbol,strike\n9992.HK,127.5\n', encoding='utf-8')
-        # Empty input (simulate 0 candidates).
-        input_path.write_text('symbol,strike\n', encoding='utf-8')
-
-        add_sell_put_labels(root, input_path, output_path)
-
-        out = output_path.read_text(encoding='utf-8').strip().splitlines()
-        assert out == ['symbol,strike']
+    assert labeled.empty
+    assert list(labeled.columns) == [
+        "symbol",
+        "strike",
+        "otm_pct",
+        "otm_band",
+        "risk_label",
+    ]
+    assert list(source.columns) == ["symbol", "strike", "otm_pct"]

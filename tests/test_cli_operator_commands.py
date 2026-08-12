@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
 
 def _read_json_output(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
@@ -782,12 +784,34 @@ def test_research_shadow_replay_build_and_analyze(capsys, monkeypatch, tmp_path:
     monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
     account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
     account_dir.mkdir(parents=True)
-    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,dte,delta,strike,iv_rv_ratio,spread_ratio\n"
-            "NVDA,lx,put,NVDA260619P00100000,30,-0.2,100,1.25,0.10\n"
-        ),
-        encoding="utf-8",
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "iv_rv_ratio": 1.25,
+                "spread_ratio": 0.10,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "dte": 30,
+                "strike": 80,
+                "spread_ratio": 0.45,
+                "rule": "risk_spread",
+            }
+        ],
     )
     (account_dir / "candidate_filter_trace.jsonl").write_text(
         json.dumps(
@@ -897,12 +921,34 @@ def test_research_shadow_replay_build_from_service_profile_latest_run(capsys, mo
     account_dir = runtime_root / "output_runs" / "run-1" / "accounts" / "lx"
     empty_run.mkdir(parents=True)
     account_dir.mkdir(parents=True)
-    (account_dir / "sell_put_candidates.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
-            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
-        ),
-        encoding="utf-8",
+    seal_opening_candidate_fixture(
+        runtime_root,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "net_income": 120,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "strike": 80,
+                "rule": "risk_spread",
+            }
+        ],
     )
     (account_dir / "candidate_filter_trace.jsonl").write_text(
         json.dumps(
@@ -973,12 +1019,37 @@ def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp
     monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
     account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
     account_dir.mkdir(parents=True)
-    (account_dir / "sell_put_candidates.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
-            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
-        ),
-        encoding="utf-8",
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        accepted_rows=[
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "delta": -0.2,
+                "strike": 100,
+                "net_income": 120,
+                "multiplier": 100,
+            }
+        ],
+        rejected_rows=[
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "dte": 30,
+                "strike": 80,
+                "net_income": 90,
+                "multiplier": 100,
+                "rule": "risk_spread",
+            }
+        ],
     )
     (account_dir / "candidate_filter_trace.jsonl").write_text(
         json.dumps(

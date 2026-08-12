@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 
 BASE = Path(__file__).resolve().parents[1]
+VPY = Path(sys.executable)
 
 
 def test_parse_option_message_domain_and_cli() -> None:
@@ -24,7 +25,7 @@ def test_parse_option_message_domain_and_cli() -> None:
 
     p = subprocess.run(
         [
-            str(BASE / '.venv' / 'bin' / 'python'),
+                str(VPY),
             '-m',
             'src.application.parse_option_message',
             '--text',
@@ -81,7 +82,7 @@ def test_alert_engine_domain_and_cli() -> None:
 
         subprocess.run(
             [
-                str(BASE / '.venv' / 'bin' / 'python'),
+                str(VPY),
                 '-m',
                 'src.application.alert_engine',
                 '--summary-input', str(summary_path),
@@ -100,8 +101,6 @@ def test_alert_engine_domain_and_cli() -> None:
 def test_step4_domain_files_no_argparse_or_main() -> None:
     targets = [
         BASE / 'src' / 'application' / 'scan_scheduler.py',
-        BASE / 'src' / 'application' / 'render_sell_put_alerts.py',
-        BASE / 'src' / 'application' / 'render_sell_call_alerts.py',
         BASE / 'src' / 'application' / 'cash_headroom_query.py',
     ]
     for path in targets:
@@ -148,7 +147,7 @@ def test_scan_scheduler_domain_and_cli() -> None:
 
         p = subprocess.run(
             [
-                str(BASE / '.venv' / 'bin' / 'python'),
+                str(VPY),
                 '-m',
                 'src.interfaces.cli.main',
                 'scheduler',
@@ -167,122 +166,3 @@ def test_scan_scheduler_domain_and_cli() -> None:
         cli_payload = json.loads(line)
         assert 'should_run_scan' in cli_payload
         assert 'should_notify' in cli_payload
-
-
-def test_render_sell_put_domain_and_cli() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
-
-    from src.application.render_sell_put_alerts import render_sell_put_alerts
-
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        csv_path = root / 'sell_put_candidates_labeled.csv'
-        out_path = root / 'sell_put_alerts.txt'
-
-        pd.DataFrame(
-            [
-                {
-                    'symbol': 'AAPL',
-                    'expiration': '2026-05-15',
-                    'strike': 180.0,
-                    'spot': 200.0,
-                    'dte': 30,
-                    'mid': 2.5,
-                    'net_income': 250.0,
-                    'annualized_net_return_on_cash_basis': 0.2,
-                    'otm_pct': 0.1,
-                    'risk_label': '中性',
-                    'spread_ratio': 0.1,
-                    'open_interest': 100,
-                    'volume': 50,
-                }
-            ]
-        ).to_csv(csv_path, index=False)
-
-        text = render_sell_put_alerts(input_path=csv_path, output_path=out_path, top=1, layered=True, base_dir=BASE)
-        assert '[Sell Put 候选]' in text
-        assert out_path.exists()
-
-        subprocess.run(
-            [
-                str(BASE / '.venv' / 'bin' / 'python'),
-                '-m',
-                'src.application.render_sell_put_alerts',
-                '--input',
-                str(csv_path),
-                '--output',
-                str(out_path),
-                '--top',
-                '1',
-                '--layered',
-            ],
-            cwd=str(BASE),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert '[Sell Put 候选]' in out_path.read_text(encoding='utf-8')
-
-
-def test_render_sell_call_domain_and_cli() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
-
-    from src.application.render_sell_call_alerts import render_sell_call_alerts
-
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        csv_path = root / 'sell_call_candidates.csv'
-        out_path = root / 'sell_call_alerts.txt'
-
-        pd.DataFrame(
-            [
-                {
-                    'symbol': 'AAPL',
-                    'expiration': '2026-05-15',
-                    'strike': 220.0,
-                    'spot': 200.0,
-                    'dte': 30,
-                    'mid': 2.5,
-                    'net_income': 250.0,
-                    'annualized_net_premium_return': 0.12,
-                    'if_exercised_total_return': 0.2,
-                    'strike_above_spot_pct': 0.1,
-                    'strike_above_cost_pct': 0.15,
-                    'risk_label': '中性',
-                    'spread_ratio': 0.1,
-                    'open_interest': 100,
-                    'volume': 50,
-                    'shares_total': 200,
-                    'shares_locked': 0,
-                    'shares_available_for_cover': 200,
-                    'covered_contracts_available': 2,
-                    'is_fully_covered_available': True,
-                }
-            ]
-        ).to_csv(csv_path, index=False)
-
-        text = render_sell_call_alerts(input_path=csv_path, output_path=out_path, top=1, layered=True, base_dir=BASE)
-        assert '[Covered Call 候选]' in text
-        assert out_path.exists()
-
-        subprocess.run(
-            [
-                str(BASE / '.venv' / 'bin' / 'python'),
-                '-m',
-                'src.application.render_sell_call_alerts',
-                '--input',
-                str(csv_path),
-                '--output',
-                str(out_path),
-                '--top',
-                '1',
-                '--layered',
-            ],
-            cwd=str(BASE),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert '[Covered Call 候选]' in out_path.read_text(encoding='utf-8')

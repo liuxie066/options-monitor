@@ -17,12 +17,22 @@ from src.application.opening_candidate_snapshot import (
     candidate_universe_summary,
     dependency_from_file,
     dependency_from_hash,
-    load_latest_opening_candidate_snapshot,
     load_opening_candidate_snapshot,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
+    rejected_opening_candidate_decisions,
     seal_opening_candidate_snapshot,
     validate_opening_candidate_snapshot,
+)
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError,
+    load_latest_candidate_snapshot_bundle,
+    publish_candidate_snapshot_manifest,
+)
+from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
+from src.application.strategy_scan_status import (
+    publish_strategy_scan_status,
+    publish_strategy_scan_status_index_v2,
 )
 
 
@@ -139,6 +149,80 @@ def _seal(base: Path, *, run_id: str = "run-1", account: str = "lx") -> dict:
             }
         ],
         final_candidates={"put": [low, high]},
+        sealed_at=NOW,
+    )
+
+
+def _publish_opening_manifest(base: Path, payload: dict) -> dict:
+    account_dir = (
+        base
+        / "output_runs"
+        / str(payload["run_id"])
+        / "accounts"
+        / str(payload["account"])
+    )
+    expected: list[dict[str, str]] = []
+    ranked = [dict(row) for row in payload.get("ranked_candidates") or []]
+    for raw in payload.get("scope_results") or []:
+        scope = dict(raw)
+        if scope.get("scope") != "strategy":
+            continue
+        mode = str(scope["strategy_mode"])
+        family = "sell_put" if mode == "put" else "covered_call"
+        symbol = str(scope["symbol"])
+        reason = str(scope.get("reason_code") or "") or None
+        status = str(scope["status"])
+        candidate_count = sum(
+            str(row.get("strategy_mode")) == mode
+            and str((row.get("facts") or {}).get("symbol") or "").upper()
+            == symbol.upper()
+            for row in ranked
+        )
+        status_kwargs: dict = {
+            "report_dir": account_dir,
+            "run_id": str(payload["run_id"]),
+            "account": str(payload["account"]),
+            "market": str(payload["market"]),
+            "symbol": symbol,
+            "strategy_family": family,
+            "status": status,
+            "snapshot_id": scope.get("quote_snapshot_id"),
+            "receipt_relpath": scope.get("quote_receipt_relpath"),
+        }
+        if status == "completed":
+            status_kwargs["candidate_count"] = candidate_count
+            if reason in SUCCESS_EMPTY_REASON_CODES:
+                status_kwargs.update(
+                    source_outcome="success_empty",
+                    reason_code=reason,
+                )
+            else:
+                status_kwargs["reason"] = reason
+        else:
+            status_kwargs["reason"] = reason or "fixture_unavailable"
+        publish_strategy_scan_status(**status_kwargs)
+        expected.append(
+            {
+                "market": str(payload["market"]),
+                "symbol": symbol,
+                "strategy_family": family,
+                "strategy_mode": mode,
+                "candidate_owner": "opening",
+                "account_config_sha256": str(payload["account_config_sha256"]),
+            }
+        )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id=str(payload["run_id"]),
+        account=str(payload["account"]),
+        account_config_sha256=str(payload["account_config_sha256"]),
+        expected=expected,
+    )
+    return publish_candidate_snapshot_manifest(
+        base=base,
+        run_id=str(payload["run_id"]),
+        account=str(payload["account"]),
+        strategy_policy_sha256=str(payload["strategy_policy_sha256"]),
         sealed_at=NOW,
     )
 
@@ -273,7 +357,8 @@ def test_agent_filter_explains_sealed_scope_without_refiltering(
         candidate_filter_explain_tool,
     )
 
-    _seal(tmp_path)
+    payload = _seal(tmp_path)
+    manifest = _publish_opening_manifest(tmp_path, payload)
     data, warnings, meta = candidate_filter_explain_tool(
         {
             "runtime_root": str(tmp_path),
@@ -294,6 +379,112 @@ def test_agent_filter_explains_sealed_scope_without_refiltering(
         for event in data["functions"][0]["events"]
     )
     assert meta["source_files"][0]["content_sha256"]
+    assert meta["source_files"][0]["manifest_content_sha256"] == manifest[
+        "content_sha256"
+    ]
+    assert meta["source_files"][0]["authority"] == (
+        "terminal_manifest_bound_opening_candidate_snapshot"
+    )
+
+
+def test_agent_explain_rejects_uncommitted_opening_owner(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools.candidate_filter_impl import (
+        candidate_filter_explain_tool,
+    )
+
+    _seal(tmp_path)
+
+    with pytest.raises(AgentToolError, match="manifest is unavailable"):
+        candidate_filter_explain_tool(
+            {
+                "runtime_root": str(tmp_path),
+                "run_id": "run-1",
+                "account": "lx",
+                "symbol": "NVDA",
+            },
+            repo_base=lambda: tmp_path,
+            mask_path=lambda path: str(path) if path else None,
+        )
+
+
+def test_agent_rank_rejects_uncommitted_opening_owner(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools.candidate_rank_impl import (
+        candidate_rank_explain_tool,
+    )
+
+    _seal(tmp_path)
+
+    with pytest.raises(AgentToolError, match="manifest is unavailable"):
+        candidate_rank_explain_tool(
+            {
+                "runtime_root": str(tmp_path),
+                "run_id": "run-1",
+                "account": "lx",
+                "mode": "put",
+            },
+            repo_base=lambda: tmp_path,
+            resolve_output_root=lambda _value: tmp_path,
+            mask_path=lambda path: str(path) if path else None,
+        )
+
+
+def test_validator_rejects_decision_outside_declared_strategy_scope(
+    tmp_path: Path,
+) -> None:
+    payload = _seal(tmp_path)
+    tampered = dict(payload)
+    tampered["scope_results"] = [
+        (
+            {**dict(row), "symbol": "AAPL"}
+            if row.get("scope") == "strategy"
+            else dict(row)
+        )
+        for row in payload["scope_results"]
+    ]
+    tampered["content_sha256"] = canonical_sha256(
+        {key: value for key, value in tampered.items() if key != "content_sha256"}
+    )
+
+    with pytest.raises(OpeningCandidateSnapshotError, match="escapes scan scope"):
+        validate_opening_candidate_snapshot(
+            tampered,
+            expected_run_id="run-1",
+            expected_account="lx",
+        )
+
+
+def test_terminal_manifest_rejects_minimal_legacy_opening_contract(
+    tmp_path: Path,
+) -> None:
+    payload = _seal(tmp_path)
+    legacy = {
+        **payload,
+        "candidate_decisions": [
+            {"candidate_id": row["candidate_id"]}
+            for row in payload["candidate_decisions"]
+        ],
+    }
+    legacy["content_sha256"] = canonical_sha256(
+        {key: value for key, value in legacy.items() if key != "content_sha256"}
+    )
+    snapshot_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+        / OPENING_CANDIDATE_SNAPSHOT_FILE
+    )
+    snapshot_path.write_text(
+        json.dumps(legacy, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CandidateSnapshotManifestError, match="snapshot is invalid"):
+        _publish_opening_manifest(tmp_path, legacy)
 
 
 def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
@@ -319,6 +510,8 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
                 "strategy_mode": "put",
                 "status": "completed",
                 "reason": "no_expirations",
+                "quote_snapshot_id": "empty-quote",
+                "quote_receipt_relpath": "quotes/NVDA/receipt.json",
             }
         ],
         final_candidates={"put": []},
@@ -339,6 +532,8 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import (
         candidate_filter_explain_tool,
     )
+
+    _publish_opening_manifest(tmp_path, payload)
 
     data, warnings, _meta = candidate_filter_explain_tool(
         {
@@ -899,6 +1094,15 @@ def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     assert contract_scope["rejects"][0]["metric_value"] == opening_decision[
         "rejects"
     ][0]["metric_value"]
+    projected_rejections = rejected_opening_candidate_decisions(
+        payload,
+        mode="put",
+    )
+    assert len(projected_rejections) == 1
+    assert projected_rejections[0]["candidate_id"] == contract_scope["candidate_id"]
+    assert projected_rejections[0]["opening_decision"]["accepted"] is False
+
+    _publish_opening_manifest(tmp_path, payload)
 
     data, warnings, _meta = candidate_filter_explain_tool(
         {
@@ -920,6 +1124,55 @@ def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     assert event["metric_value"] == opening_decision["rejects"][0]["metric_value"]
     assert event["threshold"] == 0.10
     assert event["message"] == "annualized net return below formal minimum or unavailable"
+
+
+def test_rejected_decision_cannot_escape_scanned_symbol_scope(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.engine import evaluate_opening_candidate_policy
+
+    candidate = _candidate(
+        contract_symbol="AAPL260918P00090000",
+        period_return=0.01,
+    )
+    candidate["symbol"] = "AAPL"
+    opening_decision = evaluate_opening_candidate_policy(candidate, mode="put")
+
+    with pytest.raises(OpeningCandidateSnapshotError, match="escapes scan scope"):
+        seal_opening_candidate_snapshot(
+            base=tmp_path,
+            run_id="run-cross-symbol",
+            account="lx",
+            market="US",
+            physical_account={
+                "status": "available",
+                "logical_account": "lx",
+                "futu_account_id": "12345",
+                "trd_env": "REAL",
+                "market": "US",
+                "source": "opend",
+            },
+            account_config_sha256="a" * 64,
+            strategy_policy_sha256="b" * 64,
+            dependencies=_dependencies(tmp_path, "run-cross-symbol", "lx"),
+            scan_statuses=[
+                {
+                    "symbol": "NVDA",
+                    "strategy_mode": "put",
+                    "status": "completed",
+                }
+            ],
+            final_candidates={"put": []},
+            candidate_evaluations={
+                "put": [
+                    {
+                        "normalized_input": candidate,
+                        "opening_decision": opening_decision,
+                    }
+                ]
+            },
+            sealed_at=NOW,
+        )
 
 
 def test_snapshot_reuses_resolved_policy_fields_instead_of_default_thresholds(
@@ -1093,19 +1346,22 @@ def test_tamper_wrong_scope_and_missing_dependency_fail_closed(tmp_path: Path) -
         load_opening_candidate_snapshot(base=other, run_id="run-1", account="lx")
 
 
-def test_immutable_conflict_and_latest_pointer_fail_closed(tmp_path: Path) -> None:
+def test_immutable_conflict_and_terminal_latest_pointer_fail_closed(
+    tmp_path: Path,
+) -> None:
+    payload = _seal(tmp_path)
     _seal(tmp_path)
-    _seal(tmp_path)
+    _publish_opening_manifest(tmp_path, payload)
     pointer = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
     pointer.parent.mkdir(parents=True)
     pointer.write_text("output_runs/run-1\n", encoding="utf-8")
-    assert load_latest_opening_candidate_snapshot(base=tmp_path, account="lx")[
-        "run_id"
-    ] == "run-1"
+    bundle = load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+    assert bundle["manifest"]["run_id"] == "run-1"
+    assert bundle["owners"]["opening"]["run_id"] == "run-1"
 
     pointer.write_text("output_runs/missing-run\n", encoding="utf-8")
-    with pytest.raises(OpeningCandidateSnapshotError, match="unavailable"):
-        load_latest_opening_candidate_snapshot(base=tmp_path, account="lx")
+    with pytest.raises(CandidateSnapshotManifestError, match="unavailable"):
+        load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
 
     with pytest.raises(OpeningCandidateSnapshotError, match="conflicts"):
         seal_opening_candidate_snapshot(

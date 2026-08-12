@@ -197,12 +197,12 @@ def _account_candidate_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
             "ran_scan": item.get("ran_scan"),
             "should_notify": item.get("should_notify"),
             "reason": item.get("reason"),
-            "candidate_note": "Use candidate/filter trace evidence to distinguish market candidates from account-level filtering.",
+            "candidate_note": "Use sealed candidate snapshots plus filter trace evidence to distinguish accepted and rejected decisions.",
         }
     candidate = _dict(evidence.get("candidate_evidence"))
     candidate_accounts = _candidate_account_summaries(candidate)
     for account, summary in candidate_accounts.items():
-        accounts.setdefault(account, {"candidate_note": "Inferred from candidate evidence paths or rows."})
+        accounts.setdefault(account, {"candidate_note": "Derived from sealed candidate evidence."})
         accounts[account]["candidate_evidence"] = summary
     return {
         "status": "ok" if accounts else "warn",
@@ -214,21 +214,21 @@ def _account_candidate_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
 
 def _candidate_account_summaries(candidate: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, dict[str, Any]] = {}
-    for report in _list_of_dicts(candidate.get("candidate_reports")):
+    for report in _list_of_dicts(candidate.get("candidate_snapshot_reports")):
         for account, count in _dict(report.get("account_counts")).items():
-            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "rejection_decision_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             item["candidate_rows"] = _as_int(item.get("candidate_rows")) + _as_int(count)
-    for report in _list_of_dicts(candidate.get("reject_logs")):
+    for report in _list_of_dicts(candidate.get("rejection_evidence")):
         for account, count in _dict(report.get("account_counts")).items():
-            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
-            item["reject_log_rows"] = _as_int(item.get("reject_log_rows")) + _as_int(count)
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "rejection_decision_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item["rejection_decision_rows"] = _as_int(item.get("rejection_decision_rows")) + _as_int(count)
     for trace in _list_of_dicts(candidate.get("filter_traces")):
         for account, count in _dict(trace.get("account_counts")).items():
-            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "rejection_decision_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             item["trace_rows"] = _as_int(item.get("trace_rows")) + _as_int(count)
         status_by_account = _dict(trace.get("account_status_counts"))
         for account, counts in status_by_account.items():
-            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "rejection_decision_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             status_counts = _dict(item.get("trace_status_counts"))
             for status, count in _dict(counts).items():
                 status_counts[str(status)] = _as_int(status_counts.get(str(status))) + _as_int(count)
@@ -429,7 +429,7 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
         f"- status: {account_candidate.get('status')}",
         f"- accounts: {', '.join(sorted(_dict(account_candidate.get('accounts')).keys())) or '<none>'}",
         f"- candidate_rows: {candidate_summary.get('candidate_row_count')}",
-        f"- reject_log_rows: {candidate_summary.get('reject_log_row_count')}",
+        f"- rejection_decision_rows: {candidate_summary.get('rejection_decision_count')}",
         f"- filter_trace_files: {candidate_summary.get('filter_trace_file_count')}",
         f"- ranking_reports: {ranking_summary.get('report_count')}",
         f"- ranking_top_rows: {ranking_summary.get('top_row_count')}",

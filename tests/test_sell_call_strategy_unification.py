@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,17 +19,6 @@ def _add_repo_to_syspath() -> Path:
     return base
 
 
-def _extract_title_strikes(text: str) -> list[float]:
-    strikes: list[float] = []
-    for line in text.splitlines():
-        if not line.startswith("[Covered Call 候选]"):
-            continue
-        m = re.search(r" ([0-9]+(?:\.[0-9]+)?)C$", line.strip())
-        if m:
-            strikes.append(float(m.group(1)))
-    return strikes
-
-
 def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() -> None:
     _add_repo_to_syspath()
     from src.application.scan_sell_call import run_sell_call_scan
@@ -39,7 +27,6 @@ def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() ->
         root = Path(td)
         parsed = root / "parsed"
         parsed.mkdir(parents=True, exist_ok=True)
-        out_path = root / "sell_call_candidates.csv"
 
         pd.DataFrame(
             [phase2_opening_row(row) for row in [
@@ -169,21 +156,18 @@ def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() ->
         out = run_sell_call_scan(
             symbols=["AAPL"],
             input_root=root,
-            output=out_path,
             avg_cost=100.0,
             shares=100,
             min_annualized_net_return=0.10,
             min_net_income=100,
             min_open_interest=10,
-            quiet=True,
             quote_freshness_now_utc=_SCAN_NOW,
         )
 
         assert list(out["contract_symbol"]) == ["A", "B", "C", "D", "F", "E"]
         assert out["period_net_premium_return"].notna().all()
-        reject_path = out_path.with_name(f"{out_path.stem}_reject_log.csv")
-        reject_log = pd.read_csv(reject_path)
-        assert reject_log.empty
+        assert list(root.glob("*candidates*.csv")) == []
+        assert list(root.glob("*reject_log*.csv")) == []
 
 
 def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Path) -> None:
@@ -219,14 +203,12 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
     out = run_sell_call_scan(
         symbols=["SMALL"],
         input_root=tmp_path,
-        output=tmp_path / "sell_call_candidates.csv",
         avg_cost=90.0,
         shares=10,
         min_annualized_net_return=0.01,
         min_net_income=1,
         min_open_interest=1,
         min_volume=1,
-        quiet=True,
         quote_freshness_now_utc=_SCAN_NOW,
     )
 
@@ -242,7 +224,6 @@ def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy() -> None:
         root = Path(td)
         parsed = root / "parsed"
         parsed.mkdir(parents=True, exist_ok=True)
-        out_path = root / "sell_call_candidates.csv"
 
         pd.DataFrame(
             [phase2_opening_row(row) for row in [
@@ -309,14 +290,12 @@ def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy() -> None:
         out = run_sell_call_scan(
             symbols=["AAPL"],
             input_root=root,
-            output=out_path,
             avg_cost=100.0,
             shares=100,
             min_strike_cost_multiplier=1.02,
             min_annualized_net_return=0.10,
             min_net_income=100,
             min_open_interest=10,
-            quiet=True,
             quote_freshness_now_utc=_SCAN_NOW,
         )
 
@@ -341,17 +320,11 @@ def test_sell_call_risk_bands_are_stable() -> None:
     assert (conservative.band, conservative.risk_label) == (">=8%", "保守")
 
 
-def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
+def test_sell_call_rank_order_is_consistent_with_strategy() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import rank_candidate_rows
-    from src.application.render_sell_call_alerts import render_sell_call_alerts
 
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        in_path = root / "sell_call_candidates.csv"
-        out_path = root / "sell_call_alerts.txt"
-
-        df = pd.DataFrame(
+    df = pd.DataFrame(
             [
                 {
                     "symbol": "AAPL",
@@ -446,17 +419,8 @@ def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
                     "volume": 45,
                 },
             ]
-        )
-        df.to_csv(in_path, index=False)
+    )
 
-        expected = pd.DataFrame(rank_candidate_rows(df.to_dict("records"), mode="call")).head(3)
+    ranked = rank_candidate_rows(df.to_dict("records"), mode="call")
 
-        text = render_sell_call_alerts(
-            input_path=in_path,
-            output_path=out_path,
-            top=3,
-            layered=True,
-            base_dir=_add_repo_to_syspath(),
-        )
-
-        assert _extract_title_strikes(text) == [float(v) for v in expected["strike"].tolist()]
+    assert [float(row["strike"]) for row in ranked] == [106.0, 103.0, 101.0, 112.0]

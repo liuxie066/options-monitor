@@ -193,9 +193,8 @@ def _single_put_df(
     return pd.DataFrame([row])
 
 
-def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path: Path) -> None:
+def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
-        attach_best_linked_calls,
         build_yield_enhancement_rank_shadow,
         find_sell_put_yield_enhancement_pairs,
         select_best_yield_enhancement_pairs,
@@ -286,15 +285,9 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
             "max_combo_spread_ratio": 0.50,
         },
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 90},
-        output_path=tmp_path / "sell_put_linked_calls.csv",
     )
     selected = select_best_yield_enhancement_pairs(pairs)
     shadow = build_yield_enhancement_rank_shadow(pairs)
-    out = attach_best_linked_calls(
-        df_candidates=df,
-        pairs_df=pairs,
-        out_path=tmp_path / "sell_put_candidates_labeled.csv",
-    )
 
     assert len(selected) == 1
     assert selected.iloc[0]["call_contract_symbol"] == "NVDA_C112"
@@ -302,22 +295,16 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     assert shadow.loc[shadow["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C112"]
     assert shadow.loc[shadow["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
     assert shadow["rank_changed"].all()
-
-    row = out.iloc[0]
-    assert row["linked_call_contract"] == "2026-06-19 112C"
-    assert row["linked_call_contract_symbol"] == "NVDA_C112"
-    assert round(float(row["linked_call_scenario_score"]), 4) > 0.03
-    assert round(float(row["linked_call_expected_move"]), 1) == 14.1
-    assert int(row["linked_call_count"]) == 2
-    assert float(row["linked_call_put_only_breakeven"]) < float(row["linked_call_combo_breakeven"])
-    assert float(row["linked_call_downside_breakeven_penalty"]) > 0
-    assert float(row["linked_call_lottery_budget_ratio"]) > 0
-    assert float(row["linked_call_payoff_multiple_at_2_0_sigma"]) > float(
-        row["linked_call_payoff_multiple_at_1_5_sigma"]
+    row = selected.iloc[0]
+    assert round(float(row["scenario_score"]), 4) > 0.03
+    assert round(float(row["expected_move"]), 1) == 14.1
+    assert int(row["call_candidate_count"]) == 2
+    assert float(row["put_only_breakeven"]) < float(row["combo_breakeven"])
+    assert float(row["downside_breakeven_penalty"]) > 0
+    assert float(row["lottery_budget_ratio"]) > 0
+    assert float(row["call_payoff_multiple_at_2_0_sigma"]) > float(
+        row["call_payoff_multiple_at_1_5_sigma"]
     )
-
-    persisted_pairs = pd.read_csv(tmp_path / "sell_put_linked_calls.csv")
-    assert set(persisted_pairs["call_contract_symbol"]) == {"NVDA_C110", "NVDA_C112"}
 
 
 def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Path) -> None:
@@ -969,27 +956,6 @@ def test_yield_enhancement_required_data_read_error_is_not_an_empty_universe(tmp
             input_root=tmp_path,
             yield_enhancement_cfg={"enabled": True},
             sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
-        )
-
-
-def test_yield_enhancement_pair_write_error_is_not_swallowed(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
-
-    _write_single_call(tmp_path, dte=44)
-    blocked_parent = tmp_path / "blocked"
-    blocked_parent.write_text("not a directory", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="failed to persist Combo Yield pairs"):
-        find_sell_put_yield_enhancement_pairs(
-            df_candidates=_single_put_df(dte=44),
-            symbol="NVDA",
-            input_root=tmp_path,
-            yield_enhancement_cfg={
-                "enabled": True,
-                "call": {"min_delta": 0.10, "max_delta": 0.45},
-            },
-            sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
-            output_path=blocked_parent / "pairs.csv",
         )
 
 

@@ -37,7 +37,6 @@ from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
 )
-from src.infrastructure.io_utils import atomic_write_text
 
 
 def _safe_float(value: Any) -> float | None:
@@ -63,11 +62,6 @@ def _merged_dict(*items: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(item, dict):
             out.update(item)
     return out
-
-
-def _format_contract(expiration: str, strike: float, option_suffix: str) -> str:
-    token = int(strike) if float(strike).is_integer() else strike
-    return f"{expiration} {token}{option_suffix}"
 
 
 def _spread_values(contract: CandidateContractInput) -> tuple[float | None, float | None]:
@@ -526,15 +520,6 @@ def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
     return df.loc[mask].copy()
 
 
-def _write_pairs_df(pairs_df: pd.DataFrame, output_path: Path | None) -> None:
-    if output_path is None:
-        return
-    try:
-        atomic_write_text(output_path, pairs_df.to_csv(index=False))
-    except Exception as exc:
-        raise RuntimeError(f"failed to persist Combo Yield pairs: {output_path}") from exc
-
-
 _PAIR_DIAGNOSTIC_COLUMNS = (
     "run_id account diagnostic_scope diagnostic_stage accepted reject_reasons "
     "symbol expiration dte spot currency multiplier "
@@ -934,7 +919,6 @@ def find_sell_put_yield_enhancement_pairs(
     yield_enhancement_cfg: dict[str, Any] | None,
     sell_put_cfg: dict[str, Any] | None = None,
     global_yield_enhancement_liquidity: dict[str, Any] | None = None,
-    output_path: Path | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
     policy = derive_yield_enhancement_policy(
@@ -946,7 +930,6 @@ def find_sell_put_yield_enhancement_pairs(
     if df.empty or not policy.enabled:
         pairs_df = _empty_pairs_df()
         pairs_df.attrs["pair_diagnostics"] = _pair_diagnostics_df(diagnostics)
-        _write_pairs_df(pairs_df, output_path)
         return pairs_df
 
     call_cfg = dict(cfg.get("call") or {})
@@ -989,7 +972,6 @@ def find_sell_put_yield_enhancement_pairs(
     pairs_df = pd.DataFrame(ranked_pairs) if ranked_pairs else _empty_pairs_df()
     pairs_df.attrs["reject_counts"] = dict(sorted(reject_counts.items()))
     pairs_df.attrs["pair_diagnostics"] = _pair_diagnostics_df(diagnostics)
-    _write_pairs_df(pairs_df, output_path)
     return pairs_df
 
 
@@ -1070,83 +1052,3 @@ def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(out)
-
-
-def _ensure_selected_yield_enhancement_pairs(pairs_df: pd.DataFrame) -> pd.DataFrame:
-    if pairs_df.empty:
-        return _empty_pairs_df()
-    if "put_contract_symbol" in pairs_df.columns and "call_candidate_count" in pairs_df.columns:
-        try:
-            if not pairs_df["put_contract_symbol"].duplicated().any():
-                ranked_rows = rank_yield_enhancement_rows(pairs_df.to_dict("records"))
-                return pd.DataFrame(ranked_rows) if ranked_rows else _empty_pairs_df()
-        except Exception:
-            pass
-    return select_best_yield_enhancement_pairs(pairs_df)
-
-
-def attach_best_linked_calls(
-    *,
-    df_candidates: pd.DataFrame,
-    pairs_df: pd.DataFrame,
-    out_path: Path | None = None,
-) -> pd.DataFrame:
-    df = df_candidates.copy()
-    if df.empty or pairs_df.empty:
-        if out_path is not None:
-            try:
-                atomic_write_text(out_path, df.to_csv(index=False))
-            except Exception as exc:
-                raise RuntimeError(f"failed to persist linked-call candidates: {out_path}") from exc
-        return df
-
-    selected_pairs = _ensure_selected_yield_enhancement_pairs(pairs_df)
-    best_by_put: list[dict[str, Any]] = []
-    for _, top_row in selected_pairs.iterrows():
-        put_contract_symbol = str(top_row["put_contract_symbol"])
-        top = dict(top_row)
-        call_strike = float(top["call_strike"])
-        best_by_put.append(
-            {
-                "contract_symbol": put_contract_symbol,
-                "linked_call_contract": _format_contract(str(top["call_expiration"]), call_strike, "C"),
-                "linked_call_contract_symbol": top["call_contract_symbol"],
-                "linked_call_strike": call_strike,
-                "linked_call_ask": _safe_float(top.get("call_ask")),
-                "linked_call_delta": _safe_float(top.get("call_delta")),
-                "linked_call_iv": _safe_float(top.get("call_implied_volatility")),
-                "linked_call_net_credit": _safe_float(top.get("net_credit")),
-                "linked_call_net_credit_yield": _safe_float(top.get("net_credit_yield")),
-                "linked_call_annualized_net_credit_yield": _safe_float(top.get("annualized_net_credit_yield")),
-                "linked_call_expected_move": _safe_float(top.get("expected_move")),
-                "linked_call_expected_move_iv": _safe_float(top.get("expected_move_iv")),
-                "linked_call_put_only_net_credit": _safe_float(top.get("put_only_net_credit")),
-                "linked_call_put_only_breakeven": _safe_float(top.get("put_only_breakeven")),
-                "linked_call_combo_breakeven": _safe_float(top.get("combo_breakeven")),
-                "linked_call_downside_breakeven_penalty": _safe_float(top.get("downside_breakeven_penalty")),
-                "linked_call_lottery_budget_ratio": _safe_float(top.get("lottery_budget_ratio")),
-                "linked_call_residual_premium_ratio": _safe_float(top.get("residual_premium_ratio")),
-                "linked_call_payoff_multiple_at_1_5_sigma": _safe_float(
-                    top.get("call_payoff_multiple_at_1_5_sigma")
-                ),
-                "linked_call_payoff_multiple_at_2_0_sigma": _safe_float(
-                    top.get("call_payoff_multiple_at_2_0_sigma")
-                ),
-                "linked_call_scenario_score": _safe_float(top.get("scenario_score")),
-                "linked_call_annualized_scenario_score": _safe_float(top.get("annualized_scenario_score")),
-                "linked_call_count": int(_safe_float(top.get("call_candidate_count")) or 1),
-                "linked_call_cost_to_put_credit": _safe_float(top.get("call_cost_to_put_credit")),
-                "linked_call_upside_lift": _safe_float(top.get("upside_lift")),
-                "linked_call_upside_lift_to_call_cost": _safe_float(top.get("upside_lift_to_call_cost")),
-                "linked_call_upside_lift_to_put_credit": _safe_float(top.get("upside_lift_to_put_credit")),
-                "linked_call_premium_funding_score": _safe_float(top.get("premium_funding_score")),
-            }
-        )
-
-    merged = df.merge(pd.DataFrame(best_by_put), on="contract_symbol", how="left")
-    if out_path is not None:
-        try:
-            atomic_write_text(out_path, merged.to_csv(index=False))
-        except Exception as exc:
-            raise RuntimeError(f"failed to persist linked-call candidates: {out_path}") from exc
-    return merged

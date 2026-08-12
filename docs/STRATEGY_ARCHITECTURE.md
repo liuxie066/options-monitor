@@ -135,9 +135,9 @@ period_net_return = combo_net_credit / cash_required
 7. min(`put_open_interest`, `call_open_interest`) 降序
 8. symbol、Put 合约、Call 合约稳定排序
 
-因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
+因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试进入 sealed Combo snapshot 的 `pair_evaluations`，不会进入通知。
 
-Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算；`*_combo_yield_put_universe*.csv` 只是审计报表，不得回读为计算权威。Combo Yield 候选写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），Agent 与 Daily Brief 只消费该快照；`*_combo_yield_candidates.csv` 不再作为正式候选读路径。
+Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算。Combo Yield 候选、Funding Put 决策、pair diagnostics 和 rank evidence 写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），其完整性由 `candidate_snapshot_manifest.v1.json` 提交；Agent、Daily Brief、Research 与 Shadow Replay 均只消费该 bundle，不从兼容 CSV 恢复候选事实。
 
 ### 候选身份、成交意图与回执
 

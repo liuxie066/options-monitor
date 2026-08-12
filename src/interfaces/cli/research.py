@@ -69,9 +69,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     research_collect.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
     research_collect.add_argument("--scheduler-evidence-json", default=None)
     research_collect.add_argument("--scheduler-evidence-file", default=None)
-    research_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
     research_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    research_collect.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
     research_collect.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
     research_collect.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
     research_collect.add_argument("--candidate-report-dir", default=None)
@@ -115,7 +113,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_pull.add_argument(
         "--require-replay-evidence",
         action="store_true",
-        help="auto-select only source runs with candidate, trace, or reject-log evidence",
+        help="auto-select only source runs with candidate snapshot/status or trace evidence",
     )
     archive_pull.add_argument("--no-logs", action="store_true")
     archive_pull.add_argument("--rsync-path", default="rsync")
@@ -272,9 +270,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="select the newest run under runs-root/profile runtime root that has replay evidence",
     )
     shadow_build.add_argument("--report-dir", default=None)
-    shadow_build.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
     shadow_build.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    shadow_build.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
     shadow_build.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
     shadow_build.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
     shadow_build.add_argument(
@@ -326,19 +322,20 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     )
     shadow_evaluate_combo.add_argument("--dataset", required=True)
     shadow_evaluate_combo.add_argument(
-        "--underwritten-put-path",
+        "--funding-put-path",
         default=None,
-        help="Combo-owned event/cash/underwriting accepted Put CSV",
+        help="manifest-bound Combo Funding Put decision JSONL",
     )
     shadow_evaluate_combo.add_argument("--write", action="store_true")
     shadow_prepare_combo = research_shadow_sub.add_parser(
         "prepare-combo-funding-puts",
-        help="run canonical Combo-owned Put scan/event/cash/underwriting on a capture",
+        help="project manifest-bound Combo Funding Put decisions into a capture",
     )
     shadow_prepare_combo.add_argument("--dataset", required=True)
-    shadow_prepare_combo.add_argument("--portfolio-context", required=True)
-    shadow_prepare_combo.add_argument("--usd-per-cny", type=float, default=None)
-    shadow_prepare_combo.add_argument("--cny-per-hkd", type=float, default=None)
+    shadow_prepare_combo.add_argument("--source-run-id", required=True)
+    shadow_prepare_combo.add_argument("--runs-root", default=None)
+    shadow_prepare_combo.add_argument("--profile-path", default=None)
+    shadow_prepare_combo.add_argument("--runtime-root", default=None)
     shadow_prepare_combo.add_argument("--write", action="store_true")
     shadow_analyze = research_shadow_sub.add_parser("analyze", help="analyze a local shadow replay dataset")
     shadow_analyze.add_argument("--dataset", required=True)
@@ -566,9 +563,7 @@ def _research_collect_payload(args: argparse.Namespace) -> dict[str, Any]:
         "max_run_age_minutes": args.max_run_age_minutes,
         "max_notification_chars": args.max_notification_chars,
         "output": args.output,
-        "candidate_paths": args.candidate_paths,
         "trace_paths": args.trace_paths,
-        "reject_log_paths": args.reject_log_paths,
         "mark_paths": args.mark_paths,
         "outcome_paths": args.outcome_paths,
         "candidate_report_dir": args.candidate_report_dir,
@@ -1126,15 +1121,15 @@ def handle_research_command(
 
     if args.shadow_replay_command == "evaluate-combo-variants":
         dataset = _resolve_shadow_path(args.dataset, base=base)
-        underwritten_put_path = (
-            _resolve_shadow_path(args.underwritten_put_path, base=base)
-            if args.underwritten_put_path
-            else dataset / "combo_owned_underwritten_puts.csv"
+        funding_put_path = (
+            _resolve_shadow_path(args.funding_put_path, base=base)
+            if args.funding_put_path
+            else dataset / "combo_owned_funding_put_decisions.v1.jsonl"
         )
         try:
             data = evaluate_combo_variant_dataset(
                 dataset=dataset,
-                underwritten_put_path=underwritten_put_path,
+                funding_put_path=funding_put_path,
                 write=bool(args.write),
             )
         except ValueError as exc:
@@ -1146,15 +1141,22 @@ def handle_research_command(
         )
 
     if args.shadow_replay_command == "prepare-combo-funding-puts":
+        runs_root = _shadow_replay_runs_root(
+            args,
+            profile=profile,
+            runtime_root=runtime_root,
+            base=base,
+        )
+        if runs_root is None:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="--runs-root, --runtime-root, or a profile runs_root is required",
+            )
         try:
             data = prepare_combo_funding_puts(
                 dataset=_resolve_shadow_path(args.dataset, base=base),
-                portfolio_context_path=_resolve_shadow_path(
-                    args.portfolio_context,
-                    base=base,
-                ),
-                usd_per_cny_exchange_rate=args.usd_per_cny,
-                cny_per_hkd_exchange_rate=args.cny_per_hkd,
+                source_run_id=args.source_run_id,
+                source_runs_root=runs_root,
                 write=bool(args.write),
             )
         except (ValueError, json.JSONDecodeError) as exc:
@@ -1180,9 +1182,7 @@ def handle_research_command(
                 runs_root=runs_root,
                 run_dir=args.run_dir,
                 report_dir=args.report_dir,
-                candidate_paths=args.candidate_paths,
                 trace_paths=args.trace_paths,
-                reject_log_paths=args.reject_log_paths,
                 mark_paths=args.mark_paths,
                 outcome_paths=args.outcome_paths,
                 include_close_decisions=bool(args.include_close_decisions),
