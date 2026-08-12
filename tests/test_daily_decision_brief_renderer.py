@@ -1183,143 +1183,53 @@ def test_data_recovery_keeps_candidate_event_change_summary() -> None:
     assert "事件证据已恢复，现预计 8 月 5 日发布财报" in message
 
 
-def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
-    brief = _brief()
-    extra = [
-        _candidate(
-            rank=rank,
-            symbol=f"C{rank}",
-            option_type="put",
-            expiration="2026-08-21",
-            strike=100 + rank,
-            capacity=1,
-        )
-        for rank in (3, 4)
-    ]
-    brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
-    extra[1]["candidate_id"] = "put-rank4"
-    brief["candidates"]["sell_put"].extend(extra)
-    brief["candidates"]["covered_call"] = []
-    brief["ai_decision_advice"] = {
-        "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
-        "sell_put": {
-            "action": "switch",
-            "baseline_candidate_id": "put-rank2",
-            "selected_candidate_id": "put-rank4",
-            "rationale": {"risk_mechanism": "集中度叠加", "candidate_effect": "加重风险"},
-            "source_refs": {},
-        },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": True},
-        "reused": False,
-        "advice_record_id": "adv-1",
-    }
-
-    message = render_fixed_report(
-        brief,
-        limits={"max_candidates_per_strategy": 1},
-        context=_scheduled_context(),
-    )
-    # AI 引用的 baseline（排序 2）与改选目标（排序 4）都必须展开且保留真实排序。
-    assert "NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）" in message
-    assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" in message
-    assert "C3｜Sell Put" not in message
-    assert "### AI建议" in message
-    assert "建议改选策略排序 4：C4 08-21 $104 Put。" in message
-    assert "## Covered Call" in message
-    assert "本轮无策略候选。" in message
-
-
-def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
-    brief = _brief()
-    brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
-    brief["ai_decision_advice"] = {
-        "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
-        "sell_put": {
-            "action": "defer",
-            "baseline_candidate_id": "put-rank2",
-            "selected_candidate_id": None,
-            "rationale": {"risk_mechanism": "监管风险上升"},
-            "source_refs": {"external_evidence_refs": ["ev-aaa111bbb222"]},
-        },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": True},
-        "reused": False,
-        "advice_record_id": "adv-1",
-    }
-    brief["ai_decision_advice_evidence_index"] = {
-        "frozen_at": "2026-07-20T13:00:00+00:00",
-        "symbols": [
-            {
-                "symbol": "NVDA",
-                "coverage": "completed",
-                "evidence": [
-                    {
-                        "ref": "ev-aaa111bbb222",
-                        "source": {
-                            "title": "监管新规征求意见",
-                            "publisher": "监管机构",
-                            "published_at": "2026-07-19",
-                            "url": "https://example.gov/rule",
-                        },
-                    }
-                ],
-            }
-        ],
-    }
-
-    message = render_fixed_report(brief, context=_scheduled_context())
-    assert "### AI建议" in message
-    assert (
-        "来源｜监管新规征求意见（监管机构 · 2026-07-19 · example.gov） "
-        "https://example.gov/rule"
-    ) in message
-
-
-def test_fixed_report_card_places_ai_advice_inside_strategy_module() -> None:
+def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
     from src.application.daily_decision_brief_renderer import (
+        render_fixed_report,
         render_fixed_report_card_markdown,
     )
 
     brief = _brief()
-    brief["candidates"]["sell_put"][0]["candidate_id"] = "put-1"
+    brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
+    rank_four = _candidate(
+        rank=4,
+        symbol="C4",
+        option_type="put",
+        expiration="2026-08-21",
+        strike=104,
+        capacity=1,
+    )
+    rank_four["candidate_id"] = "put-rank4"
+    brief["candidates"]["sell_put"].append(rank_four)
     brief["ai_decision_advice"] = {
         "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
         "sell_put": {
-            "action": "keep",
-            "baseline_candidate_id": "put-1",
-            "selected_candidate_id": "put-1",
-            "rationale": {},
-            "source_refs": {},
+            "action": "switch",
+            "baseline_candidate_id": "put-rank2",
+            "selected_candidate_id": "put-rank4",
+            "rationale": {"decision_reason": "RETIRED-ADVICE-MUST-NOT-LEAK"},
         },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": False},
-        "reused": False,
-        "advice_record_id": "adv-1",
+    }
+    brief["ai_decision_advice_evidence_index"] = {
+        "symbols": [{"source": {"title": "RETIRED-SOURCE-MUST-NOT-LEAK"}}]
     }
 
-    message = render_fixed_report_card_markdown(
+    text_message = render_fixed_report(
         brief,
+        limits={"max_candidates_per_strategy": 1},
+        context=_scheduled_context(),
+    )
+    card_message = render_fixed_report_card_markdown(
+        brief,
+        limits={"max_candidates_per_strategy": 1},
         context=_scheduled_context(),
     )
 
-    sell_put = message.index("## Sell Put")
-    advice = message.index("### AI建议", sell_put)
-    candidates = message.index("**MSFT｜Sell Put｜", advice)
-    assert sell_put < advice < candidates
-    assert "### 策略候选" not in message
-    assert "结论｜维持策略排序 1。" in message
-    assert "提醒｜多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
+    for message in (text_message, card_message):
+        assert "AI建议" not in message
+        assert "RETIRED-ADVICE-MUST-NOT-LEAK" not in message
+        assert "RETIRED-SOURCE-MUST-NOT-LEAK" not in message
+        assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" not in message
 
 
 def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
@@ -1331,13 +1241,6 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     brief["candidates"]["covered_call"] = []
     for item in brief["candidates"]["sell_put"]:
         item.pop("capacity", None)
-    brief["ai_decision_advice"] = {
-        "status": "unavailable",
-        "unavailable_reason": "model_unavailable",
-        "sell_put": None,
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": True},
-    }
     brief["data_gaps"].extend(
         [
             {
@@ -1357,11 +1260,10 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
         context=_scheduled_context(),
     )
 
-    notice = "AI｜未完成；以下仅为策略排序，未经综合判断。"
-    assert message.count(notice) == 1
-    assert "### AI建议" not in message
+    assert "AI｜" not in message
+    assert "AI建议" not in message
     assert "### 策略候选" not in message
-    assert "## Covered Call\n\n本轮无策略候选。" in message
+    assert "## Covered Call" not in message
     assert "多个 Sell Put 候选共享同一现金额度" not in message
     assert "## 提醒" not in message
     assert "提醒｜" not in message
@@ -1458,92 +1360,7 @@ def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
     assert "提醒｜NVDA" not in message
 
 
-def test_unavailable_ai_copy_matches_each_family_candidate_presence() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
-    brief = _brief()
-    brief["candidates"]["sell_put"] = []
-    brief["ai_decision_advice"] = {
-        "status": "unavailable",
-        "unavailable_reason": "timeout",
-        "evidence_as_of": None,
-        "sell_put": None,
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": False},
-        "reused": False,
-        "advice_record_id": None,
-    }
-
-    message = render_fixed_report(brief, context=_scheduled_context())
-    sell_put_block = message[
-        message.index("## Sell Put") : message.index("## Covered Call")
-    ]
-    covered_call_block = message[
-        message.index("## Covered Call") : message.index("## 组合增强")
-    ]
-
-    assert message.count("AI｜未完成；以下仅为策略排序，未经综合判断。") == 1
-    assert "本轮无可展示的策略排序。" in sell_put_block
-    assert "以下仅展示策略原始排序" not in sell_put_block
-    assert "AI建议未完成" not in covered_call_block
-
-
-def test_unavailable_ai_copy_uses_raw_family_presence_when_render_budget_omits_rows() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
-    brief = _brief()
-    brief["candidates"]["sell_put"] = [
-        _candidate(
-            rank=index + 1,
-            symbol=f"P{index}",
-            option_type="put",
-            expiration="2026-08-21",
-            strike=100 + index,
-        )
-        for index in range(41)
-    ]
-    brief["ai_decision_advice"] = {
-        "status": "unavailable",
-        "unavailable_reason": "timeout",
-        "evidence_as_of": None,
-        "sell_put": None,
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": False},
-        "reused": False,
-        "advice_record_id": None,
-    }
-    diff = {
-        "changes": [
-            {
-                "change_type": "candidate_added",
-                "action": {
-                    "action_type": "open_candidate",
-                    "strategy_family": "sell_put",
-                    "symbol": f"P{index}",
-                    "option_type": "put",
-                    "expiration": "2026-08-21",
-                    "strike": 100 + index,
-                },
-            }
-            for index in range(41)
-        ]
-    }
-
-    message = render_delta_brief(
-        brief,
-        diff,
-        limits={"max_candidates_per_strategy": 1},
-    )
-    covered_call_block = message[
-        message.index("## Covered Call") : message.index("## 持仓")
-    ]
-
-    assert "补充｜另有 1 个策略候选未展开" in covered_call_block
-    assert "AI建议未完成；以下仅展示策略原始排序" in covered_call_block
-    assert "本轮没有可展示的策略原始排序" not in covered_call_block
-
-
-def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
+def test_candidate_alert_ignores_retired_ai_candidate_selection() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,
     )
@@ -1598,7 +1415,8 @@ def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> N
         context=_scheduled_context(),
     )
 
-    assert "结论｜建议改选策略排序 2：NVDA 08-21 $100 Put。" in message
+    assert "AI建议" not in message
+    assert "当前首选存在额外事件风险" not in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜Sell Put" not in message
 

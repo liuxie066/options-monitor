@@ -31,6 +31,7 @@ from src.application.daily_decision_brief_renderer import (
     select_rendered_combo_candidate_rows,
 )
 from src.application.daily_decision_brief_repository import (
+    classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
     persist_daily_decision_brief_success,
     prepare_daily_decision_brief_delivery,
@@ -129,6 +130,7 @@ class DailyBriefNotificationPreparation:
     markets: tuple[str, ...]
     transport_envelopes_by_account: dict[str, dict[str, Any]] = field(default_factory=dict)
     multi_market_delivery_unsupported: bool = False
+    blocked_error_code: str | None = None
 
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
@@ -144,6 +146,36 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         rc = int(fn())
         if rc == 0:
             request.complete_tick_idempotency_fn(status=status, message=message)
+        return rc
+
+    def finish_retry_blocker(error_code: str) -> int:
+        request.audit_helper.guard_mark_failure(
+            error_code,
+            "daily_brief_retry_guard",
+        )
+        rc = finalize_no_account_notification(
+            base=request.base,
+            run_id=request.run_id,
+            runlog=request.runlog,
+            results=request.results,
+            tick_metrics=request.tick_metrics,
+            no_send=request.no_send,
+            state_repo=state_repo,
+            utc_now_fn=utc_now,
+            audit_fn=request.audit_helper.audit,
+            safe_data_fn=_safe_runlog_data,
+            on_success=request.audit_helper.guard_mark_success,
+            reason=error_code,
+            run_end_outcome="error",
+            error_code=error_code,
+            return_code=2,
+        )
+        request.complete_tick_idempotency_fn(
+            status="unsupported_failed",
+            message=error_code,
+            ok=False,
+            error_code=error_code,
+        )
         return rc
 
     daily_brief_prep = _prepare_daily_brief_notification(request)
@@ -222,6 +254,12 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             error_code=error_code,
         )
         return rc
+
+    if (
+        daily_brief_prep.blocked_error_code
+        and not bool(prepared_messages.threshold_met)
+    ):
+        return finish_retry_blocker(daily_brief_prep.blocked_error_code)
 
     if not bool(prepared_messages.threshold_met):
         _audit_notification_perception(
@@ -361,6 +399,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         ),
     )
     if str(notify_delivery.get("action") or "") == "skip_quiet_hours":
+        if daily_brief_prep.blocked_error_code:
+            return finish_retry_blocker(daily_brief_prep.blocked_error_code)
         quiet_window = str(notify_delivery.get("quiet_window") or "")
         request.runlog.safe_event("notify", "skip", message=f"in quiet hours ({quiet_window})")
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
@@ -391,6 +431,22 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     sent_accounts: list[str] = []
     would_send_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
+    if daily_brief_prep.blocked_error_code:
+        request.audit_helper.guard_mark_failure(
+            daily_brief_prep.blocked_error_code,
+            "daily_brief_retry_guard",
+        )
+        notify_failures.append(
+            {
+                "account": None,
+                "error_code": daily_brief_prep.blocked_error_code,
+                "attempts": 0,
+                "final_returncode": 0,
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "local_blocked": True,
+            }
+        )
     send_attempted_count = 0
     send_confirmed_count = 0
     retry_attempt_count = 0
@@ -432,7 +488,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             transport_envelopes_by_account=daily_brief_prep.transport_envelopes_by_account,
         )
         sent_accounts = list(execution.sent_accounts)
-        notify_failures = list(execution.notify_failures)
+        notify_failures.extend(execution.notify_failures)
         sent_accounts, confirmation_failures = _confirm_daily_brief_execution(
             request=request,
             preparation=daily_brief_prep,
@@ -486,6 +542,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     if request.delivery_only:
         if notify_failures:
             request.runlog.safe_event("run_end", "error", error_code="NOTIFY_FAILED")
+            if daily_brief_prep.blocked_error_code:
+                request.complete_tick_idempotency_fn(
+                    status="unsupported_failed",
+                    message=daily_brief_prep.blocked_error_code,
+                    ok=False,
+                    error_code=daily_brief_prep.blocked_error_code,
+                )
             return 1
         if request.no_send:
             request.runlog.safe_event(
@@ -553,8 +616,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             extra={"notification_delivery_confirmed": bool(sent_accounts)},
         )
 
-    return finish_success(
-        lambda: finalize_multi_tick_run(
+    rc = int(
+        finalize_multi_tick_run(
             base=request.base,
             run_id=request.run_id,
             runlog=request.runlog,
@@ -575,6 +638,16 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             on_success=request.audit_helper.guard_mark_success,
         )
     )
+    if rc == 0:
+        request.complete_tick_idempotency_fn(status="completed", message=None)
+    elif daily_brief_prep.blocked_error_code:
+        request.complete_tick_idempotency_fn(
+            status="unsupported_failed",
+            message=daily_brief_prep.blocked_error_code,
+            ok=False,
+            error_code=daily_brief_prep.blocked_error_code,
+        )
+    return rc
 
 
 def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
@@ -673,6 +746,7 @@ def _prepare_daily_brief_notification(
     transport_envelopes_by_account: dict[str, dict[str, Any]] = {}
     messages_by_account: dict[str, str] = {}
     lifecycle_audit: list[dict[str, Any]] = []
+    blocked_error_code: str | None = None
     daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
 
     if request.delivery_only:
@@ -693,6 +767,24 @@ def _prepare_daily_brief_notification(
                 )
                 envelope = retry.get("envelope")
                 if not isinstance(envelope, dict):
+                    continue
+                retired_classification = classify_retryable_daily_decision_brief_payload(
+                    base=request.base,
+                    account=account,
+                    market=market,
+                    market_trading_date=market_date,
+                    envelope=envelope,
+                )
+                if retired_classification != "clean":
+                    blocked_error_code = "legacy_ai_payload_retired"
+                    lifecycle_audit.append(
+                        _daily_brief_retired_envelope_audit(
+                            account,
+                            market,
+                            market_date,
+                            envelope,
+                        )
+                    )
                     continue
                 messages_by_account[account] = str(envelope["rendered_message"])
                 delivery_keys_by_account[account] = str(envelope["delivery_key"])
@@ -733,6 +825,30 @@ def _prepare_daily_brief_notification(
             if not ran_scan:
                 continue
             scheduler = _daily_brief_scheduler_decision(request, account)
+            blocked_retry: dict[str, Any] | None = None
+            blocked_retry_envelope: dict[str, Any] | None = None
+            blocked_retry_classification: str | None = None
+            blocked_market_date = _daily_brief_market_date(scheduler)
+            if scheduled_trigger and not multi_market and blocked_market_date:
+                retry_before_writes = read_retryable_daily_decision_brief_delivery(
+                    base=request.base,
+                    account=account,
+                    market=markets[0],
+                    market_trading_date=blocked_market_date,
+                )
+                envelope_before_writes = retry_before_writes.get("envelope")
+                if isinstance(envelope_before_writes, dict):
+                    blocked_retry_classification = classify_retryable_daily_decision_brief_payload(
+                        base=request.base,
+                        account=account,
+                        market=markets[0],
+                        market_trading_date=blocked_market_date,
+                        envelope=envelope_before_writes,
+                    )
+                    if blocked_retry_classification == "legacy_ai_payload_retired":
+                        blocked_error_code = "legacy_ai_payload_retired"
+                        blocked_retry = retry_before_writes
+                        blocked_retry_envelope = envelope_before_writes
             advice_handoff = _advice_handoff_for_account(
                 request,
                 account=account,
@@ -771,7 +887,7 @@ def _prepare_daily_brief_notification(
                     previous = persisted.get("previous_successful_brief")
                     if isinstance(previous, dict) and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]:
                         diff = diff_daily_decision_briefs(previous, persisted["brief"])
-                    if scheduled_trigger:
+                    if scheduled_trigger and blocked_retry_envelope is None:
                         recorded = record_daily_decision_brief_candidates(
                             base=request.base,
                             account=account,
@@ -804,11 +920,14 @@ def _prepare_daily_brief_notification(
                 action = str(decision["action"])
                 existing_retry = None
                 if scheduled_trigger and not multi_market:
-                    existing_retry = read_retryable_daily_decision_brief_delivery(
-                        base=request.base,
-                        account=account,
-                        market=market,
-                        market_trading_date=str(brief["market_trading_date"]),
+                    existing_retry = (
+                        blocked_retry
+                        or read_retryable_daily_decision_brief_delivery(
+                            base=request.base,
+                            account=account,
+                            market=market,
+                            market_trading_date=str(brief["market_trading_date"]),
+                        )
                     )
                 existing_envelope = (
                     existing_retry.get("envelope")
@@ -929,28 +1048,45 @@ def _prepare_daily_brief_notification(
                         )
 
                 retry = None
+                retired_classification: str | None = None
                 if scheduled_trigger and not multi_market:
-                    retry = read_retryable_daily_decision_brief_delivery(
-                        base=request.base,
-                        account=account,
-                        market=market,
-                        market_trading_date=str(brief["market_trading_date"]),
+                    retry = (
+                        blocked_retry
+                        or read_retryable_daily_decision_brief_delivery(
+                            base=request.base,
+                            account=account,
+                            market=market,
+                            market_trading_date=str(brief["market_trading_date"]),
+                        )
                     )
                     envelope = retry.get("envelope")
                     if isinstance(envelope, dict):
-                        messages_by_account[account] = str(envelope["rendered_message"])
-                        delivery_keys_by_account[account] = str(envelope["delivery_key"])
-                        if isinstance(envelope.get("rendered_transport"), dict):
-                            transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
-                        lifecycles_by_account[account] = {
-                            "brief": persisted["brief"] if persisted is not None else brief,
-                            "diff": diff,
-                            "delivery_kind": "full" if envelope["delivery_kind"].startswith("fixed_") else "delta",
-                            "delivery_key": envelope["delivery_key"],
-                            "envelope": envelope,
-                            "market": market,
-                            "market_trading_date": str(brief["market_trading_date"]),
-                        }
+                        retired_classification = (
+                            blocked_retry_classification
+                            or classify_retryable_daily_decision_brief_payload(
+                                base=request.base,
+                                account=account,
+                                market=market,
+                                market_trading_date=str(brief["market_trading_date"]),
+                                envelope=envelope,
+                            )
+                        )
+                        if retired_classification == "clean":
+                            messages_by_account[account] = str(envelope["rendered_message"])
+                            delivery_keys_by_account[account] = str(envelope["delivery_key"])
+                            if isinstance(envelope.get("rendered_transport"), dict):
+                                transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
+                            lifecycles_by_account[account] = {
+                                "brief": persisted["brief"] if persisted is not None else brief,
+                                "diff": diff,
+                                "delivery_kind": "full" if envelope["delivery_kind"].startswith("fixed_") else "delta",
+                                "delivery_key": envelope["delivery_key"],
+                                "envelope": envelope,
+                                "market": market,
+                                "market_trading_date": str(brief["market_trading_date"]),
+                            }
+                        else:
+                            blocked_error_code = "legacy_ai_payload_retired"
                 selected_envelope = retry.get("envelope") if isinstance(retry, dict) else None
                 lifecycle_audit.append(
                     {
@@ -979,6 +1115,11 @@ def _prepare_daily_brief_notification(
                         ),
                         "message_chars": len(str(selected_envelope.get("rendered_message") or "")) if isinstance(selected_envelope, dict) else 0,
                         "render_limits": dict(daily_limits),
+                        "error_code": (
+                            "legacy_ai_payload_retired"
+                            if retired_classification == "legacy_ai_payload_retired"
+                            else None
+                        ),
                     }
                 )
 
@@ -995,7 +1136,7 @@ def _prepare_daily_brief_notification(
             "prepared",
             run_id=request.run_id,
             account=str(item["account"]),
-            status="ok",
+            status="error" if item.get("error_code") else "ok",
             extra={key: value for key, value in item.items() if key != "account"},
         )
     return DailyBriefNotificationPreparation(
@@ -1010,6 +1151,7 @@ def _prepare_daily_brief_notification(
         transport_envelopes_by_account=transport_envelopes_by_account,
         markets=markets,
         multi_market_delivery_unsupported=multi_market,
+        blocked_error_code=blocked_error_code,
     )
 
 
@@ -1221,6 +1363,20 @@ def _daily_brief_envelope_audit(account: str, market: str, envelope: dict[str, A
             else "post_markdown"
         ),
         "retry": retry,
+    }
+
+
+def _daily_brief_retired_envelope_audit(
+    account: str,
+    market: str,
+    market_trading_date: str,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **_daily_brief_envelope_audit(account, market, envelope, retry=True),
+        "market_trading_date": market_trading_date,
+        "error_code": "legacy_ai_payload_retired",
+        "blocked": True,
     }
 
 def _daily_brief_render_context(
