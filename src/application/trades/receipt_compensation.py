@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from domain.domain.ledger.position_fields import normalize_trade_price
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
@@ -39,6 +40,11 @@ from src.infrastructure.io_utils import atomic_write_json, utc_now
 
 COMPENSATION_SCHEMA_VERSION = "trade_intake_receipt_compensation.v1"
 LEGACY_FALSE_OUTBOX_REASON = "legacy_false_outbox_marker"
+SKIPPED_NO_ROUTE_REASON = "skipped_no_route"
+SUPPORTED_COMPENSATION_REASONS = {
+    LEGACY_FALSE_OUTBOX_REASON,
+    SKIPPED_NO_ROUTE_REASON,
+}
 
 
 def compensate_trade_intake_receipts(
@@ -155,10 +161,10 @@ def _build_plan(
     account_value = str(account).strip().lower()
     canonical_ids = _canonical_deal_ids(deal_ids, account=account_value)
     reason_value = str(reason or "").strip()
-    if reason_value != LEGACY_FALSE_OUTBOX_REASON:
+    if reason_value not in SUPPORTED_COMPENSATION_REASONS:
         raise ValueError(
-            "unsupported receipt compensation reason; expected "
-            f"{LEGACY_FALSE_OUTBOX_REASON}"
+            "unsupported receipt compensation reason; expected one of "
+            + ", ".join(sorted(SUPPORTED_COMPENSATION_REASONS))
         )
 
     state_path = Path(source["state_path"])
@@ -167,10 +173,11 @@ def _build_plan(
         raise ValueError(f"trade intake state does not exist: {state_path}")
     state = load_trade_intake_state(state_path)
     state_rows = {
-        deal_id: _validated_legacy_state_row(
+        deal_id: _validated_compensable_state_row(
             state,
             deal_id=deal_id,
             account=account_value,
+            reason=reason_value,
         )
         for deal_id in canonical_ids
     }
@@ -284,11 +291,12 @@ def _canonical_deal_ids(
     return sorted(values)
 
 
-def _validated_legacy_state_row(
+def _validated_compensable_state_row(
     state: dict[str, Any],
     *,
     deal_id: str,
     account: str,
+    reason: str,
 ) -> dict[str, Any]:
     entry = lookup_deal_state_entry(state, deal_id)
     if entry is None:
@@ -322,14 +330,25 @@ def _validated_legacy_state_row(
         receipt.get("message_id") or ""
     ).strip():
         raise ValueError(f"receipt is already delivery-confirmed: {deal_id}")
-    if (
-        str(receipt.get("status") or "").strip().lower() != "outbox_managed"
-        or str(receipt.get("reason") or "").strip().lower()
-        != "transactional_outbox"
-    ):
-        raise ValueError(
-            f"receipt is not the legacy false outbox marker: {deal_id}"
-        )
+    receipt_status = str(receipt.get("status") or "").strip().lower()
+    receipt_reason = str(receipt.get("reason") or "").strip().lower()
+    if reason == LEGACY_FALSE_OUTBOX_REASON:
+        if (
+            receipt_status != "outbox_managed"
+            or receipt_reason != "transactional_outbox"
+        ):
+            raise ValueError(
+                f"receipt is not the legacy false outbox marker: {deal_id}"
+            )
+    elif reason == SKIPPED_NO_ROUTE_REASON:
+        if (
+            receipt_status != "skipped"
+            or receipt_reason != SKIPPED_NO_ROUTE_REASON
+            or receipt.get("target_set") is not False
+        ):
+            raise ValueError(
+                f"receipt is not an unsent no-route marker: {deal_id}"
+            )
     claimed_outbox_ids = [
         value
         for value in [
@@ -402,7 +421,17 @@ def _build_member(
         )
     first = matched[0]
     contracts = sum(_positive_int(event.get("contracts"), field="contracts") for event in matched)
-    prices = {_decimal(event.get("price"), field="price") for event in matched}
+    prices = {
+        Decimal(
+            str(
+                normalize_trade_price(
+                    event.get("price"),
+                    field_name="price",
+                )
+            )
+        )
+        for event in matched
+    }
     if len(prices) != 1:
         raise ValueError(f"ledger event prices disagree for deal_id={deal_id}")
     price = next(iter(prices))

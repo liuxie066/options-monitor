@@ -1183,144 +1183,184 @@ def test_data_recovery_keeps_candidate_event_change_summary() -> None:
     assert "事件证据已恢复，现预计 8 月 5 日发布财报" in message
 
 
-def test_ai_referenced_candidate_beyond_top_n_is_expanded_with_true_rank() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
+def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report,
+        render_fixed_report_card_markdown,
+    )
 
     brief = _brief()
-    extra = [
-        _candidate(
-            rank=rank,
-            symbol=f"C{rank}",
-            option_type="put",
-            expiration="2026-08-21",
-            strike=100 + rank,
-            capacity=1,
-        )
-        for rank in (3, 4)
-    ]
     brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
-    extra[1]["candidate_id"] = "put-rank4"
-    brief["candidates"]["sell_put"].extend(extra)
-    brief["candidates"]["covered_call"] = []
+    rank_four = _candidate(
+        rank=4,
+        symbol="C4",
+        option_type="put",
+        expiration="2026-08-21",
+        strike=104,
+        capacity=1,
+    )
+    rank_four["candidate_id"] = "put-rank4"
+    brief["candidates"]["sell_put"].append(rank_four)
     brief["ai_decision_advice"] = {
         "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
         "sell_put": {
             "action": "switch",
             "baseline_candidate_id": "put-rank2",
             "selected_candidate_id": "put-rank4",
-            "rationale": {"risk_mechanism": "集中度叠加", "candidate_effect": "加重风险"},
-            "source_refs": {},
+            "rationale": {"decision_reason": "RETIRED-ADVICE-MUST-NOT-LEAK"},
         },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": True},
-        "reused": False,
-        "advice_record_id": "adv-1",
+    }
+    brief["ai_decision_advice_evidence_index"] = {
+        "symbols": [{"source": {"title": "RETIRED-SOURCE-MUST-NOT-LEAK"}}]
     }
 
-    message = render_fixed_report(
+    text_message = render_fixed_report(
         brief,
         limits={"max_candidates_per_strategy": 1},
         context=_scheduled_context(),
     )
-    # AI 引用的 baseline（排序 2）与改选目标（排序 4）都必须展开且保留真实排序。
-    assert "NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）" in message
-    assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" in message
-    assert "C3｜Sell Put" not in message
-    assert "### AI建议" in message
-    assert "建议改选策略排序 4：C4 08-21 $104 Put。" in message
-    assert "## Covered Call" in message
-    assert "本轮无可供 AI 评估的策略候选。" in message
+    card_message = render_fixed_report_card_markdown(
+        brief,
+        limits={"max_candidates_per_strategy": 1},
+        context=_scheduled_context(),
+    )
+
+    for message in (text_message, card_message):
+        assert "AI建议" not in message
+        assert "RETIRED-ADVICE-MUST-NOT-LEAK" not in message
+        assert "RETIRED-SOURCE-MUST-NOT-LEAK" not in message
+        assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" not in message
 
 
-def test_ai_advice_source_lines_render_from_brief_evidence_index() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
-    brief = _brief()
-    brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
-    brief["ai_decision_advice"] = {
-        "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
-        "sell_put": {
-            "action": "defer",
-            "baseline_candidate_id": "put-rank2",
-            "selected_candidate_id": None,
-            "rationale": {"risk_mechanism": "监管风险上升"},
-            "source_refs": {"external_evidence_refs": ["ev-aaa111bbb222"]},
-        },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": True},
-        "reused": False,
-        "advice_record_id": "adv-1",
-    }
-    brief["ai_decision_advice_evidence_index"] = {
-        "frozen_at": "2026-07-20T13:00:00+00:00",
-        "symbols": [
-            {
-                "symbol": "NVDA",
-                "coverage": "completed",
-                "evidence": [
-                    {
-                        "ref": "ev-aaa111bbb222",
-                        "source": {
-                            "title": "监管新规征求意见",
-                            "publisher": "监管机构",
-                            "published_at": "2026-07-19",
-                            "url": "https://example.gov/rule",
-                        },
-                    }
-                ],
-            }
-        ],
-    }
-
-    message = render_fixed_report(brief, context=_scheduled_context())
-    assert "### AI建议" in message
-    assert (
-        "来源｜监管新规征求意见（监管机构 · 2026-07-19 · example.gov） "
-        "https://example.gov/rule"
-    ) in message
-
-
-def test_fixed_report_card_places_ai_advice_inside_strategy_module() -> None:
+def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     from src.application.daily_decision_brief_renderer import (
         render_fixed_report_card_markdown,
     )
 
     brief = _brief()
-    brief["candidates"]["sell_put"][0]["candidate_id"] = "put-1"
-    brief["ai_decision_advice"] = {
-        "status": "completed",
-        "unavailable_reason": None,
-        "evidence_as_of": "2026-07-20T13:00:00+00:00",
-        "sell_put": {
-            "action": "keep",
-            "baseline_candidate_id": "put-1",
-            "selected_candidate_id": "put-1",
-            "rationale": {},
-            "source_refs": {},
-        },
-        "covered_call": None,
-        "zero_candidate": {"sell_put": False, "covered_call": False},
-        "reused": False,
-        "advice_record_id": "adv-1",
-    }
+    brief["candidates"]["covered_call"] = []
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": symbol,
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            }
+            for symbol in ("GOOGL", "NVDA")
+        ]
+    )
 
     message = render_fixed_report_card_markdown(
         brief,
         context=_scheduled_context(),
     )
 
-    sell_put = message.index("## Sell Put")
-    advice = message.index("### AI建议", sell_put)
-    candidates = message.index("### 策略候选", advice)
-    assert sell_put < advice < candidates
-    assert "结论｜维持策略排序 1。" in message
+    assert "AI｜" not in message
+    assert "AI建议" not in message
+    assert "### 策略候选" not in message
+    assert "## Covered Call" not in message
+    assert "多个 Sell Put 候选共享同一现金额度" not in message
+    assert "## 提醒" not in message
+    assert "提醒｜" not in message
+    assert "GOOGL Sell Put：本轮部分行情证据不可用" not in message
+    assert "事件数据不完整，无法排除近期重要事件；下单前复核。" in message
+    assert "当前无法确认没有重要事件" not in message
 
 
-def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> None:
+def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "GOOGL",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            },
+            {
+                "scope": "symbol",
+                "symbol": "GOOGL",
+                "reason": "ok",
+                "source": "required_data_prefetch_summary",
+            },
+            {
+                "scope": "symbol",
+                "symbol": "NVDA",
+                "reason": "quote_fetch_timeout",
+                "source": "required_data_prefetch_summary",
+            },
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert message.count("提醒｜") == 1
+    assert "提醒｜NVDA：行情获取失败，本轮候选结果不完整" in message
+    assert "提醒｜GOOGL" not in message
+    assert "opening_candidate_strategy_partial_data" not in message
+    assert "quote_fetch_timeout" not in message
+
+
+def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    brief["data_gaps"].extend(
+        [
+            {
+                "scope": "strategy",
+                "symbol": "GOOGL",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "reason_code": "term_matched_rv_unavailable",
+                "severity": "warning",
+                "actionable": False,
+            },
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+                "reason": "opening_candidate_strategy_partial_data",
+                "severity": "warning",
+                "actionable": False,
+            },
+        ]
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert message.count("提醒｜") == 1
+    assert (
+        "提醒｜GOOGL Sell Put：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
+        in message
+    )
+    assert "提醒｜NVDA" not in message
+
+
+def test_candidate_alert_ignores_retired_ai_candidate_selection() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,
     )
@@ -1375,7 +1415,8 @@ def test_candidate_alert_ai_can_select_old_candidate_without_relisting_it() -> N
         context=_scheduled_context(),
     )
 
-    assert "结论｜建议改选策略排序 2：NVDA 08-21 $100 Put。" in message
+    assert "AI建议" not in message
+    assert "当前首选存在额外事件风险" not in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜Sell Put" not in message
 
@@ -1427,7 +1468,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
     assert "## Sell Put" in message
-    assert "### 策略候选" in message
+    assert "### 策略候选" not in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）**" in message
     assert (
@@ -1514,7 +1555,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "| 项目 | 数值 |" not in message
 
 
-def test_evidence_hold_is_rendered_as_waiting_not_current_recommendation() -> None:
+def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report
 
     brief = _brief()
@@ -1543,5 +1584,5 @@ def test_evidence_hold_is_rendered_as_waiting_not_current_recommendation() -> No
 
     rendered = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "行情证据不可用，待恢复（不是当前推荐）" in rendered
     assert "原候选仅保留待恢复身份，不是当前推荐" in rendered
+    assert "提醒｜" not in rendered

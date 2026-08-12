@@ -8,7 +8,6 @@ import pytest
 
 from src.infrastructure.portfolio_management_client import (
     API_VERSION,
-    DISTRIBUTION_VALUATION_CURRENCY,
     PortfolioManagementClient,
     PortfolioManagementConfigError,
     PortfolioManagementHTTPError,
@@ -88,31 +87,6 @@ def _valuation_receipt(accounts=None) -> dict:
     }
 
 
-def _distribution_receipt(account: str = "lx") -> dict:
-    return {
-        "success": True,
-        "accounts": [account],
-        "freshness": {
-            "status": "fresh",
-            "trust_status": "trusted",
-            "observed_at_utc": "2026-08-09T10:00:00Z",
-            "dataset_ids": ["pm.holdings", "pm.prices", "pm.fx"],
-            "reason_codes": [],
-        },
-        "retrieved_at_utc": "2026-08-09T10:00:01Z",
-        "by_asset": [
-            {
-                "code": "NVDA",
-                "normalized_type": "stock",
-                "currency": "USD",
-                "quantity": 10,
-                "value": 12345.0,
-            }
-        ],
-        "errors": [],
-    }
-
-
 def test_origin_accepts_ipv4_ipv6_and_rejects_remote_or_embedded_paths() -> None:
     assert resolve_portfolio_service_origin("http://127.0.0.1:8765") == "http://127.0.0.1:8765"
     assert resolve_portfolio_service_origin("http://[::1]:8765") == "http://[::1]:8765"
@@ -149,83 +123,25 @@ def test_client_uses_v1_path_and_requires_version_header() -> None:
         ).read_view("accounts", timeout=10)
 
 
-def test_distribution_uses_fixed_single_account_query_and_contract() -> None:
+def test_generic_distribution_view_remains_available() -> None:
     seen = {}
 
     def open_ok(request, *, timeout):
         seen.update(url=request.full_url, method=request.method, timeout=timeout)
-        return _Response(_distribution_receipt("Feishu EXT"))
+        return _Response({"success": True, "accounts": ["lx"], "by_asset": []})
 
-    result = PortfolioManagementClient(urlopen_fn=open_ok).read_distribution(
-        account=" Feishu EXT ",
+    result = PortfolioManagementClient(urlopen_fn=open_ok).read_view(
+        "distribution",
+        query={"account": "lx", "by_asset": "true"},
         timeout=12,
     )
 
     assert seen == {
-        "url": (
-            "http://127.0.0.1:8765/api/v1/distribution?"
-            "account=Feishu+EXT&by_asset=true&include_value=true&group_cash=false"
-        ),
+        "url": "http://127.0.0.1:8765/api/v1/distribution?account=lx&by_asset=true",
         "method": "GET",
         "timeout": 12.0,
     }
-    assert result["accounts"] == ["Feishu EXT"]
-    assert result["by_asset"][0]["value"] == 12345.0
-    assert DISTRIBUTION_VALUATION_CURRENCY == "CNY"
-
-
-@pytest.mark.parametrize("account", ["", " ", "all", "ALL", "lx,sy"])
-def test_distribution_rejects_non_single_account_without_request(account: str) -> None:
-    calls = 0
-
-    def open_never(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return _Response(_distribution_receipt())
-
-    with pytest.raises(PortfolioManagementProtocolError, match="account"):
-        PortfolioManagementClient(urlopen_fn=open_never).read_distribution(
-            account=account,
-            timeout=10,
-        )
-    assert calls == 0
-
-
-@pytest.mark.parametrize(
-    ("mutator", "error"),
-    [
-        (lambda item: item.pop("accounts"), "missing required fields"),
-        (lambda item: item.update(accounts=["sy"]), "account scope mismatch"),
-        (lambda item: item.update(accounts=["LX"]), "account scope mismatch"),
-        (lambda item: item.update(accounts=["lx", "lx"]), "account scope mismatch"),
-        (
-            lambda item: item["freshness"].update(status="FRESH"),
-            "freshness evidence is invalid",
-        ),
-        (
-            lambda item: item["freshness"].update(trust_status="TRUSTED"),
-            "freshness evidence is invalid",
-        ),
-        (
-            lambda item: item["freshness"].update(observed_at_utc="bad"),
-            "freshness observed_at_utc",
-        ),
-        (lambda item: item.update(by_asset=None), "by_asset must be an array"),
-        (lambda item: item.update(errors={}), "errors must be an array"),
-    ],
-)
-def test_distribution_rejects_missing_or_misbound_wire_contract(
-    mutator,
-    error,
-) -> None:
-    receipt = _distribution_receipt()
-    mutator(receipt)
-    client = PortfolioManagementClient(
-        urlopen_fn=lambda *_args, **_kwargs: _Response(receipt)
-    )
-
-    with pytest.raises(PortfolioManagementProtocolError, match=error):
-        client.read_distribution(account="lx", timeout=10)
+    assert result == {"success": True, "accounts": ["lx"], "by_asset": []}
 
 
 def test_client_maps_http_error_without_retry() -> None:

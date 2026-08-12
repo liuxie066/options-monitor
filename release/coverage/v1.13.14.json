@@ -1,0 +1,181 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.14",
+  "base": {
+    "tag": "v1.13.13",
+    "commit": "b85607be9872ba8b3cc7d21db82dafeda416dce9"
+  },
+  "reviewed_head": "f8e0b9a8a9db8bbc7762cacc3218cea8ff447a58",
+  "commits": [
+    {
+      "sha": "8a3520f0ded084d9fc390ed2fa1be9babc3fe427",
+      "subject": "chore(gateflow): accept plan for candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "0893f5e0b7d7f9ade616c1fbaa79266b94940c23",
+      "subject": "fix(candidate): accept evidence-integrity slice 1"
+    },
+    {
+      "sha": "4c40add63f916e835fdc5a07e906d3de136cb3b9",
+      "subject": "fix(brief): accept evidence-integrity slice 2"
+    },
+    {
+      "sha": "5b33bb27328875d8311b3cb5da408191b2ff0dc7",
+      "subject": "fix(brief): accept aggregate evidence review"
+    },
+    {
+      "sha": "3ce14a58462b41cb7982516566473c39c015a3bd",
+      "subject": "gateflow: accept PR review for candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "85b885bea9bb82d5d801eb286ce8bb4ed6d935ba",
+      "subject": "docs(gateflow): fix PR guardrail evidence paths"
+    },
+    {
+      "sha": "e73cba87cdede864e4c01d8cce738ab2e6fc57dc",
+      "subject": "gateflow: accept supplemental PR review for candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "e64b1512cec1283c1ee88466d78a6485c357115b",
+      "subject": "gateflow: record draft PR pass for candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "709c9902bb4c95f8f7a947f5a4f1a8aed7294958",
+      "subject": "gateflow: close candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "beb0836562c269e78a5f540659d20f76ee71e3d0",
+      "subject": "Merge pull request #149 from liuxie066/fix/candidate-brief-evidence-integrity"
+    },
+    {
+      "sha": "ef6d864b7fd3f3fdcac1ae0da37b085e71d95fef",
+      "subject": "chore(gateflow): accept plan for retire-ai-decision-advice"
+    },
+    {
+      "sha": "c40645f9e9b8486fe4db792776fdd41bb778f88a",
+      "subject": "refactor(gateflow): accept retire-ai-decision-advice slice-1"
+    },
+    {
+      "sha": "f92b6e165b91526dde67f1332264edcab57fdfd6",
+      "subject": "refactor(gateflow): accept retire-ai-decision-advice slice-2"
+    },
+    {
+      "sha": "3081d2a6e3462f58451b8807bd9b6aa9b68c3118",
+      "subject": "chore(gateflow): accept deepreview for retire-ai-decision-advice"
+    },
+    {
+      "sha": "db89f8d141f23c260454a2e02e89450cccd66f14",
+      "subject": "chore(gateflow): accept main-chain review for retire-ai-decision-advice"
+    },
+    {
+      "sha": "a0038e40a2b6e3f620682b5d59b89e8417729d81",
+      "subject": "chore(gateflow): accept latest-main review for retire-ai-decision-advice"
+    },
+    {
+      "sha": "3b0c2aa68bcd4c16f04219ce0287f6f5e33c3eef",
+      "subject": "chore(gateflow): accept PR review for retire-ai-decision-advice"
+    },
+    {
+      "sha": "aa2a0ebd8200a8232e163931aac16b135f20504e",
+      "subject": "chore(gateflow): record draft PR pass for retire-ai-decision-advice"
+    },
+    {
+      "sha": "a51ea56a37cca71150c53612e5603f768469f5d1",
+      "subject": "chore(gateflow): close retire-ai-decision-advice"
+    },
+    {
+      "sha": "8db17222bff32cdc8edb2da4f36aaa6b5c6607d4",
+      "subject": "Merge pull request #150 from liuxie066/refactor/retire-ai-decision-advice"
+    },
+    {
+      "sha": "f8e0b9a8a9db8bbc7762cacc3218cea8ff447a58",
+      "subject": "fix(ledger): reconcile broker trade receipts"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Retired AI Decision Advice end to end: removed model generation, external-news collection, portfolio-distribution preparation, configuration, managed collector services, and current Daily Brief/Agent rendering. Deterministic candidate, position, funds, Close Advice, and Daily Brief authorities remain unchanged; legacy frozen deliveries containing AI content fail closed until separately resolved.",
+      "commits": [
+        "c40645f9e9b8486fe4db792776fdd41bb778f88a",
+        "f92b6e165b91526dde67f1332264edcab57fdfd6",
+        "8db17222bff32cdc8edb2da4f36aaa6b5c6607d4"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved candidate and Daily Brief evidence integrity by treating deterministic non-positive premiums as policy rejections, retaining specific sealed RV gaps, accepting successful prefetch receipts, and requiring CC+LP snapshots only when that variant is effectively enabled.",
+      "commits": [
+        "0893f5e0b7d7f9ade616c1fbaa79266b94940c23",
+        "4c40add63f916e835fdc5a07e906d3de136cb3b9",
+        "5b33bb27328875d8311b3cb5da408191b2ff0dc7",
+        "3ce14a58462b41cb7982516566473c39c015a3bd",
+        "beb0836562c269e78a5f540659d20f76ee71e3d0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Normalized binary floating-point transport noise at the three-decimal trade-price boundary, so broker fills such as `1.5699999999999998` resolve as `1.570` while genuinely over-precise prices remain rejected.",
+      "commits": [
+        "f8e0b9a8a9db8bbc7762cacc3218cea8ff447a58"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Classified only exact zero-price, fully filled Futu option orders recorded on contract expiration as broker-generated expiry receipts, allowing due lifecycle cases to settle while ambiguous orders continue to fail closed for review.",
+      "commits": [
+        "f8e0b9a8a9db8bbc7762cacc3218cea8ff447a58"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "8a3520f0ded084d9fc390ed2fa1be9babc3fe427",
+      "reason": "planning and review artifacts only; no independent user-facing behavior"
+    },
+    {
+      "commit": "85b885bea9bb82d5d801eb286ce8bb4ed6d935ba",
+      "reason": "review evidence path corrections only; no independent user-facing behavior"
+    },
+    {
+      "commit": "e73cba87cdede864e4c01d8cce738ab2e6fc57dc",
+      "reason": "supplemental review artifacts only; no independent user-facing behavior"
+    },
+    {
+      "commit": "e64b1512cec1283c1ee88466d78a6485c357115b",
+      "reason": "draft PR verification artifact only; no independent user-facing behavior"
+    },
+    {
+      "commit": "709c9902bb4c95f8f7a947f5a4f1a8aed7294958",
+      "reason": "work-unit closeout documentation only; no independent user-facing behavior"
+    },
+    {
+      "commit": "ef6d864b7fd3f3fdcac1ae0da37b085e71d95fef",
+      "reason": "planning and review artifacts only; no independent user-facing behavior"
+    },
+    {
+      "commit": "3081d2a6e3462f58451b8807bd9b6aa9b68c3118",
+      "reason": "review artifacts and regression-test adjustments only; no independent user-facing behavior"
+    },
+    {
+      "commit": "db89f8d141f23c260454a2e02e89450cccd66f14",
+      "reason": "review documentation and generated dependency metadata only"
+    },
+    {
+      "commit": "a0038e40a2b6e3f620682b5d59b89e8417729d81",
+      "reason": "review documentation and generated dependency metadata only"
+    },
+    {
+      "commit": "3b0c2aa68bcd4c16f04219ce0287f6f5e33c3eef",
+      "reason": "PR review artifacts only; no independent user-facing behavior"
+    },
+    {
+      "commit": "aa2a0ebd8200a8232e163931aac16b135f20504e",
+      "reason": "draft PR verification artifact only; no independent user-facing behavior"
+    },
+    {
+      "commit": "a51ea56a37cca71150c53612e5603f768469f5d1",
+      "reason": "work-unit closeout documentation only; no independent user-facing behavior"
+    }
+  ]
+}
