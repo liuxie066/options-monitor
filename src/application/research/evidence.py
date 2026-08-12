@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import subprocess
@@ -9,11 +8,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain.engine import explain_candidate_rank, yield_enhancement_rank_key
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.shadow_replay import summarize_shadow_replay_readiness
+from src.application.shadow_replay.capture import (
+    ShadowReplaySourceSelection,
+    candidate_replay_observations_from_selection,
+    mark_paths_from_selection,
+    outcome_paths_from_selection,
+)
 
 
 def collect_evidence(
@@ -76,8 +80,6 @@ def collect_evidence(
         source_paths=source_paths,
         base=base,
         tail_limit=tail_limit,
-        cfg=cfg,
-        ranking_attribution_allowed=bool(attribution["configured_ranking_allowed"]),
         attribution=attribution,
     )
 
@@ -104,10 +106,6 @@ def collect_evidence(
     warnings = list(runtime_warnings)
     if not scheduler_evidence.get("provided"):
         warnings.append("scheduler_evidence_missing: online scheduler status was not provided")
-    if not attribution["configured_ranking_allowed"]:
-        warnings.append(
-            "historical_producer_provenance_unavailable_or_mismatched: configured ranking explanation disabled"
-        )
     meta = {
         "config_path": mask_path(config_path),
         "runtime_status_meta": runtime_meta,
@@ -169,9 +167,7 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "tail_limit",
         "max_run_age_minutes",
         "max_notification_chars",
-        "candidate_paths",
         "trace_paths",
-        "reject_log_paths",
         "mark_paths",
         "outcome_paths",
         "candidate_report_dir",
@@ -464,57 +460,48 @@ def _candidate_evidence(
     source_paths: dict[str, Path | None],
     base: Path,
     tail_limit: int,
-    cfg: dict[str, Any],
-    ranking_attribution_allowed: bool,
     attribution: dict[str, Any],
 ) -> dict[str, Any]:
-    candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
-    trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
-    reject_log_paths = _explicit_paths(payload.get("reject_log_paths") or payload.get("reject_log_path"), base=base)
-    pair_diagnostic_paths: list[Path] = []
-    mark_paths = _explicit_paths(payload.get("mark_paths") or payload.get("mark_path"), base=base)
-    outcome_paths = _explicit_paths(payload.get("outcome_paths") or payload.get("outcome_path"), base=base)
-    for directory in _candidate_dirs(source_paths, base=base):
-        found_candidates, found_reject_logs = _candidate_and_reject_log_paths(directory)
-        candidate_paths.extend(found_candidates)
-        reject_log_paths.extend(found_reject_logs)
-        trace_paths.append(directory / "candidate_filter_trace.jsonl")
-        pair_diagnostic_paths.extend(
-            _glob_many(
-                directory,
-                ("*_combo_yield_pair_diagnostics.csv", "*_yield_enhancement_pair_diagnostics.csv"),
-            )
-        )
-        mark_paths.extend(_glob_many(directory, ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv")))
-        outcome_paths.extend(_glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv")))
-
-    explicit_reject_logs = [path for path in candidate_paths if _is_reject_log_path(path)]
-    reject_log_paths.extend(explicit_reject_logs)
-    candidate_paths = _unique_paths([path for path in candidate_paths if _is_candidate_report_path(path)])[:30]
-    reject_log_paths = _unique_paths(reject_log_paths)[:30]
-    trace_paths = _unique_paths(trace_paths)[:20]
-    pair_diagnostic_paths = _unique_paths(pair_diagnostic_paths)[:30]
-    mark_paths = _unique_paths(mark_paths)[:30]
-    outcome_paths = _unique_paths(outcome_paths)[:30]
-    candidate_reports = [_candidate_csv_summary(path, base=base) for path in candidate_paths]
-    reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
-    filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
-    combo_yield_pair_diagnostics = _combo_yield_pair_diagnostics(pair_diagnostic_paths, base=base)
-    ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
-    ranking_evidence = _ranking_evidence(
-        candidate_paths,
+    selection = _candidate_source_selection(
+        payload,
+        source_paths=source_paths,
         base=base,
-        cfg=cfg,
+    )
+    observations = candidate_replay_observations_from_selection(selection)
+    candidate_rows = list(observations["candidate_snapshots"])
+    filter_decisions = list(observations["filter_decisions"])
+    rank_rows = list(observations["rank_snapshots"])
+    trace_paths = list(observations["trace_paths"])[:20]
+    mark_paths = mark_paths_from_selection(selection)[:30]
+    outcome_paths = outcome_paths_from_selection(selection)[:30]
+    snapshot_sources = _candidate_snapshot_source_paths(
+        observations["account_evidence"]
+    )
+    candidate_reports = _candidate_snapshot_reports(
+        candidate_rows,
+        account_evidence=observations["account_evidence"],
+        base=base,
+    )
+    reject_logs = _candidate_rejection_summaries(filter_decisions)
+    filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
+    combo_yield_pair_diagnostics = _combo_yield_pair_diagnostics_from_evidence(
+        observations["account_evidence"],
+        base=base,
+    )
+    ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
+    ranking_evidence = _sealed_ranking_evidence(
+        rank_rows,
         limit=ranking_limit,
-        configured_attribution_allowed=ranking_attribution_allowed,
         attribution=attribution,
     )
     shadow_replay = summarize_shadow_replay_readiness(
-        candidate_paths=candidate_paths,
+        candidate_snapshots=candidate_rows,
+        filter_decisions=filter_decisions,
         trace_paths=trace_paths,
-        reject_log_paths=reject_log_paths,
         mark_paths=mark_paths,
         outcome_paths=outcome_paths,
+        source_paths=snapshot_sources,
+        candidate_evidence_coverage=observations["coverage"],
         base=base,
         min_sample=_as_int(payload.get("shadow_replay_min_sample"), default=30, low=1, high=10000),
     )
@@ -523,19 +510,25 @@ def _candidate_evidence(
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
         "schema_version": "research_candidate_evidence.v1",
-        "candidate_reports": candidate_reports,
-        "reject_logs": reject_logs,
+        "candidate_snapshot_reports": candidate_reports,
+        "rejection_evidence": reject_logs,
         "filter_traces": filter_traces,
         "combo_yield_pair_diagnostics": combo_yield_pair_diagnostics,
         "ranking_evidence": ranking_evidence,
+        "compatibility": observations["coverage"],
         "shadow_replay": shadow_replay,
         "summary": {
-            "candidate_file_count": sum(1 for item in candidate_reports if item.get("exists")),
+            "candidate_snapshot_file_count": sum(
+                len(item.get("owner_snapshots") or [])
+                for item in candidate_reports
+            ),
             "candidate_row_count": total_candidate_rows,
-            "reject_log_file_count": sum(1 for item in reject_logs if item.get("exists")),
-            "reject_log_row_count": total_reject_rows,
+            "rejection_evidence_group_count": sum(
+                1 for item in reject_logs if item.get("exists")
+            ),
+            "rejection_decision_count": total_reject_rows,
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
-            "combo_yield_pair_diagnostic_file_count": _nested(combo_yield_pair_diagnostics, "summary", "file_count"),
+            "combo_yield_pair_diagnostic_snapshot_count": _nested(combo_yield_pair_diagnostics, "summary", "file_count"),
             "combo_yield_pair_diagnostic_row_count": _nested(combo_yield_pair_diagnostics, "summary", "row_count"),
             "combo_yield_pair_diagnostic_unique_market_row_count": _nested(
                 combo_yield_pair_diagnostics, "summary", "unique_market_row_count"
@@ -565,18 +558,6 @@ def _first_shadow_replay_status(profile: dict[str, Any]) -> str | None:
     return status or None
 
 
-def _candidate_dirs(source_paths: dict[str, Path | None], *, base: Path) -> list[Path]:
-    dirs: list[Path] = []
-    for key in ("report_dir", "latest_run_dir", "latest_scanned_run_dir"):
-        path = source_paths.get(key)
-        if path is not None:
-            dirs.append(path)
-            accounts_dir = path / "accounts"
-            if accounts_dir.exists() and accounts_dir.is_dir():
-                dirs.extend(item for item in accounts_dir.iterdir() if item.is_dir())
-    return _unique_paths(dirs)
-
-
 def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
     raw_items = value if isinstance(value, list) else ([value] if value else [])
     out: list[Path] = []
@@ -593,29 +574,120 @@ def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
     return out
 
 
-def _glob_many(directory: Path, patterns: tuple[str, ...]) -> list[Path]:
-    if not directory.exists() or not directory.is_dir():
-        return []
-    out: list[Path] = []
-    for pattern in patterns:
-        out.extend(path.resolve() for path in directory.glob(pattern) if path.is_file())
-    return out
-
-
-def _candidate_and_reject_log_paths(directory: Path) -> tuple[list[Path], list[Path]]:
-    candidate_like = _glob_many(
-        directory,
-        (
-            "*sell_put_candidates*.csv",
-            "*sell_call_candidates*.csv",
-            "*combo_yield_candidates*.csv",
-            "*yield_enhancement_candidates*.csv",
+def _candidate_source_selection(
+    payload: dict[str, Any],
+    *,
+    source_paths: dict[str, Path | None],
+    base: Path,
+) -> ShadowReplaySourceSelection:
+    runs_root = source_paths.get("runs_root")
+    explicit_run_dir = _explicit_paths(payload.get("run_dir"), base=base)
+    run_dir = explicit_run_dir[0] if explicit_run_dir else None
+    run_id = _text(payload.get("run_id")) or None
+    if run_dir is None and run_id and runs_root is not None:
+        run_dir = (runs_root / run_id).resolve()
+    if run_dir is None:
+        run_dir = (
+            source_paths.get("latest_scanned_run_dir")
+            or source_paths.get("latest_run_dir")
+        )
+    return ShadowReplaySourceSelection(
+        repo_root=base,
+        run_id=run_id or (run_dir.name if run_dir is not None else None),
+        runs_root=runs_root,
+        run_dir=run_dir,
+        report_dir=source_paths.get("report_dir"),
+        trace_paths=tuple(
+            _explicit_paths(
+                payload.get("trace_paths") or payload.get("trace_path"),
+                base=base,
+            )
+        ),
+        mark_paths=tuple(
+            _explicit_paths(
+                payload.get("mark_paths") or payload.get("mark_path"),
+                base=base,
+            )
+        ),
+        outcome_paths=tuple(
+            _explicit_paths(
+                payload.get("outcome_paths") or payload.get("outcome_path"),
+                base=base,
+            )
         ),
     )
-    reject_like = _glob_many(directory, ("*reject_log.csv",))
-    candidates = [path for path in candidate_like if _is_candidate_report_path(path)]
-    reject_logs = [path for path in [*candidate_like, *reject_like] if _is_reject_log_path(path)]
-    return candidates, reject_logs
+
+
+def _candidate_snapshot_source_paths(account_evidence: list[Any]) -> list[Path]:
+    paths: list[Path] = []
+    for evidence in account_evidence:
+        for owner in evidence.owners:
+            filenames = {
+                "opening": "opening_candidate_snapshot.json",
+                "sp_lc": "combo_yield_candidate_snapshot.json",
+                "cc_lp": "cc_lp_candidate_snapshot.json",
+            }
+            paths.append(evidence.account_dir / "state" / filenames[owner])
+    return _unique_paths(paths)
+
+
+def _candidate_snapshot_reports(
+    rows: list[dict[str, Any]],
+    *,
+    account_evidence: list[Any],
+    base: Path,
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for evidence in account_evidence:
+        account = _text(evidence.classification.get("account")).lower()
+        account_rows = [row for row in rows if _text(row.get("account")).lower() == account]
+        status_counts = Counter(_text(row.get("status")).lower() or "unknown" for row in account_rows)
+        strategy_counts = Counter(_text(row.get("strategy")) for row in account_rows if _text(row.get("strategy")))
+        symbol_counts = Counter(_text(row.get("symbol")).upper() for row in account_rows if _text(row.get("symbol")))
+        reports.append(
+            {
+                "source_kind": "sealed_candidate_snapshot",
+                "path": _safe_rel(evidence.account_dir / "state", base=base),
+                "exists": bool(evidence.owners),
+                "account_hint": account or None,
+                "row_count": len(account_rows),
+                "account_counts": {account: len(account_rows)} if account else {},
+                "strategy_counts": dict(strategy_counts.most_common()),
+                "symbol_counts": dict(symbol_counts.most_common()),
+                "status_counts": dict(status_counts.most_common()),
+                "owner_snapshots": sorted(evidence.owners),
+                "compatibility": dict(evidence.classification),
+                "sample_rows": account_rows[:5],
+            }
+        )
+    return reports
+
+
+def _candidate_rejection_summaries(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_text(row.get("account")).lower(), []).append(row)
+    reports: list[dict[str, Any]] = []
+    for account, items in sorted(grouped.items()):
+        stage_counts = Counter(_text(row.get("stage")) for row in items if _text(row.get("stage")))
+        reason_counts = Counter(_text(row.get("rule")) for row in items if _text(row.get("rule")))
+        symbol_counts = Counter(_text(row.get("symbol")).upper() for row in items if _text(row.get("symbol")))
+        reports.append(
+            {
+                "source_kind": "sealed_snapshot_and_trace",
+                "account_hint": account or None,
+                "row_count": len(items),
+                "account_counts": {account: len(items)} if account else {},
+                "stage_counts": dict(stage_counts.most_common(10)),
+                "reason_counts": dict(reason_counts.most_common(20)),
+                "symbol_counts": dict(symbol_counts.most_common(20)),
+                "sample_rows": items[:5],
+                "exists": True,
+            }
+        )
+    return reports
 
 
 _PAIR_DIAGNOSTIC_NEAREST_MISS_SPECS: dict[str, tuple[str, str | None, str]] = {
@@ -640,26 +712,31 @@ _PAIR_DIAGNOSTIC_NEAREST_MISS_SPECS: dict[str, tuple[str, str | None, str]] = {
 }
 
 
-def _combo_yield_pair_diagnostics(paths: list[Path], *, base: Path) -> dict[str, Any]:
+def _combo_yield_pair_diagnostics_from_evidence(
+    account_evidence: list[Any],
+    *,
+    base: Path,
+) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     unique: dict[tuple[str, ...], dict[str, Any]] = {}
-    for path in paths:
-        account_hint = _account_hint(path)
+    for evidence in account_evidence:
+        snapshot = evidence.owners.get("sp_lc")
+        if not isinstance(snapshot, dict):
+            continue
+        path = evidence.account_dir / "state" / "combo_yield_candidate_snapshot.json"
+        account_hint = _text(evidence.classification.get("account")).lower() or None
+        file_rows = [
+            dict(item)
+            for item in snapshot.get("pair_evaluations") or []
+            if isinstance(item, dict)
+        ]
         file_info: dict[str, Any] = {
             "path": _safe_rel(path, base=base),
-            "exists": path.exists(),
+            "exists": True,
             "account_hint": account_hint,
-            "row_count": 0,
+            "row_count": len(file_rows),
         }
-        try:
-            with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-                file_rows = list(csv.DictReader(fh))
-        except Exception as exc:
-            file_info["read_error"] = f"{type(exc).__name__}: {exc}"
-            files.append(file_info)
-            continue
-        file_info["row_count"] = len(file_rows)
         files.append(file_info)
         for row in file_rows:
             item = dict(row)
@@ -788,7 +865,9 @@ def _pair_diagnostic_nearest_misses(rows: list[dict[str, Any]], *, limit: int = 
 
 
 def _pair_diagnostic_reasons(row: dict[str, Any]) -> list[str]:
-    return [reason.strip() for reason in _text(row.get("reject_reasons")).split("|") if reason.strip()]
+    raw = row.get("reject_reasons")
+    values = raw if isinstance(raw, list) else _text(raw).split("|")
+    return sorted({str(reason).strip() for reason in values if str(reason).strip()})
 
 
 def _bool_or_none(value: Any) -> bool | None:
@@ -800,115 +879,6 @@ def _bool_or_none(value: Any) -> bool | None:
     if text in {"0", "false", "no"}:
         return False
     return None
-
-
-def _is_candidate_report_path(path: Path) -> bool:
-    name = path.name.lower()
-    if _is_reject_log_path(path):
-        return False
-    return (
-        "sell_put_candidates" in name
-        or "sell_call_candidates" in name
-        or "combo_yield_candidates" in name
-        or "yield_enhancement_candidates" in name
-    ) and name.endswith(".csv")
-
-
-def _is_reject_log_path(path: Path) -> bool:
-    name = path.name.lower()
-    return "reject_log" in name and name.endswith(".csv")
-
-
-def _candidate_csv_summary(path: Path, *, base: Path) -> dict[str, Any]:
-    account_hint = _account_hint(path)
-    out: dict[str, Any] = {
-        "path": _safe_rel(path, base=base),
-        "exists": path.exists(),
-        "account_hint": account_hint,
-        "row_count": 0,
-        "columns": [],
-        "sample_rows": [],
-        "metric_ranges": {},
-        "account_counts": {},
-        "strategy_counts": {},
-        "symbol_counts": {},
-    }
-    if not path.exists() or not path.is_file():
-        return out
-    metric_values: dict[str, list[float]] = {}
-    account_counts: Counter[str] = Counter()
-    strategy_counts: Counter[str] = Counter()
-    symbol_counts: Counter[str] = Counter()
-    try:
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            reader = csv.DictReader(fh)
-            out["columns"] = list(reader.fieldnames or [])
-            samples: list[dict[str, Any]] = []
-            for row in reader:
-                out["row_count"] = int(out["row_count"]) + 1
-                if len(samples) < 5:
-                    samples.append(_select_candidate_fields(row))
-                _count_text(account_counts, row.get("account") or account_hint)
-                _count_text(strategy_counts, row.get("strategy") or row.get("mode") or _strategy_hint(path))
-                _count_text(symbol_counts, row.get("symbol"))
-                _collect_metric_values(row, metric_values)
-            out["sample_rows"] = samples
-            out["metric_ranges"] = _metric_ranges(metric_values)
-            out["account_counts"] = dict(account_counts.most_common(20))
-            out["strategy_counts"] = dict(strategy_counts.most_common(20))
-            out["symbol_counts"] = dict(symbol_counts.most_common(30))
-    except Exception as exc:
-        out["read_error"] = f"{type(exc).__name__}: {exc}"
-    return out
-
-
-def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
-    account_hint = _account_hint(path)
-    out: dict[str, Any] = {
-        "path": _safe_rel(path, base=base),
-        "exists": path.exists(),
-        "account_hint": account_hint,
-        "row_count": 0,
-        "columns": [],
-        "account_counts": {},
-        "stage_counts": {},
-        "reason_counts": {},
-        "symbol_counts": {},
-        "sample_rows": [],
-    }
-    if not path.exists() or not path.is_file():
-        return out
-    stage_counts: Counter[str] = Counter()
-    reason_counts: Counter[str] = Counter()
-    symbol_counts: Counter[str] = Counter()
-    account_counts: Counter[str] = Counter()
-    samples: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            reader = csv.DictReader(fh)
-            out["columns"] = list(reader.fieldnames or [])
-            for row in reader:
-                out["row_count"] = int(out["row_count"]) + 1
-                stage = str(row.get("engine_reject_stage") or row.get("reject_stage") or "").strip()
-                reason = str(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or "").strip()
-                symbol = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
-                _count_text(account_counts, row.get("account") or account_hint)
-                if len(samples) < 5:
-                    samples.append(_select_reject_fields(row, account_hint=account_hint))
-                if stage:
-                    stage_counts[stage] += 1
-                if reason:
-                    reason_counts[reason] += 1
-                if symbol:
-                    symbol_counts[symbol] += 1
-            out["account_counts"] = dict(account_counts.most_common(20))
-            out["stage_counts"] = dict(stage_counts.most_common(10))
-            out["reason_counts"] = dict(reason_counts.most_common(10))
-            out["symbol_counts"] = dict(symbol_counts.most_common(10))
-            out["sample_rows"] = samples
-    except Exception as exc:
-        out["read_error"] = f"{type(exc).__name__}: {exc}"
-    return out
 
 
 def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
@@ -973,174 +943,85 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     return out
 
 
-def _ranking_evidence(
-    candidate_paths: list[Path],
+def _sealed_ranking_evidence(
+    rank_rows: list[dict[str, Any]],
     *,
-    base: Path,
-    cfg: dict[str, Any],
     limit: int,
-    configured_attribution_allowed: bool,
     attribution: dict[str, Any],
 ) -> dict[str, Any]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rank_rows:
+        key = (
+            _text(row.get("account")).lower(),
+            _text(row.get("strategy")) or "unknown",
+        )
+        grouped.setdefault(key, []).append(row)
     reports: list[dict[str, Any]] = []
     strategy_counts: Counter[str] = Counter()
-    cash_constraint_counts: Counter[str] = Counter()
     top_row_count = 0
-
-    for path in candidate_paths:
-        report = _ranking_report(
-            path,
-            base=base,
-            cfg=cfg,
-            limit=limit,
-            configured_attribution_allowed=configured_attribution_allowed,
+    for (account, strategy), rows in sorted(grouped.items()):
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                int(_first_float(row, "rank") or 10**9),
+                _text(row.get("candidate_pair_id")),
+                _text(row.get("contract_symbol")),
+            ),
         )
-        reports.append(report)
-        if report.get("exists"):
-            _count_text(strategy_counts, report.get("strategy"))
-            raw_top_rows = report.get("top_rows")
-            top_rows = raw_top_rows if isinstance(raw_top_rows, list) else []
-            top_row_count += len(top_rows)
-            for row in top_rows:
-                cash = _dict_or_empty(row.get("cash_constraint")) if isinstance(row, dict) else {}
-                if cash.get("cash_headroom_ratio") is not None:
-                    cash_constraint_counts["cash_headroom_known"] += 1
-                elif cash:
-                    cash_constraint_counts["cash_fields_partial"] += 1
-                else:
-                    cash_constraint_counts["cash_fields_missing"] += 1
-
+        top_rows = [_sealed_ranking_row(row) for row in ordered[:limit]]
+        reports.append(
+            {
+                "source_kind": "sealed_candidate_snapshot",
+                "exists": True,
+                "account_hint": account or None,
+                "strategy": strategy,
+                "row_count": len(rows),
+                "top_rows": top_rows,
+            }
+        )
+        strategy_counts[strategy] += 1
+        top_row_count += len(top_rows)
     return {
         "schema_version": "research_ranking_evidence.v1",
         "top_rows_per_report": limit,
-        "attribution": attribution,
+        "attribution": {
+            **attribution,
+            "rank_source": "sealed_candidate_snapshot",
+            "recomputed": False,
+        },
         "reports": reports,
         "summary": {
-            "report_count": sum(1 for item in reports if item.get("exists")),
+            "report_count": len(reports),
             "top_row_count": top_row_count,
             "strategy_counts": dict(strategy_counts.most_common(20)),
-            "cash_constraint_counts": dict(cash_constraint_counts.most_common(10)),
+            "cash_constraint_counts": {},
         },
     }
 
 
-def _ranking_report(
-    path: Path,
-    *,
-    base: Path,
-    cfg: dict[str, Any],
-    limit: int,
-    configured_attribution_allowed: bool,
-) -> dict[str, Any]:
-    strategy = _strategy_hint(path)
-    account_hint = _account_hint(path)
-    out: dict[str, Any] = {
-        "path": _safe_rel(path, base=base),
-        "exists": path.exists(),
-        "account_hint": account_hint,
-        "strategy": strategy,
-        "mode": _strategy_mode(strategy),
-        "row_count": 0,
-        "top_rows": [],
-    }
-    if not path.exists() or not path.is_file():
-        return out
-
-    rows: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for idx, row in enumerate(reader, start=1):
-                out["row_count"] = int(out["row_count"]) + 1
-                if len(rows) < limit:
-                    rows.append(
-                        _ranking_row_evidence(
-                            row,
-                            rank=idx,
-                            strategy=strategy,
-                            account_hint=account_hint,
-                            cfg=cfg,
-                            configured_attribution_allowed=configured_attribution_allowed,
-                        )
-                    )
-    except Exception as exc:
-        out["read_error"] = f"{type(exc).__name__}: {exc}"
-        return out
-
-    out["top_rows"] = rows
-    return out
-
-
-def _ranking_row_evidence(
-    row: dict[str, Any],
-    *,
-    rank: int,
-    strategy: str | None,
-    account_hint: str | None,
-    cfg: dict[str, Any],
-    configured_attribution_allowed: bool,
-) -> dict[str, Any]:
-    mode = _strategy_mode(strategy)
-    symbol = _text(row.get("symbol") or row.get("underlying_symbol")).upper() or None
-    strategy_cfg = (
-        _strategy_settings_for_symbol(cfg, symbol=symbol, strategy=strategy)
-        if configured_attribution_allowed
-        else {}
-    )
-    rank_explanation: dict[str, Any] | None = None
-    rank_key: dict[str, Any] | None = None
-
-    if not configured_attribution_allowed:
-        rank_explanation = {
-            "status": "unavailable",
-            "reason": "historical_producer_policy_unavailable_or_mismatched",
-        }
-    elif mode in {"put", "call"}:
-        try:
-            rank_explanation = explain_candidate_rank(row, mode=mode)
-        except Exception as exc:
-            rank_explanation = {"error": f"{type(exc).__name__}: {exc}"}
-    elif strategy == "combo_yield":
-        try:
-            rank_key = {
-                "sort_tuple": list(yield_enhancement_rank_key(row)),
-                "sort_order": [
-                    "funding_accepted",
-                    "annualized_net_credit_yield",
-                    "premium_funding_score",
-                    "upside_lift_to_call_cost",
-                    "upside_lift_to_put_credit",
-                    "call_cost_to_put_credit",
-                    "combo_spread_ratio",
-                    "combo_net_credit",
-                    "scenario_score",
-                    "annualized_scenario_score",
-                    "upside_breakeven_pct_above_spot",
-                    "net_credit",
-                    "put_otm_pct",
-                    "min_leg_open_interest",
-                    "call_delta",
-                ],
-            }
-        except Exception as exc:
-            rank_key = {"error": f"{type(exc).__name__}: {exc}"}
-
+def _sealed_ranking_row(row: dict[str, Any]) -> dict[str, Any]:
+    facts = row.get("sealed_facts")
+    facts = facts if isinstance(facts, dict) else {}
     return {
-        "rank": rank,
-        "account": _text(row.get("account") or account_hint).lower() or None,
-        "strategy": strategy,
-        "mode": mode,
-        "symbol": symbol,
-        "contract_symbol": _text(row.get("contract_symbol") or row.get("option_symbol")) or None,
-        "option_type": _text(row.get("option_type")).lower() or None,
-        "expiration": _text(row.get("expiration") or row.get("exp")) or None,
-        "strike": _first_float(row, "strike"),
-        "spot": _first_float(row, "spot"),
-        "metrics": _ranking_metrics(row),
-        "cash_constraint": _cash_constraint(row),
-        "configured_thresholds": _strategy_thresholds(strategy_cfg),
-        "rank_explanation": rank_explanation,
-        "combo_yield_rank": rank_key,
+        "rank": row.get("rank"),
+        "account": row.get("account"),
+        "strategy": row.get("strategy"),
+        "mode": row.get("mode"),
+        "symbol": row.get("symbol"),
+        "contract_symbol": row.get("contract_symbol"),
+        "option_type": _text(facts.get("option_type")).lower() or row.get("mode"),
+        "expiration": _text(facts.get("expiration") or facts.get("exp")) or None,
+        "strike": _first_float(facts, "strike"),
+        "spot": _first_float(facts, "spot"),
+        "metrics": _ranking_metrics(facts),
+        "cash_constraint": _cash_constraint(facts),
+        "configured_thresholds": {},
+        "rank_explanation": row.get("rank_explanation"),
+        "combo_yield_rank": (
+            row.get("rank_explanation")
+            if row.get("strategy") == "combo_yield"
+            else None
+        ),
     }
 
 
@@ -1191,177 +1072,9 @@ def _cash_constraint(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _strategy_mode(strategy: str | None) -> str | None:
-    if strategy == "sell_put":
-        return "put"
-    if strategy == "sell_call":
-        return "call"
-    if strategy in {"combo_yield", "yield_enhancement"}:
-        return "enhancement"
-    return None
-
-
-def _strategy_settings_for_symbol(cfg: dict[str, Any], *, symbol: str | None, strategy: str | None) -> dict[str, Any]:
-    if not strategy:
-        return {}
-    symbol_cfg = _symbol_config(cfg, symbol)
-    merged: dict[str, Any] = {}
-    templates = _template_map(cfg)
-    for name in _template_names(symbol_cfg.get("use")):
-        template = _dict_or_empty(templates.get(name))
-        merged.update(_dict_or_empty(template.get(strategy)))
-    merged.update(_dict_or_empty(symbol_cfg.get(strategy)))
-    return merged
-
-
-def _symbol_config(cfg: dict[str, Any], symbol: str | None) -> dict[str, Any]:
-    if not symbol:
-        return {}
-    target = str(symbol).strip().upper()
-    symbols = cfg.get("symbols") if isinstance(cfg, dict) else None
-    if not isinstance(symbols, list):
-        return {}
-    for item in symbols:
-        symbol_cfg = _dict_or_empty(item)
-        if str(symbol_cfg.get("symbol") or "").strip().upper() == target:
-            return symbol_cfg
-    return {}
-
-
-def _template_map(cfg: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    out.update(_dict_or_empty(_nested(cfg, "defaults", "templates")))
-    out.update(_dict_or_empty(cfg.get("templates") if isinstance(cfg, dict) else None))
-    return out
-
-
-def _template_names(value: Any) -> list[str]:
-    raw_items = value if isinstance(value, list) else ([value] if value else [])
-    return [str(item).strip() for item in raw_items if str(item or "").strip()]
-
-
-def _strategy_thresholds(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "enabled",
-        "min_dte",
-        "max_dte",
-        "min_strike",
-        "max_strike",
-        "min_annualized_net_return",
-        "min_net_income",
-        "min_open_interest",
-        "min_volume",
-        "max_spread_ratio",
-        "min_strike_cost_multiplier",
-        "min_combo_net_credit",
-        "max_call_cost_to_put_credit",
-        "max_combo_spread_ratio",
-    )
-    return {key: strategy_cfg.get(key) for key in keys if key in strategy_cfg}
-
-
-def _select_candidate_fields(row: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "symbol",
-        "account",
-        "strategy",
-        "mode",
-        "option_type",
-        "expiration",
-        "dte",
-        "delta",
-        "strike",
-        "spot",
-        "annualized_return",
-        "annualized_net_return",
-        "annualized_net_return_on_cash_basis",
-        "annualized_net_premium_return",
-        "net_income",
-        "otm_pct",
-        "spread_ratio",
-        "open_interest",
-        "volume",
-        "score",
-        "strategy_score",
-        "cash_required_cny",
-        "cash_free_cny",
-        "cash_free_total_cny",
-        "cash_required_usd",
-        "cash_free_usd",
-        "status",
-        "filter_reason",
-    )
-    return {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
-
-
-def _select_reject_fields(row: dict[str, Any], *, account_hint: str | None) -> dict[str, Any]:
-    keys = (
-        "account",
-        "symbol",
-        "contract_symbol",
-        "expiration",
-        "strike",
-        "mode",
-        "reject_stage",
-        "reject_rule",
-        "engine_reject_stage",
-        "engine_reject_reason",
-        "metric_value",
-        "threshold",
-    )
-    out = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
-    if "account" not in out and account_hint:
-        out["account"] = account_hint
-    return out
-
-
 def _select_trace_fields(row: dict[str, Any]) -> dict[str, Any]:
     keys = ("run_id", "account", "symbol", "function", "mode", "status", "stage", "rule", "metric_value", "threshold", "message", "evidence_path")
     return {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
-
-
-def _collect_metric_values(row: dict[str, Any], values: dict[str, list[float]]) -> None:
-    for key in (
-        "dte",
-        "delta",
-        "annualized_return",
-        "annualized_net_return",
-        "annualized_net_return_on_cash_basis",
-        "annualized_net_premium_return",
-        "annualized_net_credit_yield",
-        "annualized_scenario_score",
-        "net_income",
-        "net_credit",
-        "combo_net_credit",
-        "otm_pct",
-        "put_otm_pct",
-        "call_otm_pct",
-        "spread_ratio",
-        "combo_spread_ratio",
-        "open_interest",
-        "volume",
-        "cash_required_cny",
-        "cash_free_cny",
-        "cash_free_total_cny",
-        "cash_required_usd",
-        "cash_free_usd",
-        "score",
-        "strategy_score",
-        "premium_funding_score",
-        "scenario_score",
-    ):
-        parsed = _float_or_none(row.get(key))
-        if parsed is not None:
-            values.setdefault(key, []).append(parsed)
-
-
-def _metric_ranges(values: dict[str, list[float]]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, items in values.items():
-        if not items:
-            continue
-        out[key] = {"min": min(items), "max": max(items), "avg": sum(items) / len(items)}
-    return out
 
 
 def _count_text(counter: Counter[str], value: Any) -> None:
@@ -1379,17 +1092,6 @@ def _account_hint(path: Path) -> str | None:
         if idx + 1 < len(parts):
             account = str(parts[idx + 1]).strip().lower()
             return account or None
-    return None
-
-
-def _strategy_hint(path: Path) -> str | None:
-    name = path.name.lower()
-    if "combo_yield" in name or "yield_enhancement" in name:
-        return "combo_yield"
-    if "sell_call" in name:
-        return "sell_call"
-    if "sell_put" in name:
-        return "sell_put"
     return None
 
 

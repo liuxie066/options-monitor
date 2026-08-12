@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime
+import json
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -9,16 +10,18 @@ from typing import Any
 from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.capture import (
     ShadowReplaySourceSelection,
-    accepted_candidate_snapshots,
-    candidate_paths_from_selection,
-    candidate_snapshots_from_filter_decisions,
+    candidate_evidence_coverage,
+    candidate_evidence_from_selection,
+    candidate_replay_observations_from_selection,
     dedupe_snapshots,
-    filter_decision_rows,
     mark_paths_from_selection,
     outcome_paths_from_selection,
     read_replay_rows,
-    reject_log_paths_from_selection,
-    trace_paths_from_selection,
+)
+from src.application.candidate_evidence_history import (
+    CANDIDATE_EVIDENCE_STATES,
+    NOT_SCANNED,
+    SUPPORTED,
 )
 from src.application.shadow_replay.common import (
     MARK_PATH_SCHEMA_VERSION,
@@ -114,7 +117,12 @@ def load_shadow_replay_observed_evidence(
     market_filter = text(market).lower() or None
     if dataset is not None and str(dataset).strip():
         evidence = _load_dataset_evidence(dataset, base=base)
-        coverage = _dataset_coverage(evidence=evidence, dataset=dataset)
+        coverage = _dataset_coverage(
+            evidence=evidence,
+            dataset=dataset,
+            accounts=account_filter,
+            market=market_filter,
+        )
     else:
         start = _parse_date_arg(start_date, label="start_date") if start_date else None
         end = _parse_date_arg(end_date, label="end_date") if end_date else None
@@ -125,6 +133,8 @@ def load_shadow_replay_observed_evidence(
             runs_root=runs_root,
             start=start,
             end=end,
+            accounts=account_filter,
+            market=market_filter,
         )
     evidence["mark_snapshots"] = bind_legacy_decision_evidence(
         list(evidence["candidate_snapshots"]),
@@ -144,6 +154,11 @@ def load_shadow_replay_observed_evidence(
         accounts=account_filter,
         market=market_filter,
     )
+    rank_snapshots = _filter_candidates(
+        evidence.get("rank_snapshots") or [],
+        accounts=account_filter,
+        market=market_filter,
+    )
     mark_snapshots = _filter_replay_observations(
         evidence["mark_snapshots"],
         scoped_candidates=candidate_snapshots,
@@ -159,6 +174,7 @@ def load_shadow_replay_observed_evidence(
     return {
         "candidate_snapshots": candidate_snapshots,
         "filter_decisions": filter_decisions,
+        "rank_snapshots": rank_snapshots,
         "mark_snapshots": mark_snapshots,
         "outcome_facts": outcome_facts,
         "source": evidence.get("source") or {},
@@ -322,9 +338,16 @@ def _load_dataset_evidence(dataset: str | Path, *, base: Path) -> dict[str, Any]
         candidates = freeze_decision_identities(
             read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
         )
+        manifest: dict[str, Any] = {}
+        manifest_path = dataset_dir / "manifest.json"
+        if manifest_path.is_file():
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                manifest = payload
         result = {
             "candidate_snapshots": candidates,
             "filter_decisions": read_jsonl(dataset_dir / "filter_decisions.jsonl"),
+            "rank_snapshots": read_jsonl(dataset_dir / "rank_snapshots.jsonl"),
             "mark_snapshots": bind_legacy_decision_evidence(
                 candidates,
                 read_jsonl(dataset_dir / "mark_path_snapshots.jsonl"),
@@ -338,16 +361,57 @@ def _load_dataset_evidence(dataset: str | Path, *, base: Path) -> dict[str, Any]
                 "dataset_dir": safe_rel(dataset_dir, base=base),
             },
             "integrity": integrity,
+            "manifest": manifest,
         }
         validate_dataset_integrity(dataset_dir, require_manifest=False)
         return result
 
 
-def _dataset_coverage(*, evidence: dict[str, Any], dataset: str | Path) -> dict[str, Any]:
+def _dataset_coverage(
+    *,
+    evidence: dict[str, Any],
+    dataset: str | Path,
+    accounts: set[str],
+    market: str | None,
+) -> dict[str, Any]:
     dataset_dir = dataset_dir_from_arg(dataset)
-    candidate_count = len(evidence["candidate_snapshots"])
+    candidate_count = len(
+        _filter_candidates(
+            evidence["candidate_snapshots"],
+            accounts=accounts,
+            market=market,
+        )
+    )
     integrity = evidence.get("integrity") or {}
     integrity_verified = integrity.get("status") == "verified"
+    manifest = evidence.get("manifest") or {}
+    raw_source_coverage = (manifest.get("source") or {}).get(
+        "candidate_evidence_coverage"
+    )
+    source_coverage = (
+        _scope_candidate_evidence_coverage(
+            raw_source_coverage,
+            accounts=accounts,
+            market=market,
+        )
+        if isinstance(raw_source_coverage, dict)
+        else None
+    )
+    authority_supported = bool(
+        isinstance(source_coverage, dict)
+        and source_coverage.get("strict_replay_authority") is True
+    )
+    strict = candidate_count > 0 and integrity_verified and authority_supported
+    if not integrity_verified:
+        reason = "dataset_integrity_unverified"
+    elif not isinstance(source_coverage, dict):
+        reason = "candidate_evidence_coverage_missing"
+    elif not authority_supported:
+        reason = "candidate_evidence_coverage_incomplete"
+    elif candidate_count <= 0:
+        reason = "candidate_universe_missing"
+    else:
+        reason = "dataset_candidate_universe_ready"
     return {
         "mode": "dataset",
         "dataset_dir": str(dataset_dir),
@@ -355,16 +419,65 @@ def _dataset_coverage(*, evidence: dict[str, Any], dataset: str | Path) -> dict[
         "requested_end_date": None,
         "available_scanned_runs": None,
         "selected_scanned_runs": None,
-        "strict_backtest_allowed": candidate_count > 0 and integrity_verified,
-        "reason": (
-            "dataset_candidate_universe_ready"
-            if candidate_count > 0 and integrity_verified
-            else "dataset_integrity_unverified"
-            if candidate_count > 0
-            else "candidate_universe_missing"
-        ),
+        "strict_backtest_allowed": strict,
+        "reason": reason,
+        "candidate_evidence_coverage": source_coverage,
         "dataset_integrity": integrity,
         "missing_prefix_days": 0,
+    }
+
+
+def _scope_candidate_evidence_coverage(
+    coverage: dict[str, Any],
+    *,
+    accounts: set[str],
+    market: str | None,
+) -> dict[str, Any]:
+    """Recompute authority for the requested evidence scope.
+
+    A classification with no market metadata remains in scope because its
+    market cannot be disproved. This preserves fail-closed behavior for older
+    unsupported history while allowing known other-market evidence to be
+    excluded.
+    """
+
+    if not accounts and not market:
+        return dict(coverage)
+    scoped: list[dict[str, Any]] = []
+    for raw in coverage.get("accounts") or []:
+        if not isinstance(raw, dict):
+            continue
+        classification = dict(raw)
+        account = text(classification.get("account")).lower()
+        if accounts and account not in accounts:
+            continue
+        known_markets = {
+            text(value).lower()
+            for value in classification.get("markets") or []
+            if text(value)
+        }
+        if market and known_markets and market not in known_markets:
+            continue
+        scoped.append(classification)
+    counts = {
+        state: sum(item.get("status") == state for item in scoped)
+        for state in sorted(CANDIDATE_EVIDENCE_STATES)
+    }
+    strict = bool(scoped) and all(item.get("status") == SUPPORTED for item in scoped)
+    return {
+        **{
+            key: value
+            for key, value in coverage.items()
+            if key not in {"accounts", "counts", "strict_replay_authority", "reason_code"}
+        },
+        "accounts": scoped,
+        "counts": counts,
+        "strict_replay_authority": strict,
+        "reason_code": (
+            "all_accounts_manifest_supported"
+            if strict
+            else "candidate_evidence_coverage_incomplete"
+        ),
     }
 
 
@@ -374,21 +487,40 @@ def _load_run_window_evidence(
     runs_root: str | Path | None,
     start: date | None,
     end: date | None,
+    accounts: set[str],
+    market: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     root = Path(runs_root).expanduser().resolve() if runs_root else (base / "output_runs").resolve()
     all_runs = _discover_runs(root)
-    evidence_runs = [row for row in all_runs if row["has_scan_artifacts"]]
+    evidence_runs: list[dict[str, Any]] = []
+    for row in all_runs:
+        if not row["has_scan_artifacts"]:
+            continue
+        scoped_coverage = _scope_candidate_evidence_coverage(
+            row["candidate_evidence_coverage"],
+            accounts=accounts,
+            market=market,
+        )
+        if not scoped_coverage.get("accounts"):
+            continue
+        evidence_runs.append(
+            {**row, "scoped_candidate_evidence_coverage": scoped_coverage}
+        )
     selected = [row for row in evidence_runs if _in_window(row["run_date"], start=start, end=end)]
     candidate_snapshots: list[dict[str, Any]] = []
     filter_decisions: list[dict[str, Any]] = []
     mark_snapshots: list[dict[str, Any]] = []
     outcome_facts: list[dict[str, Any]] = []
+    rank_snapshots: list[dict[str, Any]] = []
+    selected_coverages: list[dict[str, Any]] = []
     for run in selected:
         run_evidence = _run_evidence(base=base, runs_root=root, run_dir=run["path"])
         candidate_snapshots.extend(run_evidence["candidate_snapshots"])
         filter_decisions.extend(run_evidence["filter_decisions"])
         mark_snapshots.extend(run_evidence["mark_snapshots"])
         outcome_facts.extend(run_evidence["outcome_facts"])
+        rank_snapshots.extend(run_evidence["rank_snapshots"])
+        selected_coverages.append(run["scoped_candidate_evidence_coverage"])
     coverage = _run_window_coverage(
         root=root,
         all_runs=all_runs,
@@ -396,6 +528,7 @@ def _load_run_window_evidence(
         selected=selected,
         start=start,
         end=end,
+        selected_coverages=selected_coverages,
     )
     return (
         {
@@ -403,6 +536,7 @@ def _load_run_window_evidence(
             "filter_decisions": filter_decisions,
             "mark_snapshots": mark_snapshots,
             "outcome_facts": outcome_facts,
+            "rank_snapshots": rank_snapshots,
             "source": {"mode": "runs", "runs_root": safe_rel(root, base=base)},
         },
         coverage,
@@ -411,15 +545,11 @@ def _load_run_window_evidence(
 
 def _run_evidence(*, base: Path, runs_root: Path, run_dir: Path) -> dict[str, Any]:
     selection = ShadowReplaySourceSelection(repo_root=base, runs_root=runs_root, run_dir=run_dir)
-    candidate_paths = candidate_paths_from_selection(selection)
-    trace_paths = trace_paths_from_selection(selection)
-    reject_log_paths = reject_log_paths_from_selection(selection)
+    observations = candidate_replay_observations_from_selection(selection)
     mark_paths = mark_paths_from_selection(selection)
     outcome_paths = outcome_paths_from_selection(selection)
-    accepted = accepted_candidate_snapshots(candidate_paths, base=base)
-    decisions = filter_decision_rows(trace_paths, reject_log_paths, base=base)
-    rejected = candidate_snapshots_from_filter_decisions(decisions)
-    candidates = dedupe_snapshots(accepted + rejected)
+    candidates = list(observations["candidate_snapshots"])
+    decisions = list(observations["filter_decisions"])
     for row in candidates + decisions:
         row.setdefault("run_id", run_dir.name)
     marks = read_replay_rows(mark_paths, schema_version=MARK_PATH_SCHEMA_VERSION, base=base)
@@ -429,8 +559,10 @@ def _run_evidence(*, base: Path, runs_root: Path, run_dir: Path) -> dict[str, An
     return {
         "candidate_snapshots": candidates,
         "filter_decisions": decisions,
+        "rank_snapshots": list(observations["rank_snapshots"]),
         "mark_snapshots": bind_legacy_decision_evidence(candidates, marks),
         "outcome_facts": bind_legacy_decision_evidence(candidates, outcomes),
+        "candidate_evidence_coverage": observations["coverage"],
     }
 
 
@@ -441,19 +573,18 @@ def _discover_runs(root: Path) -> list[dict[str, Any]]:
     for child in sorted((path.resolve() for path in root.iterdir() if path.is_dir()), key=lambda item: item.name):
         run_date = _run_date(child.name)
         selection = ShadowReplaySourceSelection(repo_root=root.parent, runs_root=root, run_dir=child)
-        candidate_count = len(candidate_paths_from_selection(selection))
-        trace_count = len(trace_paths_from_selection(selection))
-        reject_count = len(reject_log_paths_from_selection(selection))
-        has_scan_artifacts = bool(candidate_count or trace_count or reject_count)
+        evidence = candidate_evidence_from_selection(selection)
+        coverage = candidate_evidence_coverage(evidence)
+        has_scan_artifacts = any(
+            item.classification["status"] != NOT_SCANNED for item in evidence
+        )
         out.append(
             {
                 "run_id": child.name,
                 "path": child,
                 "run_date": run_date,
                 "has_scan_artifacts": has_scan_artifacts,
-                "candidate_path_count": candidate_count,
-                "trace_path_count": trace_count,
-                "reject_log_path_count": reject_count,
+                "candidate_evidence_coverage": coverage,
             }
         )
     return out
@@ -467,6 +598,7 @@ def _run_window_coverage(
     selected: list[dict[str, Any]],
     start: date | None,
     end: date | None,
+    selected_coverages: list[dict[str, Any]],
 ) -> dict[str, Any]:
     selected_dates = sorted({row["run_date"] for row in selected if row["run_date"] is not None})
     first_selected = selected_dates[0] if selected_dates else None
@@ -483,6 +615,22 @@ def _run_window_coverage(
     elif start and first_selected is None:
         strict = False
         reason = "requested_start_date_has_no_scan_artifacts"
+    elif not all(
+        coverage.get("strict_replay_authority") is True
+        for coverage in selected_coverages
+    ):
+        strict = False
+        reason = "candidate_evidence_coverage_incomplete"
+
+    status_counts: Counter[str] = Counter()
+    account_classifications: list[dict[str, Any]] = []
+    for coverage in selected_coverages:
+        status_counts.update(coverage.get("counts") or {})
+        account_classifications.extend(
+            row
+            for row in coverage.get("accounts") or []
+            if isinstance(row, dict)
+        )
 
     first_available = next((row["run_date"] for row in evidence_runs if row["run_date"] is not None), None)
     last_available = next((row["run_date"] for row in reversed(evidence_runs) if row["run_date"] is not None), None)
@@ -502,6 +650,15 @@ def _run_window_coverage(
         "strict_backtest_allowed": strict,
         "missing_prefix_days": missing_prefix_days,
         "reason": reason,
+        "candidate_evidence_coverage": {
+            "status_counts": dict(sorted(status_counts.items())),
+            "accounts": account_classifications,
+            "strict_replay_authority": bool(selected_coverages)
+            and all(
+                coverage.get("strict_replay_authority") is True
+                for coverage in selected_coverages
+            ),
+        },
     }
 
 
