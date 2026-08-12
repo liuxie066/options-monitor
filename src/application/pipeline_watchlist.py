@@ -34,14 +34,12 @@ from src.application.yield_enhancement_config import (
     COMBO_YIELD_CONFIG_KEY,
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
-    wants_yield_enhancement_separate,
 )
 from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
     load_strategy_scan_status_index_v2,
-    publish_strategy_scan_status_index,
     publish_strategy_scan_status_index_v2,
 )
 from src.application.opening_candidate_snapshot import (
@@ -687,7 +685,10 @@ def run_watchlist_pipeline(
                 }
             ),
         ]
-        if wants_yield_enhancement_separate(resolve_yield_enhancement_cfg(item0)):
+        if derive_yield_enhancement_policy(
+            resolve_yield_enhancement_cfg(item0),
+            market=symbol_market(symbol),
+        ).enabled:
             rows.append(
                 normalize_processor_row(
                     {
@@ -824,19 +825,6 @@ def run_watchlist_pipeline(
                 cfg.get("portfolio")
                 if isinstance(cfg.get("portfolio"), dict)
                 else {}
-            )
-            publish_strategy_scan_status_index(
-                report_dir=report_dir,
-                run_id=str(source_producer_run_id),
-                account=str(portfolio_cfg.get("account") or ""),
-                expected=(
-                    {
-                        "market": item["market"],
-                        "symbol": item["symbol"],
-                        "strategy_family": item["strategy_family"],
-                    }
-                    for item in expected_strategy_statuses
-                ),
             )
             if str(account_config_sha256 or "").strip():
                 publish_strategy_scan_status_index_v2(

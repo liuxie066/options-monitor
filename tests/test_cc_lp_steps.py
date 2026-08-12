@@ -159,7 +159,6 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
     df = run_cc_lp_scan(
         symbol="NVDA",
         required_data_dir=required_data,
-        report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
@@ -186,7 +185,6 @@ def test_run_cc_lp_scan_skips_without_stock(tmp_path: Path) -> None:
     df = run_cc_lp_scan(
         symbol="NVDA",
         required_data_dir=required_data,
-        report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
@@ -206,7 +204,6 @@ def test_run_cc_lp_scan_rejects_retention_below_floor(tmp_path: Path) -> None:
     df = run_cc_lp_scan(
         symbol="NVDA",
         required_data_dir=required_data,
-        report_dir=tmp_path,
         sell_call_cfg={"enabled": True},
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
@@ -232,7 +229,6 @@ def test_run_cc_lp_scan_inherits_sell_call_underwriting_gate(tmp_path: Path) -> 
     df = run_cc_lp_scan(
         symbol="NVDA",
         required_data_dir=required_data,
-        report_dir=tmp_path,
         sell_call_cfg={
             "enabled": True,
             "min_annualized_net_premium_return": 0.10,
@@ -259,18 +255,13 @@ def test_run_cc_lp_variant_returns_summary(tmp_path: Path) -> None:
         "_global_sell_call_liquidity": {},
     }
     summary = run_cc_lp_variant(
-        base=tmp_path,
-        sym="NVDA",
         symbol="NVDA",
-        symbol_lower="nvda",
         symbol_cfg=symbol_cfg,
-        yield_cfg=resolve_yield_enhancement_cfg(symbol_cfg),
         policy=derive_yield_enhancement_policy(
             resolve_yield_enhancement_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
-        report_dir=tmp_path,
         exchange_rate_converter=_converter(),
         portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
@@ -305,18 +296,13 @@ def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
     }
     captured: list[dict] = []
     summary = run_cc_lp_variant(
-        base=tmp_path,
-        sym="NVDA",
         symbol="NVDA",
-        symbol_lower="nvda",
         symbol_cfg=symbol_cfg,
-        yield_cfg=resolve_yield_enhancement_cfg(symbol_cfg),
         policy=derive_yield_enhancement_policy(
             resolve_yield_enhancement_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
-        report_dir=tmp_path,
         exchange_rate_converter=_converter(),
         portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
@@ -332,11 +318,12 @@ def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
                 }
             ]
         ),
-        combo_pairs_sink_fn=captured.extend,
+        combo_evidence_sink_fn=captured.append,
     )
     assert summary["status"] == "candidates_found"
     assert len(captured) == 1
     assert captured[0]["variant"] == "cc_lp"
+    assert captured[0]["ranked_pairs"][0]["candidate_pair_id"] == "cc_lp:NVDA:C:P"
 
 
 def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
@@ -352,18 +339,13 @@ def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
         "_global_sell_call_liquidity": {},
     }
     summary = run_cc_lp_variant(
-        base=tmp_path,
-        sym="NVDA",
         symbol="NVDA",
-        symbol_lower="nvda",
         symbol_cfg=symbol_cfg,
-        yield_cfg=resolve_yield_enhancement_cfg(symbol_cfg),
         policy=derive_yield_enhancement_policy(
             resolve_yield_enhancement_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
-        report_dir=tmp_path,
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(),

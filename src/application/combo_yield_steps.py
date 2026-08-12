@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
-from pandas.errors import EmptyDataError
 
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
@@ -28,22 +27,20 @@ from src.application.cc_lp_steps import (
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
-    candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
 from src.application.candidate_scanning import (
     evidence_summary_from_decisions,
     project_evidence_scan_status,
 )
-from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
-from src.application.report_labels import (
-    add_sell_put_labels,
-    label_sell_put_candidates,
+from src.application.combo_yield_candidate_snapshot import (
+    COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
 )
+from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+from src.application.report_labels import label_sell_put_candidates
 from src.application.report_summaries import summarize_yield_enhancement
 from src.application.scan_sell_put import run_sell_put_scan
 from src.application.sell_put_call_helper import (
-    attach_best_linked_calls,
     build_yield_enhancement_rank_shadow,
     find_sell_put_yield_enhancement_pairs,
     get_yield_enhancement_pair_diagnostics,
@@ -55,26 +52,20 @@ from src.application.yield_enhancement_config import (
     YieldEnhancementPolicy,
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
-    wants_yield_enhancement_inline,
-    wants_yield_enhancement_separate,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.infrastructure.io_utils import atomic_write_text, safe_read_csv
 
 
 COMBO_YIELD_FAMILY = "combo_yield"
+_COMBO_YIELD_CANDIDATE_EVIDENCE_PATH = (
+    f"state/{COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE}"
+)
+_CANDIDATE_FILTER_TRACE_EVIDENCE_PATH = "candidate_filter_trace.jsonl"
 
 
 @dataclass(frozen=True)
 class ComboYieldResult:
     recommended_pairs: pd.DataFrame
-    separate_enabled: bool
-    candidates_path: Path
-    alerts_path: Path
-
-
-def _atomic_write_dataframe(path: Path, df: pd.DataFrame) -> None:
-    atomic_write_text(path, df.to_csv(index=False))
 
 
 def _utc_now() -> datetime:
@@ -131,40 +122,23 @@ def enrich_combo_funding_cash(
     symbol: str,
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
-    out_path: Path | None = None,
-    **_compat: Any,
 ) -> pd.DataFrame:
     """Attach Funding Put cash facts without pre-empting Candidate Engine."""
 
-    # ``out_path`` retains the historical ``*_cash_filtered.csv`` audit name.
-    # Its rows are a cash-enriched universe, not a formal candidate authority;
-    # Candidate Engine underwriting below owns the only capacity rejection.
     return enrich_sell_put_candidates_with_cash(
         df_labeled=df_labeled,
         symbol=symbol,
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
-        out_path=out_path,
     )
 
 
-# Read-only Shadow Replay imports the historical name. Keep the import surface
-# stable while making both paths use the same enrichment-only authority model.
-enrich_and_filter_combo_funding_cash = enrich_combo_funding_cash
-
-
-def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
-    return ComboYieldResult(
-        recommended_pairs=pd.DataFrame(),
-        separate_enabled=False,
-        candidates_path=(report_dir / f"{symbol_lower}_combo_yield_candidates.csv").resolve(),
-        alerts_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
-    )
+def _empty_result() -> ComboYieldResult:
+    return ComboYieldResult(recommended_pairs=pd.DataFrame())
 
 
 def run_combo_yield_scan_and_summarize(
     *,
-    base: Path,
     sym: str,
     symbol: str,
     symbol_lower: str,
@@ -172,8 +146,6 @@ def run_combo_yield_scan_and_summarize(
     yield_enhancement_cfg: dict[str, Any],
     yield_sp: dict[str, Any],
     yield_enhancement_policy: YieldEnhancementPolicy,
-    df_sell_put_labeled: pd.DataFrame,
-    sell_put_labeled_path: Path,
     required_data_dir: Path,
     report_dir: Path,
     yield_window: CandidateWindowDefaults,
@@ -183,10 +155,8 @@ def run_combo_yield_scan_and_summarize(
     top_n: int,
     is_scheduled: bool,
     run_put_scan_fn: Callable[..., Any] = run_sell_put_scan,
-    label_put_candidates_fn: Callable[..., Any] = add_sell_put_labels,
     find_pairs_fn: Callable[..., pd.DataFrame] = find_sell_put_yield_enhancement_pairs,
     select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_yield_enhancement_pairs,
-    attach_calls_fn: Callable[..., pd.DataFrame] = attach_best_linked_calls,
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
@@ -195,22 +165,19 @@ def run_combo_yield_scan_and_summarize(
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
-    result = _empty_result(report_dir=report_dir, symbol_lower=symbol_lower)
+    result = _empty_result()
     if not bool(yield_enhancement_policy.enabled):
         return result, None
 
-    symbol_yield_put_universe = (report_dir / f"{symbol_lower}_combo_yield_put_universe.csv").resolve()
-    symbol_yield_put_universe_labeled = (
-        report_dir / f"{symbol_lower}_combo_yield_put_universe_labeled.csv"
-    ).resolve()
-    # Compatibility-only audit filename. The formal Funding Put path remains
-    # typed and in memory, and Candidate Engine owns the capacity filter.
-    symbol_yield_put_universe_cash_audit = (
-        report_dir / f"{symbol_lower}_combo_yield_put_universe_cash_filtered.csv"
-    ).resolve()
-    symbol_yield_put_universe_underwritten = (
-        report_dir / f"{symbol_lower}_combo_yield_put_universe_underwritten.csv"
-    ).resolve()
+    trace_path = (report_dir / "candidate_filter_trace.jsonl").resolve()
+    scope = infer_trace_scope_from_path(trace_path)
+    trace_evidence_path = (
+        _COMBO_YIELD_CANDIDATE_EVIDENCE_PATH
+        if combo_evidence_sink_fn is not None
+        and scope.get("run_id")
+        and scope.get("account")
+        else _CANDIDATE_FILTER_TRACE_EVIDENCE_PATH
+    )
     funding_put_min_annualized_return = resolve_min_annualized_net_return(
         symbol_cfg={"sell_put": yield_sp},
     )
@@ -219,7 +186,6 @@ def run_combo_yield_scan_and_summarize(
     scanned_put_universe = run_put_scan_fn(
         symbols=[sym],
         input_root=required_data_dir,
-        output=symbol_yield_put_universe,
         min_dte=yield_window.min_dte,
         max_dte=yield_window.max_dte,
         min_annualized_net_return=funding_put_min_annualized_return,
@@ -231,10 +197,8 @@ def run_combo_yield_scan_and_summarize(
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=COMBO_YIELD_FAMILY,
         strategy_profile=yield_enhancement_policy.mode,
-        quiet=True,
         calculation_decision_sink_fn=funding_put_decisions.extend,
     )
-    label_put_candidates_fn(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
     if not isinstance(scanned_put_universe, pd.DataFrame):
         raise RuntimeError(
             "Combo Yield funding-put scan did not return a typed candidate universe"
@@ -259,9 +223,6 @@ def run_combo_yield_scan_and_summarize(
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            out_path=symbol_yield_put_universe_cash_audit,
-            strategy_family=COMBO_YIELD_FAMILY,
-            strategy_profile=yield_enhancement_policy.mode,
         )
     df_yield_put_candidates_for_pairs = df_yield_put_cash_enriched
     if not df_yield_put_cash_enriched.empty:
@@ -273,10 +234,6 @@ def run_combo_yield_scan_and_summarize(
             exchange_rate_converter=exchange_rate_converter,
             decision_sink_fn=funding_put_decisions.extend,
         )
-        _atomic_write_dataframe(
-            symbol_yield_put_universe_underwritten,
-            df_yield_put_candidates_for_pairs,
-        )
 
     raw_yield_pairs_df = find_pairs_fn(
         df_candidates=df_yield_put_candidates_for_pairs,
@@ -285,22 +242,14 @@ def run_combo_yield_scan_and_summarize(
         yield_enhancement_cfg=yield_enhancement_cfg,
         sell_put_cfg=yield_sp,
         global_yield_enhancement_liquidity=(symbol_cfg.get("_global_yield_enhancement_liquidity") or {}),
-        output_path=None,
     )
-    scope = infer_trace_scope_from_path(result.candidates_path)
-    pair_diagnostics_path = (report_dir / f"{symbol_lower}_combo_yield_pair_diagnostics.csv").resolve()
-    try:
-        pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
-        pair_diagnostics["run_id"] = scope.get("run_id")
-        pair_diagnostics["account"] = scope.get("account")
-        _atomic_write_dataframe(pair_diagnostics_path, pair_diagnostics)
-    except Exception as exc:
-        raise RuntimeError(f"failed to persist Combo Yield pair diagnostics: {pair_diagnostics_path}") from exc
+    pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
+    pair_diagnostics["run_id"] = scope.get("run_id")
+    pair_diagnostics["account"] = scope.get("account")
 
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
-    occurrence_scope = infer_trace_scope_from_path(result.candidates_path)
-    occurrence_account = str(occurrence_scope.get("account") or "").strip().lower()
-    occurrence_run_id = str(occurrence_scope.get("run_id") or "").strip()
+    occurrence_account = str(scope.get("account") or "").strip().lower()
+    occurrence_run_id = str(scope.get("run_id") or "").strip()
     if occurrence_account and occurrence_run_id and not recommended_yield_pairs_df.empty:
         recommended_yield_pairs_df = attach_combo_candidate_occurrences(
             recommended_yield_pairs_df,
@@ -310,11 +259,6 @@ def run_combo_yield_scan_and_summarize(
             generated_at_utc=now_utc_fn(),
         )
     rank_shadow = build_yield_enhancement_rank_shadow(raw_yield_pairs_df)
-    rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
-    try:
-        _atomic_write_dataframe(rank_shadow_path, rank_shadow)
-    except Exception as exc:
-        raise RuntimeError(f"failed to persist Combo Yield rank shadow: {rank_shadow_path}") from exc
 
     trace_rows = [
         build_candidate_filter_trace_row(
@@ -331,7 +275,7 @@ def run_combo_yield_scan_and_summarize(
             metric_value=int(count),
             threshold=0,
             message=f"combo yield pair rejection count: {reason}",
-            evidence_path=result.candidates_path.name,
+            evidence_path=trace_evidence_path,
             config_values={
                 **yield_enhancement_policy.to_fields(),
                 "funding_put_min_annualized_return": funding_put_min_annualized_return,
@@ -375,29 +319,16 @@ def run_combo_yield_scan_and_summarize(
             metric_value=len(recommended_yield_pairs_df),
             threshold=yield_threshold,
             message="combo yield pair selection",
-            evidence_path=result.candidates_path.name,
+            evidence_path=trace_evidence_path,
             config_values={
                 **yield_enhancement_policy.to_fields(),
                 "funding_put_min_annualized_return": funding_put_min_annualized_return,
             },
         )
     )
-    append_candidate_filter_trace_rows(candidate_trace_path_for_output(result.candidates_path), trace_rows)
+    append_candidate_filter_trace_rows(trace_path, trace_rows)
 
-    separate_enabled = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_separate(yield_enhancement_cfg)
-    inline_enabled = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_inline(yield_enhancement_cfg)
-    if separate_enabled:
-        try:
-            _atomic_write_dataframe(result.candidates_path, recommended_yield_pairs_df)
-        except Exception as exc:
-            raise RuntimeError(f"failed to persist Combo Yield candidates: {result.candidates_path}") from exc
-
-    final_result = ComboYieldResult(
-        recommended_pairs=recommended_yield_pairs_df,
-        separate_enabled=separate_enabled,
-        candidates_path=result.candidates_path,
-        alerts_path=result.alerts_path,
-    )
+    final_result = ComboYieldResult(recommended_pairs=recommended_yield_pairs_df)
     if combo_evidence_sink_fn is not None:
         combo_evidence_sink_fn(
             {
@@ -420,13 +351,11 @@ def run_combo_yield_scan_and_summarize(
             }
         )
 
-    if not is_scheduled and final_result.separate_enabled:
+    if not is_scheduled:
         render_alerts_fn(
-            input_path=final_result.candidates_path,
-            symbol=symbol,
+            candidates=final_result.recommended_pairs,
             top=int(top_n),
-            output_path=final_result.alerts_path,
-            base_dir=base,
+            output_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
         )
 
     evidence = evidence_summary_from_decisions(
@@ -437,58 +366,15 @@ def run_combo_yield_scan_and_summarize(
         evidence=evidence,
         candidate_count=len(final_result.recommended_pairs),
     )
-    summary = None
-    if final_result.separate_enabled:
-        summary = summarize_yield_enhancement(final_result.recommended_pairs, symbol, symbol_cfg=symbol_cfg)
-        summary["_evidence_summary"] = evidence
-        summary["_strategy_status"] = strategy_status
-        summary["_strategy_reason"] = strategy_reason
-    if inline_enabled:
-        attach_calls_fn(
-            df_candidates=df_sell_put_labeled,
-            pairs_df=recommended_yield_pairs_df,
-            out_path=sell_put_labeled_path,
-        )
+    summary = summarize_yield_enhancement(
+        final_result.recommended_pairs,
+        symbol,
+        symbol_cfg=symbol_cfg,
+    )
+    summary["_evidence_summary"] = evidence
+    summary["_strategy_status"] = strategy_status
+    summary["_strategy_reason"] = strategy_reason
     return final_result, summary
-
-
-def materialize_empty_combo_yield_artifacts(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
-    """Replace current Combo Yield outputs with explicit empty artifacts."""
-
-    result = _empty_result(report_dir=report_dir, symbol_lower=symbol_lower)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    sell_put_labeled_path = (report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve()
-    if sell_put_labeled_path.exists() and sell_put_labeled_path.stat().st_size > 0:
-        try:
-            sell_put_labeled = pd.read_csv(sell_put_labeled_path)
-        except EmptyDataError:
-            sell_put_labeled = pd.DataFrame()
-        except Exception as exc:
-            raise RuntimeError(f"failed to read inline Combo Yield artifact: {sell_put_labeled_path}") from exc
-        linked_columns = [
-            column for column in sell_put_labeled.columns if str(column).startswith("linked_call_")
-        ]
-        if linked_columns:
-            try:
-                _atomic_write_dataframe(
-                    sell_put_labeled_path,
-                    sell_put_labeled.drop(columns=linked_columns),
-                )
-            except Exception as exc:
-                raise RuntimeError(f"failed to clear inline Combo Yield artifact: {sell_put_labeled_path}") from exc
-
-    _atomic_write_dataframe(result.candidates_path, pd.DataFrame())
-    atomic_write_text(result.alerts_path, "")
-    for suffix in (
-        "combo_yield_pair_diagnostics.csv",
-        "combo_yield_rank_shadow.csv",
-        "combo_yield_put_universe.csv",
-        "combo_yield_put_universe_labeled.csv",
-        "combo_yield_put_universe_cash_filtered.csv",
-        "combo_yield_put_universe_underwritten.csv",
-    ):
-        _atomic_write_dataframe((report_dir / f"{symbol_lower}_{suffix}").resolve(), pd.DataFrame())
-    return result
 
 
 def empty_combo_yield_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -497,7 +383,6 @@ def empty_combo_yield_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dic
 
 def run_combo_yield_for_symbol_and_summarize(
     *,
-    base: Path,
     sym: str,
     symbol: str,
     symbol_lower: str,
@@ -518,40 +403,25 @@ def run_combo_yield_for_symbol_and_summarize(
     yield_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     policy = derive_yield_enhancement_policy(yield_cfg, market=symbol_market(symbol))
     if not policy.enabled:
-        materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
         return None
 
     variant = str((policy.config or {}).get("variant") or "sp_lc").strip().lower()
     if variant == "cc_lp":
         return run_cc_lp_variant(
-            base=base,
-            sym=sym,
             symbol=symbol,
-            symbol_lower=symbol_lower,
             symbol_cfg=symbol_cfg,
-            yield_cfg=yield_cfg,
             policy=policy,
             required_data_dir=required_data_dir,
-            report_dir=report_dir,
             exchange_rate_converter=exchange_rate_converter,
             portfolio_ctx=portfolio_ctx,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
         )
 
-    materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     yield_window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
     funding_put_cfg = dict(sell_put_cfg)
     funding_put_cfg["strategy"] = policy.derived_from_sell_put_strategy
-    sell_put_labeled_path = (report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve()
-    df_sell_put_labeled = (
-        safe_read_csv(sell_put_labeled_path)
-        if bool(sell_put_cfg.get("enabled", False))
-        else pd.DataFrame()
-    )
-
     _result, summary = run_combo_yield_scan_and_summarize(
-        base=base,
         sym=sym,
         symbol=symbol,
         symbol_lower=symbol_lower,
@@ -559,8 +429,6 @@ def run_combo_yield_for_symbol_and_summarize(
         yield_enhancement_cfg=yield_cfg,
         yield_sp=funding_put_cfg,
         yield_enhancement_policy=policy,
-        df_sell_put_labeled=df_sell_put_labeled,
-        sell_put_labeled_path=sell_put_labeled_path,
         required_data_dir=required_data_dir,
         report_dir=report_dir,
         yield_window=yield_window,
@@ -577,15 +445,10 @@ def run_combo_yield_for_symbol_and_summarize(
 
 def run_cc_lp_variant(
     *,
-    base: Path,
-    sym: str,
     symbol: str,
-    symbol_lower: str,
     symbol_cfg: dict[str, Any],
-    yield_cfg: dict[str, Any],
     policy: YieldEnhancementPolicy,
     required_data_dir: Path,
-    report_dir: Path,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
@@ -593,14 +456,12 @@ def run_cc_lp_variant(
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
-    del base, sym, symbol_lower, yield_cfg
     stock = (portfolio_ctx or {}).get("stock") if isinstance(portfolio_ctx, dict) else None
     sell_call_cfg = dict(symbol_cfg.get("sell_call") or {})
     global_sell_call_liquidity = symbol_cfg.get("_global_sell_call_liquidity") or {}
     df = run_cc_lp_scan_fn(
         symbol=symbol,
         required_data_dir=required_data_dir,
-        report_dir=report_dir,
         sell_call_cfg=sell_call_cfg,
         exchange_rate_converter=exchange_rate_converter,
         portfolio_ctx=portfolio_ctx,

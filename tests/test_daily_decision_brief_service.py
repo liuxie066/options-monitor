@@ -662,7 +662,6 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
     )
     from src.application.strategy_scan_status import (
         publish_strategy_scan_status,
-        publish_strategy_scan_status_index,
         publish_strategy_scan_status_index_v2,
         strategy_status_path,
     )
@@ -711,8 +710,6 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
             }[mode]
             status = str(scope.get("status") or "").lower()
             reason = str(scope.get("reason_code") or "").strip() or None
-            if family == "combo_yield":
-                (account_dir / f"{symbol.lower()}_combo_yield_candidates.csv").touch()
             status_path = strategy_status_path(
                 report_dir=account_dir,
                 symbol=symbol,
@@ -768,19 +765,6 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     "account_config_sha256": "f" * 64,
                 }
             )
-    publish_strategy_scan_status_index(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        expected=(
-            {
-                "market": row["market"],
-                "symbol": row["symbol"],
-                "strategy_family": row["strategy_family"],
-            }
-            for row in expected
-        ),
-    )
     publish_strategy_scan_status_index_v2(
         report_dir=account_dir,
         run_id="run-1",
@@ -915,7 +899,6 @@ def _install_success_empty_strategy_evidence(
     )
     from src.application.strategy_scan_status import (
         publish_strategy_scan_status,
-        publish_strategy_scan_status_index,
     )
 
     account_dir = _account_dir(base)
@@ -1084,18 +1067,6 @@ def _install_success_empty_strategy_evidence(
         source_outcome="success_empty",
         reason_code=reason_code,
     )
-    publish_strategy_scan_status_index(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        expected=[
-            {
-                "market": "US",
-                "symbol": "NVDA",
-                "strategy_family": "sell_put",
-            }
-        ],
-    )
     return completed_at + timedelta(seconds=1), evidence
 
 
@@ -1128,36 +1099,10 @@ def test_success_empty_opening_snapshot_remains_non_actionable(
     )
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("snapshot_id", "f" * 64),
-        ("receipt_relpath", ""),
-        ("reason_code", "no_contract_rows"),
-        ("source_outcome", "provider_error"),
-        ("strategy_family", "unknown_family"),
-        ("candidate_count", 1),
-    ),
-)
-def test_status_index_cannot_override_sealed_opening_snapshot(
+def test_success_empty_bundle_does_not_publish_v1_status_index(
     tmp_path: Path,
-    field: str,
-    value: object,
 ) -> None:
-    now_utc, _evidence = _install_success_empty_strategy_evidence(
-        tmp_path
-    )
-    index_path = (
-        tmp_path
-        / "output_runs"
-        / "run-1"
-        / "accounts"
-        / "lx"
-        / "strategy_scan_status_index.v1.json"
-    )
-    payload = json.loads(index_path.read_text(encoding="utf-8"))
-    payload["items"][0][field] = value
-    index_path.write_text(json.dumps(payload), encoding="utf-8")
+    now_utc, _evidence = _install_success_empty_strategy_evidence(tmp_path)
 
     brief = _assemble(
         tmp_path,
@@ -1165,18 +1110,10 @@ def test_status_index_cannot_override_sealed_opening_snapshot(
         config=_live_window_config(now_utc),
     )
 
-    assert brief["status"] == "degraded"
-    assert brief["actionability"] == "live_actionable"
-    assert "notification_authority" not in brief
-    assert not any(
-        item.get("reason")
-        == "strategy_status_projection_mismatch"
-        for item in brief["data_gaps"]
-    )
-    assert not any(
-        item.get("outcome") == "success_empty"
-        for item in brief["data_gaps"]
-    )
+    account_dir = _account_dir(tmp_path)
+    assert brief["candidates"]["sell_put"] == []
+    assert not (account_dir / "strategy_scan_status_index.v1.json").exists()
+    assert (account_dir / "strategy_scan_status_index.v2.json").is_file()
 
 
 def _call_row(*, symbol: str = "NVDA", contract: str = "NVDA260821C00140000", annualized: float = 0.1) -> dict:

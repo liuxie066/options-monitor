@@ -264,7 +264,7 @@ DATASET_ID=us-<run-id>
   --min-mark-points 2
 ```
 
-`--profile-path` 只解析 `output_runs`、dataset root、required-data root 和 receipt root；不会改 runtime config、交易状态、Feishu 或 broker-facing 数据。`--latest-scanned-run` 会从 profile/runtime 的 `output_runs` 中按 mtime 找最新包含候选、reject log 或 `candidate_filter_trace.jsonl` 的 run；如果要复盘指定 run，用 `--run-id <run-id>` 或 `--run-dir <path>`。
+`--profile-path` 只解析 `output_runs`、dataset root、required-data root 和 receipt root；不会改 runtime config、交易状态、Feishu 或 broker-facing 数据。`--latest-scanned-run` 会从 profile/runtime 的 `output_runs` 中按 mtime 找最新具有可分类候选证据的 run；现代 run 以 manifest-bound snapshot/status 为准，JSONL trace 仅补充拒绝证据，历史 CSV 文件名只参与 unsupported 分类。如果要复盘指定 run，用 `--run-id <run-id>` 或 `--run-dir <path>`。
 
 查看所有本地 dataset 是否已经能复盘：
 
@@ -461,10 +461,10 @@ Put-only baseline、资本天数、路径回撤和非概率加权的提前指派
 
 | status / reason | 含义 | 处理 |
 |---|---|---|
-| `not_ready / candidate_universe_missing` | 没有候选全集 | 重新指定 `run-id` / `run-dir` / candidate path |
+| `not_ready / candidate_universe_missing` | 没有可验证的候选全集 | 重新指定具有有效 manifest-bound snapshot 的 `run-id` / `run-dir` |
 | `not_ready / candidate_snapshot_count_below_min_sample` | 样本数不足 | 多积累 run 或降低人工评审阈值 |
 | `not_ready / parameter_fields_missing` | 候选影响对比样本缺少实际可调字段，不能可靠比较 variants | 让新扫描 trace/reject evidence 写入 `dte`、`delta/abs_delta`、`iv_rv_ratio`、`iv_minus_rv` 后重跑 |
-| `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 `candidate_filter_trace.jsonl` / reject log |
+| `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 owner snapshot 中的拒绝决策及 `candidate_filter_trace.jsonl` |
 | `ready_for_sampling / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
 | `ready_for_sampling / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |
 | `ready_for_settlement / outcome_facts_missing` | 缺失 outcome 中已有可用 mark 和 entry premium，可直接结算 | 跑 `settle --write` |

@@ -62,6 +62,7 @@ def test_watchlist_whitelist_filters_symbols() -> None:
 
 def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.strategy_scan_status import publish_strategy_scan_status
 
     received: list[dict] = []
 
@@ -69,6 +70,20 @@ def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
         return dict(item)
 
     def _process_symbol(*args, **kwargs):
+        report_dir = tmp_path / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        publish_strategy_scan_status(
+            report_dir=report_dir,
+            run_id="run-1",
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family="sell_put",
+            status="completed",
+            candidate_count=0,
+            snapshot_id="quote-1",
+            receipt_relpath="quotes/quote-1/receipt.json",
+        )
         sink = kwargs.get("combo_evidence_sink_fn")
         if sink is not None:
             sink(

@@ -30,10 +30,7 @@ from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
-from src.application.strategy_scan_status import (
-    STRATEGY_SCAN_STATUS_INDEX_SCHEMA,
-    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
-)
+from src.application.strategy_scan_status import STRATEGY_SCAN_STATUS_INDEX_V2_FILE
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
     AccountRunConfigError,
@@ -66,6 +63,7 @@ CANDIDATE_EVIDENCE_STATES = frozenset(
 _LEGACY_COMBO_SCHEMA = "combo_yield_candidate_snapshot.v1"
 _LEGACY_CC_LP_SCHEMA = "cc_lp_candidate_snapshot.v1"
 _LEGACY_INDEX_FILE = "strategy_scan_status_index.v1.json"
+_LEGACY_INDEX_SCHEMA = "strategy_scan_status_index.v1"
 _OWNER_FILES = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
@@ -442,7 +440,7 @@ def _load_legacy_status_index(
         raise CandidateEvidenceHistoryError("legacy status index is unreadable") from exc
     if not isinstance(payload, dict):
         raise CandidateEvidenceHistoryError("legacy status index must be an object")
-    if payload.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_SCHEMA:
+    if payload.get("schema_version") != _LEGACY_INDEX_SCHEMA:
         raise CandidateEvidenceHistoryError("legacy status index schema mismatch")
     if payload.get("run_id") != run_id or str(payload.get("account") or "").lower() != account:
         raise CandidateEvidenceHistoryError("legacy status index identity mismatch")

@@ -116,34 +116,36 @@ def _run(
     underwriting_filter_put_candidates_fn=None,
     cash_filter_put_candidates_fn=None,
     portfolio_ctx: dict | None = None,
-    output_mode: str = "separate",
     is_scheduled: bool = True,
-    attach_calls_fn=None,
     render_alerts_fn=None,
     combo_evidence_sink_fn=None,
     select_pairs_fn=None,
+    account_run_scope: bool = False,
 ):
-    report_dir = tmp_path / "reports"
+    report_dir = (
+        tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+        if account_run_scope
+        else tmp_path / "reports"
+    )
     report_dir.mkdir(parents=True, exist_ok=True)
     captured: dict[str, pd.DataFrame] = {}
 
     def run_put_scan_fn(**kwargs):
         captured["scan_kwargs"] = kwargs
-        frame = pd.DataFrame(candidates)
-        frame.to_csv(kwargs["output"], index=False)
-        return frame
-
-    def label_put_candidates_fn(_base, input_path, output_path):
-        Path(output_path).write_bytes(Path(input_path).read_bytes())
+        return pd.DataFrame(candidates)
 
     def capture_pairs(**kwargs):
         captured["df"] = kwargs["df_candidates"].copy()
         return find_pairs_fn(**kwargs)
 
-    yield_cfg = {"enabled": True, "output_mode": output_mode}
+    def capture_cash(**kwargs):
+        out = cash_filter_put_candidates_fn(**kwargs)
+        captured["cash_df"] = out.copy()
+        return out
+
+    yield_cfg = {"enabled": True}
     policy = derive_yield_enhancement_policy(yield_cfg)
     _result, summary = run_combo_yield_scan_and_summarize(
-        base=tmp_path,
         sym="NVDA",
         symbol="NVDA",
         symbol_lower="nvda",
@@ -155,8 +157,6 @@ def _run(
             **(yield_sp or {}),
         },
         yield_enhancement_policy=policy,
-        df_sell_put_labeled=pd.DataFrame(),
-        sell_put_labeled_path=report_dir / "nvda_sell_put_candidates_labeled.csv",
         required_data_dir=tmp_path / "required_data",
         report_dir=report_dir,
         yield_window=CandidateWindowDefaults(min_dte=7, max_dte=60),
@@ -166,15 +166,15 @@ def _run(
         top_n=3,
         is_scheduled=is_scheduled,
         run_put_scan_fn=run_put_scan_fn,
-        label_put_candidates_fn=label_put_candidates_fn,
         find_pairs_fn=capture_pairs,
         select_pairs_fn=select_pairs_fn or (lambda df: df),
-        cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
+        cash_filter_put_candidates_fn=(
+            capture_cash if cash_filter_put_candidates_fn is not None else None
+        ),
         underwriting_filter_put_candidates_fn=(
             underwriting_filter_put_candidates_fn
             or _accept_all_underwriting
         ),
-        **({"attach_calls_fn": attach_calls_fn} if attach_calls_fn is not None else {}),
         **({"render_alerts_fn": render_alerts_fn} if render_alerts_fn is not None else {}),
         **(
             {"combo_evidence_sink_fn": combo_evidence_sink_fn}
@@ -187,7 +187,35 @@ def _run(
         for line in (report_dir / "candidate_filter_trace.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    assert trace
+    expected_evidence_path = (
+        "state/combo_yield_candidate_snapshot.json"
+        if account_run_scope and combo_evidence_sink_fn is not None
+        else "candidate_filter_trace.jsonl"
+    )
+    assert {row["evidence_path"] for row in trace} == {expected_evidence_path}
+    if "cash_df" in captured:
+        captured["scan_kwargs"]["_cash_output"] = captured["cash_df"]
     return captured["df"], trace, captured["scan_kwargs"], summary
+
+
+def test_combo_yield_trace_links_account_run_snapshot_when_capture_is_enabled(
+    tmp_path: Path,
+) -> None:
+    evidence: list[dict] = []
+
+    _rows, trace, _scan_kwargs, _summary = _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        combo_evidence_sink_fn=evidence.append,
+        account_run_scope=True,
+    )
+
+    assert evidence
+    assert {row["evidence_path"] for row in trace} == {
+        "state/combo_yield_candidate_snapshot.json"
+    }
 
 
 def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path) -> None:
@@ -481,11 +509,7 @@ def test_combo_cash_enrichment_preserves_gap_plus_capacity_reject_decision(
     assert evidence["evaluated_contract_count"] == 1
     assert evidence["eligibility_unresolved_count"] == 0
     assert evidence["diagnostic_evidence_gap_count"] == 1
-    cash_audit = pd.read_csv(
-        tmp_path
-        / "reports"
-        / "nvda_combo_yield_put_universe_cash_filtered.csv"
-    )
+    cash_audit = _scan["_cash_output"]
     assert list(cash_audit["contract_symbol"]) == ["NVDA260821P00100000"]
     assert int(cash_audit.iloc[0]["max_new_contracts"]) == 0
 
@@ -500,14 +524,13 @@ def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_dis
 
     def fake_run(**kwargs):
         captured.update(kwargs)
-        return steps._empty_result(report_dir=kwargs["report_dir"], symbol_lower=kwargs["symbol_lower"]), {
+        return steps._empty_result(), {
             "strategy": "combo_yield",
         }
 
     monkeypatch.setattr(steps, "run_combo_yield_scan_and_summarize", fake_run)
 
     summary = run_combo_yield_for_symbol_and_summarize(
-        base=tmp_path,
         sym="NVDA",
         symbol="NVDA",
         symbol_lower="nvda",
@@ -566,7 +589,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     assert len(pair_rows) == 1
     assert pair_rows[0]["rule"] == "min_net_credit_retention"
     assert pair_rows[0]["metric_value"] == 3
-    diagnostics = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_pair_diagnostics.csv")
+    diagnostics = pd.DataFrame(evidence[0]["pair_evaluations"])
     assert diagnostics[["put_contract_symbol", "call_contract_symbol"]].to_dict("records") == [
         {
             "put_contract_symbol": "NVDA260821P00100000",
@@ -579,9 +602,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     assert evidence[0]["schema_version"] == "combo_yield_scan_evidence.v1"
     assert evidence[0]["variant"] == "sp_lc"
     assert evidence[0]["symbol"] == "NVDA"
-    assert evidence[0]["pair_evaluations"] == json.loads(
-        diagnostics.to_json(orient="records")
-    )
+    assert evidence[0]["pair_evaluations"] == diagnostics.to_dict("records")
     assert evidence[0]["rank_records"] == []
     assert evidence[0]["ranked_pairs"] == []
 
@@ -614,13 +635,15 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
         ]
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
 
+    evidence: list[dict] = []
     _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
         find_pairs_fn=find_sell_put_yield_enhancement_pairs,
+        combo_evidence_sink_fn=evidence.append,
     )
 
-    diagnostics = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_pair_diagnostics.csv")
+    diagnostics = pd.DataFrame(evidence[0]["pair_evaluations"])
     call_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "call"].iloc[0]
     assert call_reject["call_contract_symbol"] == "NVDA260821C00120000"
     assert call_reject["reject_reasons"] == "call_delta_above_max"
@@ -660,7 +683,7 @@ def test_combo_yield_traces_when_no_funding_put_is_eligible(tmp_path: Path) -> N
     assert row["threshold"] == 0.16
 
 
-def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_path: Path) -> None:
+def test_combo_yield_emits_shadow_rank_evidence_without_changing_selection(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
         select_best_yield_enhancement_pairs,
     )
@@ -735,7 +758,7 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
         select_pairs_fn=select_best_yield_enhancement_pairs,
     )
 
-    artifact = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_rank_shadow.csv")
+    artifact = pd.DataFrame(evidence[0]["rank_records"])
     assert artifact.loc[artifact["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
     assert artifact.loc[artifact["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
     assert artifact["rank_changed"].all()
@@ -758,32 +781,17 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
     }
 
 
-def test_combo_yield_candidate_write_error_is_not_swallowed(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import src.application.combo_yield_steps as steps
+def test_combo_yield_does_not_write_candidate_compatibility_csv(tmp_path: Path) -> None:
+    _run(
+        tmp_path,
+        candidates=[_candidate()],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+    )
 
-    original_write = steps._atomic_write_dataframe
-
-    def fail_candidate_write(path: Path, df: pd.DataFrame) -> None:
-        if path.name == "nvda_combo_yield_candidates.csv":
-            raise OSError("disk full")
-        original_write(path, df)
-
-    monkeypatch.setattr(steps, "_atomic_write_dataframe", fail_candidate_write)
-
-    with pytest.raises(RuntimeError, match="failed to persist Combo Yield candidates"):
-        _run(
-            tmp_path,
-            candidates=[_candidate()],
-            find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
-        )
+    assert not list((tmp_path / "reports").glob("*combo_yield*.csv"))
 
 
-def test_combo_yield_render_failure_happens_before_inline_commit(tmp_path: Path) -> None:
-    attached: list[bool] = []
-
+def test_combo_yield_manual_render_failure_propagates(tmp_path: Path) -> None:
     def fail_render(**_kwargs) -> str:
         raise RuntimeError("render failed")
 
@@ -792,33 +800,16 @@ def test_combo_yield_render_failure_happens_before_inline_commit(tmp_path: Path)
             tmp_path,
             candidates=[_candidate()],
             find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
-            output_mode="both",
             is_scheduled=False,
-            attach_calls_fn=lambda **_kwargs: attached.append(True),
             render_alerts_fn=fail_render,
         )
 
-    assert attached == []
 
+def test_empty_combo_yield_does_not_materialize_candidate_csv(tmp_path: Path) -> None:
+    _run(
+        tmp_path,
+        candidates=[],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+    )
 
-def test_empty_combo_yield_materialization_clears_stale_inline_columns(tmp_path: Path) -> None:
-    from src.application.combo_yield_steps import materialize_empty_combo_yield_artifacts
-
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    labeled_path = report_dir / "nvda_sell_put_candidates_labeled.csv"
-    pd.DataFrame(
-        [
-            {
-                "contract_symbol": "NVDA_P100",
-                "label": "候选",
-                "linked_call_contract": "2026-08-21 110C",
-                "linked_call_contract_symbol": "NVDA_C110",
-            }
-        ]
-    ).to_csv(labeled_path, index=False)
-
-    materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower="nvda")
-
-    cleaned = pd.read_csv(labeled_path)
-    assert cleaned.to_dict("records") == [{"contract_symbol": "NVDA_P100", "label": "候选"}]
+    assert not list((tmp_path / "reports").glob("*.csv"))

@@ -34,7 +34,6 @@ from src.application.sell_put_call_helper import (
 )
 from src.application.strategy_policy import SELL_CALL_FAMILY
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.infrastructure.io_utils import atomic_write_text
 
 
 CC_LP_FAMILY = "combo_yield"
@@ -67,7 +66,6 @@ def run_cc_lp_scan(
     *,
     symbol: str,
     required_data_dir: Path,
-    report_dir: Path,
     sell_call_cfg: dict[str, Any],
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None = None,
@@ -108,7 +106,6 @@ def run_cc_lp_scan(
     df_calls = run_sell_call_scan_fn(
         symbols=[symbol],
         input_root=required_data_dir,
-        output=None,
         avg_cost=float(avg_cost),
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
@@ -132,7 +129,6 @@ def run_cc_lp_scan(
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=SELL_CALL_FAMILY,
         strategy_profile="cc_lp_funding_call",
-        quiet=True,
     )
     if df_calls.empty:
         return pd.DataFrame()
@@ -246,13 +242,7 @@ def run_cc_lp_scan(
                 }
             )
     ranked = rank_cc_lp_rows(rows)
-    df = pd.DataFrame(ranked)
-    if not df.empty:
-        atomic_write_text(
-            report_dir / f"{symbol.lower()}_cc_lp_candidates.csv",
-            df.to_csv(index=False),
-        )
-    return df
+    return pd.DataFrame(ranked)
 
 
 def summarize_cc_lp_result(

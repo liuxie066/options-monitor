@@ -37,7 +37,6 @@ from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS,
     YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
     YIELD_ENHANCEMENT_OBJECTIVES,
-    YIELD_ENHANCEMENT_OUTPUT_MODES,
     YIELD_ENHANCEMENT_STRUCTURE_MODES,
     YIELD_ENHANCEMENT_VARIANTS,
 )
@@ -538,6 +537,11 @@ def validate_resolved_watchlist_item_runtime_config(item: dict) -> None:
                 'min_strike_cost_multiplier',
                 f'{symbol}.{side}',
             )
+    combo_cfg = item.get('combo_yield')
+    if combo_cfg is not None:
+        _validate_yield_enhancement_cfg(combo_cfg, f'{symbol}.combo_yield')
+    if item.get('yield_enhancement') is not None:
+        die(f'{symbol}.yield_enhancement has been removed; use {symbol}.combo_yield instead')
 
 
 def _use_list(item: dict) -> list[str]:
@@ -678,10 +682,11 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         objective = str(cfg.get('objective') or '').strip().lower()
         if objective not in YIELD_ENHANCEMENT_OBJECTIVES:
             die(f"{path}.objective must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OBJECTIVES))}")
-    if 'output_mode' in cfg and cfg.get('output_mode') is not None:
-        output_mode = str(cfg.get('output_mode') or '').strip().lower()
-        if output_mode not in YIELD_ENHANCEMENT_OUTPUT_MODES:
-            die(f"{path}.output_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OUTPUT_MODES))}")
+    if 'output_mode' in cfg:
+        die(
+            f"{path}.output_mode has been removed; Combo Yield candidate output is sealed JSON only; "
+            "rebuild runtime config with ./om config build"
+        )
     if 'structure_mode' in cfg and cfg.get('structure_mode') is not None:
         structure_mode = str(cfg.get('structure_mode') or '').strip().lower()
         if structure_mode not in YIELD_ENHANCEMENT_STRUCTURE_MODES:

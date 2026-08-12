@@ -91,7 +91,6 @@ def evaluate_combo_variant_pairs(
             global_yield_enhancement_liquidity=dict(
                 global_liquidity_by_symbol.get(symbol) or {}
             ),
-            output_path=None,
         )
         baseline_keys = {
             _pair_key(row)
@@ -117,7 +116,6 @@ def evaluate_combo_variant_pairs(
                 global_yield_enhancement_liquidity=dict(
                     global_liquidity_by_symbol.get(symbol) or {}
                 ),
-                output_path=None,
             )
             pair_rows.extend(pairs.to_dict("records"))
         pair_rows = _dedupe_pairs(pair_rows)
