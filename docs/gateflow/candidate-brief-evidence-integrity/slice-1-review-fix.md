@@ -39,7 +39,7 @@ Final status: `已修复`.
 ## Validation
 
 ```text
-/Volumes/liuxie的硬盘/workspace/options-monitor/.venv/bin/python -m pytest -q tests/test_scan_volume_gate_min_zero.py tests/test_candidate_scanning_evidence.py tests/test_opening_candidate_snapshot.py
+./.venv/bin/python -m pytest -q tests/test_scan_volume_gate_min_zero.py tests/test_candidate_scanning_evidence.py tests/test_opening_candidate_snapshot.py
 ```
 
 Result after both fixes: `39 passed`.
