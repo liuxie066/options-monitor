@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import build_candidate_decision
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
@@ -16,6 +17,7 @@ from src.application.combo_yield_candidate_snapshot import (
     project_combo_yield_rank_evidence,
     project_combo_yield_rejections,
     seal_combo_yield_candidate_snapshot,
+    validate_combo_yield_candidate_snapshot,
 )
 
 
@@ -173,6 +175,21 @@ def test_combo_yield_snapshot_rejects_tampered_payload(tmp_path: Path) -> None:
             base=tmp_path,
             run_id="run-1",
             account="lx",
+        )
+
+
+def test_combo_yield_snapshot_rejects_rehashed_wrong_owner(tmp_path: Path) -> None:
+    payload = dict(_seal(tmp_path))
+    payload["candidate_owner"] = "cc_lp"
+    payload["content_sha256"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "content_sha256"}
+    )
+
+    with pytest.raises(ComboYieldCandidateSnapshotError, match="owner mismatch"):
+        validate_combo_yield_candidate_snapshot(
+            payload,
+            expected_run_id="run-1",
+            expected_account="lx",
         )
 
 
