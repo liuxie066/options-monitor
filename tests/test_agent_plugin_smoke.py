@@ -9,12 +9,12 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 from src.application.close_advice_report_manifest import (
     publish_close_advice_report_manifest,
 )
+from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -5019,17 +5019,10 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
 
 def test_candidate_rank_explain_reads_sealed_account_snapshot(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
+    from src.application.candidate_snapshot_manifest import (
+        load_candidate_snapshot_bundle,
+    )
 
-    dependencies = [
-        {"kind": kind, "relpath": None, "sha256": char * 64}
-        for kind, char in (
-            ("required_data", "a"),
-            ("portfolio", "b"),
-            ("ledger", "c"),
-            ("fx", "d"),
-            ("earnings_rv", "e"),
-        )
-    ]
     rows = [
         (
             "liquid",
@@ -5058,64 +5051,20 @@ def test_candidate_rank_explain_reads_sealed_account_snapshot(tmp_path: Path) ->
             },
         ),
     ]
-    snapshot = {
-        "schema_version": "opening_candidate_snapshot.v1",
-        "run_id": "run-1",
-        "account": "lx",
-        "futu_account_id": "12345",
-        "trade_env": "REAL",
-        "market": "US",
-        "strategy_modes": ["put"],
-        "account_config_sha256": "f" * 64,
-        "strategy_policy_sha256": "1" * 64,
-        "required_data_manifest_sha256": "a" * 64,
-        "dependencies": dependencies,
-        "sealed_at_utc": "2026-06-01T00:00:00Z",
-        "opening_status": "candidates_found",
-        "strategy_results": [
-            {
-                "strategy_mode": "put",
-                "strategy_status": "candidates_found",
-                "capacity_status": "available",
-                "candidate_count": 2,
-                "scope_count": 1,
-            }
-        ],
-        "scope_results": [],
-        "candidate_decisions": [
-            {"candidate_id": candidate_id} for candidate_id, _facts in rows
-        ],
-        "ranked_candidates": [
-            {
-                "candidate_id": candidate_id,
-                "strategy_mode": "put",
-                "rank": rank,
-                "facts": facts,
-                "ranking": {
-                    "annualized_return": facts[
-                        "annualized_net_return_on_cash_basis"
-                    ],
-                    "net_income": facts["net_income"],
-                    "rank_reason": "持有期净收益优先",
-                    "risk_notes": [],
-                    "score_warnings": [],
-                },
-            }
-            for rank, (candidate_id, facts) in enumerate(rows, start=1)
-        ],
-    }
-    snapshot["content_sha256"] = canonical_sha256(snapshot)
-    snapshot_path = (
-        tmp_path
-        / "output_runs"
-        / "run-1"
-        / "accounts"
-        / "lx"
-        / "state"
-        / "opening_candidate_snapshot.json"
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id="run-1",
+        account="lx",
+        accepted_rows=[facts for _candidate_id, facts in rows],
     )
-    snapshot_path.parent.mkdir(parents=True)
-    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    sealed = load_candidate_snapshot_bundle(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+    )["owners"]["opening"]
+    expected_rank_reason = sealed["ranked_candidates"][0]["ranking"][
+        "rank_reason"
+    ]
 
     out = run_tool(
         "candidate_rank_explain",
@@ -5131,13 +5080,14 @@ def test_candidate_rank_explain_reads_sealed_account_snapshot(tmp_path: Path) ->
     assert out["ok"] is True
     assert out["data"]["row_count"] == 2
     assert out["data"]["ranked"][0]["contract_symbol"] == "NVDA_PUT_LIQUID"
-    assert out["data"]["ranked"][0]["rank_reason"] == "持有期净收益优先"
+    assert out["data"]["ranked"][0]["rank_reason"] == expected_rank_reason
     assert out["data"]["groups"][0]["ranking_policy"] == (
         "opening_candidate_snapshot"
     )
     assert out["meta"]["source_files"][0]["path"].endswith(
         "opening_candidate_snapshot.json"
     )
+    assert out["meta"]["source_files"][0]["manifest_content_sha256"]
 
 
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:

@@ -432,6 +432,10 @@ def validate_combo_yield_candidate_snapshot(
             raise ComboYieldCandidateSnapshotError("combo yield candidate snapshot run mismatch")
         if item.get("account") != expected_account:
             raise ComboYieldCandidateSnapshotError("combo yield candidate snapshot account mismatch")
+        if item.get("candidate_owner") != "sp_lc":
+            raise ComboYieldCandidateSnapshotError(
+                "combo yield candidate snapshot owner mismatch"
+            )
         for field in (
             "account_config_sha256",
             "strategy_policy_sha256",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
+    load_latest_candidate_snapshot_bundle,
     publish_candidate_snapshot_manifest,
 )
 from src.application.combo_yield_candidate_snapshot import (
@@ -157,6 +159,31 @@ def test_manifest_binds_terminal_status_and_owner_snapshot(tmp_path: Path) -> No
     )
     assert bundle["manifest"] == manifest
     assert set(bundle["owners"]) == {"sp_lc"}
+    assert load_latest_candidate_snapshot_bundle(
+        base=tmp_path,
+        account="lx",
+    )["manifest"] == manifest
+
+
+def test_latest_bundle_does_not_fall_back_past_incomplete_candidate_run(
+    tmp_path: Path,
+) -> None:
+    _seal_combo_bundle(tmp_path)
+    complete_run = tmp_path / "output_runs" / "run-1"
+    incomplete_state = (
+        tmp_path
+        / "output_runs"
+        / "run-2"
+        / "accounts"
+        / "lx"
+        / "state"
+    )
+    incomplete_state.mkdir(parents=True)
+    newer_ns = complete_run.stat().st_mtime_ns + 1_000_000_000
+    os.utime(incomplete_state.parents[2], ns=(newer_ns, newer_ns))
+
+    with pytest.raises(CandidateSnapshotManifestError, match="manifest is unavailable"):
+        load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
 
 
 def test_manifest_supports_empty_no_applicable_scope_commit(tmp_path: Path) -> None:
