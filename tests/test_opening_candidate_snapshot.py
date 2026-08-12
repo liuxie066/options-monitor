@@ -790,7 +790,146 @@ def test_input_invalid_decision_cannot_seal_as_clean_no_candidate(
             {
                 "symbol": "NVDA",
                 "strategy_mode": "put",
-                "reason_code": "input_invalid",
+                "reason_code": "term_matched_rv_unavailable",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("reverse_rejects", [False, True])
+def test_specific_contract_gap_replaces_only_generic_strategy_reason(
+    reverse_rejects: bool,
+) -> None:
+    nvda_rejects = [
+        {
+            "reason": "input_missing",
+        },
+        {
+            "reason": "input_invalid",
+            "metric_value": {
+                "reason_code": "term_matched_rv_unavailable",
+            },
+        },
+    ]
+    if reverse_rejects:
+        nvda_rejects.reverse()
+    snapshot = {
+        "scope_results": [
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason_code": "partial_data",
+            },
+            {
+                "scope": "contract",
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "rejected",
+                "reason_codes": ["input_invalid", "input_missing"],
+                "rejects": nvda_rejects,
+            },
+            {
+                "scope": "strategy",
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "status": "unavailable",
+                "reason_code": "covered_call_portfolio_context_unavailable",
+            },
+            {
+                "scope": "contract",
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "status": "rejected",
+                "reason_codes": ["input_missing"],
+                "rejects": [
+                    {
+                        "reason": "input_missing",
+                        "metric_value": {
+                            "reason_code": "term_matched_rv_unavailable",
+                        },
+                    }
+                ],
+            },
+        ]
+    }
+
+    assert candidate_universe_summary(snapshot) == {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "AAPL",
+                "strategy_mode": "call",
+                "reason_code": "covered_call_portfolio_context_unavailable",
+            },
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "reason_code": "term_matched_rv_unavailable",
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize("reverse_contracts", [False, True])
+def test_contract_gap_reason_is_deterministic_across_contract_scopes(
+    reverse_contracts: bool,
+) -> None:
+    contracts = [
+        {
+            "scope": "contract",
+            "symbol": "NVDA",
+            "strategy_mode": "put",
+            "status": "rejected",
+            "reason_codes": ["input_invalid"],
+            "rejects": [
+                {
+                    "reason": "input_invalid",
+                    "metric_value": {
+                        "reason_code": "term_matched_rv_unavailable",
+                    },
+                }
+            ],
+        },
+        {
+            "scope": "contract",
+            "symbol": "NVDA",
+            "strategy_mode": "put",
+            "status": "rejected",
+            "reason_codes": ["input_invalid"],
+            "rejects": [
+                {
+                    "reason": "input_invalid",
+                    "metric_value": {
+                        "reason_code": "option_multiplier_conflict",
+                    },
+                }
+            ],
+        },
+    ]
+    if reverse_contracts:
+        contracts.reverse()
+    snapshot = {
+        "scope_results": [
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason_code": "partial_data",
+            },
+            *contracts,
+        ]
+    }
+
+    assert candidate_universe_summary(snapshot) == {
+        "status": "partial",
+        "affected_scopes": [
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "reason_code": "option_multiplier_conflict",
             }
         ],
     }

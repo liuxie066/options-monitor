@@ -211,44 +211,13 @@ cd "$REPO"
 
 如果 OpenD 由外部服务管理，不传 `--include-opend` 即可；渲染出的采样命令仍包含所选账户的显式 host/port，但不会伪造 systemd 依赖。部署前必须单独确认该端点可用。recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in 和账户绑定；service drift 会按绑定账户从 canonical config 重新解析端点，因此配置变化会显示为 drift。不传 recorder 开关则默认不启用。
 
-### AI Decision Advice 外部证据 Collector
+### 已退役 AI Advice 的生产清理
 
-当 `config.yaml` 中 `ai_decision_advice.enabled: true` 时，`service render` 会自动额外渲染：
-
-- `/etc/systemd/system/options-monitor-ai-evidence-collector.service`：由 systemd 执行内部 Python module wrapper，不通过 `./om` 公开 collector 命令；
-- `/etc/systemd/system/options-monitor-ai-evidence-collector.timer`：每 24 小时刷新外部证据（`OnBootSec=2min` + `OnUnitActiveSec=24h`，`Persistent=true`）。
-
-Collector 只用公开 symbol 身份和 DeepSeek Responses `web_search`，不读取持仓/候选；
-运行前必须 provision 逻辑凭据 `llm.deepseek.api_key`，并由 collector unit 选定的逐 unit
-credential delivery 模式单独注入。未开启 `ai_decision_advice.enabled` 时不渲染这两个
-unit，默认关闭；显式开启代表同意按设计文档第 18 节的最小数据合同向 DeepSeek
-传输数据。本功能不提供 operator/manual refresh 命令；Provider 原始响应、搜索
-query/call ID 不落盘。设计契约见 `docs/AI_DECISION_ADVICE_DESIGN.md`。
-
-组合分布是独立的可选依赖，不是 Collector 的输入。只有以下显式配置才会在正常 Tick
-中按账户读取 portfolio-management：
-
-```yaml
-ai_decision_advice:
-  enabled: true
-  portfolio_distribution:
-    provider: portfolio_management
-```
-
-服务环境可用 `PORTFOLIO_SERVICE_URL` 指向 loopback PM 服务（默认
-`http://127.0.0.1:8765`）；非 loopback 地址会被拒绝。OM 账户通过
-`account_settings.<account>.holdings_account` 映射到 PM 账户，未配置时使用同名账户；每个
-账户单独请求和校验，禁止跨账户聚合。每次 Tick 将结果封存到
-`output_runs/<run_id>/accounts/<account>/state/prepared_portfolio_distribution.v1.json`。
-provider 为 `none`、PM 未安装、不可达、账户不匹配或返回数据质量不足时，仍生成明确的
-unavailable prepared envelope；Candidate Engine、原始候选和正常回执不会被阻断，AI
-动作最高降为 `needs_review`，且不会用 Futu/holdings 数据替代 PM 组合分布。
-
-受控上线检查应分别确认：collector service/timer 的 active/enabled 状态；共享观察集合、
-身份和证据文件为私有权限；下一次正常 scheduled Tick 产生账户级 prepared PM/option
-工件、正式 Advice JSONL 和对应 Daily Brief 投影；`daily_decision_brief_read` 只读结果与
-回执动作一致。不要通过手动刷新 Collector、临时模型调用或真实测试通知完成 canary；
-发布、远端升级和真实通知仍需要各自授权。
+当前 service bundle 不再渲染 AI 外部证据 Collector。升级前已经安装的 Collector
+service/timer 会成为 drift 中的 extra unit；只有在取得生产服务变更授权后，才可通过受控
+reconcile 停用并移除。源码升级不会自动清理历史 Advice/外部证据文件，也不会删除通用
+DeepSeek 逻辑凭据。运行数据清理与密钥删除必须分别授权，详见
+`docs/AI_DECISION_ADVICE_DESIGN.md`。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 

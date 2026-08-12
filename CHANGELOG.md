@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 1.13.17 - 2026-08-13
+
+### Bug Fixes
+- Normalized binary floating-point transport noise when rendering guarded historical trade receipts, so the displayed fill price matches the broker price already accepted by the ledger without weakening price validation.
+
+## 1.13.16 - 2026-08-13
+
+### Bug Fixes
+- Reconciled terminal lifecycle intake rows from the canonical frozen observation anchor when the evidence event ID identifies the observation itself rather than the original broker deal.
+
+## 1.13.15 - 2026-08-13
+
+### Bug Fixes
+- Reconciled completed lifecycle intake state from the canonical v2 terminal summary when legacy `decision_type` fields are absent, including the exact resolved lot IDs.
+- Allowed guarded historical receipt compensation for applied open trades whose original delivery was provably skipped because no route was available, while preserving duplicate and outbox evidence checks.
+
+## 1.13.14 - 2026-08-13
+
+### Improvements
+- Retired AI Decision Advice end to end: removed model generation, external-news collection, portfolio-distribution preparation, configuration, managed collector services, and current Daily Brief/Agent rendering. Deterministic candidate, position, funds, Close Advice, and Daily Brief authorities remain unchanged; legacy frozen deliveries containing AI content fail closed until separately resolved.
+
+### Bug Fixes
+- Preserved candidate and Daily Brief evidence integrity by treating deterministic non-positive premiums as policy rejections, retaining specific sealed RV gaps, accepting successful prefetch receipts, and requiring CC+LP snapshots only when that variant is effectively enabled.
+- Normalized binary floating-point transport noise at the three-decimal trade-price boundary, so broker fills such as `1.5699999999999998` resolve as `1.570` while genuinely over-precise prices remain rejected.
+- Classified only exact zero-price, fully filled Futu option orders recorded on contract expiration as broker-generated expiry receipts, allowing due lifecycle cases to settle while ambiguous orders continue to fail closed for review.
+
+## 1.13.13 - 2026-08-12
+
+### Improvements
+- Condensed the scheduled Daily Brief by removing repeated AI and candidate headings, shortening event copy, and showing shared-cash guidance only when per-candidate capacity is visible.
+
+### Bug Fixes
+- Limited fixed-report reminders to confirmed quote-prefetch, strategy-scan, or candidate-snapshot failures, while keeping ordinary no-bid and partial-data outcomes in structured audit evidence and treating successful `fetched` prefetch results as available.
+
 ## 1.13.12 - 2026-08-12
 
 ### Improvements

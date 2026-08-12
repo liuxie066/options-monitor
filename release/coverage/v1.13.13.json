@@ -1,0 +1,32 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.13",
+  "base": {
+    "tag": "v1.13.12",
+    "commit": "ded8f882242f5dc5eda9d564461e05a884ed64ba"
+  },
+  "reviewed_head": "c031bf7b59f4cfeb571493920d07ba9ca355bc91",
+  "commits": [
+    {
+      "sha": "c031bf7b59f4cfeb571493920d07ba9ca355bc91",
+      "subject": "fix(notify): compact fixed daily brief"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Condensed the scheduled Daily Brief by removing repeated AI and candidate headings, shortening event copy, and showing shared-cash guidance only when per-candidate capacity is visible.",
+      "commits": [
+        "c031bf7b59f4cfeb571493920d07ba9ca355bc91"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Limited fixed-report reminders to confirmed quote-prefetch, strategy-scan, or candidate-snapshot failures, while keeping ordinary no-bid and partial-data outcomes in structured audit evidence and treating successful `fetched` prefetch results as available.",
+      "commits": [
+        "c031bf7b59f4cfeb571493920d07ba9ca355bc91"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
