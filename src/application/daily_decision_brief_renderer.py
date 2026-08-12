@@ -50,6 +50,9 @@ _CLOSE_RECOMMENDATION_LABELS = {
     "hold": "继续观察",
     "not_evaluable": "暂无法评估（证据不足）",
 }
+_PARTIAL_DATA_REASON_TEXT = {
+    "term_matched_rv_unavailable": "期限匹配的已实现波动率（RV）证据不可用",
+}
 
 
 @dataclass
@@ -116,6 +119,18 @@ def build_daily_brief_user_view(
         brief,
         market=market,
     )
+    raw_candidates = brief.get("candidates")
+    ai_raw_candidate_presence = {
+        family: any(
+            isinstance(item, Mapping)
+            for item in (
+                raw_candidates.get(family) or []
+                if isinstance(raw_candidates, Mapping)
+                else []
+            )
+        )
+        for family in ("sell_put", "covered_call")
+    }
     strategy_failure_items = _strategy_failure_items(brief)
     reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
@@ -192,6 +207,7 @@ def build_daily_brief_user_view(
         "ai_decision_advice_evidence_index": brief.get("ai_decision_advice_evidence_index"),
         "_ai_candidate_contract_by_id": ai_candidate_contracts,
         "_ai_candidate_rank_by_id": ai_candidate_ranks,
+        "_ai_raw_candidate_presence": ai_raw_candidate_presence,
     }
     return view
 
@@ -478,16 +494,17 @@ def _render_user_view(
         if isinstance(ai_section, Mapping)
         and (
             bool(ai_zero.get(family))
-            or (
-                ai_status != "not_applicable"
-                and not (projection == "fixed_report" and ai_status == "unavailable")
-            )
+            or ai_status != "not_applicable"
         )
     }
     candidate_families = {str(item.get("family") or "") for item in candidates}
     visible_families = candidate_families | ai_visible_families
     global_ai_notice = (
-        _fixed_report_ai_notice(ai_section, candidates=candidates)
+        _fixed_report_ai_notice(
+            ai_section,
+            candidates=candidates,
+            raw_candidate_presence=view.get("_ai_raw_candidate_presence"),
+        )
         if projection == "fixed_report"
         else ""
     )
@@ -538,15 +555,11 @@ def _render_user_view(
             if family not in visible_families:
                 continue
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
-            advice_lines = (
-                []
-                if global_ai_notice and not bool(ai_zero.get(family))
-                else _ai_advice_lines_for_family(
-                    view,
-                    family=family,
-                    market=market,
-                    heading_level=heading_level + 2,
-                )
+            advice_lines = _ai_advice_lines_for_family(
+                view,
+                family=family,
+                market=market,
+                heading_level=heading_level + 2,
             )
             if projection == "fixed_report":
                 advice_lines = _compact_fixed_report_advice(advice_lines)
@@ -663,10 +676,7 @@ def _render_user_view_card(
         if isinstance(ai_section, Mapping)
         and (
             bool(ai_zero.get(family))
-            or (
-                ai_status != "not_applicable"
-                and not (projection == "fixed_report" and ai_status == "unavailable")
-            )
+            or ai_status != "not_applicable"
         )
     }
     candidate_families = {str(item.get("family") or "") for item in candidates}
@@ -674,7 +684,11 @@ def _render_user_view_card(
     if projection == "candidate_alert":
         visible_families = candidate_families
     global_ai_notice = (
-        _fixed_report_ai_notice(ai_section, candidates=candidates)
+        _fixed_report_ai_notice(
+            ai_section,
+            candidates=candidates,
+            raw_candidate_presence=view.get("_ai_raw_candidate_presence"),
+        )
         if projection == "fixed_report"
         else ""
     )
@@ -689,15 +703,11 @@ def _render_user_view_card(
             if family not in visible_families:
                 continue
             family_rows = [item for item in candidates if item.get("family") == family]
-            advice_lines = (
-                []
-                if global_ai_notice and not bool(ai_zero.get(family))
-                else _ai_advice_lines_for_family(
-                    view,
-                    family=family,
-                    market=market,
-                    heading_level=3,
-                )
+            advice_lines = _ai_advice_lines_for_family(
+                view,
+                family=family,
+                market=market,
+                heading_level=3,
             )
             if projection == "fixed_report":
                 advice_lines = _compact_fixed_report_advice(advice_lines)
@@ -857,13 +867,20 @@ def _fixed_report_ai_notice(
     section: Any,
     *,
     candidates: list[Mapping[str, Any]],
+    raw_candidate_presence: Any = None,
 ) -> str:
     if not isinstance(section, Mapping) or _lower(section.get("status")) != "unavailable":
         return ""
-    has_ranked_candidates = any(
-        str(item.get("family") or "") in {"sell_put", "covered_call"}
-        for item in candidates
-    )
+    if isinstance(raw_candidate_presence, Mapping):
+        has_ranked_candidates = any(
+            raw_candidate_presence.get(family) is True
+            for family in ("sell_put", "covered_call")
+        )
+    else:
+        has_ranked_candidates = any(
+            str(item.get("family") or "") in {"sell_put", "covered_call"}
+            for item in candidates
+        )
     if has_ranked_candidates:
         return "AI｜未完成；以下仅为策略排序，未经综合判断。"
     return "AI｜未完成。"
@@ -877,6 +894,10 @@ def _compact_fixed_report_advice(lines: Iterable[str]) -> list[str]:
         return ["本轮无策略候选。"]
     if rendered[1].startswith("本轮没有证据完整、可供 AI 评估的策略候选"):
         return ["本轮无证据完整候选；部分合约因硬证据缺失未纳入。"]
+    if rendered[1] == "AI建议未完成；本轮没有可展示的策略原始排序。":
+        return ["本轮无可展示的策略排序。"]
+    if rendered[1].startswith("AI建议未完成；以下仅展示策略原始排序"):
+        return []
     return rendered
 
 
@@ -1026,6 +1047,25 @@ def _ai_advice_lines_for_family(
         return []
     contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
     evidence_by_ref = _ai_evidence_ref_map(brief)
+    raw_presence = brief.get("_ai_raw_candidate_presence")
+    if isinstance(raw_presence, Mapping) and isinstance(
+        raw_presence.get(family), bool
+    ):
+        has_raw_candidates = raw_presence[family]
+    else:
+        candidates = brief.get("candidates")
+        if isinstance(candidates, Mapping):
+            has_raw_candidates = any(
+                isinstance(item, Mapping)
+                for item in candidates.get(family) or []
+            )
+        else:
+            candidate_rows = candidates if isinstance(candidates, list) else []
+            has_raw_candidates = any(
+                isinstance(item, Mapping)
+                and _lower(item.get("family")) == family
+                for item in candidate_rows
+            )
     return render_family_advice_lines(
         section,
         family=family,
@@ -1033,6 +1073,7 @@ def _ai_advice_lines_for_family(
         candidate_rank_by_id=ranks,
         evidence_by_ref=evidence_by_ref,
         heading_level=heading_level,
+        has_raw_candidates=has_raw_candidates,
     )
 
 
@@ -1612,6 +1653,20 @@ def _fixed_report_error_reminders(
                 int(_number(item.get("count")) or 0),
             )
             continue
+        if reason == "opening_candidate_strategy_partial_data":
+            detail = _PARTIAL_DATA_REASON_TEXT.get(
+                _lower(item.get("reason_code"))
+            )
+            if detail:
+                symbol = _upper(item.get("symbol")) or "相关标的"
+                family = _STRATEGY_LABELS.get(
+                    _lower(item.get("strategy_family")),
+                    "策略",
+                )
+                reminders.append(
+                    f"{symbol} {family}：{detail}，候选结果不完整"
+                )
+            continue
         if reason not in snapshot_error_labels:
             continue
         family = _STRATEGY_LABELS.get(
@@ -1714,8 +1769,13 @@ def _strategy_data_gap_reminders(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
             )
         elif reason == "opening_candidate_strategy_partial_data":
+            detail = _PARTIAL_DATA_REASON_TEXT.get(
+                _lower(item.get("reason_code"))
+            )
             reminders.append(
-                f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
+                f"{symbol} {family}：{detail}，候选结果不完整"
+                if detail
+                else f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
             )
         seen.add(identity)
     return reminders
