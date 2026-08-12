@@ -1921,6 +1921,58 @@ def test_service_drift_retires_removed_position_advice_promotion_units(
         assert ["systemctl", "disable", "--now", name] in calls
 
 
+def test_service_drift_reports_retired_ai_collector_units_without_applying(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    retired_units = (
+        "options-monitor-ai-evidence-collector.service",
+        "options-monitor-ai-evidence-collector.timer",
+    )
+    profile["services"].extend({"name": name} for name in retired_units)
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    systemd_root.mkdir(exist_ok=True)
+    for name in retired_units:
+        (systemd_root / name).write_text("legacy\n", encoding="utf-8")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=False,
+    )
+
+    assert out["extra_profile_units"] == sorted(retired_units)
+    assert out["extra_installed_units"] == sorted(retired_units)
+    assert out["confirmed"] is False
+    assert out["changed"] is False
+    assert out["operations"] == []
+    assert all((systemd_root / name).is_file() for name in retired_units)
+
+
 def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift

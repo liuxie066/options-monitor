@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.notification_format_assertions import assert_mobile_flat_markdown
+
+
+def test_mobile_markdown_rejects_retired_ai_advice_heading() -> None:
+    with pytest.raises(AssertionError):
+        assert_mobile_flat_markdown(
+            "# OM · 决策简报\n\n### AI建议\n已退役内容"
+        )
 
 
 def test_render_system_notice_flattens_fields_and_omits_empty_sections() -> None:
