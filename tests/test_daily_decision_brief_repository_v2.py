@@ -656,6 +656,113 @@ def test_v1_full_migration_is_dry_run_by_default_and_recomputes_digest(tmp_path:
     assert lifecycle["paths"]["revision"].read_bytes() == revision_before
 
 
+def test_v1_overlay_digest_remains_valid_for_next_prepare_and_migration(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery,
+        migrate_daily_decision_brief_delivery,
+        prepare_daily_decision_brief,
+    )
+
+    lifecycle = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="legacy-overlay", actions=[_action()]),
+    )
+    confirm_daily_decision_brief_delivery(
+        base=tmp_path,
+        market="US",
+        market_trading_date=MARKET_DATE,
+        account="lx",
+        revision=lifecycle["brief"]["revision"],
+        delivery_kind=lifecycle["delivery_kind"],
+        delivery_key=lifecycle["delivery_key"],
+        brief_digest=lifecycle["current_brief_digest"],
+        confirmed_at_utc="2026-07-21T14:01:00+00:00",
+    )
+    for path in (lifecycle["paths"]["revision"], lifecycle["paths"]["current"]):
+        historical = json.loads(path.read_text(encoding="utf-8"))
+        historical["ai_decision_advice"] = {
+            "status": "completed",
+            "summary": "historical-overlay",
+        }
+        historical["ai_decision_advice_evidence_index"] = {
+            "source": "historical-evidence",
+        }
+        path.write_text(json.dumps(historical), encoding="utf-8")
+    legacy_digest = daily_brief_compatible_digests(historical)[-1]
+    assert legacy_digest != lifecycle["current_brief_digest"]
+
+    pointer_path = lifecycle["paths"]["delivery"]
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["brief_digest"] = legacy_digest
+    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+
+    preview = migrate_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )
+    assert preview["migration"]["legacy_brief_digest_matches_revision"] is True
+
+    next_run = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="after-overlay", actions=[_action(symbol="AMD")]),
+    )
+    assert next_run["current_revision"] == 1
+    assert next_run["last_delivered_brief_digest"] == legacy_digest
+    assert next_run["delivery_key"].startswith(
+        f"daily-brief:US:{MARKET_DATE}:lx:from:{legacy_digest}:"
+    )
+    confirmed = confirm_daily_decision_brief_delivery(
+        base=tmp_path,
+        market="US",
+        market_trading_date=MARKET_DATE,
+        account="lx",
+        revision=next_run["brief"]["revision"],
+        delivery_kind=next_run["delivery_kind"],
+        delivery_key=next_run["delivery_key"],
+        brief_digest=next_run["current_brief_digest"],
+        confirmed_at_utc="2026-07-21T14:02:00+00:00",
+    )
+    assert confirmed["advanced"] is True
+
+
+def test_v1_overlay_revision_can_be_confirmed_with_its_exact_historical_digest(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery,
+        prepare_daily_decision_brief,
+    )
+
+    lifecycle = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="legacy-unconfirmed", actions=[_action()]),
+    )
+    revision_path = lifecycle["paths"]["revision"]
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"source": "legacy"}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    legacy_digest = daily_brief_compatible_digests(historical)[-1]
+
+    confirmed = confirm_daily_decision_brief_delivery(
+        base=tmp_path,
+        market="US",
+        market_trading_date=MARKET_DATE,
+        account="lx",
+        revision=lifecycle["brief"]["revision"],
+        delivery_kind=lifecycle["delivery_kind"],
+        delivery_key=lifecycle["delivery_key"],
+        brief_digest=legacy_digest,
+        confirmed_at_utc="2026-07-21T14:01:00+00:00",
+    )
+    assert confirmed["pointer"]["brief_digest"] == legacy_digest
+
+
 def test_v1_delta_without_persisted_diff_migrates_no_alerted_candidates(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import (
         confirm_daily_decision_brief_delivery,
@@ -830,7 +937,7 @@ def test_v2_attempt_and_confirmation_advance_exact_envelope_and_candidates(tmp_p
     assert {item["via"] for item in day["alerted_candidates"].values()} == {"fixed_report"}
 
 
-def test_v2_delivery_accepts_digest_from_revision_before_optional_ai_defaults(
+def test_v2_delivery_accepts_exact_digest_from_retired_ai_overlay_revision(
     tmp_path: Path,
 ) -> None:
     from domain.domain.daily_decision_brief import daily_brief_compatible_digests
@@ -859,8 +966,13 @@ def test_v2_delivery_accepts_digest_from_revision_before_optional_ai_defaults(
 
     for path in (persisted["paths"]["revision"], persisted["paths"]["current"]):
         historical = json.loads(path.read_text(encoding="utf-8"))
-        historical.pop("ai_decision_advice", None)
-        historical.pop("ai_decision_advice_evidence_index", None)
+        historical["ai_decision_advice"] = {
+            "status": "completed",
+            "summary": "historical-overlay",
+        }
+        historical["ai_decision_advice_evidence_index"] = {
+            "source": "historical-evidence",
+        }
         path.write_text(json.dumps(historical), encoding="utf-8")
     legacy_digest = daily_brief_compatible_digests(historical)[-1]
     assert legacy_digest != persisted["current_brief_digest"]
@@ -888,11 +1000,112 @@ def test_v2_delivery_accepts_digest_from_revision_before_optional_ai_defaults(
         brief=_brief(run_id="run-2", actions=[_action()]),
     )
     assert next_run["current_revision"] == 1
+    assert "ai_decision_advice" not in next_run["previous_successful_brief"]
+    assert "ai_decision_advice_evidence_index" not in next_run[
+        "previous_successful_brief"
+    ]
     assert read_daily_decision_brief_delivery_state(
         base=tmp_path,
         account="lx",
         market="US",
     )["available"] is True
+
+
+def test_retry_payload_classifier_blocks_retired_source_text_and_card(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.channels.feishu_notification_renderer import (
+        feishu_notification_envelope_sha256,
+        render_feishu_notification_card,
+    )
+    from src.application.daily_decision_brief_repository import (
+        classify_retryable_daily_decision_brief_payload,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    prepared = _prepare_fixed(tmp_path, persisted)
+    clean = prepared["envelope"]
+    common = {
+        "base": tmp_path,
+        "account": "lx",
+        "market": "US",
+        "market_trading_date": MARKET_DATE,
+    }
+    assert classify_retryable_daily_decision_brief_payload(
+        **common,
+        envelope=clean,
+    ) == "clean"
+
+    message_only = {
+        **clean,
+        "rendered_message": "# AI建议\n旧建议不得重发",
+    }
+    message_only["message_sha256"] = hashlib.sha256(
+        message_only["rendered_message"].encode()
+    ).hexdigest()
+    assert classify_retryable_daily_decision_brief_payload(
+        **common,
+        envelope=message_only,
+    ) == "legacy_ai_payload_retired"
+
+    card = render_feishu_notification_card(
+        markdown="# AI Decision Advice\nretired",
+        fallback_text=clean["rendered_message"],
+    )
+    card_only = {
+        **clean,
+        "rendered_transport": card,
+        "rendered_transport_sha256": feishu_notification_envelope_sha256(card),
+    }
+    assert classify_retryable_daily_decision_brief_payload(
+        **common,
+        envelope=card_only,
+    ) == "legacy_ai_payload_retired"
+
+    revision_path = persisted["paths"]["revision"]
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    source_only = {
+        **clean,
+        "source_digest": daily_brief_compatible_digests(historical)[-1],
+    }
+    assert classify_retryable_daily_decision_brief_payload(
+        **common,
+        envelope=source_only,
+    ) == "legacy_ai_payload_retired"
+
+
+def test_retry_payload_classifier_inspects_the_same_raw_revision_it_validates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    prepared = _prepare_fixed(tmp_path, persisted)
+    revision_path = persisted["paths"]["revision"].resolve()
+    revision_reads = 0
+    original_read = repository._read_json_strict
+
+    def counted_read(path: Path):
+        nonlocal revision_reads
+        if Path(path).resolve() == revision_path:
+            revision_reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(repository, "_read_json_strict", counted_read)
+
+    assert repository.classify_retryable_daily_decision_brief_payload(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        envelope=prepared["envelope"],
+    ) == "clean"
+    assert revision_reads == 1
 
 
 def test_v2_ambiguous_attempt_freezes_envelope_and_exact_retry_can_confirm(tmp_path: Path) -> None:

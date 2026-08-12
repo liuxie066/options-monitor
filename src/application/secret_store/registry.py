@@ -45,8 +45,6 @@ _SPECS = (
         ("DEEPSEEK_API_KEY",),
         "DeepSeek API authentication",
         (
-            "options-monitor-ai-evidence-collector.service",
-            "options-monitor-tick-*.service",
             "options-monitor-feishu-ws.service",
             "options-monitor-wechat-clawbot.service",
         ),

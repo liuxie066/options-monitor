@@ -773,6 +773,190 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     assert retry_calls[0]["idempotency_key"] == calls[0]["idempotency_key"]
 
 
+@pytest.mark.parametrize("retry_status", ("pending", "ambiguous"))
+def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
+    monkeypatch,
+    tmp_path: Path,
+    retry_status: str,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+
+    _patch_assembler(monkeypatch)
+    first_calls: list[dict] = []
+    _patch_sender(
+        monkeypatch,
+        calls=first_calls,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    first = _request(tmp_path, run_id="retired-ai-seed")
+    assert mod.run_tick_notification_flow(first.request) == 1
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    envelope = retry["envelope"]
+    assert envelope["status"] == "pending"
+
+    revision_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / f"daily_decision_brief.US.{MARKET_DATE}.r{envelope['revision']:04d}.json"
+    )
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    legacy_digest = daily_brief_compatible_digests(historical)[-1]
+
+    delivery_path = retry["path"]
+    delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "source_digest"
+    ] = legacy_digest
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "status"
+    ] = retry_status
+    delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
+    state_before = delivery_path.read_bytes()
+
+    retry_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=retry_calls)
+    second = _request(tmp_path, run_id="retired-ai-delivery-only", delivery_only=True)
+
+    assert mod.run_tick_notification_flow(second.request) == 2
+    assert retry_calls == []
+    assert delivery_path.read_bytes() == state_before
+    audit = second.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert audit["delivery_key"] == envelope["delivery_key"]
+    assert audit["error_code"] == "legacy_ai_payload_retired"
+    assert audit["blocked"] is True
+    assert second.request.audit_helper.failures == [
+        ("legacy_ai_payload_retired", "daily_brief_retry_guard")
+    ]
+    assert second.completions == [
+        {
+            "status": "unsupported_failed",
+            "message": "legacy_ai_payload_retired",
+            "ok": False,
+            "error_code": "legacy_ai_payload_retired",
+        }
+    ]
+
+    post_scan_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=post_scan_calls)
+    post_scan = _request(tmp_path, run_id="retired-ai-post-scan")
+    assert mod.run_tick_notification_flow(post_scan.request) == 2
+    assert post_scan_calls == []
+    assert delivery_path.read_bytes() == state_before
+    current_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / "daily_decision_brief.US.current.json"
+    )
+    assert json.loads(current_path.read_text(encoding="utf-8"))["run_id"] == (
+        "retired-ai-post-scan"
+    )
+    post_scan_audit = post_scan.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert post_scan_audit["delivery_key"] == envelope["delivery_key"]
+    assert post_scan_audit["error_code"] == "legacy_ai_payload_retired"
+
+
+def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(
+        monkeypatch,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    seed = _request(
+        tmp_path,
+        run_id="retired-ai-mixed-seed",
+        accounts=("lx", "sy"),
+    )
+    assert mod.run_tick_notification_flow(seed.request) == 1
+
+    lx_retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    lx_envelope = lx_retry["envelope"]
+    revision_path = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / f"daily_decision_brief.US.{MARKET_DATE}.r{lx_envelope['revision']:04d}.json"
+    )
+    historical = json.loads(revision_path.read_text(encoding="utf-8"))
+    historical["ai_decision_advice"] = {"status": "completed"}
+    historical["ai_decision_advice_evidence_index"] = {"symbols": []}
+    revision_path.write_text(json.dumps(historical), encoding="utf-8")
+    delivery = json.loads(lx_retry["path"].read_text(encoding="utf-8"))
+    delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET][
+        "source_digest"
+    ] = daily_brief_compatible_digests(historical)[-1]
+    lx_retry["path"].write_text(json.dumps(delivery), encoding="utf-8")
+    lx_state_before = lx_retry["path"].read_bytes()
+
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    retry = _request(
+        tmp_path,
+        run_id="retired-ai-mixed-retry",
+        accounts=("lx", "sy"),
+        delivery_only=True,
+    )
+
+    assert mod.run_tick_notification_flow(retry.request) == 1
+    assert len(calls) == 1
+    assert "sy" in calls[0]["message"]
+    assert "lx" not in calls[0]["message"]
+    assert lx_retry["path"].read_bytes() == lx_state_before
+    assert retry.completions == [
+        {
+            "status": "unsupported_failed",
+            "message": "legacy_ai_payload_retired",
+            "ok": False,
+            "error_code": "legacy_ai_payload_retired",
+        }
+    ]
+    assert retry.request.audit_helper.failures == [
+        ("legacy_ai_payload_retired", "daily_brief_retry_guard")
+    ]
+
+
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import (
@@ -854,179 +1038,6 @@ def test_delivery_only_without_envelope_is_read_only_and_skips_assembler(monkeyp
     assert mod.run_tick_notification_flow(bundle.request) == 0
     assert bundle.completions == [{"status": "skipped", "message": "no_retryable_delivery"}]
     assert not (tmp_path / "output_runs").exists()
-
-
-def test_advice_handoff_selects_only_current_account(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.prepared_portfolio_distribution import (
-        PreparedPortfolioDistribution,
-    )
-
-    captured: dict[str, dict] = {}
-
-    def assemble(*, base, run_id, account, markets_to_run, **kwargs):
-        captured[account] = kwargs
-        return {
-            market: _brief(
-                base=base,
-                run_id=run_id,
-                account=account,
-                market=market,
-            )
-            for market in markets_to_run
-        }
-
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
-    bundle = _request(
-        tmp_path,
-        run_id="account-isolation",
-        accounts=("lx", "sy"),
-    )
-    pm_by_account = {
-        account: PreparedPortfolioDistribution(
-            envelope={
-                "authority": {
-                    "run_id": "account-isolation",
-                    "account": account,
-                    "status": "ready",
-                    "reason": "portfolio_ready",
-                },
-                "payload": {"marker": account},
-            },
-            artifact_path=tmp_path / f"{account}.json",
-            artifact_sha256=("a" if account == "lx" else "b") * 64,
-        )
-        for account in ("lx", "sy")
-    }
-    option_by_account = {
-        account: {
-            "prepared_authority": {
-                "run_id": "account-isolation",
-                "account": account,
-            },
-            "marker": account,
-        }
-        for account in ("lx", "sy")
-    }
-    bundle.request = replace(
-        bundle.request,
-        opening_candidate_snapshot_by_account={
-            account: {"account": account, "marker": account}
-            for account in ("lx", "sy")
-        },
-        opening_candidate_snapshot_unavailable_by_account={},
-        prepared_portfolio_distribution_by_account=pm_by_account,
-        prepared_portfolio_distribution_artifact_path_by_account={
-            account: prepared.artifact_path
-            for account, prepared in pm_by_account.items()
-        },
-        prepared_portfolio_distribution_artifact_sha256_by_account={
-            account: prepared.artifact_sha256
-            for account, prepared in pm_by_account.items()
-        },
-        prepared_portfolio_distribution_status_by_account={
-            account: prepared.status
-            for account, prepared in pm_by_account.items()
-        },
-        prepared_option_positions_context_by_account=option_by_account,
-        prepared_option_positions_context_unavailable_by_account={},
-        prepared_option_positions_context_manifest_by_account={
-            account: tmp_path / f"{account}-option.json"
-            for account in ("lx", "sy")
-        },
-        prepared_option_positions_context_manifest_sha256_by_account={
-            "lx": "c" * 64,
-            "sy": "d" * 64,
-        },
-    )
-
-    mod._prepare_daily_brief_notification(bundle.request)
-
-    assert captured["lx"]["opening_candidate_snapshot"]["marker"] == "lx"
-    assert captured["sy"]["opening_candidate_snapshot"]["marker"] == "sy"
-    assert (
-        captured["lx"]["prepared_portfolio_distribution"]
-        is pm_by_account["lx"]
-    )
-    assert (
-        captured["sy"]["prepared_option_positions_context"]["marker"]
-        == "sy"
-    )
-    assert "prepared_portfolio_distribution_by_account" not in str(
-        bundle.request.tick_metrics
-    )
-
-
-def test_missing_portfolio_authority_map_is_soft_unavailable(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    import src.application.tick_notification_flow as mod
-    from src.application.prepared_portfolio_distribution import (
-        PreparedPortfolioDistribution,
-    )
-
-    captured: dict = {}
-
-    def assemble(*, base, run_id, account, markets_to_run, **kwargs):
-        captured.update(kwargs)
-        return {
-            market: _brief(base=base, run_id=run_id, account=account)
-            for market in markets_to_run
-        }
-
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
-    bundle = _request(tmp_path, run_id="missing-pm-map")
-    prepared = PreparedPortfolioDistribution(
-        envelope={"authority": {"status": "ready"}, "payload": {}},
-        artifact_path=tmp_path / "pm.json",
-        artifact_sha256="a" * 64,
-    )
-    bundle.request = replace(
-        bundle.request,
-        opening_candidate_snapshot_by_account={"lx": {"account": "lx"}},
-        prepared_portfolio_distribution_by_account={"lx": prepared},
-    )
-
-    mod._prepare_daily_brief_notification(bundle.request)
-
-    assert captured["prepared_portfolio_distribution"] is None
-    assert (
-        captured["portfolio_distribution_unavailable_reason"]
-        == "portfolio_authority_handoff_incomplete"
-    )
-
-
-def test_delivery_only_does_not_consume_advice_authority_maps(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    import src.application.tick_notification_flow as mod
-
-    class _ForbiddenMap:
-        def __getattribute__(self, _name):  # pragma: no cover
-            raise AssertionError("delivery-only must not inspect Advice maps")
-
-    monkeypatch.setattr(
-        mod,
-        "assemble_daily_decision_briefs",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("delivery-only must not assemble")
-        ),
-    )
-    bundle = _request(
-        tmp_path,
-        run_id="delivery-only-authorities",
-        delivery_only=True,
-    )
-    bundle.request = replace(
-        bundle.request,
-        opening_candidate_snapshot_by_account=_ForbiddenMap(),
-        prepared_portfolio_distribution_by_account=_ForbiddenMap(),
-        prepared_option_positions_context_by_account=_ForbiddenMap(),
-    )
-
-    assert mod.run_tick_notification_flow(bundle.request) == 0
 
 
 def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_path: Path) -> None:
