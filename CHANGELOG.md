@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.13.14 - 2026-08-13
+
 ### Improvements
 - Retired AI Decision Advice end to end: removed model generation, external-news collection, portfolio-distribution preparation, configuration, managed collector services, and current Daily Brief/Agent rendering. Deterministic candidate, position, funds, Close Advice, and Daily Brief authorities remain unchanged; legacy frozen deliveries containing AI content fail closed until separately resolved.
 
