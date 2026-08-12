@@ -238,7 +238,12 @@ def _load_owner_snapshot(
 ) -> dict[str, Any]:
     try:
         if owner == "opening":
-            return load_opening_candidate_snapshot(base=base, run_id=run_id, account=account)
+            return load_opening_candidate_snapshot(
+                base=base,
+                run_id=run_id,
+                account=account,
+                require_current_contract=True,
+            )
         if owner == "sp_lc":
             return load_combo_yield_candidate_snapshot(base=base, run_id=run_id, account=account)
         if owner == "cc_lp":
@@ -597,11 +602,82 @@ def load_candidate_snapshot_bundle(
     return {"manifest": manifest, "status_index": index, "owners": owners}
 
 
+def load_latest_candidate_snapshot_bundle(
+    *,
+    base: Path,
+    account: str,
+) -> dict[str, Any]:
+    """Resolve one account's latest run and require its terminal manifest."""
+
+    root = Path(base).resolve()
+    try:
+        account_norm = required_text(account, "account").lower()
+    except CandidateSnapshotContractError as exc:
+        raise CandidateSnapshotManifestError(str(exc)) from exc
+    runs_root_path = root / "output_runs"
+    if runs_root_path.is_symlink():
+        raise CandidateSnapshotManifestError("output_runs may not be a symlink")
+    runs_root = runs_root_path.resolve()
+    pointer = root / "output_shared" / "state" / "last_run_dir.txt"
+    if pointer.is_symlink():
+        raise CandidateSnapshotManifestError("last-run pointer may not be a symlink")
+    if pointer.exists():
+        if not pointer.is_file():
+            raise CandidateSnapshotManifestError("last-run pointer is invalid")
+        try:
+            pointed = Path(pointer.read_text(encoding="utf-8").strip())
+        except OSError as exc:
+            raise CandidateSnapshotManifestError("last-run pointer is unreadable") from exc
+        if not pointed.is_absolute():
+            pointed = (root / pointed).resolve()
+        else:
+            pointed = pointed.resolve()
+        if pointed.parent != runs_root:
+            raise CandidateSnapshotManifestError("last-run pointer is outside output_runs")
+        return load_candidate_snapshot_bundle(
+            base=root,
+            run_id=pointed.name,
+            account=account_norm,
+        )
+
+    if not runs_root.is_dir() or runs_root.is_symlink():
+        raise CandidateSnapshotManifestError("no output runs are available")
+    try:
+        candidates = sorted(
+            (
+                item
+                for item in runs_root.iterdir()
+                if item.is_dir() and not item.is_symlink()
+            ),
+            key=lambda item: (item.stat().st_mtime_ns, item.name),
+            reverse=True,
+        )
+    except OSError as exc:
+        raise CandidateSnapshotManifestError("output runs are unreadable") from exc
+    for run_dir in candidates:
+        account_dir = run_dir / "accounts" / account_norm
+        if account_dir.is_symlink():
+            raise CandidateSnapshotManifestError("latest account run may not be a symlink")
+        if not account_dir.is_dir():
+            continue
+        # The newest run containing the requested account is authoritative.
+        # Do not skip an incomplete run and silently return stale evidence.
+        return load_candidate_snapshot_bundle(
+            base=root,
+            run_id=run_dir.name,
+            account=account_norm,
+        )
+    raise CandidateSnapshotManifestError(
+        f"no candidate run is available for account {account_norm}"
+    )
+
+
 __all__ = [
     "CANDIDATE_SNAPSHOT_MANIFEST_FILE",
     "CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA",
     "CandidateSnapshotManifestError",
     "load_candidate_snapshot_bundle",
+    "load_latest_candidate_snapshot_bundle",
     "publish_candidate_snapshot_manifest",
     "validate_candidate_snapshot_manifest",
 ]

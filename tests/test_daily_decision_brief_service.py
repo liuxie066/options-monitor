@@ -9,15 +9,17 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
-    rank_candidate_rows,
+    build_candidate_decision,
 )
 from src.application.multi_tick.misc import AccountResult
 from src.application.close_advice_report_manifest import (
     publish_close_advice_report_manifest,
+)
+from src.application.opening_candidate_snapshot import (
+    seal_opening_candidate_snapshot,
 )
 
 
@@ -360,10 +362,7 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                 str(row.get("strike") or ""),
             )
             deduped.setdefault(identity, row)
-        rows_by_mode[mode] = rank_candidate_rows(
-            list(deduped.values()),
-            mode=mode,
-        )
+        rows_by_mode[mode] = list(deduped.values())
 
     for mode, scopes in scopes_by_mode.items():
         family = "sell_put" if mode == "put" else "covered_call"
@@ -386,123 +385,62 @@ def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
                 scope["quote_snapshot_id"] = status_payload.get("snapshot_id")
                 scope["quote_receipt_relpath"] = status_payload.get("receipt_relpath")
 
-    strategy_results: list[dict] = []
-    ranked_candidates: list[dict] = []
-    candidate_decisions: list[dict] = []
-    strategy_scope_results: list[dict] = []
-    contract_scope_results: list[dict] = []
     observed_modes = [
         mode for mode in ("put", "call") if scopes_by_mode[mode]
     ]
-    any_complete = False
-    any_failed = False
+    scan_statuses: list[dict[str, Any]] = []
+    candidate_evaluations: dict[str, list[dict[str, Any]]] = {
+        mode: [] for mode in observed_modes
+    }
     for mode in observed_modes:
-        rows = rows_by_mode[mode]
-        scope_rows = list(scopes_by_mode[mode].values())
-        scope_states = {str(item["status"]) for item in scope_rows}
-        if rows:
-            status = "candidates_found"
-        elif scope_states == {"completed"}:
-            status = "no_candidate"
-        else:
-            status = (
-                "partial_data"
-                if "completed" in scope_states
-                else "data_unavailable"
-            )
-        any_complete = any_complete or "completed" in scope_states
-        any_failed = any_failed or bool(scope_states - {"completed"})
-        strategy_results.append(
+        scan_statuses.extend(
             {
+                "symbol": scope["symbol"],
                 "strategy_mode": mode,
-                "strategy_status": status,
-                "capacity_status": (
-                    "available"
-                ),
-                "candidate_count": len(rows),
-                "scope_count": len(scope_rows),
+                "status": scope["status"],
+                "reason": scope.get("reason_code"),
+                "quote_snapshot_id": scope.get("quote_snapshot_id"),
+                "quote_receipt_relpath": scope.get("quote_receipt_relpath"),
             }
+            for scope in scopes_by_mode[mode].values()
         )
-        strategy_scope_results.extend(scope_rows)
-        for rank, facts in enumerate(rows, start=1):
-            candidate_id = canonical_sha256(
+        for facts in rows_by_mode[mode]:
+            candidate_evaluations[mode].append(
                 {
-                    "schema": "opening_candidate_identity.v1",
-                    "account": "lx",
-                    "futu_account_id": "12345",
-                    "market": market_norm,
-                    "strategy_mode": mode,
-                    "symbol": str(facts.get("symbol") or "").upper(),
-                    "contract_symbol": facts.get("contract_symbol"),
-                    "expiration": facts.get("expiration"),
-                    "strike": facts.get("strike"),
-                }
-            )
-            candidate_decisions.append({"candidate_id": candidate_id})
-            ranked_candidates.append(
-                {
-                    "candidate_id": candidate_id,
-                    "strategy_mode": mode,
-                    "rank": rank,
-                    "facts": facts,
-                    "ranking": {},
-                }
-            )
-            contract_scope_results.append(
-                {
-                    "scope": "contract",
-                    "candidate_id": candidate_id,
-                    "symbol": facts.get("symbol"),
-                    "strategy_mode": mode,
-                    "expiration": facts.get("expiration"),
-                    "strike": facts.get("strike"),
-                    "contract_symbol": facts.get("contract_symbol"),
-                    "status": "accepted",
-                    "reason_codes": [],
+                    "normalized_input": facts,
+                    "opening_decision": build_candidate_decision(
+                        mode=mode,
+                        symbol=str(facts.get("symbol") or ""),
+                        contract_symbol=str(facts.get("contract_symbol") or ""),
+                        accepted=True,
+                        normalized_input=facts,
+                    ),
                 }
             )
 
-    if ranked_candidates:
-        opening_status = "candidates_found"
-    elif any_failed and any_complete:
-        opening_status = "partial_data"
-    elif any_failed:
-        opening_status = "data_unavailable"
-    else:
-        opening_status = "no_candidate"
-    scope_results = sorted(
-        [*strategy_scope_results, *contract_scope_results],
-        key=lambda row: (
-            str(row.get("scope")),
-            str(row.get("strategy_mode")),
-            str(row.get("symbol")),
-            str(row.get("expiration")),
-            str(row.get("contract_symbol")),
-        ),
+    seal_opening_candidate_snapshot(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        market=market_norm,
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": market_norm,
+            "source": "opend",
+        },
+        account_config_sha256="f" * 64,
+        strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(),
+        scan_statuses=scan_statuses,
+        final_candidates={
+            mode: rows_by_mode[mode] for mode in observed_modes
+        },
+        candidate_evaluations=candidate_evaluations,
+        sealed_at="2026-07-17T13:59:59Z",
     )
-    snapshot = {
-        "schema_version": "opening_candidate_snapshot.v1",
-        "run_id": "run-1",
-        "account": "lx",
-        "futu_account_id": "12345",
-        "trade_env": "REAL",
-        "market": market_norm,
-        "strategy_modes": observed_modes,
-        "account_config_sha256": "f" * 64,
-        "strategy_policy_sha256": "1" * 64,
-        "required_data_manifest_sha256": "a" * 64,
-        "dependencies": _fixture_dependencies(),
-        "sealed_at_utc": "2026-07-17T13:59:59Z",
-        "opening_status": opening_status,
-        "strategy_results": strategy_results,
-        "scope_results": scope_results,
-        "candidate_decisions": candidate_decisions,
-        "ranked_candidates": ranked_candidates,
-    }
-    snapshot["content_sha256"] = canonical_sha256(snapshot)
-    snapshot_path = account_dir / "state" / "opening_candidate_snapshot.json"
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
 
 def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
@@ -902,7 +840,6 @@ def _install_success_empty_strategy_evidence(
     )
 
     account_dir = _account_dir(base)
-    state_dir = account_dir / "state"
     pd.DataFrame(columns=("symbol", "contract_symbol")).to_csv(
         account_dir / "nvda_sell_put_candidates.csv",
         index=False,
@@ -1046,12 +983,6 @@ def _install_success_empty_strategy_evidence(
         symbol="NVDA",
         required_data_root=required_data_root,
         now=completed_at,
-    )
-    _materialize_opening_snapshot_fixture(base, market="US")
-    snapshot = json.loads(
-        (state_dir / "opening_candidate_snapshot.json").read_text(
-            encoding="utf-8"
-        )
     )
     publish_strategy_scan_status(
         report_dir=account_dir,

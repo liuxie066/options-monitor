@@ -526,8 +526,9 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - Sell Put / Covered Call 的计算、硬筛和排序由 Candidate Engine 唯一所有；
 - 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
-- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，Agent 和 Daily Brief
-  读取同一封存事实；
+- 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，并由最后发布的
+  `candidate_snapshot_manifest.v1` 绑定完整 owner/scope；Agent 和 Daily Brief 只通过
+  terminal manifest gate 读取同一封存事实，不会挽救未完成运行中的单个 owner；
 - yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV 权威路径和重复候选
   artifact 已退出当前开仓路径；JSONL 只保留为当前决策追踪证据，历史候选文件只在
   research/archive/shadow 的受限元数据分类边界中识别且不再解析。

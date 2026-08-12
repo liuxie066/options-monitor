@@ -262,7 +262,7 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 - Candidate evidence readiness: `healthcheck` / `doctor` `candidate_evidence` check
 - Docs: `docs/candidate_strategy.md`
 
-For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and the manifest-bound snapshot/trace evidence. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity. The tool discovers traces from the runtime root, latest-run pointer, recent `output_runs`, and shared-report fallbacks; only pass explicit paths for manual forensics.
+For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and the manifest-bound snapshot/trace evidence. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity. Both candidate explanation tools validate the terminal manifest before reading the opening owner. A missing manifest or a latest run that has started but is not terminal fails closed; the tools never skip it to explain an older snapshot. Only pass an explicit `run_id` for manual forensics of a known terminal run.
 
 For offline strategy evidence review, collect a candidate-scoped Research bundle first:
 

@@ -188,6 +188,7 @@ def seal_opening_candidate_snapshot(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
         verify_dependency_root=Path(base).resolve(),
+        require_current_contract=True,
     )
     encoded = _canonical_json_bytes(payload)
     try:
@@ -206,6 +207,7 @@ def seal_opening_candidate_snapshot(
         base=Path(base),
         run_id=run_id_norm,
         account=account_norm,
+        require_current_contract=True,
     )
     if adopted != payload:
         raise OpeningCandidateSnapshotError("opening candidate snapshot adoption mismatch")
@@ -217,6 +219,7 @@ def load_opening_candidate_snapshot(
     base: Path,
     run_id: str,
     account: str,
+    require_current_contract: bool = False,
 ) -> dict[str, Any]:
     run_id_norm = _required_text(run_id, "run_id")
     account_norm = _required_text(account, "account").lower()
@@ -239,66 +242,9 @@ def load_opening_candidate_snapshot(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
         verify_dependency_root=Path(base).resolve(),
+        require_current_contract=require_current_contract,
     )
     return payload
-
-
-def load_latest_opening_candidate_snapshot(
-    *,
-    base: Path,
-    account: str,
-) -> dict[str, Any]:
-    """Resolve the latest sealed snapshot without falling back past a bad pointer."""
-
-    root = Path(base).resolve()
-    account_norm = _required_text(account, "account").lower()
-    pointer = root / "output_shared" / "state" / "last_run_dir.txt"
-    if pointer.exists():
-        if pointer.is_symlink():
-            raise OpeningCandidateSnapshotError("last-run pointer may not be a symlink")
-        try:
-            pointed = Path(pointer.read_text(encoding="utf-8").strip())
-        except OSError as exc:
-            raise OpeningCandidateSnapshotError("last-run pointer is unreadable") from exc
-        if not pointed.is_absolute():
-            pointed = (root / pointed).resolve()
-        else:
-            pointed = pointed.resolve()
-        runs_root = (root / "output_runs").resolve()
-        if pointed.parent != runs_root:
-            raise OpeningCandidateSnapshotError("last-run pointer is outside output_runs")
-        return load_opening_candidate_snapshot(
-            base=root,
-            run_id=pointed.name,
-            account=account_norm,
-        )
-
-    runs_root = root / "output_runs"
-    if not runs_root.is_dir():
-        raise OpeningCandidateSnapshotError("no output runs are available")
-    candidates = sorted(
-        (item for item in runs_root.iterdir() if item.is_dir() and not item.is_symlink()),
-        key=lambda item: (item.stat().st_mtime_ns, item.name),
-        reverse=True,
-    )
-    for run_dir in candidates:
-        snapshot_path = (
-            run_dir
-            / "accounts"
-            / account_norm
-            / "state"
-            / OPENING_CANDIDATE_SNAPSHOT_FILE
-        )
-        if not snapshot_path.is_file() or snapshot_path.is_symlink():
-            continue
-        return load_opening_candidate_snapshot(
-            base=root,
-            run_id=run_dir.name,
-            account=account_norm,
-        )
-    raise OpeningCandidateSnapshotError(
-        f"no sealed opening candidate snapshot is available for account {account_norm}"
-    )
 
 
 def ranked_opening_candidates(
@@ -367,6 +313,7 @@ def validate_opening_candidate_snapshot(
     expected_run_id: str,
     expected_account: str,
     verify_dependency_root: Path | None = None,
+    require_current_contract: bool = False,
 ) -> None:
     item = dict(payload or {})
     if item.get("schema_version") != OPENING_CANDIDATE_SNAPSHOT_SCHEMA:
@@ -558,6 +505,10 @@ def validate_opening_candidate_snapshot(
         <= set(row)
         for row in results
     ) and (not decision_ids or validated_decision_ids == decision_ids)
+    if require_current_contract and not full_current_contract:
+        raise OpeningCandidateSnapshotError(
+            "opening candidate current contract is incomplete"
+        )
     if full_current_contract:
         strategy_scopes = [
             row
@@ -580,6 +531,24 @@ def validate_opening_candidate_snapshot(
             raise OpeningCandidateSnapshotError(
                 "opening candidate strategy scopes are invalid"
             ) from exc
+        allowed_scopes = {
+            (str(row["symbol"]).upper(), str(row["strategy_mode"]))
+            for row in reconstructed_statuses
+        }
+        for raw_decision in decisions:
+            decision = dict(raw_decision)
+            normalized = dict(decision.get("normalized_input") or {})
+            decision_scope = (
+                _required_text(
+                    normalized.get("symbol"),
+                    "candidate symbol",
+                ).upper(),
+                _mode(decision.get("strategy_mode")),
+            )
+            if decision_scope not in allowed_scopes:
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate decision escapes scan scope"
+                )
         expected_scopes = _scope_results(
             statuses=reconstructed_statuses,
             decisions=[dict(row) for row in decisions],
@@ -755,6 +724,13 @@ def _snapshot_decisions(
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str, str], dict[str, Any]]]:
     status_rows = list(statuses)
     expected_modes = {str(item["strategy_mode"]) for item in status_rows}
+    allowed_scopes = {
+        (
+            str(item.get("symbol") or "").strip().upper(),
+            _mode(item.get("strategy_mode")),
+        )
+        for item in status_rows
+    }
     quote_bindings = {
         (
             str(item.get("symbol") or "").strip().upper(),
@@ -795,6 +771,14 @@ def _snapshot_decisions(
     for mode, rows in evaluation_rows.items():
         for record in rows:
             normalized = dict(record.get("normalized_input") or {})
+            decision_scope = (
+                _required_text(normalized.get("symbol"), "candidate symbol").upper(),
+                mode,
+            )
+            if decision_scope not in allowed_scopes:
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate decision escapes scan scope"
+                )
             key = _contract_key(mode, normalized)
             if key in index:
                 raise OpeningCandidateSnapshotError(
@@ -1334,7 +1318,6 @@ __all__ = [
     "candidate_universe_summary",
     "dependency_from_file",
     "dependency_from_hash",
-    "load_latest_opening_candidate_snapshot",
     "load_opening_candidate_snapshot",
     "ranked_opening_candidate_decisions",
     "ranked_opening_candidates",
