@@ -68,6 +68,12 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
+from src.application.config_profiles import apply_profiles
+from src.application.config_sections import resolve_templates_config
+from src.application.yield_enhancement_config import (
+    derive_yield_enhancement_policy,
+    resolve_yield_enhancement_cfg,
+)
 
 
 _DEFAULT_MAX_CANDIDATES = 3
@@ -164,14 +170,15 @@ def assemble_daily_decision_brief(
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
-    _cc_lp_rows, _cc_lp_available = _load_cc_lp_snapshot_family(
-        base=base_path,
-        run_id=run_id_norm,
-        account=account_norm,
-        market=market_norm,
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-    )
+    if _cc_lp_snapshot_required(config_map, market=market_norm):
+        _load_cc_lp_snapshot_family(
+            base=base_path,
+            run_id=run_id_norm,
+            account=account_norm,
+            market=market_norm,
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+        )
     close_rows, close_available = _load_close_advice(
         path=run_account_dir / "close_advice.csv",
         run_account_dir=run_account_dir,
@@ -935,6 +942,31 @@ def _load_cc_lp_snapshot_family(
     )
     return market_rows, True
 
+
+def _cc_lp_snapshot_required(
+    config: Mapping[str, Any],
+    *,
+    market: str,
+) -> bool:
+    symbols = config.get("symbols")
+    if not isinstance(symbols, list):
+        return False
+    market_norm = str(market or "").strip().upper()
+    templates = resolve_templates_config(dict(config))
+    for raw in symbols:
+        if not isinstance(raw, Mapping):
+            continue
+        symbol_config = apply_profiles(dict(raw), templates)
+        symbol = canonical_symbol(symbol_config.get("symbol"))
+        if not symbol or symbol_market(symbol) != market_norm:
+            continue
+        policy = derive_yield_enhancement_policy(
+            resolve_yield_enhancement_cfg(symbol_config),
+            market=market_norm,
+        )
+        if policy.enabled and _text(policy.config.get("variant")).lower() == "cc_lp":
+            return True
+    return False
 
 
 def _load_close_advice(
@@ -2113,6 +2145,7 @@ def _append_prefetch_gaps(prefetch: Mapping[str, Any], *, market: str, data_gaps
             "available",
             "completed",
             "cached",
+            "fetched",
         }:
             failed_symbols.add(symbol)
             data_gaps.append(

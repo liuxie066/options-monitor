@@ -49,6 +49,9 @@ _CLOSE_RECOMMENDATION_LABELS = {
     "hold": "继续观察",
     "not_evaluable": "暂无法评估（证据不足）",
 }
+_PARTIAL_DATA_REASON_TEXT = {
+    "term_matched_rv_unavailable": "期限匹配的已实现波动率（RV）证据不可用",
+}
 
 
 @dataclass
@@ -933,6 +936,19 @@ def _ai_advice_lines_for_family(
         return []
     contracts, ranks = _ai_candidate_fact_maps(brief, market=market)
     evidence_by_ref = _ai_evidence_ref_map(brief)
+    candidates = brief.get("candidates")
+    if isinstance(candidates, Mapping):
+        has_raw_candidates = any(
+            isinstance(item, Mapping)
+            for item in candidates.get(family) or []
+        )
+    else:
+        candidate_rows = candidates if isinstance(candidates, list) else []
+        has_raw_candidates = any(
+            isinstance(item, Mapping)
+            and _lower(item.get("family")) == family
+            for item in candidate_rows
+        )
     return render_family_advice_lines(
         section,
         family=family,
@@ -940,6 +956,7 @@ def _ai_advice_lines_for_family(
         candidate_rank_by_id=ranks,
         evidence_by_ref=evidence_by_ref,
         heading_level=heading_level,
+        has_raw_candidates=has_raw_candidates,
     )
 
 
@@ -1552,8 +1569,13 @@ def _strategy_data_gap_reminders(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
             )
         elif reason == "opening_candidate_strategy_partial_data":
+            detail = _PARTIAL_DATA_REASON_TEXT.get(
+                _lower(item.get("reason_code"))
+            )
             reminders.append(
-                f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
+                f"{symbol} {family}：{detail}，候选结果不完整"
+                if detail
+                else f"{symbol} {family}：本轮部分行情证据不可用，候选结果不完整"
             )
         seen.add(identity)
     return reminders
