@@ -34,6 +34,16 @@ def _write_yaml(path: Path, text: str) -> Path:
     return path
 
 
+def _contains_mapping_key(value: object, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(
+            _contains_mapping_key(item, key) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_mapping_key(item, key) for item in value)
+    return False
+
+
 def _minimal_yaml() -> str:
     return """\
 accounts:
@@ -314,6 +324,7 @@ markets:
 
     defaulted = policies["NVDA"]
     assert defaulted.explicit_fields == ("enabled",)
+    assert "output_mode" not in defaulted.config
     assert defaulted.config["min_net_credit_retention"] == 0.60
     assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
 
@@ -321,6 +332,7 @@ markets:
     assert overridden.explicit_fields == ("enabled", "min_net_credit_retention", "call")
     assert overridden.config["min_net_credit_retention"] == 0.70
     assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
+    assert "output_mode" not in overridden.config
 
 
 def test_yaml_config_keeps_explicit_sell_put_underwriting_thresholds(tmp_path: Path) -> None:
@@ -1443,6 +1455,7 @@ def test_config_build_cli_supports_yaml_source(tmp_path: Path, capsys) -> None:
     cfg = json.loads(output_path.read_text(encoding="utf-8"))
     assert cfg[GENERATED_KEY]["source_format"] == "yaml"
     assert cfg[RESOLVED_KEY]["config_yaml_path"].endswith("config.yaml")
+    assert not _contains_mapping_key(cfg, "output_mode")
     validate_config(cfg)
 
 

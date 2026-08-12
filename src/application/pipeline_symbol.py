@@ -25,7 +25,6 @@ from src.application.sell_put_steps import (
 )
 from src.application.combo_yield_steps import (
     empty_combo_yield_summary,
-    materialize_empty_combo_yield_artifacts,
     run_combo_yield_for_symbol_and_summarize,
 )
 from src.application.symbol_monitoring import (
@@ -111,6 +110,5 @@ def process_symbol(
             empty_sell_call_summary_fn=empty_sell_call_summary,
             run_combo_yield_scan_fn=run_combo_yield_for_symbol_and_summarize,
             empty_combo_yield_summary_fn=empty_combo_yield_summary,
-            materialize_empty_combo_yield_artifacts_fn=materialize_empty_combo_yield_artifacts,
         ),
     )

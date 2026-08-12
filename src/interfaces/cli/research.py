@@ -113,7 +113,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_pull.add_argument(
         "--require-replay-evidence",
         action="store_true",
-        help="auto-select only source runs with candidate, trace, or reject-log evidence",
+        help="auto-select only source runs with candidate snapshot/status or trace evidence",
     )
     archive_pull.add_argument("--no-logs", action="store_true")
     archive_pull.add_argument("--rsync-path", default="rsync")

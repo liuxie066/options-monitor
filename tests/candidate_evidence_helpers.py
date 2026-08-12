@@ -302,12 +302,6 @@ def seal_combo_candidate_fixture(
         candidate_count = sum(
             str(row.get("symbol") or "").upper() == symbol for row in selected
         )
-        # S2 still characterizes the compatibility producer. S3 removes this
-        # placeholder together with the v1 status artifact contract.
-        (account_dir / f"{symbol.lower()}_combo_yield_candidates.csv").write_text(
-            "symbol\n",
-            encoding="utf-8",
-        )
         publish_strategy_scan_status(
             report_dir=account_dir,
             run_id=run_id,

@@ -42,14 +42,12 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters() -> None
         ).to_csv(parsed_dir / "0700.HK_required_data.csv", index=False)
 
         out = run_sell_put_scan(
-            symbols=["0700.HK"],
-            input_root=root,
-            output=root / "sell_put_candidates.csv",
+                symbols=["0700.HK"],
+                input_root=root,
             min_open_interest=999_999,
             min_volume=999_999,
             min_net_income=0,
             min_annualized_net_return=0,
-            quiet=True,
             quote_freshness_now_utc=datetime(2026, 4, 17, 2, 1, tzinfo=timezone.utc),
         )
 
@@ -87,12 +85,10 @@ def test_sell_put_scan_emits_calculation_reject_without_csv_authority() -> None:
         captured: list[dict] = []
 
         out = run_sell_put_scan(
-            symbols=["NVDA"],
-            input_root=root,
-            output=None,
+                symbols=["NVDA"],
+                input_root=root,
             min_net_income=0,
             min_annualized_net_return=0,
-            quiet=True,
             calculation_decision_sink_fn=captured.extend,
             quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         )

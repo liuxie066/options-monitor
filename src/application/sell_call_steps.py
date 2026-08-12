@@ -57,17 +57,10 @@ def _empty_sell_call_result(
 
 def run_sell_call_scan_and_summarize(
     *,
-    py: str,
-    base: Path,
     symbol: str,
-    symbol_lower: str,
     symbol_cfg: dict[str, Any],
     cc: dict[str, Any],
-    top_n: int,
     required_data_dir: Path,
-    report_dir: Path,
-    timeout_sec: int | None,
-    is_scheduled: bool,
     stock: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None = None,
@@ -82,7 +75,6 @@ def run_sell_call_scan_and_summarize(
     ) = None,
 ) -> dict[str, Any]:
     """Run the Covered Call opening policy in memory and summarize it."""
-    del py, base, symbol_lower, top_n, report_dir, timeout_sec, is_scheduled
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     portfolio_source = str(
         (portfolio_ctx or {}).get("portfolio_source_name")
@@ -189,7 +181,6 @@ def run_sell_call_scan_and_summarize(
     df_cc = run_sell_call_scan(
         symbols=[symbol],
         input_root=required_data_dir,
-        output=None,
         avg_cost=float(avg_cost),
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
@@ -220,7 +211,6 @@ def run_sell_call_scan_and_summarize(
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
-        quiet=True,
         calculation_decision_sink_fn=candidate_decisions.extend,
     )
 

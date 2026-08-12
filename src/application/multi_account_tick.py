@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from src.infrastructure.io_utils import (
 from src.infrastructure.run_log import RunLogger
 from src.application.account_config import accounts_from_config
 from src.application.config_sections import resolve_watchlist_config
+from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from domain.domain.symbol_identity import canonical_symbol
 
@@ -353,6 +355,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         except RuntimeConfigFreshnessError as exc:
             raise SystemExit(str(exc)) from exc
+    if allow_stale_config:
+        # The emergency override skips source-freshness comparison only. It must
+        # never revive schema fields removed by the currently running release.
+        validate_config(deepcopy(base_cfg))
     try:
         if args.accounts is None:
             args.accounts = accounts_from_config(base_cfg)

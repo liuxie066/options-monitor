@@ -31,70 +31,51 @@ def _sample_candidate(symbol: str = "NVDA") -> dict:
     }
 
 
-def test_render_yield_enhancement_alerts_defaults_to_symbol_scoped_paths(tmp_path: Path) -> None:
+def test_render_yield_enhancement_alerts_renders_typed_candidates(tmp_path: Path) -> None:
     from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    input_path = report_dir / "nvda_yield_enhancement_candidates.csv"
-    pd.DataFrame([_sample_candidate()]).to_csv(input_path, index=False)
+    output_path = tmp_path / "nvda_combo_yield_alerts.txt"
 
     text = render_yield_enhancement_alerts(
-        report_dir=report_dir,
-        symbol="NVDA",
+        candidates=pd.DataFrame([_sample_candidate()]),
+        output_path=output_path,
         top=1,
     )
 
-    output_path = report_dir / "nvda_combo_yield_alerts.txt"
     assert "[组合收益推荐] NVDA 2026-06-19 95P + 110C" in text
     assert "净权利金年化: 13.00%" in text
     assert "Put: strike=95 | bid=3.00 | delta=-0.25" in text
     assert "Call候选: 2个" in text
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == text
-    assert not (report_dir / "yield_enhancement_alerts.txt").exists()
 
 
-def test_render_yield_enhancement_alerts_keeps_aggregate_fallback_without_symbol(tmp_path: Path) -> None:
+def test_render_yield_enhancement_alerts_accepts_record_lists(tmp_path: Path) -> None:
     from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    pd.DataFrame([_sample_candidate("AAPL")]).to_csv(
-        report_dir / "yield_enhancement_candidates.csv",
-        index=False,
-    )
+    output_path = tmp_path / "combo_yield_alerts.txt"
 
     text = render_yield_enhancement_alerts(
-        report_dir=report_dir,
+        candidates=[_sample_candidate("AAPL")],
+        output_path=output_path,
         top=1,
     )
 
-    output_path = report_dir / "combo_yield_alerts.txt"
     assert "[组合收益推荐] AAPL 2026-06-19 95P + 110C" in text
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == text
 
 
-def test_render_yield_enhancement_alerts_preserves_explicit_paths(tmp_path: Path) -> None:
+def test_render_yield_enhancement_alerts_writes_empty_message(tmp_path: Path) -> None:
     from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir()
-    input_path = tmp_path / "custom.csv"
     output_path = tmp_path / "custom.txt"
-    pd.DataFrame([_sample_candidate()]).to_csv(input_path, index=False)
 
     text = render_yield_enhancement_alerts(
-        input_path=input_path,
+        candidates=pd.DataFrame(),
         output_path=output_path,
-        report_dir=report_dir,
-        symbol="NVDA",
         top=1,
     )
 
-    assert "[组合收益推荐] NVDA 2026-06-19 95P + 110C" in text
-    assert output_path.exists()
+    assert text == "无候选提醒。"
     assert output_path.read_text(encoding="utf-8") == text
-    assert not (report_dir / "nvda_combo_yield_alerts.txt").exists()
-

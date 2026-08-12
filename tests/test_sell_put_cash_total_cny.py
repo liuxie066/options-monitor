@@ -158,8 +158,6 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
             }
         ]
     )
-    out_path = tmp_path / "sell_put_candidates_labeled.csv"
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -172,7 +170,6 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
             },
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=0.92)),
-        out_path=out_path,
     )
 
     row = result.iloc[0]
@@ -201,8 +198,6 @@ def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_cl
             }
         ]
     )
-    out_path = tmp_path / "sell_put_candidates_labeled.csv"
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -215,7 +210,6 @@ def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_cl
             },
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=0.92)),
-        out_path=out_path,
     )
 
     row = result.iloc[0]
@@ -238,8 +232,6 @@ def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_c
             }
         ]
     )
-    out_path = tmp_path / "sell_put_candidates_labeled.csv"
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -252,7 +244,6 @@ def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_c
             },
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
-        out_path=out_path,
     )
 
     row = result.iloc[0]
@@ -275,8 +266,6 @@ def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_
             }
         ]
     )
-    out_path = tmp_path / "sell_put_candidates_labeled.csv"
-
     result = enrich_sell_put_candidates_with_cash(
         df_labeled=df,
         symbol="0700.HK",
@@ -289,7 +278,6 @@ def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_
             },
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        out_path=out_path,
     )
 
     row = result.iloc[0]
@@ -315,7 +303,6 @@ def test_enrich_sell_put_candidates_keeps_native_cash_when_fx_is_unavailable(tmp
             },
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        out_path=tmp_path / "sell_put_candidates_labeled.csv",
     )
 
     row = result.iloc[0]
@@ -342,155 +329,9 @@ def test_enrich_sell_put_candidates_marks_expired_fx_without_blocking_native_cas
             "_sell_put_fx_status": "unavailable_stale",
         },
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        out_path=tmp_path / "sell_put_candidates_labeled.csv",
     )
 
     row = result.iloc[0]
     assert row["cash_free_effective_native"] == 18_000.0
     assert row["cash_fx_status"] == "known_cash_only_cross_currency_fx_stale:CNY"
     assert pd.isna(row["cash_requirement_unavailable_reason"])
-
-
-def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
-    from src.application.render_sell_put_alerts import render_sell_put_alerts
-
-    csv_path = tmp_path / "sell_put_candidates_labeled.csv"
-    out_path = tmp_path / "sell_put_alerts.txt"
-
-    pd.DataFrame(
-        [
-            {
-                "symbol": "0700.HK",
-                "expiration": "2026-06-29",
-                "strike": 450.0,
-                "spot": 500.0,
-                "dte": 60,
-                "mid": 14.375,
-                "net_income": 1416.5,
-                "annualized_net_return_on_cash_basis": 0.1977,
-                "otm_pct": 0.1,
-                "risk_label": "中性",
-                "implied_volatility": 0.36,
-                "realized_volatility_estimate": 0.24,
-                "iv_rv_ratio": 1.5,
-                "iv_minus_rv": 0.12,
-                "abs_delta": 0.2,
-                "single_trade_concentration": 0.07,
-                "symbol_concentration_after": 0.17,
-                "total_short_put_concentration_after": 0.25,
-                "spread_ratio": 0.1,
-                "open_interest": 100,
-                "volume": 50,
-                "currency": "HKD",
-                "cash_required_cny": 39280.0,
-                "cash_available_total_cny": 531694.0,
-                "cash_free_total_cny": 11666.0,
-            }
-        ]
-    ).to_csv(csv_path, index=False)
-
-    text = render_sell_put_alerts(
-        input_path=csv_path,
-        output_path=out_path,
-        top=1,
-        layered=True,
-    )
-
-    assert "现金类资产折算(CNY): ¥531,694" in text
-    assert "扣担保后余量(现金类资产, CNY): ¥11,666" in text
-    assert "余量(总折算估算, CNY): ¥-27,614" in text
-    assert "波动率: IV=36.00% | RV估计=24.00% | IV/RV=1.50 | IV-RV=12.00%" in text
-    assert "Delta: abs=0.20" in text
-    assert "集中度: 单笔=7.00% | 标的后=17.00% | Short Put总后=25.00%" in text
-    assert "判断: 所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in text
-
-
-def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: Path) -> None:
-    from src.application.render_sell_put_alerts import render_sell_put_alerts
-
-    csv_path = tmp_path / "sell_put_candidates_labeled.csv"
-    out_path = tmp_path / "sell_put_alerts.txt"
-
-    pd.DataFrame(
-        [
-            {
-                "symbol": "AAPL",
-                "expiration": "2026-06-29",
-                "strike": 180.0,
-                "spot": 200.0,
-                "dte": 60,
-                "mid": 2.15,
-                "net_income": 210.0,
-                "annualized_net_return_on_cash_basis": 0.18,
-                "otm_pct": 0.1,
-                "risk_label": "中性",
-                "spread_ratio": 0.1,
-                "open_interest": 100,
-                "volume": 50,
-                "currency": "USD",
-                "cash_required_usd": 18000.0,
-                "cash_free_usd": 15000.0,
-            }
-        ]
-    ).to_csv(csv_path, index=False)
-
-    text = render_sell_put_alerts(
-        input_path=csv_path,
-        output_path=out_path,
-        top=1,
-        layered=True,
-    )
-
-    assert "判断: 所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in text
-    assert "担保现金需求(生效口径, USD): $18,000" in text
-    assert "账户可用担保现金(USD): $15,000" in text
-    assert "余量(生效口径, USD): $-3,000" in text
-
-
-def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> None:
-    from src.application.render_sell_put_alerts import render_sell_put_alerts
-
-    csv_path = tmp_path / "sell_put_candidates_labeled.csv"
-    out_path = tmp_path / "sell_put_alerts.txt"
-
-    pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "strike": 95.0,
-                "spot": 100.0,
-                "dte": 44,
-                "mid": 3.1,
-                "net_income": 307.65,
-                "annualized_net_return_on_cash_basis": 0.273,
-                "otm_pct": 0.05,
-                "risk_label": "中性",
-                "spread_ratio": 0.1,
-                "open_interest": 1200,
-                "volume": 80,
-                "currency": "USD",
-                "linked_call_contract": "2026-06-19 110C",
-                "linked_call_ask": 1.5,
-                "linked_call_delta": 0.32,
-                "linked_call_net_credit": 145.33,
-                "linked_call_annualized_net_credit_yield": 0.13,
-                "linked_call_scenario_score": 0.0458,
-                "linked_call_annualized_scenario_score": 0.38,
-                "linked_call_count": 2,
-            }
-        ]
-    ).to_csv(csv_path, index=False)
-
-    text = render_sell_put_alerts(
-        input_path=csv_path,
-        output_path=out_path,
-        top=1,
-        layered=True,
-    )
-
-    assert "推荐 Call: 2026-06-19 110C  (候选 2 个)" in text
-    assert "买入参考: ask=1.50 | delta=0.32" in text
-    assert "组合估算: 净权利金=145.33 | 净权利金年化=13.00% | 场景评分=4.58% | 场景年化=38.00%" in text
-    assert "目标价" not in text
-    assert "目标收益" not in text
