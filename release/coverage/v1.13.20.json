@@ -1,0 +1,130 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.20",
+  "base": {
+    "tag": "v1.13.19",
+    "commit": "29326830f1dfab9a3b5df5da464e47c51f46bada"
+  },
+  "reviewed_head": "8cd1eebac87299eb8279376bb5eef16adfb69660",
+  "commits": [
+    {
+      "sha": "de39a7dcedb0b85539487735caa9012251c5cb88",
+      "subject": "chore(gateflow): accept plan for data-storage-runtime-projection-p1"
+    },
+    {
+      "sha": "cd96c8c4ac10f71651a3c4180fb933af647bd830",
+      "subject": "feat(research): add read-only storage baseline"
+    },
+    {
+      "sha": "b0e99f3f541cb674320375eea70c4d9c4a1d99b7",
+      "subject": "chore(gateflow): accept plan for candidate-filter-run-resolution"
+    },
+    {
+      "sha": "2ad81020774ef0247b69de2fbedcaf06827c543d",
+      "subject": "chore(gateflow): accept candidate-filter-run-resolution S1"
+    },
+    {
+      "sha": "1135c17df156a44b84b7e1ef356c9385ac43c404",
+      "subject": "chore(gateflow): accept deepreview for candidate-filter-run-resolution"
+    },
+    {
+      "sha": "9ab80d3a8bd33cc42778aa9c5f67347fbbc6067b",
+      "subject": "chore(gateflow): accept PR review for candidate-filter-run-resolution"
+    },
+    {
+      "sha": "286069c3b88ff91cab43763d8debfc040cda41dc",
+      "subject": "chore(gateflow): final closeout for candidate-filter-run-resolution"
+    },
+    {
+      "sha": "b94084374d48778a1f2d9ca95ec09ac0de4b419f",
+      "subject": "Merge pull request #153 from liuxie066/feat/candidate-filter-run-resolution"
+    },
+    {
+      "sha": "ea7587df0531c418352ff7d7f37644e7d4169a34",
+      "subject": "chore(gateflow): accept data-storage-runtime-projection-p1 slice-2"
+    },
+    {
+      "sha": "74336f2264721dcdbd51881b072358294844119d",
+      "subject": "chore(gateflow): accept deepreview for data-storage-runtime-projection-p1"
+    },
+    {
+      "sha": "c8e08b2c67bfa53a5073b982ec48075da2aed5b1",
+      "subject": "chore(gateflow): accept PR review for data-storage-runtime-projection-p1"
+    },
+    {
+      "sha": "7a2f0a499ed7532858170e12941be0a09c01f095",
+      "subject": "chore(gateflow): close data-storage-runtime-projection-p1"
+    },
+    {
+      "sha": "f25352f10ef8f48e87f4c2be98a3765d292b8bc3",
+      "subject": "Merge pull request #154 from liuxie066/perf/data-storage-runtime-projection-p1"
+    },
+    {
+      "sha": "8cd1eebac87299eb8279376bb5eef16adfb69660",
+      "subject": "chore(docs): regenerate dependency graph after candidate-filter run resolution"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added notification-round run resolution to the `candidate_filter_explain` agent tool: with `run_selector=latest_notification` and an optional ISO `notification_date`, Copilot can resolve the run whose notification was actually delivered to the account on that date and explain why a symbol was filtered, instead of requiring an explicit run id or defaulting to the latest run. Resolution is fail-closed with explicit `no_notification_run`, `audit_window_truncated`, and `snapshot_unavailable_for_notification_run` reasons, and records `run_resolution` provenance in the output.",
+      "commits": [
+        "2ad81020774ef0247b69de2fbedcaf06827c543d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "de39a7dcedb0b85539487735caa9012251c5cb88",
+      "reason": "docs-only Gateflow plan artifact for the storage-baseline work unit; no user-facing behavioral change"
+    },
+    {
+      "commit": "cd96c8c4ac10f71651a3c4180fb933af647bd830",
+      "reason": "research-only read-only storage baseline collector; produces no user-facing runtime behavior change"
+    },
+    {
+      "commit": "b0e99f3f541cb674320375eea70c4d9c4a1d99b7",
+      "reason": "docs-only Gateflow plan artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "1135c17df156a44b84b7e1ef356c9385ac43c404",
+      "reason": "docs-only Gateflow deepreview acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "9ab80d3a8bd33cc42778aa9c5f67347fbbc6067b",
+      "reason": "docs-only Gateflow PR review acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "286069c3b88ff91cab43763d8debfc040cda41dc",
+      "reason": "docs-only Gateflow closeout artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "b94084374d48778a1f2d9ca95ec09ac0de4b419f",
+      "reason": "merge commit for candidate-filter-run-resolution; user-facing change covered by the release note mapped to 2ad81020"
+    },
+    {
+      "commit": "ea7587df0531c418352ff7d7f37644e7d4169a34",
+      "reason": "docs-only Gateflow slice acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "74336f2264721dcdbd51881b072358294844119d",
+      "reason": "docs-only Gateflow deepreview acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "c8e08b2c67bfa53a5073b982ec48075da2aed5b1",
+      "reason": "docs-only Gateflow PR review acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "7a2f0a499ed7532858170e12941be0a09c01f095",
+      "reason": "docs-only Gateflow closeout artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "f25352f10ef8f48e87f4c2be98a3765d292b8bc3",
+      "reason": "merge commit for the read-only storage baseline research work unit; no user-facing behavioral change"
+    },
+    {
+      "commit": "8cd1eebac87299eb8279376bb5eef16adfb69660",
+      "reason": "docs-only dependency graph regeneration; no user-facing behavioral change"
+    }
+  ]
+}

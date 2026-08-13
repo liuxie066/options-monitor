@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.20 - 2026-08-13
+
+### Improvements
+- Added notification-round run resolution to the `candidate_filter_explain` agent tool: with `run_selector=latest_notification` and an optional ISO `notification_date`, Copilot can resolve the run whose notification was actually delivered to the account on that date and explain why a symbol was filtered, instead of requiring an explicit run id or defaulting to the latest run. Resolution is fail-closed with explicit `no_notification_run`, `audit_window_truncated`, and `snapshot_unavailable_for_notification_run` reasons, and records `run_resolution` provenance in the output.
+
 ## 1.13.19 - 2026-08-13
 
 ### Bug Fixes
