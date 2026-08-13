@@ -488,3 +488,29 @@ def test_truncated_window_reports_distinct_reason(tmp_path: Path, monkeypatch) -
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
     assert out["error"]["details"]["reason"] == "audit_window_truncated"
+
+
+def test_notification_run_with_missing_snapshot_reports_resolved_run_id(tmp_path: Path) -> None:
+    # 通知事件存在，但对应 run 目录已被清理：错误必须带已解析的 run_id。
+    today = _today_local()
+    event_time = datetime.combine(
+        today, datetime.min.time(), tzinfo=_local_tz()
+    ).astimezone(timezone.utc) + timedelta(hours=1)
+    _write_shared_audit(
+        tmp_path,
+        [_perception_audit_row(run_id="run-purged", event_at_utc=event_time, accounts=["lx"])],
+    )
+
+    out = _run_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "account": "lx",
+            "symbol": "NVDA",
+            "run_selector": "latest_notification",
+        }
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_MISSING"
+    assert out["error"]["details"]["reason"] == "snapshot_unavailable_for_notification_run"
+    assert out["error"]["details"]["run_id"] == "run-purged"
