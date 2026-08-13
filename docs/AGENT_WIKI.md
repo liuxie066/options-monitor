@@ -178,6 +178,47 @@ explicit. Capacity warnings and cold-candidate rows are read-only decision
 previews; this command has no move, delete, compact, checkpoint, repair, or
 notification action.
 
+To measure the current canonical position projector and the real SQLite full-
+replay writer on deterministic synthetic data:
+
+```bash
+./.venv/bin/python scripts/benchmark_data_storage_projection.py \
+  --baseline ./baseline-2026-08.json \
+  --scenario all \
+  --output-dir ./projection-benchmark-2026-08
+```
+
+The output directory must be absent or empty. The runner never opens a runtime
+ledger: it derives bounded dimensions from aggregate baseline metadata, creates
+fresh temporary SQLite ledgers, and atomically publishes `fixture-manifest.json`,
+`timing.json`, `cpu-profile.json`, `allocation-profile.json`, and
+`decision.json`. Omit `--baseline` to use deterministic safe defaults.
+
+Timing uses 5 warmups and 30 measured repetitions by default. Lower values are
+allowed for plumbing checks but are labeled `non_acceptance_smoke`. `cProfile`
+and `tracemalloc` run in separate child processes and therefore never influence
+the threshold timing. The `history_10x` result contains both a fixed-output
+history-cost case and a retained-closed-lot case, each with at least 10,000
+events.
+
+Absolute p95 wall/CPU decisions require an exact host-profile match. First run
+without a reference to record the `host_fingerprint`; only a deliberately
+designated reference run should repeat with:
+
+```bash
+./.venv/bin/python scripts/benchmark_data_storage_projection.py \
+  --scenario history_10x \
+  --reference-host-fingerprint <recorded-sha256> \
+  --output-dir ./projection-benchmark-reference
+```
+
+Without an exact match, timing is still reported but the writer gate is
+`not_comparable`. `projector_only` is diagnostic evidence, not a writer pass.
+Because diff publication is not implemented in Phase 1,
+`lot_diff_publication=not_implemented` and the combined Phase 3A decision stays
+`not_ready`; the command never enables checkpointing, tiering, migration, or
+runtime mutation.
+
 ### Scopes
 
 | Scope | Purpose |
