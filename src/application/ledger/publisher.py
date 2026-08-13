@@ -48,6 +48,8 @@ class PublishedPositionLotProjection:
     lots: list[PositionLotRecord]
     diagnostics: list[LedgerDiagnostic]
     ledger_projection: ProjectionResult
+    resumable_state: ResumableProjectionState | None = None
+    resumable_publication_state: ResumablePublicationState | None = None
 
     @property
     def has_errors(self) -> bool:
@@ -131,23 +133,7 @@ class ResumablePublicationState:
         ).encode("utf-8")
 
     @classmethod
-    def from_json_bytes(cls, payload: bytes) -> "ResumablePublicationState":
-        def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-            out: dict[str, Any] = {}
-            for key, value in items:
-                if key in out:
-                    raise ValueError(f"duplicate publication state key: {key}")
-                out[key] = value
-            return out
-
-        try:
-            decoded = json.loads(
-                bytes(payload).decode("utf-8"),
-                object_pairs_hook=_pairs,
-                parse_constant=lambda value: (_raise_nonfinite(value)),
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("publication state is not valid UTF-8 JSON") from exc
+    def from_dict(cls, decoded: Any) -> "ResumablePublicationState":
         if not isinstance(decoded, dict) or set(decoded) != {
             "schema_version",
             "active_lots",
@@ -174,14 +160,32 @@ class ResumablePublicationState:
                 raise ValueError("publication lot fields must be an object")
             if not isinstance(row["auto_close_baseline"], dict):
                 raise ValueError("publication auto-close baseline must be an object")
-            fields_by_lot_id[lot_id] = deepcopy(row["fields"])
-            baselines_by_lot_id[lot_id] = deepcopy(
-                row["auto_close_baseline"]
-            )
-        state = cls(
+            fields_by_lot_id[lot_id] = row["fields"]
+            baselines_by_lot_id[lot_id] = row["auto_close_baseline"]
+        return cls(
             fields_by_lot_id=fields_by_lot_id,
             auto_close_baseline_by_lot_id=baselines_by_lot_id,
         )
+
+    @classmethod
+    def from_json_bytes(cls, payload: bytes) -> "ResumablePublicationState":
+        def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            out: dict[str, Any] = {}
+            for key, value in items:
+                if key in out:
+                    raise ValueError(f"duplicate publication state key: {key}")
+                out[key] = value
+            return out
+
+        try:
+            decoded = json.loads(
+                bytes(payload).decode("utf-8"),
+                object_pairs_hook=_pairs,
+                parse_constant=lambda value: (_raise_nonfinite(value)),
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("publication state is not valid UTF-8 JSON") from exc
+        state = cls.from_dict(decoded)
         if state.to_json_bytes() != bytes(payload):
             raise ValueError("publication state JSON is not canonical")
         return state
@@ -239,6 +243,8 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
                 lots=list(current.touched_lots),
                 diagnostics=[],
                 ledger_projection=ledger_projection,
+                resumable_state=current.domain_state,
+                resumable_publication_state=current.publication_state,
             )
     legacy_by_event_id = {
         str(payload.get("event_id") or "").strip(): payload
