@@ -145,6 +145,88 @@ With a readiness snapshot:
   --no-write-outputs
 ```
 
+To collect a payload-free storage and capacity baseline for a selected runtime
+root:
+
+```bash
+./om research storage-baseline \
+  --runtime-root /var/lib/options-monitor
+```
+
+The command traverses only the fixed runtime subroots, does not follow
+symlinks, and never opens the source ledger. It copies the source SQLite
+`db/wal/shm` set to a temporary directory after a bounded stability check, then
+queries aggregate row/JSON-byte counts from that copy in `mode=ro` with
+`query_only=ON`. Research payload bodies are neither read nor hashed: declared
+manifest hashes and sizes are capacity metadata, while current content remains
+`not_verified`. The payload-free account baseline is the count of immediate,
+non-symlink directories under `output_accounts`; missing or unsafe roots remain
+explicitly unavailable instead of being inferred from file counts.
+
+Pass prior reports in chronological order to obtain a measured growth and
+90-day forecast; one observation remains `insufficient_history`:
+
+```bash
+./om research storage-baseline \
+  --runtime-root /var/lib/options-monitor \
+  --history-report ./baseline-2026-06.json \
+  --history-report ./baseline-2026-07.json \
+  --output ./baseline-2026-08.json
+```
+
+`--output` writes one atomic local JSON file and must point outside the
+inventoried runtime root. Existing output is refused unless `--overwrite` is
+explicit. Capacity warnings and cold-candidate rows are read-only decision
+previews; this command has no move, delete, compact, checkpoint, repair, or
+notification action.
+
+To measure the current canonical position projector and the real SQLite full-
+replay writer on deterministic synthetic data:
+
+```bash
+./.venv/bin/python scripts/benchmark_data_storage_projection.py \
+  --baseline ./baseline-2026-08.json \
+  --scenario all \
+  --output-dir ./projection-benchmark-2026-08
+```
+
+The output directory must be absent or empty. The runner never opens a runtime
+ledger: it derives bounded dimensions from aggregate baseline metadata, creates
+fresh temporary SQLite ledgers, and atomically publishes `fixture-manifest.json`,
+`timing.json`, `cpu-profile.json`, `allocation-profile.json`, and
+`decision.json`. Omit `--baseline` to use deterministic safe defaults.
+
+Timing uses 5 warmups and 30 measured repetitions by default. Lower values are
+allowed for plumbing checks but are labeled `non_acceptance_smoke`. `cProfile`
+and `tracemalloc` run in separate child processes and therefore never influence
+the threshold timing. The `history_10x` result contains both a fixed-output
+history-cost case and a retained-closed-lot case, each with at least 10,000
+events. It also measures `research_storage_status.history_10x` against a
+deterministic 10,000-partition manifest fixture. Fixture construction and module
+imports are outside the storage timing/allocation scope; the decision freezes
+p95 wall at 5 seconds and Python peak allocation at 64 MiB while preserving
+zero payload-content reads and zero runtime mutations. Use
+`--scenario research_storage_status` to run only that component.
+
+Absolute p95 wall/CPU decisions require an exact host-profile match, including
+separate CPU and hardware-model fields. First run
+without a reference to record the `host_fingerprint`; only a deliberately
+designated reference run should repeat with:
+
+```bash
+./.venv/bin/python scripts/benchmark_data_storage_projection.py \
+  --scenario history_10x \
+  --reference-host-fingerprint <recorded-sha256> \
+  --output-dir ./projection-benchmark-reference
+```
+
+Without an exact match, timing is still reported but the writer gate is
+`not_comparable`. `projector_only` is diagnostic evidence, not a writer pass.
+Because diff publication is not implemented in Phase 1,
+`lot_diff_publication=not_implemented` and the combined Phase 3A decision stays
+`not_ready`; the command never enables checkpointing, tiering, migration, or
+runtime mutation.
+
 ### Scopes
 
 | Scope | Purpose |
