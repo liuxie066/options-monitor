@@ -1,0 +1,93 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.18",
+  "base": {
+    "tag": "v1.13.17",
+    "commit": "6940a96cc6e546578720bf6af0f7ae70d5545037"
+  },
+  "reviewed_head": "46934c27c3d1e32d6e72a687f6b552d8d11ff9f6",
+  "commits": [
+    {
+      "sha": "59ad85c15d174710bdb144aea7a6103add48685c",
+      "subject": "chore(gateflow): accept plan for candidate-csv-retirement"
+    },
+    {
+      "sha": "97a244796a11178f26e25c9a2b821559d5dbb460",
+      "subject": "feat(candidates): seal manifest-bound snapshot authority"
+    },
+    {
+      "sha": "7a84eb4d4321f48a0d013bc4be12245321916445",
+      "subject": "refactor(research): consume sealed candidate evidence"
+    },
+    {
+      "sha": "82816ff3f2260731c1a96c7a16d0e3e29c9287e9",
+      "subject": "chore(gateflow): accept candidate-csv-retirement S3"
+    },
+    {
+      "sha": "46ba161c8aabc60d2f23527d326a95b47ed05597",
+      "subject": "chore(gateflow): accept deepreview for candidate-csv-retirement"
+    },
+    {
+      "sha": "53a68f295783ace26119dd1a0e4e3ef3000d2fe6",
+      "subject": "chore(gateflow): integrate latest main"
+    },
+    {
+      "sha": "d4ab3359bf68f5d7c721b5407a947913f970c9ba",
+      "subject": "chore(gateflow): accept PR review for candidate-csv-retirement"
+    },
+    {
+      "sha": "7d64653151b073b26c87cc19834c5e1fa561d574",
+      "subject": "chore(gateflow): record draft PR pass for candidate-csv-retirement"
+    },
+    {
+      "sha": "24cacba49ff710ba6dd822644f1699bb0af9b8ff",
+      "subject": "chore(gateflow): close candidate-csv-retirement"
+    },
+    {
+      "sha": "46934c27c3d1e32d6e72a687f6b552d8d11ff9f6",
+      "subject": "Merge pull request #151 from liuxie066/refactor/candidate-csv-retirement"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Removed candidate compatibility CSV production and consumption for Sell Put, Covered Call, SP+LC, and CC+LP, including scanner output/reject-log flags, Combo Yield `output_mode`, v1 status publication, and CSV-only adapters. Current candidate facts now require terminal manifest-bound JSON snapshots and JSONL trace; historical CSV-only runs remain untouched but unsupported for automated replay. Required-data, Close Advice, symbols summary, and mark/outcome CSV contracts are unchanged.",
+      "commits": [
+        "82816ff3f2260731c1a96c7a16d0e3e29c9287e9"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Bound Daily Brief, Agent candidate explanations, Research, archive, Shadow Replay, Strategy Lab, and Combo Funding Put projections to one validated account-run candidate manifest with exact owner, scope, identity, file hash, status, reason, and count evidence; interrupted or inconsistent modern runs now fail closed instead of falling back to partial or stale candidate facts.",
+      "commits": [
+        "97a244796a11178f26e25c9a2b821559d5dbb460",
+        "7a84eb4d4321f48a0d013bc4be12245321916445",
+        "82816ff3f2260731c1a96c7a16d0e3e29c9287e9",
+        "46ba161c8aabc60d2f23527d326a95b47ed05597",
+        "53a68f295783ace26119dd1a0e4e3ef3000d2fe6"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "59ad85c15d174710bdb144aea7a6103add48685c",
+      "reason": "docs-only Gateflow plan and review artifacts; no user-facing behavioral change"
+    },
+    {
+      "commit": "d4ab3359bf68f5d7c721b5407a947913f970c9ba",
+      "reason": "docs-only Gateflow PR review artifacts; no user-facing behavioral change"
+    },
+    {
+      "commit": "7d64653151b073b26c87cc19834c5e1fa561d574",
+      "reason": "docs-only Draft PR verification artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "24cacba49ff710ba6dd822644f1699bb0af9b8ff",
+      "reason": "docs-only Gateflow closeout artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "46934c27c3d1e32d6e72a687f6b552d8d11ff9f6",
+      "reason": "mechanical GitHub merge commit; the underlying product commits are mapped to release notes"
+    }
+  ]
+}
