@@ -28,6 +28,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_publication import (
+    publish_full_position_projection,
+)
 from src.application.ledger.results import LedgerWriteResult
 from src.application.ledger.targets import assert_position_lot_target_matches_current_state
 from src.application.ledger.writer import (
@@ -664,11 +667,11 @@ def persist_manual_adjust_events(
         events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
         projection = project_stored_trade_events_to_position_lots(events)
         ensure_projection_publishable(projection, operation="manual adjustment projection")
-        lot_count = (
-            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
-            if conn is not None
-            else sqlite_repo.replace_position_lots(projection.lots)
-        )
+        lot_count = publish_full_position_projection(
+            sqlite_repo,
+            projection.lots,
+            conn=conn,
+        ).position_lot_count
         diagnostics = projection_diagnostics_summary(projection.diagnostics)
         out: list[LedgerWriteResult] = []
         for (record_id, event, patch_contract), created in zip(prepared, created_flags, strict=True):
@@ -683,4 +686,8 @@ def persist_manual_adjust_events(
             out.append(LedgerWriteResult.from_payload(payload))
         return out
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )

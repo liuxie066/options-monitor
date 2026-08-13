@@ -26,6 +26,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_publication import (
+    publish_full_position_projection,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
     with_sqlite_repo_transaction,
@@ -508,14 +511,14 @@ def persist_manual_repair_event(
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
             ensure_projection_publishable(projection, operation="trade event repair projection")
             records = projection.lots
-            lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
+            lot_count = publish_full_position_projection(sqlite_repo, records, conn=conn).position_lot_count
         else:
             void_created = sqlite_repo.upsert_trade_event(void_event)
             repair_created = sqlite_repo.upsert_trade_event(repair_event)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
             ensure_projection_publishable(projection, operation="trade event repair projection")
             records = projection.lots
-            lot_count = sqlite_repo.replace_position_lots(records)
+            lot_count = publish_full_position_projection(sqlite_repo, records).position_lot_count
         result = {
             "target_event_id": str(target_event_id),
             "void_event_id": void_event.event_id,
@@ -527,7 +530,11 @@ def persist_manual_repair_event(
         result.update(projection_diagnostics_summary(projection.diagnostics))
         return result
 
-    result = with_sqlite_repo_transaction(repo, _run)
+    result = with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
     result["preview"] = preview.to_payload()
     return LedgerWriteResult(
         event_id=str(result.get("repair_event_id") or ""),

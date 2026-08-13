@@ -72,6 +72,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_publication import (
+    publish_full_position_projection,
+)
 from src.application.ledger.projection_verify import (
     compare_projection_lots,
 )
@@ -316,12 +319,12 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
             events = sqlite_repo.list_trade_events(conn=conn)
             projection = project_stored_trade_events_to_position_lots(events)
             ensure_projection_publishable(projection, operation="position projection rebuild")
-            inserted = sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+            inserted = publish_full_position_projection(sqlite_repo, projection.lots, conn=conn).position_lot_count
         else:
             events = sqlite_repo.list_trade_events()
             projection = project_stored_trade_events_to_position_lots(events)
             ensure_projection_publishable(projection, operation="position projection rebuild")
-            inserted = sqlite_repo.replace_position_lots(projection.lots)
+            inserted = publish_full_position_projection(sqlite_repo, projection.lots).position_lot_count
         result = {
             "trade_event_count": int(len(events)),
             "position_lot_count": int(inserted),
@@ -329,7 +332,11 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
         result.update(projection_diagnostics_summary(projection.diagnostics))
         return ProjectionRefreshResult.from_payload(result)
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
@@ -361,13 +368,13 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
             ensure_projection_publishable(projection, operation="trade event persistence")
             records = projection.lots
-            lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
+            lot_count = publish_full_position_projection(sqlite_repo, records, conn=conn).position_lot_count
         else:
             created_flags = [sqlite_repo.upsert_trade_event(item) for item in storage_events]
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
             ensure_projection_publishable(projection, operation="trade event persistence")
             records = projection.lots
-            lot_count = sqlite_repo.replace_position_lots(records)
+            lot_count = publish_full_position_projection(sqlite_repo, records).position_lot_count
         payload = storage_events[0].raw_payload or {}
         explicit_record_id = str(payload.get("record_id") or "").strip()
         record_id = explicit_record_id or next(
@@ -387,7 +394,11 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         result.update(projection_diagnostics_summary(projection.diagnostics))
         return LedgerWriteResult.from_payload(result)
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def persist_trade_event_with_combo_identity(
@@ -438,7 +449,7 @@ def persist_trade_event_with_combo_identity(
                 sorted({item.code for item in projection.diagnostics if item.severity == "error"})
             )
             raise ValueError(f"combo identity projection failed: {codes}")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
         records_by_open_event = {
             str(record.fields.get("source_event_id") or "").strip(): record
             for record in projection.lots
@@ -512,7 +523,11 @@ def persist_trade_event_with_combo_identity(
             "position_lot_count": len(projection.lots),
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def adopt_existing_combo_identity_atomically(
@@ -1797,7 +1812,7 @@ def apply_lifecycle_allocation_atomically(
                 sorted({item.code for item in projection.diagnostics if item.severity == "error"})
             )
             raise ValueError(f"lifecycle allocation projection failed: {codes}")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
         allocation_created = [
             sqlite_repo.insert_trade_lifecycle_allocation(item, conn=conn)
             for item in allocation_rows
@@ -2048,7 +2063,11 @@ def apply_lifecycle_allocation_atomically(
             ),
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def accept_option_close_evidence_atomically(
@@ -3825,11 +3844,11 @@ def persist_trade_event_objects_atomically(
         )
         projection = project_stored_trade_events_to_position_lots(stored)
         ensure_projection_publishable(projection, operation="atomic trade event persistence")
-        lot_count = (
-            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
-            if conn is not None
-            else sqlite_repo.replace_position_lots(projection.lots)
-        )
+        lot_count = publish_full_position_projection(
+            sqlite_repo,
+            projection.lots,
+            conn=conn,
+        ).position_lot_count
         notification_intent = _normal_close_notification_intent(
             storage_events
         )
@@ -3930,7 +3949,11 @@ def persist_trade_event_objects_atomically(
             for event, created in zip(storage_events, created_flags, strict=True)
         ]
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def _events_for_storage(repo: Any, event: Any) -> list[Any]:
