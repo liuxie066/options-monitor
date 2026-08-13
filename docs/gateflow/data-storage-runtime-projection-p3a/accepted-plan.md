@@ -13,6 +13,10 @@
   `docs/reviews/plan-review-20260813-221516.md` (`pass-with-risks`)
 - Artifact path:
   `docs/gateflow/data-storage-runtime-projection-p3a/accepted-plan.md`
+- S4 scope amendment:
+  `docs/gateflow/data-storage-runtime-projection-p3a/s4-scope-amendment.md`
+  (`accepted 2026-08-14`; targeted review
+  `docs/reviews/plan-review-20260814-074509.md` passed)
 
 ## Accepted decision
 

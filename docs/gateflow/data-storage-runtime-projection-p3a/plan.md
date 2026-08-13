@@ -1177,6 +1177,9 @@ evidence later accepts it.
 
 **Allowed files:**
 
+- `src/application/ledger/position_projection_runtime.py`, limited to exposing
+  the already-owned in-transaction runtime and preserving projection
+  diagnostics for facade result compatibility;
 - `src/application/ledger/preflight.py`;
 - `src/application/ledger/lot_resolver.py`;
 - `src/application/ledger/writer.py`;
@@ -1190,6 +1193,14 @@ evidence later accepts it.
 
 **Exact changes:**
 
+- expose one application-internal runtime entrypoint for callers that already
+  hold the SQLite transaction; it must reuse the S3 implementation, require an
+  active transaction, preserve input-order idempotency flags, and never commit
+  or roll back the caller-owned transaction;
+- return the full oracle's exact diagnostics from full fallback while fast,
+  unchanged, and checkpoint-backed results remain eligible only with an empty
+  diagnostic list; a diagnostic-bearing full result must not create or rotate
+  a checkpoint;
 - use resumed preflight for eligible candidates and retain full control preflight;
 - route the facade matrix in section 9 through the runtime with explicit mode;
 - replace candidate `existing_by_id` full-history maps with one primary-key
@@ -1205,7 +1216,9 @@ evidence later accepts it.
   metadata ordinary-fast parity, special combo-identity/reconciliation
   fallback, rebuild/bootstrap recovery, error parity, full-prefix spy failures
   and full-lot-list spy failures on fast paths, explicit target-to-closed-lot
-  fallback, account-crossing rejection, and `rg` inventory closure.
+  fallback, account-crossing rejection, caller-owned transaction rollback,
+  exact input-order created flags, diagnostic-bearing full-fallback parity with
+  zero checkpoint publication, and `rg` inventory closure.
 
 **Stop condition:** any event writer bypasses heads/diff publication or an
 existing public workflow changes semantics.
