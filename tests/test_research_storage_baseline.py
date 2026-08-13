@@ -218,6 +218,47 @@ def test_runtime_scan_does_not_follow_root_or_nested_symlinks(
     assert roots["output"]["status"] == "symlink_not_followed"
 
 
+def test_manifest_reference_cannot_escape_through_unscanned_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path)
+    outside = tmp_path / "outside-research"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"data")
+    dataset = root / "output_shared/research/dataset"
+    dataset.mkdir(parents=True)
+    (dataset / "linked").symlink_to(outside, target_is_directory=True)
+    (dataset / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "research.dataset.v1",
+                "entries": [
+                    {
+                        "relpath": "linked/payload.bin",
+                        "size_bytes": 4,
+                        "sha256": "a" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _collect(monkeypatch, tmp_path, root=root)
+
+    assert result["research_storage"]["protected_reference_failures"] == [
+        {
+            "manifest": "output_shared/research/dataset/manifest.json",
+            "reference": "linked/payload.bin",
+            "reason": "missing",
+        }
+    ]
+    assert "output_shared/research/dataset/linked" in {
+        row["path"] for row in result["runtime_storage"]["symlinks_not_followed"]
+    }
+
+
 def test_runtime_scan_counts_immediate_non_symlink_account_directories(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

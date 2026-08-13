@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import tokenize
 import heapq
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import AbstractSet, Any, Callable, Iterable, Mapping, Sequence
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.store_resolution import LEDGER_DB_RELATIVE_PATH
@@ -857,6 +857,8 @@ def _collect_research_storage(
     history_reports: Sequence[str | Path],
 ) -> dict[str, Any]:
     manifests = [row for row in file_rows if _is_manifest_relpath(str(row["path"]))]
+    file_index = {str(row["path"]): row for row in file_rows}
+    known_files = frozenset(file_index)
     manifest_results: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
     generations: set[str] = set()
@@ -882,6 +884,7 @@ def _collect_research_storage(
             payload,
             manifest_path=path,
             root=root,
+            known_files=known_files,
         )
         references.extend(extracted)
         manifest_results.append(
@@ -893,7 +896,6 @@ def _collect_research_storage(
             }
         )
 
-    file_index = {str(row["path"]): row for row in file_rows}
     referenced_paths: set[str] = set()
     protected_failures: list[dict[str, Any]] = []
     hash_sizes: dict[str, int] = {}
@@ -1051,13 +1053,18 @@ def _is_manifest_relpath(relpath: str) -> bool:
 
 
 def _extract_manifest_references(
-    payload: Mapping[str, Any], *, manifest_path: Path, root: Path
+    payload: Mapping[str, Any],
+    *,
+    manifest_path: Path,
+    root: Path,
+    known_files: AbstractSet[str],
 ) -> list[dict[str, Any]]:
     if payload.get("schema_version") == "research_archive.v2" and payload.get("action") == "verify":
         return _extract_research_archive_references(
             payload,
             manifest_path=manifest_path,
             root=root,
+            known_files=known_files,
         )
 
     out: list[dict[str, Any]] = []
@@ -1081,6 +1088,7 @@ def _extract_manifest_references(
                 context=context,
                 reference_roots=manifest_reference_roots,
                 path_hint=path_hint,
+                known_files=known_files,
             )
             if reference is not None:
                 out.append(reference)
@@ -1094,10 +1102,11 @@ def _extract_manifest_references(
     visit(dict(payload))
     out.extend(
         _extract_parallel_file_map_references(
-            payload,
-            manifest_path=manifest_path,
-            root=root,
-        )
+        payload,
+        manifest_path=manifest_path,
+        root=root,
+        known_files=known_files,
+    )
     )
     unique: dict[tuple[str, str | None, int | None], dict[str, Any]] = {}
     for item in out:
@@ -1115,6 +1124,7 @@ def _extract_research_archive_references(
     *,
     manifest_path: Path,
     root: Path,
+    known_files: AbstractSet[str],
 ) -> list[dict[str, Any]]:
     declared_root = Path(str(payload.get("archive_root") or "")).expanduser()
     archive_root = declared_root.resolve() if declared_root.is_absolute() else manifest_path.parent.parent.resolve()
@@ -1148,6 +1158,7 @@ def _extract_research_archive_references(
                     size=item.get("size_bytes"),
                     artifact_class="immutable_replay_authority",
                     market=_first_text(run, ("market",)),
+                    known_files=known_files,
                 )
             )
     return references
@@ -1158,6 +1169,7 @@ def _extract_parallel_file_map_references(
     *,
     manifest_path: Path,
     root: Path,
+    known_files: AbstractSet[str],
 ) -> list[dict[str, Any]]:
     references: list[dict[str, Any]] = []
 
@@ -1180,6 +1192,7 @@ def _extract_parallel_file_map_references(
                             size=sizes.get(name) if isinstance(sizes, Mapping) else None,
                             artifact_class="experiment_or_research_artifact",
                             market=_first_text(value, ("market",)),
+                            known_files=known_files,
                         )
                     )
             for child in value.values():
@@ -1202,6 +1215,7 @@ def _explicit_manifest_reference(
     size: Any,
     artifact_class: str,
     market: str | None,
+    known_files: AbstractSet[str],
 ) -> dict[str, Any]:
     digest_value = str(digest or "").strip().lower() or None
     if digest_value is not None and (
@@ -1219,6 +1233,7 @@ def _explicit_manifest_reference(
             manifest_path=manifest_path,
             root=root,
             reference_roots=(reference_root,),
+            known_files=known_files,
         ),
         "declared_sha256": digest_value,
         "declared_size_bytes": size_value,
@@ -1237,6 +1252,7 @@ def _reference_from_mapping(
     context: Mapping[str, Any] | None,
     reference_roots: Sequence[Path],
     path_hint: str | None,
+    known_files: AbstractSet[str],
 ) -> dict[str, Any] | None:
     path_key, path_value = _first_key_value(value, _REFERENCE_PATH_KEYS)
     if path_value is None:
@@ -1278,6 +1294,7 @@ def _reference_from_mapping(
         manifest_path=manifest_path,
         root=root,
         reference_roots=reference_roots,
+        known_files=known_files,
     )
     context_map = context or value
     artifact_class = _first_text(value, ("artifact_class", "storage_class", "class")) or _first_text(
@@ -1335,24 +1352,60 @@ def _resolve_manifest_reference(
     manifest_path: Path,
     root: Path,
     reference_roots: Sequence[Path],
+    known_files: AbstractSet[str],
 ) -> str | None:
     raw = value.strip()
     if not raw:
         return None
     path = Path(raw)
     if path.is_absolute():
-        candidate = path.resolve()
-        return candidate.relative_to(root).as_posix() if _is_relative_to(candidate, root) else None
+        return _select_runtime_relative_candidate(
+            (path,),
+            root=root,
+            known_files=known_files,
+        )
     candidates: list[Path] = []
     if path.parts and path.parts[0] in RUNTIME_SUBROOTS:
-        candidates.append((root / path).resolve())
-    candidates.extend((reference_root / path).resolve() for reference_root in reference_roots)
-    candidates.extend(((manifest_path.parent / path).resolve(), (root / path).resolve()))
-    valid = [candidate for candidate in candidates if _is_relative_to(candidate, root)]
-    for candidate in valid:
-        if candidate.exists() and candidate.is_file() and not candidate.is_symlink():
-            return candidate.relative_to(root).as_posix()
-    return valid[0].relative_to(root).as_posix() if valid else None
+        candidates.append(root / path)
+    candidates.extend(reference_root / path for reference_root in reference_roots)
+    candidates.extend((manifest_path.parent / path, root / path))
+    return _select_runtime_relative_candidate(
+        candidates,
+        root=root,
+        known_files=known_files,
+    )
+
+
+def _select_runtime_relative_candidate(
+    candidates: Iterable[Path],
+    *,
+    root: Path,
+    known_files: AbstractSet[str],
+) -> str | None:
+    """Resolve a declared path against the no-follow scan without filesystem walks.
+
+    ``root`` and every reference root are canonicalized once before this hot
+    path. Candidate normalization is lexical; a candidate is considered present
+    only when its runtime-relative path was already produced by the bounded
+    ``os.scandir(..., follow_symlinks=False)`` inventory. This avoids repeated
+    ``realpath``/``stat`` calls while preserving the no-symlink authority.
+    """
+
+    valid: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = Path(os.path.normpath(os.fspath(candidate)))
+        try:
+            relpath = normalized.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if relpath == "." or relpath in seen:
+            continue
+        seen.add(relpath)
+        valid.append(relpath)
+        if relpath in known_files:
+            return relpath
+    return valid[0] if valid else None
 
 
 def _artifact_class_for_reference(relpath: str | None) -> str:

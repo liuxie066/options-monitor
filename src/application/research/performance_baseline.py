@@ -5,6 +5,7 @@ import base64
 import cProfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ from src.application.ledger.event_codec import (
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import rebuild_position_lots_from_trade_events
+from src.application.research.storage_baseline import collect_storage_runtime_baseline
 
 try:
     import resource
@@ -61,6 +63,11 @@ MIN_PAYLOAD_BYTES = 256
 MAX_PAYLOAD_BYTES = 4_096
 WALL_LIMIT_NS = 2_000_000_000
 CPU_LIMIT_NS = 1_500_000_000
+STORAGE_STATUS_KEY = "research_storage_status.history_10x"
+STORAGE_STATUS_PARTITION_COUNT = 10_000
+STORAGE_STATUS_WALL_LIMIT_NS = 5_000_000_000
+STORAGE_STATUS_ALLOCATION_LIMIT_BYTES = 64 * 1024 * 1024
+STORAGE_STATUS_OBSERVED_AT = datetime(2026, 8, 13, tzinfo=timezone.utc)
 ARTIFACT_FILENAMES = (
     "fixture-manifest.json",
     "timing.json",
@@ -74,6 +81,7 @@ PUBLIC_SCENARIOS = (
     "history_10x",
     "current_state_10x",
     "account_fanout",
+    "research_storage_status",
 )
 
 
@@ -115,7 +123,17 @@ def run_data_storage_projection_benchmark(
     fixture_seed = _bounded_nonnegative_int(seed, name="seed", maximum=2**31 - 1)
     reference_fingerprint = _validated_reference_fingerprint(reference_host_fingerprint)
     dimensions = _load_baseline_dimensions(baseline, repo_root=base)
-    scenario_specs = _build_scenario_specs(dimensions, selected=selected)
+    projection_scenarios = tuple(
+        item for item in selected if item != "research_storage_status"
+    )
+    scenario_specs = _build_scenario_specs(dimensions, selected=projection_scenarios)
+    storage_status_spec = (
+        _storage_status_spec(seed=fixture_seed)
+        if "history_10x" in selected or "research_storage_status" in selected
+        else None
+    )
+    if not scenario_specs and storage_status_spec is None:
+        raise ValueError("benchmark selection produced no scenarios")
     host = _host_profile()
     run_label = (
         "acceptance_5_warmups_30_repetitions"
@@ -129,6 +147,7 @@ def run_data_storage_projection_benchmark(
         seed=fixture_seed,
         host=host,
         run_label=run_label,
+        storage_status_spec=storage_status_spec,
     )
     worker_spec = {
         "schema_version": WORKER_SPEC_SCHEMA,
@@ -137,6 +156,7 @@ def run_data_storage_projection_benchmark(
         "repetitions": repetition_count,
         "run_label": run_label,
         "scenarios": scenario_specs,
+        "research_storage_status": storage_status_spec,
     }
     run_worker = worker_runner or _run_worker_process
     timing = run_worker(repo_root=base, mode="timing", worker_spec=worker_spec)
@@ -156,6 +176,7 @@ def run_data_storage_projection_benchmark(
         fixture_manifest=fixture_manifest,
         current_host=host,
         reference_host_fingerprint=reference_fingerprint,
+        allocation_profile=allocation_profile,
     )
     target = _publish_artifact_set(
         output_dir=output_dir,
@@ -176,6 +197,7 @@ def run_data_storage_projection_benchmark(
         "fixture_set_sha256": fixture_manifest["fixture_set_sha256"],
         "host_fingerprint": host["fingerprint"],
         "existing_full_replay_writer": decision["components"]["existing_full_replay_writer"],
+        "research_storage_status": decision["components"]["research_storage_status"],
         "phase_3a_combined": decision["phase_3a_combined"],
     }
 
@@ -507,6 +529,30 @@ def _scenario_spec(
     }
 
 
+def _storage_status_spec(*, seed: int) -> dict[str, Any]:
+    fixture_identity = {
+        "schema_version": "research_storage_status_history_10x_fixture.v1",
+        "seed": int(seed),
+        "partition_count": STORAGE_STATUS_PARTITION_COUNT,
+        "manifest_count": 1,
+        "bytes_per_partition": 1,
+        "manifest_shape": "integrity.files",
+    }
+    return {
+        "key": STORAGE_STATUS_KEY,
+        "axis": "history_10x",
+        "classification": "synthetic_manifest_declared_partitions",
+        "axis_status": "evaluable",
+        "effective_dimensions": {
+            "partition_count": STORAGE_STATUS_PARTITION_COUNT,
+            "manifest_count": 1,
+            "runtime_file_count": STORAGE_STATUS_PARTITION_COUNT + 1,
+        },
+        "fixture_sha256": _sha256_json(fixture_identity),
+        "fixture_identity": fixture_identity,
+    }
+
+
 def _build_fixture_manifest(
     *,
     repo_root: Path,
@@ -515,6 +561,7 @@ def _build_fixture_manifest(
     seed: int,
     host: dict[str, Any],
     run_label: str,
+    storage_status_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenarios: list[dict[str, Any]] = []
     fixture_hashes: list[str] = []
@@ -531,10 +578,13 @@ def _build_fixture_manifest(
                 "synthetic_only": True,
             }
         )
+    fixture_set_items: list[Any] = list(fixture_hashes)
+    if storage_status_spec is not None:
+        fixture_set_items.append(str(storage_status_spec.get("fixture_sha256") or ""))
     return {
         "schema_version": FIXTURE_SCHEMA,
         "fixture_seed": int(seed),
-        "fixture_set_sha256": _sha256_json(fixture_hashes),
+        "fixture_set_sha256": _sha256_json(fixture_set_items),
         "dimension_source": dimensions.dimension_source,
         "baseline_dimensions": {
             "requested": dimensions.requested,
@@ -567,6 +617,7 @@ def _build_fixture_manifest(
             "runtime_mutations": 0,
         },
         "scenarios": scenarios,
+        "research_storage_status": dict(storage_status_spec) if storage_status_spec is not None else None,
     }
 
 
@@ -1014,18 +1065,32 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
     if worker_spec.get("schema_version") != WORKER_SPEC_SCHEMA:
         raise ValueError("worker spec schema is invalid")
     raw_scenarios = worker_spec.get("scenarios")
-    if not isinstance(raw_scenarios, list) or not raw_scenarios:
+    if not isinstance(raw_scenarios, list):
         raise ValueError("worker spec scenarios are missing")
     seed = _bounded_nonnegative_int(worker_spec.get("seed"), name="seed", maximum=2**31 - 1)
     warmups = _bounded_nonnegative_int(worker_spec.get("warmups"), name="warmups", maximum=100)
     repetitions = _bounded_positive_int(worker_spec.get("repetitions"), name="repetitions", maximum=1_000)
     label = str(worker_spec.get("run_label") or "")
+    storage_status_spec = worker_spec.get("research_storage_status")
+    if storage_status_spec is not None and not isinstance(storage_status_spec, Mapping):
+        raise ValueError("research storage status worker spec is invalid")
+    if not raw_scenarios and storage_status_spec is None:
+        raise ValueError("worker spec has no measurable scenarios")
     if mode == "timing":
         rows = [
             _measure_timing_scenario(spec, seed=seed, warmups=warmups, repetitions=repetitions)
             for spec in raw_scenarios
             if isinstance(spec, dict)
         ]
+        storage_status = (
+            _measure_storage_status_timing(
+                storage_status_spec,
+                warmups=warmups,
+                repetitions=repetitions,
+            )
+            if isinstance(storage_status_spec, Mapping)
+            else None
+        )
         return {
             "schema_version": TIMING_SCHEMA,
             "measurement_mode": "timing_without_profiler",
@@ -1036,26 +1101,192 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "run_label": label,
             "clock_authority": ["time.perf_counter_ns", "time.process_time_ns"],
             "scenarios": rows,
+            "research_storage_status": storage_status,
         }
     if mode == "cpu":
         rows = [_measure_cpu_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
+        storage_status = (
+            _measure_storage_status_cpu(storage_status_spec)
+            if isinstance(storage_status_spec, Mapping)
+            else None
+        )
         return {
             "schema_version": CPU_PROFILE_SCHEMA,
             "measurement_mode": "cprofile_separate_process",
             "timing_threshold_eligible": False,
             "tracemalloc_enabled": False,
             "scenarios": rows,
+            "research_storage_status": storage_status,
         }
     if mode == "allocation":
         rows = [_measure_allocation_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
+        storage_status = (
+            _measure_storage_status_allocation(storage_status_spec)
+            if isinstance(storage_status_spec, Mapping)
+            else None
+        )
         return {
             "schema_version": ALLOCATION_PROFILE_SCHEMA,
             "measurement_mode": "tracemalloc_separate_process",
             "timing_threshold_eligible": False,
             "cprofile_enabled": False,
             "scenarios": rows,
+            "research_storage_status": storage_status,
         }
     raise ValueError(f"unsupported worker mode: {mode}")
+
+
+@contextmanager
+def _temporary_storage_status_fixture(spec: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+    dimensions = spec.get("effective_dimensions")
+    if not isinstance(dimensions, Mapping):
+        raise ValueError("research storage status dimensions are missing")
+    partition_count = _bounded_positive_int(
+        dimensions.get("partition_count"),
+        name="partition_count",
+        maximum=STORAGE_STATUS_PARTITION_COUNT,
+    )
+    if partition_count != STORAGE_STATUS_PARTITION_COUNT:
+        raise ValueError("research storage status partition count must match the frozen fixture")
+    with tempfile.TemporaryDirectory(prefix="om-storage-status-history10x-") as temp_name:
+        runtime_root = Path(temp_name)
+        history_root = runtime_root / "output_shared" / "research" / "history_10x"
+        history_root.mkdir(parents=True)
+        digest = hashlib.sha256(b"x").hexdigest()
+        files: dict[str, dict[str, Any]] = {}
+        for index in range(partition_count):
+            name = f"partition-{index:05d}.bin"
+            (history_root / name).write_bytes(b"x")
+            files[name] = {"sha256": digest, "bytes": 1}
+        manifest = {
+            "schema_version": "research.history_10x.v1",
+            "integrity": {"files": files},
+        }
+        manifest_path = history_root / "manifest.json"
+        manifest_path.write_bytes(_canonical_json_bytes(manifest) + b"\n")
+        actual_identity = _sha256_json(
+            {
+                "schema_version": "research_storage_status_history_10x_fixture.v1",
+                "seed": int((spec.get("fixture_identity") or {}).get("seed") or 0),
+                "partition_count": partition_count,
+                "manifest_count": 1,
+                "bytes_per_partition": 1,
+                "manifest_shape": "integrity.files",
+            }
+        )
+        expected_identity = str(spec.get("fixture_sha256") or "")
+        if actual_identity != expected_identity:
+            raise RuntimeError("research storage status fixture identity mismatch")
+        yield {
+            "repo_root": Path.cwd(),
+            "runtime_root": runtime_root,
+            "fixture_sha256": actual_identity,
+        }
+
+
+def _collect_synthetic_storage_status(context: Mapping[str, Any]) -> dict[str, Any]:
+    return collect_storage_runtime_baseline(
+        repo_root=context["repo_root"],
+        runtime_root=context["runtime_root"],
+        now_fn=lambda: STORAGE_STATUS_OBSERVED_AT,
+    )
+
+
+def _storage_status_output(result: Mapping[str, Any]) -> dict[str, Any]:
+    runtime = result.get("runtime_storage")
+    research = result.get("research_storage")
+    safety = result.get("safety")
+    if not isinstance(runtime, Mapping) or not isinstance(research, Mapping) or not isinstance(safety, Mapping):
+        raise RuntimeError("research storage status output is incomplete")
+    output = {
+        "status": result.get("status"),
+        "runtime_file_count": runtime.get("file_count"),
+        "manifest_count": research.get("manifest_count"),
+        "declared_reference_count": research.get("declared_reference_count"),
+        "protected_reference_failure_count": len(research.get("protected_reference_failures") or []),
+        "payload_content_reads": safety.get("payload_content_reads"),
+        "mutation_operations": safety.get("mutation_operations"),
+        "no_follow_traversal": safety.get("no_follow_traversal"),
+    }
+    expected = {
+        "runtime_file_count": STORAGE_STATUS_PARTITION_COUNT + 1,
+        "manifest_count": 1,
+        "declared_reference_count": STORAGE_STATUS_PARTITION_COUNT,
+        "protected_reference_failure_count": 0,
+        "payload_content_reads": 0,
+        "mutation_operations": 0,
+        "no_follow_traversal": True,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": output.get(key)}
+        for key, value in expected.items()
+        if output.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"research storage status output mismatch: {mismatches}")
+    return output
+
+
+def _measure_storage_status_timing(
+    spec: Mapping[str, Any],
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    with _temporary_storage_status_fixture(spec) as context:
+        result: Mapping[str, Any] | None = None
+        for _ in range(warmups):
+            result = _collect_synthetic_storage_status(context)
+        wall_samples: list[int] = []
+        cpu_samples: list[int] = []
+        for _ in range(repetitions):
+            wall_start = time.perf_counter_ns()
+            cpu_start = time.process_time_ns()
+            result = _collect_synthetic_storage_status(context)
+            cpu_samples.append(time.process_time_ns() - cpu_start)
+            wall_samples.append(time.perf_counter_ns() - wall_start)
+        if result is None:
+            result = _collect_synthetic_storage_status(context)
+        return {
+            "key": STORAGE_STATUS_KEY,
+            "fixture_sha256": str(context["fixture_sha256"]),
+            "axis_status": str(spec.get("axis_status") or "unknown"),
+            "setup_included": False,
+            "measurement_scope": "payload_free_storage_status_collection",
+            "wall_time_ns": _timing_distribution(wall_samples),
+            "cpu_time_ns": _timing_distribution(cpu_samples),
+            "output": _storage_status_output(result),
+        }
+
+
+def _measure_storage_status_cpu(spec: Mapping[str, Any]) -> dict[str, Any]:
+    with _temporary_storage_status_fixture(spec) as context:
+        profile, output = _profile_call(
+            lambda: _collect_synthetic_storage_status(context),
+            output_fn=_storage_status_output,
+        )
+        return {
+            "key": STORAGE_STATUS_KEY,
+            "fixture_sha256": str(context["fixture_sha256"]),
+            "setup_included": False,
+            "component": profile,
+            "output": output,
+        }
+
+
+def _measure_storage_status_allocation(spec: Mapping[str, Any]) -> dict[str, Any]:
+    with _temporary_storage_status_fixture(spec) as context:
+        allocation, output = _allocation_call(
+            lambda: _collect_synthetic_storage_status(context),
+            output_fn=_storage_status_output,
+        )
+        return {
+            "key": STORAGE_STATUS_KEY,
+            "fixture_sha256": str(context["fixture_sha256"]),
+            "setup_included": False,
+            "component": allocation,
+            "output": output,
+        }
 
 
 def _measure_timing_scenario(
@@ -1521,6 +1752,20 @@ def _validate_worker_artifacts(
             parity = item.get("parity") if isinstance(item, Mapping) else None
             if not isinstance(parity, Mapping) or parity.get("exact") is not True:
                 raise RuntimeError(f"worker parity contract failed for {artifact.get('schema_version')}")
+        expected_storage = fixture_manifest.get("research_storage_status")
+        actual_storage = artifact.get("research_storage_status")
+        if expected_storage is None:
+            if actual_storage is not None:
+                raise RuntimeError("unexpected research storage status worker artifact")
+        else:
+            if not isinstance(expected_storage, Mapping) or not isinstance(actual_storage, Mapping):
+                raise RuntimeError("research storage status worker artifact is missing")
+            if (
+                actual_storage.get("key") != expected_storage.get("key")
+                or actual_storage.get("fixture_sha256") != expected_storage.get("fixture_sha256")
+                or actual_storage.get("setup_included") is not False
+            ):
+                raise RuntimeError("research storage status worker identity mismatch")
     for item in timing.get("scenarios", []):
         components = item.get("components") if isinstance(item, Mapping) else None
         if not isinstance(components, Mapping):
@@ -1539,6 +1784,18 @@ def _validate_worker_artifacts(
                 repetitions=expected_repetitions,
                 label=f"{component}.cpu_time_ns",
             )
+    storage_timing = timing.get("research_storage_status")
+    if isinstance(storage_timing, Mapping):
+        _validate_timing_distribution(
+            storage_timing.get("wall_time_ns"),
+            repetitions=expected_repetitions,
+            label="research_storage_status.wall_time_ns",
+        )
+        _validate_timing_distribution(
+            storage_timing.get("cpu_time_ns"),
+            repetitions=expected_repetitions,
+            label="research_storage_status.cpu_time_ns",
+        )
 
 
 def _validate_timing_distribution(value: Any, *, repetitions: int, label: str) -> None:
@@ -1566,6 +1823,7 @@ def _build_gate_decision(
     fixture_manifest: Mapping[str, Any],
     current_host: Mapping[str, Any],
     reference_host_fingerprint: str | None,
+    allocation_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_fingerprint = str(current_host.get("fingerprint") or "")
     comparable = bool(
@@ -1641,6 +1899,19 @@ def _build_gate_decision(
         writer_status = "not_evaluable"
     else:
         writer_status = "not_comparable"
+    storage_timing = timing.get("research_storage_status")
+    storage_allocation = (
+        allocation_profile.get("research_storage_status")
+        if isinstance(allocation_profile, Mapping)
+        else None
+    )
+    storage_status, storage_reason, storage_wall_p95, storage_peak_allocation = _storage_status_gate(
+        timing=storage_timing,
+        allocation=storage_allocation,
+        run_label=str(timing.get("run_label") or ""),
+        comparable=comparable,
+        comparison_reason=comparison_reason,
+    )
     return {
         "schema_version": DECISION_SCHEMA,
         "reference_host": {
@@ -1653,6 +1924,8 @@ def _build_gate_decision(
         "thresholds": {
             "history_10x_writer_wall_p95_ns": WALL_LIMIT_NS,
             "history_10x_writer_cpu_p95_ns": CPU_LIMIT_NS,
+            "research_storage_status_wall_p95_ns": STORAGE_STATUS_WALL_LIMIT_NS,
+            "research_storage_status_python_peak_bytes": STORAGE_STATUS_ALLOCATION_LIMIT_BYTES,
             "required_subcases": list(history_keys),
         },
         "components": {
@@ -1663,6 +1936,13 @@ def _build_gate_decision(
             "existing_full_replay_writer": {
                 "status": writer_status,
                 "subcases": subcases,
+            },
+            "research_storage_status": {
+                "status": storage_status,
+                "reason": storage_reason,
+                "wall_p95_ns": storage_wall_p95,
+                "python_peak_bytes": storage_peak_allocation,
+                "fixture": STORAGE_STATUS_KEY,
             },
             "lot_diff_publication": {
                 "status": "not_implemented",
@@ -1675,6 +1955,41 @@ def _build_gate_decision(
         },
         "automatic_actions": [],
     }
+
+
+def _storage_status_gate(
+    *,
+    timing: Any,
+    allocation: Any,
+    run_label: str,
+    comparable: bool,
+    comparison_reason: str,
+) -> tuple[str, str, int | None, int | None]:
+    if not isinstance(timing, Mapping) or not isinstance(allocation, Mapping):
+        return "not_evaluable", "scenario_not_selected", None, None
+    wall = timing.get("wall_time_ns")
+    component = allocation.get("component")
+    wall_p95 = (
+        int(wall.get("p95"))
+        if isinstance(wall, Mapping) and isinstance(wall.get("p95"), int)
+        else None
+    )
+    peak = (
+        int(component.get("python_peak_bytes"))
+        if isinstance(component, Mapping) and isinstance(component.get("python_peak_bytes"), int)
+        else None
+    )
+    if run_label != "acceptance_5_warmups_30_repetitions":
+        return "not_evaluable", "non_acceptance_smoke", wall_p95, peak
+    if wall_p95 is None or peak is None:
+        return "not_evaluable", "measurement_missing", wall_p95, peak
+    if peak > STORAGE_STATUS_ALLOCATION_LIMIT_BYTES:
+        return "fail", "frozen_allocation_limit_exceeded", wall_p95, peak
+    if not comparable:
+        return "not_comparable", comparison_reason, wall_p95, peak
+    if wall_p95 > STORAGE_STATUS_WALL_LIMIT_NS:
+        return "fail", "frozen_wall_limit_exceeded", wall_p95, peak
+    return "pass", "within_frozen_limits", wall_p95, peak
 
 
 def _resolve_output_dir(value: str | Path, *, repo_root: Path) -> tuple[Path, bool]:
