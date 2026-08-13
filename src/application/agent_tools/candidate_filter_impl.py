@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
@@ -13,9 +14,91 @@ from src.application.candidate_snapshot_manifest import (
     load_candidate_snapshot_bundle,
     load_latest_candidate_snapshot_bundle,
 )
+from src.application.notification_perception_read import (
+    iter_notification_perception_events,
+)
 
 
 _FUNCTION_MODE = {"sell_put": "put", "sell_call": "call"}
+_RUN_SELECTORS = {"latest", "latest_notification"}
+_DELIVERED_EVENT_KIND = "notification_delivery_completed"
+
+
+def _local_timezone() -> timezone:
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _event_local_date(event: Mapping[str, Any], tz: timezone) -> date | None:
+    raw = str(event.get("created_at_utc") or "").strip()
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(tz).date()
+
+
+def _event_visible_to_account(event: Mapping[str, Any], account: str) -> bool:
+    send_summary = event.get("send_summary")
+    if isinstance(send_summary, Mapping):
+        sent = send_summary.get("sent_accounts")
+        if isinstance(sent, list) and sent:
+            return account in {str(item).strip().lower() for item in sent}
+        failure_count = int(send_summary.get("failure_count") or 0)
+        if isinstance(sent, list) and not sent and failure_count > 0:
+            return False
+    accounts = event.get("accounts")
+    if isinstance(accounts, list):
+        return account in {str(item).strip().lower() for item in accounts}
+    return False
+
+
+def _is_delivered_notification(event: Mapping[str, Any], account: str) -> bool:
+    if str(event.get("event_kind") or "").strip() != _DELIVERED_EVENT_KIND:
+        return False
+    if event.get("no_send") is True:
+        return False
+    return _event_visible_to_account(event, account)
+
+
+class NotificationRunResolution(TypedDict, total=False):
+    run_id: str
+    matched_event_created_at_utc: Any
+    truncated: bool
+    total_count: int
+
+
+def _resolve_notification_run(
+    *,
+    base: Path,
+    account: str,
+    notification_date: date,
+    tz: timezone,
+) -> NotificationRunResolution:
+    result = iter_notification_perception_events(
+        repo_root=base,
+        event_kind=_DELIVERED_EVENT_KIND,
+    )
+    resolution: NotificationRunResolution = {
+        "truncated": bool(result.get("truncated")),
+        "total_count": int(result.get("total_count") or 0),
+    }
+    for event in result.get("events") or []:
+        if not isinstance(event, Mapping):
+            continue
+        if not _is_delivered_notification(event, account):
+            continue
+        if _event_local_date(event, tz) != notification_date:
+            continue
+        run_id = str(event.get("run_id") or "").strip()
+        if run_id:
+            resolution["run_id"] = run_id
+            resolution["matched_event_created_at_utc"] = event.get("created_at_utc")
+            return resolution
+    return resolution
 
 
 def candidate_filter_explain_tool(
@@ -45,6 +128,34 @@ def candidate_filter_explain_tool(
             hint="Supported functions: sell_put, sell_call.",
         )
     base = Path(payload.get("runtime_root") or repo_base()).resolve()
+    run_selector = str(payload.get("run_selector") or "").strip().lower() or None
+    if run_selector is not None and run_selector not in _RUN_SELECTORS:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"unsupported run_selector: {run_selector}",
+            hint="Supported selectors: latest, latest_notification.",
+        )
+    raw_notification_date = str(payload.get("notification_date") or "").strip()
+    if raw_notification_date and run_selector != "latest_notification":
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="notification_date requires run_selector=latest_notification",
+            hint="Pass run_selector=latest_notification to resolve a run from delivered notifications.",
+        )
+    tz = _local_timezone()
+    try:
+        notification_date = (
+            date.fromisoformat(raw_notification_date)
+            if raw_notification_date
+            else datetime.now(tz).date()
+        )
+    except ValueError as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="notification_date must be ISO YYYY-MM-DD",
+            hint="Pass notification_date as an ISO date, for example 2026-08-13.",
+        ) from exc
+    run_resolution: dict[str, Any] | None = None
     try:
         if str(payload.get("run_id") or "").strip():
             bundle = load_candidate_snapshot_bundle(
@@ -52,22 +163,91 @@ def candidate_filter_explain_tool(
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
             )
+            run_resolution = {
+                "selector": "explicit_run_id",
+                "resolved_run_id": str(payload["run_id"]).strip(),
+            }
+        elif run_selector == "latest_notification":
+            resolved = _resolve_notification_run(
+                base=base,
+                account=account,
+                notification_date=notification_date,
+                tz=tz,
+            )
+            if not resolved.get("run_id"):
+                reason = (
+                    "audit_window_truncated"
+                    if resolved.get("truncated")
+                    else "no_notification_run"
+                )
+                raise AgentToolError(
+                    code="DEPENDENCY_MISSING",
+                    message=(
+                        "no delivered notification run found for account "
+                        f"{account} on {notification_date.isoformat()}"
+                        + (
+                            " (notification audit window truncated before reaching that date)"
+                            if resolved.get("truncated")
+                            else ""
+                        )
+                    ),
+                    details={
+                        "reason": reason,
+                        "account": account,
+                        "notification_date": notification_date.isoformat(),
+                        "audit_total_count": resolved.get("total_count"),
+                    },
+                )
+            try:
+                bundle = load_candidate_snapshot_bundle(
+                    base=base,
+                    run_id=resolved["run_id"],
+                    account=account,
+                )
+            except CandidateSnapshotManifestError as exc:
+                raise AgentToolError(
+                    code="DEPENDENCY_MISSING",
+                    message=str(exc),
+                    details={
+                        "reason": "snapshot_unavailable_for_notification_run",
+                        "account": account,
+                        "run_id": resolved["run_id"],
+                        "notification_date": notification_date.isoformat(),
+                    },
+                ) from exc
+            run_resolution = {
+                "selector": run_selector,
+                "notification_date": notification_date.isoformat(),
+                "timezone": str(tz),
+                "resolved_run_id": resolved["run_id"],
+                "matched_event_created_at_utc": resolved.get(
+                    "matched_event_created_at_utc"
+                ),
+            }
         else:
             bundle = load_latest_candidate_snapshot_bundle(
                 base=base,
                 account=account,
             )
+            run_resolution = {
+                "selector": "latest",
+                "resolved_run_id": None,
+            }
         snapshot = (bundle.get("owners") or {}).get("opening")
         if not isinstance(snapshot, dict):
             raise CandidateSnapshotManifestError(
                 "manifest-bound opening candidate snapshot is unavailable"
             )
+    except AgentToolError:
+        raise
     except CandidateSnapshotManifestError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
             details={"account": account, "run_id": payload.get("run_id")},
         ) from exc
+    if run_resolution is not None and run_resolution.get("resolved_run_id") is None:
+        run_resolution["resolved_run_id"] = snapshot.get("run_id")
 
     requested_mode = _FUNCTION_MODE.get(function_filter)
     scoped = [
@@ -109,6 +289,8 @@ def candidate_filter_explain_tool(
         ),
         "authority": "terminal_manifest_bound_opening_candidate_snapshot",
     }
+    if run_resolution is not None:
+        source["run_resolution"] = run_resolution
     return (
         {
             "symbol": symbol,

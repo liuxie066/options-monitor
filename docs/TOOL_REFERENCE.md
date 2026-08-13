@@ -203,6 +203,11 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
 
 两者读取已有 artifact，不重跑扫描。
 
+`candidate_filter_explain` 还支持从通知投递证据定位轮次：`run_selector=latest_notification`
+解析该账户在 `notification_date`（ISO 日期，默认按运行时主机本地时区的今天）实际送达的
+最近一次通知对应的 run；找不到匹配通知时 fail-closed 返回 `DEPENDENCY_MISSING`
+（`details.reason=no_notification_run`），不会静默回退到其他轮次。
+
 ### 扫描
 
 ```bash
