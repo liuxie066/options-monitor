@@ -145,6 +145,39 @@ With a readiness snapshot:
   --no-write-outputs
 ```
 
+To collect a payload-free storage and capacity baseline for a selected runtime
+root:
+
+```bash
+./om research storage-baseline \
+  --runtime-root /var/lib/options-monitor
+```
+
+The command traverses only the fixed runtime subroots, does not follow
+symlinks, and never opens the source ledger. It copies the source SQLite
+`db/wal/shm` set to a temporary directory after a bounded stability check, then
+queries aggregate row/JSON-byte counts from that copy in `mode=ro` with
+`query_only=ON`. Research payload bodies are neither read nor hashed: declared
+manifest hashes and sizes are capacity metadata, while current content remains
+`not_verified`.
+
+Pass prior reports in chronological order to obtain a measured growth and
+90-day forecast; one observation remains `insufficient_history`:
+
+```bash
+./om research storage-baseline \
+  --runtime-root /var/lib/options-monitor \
+  --history-report ./baseline-2026-06.json \
+  --history-report ./baseline-2026-07.json \
+  --output ./baseline-2026-08.json
+```
+
+`--output` writes one atomic local JSON file and must point outside the
+inventoried runtime root. Existing output is refused unless `--overwrite` is
+explicit. Capacity warnings and cold-candidate rows are read-only decision
+previews; this command has no move, delete, compact, checkpoint, repair, or
+notification action.
+
 ### Scopes
 
 | Scope | Purpose |
