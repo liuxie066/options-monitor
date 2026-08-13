@@ -77,7 +77,7 @@ def _timing_artifact(
 ) -> dict[str, Any]:
     wall_samples = [wall_p95] * 30
     cpu_samples = [cpu_p95] * 30
-    return {
+    payload = {
         "schema_version": module.TIMING_SCHEMA,
         "measurement_mode": "timing_without_profiler",
         "profilers_enabled": False,
@@ -107,6 +107,18 @@ def _timing_artifact(
             for row in fixture_manifest["scenarios"]
         ],
     }
+    storage = fixture_manifest.get("research_storage_status")
+    if isinstance(storage, dict):
+        payload["research_storage_status"] = {
+            "key": storage["key"],
+            "fixture_sha256": storage["fixture_sha256"],
+            "setup_included": False,
+            "wall_time_ns": module._timing_distribution(wall_samples),
+            "cpu_time_ns": module._timing_distribution(cpu_samples),
+        }
+    else:
+        payload["research_storage_status"] = None
+    return payload
 
 
 def _profile_artifact(
@@ -115,7 +127,7 @@ def _profile_artifact(
     schema: str,
     mode: str,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": schema,
         "measurement_mode": mode,
         "timing_threshold_eligible": False,
@@ -132,6 +144,17 @@ def _profile_artifact(
             for row in fixture_manifest["scenarios"]
         ],
     }
+    storage = fixture_manifest.get("research_storage_status")
+    if isinstance(storage, dict):
+        payload["research_storage_status"] = {
+            "key": storage["key"],
+            "fixture_sha256": storage["fixture_sha256"],
+            "setup_included": False,
+            "component": {"python_peak_bytes": 1_024},
+        }
+    else:
+        payload["research_storage_status"] = None
+    return payload
 
 
 def _fake_workers(
@@ -169,6 +192,27 @@ def _fake_workers(
         "allocation": (module.ALLOCATION_PROFILE_SCHEMA, "tracemalloc_separate_process"),
     }
     schema, measurement_mode = schemas[mode]
+    storage_spec = worker_spec.get("research_storage_status")
+    storage_status = None
+    if isinstance(storage_spec, dict):
+        storage_status = {
+            "key": storage_spec["key"],
+            "fixture_sha256": storage_spec["fixture_sha256"],
+            "setup_included": False,
+        }
+        if mode == "timing":
+            storage_status.update(
+                wall_time_ns=module._timing_distribution(
+                    [100] * worker_spec["repetitions"]
+                ),
+                cpu_time_ns=module._timing_distribution(
+                    [100] * worker_spec["repetitions"]
+                ),
+            )
+        elif mode == "allocation":
+            storage_status["component"] = {"python_peak_bytes": 1_024}
+        else:
+            storage_status["component"] = {}
     return {
         "schema_version": schema,
         "measurement_mode": measurement_mode,
@@ -179,6 +223,7 @@ def _fake_workers(
         "repetitions": worker_spec["repetitions"] if mode == "timing" else None,
         "run_label": worker_spec["run_label"],
         "scenarios": scenarios,
+        "research_storage_status": storage_status,
     }
 
 
@@ -309,6 +354,149 @@ def test_timing_cpu_and_allocation_modes_are_contractually_separate() -> None:
     assert cpu["timing_threshold_eligible"] is False
     assert allocation["measurement_mode"] == "tracemalloc_separate_process"
     assert allocation["timing_threshold_eligible"] is False
+
+
+def test_storage_status_fixture_identity_is_repeatable() -> None:
+    first = module._storage_status_spec(seed=module.SEED)
+    second = module._storage_status_spec(seed=module.SEED)
+    third = module._storage_status_spec(seed=module.SEED + 1)
+
+    assert first == second
+    assert first["fixture_sha256"] != third["fixture_sha256"]
+    assert first["effective_dimensions"] == {
+        "partition_count": 10_000,
+        "manifest_count": 1,
+        "runtime_file_count": 10_001,
+    }
+
+
+def test_research_storage_status_can_run_without_projection_scenarios(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "_host_profile",
+        lambda: {
+            "schema_version": "data_storage_projection_host_profile.v1",
+            "fingerprint": "a" * 64,
+        },
+    )
+    output = tmp_path / "storage-only"
+
+    result = module.run_data_storage_projection_benchmark(
+        repo_root=Path.cwd(),
+        output_dir=output,
+        scenario="research_storage_status",
+        warmups=1,
+        repetitions=2,
+        worker_runner=_fake_workers,
+    )
+
+    assert result["scenario_count"] == 0
+    assert result["research_storage_status"]["status"] == "not_evaluable"
+    fixture = json.loads((output / "fixture-manifest.json").read_text(encoding="utf-8"))
+    assert fixture["scenarios"] == []
+    assert fixture["research_storage_status"]["key"] == module.STORAGE_STATUS_KEY
+
+
+def test_storage_status_workers_exclude_setup_and_preserve_payload_free_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = module._storage_status_spec(seed=module.SEED)
+    result = {
+        "status": "partial_data",
+        "runtime_storage": {"file_count": 10_001},
+        "research_storage": {
+            "manifest_count": 1,
+            "declared_reference_count": 10_000,
+            "protected_reference_failures": [],
+        },
+        "safety": {
+            "payload_content_reads": 0,
+            "mutation_operations": 0,
+            "no_follow_traversal": True,
+        },
+    }
+    setup_calls = 0
+    collect_calls = 0
+
+    @module.contextmanager
+    def fake_fixture(_spec: dict[str, Any]):
+        nonlocal setup_calls
+        setup_calls += 1
+        yield {"fixture_sha256": spec["fixture_sha256"]}
+
+    def fake_collect(_context: dict[str, Any]) -> dict[str, Any]:
+        nonlocal collect_calls
+        collect_calls += 1
+        return result
+
+    monkeypatch.setattr(module, "_temporary_storage_status_fixture", fake_fixture)
+    monkeypatch.setattr(module, "_collect_synthetic_storage_status", fake_collect)
+
+    timing = module._measure_storage_status_timing(spec, warmups=1, repetitions=2)
+    allocation = module._measure_storage_status_allocation(spec)
+
+    assert setup_calls == 2
+    assert collect_calls == 4
+    assert timing["setup_included"] is False
+    assert timing["output"]["payload_content_reads"] == 0
+    assert timing["output"]["mutation_operations"] == 0
+    assert allocation["setup_included"] is False
+
+
+def test_storage_status_gate_checks_space_on_any_host_and_time_on_reference_host() -> None:
+    timing = {
+        "wall_time_ns": module._timing_distribution([100] * 30),
+    }
+    allocation = {"component": {"python_peak_bytes": 1_024}}
+
+    mismatch = module._storage_status_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=False,
+        comparison_reason="host_profile_fingerprint_mismatch",
+    )
+    too_large = module._storage_status_gate(
+        timing=timing,
+        allocation={
+            "component": {
+                "python_peak_bytes": module.STORAGE_STATUS_ALLOCATION_LIMIT_BYTES + 1,
+            }
+        },
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=False,
+        comparison_reason="host_profile_fingerprint_mismatch",
+    )
+    passing = module._storage_status_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="exact_host_profile_fingerprint_match",
+    )
+
+    assert mismatch[:2] == ("not_comparable", "host_profile_fingerprint_mismatch")
+    assert too_large[:2] == ("fail", "frozen_allocation_limit_exceeded")
+    assert passing[:2] == ("pass", "within_frozen_limits")
+
+
+def test_storage_status_gate_is_not_comparable_when_allocation_measurement_is_missing() -> None:
+    timing = {
+        "wall_time_ns": module._timing_distribution([100] * 30),
+    }
+
+    result = module._storage_status_gate(
+        timing=timing,
+        allocation=None,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="exact_host_profile_fingerprint_match",
+    )
+
+    assert result[:2] == ("not_evaluable", "scenario_not_selected")
 
 
 def test_reference_host_gate_requires_exact_fingerprint_and_both_history_subcases(
