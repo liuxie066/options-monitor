@@ -1,0 +1,341 @@
+{
+  "schema_version": "data_storage_runtime_source_inventory.v1",
+  "scan_roots": [
+    "domain",
+    "src",
+    "scripts"
+  ],
+  "discovery_rules": [
+    {
+      "id": "ledger_event_reads",
+      "kind": "call",
+      "symbols": [
+        "list_trade_events"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/ledger/**",
+          "owner": "ledger",
+          "operation": "read",
+          "history_dimension": "trade_event_lifetime",
+          "path_class": "hot_and_offline",
+          "later_phase": "phase_3"
+        },
+        {
+          "path_glob": "src/application/trades/**",
+          "owner": "trade_workflows",
+          "operation": "read",
+          "history_dimension": "trade_event_lifetime",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_3"
+        },
+        {
+          "path_glob": "src/application/agent_tools/**",
+          "owner": "agent_read_surfaces",
+          "operation": "read",
+          "history_dimension": "trade_event_lifetime",
+          "path_class": "operator_read_path",
+          "later_phase": "phase_3"
+        },
+        {
+          "path_glob": "src/interfaces/**",
+          "owner": "cli_adapters",
+          "operation": "read",
+          "history_dimension": "trade_event_lifetime",
+          "path_class": "operator_path",
+          "later_phase": "phase_3"
+        }
+      ]
+    },
+    {
+      "id": "position_lot_replacement",
+      "kind": "call",
+      "symbols": [
+        "replace_position_lots"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/ledger/**",
+          "owner": "ledger_projection_writer",
+          "operation": "write",
+          "history_dimension": "current_position_projection",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_3"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle_history_reads",
+      "kind": "call",
+      "symbols": [
+        "list_trade_lifecycle_evidence",
+        "list_trade_lifecycle_cases",
+        "list_trade_lifecycle_allocations",
+        "list_trade_lifecycle_source_consumptions",
+        "list_trade_lifecycle_timing_policies"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/ledger/**",
+          "owner": "ledger_lifecycle",
+          "operation": "read",
+          "history_dimension": "lifecycle_history",
+          "path_class": "hot_and_offline",
+          "later_phase": "phase_2_to_4"
+        },
+        {
+          "path_glob": "src/application/trades/**",
+          "owner": "trade_lifecycle_workflows",
+          "operation": "read",
+          "history_dimension": "lifecycle_history",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_2_to_4"
+        },
+        {
+          "path_glob": "src/application/quality/**",
+          "owner": "quality",
+          "operation": "read",
+          "history_dimension": "lifecycle_history",
+          "path_class": "ordinary_quality",
+          "later_phase": "phase_4"
+        },
+        {
+          "path_glob": "src/interfaces/**",
+          "owner": "cli_adapters",
+          "operation": "read",
+          "history_dimension": "lifecycle_history",
+          "path_class": "operator_path",
+          "later_phase": "phase_2_to_4"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle_history_writes",
+      "kind": "text",
+      "patterns": [
+        "upsert_trade_lifecycle_case",
+        "upsert_trade_lifecycle_evidence",
+        "upsert_trade_lifecycle_settlement_admission_head"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/ledger/**",
+          "owner": "ledger_lifecycle_writer",
+          "operation": "write",
+          "history_dimension": "lifecycle_history",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_2"
+        },
+        {
+          "path_glob": "src/application/trades/**",
+          "owner": "trade_lifecycle_workflows",
+          "operation": "write",
+          "history_dimension": "lifecycle_history",
+          "path_class": "operator_write_path",
+          "later_phase": "phase_2"
+        }
+      ]
+    },
+    {
+      "id": "required_data_csv",
+      "kind": "call",
+      "symbols": [
+        "read_csv",
+        "safe_read_csv",
+        "to_csv"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/**",
+          "owner": "application_data_adapters",
+          "operation": "encode_decode",
+          "history_dimension": "required_data_and_reports",
+          "path_class": "compatibility_adapter",
+          "later_phase": "phase_5"
+        },
+        {
+          "path_glob": "src/infrastructure/**",
+          "owner": "infrastructure_io",
+          "operation": "encode_decode",
+          "history_dimension": "required_data_and_reports",
+          "path_class": "compatibility_adapter",
+          "later_phase": "phase_5"
+        }
+      ]
+    },
+    {
+      "id": "inline_base64_payloads",
+      "kind": "call",
+      "symbols": [
+        "b64encode",
+        "b64decode"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/**",
+          "owner": "application_data_adapters",
+          "operation": "encode_decode",
+          "history_dimension": "required_data_and_channel_payloads",
+          "path_class": "compatibility_adapter",
+          "later_phase": "phase_5"
+        },
+        {
+          "path_glob": "src/infrastructure/**",
+          "owner": "infrastructure_adapters",
+          "operation": "encode_decode",
+          "history_dimension": "required_data_and_process_payloads",
+          "path_class": "compatibility_adapter",
+          "later_phase": "phase_5"
+        }
+      ]
+    },
+    {
+      "id": "sealed_snapshot_consumers",
+      "kind": "call",
+      "symbols": [
+        "load_opening_candidate_snapshot",
+        "load_combo_yield_candidate_snapshot",
+        "load_cc_lp_candidate_snapshot",
+        "load_candidate_snapshot_bundle",
+        "load_required_data_snapshot_manifest"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/**",
+          "owner": "sealed_snapshot_consumers",
+          "operation": "manifest",
+          "history_dimension": "sealed_scan_input_output",
+          "path_class": "hot_and_offline",
+          "later_phase": "phase_5_to_7"
+        }
+      ]
+    },
+    {
+      "id": "decision_context_consumers",
+      "kind": "call",
+      "symbols": [
+        "load_prepared_option_positions_context",
+        "load_prepared_portfolio_context",
+        "load_account_portfolio_context",
+        "load_portfolio_context",
+        "load_option_positions_context"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/**",
+          "owner": "decision_context_consumers",
+          "operation": "read",
+          "history_dimension": "current_account_input",
+          "path_class": "hot",
+          "later_phase": "phase_3_to_5"
+        }
+      ]
+    },
+    {
+      "id": "research_replay_roots",
+      "kind": "call",
+      "symbols": [
+        "build_shadow_replay_dataset",
+        "validate_dataset_integrity"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "src/application/**",
+          "owner": "strategy_lab_and_shadow_replay",
+          "operation": "manifest",
+          "history_dimension": "research_generation",
+          "path_class": "offline",
+          "later_phase": "phase_6_to_7"
+        },
+        {
+          "path_glob": "src/interfaces/**",
+          "owner": "research_cli",
+          "operation": "manifest",
+          "history_dimension": "research_generation",
+          "path_class": "offline",
+          "later_phase": "phase_6_to_7"
+        }
+      ]
+    },
+    {
+      "id": "runtime_root_literals",
+      "kind": "literal",
+      "values": [
+        "output_runs",
+        "output_accounts",
+        "output_shared",
+        "output_shared/research",
+        "output_shared/required_data",
+        "required_data",
+        "research",
+        "remote_archive",
+        "logs"
+      ],
+      "classifiers": [
+        {
+          "path_glob": "domain/**",
+          "owner": "domain_storage_paths",
+          "operation": "root",
+          "history_dimension": "runtime_artifacts",
+          "path_class": "hot_and_offline",
+          "later_phase": "phase_5_to_7"
+        },
+        {
+          "path_glob": "src/**",
+          "owner": "runtime_path_consumers",
+          "operation": "root",
+          "history_dimension": "runtime_artifacts",
+          "path_class": "hot_and_offline",
+          "later_phase": "phase_5_to_7"
+        },
+        {
+          "path_glob": "scripts/**",
+          "owner": "operational_wrappers",
+          "operation": "root",
+          "history_dimension": "runtime_artifacts",
+          "path_class": "operator_path",
+          "later_phase": "phase_5_to_7"
+        }
+      ]
+    }
+  ],
+  "declared_locators": [
+    {
+      "path": "src/application/ledger/writer.py",
+      "locator": "list_trade_events",
+      "owner": "ledger_projection_writer",
+      "reason": "canonical full-replay reader"
+    },
+    {
+      "path": "src/application/ledger/writer.py",
+      "locator": "replace_position_lots",
+      "owner": "ledger_projection_writer",
+      "reason": "canonical global position-lot publisher"
+    },
+    {
+      "path": "src/application/ledger/repository.py",
+      "locator": "trade_lifecycle_evidence",
+      "owner": "ledger_lifecycle",
+      "reason": "canonical lifecycle evidence storage"
+    },
+    {
+      "path": "src/application/required_data_snapshot.py",
+      "locator": "b64decode",
+      "owner": "required_data_snapshot",
+      "reason": "legacy inline-payload compatibility consumer"
+    },
+    {
+      "path": "src/application/shadow_replay/common.py",
+      "locator": "validate_dataset_integrity",
+      "owner": "shadow_replay",
+      "reason": "offline replay integrity authority"
+    },
+    {
+      "path": "src/application/research/archive.py",
+      "locator": "remote_archive",
+      "owner": "research_archive",
+      "reason": "local remote-evidence archive root"
+    }
+  ],
+  "ignores": []
+}
