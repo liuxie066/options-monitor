@@ -26,6 +26,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_publication import (
+    publish_full_position_projection,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
     with_sqlite_repo_transaction,
@@ -210,7 +213,7 @@ def adopt_post_trade_combo_pair(
         events = sqlite_repo.list_trade_events(conn=conn)
         projection = project_stored_trade_events_to_position_lots(events)
         ensure_projection_publishable(projection, operation="post-trade Combo adoption")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
         projected_by_id = {
             str(item.record_id): item for item in projection.lots
         }
@@ -266,7 +269,11 @@ def adopt_post_trade_combo_pair(
             "inference": updated,
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def reject_post_trade_combo_pair(
@@ -411,7 +418,7 @@ def supersede_post_trade_combo_pair(
         events_after = sqlite_repo.list_trade_events(conn=conn)
         projection = project_stored_trade_events_to_position_lots(events_after)
         ensure_projection_publishable(projection, operation="post-trade Combo supersede")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
         membership_after = resolve_combo_group_membership(
             group_id=group_id,
             account=str(inference["account"]),
@@ -438,7 +445,11 @@ def supersede_post_trade_combo_pair(
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {**preview, "membership": membership_after.fact, "inference": updated}
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def _reconcile_with_repo(

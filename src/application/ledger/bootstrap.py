@@ -22,6 +22,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_publication import (
+    publish_full_position_projection,
+)
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     _load_data_config,
@@ -231,17 +234,23 @@ def materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: 
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
             _raise_if_local_bootstrap_projection_failed(events, projection)
             ensure_projection_publishable(projection, operation="ledger bootstrap projection")
-            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+            publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
         else:
             for event in events:
                 sqlite_repo.upsert_trade_event(event)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
             _raise_if_local_bootstrap_projection_failed(events, projection)
             ensure_projection_publishable(projection, operation="ledger bootstrap projection")
-            sqlite_repo.replace_position_lots(projection.lots)
+            publish_full_position_projection(sqlite_repo, projection.lots)
         return len(events)
 
-    return int(with_sqlite_repo_transaction(repo, _run))
+    return int(
+        with_sqlite_repo_transaction(
+            repo,
+            _run,
+            require_projection_publication=True,
+        )
+    )
 
 
 def apply_bootstrap_snapshot(
@@ -287,7 +296,7 @@ def load_option_positions_repo(
         if repo.count_position_lots() == 0:
             projection = project_stored_trade_events_to_position_lots(repo.list_trade_events())
             ensure_projection_publishable(projection, operation="ledger startup projection")
-            repo.replace_position_lots(projection.lots)
+            publish_full_position_projection(repo, projection.lots)
         return repo
 
     if repo.count_position_lots() > 0:

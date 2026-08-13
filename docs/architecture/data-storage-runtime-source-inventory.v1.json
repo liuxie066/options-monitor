@@ -51,6 +51,7 @@
       "id": "position_lot_replacement",
       "kind": "call",
       "symbols": [
+        "publish_full_position_projection",
         "replace_position_lots"
       ],
       "classifiers": [
@@ -307,10 +308,10 @@
       "reason": "canonical full-replay reader"
     },
     {
-      "path": "src/application/ledger/writer.py",
-      "locator": "replace_position_lots",
+      "path": "src/application/ledger/position_projection_publication.py",
+      "locator": "publish_full_position_projection",
       "owner": "ledger_projection_writer",
-      "reason": "canonical global position-lot publisher"
+      "reason": "canonical diff-based position-lot publication boundary"
     },
     {
       "path": "src/application/ledger/repository.py",
