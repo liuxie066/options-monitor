@@ -26,6 +26,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/position_fields.py",
         "domain/domain/ledger/position_fingerprint.py",
         "domain/domain/ledger/projection.py",
+        "domain/domain/ledger/projection_state.py",
     ),
     "domain/domain/ledger/economics.py": (
         "domain/domain/ledger/events.py",
@@ -45,6 +46,12 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/lots.py",
     ),
+    "domain/domain/ledger/projection_state.py": (
+        "domain/domain/ledger/economics.py",
+        "domain/domain/ledger/events.py",
+        "domain/domain/ledger/identity.py",
+        "domain/domain/ledger/lots.py",
+    ),
     "domain/domain/ledger/lots.py": (
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/identity.py",
@@ -59,6 +66,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/invariants.py",
         "domain/domain/ledger/lots.py",
+        "domain/domain/ledger/projection_state.py",
     ),
     "domain/domain/option_position_identity.py": (
         "domain/domain/expiration_dates.py",
@@ -94,7 +102,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "78160e056fa5dc3828dd695f73041cbae6ec28f5530b0ae10f85e78bad795f9e"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "6fc3cd7918b66f6072b5f973bb613850eff4d8ed34dbacf6948e4fdffa39a2d6"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):
