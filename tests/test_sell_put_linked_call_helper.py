@@ -914,6 +914,66 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
     assert shadow["rank_changed"].all()
 
 
+def test_yield_enhancement_rank_shadow_emits_nullable_int_ranks() -> None:
+    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+
+    rows = pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C110",
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C110",
+                "funding_accepted": True,
+                "premium_funding_score": 0.9,
+                "net_credit_retention": 0.80,
+                "call_cost_to_put_credit": 0.20,
+                "call_delta": 0.18,
+                "call_spread_ratio": 0.12,
+                "call_open_interest": 500,
+                "call_payoff_multiple_at_1_5_sigma": 1.8,
+                "call_payoff_multiple_at_2_0_sigma": 4.0,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.14,
+                "combo_spread_ratio": 0.20,
+                "annualized_net_credit_yield": 0.09,
+                "residual_premium_ratio": 0.80,
+            },
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C115",
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C115",
+                "funding_accepted": True,
+                "premium_funding_score": 1.1,
+                "net_credit_retention": 0.88,
+                "call_cost_to_put_credit": 0.12,
+                "call_delta": 0.10,
+                "call_spread_ratio": 0.08,
+                "call_open_interest": 900,
+                "call_payoff_multiple_at_1_5_sigma": 1.0,
+                "call_payoff_multiple_at_2_0_sigma": 3.0,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.14,
+                "combo_spread_ratio": 0.15,
+                "annualized_net_credit_yield": 0.11,
+                "residual_premium_ratio": 0.88,
+            },
+        ]
+    )
+    shadow = build_yield_enhancement_rank_shadow(rows)
+
+    assert str(shadow["baseline_rank"].dtype) == "Int64"
+    assert str(shadow["shadow_rank"].dtype) == "Int64"
+    records = shadow.to_dict("records")
+    assert any(record["baseline_rank"] is None for record in records)
+    assert any(record["shadow_rank"] is None for record in records)
+    for record in records:
+        for field in ("baseline_rank", "shadow_rank"):
+            value = record[field]
+            assert value is None or (isinstance(value, int) and not isinstance(value, bool))
+
+
 def test_yield_enhancement_rejects_crossed_call_quote(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
