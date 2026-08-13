@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import date
 from typing import Any
 
 from domain.domain.strategy_vocab import (
@@ -17,6 +19,27 @@ from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_config import resolve_output_root
 from src.application.symbol_aliases import symbol_aliases_from_config
+
+
+def _normalize_candidate_filter_copilot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    selector = normalized.get("run_selector")
+    if selector is not None:
+        selector_value = str(selector).strip().lower()
+        if selector_value not in {"latest", "latest_notification"}:
+            raise ValueError("run_selector must be latest or latest_notification")
+        normalized["run_selector"] = selector_value
+    raw_date = normalized.get("notification_date")
+    if raw_date is not None:
+        date_text = str(raw_date).strip()
+        try:
+            date.fromisoformat(date_text)
+        except ValueError as exc:
+            raise ValueError("notification_date must be ISO YYYY-MM-DD") from exc
+        if normalized.get("run_selector") != "latest_notification":
+            raise ValueError("notification_date requires run_selector=latest_notification")
+        normalized["notification_date"] = date_text
+    return normalized
 
 
 _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -150,7 +173,10 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     description=(
-        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows."
+        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
+        "With run_selector=latest_notification it resolves the run that produced the most recent notification actually delivered "
+        "to the account on notification_date (default: today, runtime host local timezone), so a user can ask why a symbol was "
+        "filtered right after a monitoring notification arrives."
     ),
     requires=("candidate_snapshot_manifest", "opening_candidate_snapshot"),
     capabilities=("opening_candidate_snapshot", "filter_explain", "read_only"),
@@ -182,6 +208,14 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
             )
         ),
         "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
+        "run_selector": (
+            "optional latest|latest_notification; latest_notification resolves the most recent run whose "
+            "notification was actually delivered to the account on notification_date"
+        ),
+        "notification_date": (
+            "optional ISO YYYY-MM-DD used with run_selector=latest_notification; "
+            "defaults to today in the runtime host local timezone"
+        ),
     },
     handler=_candidate_filter_explain_tool,
     pure_read=True,
@@ -189,9 +223,19 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     examples=(
         {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
         {"input": {"run_id": "20260514T100000Z", "account": "sy", "symbol": "泡泡玛特"}},
+        {"input": {"account": "sy", "symbol": "0700.HK", "run_selector": "latest_notification"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "symbol", "account", "function", "run_id"),
+    copilot_input_fields=(
+        "config_key",
+        "symbol",
+        "account",
+        "function",
+        "run_id",
+        "run_selector",
+        "notification_date",
+    ),
+    copilot_input_normalizer=_normalize_candidate_filter_copilot_input,
 )
 
 TOOLS: tuple[AgentTool, ...] = (
