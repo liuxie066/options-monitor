@@ -93,6 +93,22 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     research_collect.add_argument("--write-outputs", action="store_true")
     research_collect.add_argument("--no-write-outputs", action="store_true")
     research_collect.add_argument("--confirm", action="store_true")
+    storage_baseline = research_sub.add_parser(
+        "storage-baseline",
+        help="collect a payload-free read-only runtime storage and capacity baseline",
+    )
+    storage_baseline.add_argument("--runtime-root", required=True)
+    storage_baseline.add_argument("--ledger-sqlite", default=None)
+    storage_baseline.add_argument(
+        "--history-report",
+        dest="history_reports",
+        action="append",
+        default=None,
+        help="prior compatible storage baseline JSON; repeat in chronological order",
+    )
+    storage_baseline.add_argument("--output", default=None)
+    storage_baseline.add_argument("--allow-external-ledger", action="store_true")
+    storage_baseline.add_argument("--overwrite", action="store_true")
     research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
     research_handoff.add_argument("--bundle", required=True)
     research_archive = research_sub.add_parser("archive", help="mirror remote Research evidence for local replay")
@@ -840,6 +856,22 @@ def handle_research_command(
     research_collect_fn: ResearchCollectFn | None = None,
     repo_base_fn: Callable[[], Path] = repo_base,
 ) -> dict[str, Any]:
+    if args.research_command == "storage-baseline":
+        from src.application.research.storage_baseline import (
+            collect_storage_runtime_baseline,
+        )
+
+        data = collect_storage_runtime_baseline(
+            repo_root=repo_base_fn(),
+            runtime_root=args.runtime_root,
+            ledger_sqlite=args.ledger_sqlite,
+            history_reports=args.history_reports,
+            output=args.output,
+            allow_external_ledger=bool(args.allow_external_ledger),
+            overwrite=bool(args.overwrite),
+        )
+        return build_response(tool_name="research.storage-baseline", ok=True, data=data)
+
     if args.research_command == "collect":
         collect = research_collect_fn or (lambda payload: run_research_collect(payload, repo_base_fn=repo_base_fn))
         return collect(_research_collect_payload(args))

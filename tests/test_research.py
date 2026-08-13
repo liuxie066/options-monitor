@@ -139,6 +139,59 @@ def _seal_combo_diagnostic_fixture(
     )
 
 
+def test_storage_baseline_cli_dispatches_read_only_options(monkeypatch, tmp_path: Path) -> None:
+    from src.application.research import storage_baseline
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    calls: list[dict[str, Any]] = []
+
+    def _collect_storage_runtime_baseline(**kwargs):
+        calls.append(kwargs)
+        return {"schema_version": "storage_runtime_baseline.v1", "status": "complete"}
+
+    monkeypatch.setattr(
+        storage_baseline,
+        "collect_storage_runtime_baseline",
+        _collect_storage_runtime_baseline,
+    )
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    output = tmp_path / "baseline.json"
+    args = parse_args(
+        [
+            "research",
+            "storage-baseline",
+            "--runtime-root",
+            str(runtime),
+            "--history-report",
+            "before-1.json",
+            "--history-report",
+            "before-2.json",
+            "--output",
+            str(output),
+            "--allow-external-ledger",
+            "--overwrite",
+        ]
+    )
+
+    response = handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+    assert response["ok"] is True
+    assert response["tool_name"] == "research.storage-baseline"
+    assert calls == [
+        {
+            "repo_root": tmp_path,
+            "runtime_root": str(runtime),
+            "ledger_sqlite": None,
+            "history_reports": ["before-1.json", "before-2.json"],
+            "output": str(output),
+            "allow_external_ledger": True,
+            "overwrite": True,
+        }
+    ]
+
+
 class _ToolKwargs(TypedDict):
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
     repo_base: Callable[[], Path]
