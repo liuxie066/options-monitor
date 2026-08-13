@@ -201,7 +201,12 @@ allowed for plumbing checks but are labeled `non_acceptance_smoke`. `cProfile`
 and `tracemalloc` run in separate child processes and therefore never influence
 the threshold timing. The `history_10x` result contains both a fixed-output
 history-cost case and a retained-closed-lot case, each with at least 10,000
-events.
+events. It also measures `research_storage_status.history_10x` against a
+deterministic 10,000-partition manifest fixture. Fixture construction and module
+imports are outside the storage timing/allocation scope; the decision freezes
+p95 wall at 5 seconds and Python peak allocation at 64 MiB while preserving
+zero payload-content reads and zero runtime mutations. Use
+`--scenario research_storage_status` to run only that component.
 
 Absolute p95 wall/CPU decisions require an exact host-profile match, including
 separate CPU and hardware-model fields. First run

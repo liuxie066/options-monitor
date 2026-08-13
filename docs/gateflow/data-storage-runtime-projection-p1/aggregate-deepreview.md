@@ -47,6 +47,11 @@ No findings were rejected, deferred, or left needing evidence.
 - Writer result is `fail`; diff publication is `not_implemented`; combined
   Phase 3A is `not_ready`. This is accepted evidence, not a validation failure.
 
+The later PR review found that this aggregate review had not exercised the
+separately frozen `research storage status` 5-second / 64-MiB budget. That
+omission is not accepted by this artifact; see the PR review fix and re-review
+artifacts for the repaired benchmark component and its 5/30 evidence.
+
 ## Documentation decision
 
 `docs/AGENT_WIKI.md` now explains the exact payload-free account-count basis and
