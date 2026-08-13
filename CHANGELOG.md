@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.19 - 2026-08-13
+
+### Bug Fixes
+- Sealed combo-yield candidate rank records as nullable integers, so valid funding-put candidates no longer fail the strict integer rank validation and abort the HK decision batch.
+
 ## 1.13.18 - 2026-08-13
 
 ### Breaking Changes

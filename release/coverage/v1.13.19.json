@@ -1,0 +1,74 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.19",
+  "base": {
+    "tag": "v1.13.18",
+    "commit": "421591ddb5e298cda064ec414c8b87f62b0811b2"
+  },
+  "reviewed_head": "8ce1750de892353a1b6ee81ee5245715f15732e3",
+  "commits": [
+    {
+      "sha": "c78f91fe24097abe16c726e8387bf5cc2b365e30",
+      "subject": "chore(gateflow): accept plan for combo-yield-rank-int-seal"
+    },
+    {
+      "sha": "6818556d458dc52fb6da737507eea0f25347ff96",
+      "subject": "chore(gateflow): accept combo-yield-rank-int-seal slice-1"
+    },
+    {
+      "sha": "554342700de14d4d9b0fb0fbc096c2f4ecc0e4f6",
+      "subject": "chore(gateflow): accept deepreview for combo-yield-rank-int-seal"
+    },
+    {
+      "sha": "169791c210c69aefa0a3cf18b7b79f1c5e659469",
+      "subject": "chore(gateflow): accept PR review for combo-yield-rank-int-seal"
+    },
+    {
+      "sha": "5a6b3e028453c87616b40e566d03a429a31d3711",
+      "subject": "chore(gateflow): final closeout for combo-yield-rank-int-seal"
+    },
+    {
+      "sha": "85307620d03a1af723b287f0999420902f3aef8d",
+      "subject": "Merge pull request #152 from liuxie066/fix/combo-yield-rank-int-seal"
+    },
+    {
+      "sha": "8ce1750de892353a1b6ee81ee5245715f15732e3",
+      "subject": "chore(docs): regenerate dependency graph after combo-yield rank int seal"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Sealed combo-yield candidate rank records as nullable integers, so valid funding-put candidates no longer fail the strict integer rank validation and abort the HK decision batch.",
+      "commits": [
+        "6818556d458dc52fb6da737507eea0f25347ff96"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c78f91fe24097abe16c726e8387bf5cc2b365e30",
+      "reason": "docs-only Gateflow plan artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "554342700de14d4d9b0fb0fbc096c2f4ecc0e4f6",
+      "reason": "docs-only Gateflow deepreview acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "169791c210c69aefa0a3cf18b7b79f1c5e659469",
+      "reason": "docs-only Gateflow PR review acceptance artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "5a6b3e028453c87616b40e566d03a429a31d3711",
+      "reason": "docs-only Gateflow closeout artifact; no user-facing behavioral change"
+    },
+    {
+      "commit": "85307620d03a1af723b287f0999420902f3aef8d",
+      "reason": "mechanical GitHub merge commit; the underlying product commit is mapped to the release note"
+    },
+    {
+      "commit": "8ce1750de892353a1b6ee81ee5245715f15732e3",
+      "reason": "docs-only dependency graph regeneration; no user-facing behavioral change"
+    }
+  ]
+}
