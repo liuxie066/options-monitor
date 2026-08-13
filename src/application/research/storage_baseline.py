@@ -24,9 +24,7 @@ from src.application.ledger.store_resolution import LEDGER_DB_RELATIVE_PATH
 
 
 SCHEMA_VERSION = "storage_runtime_baseline.v1"
-SOURCE_INVENTORY_RELATIVE_PATH = Path(
-    "docs/architecture/data-storage-runtime-source-inventory.v1.json"
-)
+SOURCE_INVENTORY_RELATIVE_PATH = Path("docs/architecture/data-storage-runtime-source-inventory.v1.json")
 RUNTIME_SUBROOTS = (
     "output_runs",
     "output_accounts",
@@ -106,9 +104,7 @@ def collect_storage_runtime_baseline(
         if source_inventory_path is not None
         else base / SOURCE_INVENTORY_RELATIVE_PATH
     )
-    resolved_history_reports = [
-        _resolve_input_path(item, base=base) for item in (history_reports or ())
-    ]
+    resolved_history_reports = [_resolve_input_path(item, base=base) for item in (history_reports or ())]
     source_inventory = _collect_source_inventory(repo_root=base, manifest_path=inventory_path)
     runtime_storage, research_file_rows = _collect_runtime_storage(root=root, observed_at=observed_at)
     sqlite_payload = _collect_sqlite_metadata(ledger_path)
@@ -225,7 +221,9 @@ def _resolve_ledger_path(
         candidate = repo_root / candidate
     path = candidate.resolve()
     if _path_or_parent_is_symlink(candidate, stop=root if _is_relative_to(path, root) else None):
-        raise AgentToolError(code="INPUT_ERROR", message=f"explicit ledger path must not traverse a symlink: {candidate}")
+        raise AgentToolError(
+            code="INPUT_ERROR", message=f"explicit ledger path must not traverse a symlink: {candidate}"
+        )
     if not _is_relative_to(path, root) and not allow_external:
         raise AgentToolError(
             code="INPUT_ERROR",
@@ -265,7 +263,9 @@ def _collect_source_inventory(*, repo_root: Path, manifest_path: Path) -> dict[s
     except FileNotFoundError as exc:
         raise AgentToolError(code="SOURCE_INVENTORY_ERROR", message="source inventory manifest is missing") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise AgentToolError(code="SOURCE_INVENTORY_ERROR", message=f"source inventory manifest is invalid: {exc}") from exc
+        raise AgentToolError(
+            code="SOURCE_INVENTORY_ERROR", message=f"source inventory manifest is invalid: {exc}"
+        ) from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != "data_storage_runtime_source_inventory.v1":
         raise AgentToolError(code="SOURCE_INVENTORY_ERROR", message="source inventory schema is invalid")
     rules = payload.get("discovery_rules")
@@ -282,7 +282,9 @@ def _collect_source_inventory(*, repo_root: Path, manifest_path: Path) -> dict[s
         rule_id = str(raw_rule.get("id") or "").strip()
         classifiers = raw_rule.get("classifiers")
         if not rule_id or rule_id in rule_ids or not isinstance(classifiers, list) or not classifiers:
-            raise AgentToolError(code="SOURCE_INVENTORY_ERROR", message=f"source inventory rule is incomplete: {rule_id}")
+            raise AgentToolError(
+                code="SOURCE_INVENTORY_ERROR", message=f"source inventory rule is incomplete: {rule_id}"
+            )
         rule_ids.add(rule_id)
         validated_rules.append((rule_id, raw_rule, classifiers))
 
@@ -301,10 +303,7 @@ def _collect_source_inventory(*, repo_root: Path, manifest_path: Path) -> dict[s
     parse_errors: list[dict[str, str]] = []
     matches: list[dict[str, Any]] = []
     unclassified: list[dict[str, str]] = []
-    classifier_hits = {
-        rule_id: [0 for _ in classifiers]
-        for rule_id, _rule, classifiers in validated_rules
-    }
+    classifier_hits = {rule_id: [0 for _ in classifiers] for rule_id, _rule, classifiers in validated_rules}
     for root_name in roots:
         root_rel = str(root_name or "").strip()
         root = (repo_root / root_rel).resolve()
@@ -613,9 +612,7 @@ def _query_sqlite_copy(path: Path) -> dict[str, Any]:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA query_only=ON")
-        table_rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-        ).fetchall()
+        table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()
         table_names = [str(row["name"]) for row in table_rows]
         tables: list[dict[str, Any]] = []
         for table, json_columns in _SQLITE_JSON_COLUMNS.items():
@@ -632,9 +629,7 @@ def _query_sqlite_copy(path: Path) -> dict[str, Any]:
             column_rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
             present_columns = {str(row["name"]) for row in column_rows}
             selected_columns = [column for column in json_columns if column in present_columns]
-            byte_expression = " + ".join(
-                f'COALESCE(length("{column}"), 0)' for column in selected_columns
-            )
+            byte_expression = " + ".join(f'COALESCE(length("{column}"), 0)' for column in selected_columns)
             if selected_columns:
                 row = conn.execute(
                     f'SELECT COUNT(*) AS row_count, COALESCE(SUM({byte_expression}), 0) AS json_bytes FROM "{table}"'
@@ -672,18 +667,29 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
     research_files: list[dict[str, Any]] = []
     symlinks: list[dict[str, Any]] = []
     roots: list[dict[str, Any]] = []
+    account_count: int | None = None
+    account_count_status = "output_accounts_not_collected"
     for name in RUNTIME_SUBROOTS:
         path = root / name
         if path.is_symlink():
             symlinks.append({"path": name, "kind": "root"})
             roots.append({"root": name, "status": "symlink_not_followed", "file_count": 0, "size_bytes": 0})
+            if name == "output_accounts":
+                account_count_status = "symlink_not_followed"
             continue
         if not path.exists():
             roots.append({"root": name, "status": "missing", "file_count": 0, "size_bytes": 0})
+            if name == "output_accounts":
+                account_count_status = "missing"
             continue
         if not path.is_dir():
             roots.append({"root": name, "status": "not_directory", "file_count": 0, "size_bytes": 0})
+            if name == "output_accounts":
+                account_count_status = "not_directory"
             continue
+        if name == "output_accounts":
+            account_count = _count_immediate_directories(path)
+            account_count_status = "complete"
         before_count = aggregates.file_count
         before_bytes = aggregates.size_bytes
         _scan_runtime_directory(
@@ -707,6 +713,9 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
         "status": "complete",
         "file_count": aggregates.file_count,
         "size_bytes": aggregates.size_bytes,
+        "account_count": account_count,
+        "account_count_status": account_count_status,
+        "account_count_basis": "immediate_non_symlink_output_accounts_directories",
         "roots": roots,
         "by_class": _aggregate_groups(aggregates.by_class, "storage_class"),
         "by_suffix": _aggregate_groups(aggregates.by_suffix, "suffix"),
@@ -724,6 +733,11 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
         "symlinks_not_followed": sorted(symlinks, key=lambda item: item["path"]),
     }
     return payload, research_files
+
+
+def _count_immediate_directories(path: Path) -> int:
+    with os.scandir(path) as entries:
+        return sum(1 for entry in entries if not entry.is_symlink() and entry.is_dir(follow_symlinks=False))
 
 
 class _RuntimeAggregates:
@@ -796,15 +810,15 @@ def _scan_runtime_directory(
                 age_days = max(0.0, (observed_at.timestamp() - stat.st_mtime) / 86400.0)
                 tier = _storage_tier(storage_class=storage_class, age_days=age_days)
                 item = {
-                        "path": relpath,
-                        "size_bytes": int(stat.st_size),
-                        "mtime_ns": int(stat.st_mtime_ns),
-                        "age_days": round(age_days, 3),
-                        "suffix": path.suffix.lower() or "[none]",
-                        "month": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m"),
-                        "storage_class": storage_class,
-                        "tier": tier,
-                    }
+                    "path": relpath,
+                    "size_bytes": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "age_days": round(age_days, 3),
+                    "suffix": path.suffix.lower() or "[none]",
+                    "month": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m"),
+                    "storage_class": storage_class,
+                    "tier": tier,
+                }
                 aggregates.add(item)
                 if storage_class in {"research_artifact", "immutable_shared_partition", "sealed_run_artifact"}:
                     research_files.append(item)
@@ -903,7 +917,11 @@ def _collect_research_storage(
             declared_reference_count += 1
             if isinstance(size, int) and digest in hash_sizes and hash_sizes[digest] != size:
                 protected_failures.append(
-                    {"manifest": reference["manifest"], "reference": reference["display_path"], "reason": "declared_hash_size_conflict"}
+                    {
+                        "manifest": reference["manifest"],
+                        "reference": reference["display_path"],
+                        "reason": "declared_hash_size_conflict",
+                    }
                 )
             elif isinstance(size, int):
                 hash_sizes[digest] = size
@@ -920,11 +938,17 @@ def _collect_research_storage(
             reference["actual_size_bytes"] = actual_size
             if isinstance(size, int) and size != actual_size:
                 protected_failures.append(
-                    {"manifest": reference["manifest"], "reference": reference["display_path"], "reason": "declared_size_mismatch"}
+                    {
+                        "manifest": reference["manifest"],
+                        "reference": reference["display_path"],
+                        "reason": "declared_size_mismatch",
+                    }
                 )
                 reference["presence_status"] = "declared_size_mismatch"
             else:
-                reference["presence_status"] = "present_size_match" if isinstance(size, int) else "present_size_undeclared"
+                reference["presence_status"] = (
+                    "present_size_match" if isinstance(size, int) else "present_size_undeclared"
+                )
             if digest and digest not in hash_physical:
                 hash_physical[digest] = actual
         elif reference.get("path_value"):
@@ -933,7 +957,13 @@ def _collect_research_storage(
             )
 
     unique_declared_bytes = sum(hash_sizes.values())
-    unknown_hash_size_count = len({str(ref["declared_sha256"]) for ref in references if ref.get("declared_sha256") and not isinstance(ref.get("declared_size_bytes"), int)})
+    unknown_hash_size_count = len(
+        {
+            str(ref["declared_sha256"])
+            for ref in references
+            if ref.get("declared_sha256") and not isinstance(ref.get("declared_size_bytes"), int)
+        }
+    )
     manifest_paths = {str(row["path"]) for row in manifests}
     research_files = [
         row
@@ -945,10 +975,7 @@ def _collect_research_storage(
     unknown_unique_bytes = sum(int(row["size_bytes"]) for row in unmanifested)
     cold_candidates: list[dict[str, Any]] = []
     for digest, row in hash_physical.items():
-        if (
-            float(row["age_days"]) >= COLD_CANDIDATE_MIN_AGE_DAYS
-            and int(row["size_bytes"]) >= COLD_CANDIDATE_MIN_BYTES
-        ):
+        if float(row["age_days"]) >= COLD_CANDIDATE_MIN_AGE_DAYS and int(row["size_bytes"]) >= COLD_CANDIDATE_MIN_BYTES:
             cold_candidates.append(
                 {
                     "path": row["path"],
@@ -974,11 +1001,7 @@ def _collect_research_storage(
         status = "data_unavailable"
     else:
         status = "complete"
-    dedup_ratio = (
-        round(logical_bytes / unique_declared_bytes, 6)
-        if unique_declared_bytes > 0
-        else None
-    )
+    dedup_ratio = round(logical_bytes / unique_declared_bytes, 6) if unique_declared_bytes > 0 else None
     return {
         "status": status,
         "content_verification": "not_performed",
@@ -986,7 +1009,11 @@ def _collect_research_storage(
         "parsed_manifest_count": len(manifest_results),
         "manifest_parse_failures": parse_failures,
         "manifests": manifest_results,
-        "root_count": sum(1 for rel in ("output_runs", "output_shared/research", "output_shared/required_data") if (root / rel).is_dir()),
+        "root_count": sum(
+            1
+            for rel in ("output_runs", "output_shared/research", "output_shared/required_data")
+            if (root / rel).is_dir()
+        ),
         "generation_count": len(generations),
         "declared_reference_count": len(references),
         "declared_hash_reference_count": declared_reference_count,
@@ -1023,7 +1050,9 @@ def _is_manifest_relpath(relpath: str) -> bool:
     return "manifest" in name or name.startswith("inventory")
 
 
-def _extract_manifest_references(payload: Mapping[str, Any], *, manifest_path: Path, root: Path) -> list[dict[str, Any]]:
+def _extract_manifest_references(
+    payload: Mapping[str, Any], *, manifest_path: Path, root: Path
+) -> list[dict[str, Any]]:
     if payload.get("schema_version") == "research_archive.v2" and payload.get("action") == "verify":
         return _extract_research_archive_references(
             payload,
@@ -1176,8 +1205,7 @@ def _explicit_manifest_reference(
 ) -> dict[str, Any]:
     digest_value = str(digest or "").strip().lower() or None
     if digest_value is not None and (
-        len(digest_value) != 64
-        or any(char not in "0123456789abcdef" for char in digest_value)
+        len(digest_value) != 64 or any(char not in "0123456789abcdef" for char in digest_value)
     ):
         digest_value = None
     size_value = size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None
@@ -1483,11 +1511,7 @@ def _capacity_thresholds(
 ) -> dict[str, Any]:
     growth = research_storage.get("growth") if isinstance(research_storage.get("growth"), dict) else {}
     forecast_additional = growth.get("forecast_90d_additional_bytes")
-    forecast_free = (
-        max(0, disk_free_bytes - int(forecast_additional))
-        if isinstance(forecast_additional, int)
-        else None
-    )
+    forecast_free = max(0, disk_free_bytes - int(forecast_additional)) if isinstance(forecast_additional, int) else None
     warning_floor = max(math.ceil(disk_total_bytes * 0.10), 20 * GIB)
     critical_floor = max(math.ceil(disk_total_bytes * 0.05), 10 * GIB)
     protected_failures = list(research_storage.get("protected_reference_failures") or [])

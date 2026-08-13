@@ -159,7 +159,9 @@ symlinks, and never opens the source ledger. It copies the source SQLite
 queries aggregate row/JSON-byte counts from that copy in `mode=ro` with
 `query_only=ON`. Research payload bodies are neither read nor hashed: declared
 manifest hashes and sizes are capacity metadata, while current content remains
-`not_verified`.
+`not_verified`. The payload-free account baseline is the count of immediate,
+non-symlink directories under `output_accounts`; missing or unsafe roots remain
+explicitly unavailable instead of being inferred from file counts.
 
 Pass prior reports in chronological order to obtain a measured growth and
 90-day forecast; one observation remains `insufficient_history`:
@@ -201,7 +203,8 @@ the threshold timing. The `history_10x` result contains both a fixed-output
 history-cost case and a retained-closed-lot case, each with at least 10,000
 events.
 
-Absolute p95 wall/CPU decisions require an exact host-profile match. First run
+Absolute p95 wall/CPU decisions require an exact host-profile match, including
+separate CPU and hardware-model fields. First run
 without a reference to record the `host_fingerprint`; only a deliberately
 designated reference run should repeat with:
 
