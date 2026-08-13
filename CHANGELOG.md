@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.13.18 - 2026-08-13
+
+### Breaking Changes
+- Removed candidate compatibility CSV production and consumption for Sell Put, Covered Call, SP+LC, and CC+LP, including scanner output/reject-log flags, Combo Yield `output_mode`, v1 status publication, and CSV-only adapters. Current candidate facts now require terminal manifest-bound JSON snapshots and JSONL trace; historical CSV-only runs remain untouched but unsupported for automated replay. Required-data, Close Advice, symbols summary, and mark/outcome CSV contracts are unchanged.
+
+### Improvements
+- Bound Daily Brief, Agent candidate explanations, Research, archive, Shadow Replay, Strategy Lab, and Combo Funding Put projections to one validated account-run candidate manifest with exact owner, scope, identity, file hash, status, reason, and count evidence; interrupted or inconsistent modern runs now fail closed instead of falling back to partial or stale candidate facts.
+
 ## 1.13.17 - 2026-08-13
 
 ### Bug Fixes
