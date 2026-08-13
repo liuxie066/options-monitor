@@ -1051,4 +1051,7 @@ def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
                 ),
             }
         )
-    return pd.DataFrame(out)
+    frame = pd.DataFrame(out)
+    for column in ("baseline_rank", "shadow_rank"):
+        frame[column] = frame[column].astype("Int64")
+    return frame
