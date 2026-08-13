@@ -81,6 +81,46 @@ def read_notification_perception_events(
     }
 
 
+def iter_notification_perception_events(
+    *,
+    repo_root: Path,
+    event_kind: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Read shared notification perception events for internal resolution.
+
+    Unlike ``read_notification_perception_events`` (a public tool surface capped
+    at 50 rows), this helper is for internal consumers such as run resolution
+    that must scan beyond the public preview window. The scan remains bounded:
+    ``limit`` defaults to 5000 and may not exceed 5000.
+
+    Returns ``{"events": [...], "total_count": int, "truncated": bool}`` so the
+    caller can distinguish "no matching event" from "the matching event fell
+    outside the bounded scan window".
+    """
+
+    base = repo_root.resolve()
+    paths = _audit_paths(base=base, run_id=None, audit_path=None)
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        file_rows, _status = _read_jsonl(path, base=base)
+        rows.extend(file_rows)
+    filtered = [
+        row
+        for row in rows
+        if row.get("event_type") == NOTIFICATION_PERCEPTION_EVENT_TYPE
+        and _matches_event(row, conversation_id=None, event_kind=event_kind)
+    ]
+    filtered.sort(key=lambda row: str(row.get("event_at_utc") or row.get("created_at_utc") or ""), reverse=True)
+    max_rows = max(0, min(int(limit if limit is not None else 5000), 5000))
+    events = [_public_event(row) for row in filtered[:max_rows]]
+    return {
+        "events": events,
+        "total_count": len(filtered),
+        "truncated": len(filtered) > len(events),
+    }
+
+
 def _audit_paths(*, base: Path, run_id: str | None, audit_path: str | Path | None) -> list[Path]:
     if audit_path:
         return [_resolve_path(audit_path, base=base)]
@@ -256,5 +296,6 @@ def _display_path(path: Path, *, base: Path) -> str:
 
 __all__ = [
     "NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION",
+    "iter_notification_perception_events",
     "read_notification_perception_events",
 ]
