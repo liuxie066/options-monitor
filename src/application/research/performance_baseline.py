@@ -234,7 +234,11 @@ def _load_baseline_dimensions(
                 "payload_bytes": DEFAULT_PAYLOAD_BYTES,
             },
             clamped={},
-            metadata={"baseline_schema": None, "payload_fields_consumed": 0},
+            metadata={
+                "baseline_schema": None,
+                "payload_fields_consumed": 0,
+                "account_dimension_source": "safe_defaults_no_baseline",
+            },
         )
 
     raw = Path(value).expanduser()
@@ -260,7 +264,7 @@ def _load_baseline_dimensions(
     lot_row = table_rows.get("position_lots", {})
     requested_events = _metadata_int(event_row.get("row_count"), DEFAULT_CURRENT_EVENTS)
     requested_lots = _metadata_int(lot_row.get("row_count"), DEFAULT_CURRENT_LOTS)
-    requested_accounts = _baseline_account_count(payload)
+    requested_accounts, account_dimension_source = _baseline_account_count(payload)
     event_json_bytes = _metadata_int(event_row.get("json_bytes"), 0)
     requested_payload_bytes = (
         max(MIN_PAYLOAD_BYTES, math.ceil(event_json_bytes / requested_events))
@@ -300,35 +304,22 @@ def _load_baseline_dimensions(
             if isinstance(sqlite_payload, dict)
             else "missing",
             "table_metadata_consumed": ["trade_events", "position_lots"],
+            "account_dimension_source": account_dimension_source,
             "payload_fields_consumed": 0,
             "paths_retained": 0,
         },
     )
 
 
-def _nested_metadata_value(payload: Mapping[str, Any], path: Sequence[str]) -> Any:
-    current: Any = payload
-    for key in path:
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(key)
-    return current
-
-
-def _baseline_account_count(payload: Mapping[str, Any]) -> int:
-    explicit = _nested_metadata_value(payload, ("runtime_storage", "account_count"))
-    if explicit is not None:
-        return _metadata_int(explicit, DEFAULT_ACCOUNT_COUNT)
+def _baseline_account_count(payload: Mapping[str, Any]) -> tuple[int, str]:
     runtime_storage = payload.get("runtime_storage")
-    roots = runtime_storage.get("roots") if isinstance(runtime_storage, Mapping) else None
-    for row in roots if isinstance(roots, list) else []:
-        if isinstance(row, Mapping) and str(row.get("root") or "") == "output_accounts":
-            # Slice 1 intentionally exposes only payload-free aggregate metadata.
-            # Until it publishes an exact account count, a non-empty account root
-            # proves at least one account but cannot safely be treated as the
-            # configured cardinality.
-            return 1 if _metadata_int(row.get("file_count"), 0) > 0 else DEFAULT_ACCOUNT_COUNT
-    return DEFAULT_ACCOUNT_COUNT
+    if isinstance(runtime_storage, Mapping):
+        status = str(runtime_storage.get("account_count_status") or "")
+        explicit = runtime_storage.get("account_count")
+        if status == "complete" and isinstance(explicit, int) and not isinstance(explicit, bool):
+            if explicit > 0:
+                return explicit, "runtime_storage.output_accounts_immediate_directories"
+    return DEFAULT_ACCOUNT_COUNT, "safe_default_account_count_unavailable"
 
 
 def _metadata_int(value: Any, fallback: int) -> int:
@@ -381,7 +372,9 @@ def _build_scenario_specs(
         max(fanout_lots, math.ceil(fanout_lots * state_ratio)),
     )
     fanout_axis_status = (
-        "evaluable"
+        "not_evaluable_baseline_account_count_unavailable"
+        if dimensions.metadata.get("account_dimension_source") == "safe_default_account_count_unavailable"
+        else "evaluable"
         if fanout_accounts >= fanout_requested_accounts
         else "not_evaluable_clamped_below_requested_5x"
     )
@@ -499,9 +492,7 @@ def _scenario_spec(
         "requested_dimensions": {
             "event_count": int(requested_event_count if requested_event_count is not None else event_count),
             "projected_lot_count": int(requested_lot_count if requested_lot_count is not None else projected_lots),
-            "account_count": int(
-                requested_account_count if requested_account_count is not None else account_count
-            ),
+            "account_count": int(requested_account_count if requested_account_count is not None else account_count),
             "payload_bytes": int(payload_bytes),
         },
         "effective_dimensions": {
@@ -853,12 +844,14 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 
 def _host_profile() -> dict[str, Any]:
+    cpu_model, hardware_model = _hardware_identity()
     fields = {
         "schema_version": "data_storage_projection_host_profile.v1",
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
-        "hardware_model": _hardware_model(),
+        "cpu_model": cpu_model,
+        "hardware_model": hardware_model,
         "physical_memory_bytes": _physical_memory_bytes(),
         "python_implementation": platform.python_implementation(),
         "python_version": platform.python_version(),
@@ -868,33 +861,84 @@ def _host_profile() -> dict[str, Any]:
     return {**fields, "fingerprint": _sha256_json(fields)}
 
 
-def _hardware_model() -> str:
+def _hardware_identity() -> tuple[str, str]:
     system = platform.system()
     if system == "Darwin":
-        for key in ("machdep.cpu.brand_string", "hw.model"):
-            try:
-                result = subprocess.run(
-                    ["/usr/sbin/sysctl", "-n", key],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            value = result.stdout.strip()
-            if value:
-                return value
+        cpu_model = _command_value(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
+        hardware_model = _command_value(["/usr/sbin/sysctl", "-n", "hw.model"])
+        if not cpu_model or not hardware_model:
+            details = _darwin_hardware_details()
+            cpu_model = cpu_model or details.get("chip_type")
+            hardware_model = hardware_model or details.get("machine_model")
+        return (
+            cpu_model or platform.processor() or "unknown",
+            hardware_model or platform.machine() or "unknown",
+        )
     if system == "Linux":
+        cpu_model = None
         try:
             for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
                 if line.lower().startswith(("model name", "hardware")) and ":" in line:
                     value = line.split(":", 1)[1].strip()
                     if value:
-                        return value
+                        cpu_model = value
+                        break
         except (OSError, UnicodeError):
             pass
-    return platform.processor() or "unknown"
+        hardware_model = _bounded_text_file(Path("/sys/devices/virtual/dmi/id/product_name"))
+        return (
+            cpu_model or platform.processor() or "unknown",
+            hardware_model or platform.machine() or "unknown",
+        )
+    return (
+        platform.processor() or "unknown",
+        platform.machine() or "unknown",
+    )
+
+
+def _command_value(command: Sequence[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            list(command),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _darwin_hardware_details() -> dict[str, str]:
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/system_profiler", "SPHardwareDataType", "-json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}
+    rows = payload.get("SPHardwareDataType") if isinstance(payload, Mapping) else None
+    row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], Mapping) else {}
+    return {
+        key: str(row.get(key) or "").strip()
+        for key in ("chip_type", "machine_model")
+        if str(row.get(key) or "").strip()
+    }
+
+
+def _bounded_text_file(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > 4_096:
+            return None
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return value or None
 
 
 def _physical_memory_bytes() -> int | None:
@@ -994,11 +1038,7 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "scenarios": rows,
         }
     if mode == "cpu":
-        rows = [
-            _measure_cpu_scenario(spec, seed=seed)
-            for spec in raw_scenarios
-            if isinstance(spec, dict)
-        ]
+        rows = [_measure_cpu_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
         return {
             "schema_version": CPU_PROFILE_SCHEMA,
             "measurement_mode": "cprofile_separate_process",
@@ -1007,11 +1047,7 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "scenarios": rows,
         }
     if mode == "allocation":
-        rows = [
-            _measure_allocation_scenario(spec, seed=seed)
-            for spec in raw_scenarios
-            if isinstance(spec, dict)
-        ]
+        rows = [_measure_allocation_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
         return {
             "schema_version": ALLOCATION_PROFILE_SCHEMA,
             "measurement_mode": "tracemalloc_separate_process",
@@ -1242,19 +1278,13 @@ def _canonical_output(
         key=lambda item: item["record_id"],
     )
     canonical_diagnostics = [dict(item) for item in diagnostics]
-    open_lots = sum(
-        1
-        for item in canonical_lots
-        if int((item["fields"].get("contracts_open") or 0)) > 0
-    )
+    open_lots = sum(1 for item in canonical_lots if int((item["fields"].get("contracts_open") or 0)) > 0)
     lot_fingerprint = _sha256_json(canonical_lots)
     diagnostic_fingerprint = _sha256_json(canonical_diagnostics)
     return {
         "lot_fingerprint": lot_fingerprint,
         "diagnostic_fingerprint": diagnostic_fingerprint,
-        "combined_fingerprint": _sha256_json(
-            {"lots": canonical_lots, "diagnostics": canonical_diagnostics}
-        ),
+        "combined_fingerprint": _sha256_json({"lots": canonical_lots, "diagnostics": canonical_diagnostics}),
         "counts": {
             "event_count": int(events),
             "projected_lot_count": len(canonical_lots),
@@ -1539,9 +1569,7 @@ def _build_gate_decision(
 ) -> dict[str, Any]:
     current_fingerprint = str(current_host.get("fingerprint") or "")
     comparable = bool(
-        reference_host_fingerprint
-        and current_fingerprint
-        and reference_host_fingerprint == current_fingerprint
+        reference_host_fingerprint and current_fingerprint and reference_host_fingerprint == current_fingerprint
     )
     if reference_host_fingerprint is None:
         comparison_reason = "reference_host_fingerprint_not_supplied"
@@ -1549,15 +1577,9 @@ def _build_gate_decision(
         comparison_reason = "exact_host_profile_fingerprint_match"
     else:
         comparison_reason = "host_profile_fingerprint_mismatch"
-    timing_rows = {
-        str(row.get("key")): row
-        for row in timing.get("scenarios", [])
-        if isinstance(row, Mapping)
-    }
+    timing_rows = {str(row.get("key")): row for row in timing.get("scenarios", []) if isinstance(row, Mapping)}
     manifest_rows = {
-        str(row.get("key")): row
-        for row in fixture_manifest.get("scenarios", [])
-        if isinstance(row, Mapping)
+        str(row.get("key")): row for row in fixture_manifest.get("scenarios", []) if isinstance(row, Mapping)
     }
     history_keys = (
         "history_10x.fixed_output",

@@ -144,9 +144,7 @@ def _fake_workers(
     scenarios = []
     for spec in worker_spec["scenarios"]:
         events = module._build_synthetic_events(spec, seed=worker_spec["seed"])
-        timing_distribution = module._timing_distribution(
-            [100] * worker_spec["repetitions"]
-        )
+        timing_distribution = module._timing_distribution([100] * worker_spec["repetitions"])
         scenarios.append(
             {
                 "key": spec["key"],
@@ -403,21 +401,15 @@ def test_reference_host_gate_fails_when_either_history_subcase_exceeds_limit() -
         run_label="acceptance_5_warmups_30_repetitions",
     )
     timing = _timing_artifact(manifest)
-    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["p95"] = (
-        module.CPU_LIMIT_NS + 1
-    )
+    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["p95"] = module.CPU_LIMIT_NS + 1
     timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["samples"] = [
         module.CPU_LIMIT_NS + 1
     ] * 30
     timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["median"] = (
         module.CPU_LIMIT_NS + 1
     )
-    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["min"] = (
-        module.CPU_LIMIT_NS + 1
-    )
-    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["max"] = (
-        module.CPU_LIMIT_NS + 1
-    )
+    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["min"] = module.CPU_LIMIT_NS + 1
+    timing["scenarios"][1]["components"]["existing_full_replay_writer"]["cpu_time_ns"]["max"] = module.CPU_LIMIT_NS + 1
 
     decision = module._build_gate_decision(
         timing=timing,
@@ -451,7 +443,11 @@ def test_hostile_baseline_metadata_is_clamped_and_payload_paths_are_discarded(tm
                         {"table": "position_lots", "row_count": 10**9, "fields_json": "ignored"},
                     ],
                 },
-                "runtime_storage": {"account_count": 10**6, "largest_files": ["private"]},
+                "runtime_storage": {
+                    "account_count": 10**6,
+                    "account_count_status": "complete",
+                    "largest_files": ["private"],
+                },
             }
         ),
         encoding="utf-8",
@@ -485,9 +481,9 @@ def test_baseline_account_dimension_uses_payload_free_aggregate_only(tmp_path: P
                     ],
                 },
                 "runtime_storage": {
-                    "roots": [
-                        {"root": "output_accounts", "status": "complete", "file_count": 3, "size_bytes": 100}
-                    ],
+                    "account_count": 3,
+                    "account_count_status": "complete",
+                    "roots": [{"root": "output_accounts", "status": "complete", "file_count": 3, "size_bytes": 100}],
                     "largest_files": ["must not be retained"],
                 },
             }
@@ -497,9 +493,137 @@ def test_baseline_account_dimension_uses_payload_free_aggregate_only(tmp_path: P
 
     dimensions = module._load_baseline_dimensions(baseline, repo_root=tmp_path)
 
-    assert dimensions.account_count == 1
+    fanout = module._build_scenario_specs(dimensions, selected=["account_fanout"])[0]
+
+    assert dimensions.account_count == 3
+    assert dimensions.metadata["account_dimension_source"] == ("runtime_storage.output_accounts_immediate_directories")
+    assert fanout["effective_dimensions"]["account_count"] == 15
+    assert fanout["axis_status"] == "evaluable"
     assert dimensions.metadata["payload_fields_consumed"] == 0
     assert "must not be retained" not in json.dumps(dimensions.metadata)
+
+
+def test_legacy_baseline_without_exact_account_count_is_fail_closed_for_fanout(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schema_version": "storage_runtime_baseline.v1",
+                "sqlite": {"status": "complete", "tables": []},
+                "runtime_storage": {"roots": [{"root": "output_accounts", "status": "complete", "file_count": 12}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dimensions = module._load_baseline_dimensions(baseline, repo_root=tmp_path)
+    fanout = module._build_scenario_specs(dimensions, selected=["account_fanout"])[0]
+
+    assert dimensions.account_count == module.DEFAULT_ACCOUNT_COUNT
+    assert dimensions.metadata["account_dimension_source"] == ("safe_default_account_count_unavailable")
+    assert fanout["axis_status"] == "not_evaluable_baseline_account_count_unavailable"
+
+
+def test_empty_observed_account_root_is_not_treated_as_configured_cardinality(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schema_version": "storage_runtime_baseline.v1",
+                "sqlite": {"status": "complete", "tables": []},
+                "runtime_storage": {
+                    "account_count": 0,
+                    "account_count_status": "complete",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dimensions = module._load_baseline_dimensions(baseline, repo_root=tmp_path)
+    fanout = module._build_scenario_specs(dimensions, selected=["account_fanout"])[0]
+
+    assert dimensions.account_count == module.DEFAULT_ACCOUNT_COUNT
+    assert dimensions.metadata["account_dimension_source"] == ("safe_default_account_count_unavailable")
+    assert fanout["axis_status"] == "not_evaluable_baseline_account_count_unavailable"
+
+
+@pytest.mark.parametrize("invalid_count", [True, 3.5, "3", -1])
+def test_malformed_account_count_is_not_coerced_into_an_exact_dimension(
+    tmp_path: Path,
+    invalid_count: object,
+) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schema_version": "storage_runtime_baseline.v1",
+                "sqlite": {"status": "complete", "tables": []},
+                "runtime_storage": {
+                    "account_count": invalid_count,
+                    "account_count_status": "complete",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dimensions = module._load_baseline_dimensions(baseline, repo_root=tmp_path)
+
+    assert dimensions.account_count == module.DEFAULT_ACCOUNT_COUNT
+    assert dimensions.metadata["account_dimension_source"] == (
+        "safe_default_account_count_unavailable"
+    )
+
+
+def test_darwin_hardware_identity_collects_cpu_and_machine_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_command_value(command: list[str]) -> str | None:
+        calls.append(command[-1])
+        return {
+            "machdep.cpu.brand_string": "arm",
+            "hw.model": "Mac16,10",
+        }[command[-1]]
+
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module, "_command_value", fake_command_value)
+
+    assert module._hardware_identity() == ("arm", "Mac16,10")
+    assert calls == ["machdep.cpu.brand_string", "hw.model"]
+
+
+def test_darwin_hardware_identity_falls_back_to_bounded_system_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module, "_command_value", lambda _command: None)
+    monkeypatch.setattr(
+        module,
+        "_darwin_hardware_details",
+        lambda: {"chip_type": "Apple M4", "machine_model": "Mac16,10"},
+    )
+
+    assert module._hardware_identity() == ("Apple M4", "Mac16,10")
+
+
+def test_host_fingerprint_binds_cpu_and_hardware_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "_hardware_identity", lambda: ("Apple M4", "Mac16,10"))
+    first = module._host_profile()
+    monkeypatch.setattr(module, "_hardware_identity", lambda: ("Apple M4", "Mac16,11"))
+    second = module._host_profile()
+
+    assert first["cpu_model"] == "Apple M4"
+    assert first["hardware_model"] == "Mac16,10"
+    assert first["fingerprint"] != second["fingerprint"]
 
 
 def test_parent_publishes_all_five_artifacts_atomically_and_labels_smoke(
@@ -603,15 +727,13 @@ def test_worker_artifact_validation_rejects_fixture_identity_drift() -> None:
     ("mutate", "message"),
     [
         (
-            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"].pop(
-                "wall_time_ns"
-            ),
+            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"].pop("wall_time_ns"),
             "timing distribution is invalid",
         ),
         (
-            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"][
-                "wall_time_ns"
-            ]["samples"].pop(),
+            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"]["wall_time_ns"][
+                "samples"
+            ].pop(),
             "timing sample count is invalid",
         ),
         (
@@ -624,9 +746,9 @@ def test_worker_artifact_validation_rejects_fixture_identity_drift() -> None:
             "timing summary is inconsistent",
         ),
         (
-            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"][
-                "wall_time_ns"
-            ]["samples"].__setitem__(0, -1),
+            lambda timing: timing["scenarios"][0]["components"]["existing_full_replay_writer"]["wall_time_ns"][
+                "samples"
+            ].__setitem__(0, -1),
             "timing sample value is invalid",
         ),
     ],

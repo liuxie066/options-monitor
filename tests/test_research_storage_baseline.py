@@ -41,10 +41,7 @@ def _write_ledger(path: Path) -> None:
             "trade_time_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, "
             "updated_at_ms INTEGER NOT NULL)"
         )
-        conn.execute(
-            "CREATE TABLE position_lots ("
-            "record_id TEXT PRIMARY KEY, fields_json TEXT NOT NULL)"
-        )
+        conn.execute("CREATE TABLE position_lots (record_id TEXT PRIMARY KEY, fields_json TEXT NOT NULL)")
         conn.execute("CREATE TABLE future_table (payload TEXT)")
         conn.execute(
             "INSERT INTO trade_events VALUES (?, ?, ?, ?, ?)",
@@ -219,6 +216,54 @@ def test_runtime_scan_does_not_follow_root_or_nested_symlinks(
     }
     roots = {row["root"]: row for row in result["runtime_storage"]["roots"]}
     assert roots["output"]["status"] == "symlink_not_followed"
+
+
+def test_runtime_scan_counts_immediate_non_symlink_account_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path)
+    for account in ("lx", "sy", "qa"):
+        account_root = root / "output_accounts" / account
+        account_root.mkdir()
+        (account_root / "report.json").write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside-account"
+    outside.mkdir()
+    (root / "output_accounts" / "linked").symlink_to(outside, target_is_directory=True)
+
+    result = _collect(monkeypatch, tmp_path, root=root)
+
+    runtime_storage = result["runtime_storage"]
+    assert runtime_storage["account_count"] == 3
+    assert runtime_storage["account_count_status"] == "complete"
+    assert runtime_storage["account_count_basis"] == "immediate_non_symlink_output_accounts_directories"
+    assert "output_accounts/linked" in {row["path"] for row in runtime_storage["symlinks_not_followed"]}
+
+
+def test_runtime_account_count_distinguishes_empty_missing_and_symlink_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    empty_root = _make_runtime(tmp_path / "empty")
+    empty = _collect(monkeypatch, tmp_path, root=empty_root)["runtime_storage"]
+
+    missing_root = _make_runtime(tmp_path / "missing")
+    (missing_root / "output_accounts").rmdir()
+    missing = _collect(monkeypatch, tmp_path, root=missing_root)["runtime_storage"]
+
+    symlink_root = _make_runtime(tmp_path / "symlink")
+    (symlink_root / "output_accounts").rmdir()
+    target = tmp_path / "linked-accounts"
+    target.mkdir()
+    (symlink_root / "output_accounts").symlink_to(target, target_is_directory=True)
+    linked = _collect(monkeypatch, tmp_path, root=symlink_root)["runtime_storage"]
+
+    assert (empty["account_count"], empty["account_count_status"]) == (0, "complete")
+    assert (missing["account_count"], missing["account_count_status"]) == (None, "missing")
+    assert (linked["account_count"], linked["account_count_status"]) == (
+        None,
+        "symlink_not_followed",
+    )
 
 
 def test_missing_default_ledger_is_partial_data_not_fabricated_zero(
@@ -751,9 +796,7 @@ def test_source_inventory_rejects_unclassified_discovery(tmp_path: Path) -> None
                         ],
                     }
                 ],
-                "declared_locators": [
-                    {"path": "src/owned.py", "locator": "list_trade_events"}
-                ],
+                "declared_locators": [{"path": "src/owned.py", "locator": "list_trade_events"}],
                 "ignores": [],
             }
         ),
@@ -796,9 +839,7 @@ def test_source_inventory_rejects_stale_locator(tmp_path: Path) -> None:
                         ],
                     }
                 ],
-                "declared_locators": [
-                    {"path": "src/owned.py", "locator": "removed_symbol"}
-                ],
+                "declared_locators": [{"path": "src/owned.py", "locator": "removed_symbol"}],
                 "ignores": [],
             }
         ),
@@ -809,9 +850,7 @@ def test_source_inventory_rejects_stale_locator(tmp_path: Path) -> None:
         module._collect_source_inventory(repo_root=repo, manifest_path=manifest)
 
     assert raised.value.details is not None
-    assert raised.value.details["stale_locators"] == [
-        {"path": "src/owned.py", "locator": "removed_symbol"}
-    ]
+    assert raised.value.details["stale_locators"] == [{"path": "src/owned.py", "locator": "removed_symbol"}]
 
 
 def test_tier_classification_is_preview_only() -> None:
