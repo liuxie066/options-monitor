@@ -45,7 +45,12 @@ class PositionLot:
             close_event_ids=(),
         )
 
-    def apply_close(self, event: TradeEvent) -> "PositionLot":
+    def apply_close(
+        self,
+        event: TradeEvent,
+        *,
+        retain_close_event_ids: bool = True,
+    ) -> "PositionLot":
         next_open = int(self.contracts_open) - int(event.contracts)
         next_closed = int(self.contracts_closed) + int(event.contracts)
         return replace(
@@ -55,7 +60,11 @@ class PositionLot:
             status="close" if next_open == 0 else "open",
             realized_pnl=self.realized_pnl + _realized_pnl_delta(self, event),
             last_event_id=event.event_id,
-            close_event_ids=(*self.close_event_ids, event.event_id),
+            close_event_ids=(
+                (*self.close_event_ids, event.event_id)
+                if retain_close_event_ids
+                else ()
+            ),
         )
 
     def apply_adjust(self, event: TradeEvent) -> "PositionLot":

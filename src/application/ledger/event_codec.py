@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -43,11 +44,25 @@ def encode_trade_event_for_storage(item: Any) -> EncodedTradeEvent:
     )
 
 
-def import_stored_trade_events(events: list[Any]) -> tuple[list[TradeEvent], list[LedgerDiagnostic]]:
+def iter_import_stored_trade_events(
+    events: Iterable[Any],
+) -> Iterator[
+    tuple[dict[str, Any], TradeEvent | None, list[LedgerDiagnostic]]
+]:
+    """Yield canonical input, decoded event, and diagnostics one item at a time."""
+
+    for item in events:
+        payload = trade_event_payload_dict(item)
+        event, diagnostics = _stored_trade_event_payload_to_ledger_event(payload)
+        yield payload, event, diagnostics
+
+
+def import_stored_trade_events(
+    events: Iterable[Any],
+) -> tuple[list[TradeEvent], list[LedgerDiagnostic]]:
     imported: list[TradeEvent] = []
     diagnostics: list[LedgerDiagnostic] = []
-    for item in events:
-        event, item_diagnostics = stored_trade_event_to_ledger_event(item)
+    for _payload, event, item_diagnostics in iter_import_stored_trade_events(events):
         diagnostics.extend(item_diagnostics)
         if event is not None:
             imported.append(event)
@@ -83,6 +98,12 @@ def effective_import_diagnostics(
 
 def stored_trade_event_to_ledger_event(item: Any) -> tuple[TradeEvent | None, list[LedgerDiagnostic]]:
     payload = trade_event_payload_dict(item)
+    return _stored_trade_event_payload_to_ledger_event(payload)
+
+
+def _stored_trade_event_payload_to_ledger_event(
+    payload: dict[str, Any],
+) -> tuple[TradeEvent | None, list[LedgerDiagnostic]]:
     if _is_canonical_payload(payload):
         return _canonical_payload_to_ledger_event(payload)
     event_id = str(payload.get("event_id") or "").strip()
@@ -257,6 +278,7 @@ __all__ = [
     "effective_import_diagnostics",
     "encode_trade_event_for_storage",
     "import_stored_trade_events",
+    "iter_import_stored_trade_events",
     "stored_trade_event_to_ledger_event",
     "trade_event_application_payload",
     "trade_event_payload_dict",
