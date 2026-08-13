@@ -198,11 +198,23 @@ def candidate_filter_explain_tool(
                         "audit_total_count": resolved.get("total_count"),
                     },
                 )
-            bundle = load_candidate_snapshot_bundle(
-                base=base,
-                run_id=resolved["run_id"],
-                account=account,
-            )
+            try:
+                bundle = load_candidate_snapshot_bundle(
+                    base=base,
+                    run_id=resolved["run_id"],
+                    account=account,
+                )
+            except CandidateSnapshotManifestError as exc:
+                raise AgentToolError(
+                    code="DEPENDENCY_MISSING",
+                    message=str(exc),
+                    details={
+                        "reason": "snapshot_unavailable_for_notification_run",
+                        "account": account,
+                        "run_id": resolved["run_id"],
+                        "notification_date": notification_date.isoformat(),
+                    },
+                ) from exc
             run_resolution = {
                 "selector": run_selector,
                 "notification_date": notification_date.isoformat(),
