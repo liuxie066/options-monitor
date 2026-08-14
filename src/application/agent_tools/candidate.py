@@ -153,6 +153,7 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
         "mode": "optional put|call|all; defaults to all",
         "top_n": "optional int, max 100; defaults to 10",
         "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
+        "runtime_root": "optional explicit runtime root; defaults to OM_RUNTIME_ROOT then repo root",
         "account": {
             "type": "string",
             "required": True,
@@ -192,7 +193,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
             "description": "Optional market config; when present, include runtime-config symbol aliases",
         },
         "config_path": "optional explicit config path",
-        "runtime_root": "optional explicit runtime root; defaults from config_path, OM_RUNTIME_ROOT, service profile, and repo root",
+        "runtime_root": "optional explicit runtime root; defaults to OM_RUNTIME_ROOT then repo root",
         "account": {
             "type": "string",
             "required": True,
