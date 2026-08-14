@@ -22,6 +22,14 @@ OPENING_CANDIDATE_MAX_SPREAD_RATIO = 0.40
 SELL_PUT_NEAR_RETURN_THRESHOLD = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD
 EARNINGS_NEAR_EXPIRY_WINDOW_DAYS = 6
 EARNINGS_NEAR_EXPIRY_POLICY_VERSION = "earnings_near_expiry.v1"
+SELL_PUT_RANKING_CONTRACT_VERSION = "sell_put_ranking_profile.v1"
+SELL_PUT_RANKING_PROFILES = frozenset(
+    {
+        "without_concentration",
+        "current_tie_break",
+        "concentration_first",
+    }
+)
 
 STAGE_INPUT_NORMALIZATION = "stage0_input_normalization"
 STAGE_HARD_CONSTRAINTS = "stage1_hard_constraints"
@@ -1129,6 +1137,14 @@ def _sell_put_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
 def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
     return (
         *_sell_put_concentration_sort(src),
+        *_sell_put_cross_symbol_tie_key_without_concentration(src),
+    )
+
+
+def _sell_put_cross_symbol_tie_key_without_concentration(
+    src: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
         -_candidate_tie_break_margin(src, mode="put"),
         *_known_low_sort(_first_float(src, "spread_ratio")),
         *_known_high_sort(_first_float(src, "open_interest")),
@@ -1452,8 +1468,15 @@ def rank_candidate_rows(
     rows: list[dict[str, Any]],
     *,
     mode: StrategyMode | str,
+    sell_put_ranking_profile: str = "current_tie_break",
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
+    if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
+        raise ValueError(
+            f"unsupported Sell Put ranking profile: {sell_put_ranking_profile}"
+        )
+    if mode_norm == "call" and sell_put_ranking_profile != "current_tie_break":
+        raise ValueError("Sell Put ranking profiles cannot rank Covered Call rows")
     normalized_rows = [r for r in rows if isinstance(r, dict)]
     grouped: dict[str, list[dict[str, Any]]] = {}
     group_order: list[str] = []
@@ -1475,11 +1498,6 @@ def rank_candidate_rows(
         if mode_norm == "put"
         else _covered_call_within_symbol_tie_key
     )
-    cross_tie_key = (
-        _sell_put_cross_symbol_tie_key
-        if mode_norm == "put"
-        else _covered_call_cross_symbol_tie_key
-    )
     within_ranked = {
         key: _rank_return_bands(
             grouped[key],
@@ -1489,11 +1507,35 @@ def rank_candidate_rows(
         for key in group_order
     }
     representatives = [within_ranked[key][0] for key in group_order]
-    ranked_representatives = _rank_return_bands(
-        representatives,
-        period_return_fn=period_return_fn,
-        tie_key=cross_tie_key,
-    )
+    if mode_norm == "put" and sell_put_ranking_profile == "concentration_first":
+        concentration_groups: dict[tuple[bool, float], list[dict[str, Any]]] = {}
+        for row in representatives:
+            concentration_groups.setdefault(
+                _sell_put_concentration_sort(row), []
+            ).append(row)
+        ranked_representatives = [
+            row
+            for concentration in sorted(concentration_groups)
+            for row in _rank_return_bands(
+                concentration_groups[concentration],
+                period_return_fn=_sell_put_period_return,
+                tie_key=_sell_put_cross_symbol_tie_key_without_concentration,
+            )
+        ]
+    else:
+        cross_tie_key = (
+            _sell_put_cross_symbol_tie_key_without_concentration
+            if mode_norm == "put"
+            and sell_put_ranking_profile == "without_concentration"
+            else _sell_put_cross_symbol_tie_key
+            if mode_norm == "put"
+            else _covered_call_cross_symbol_tie_key
+        )
+        ranked_representatives = _rank_return_bands(
+            representatives,
+            period_return_fn=period_return_fn,
+            tie_key=cross_tie_key,
+        )
     remainder = [
         row
         for key in group_order
