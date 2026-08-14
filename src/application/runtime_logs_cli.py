@@ -13,6 +13,7 @@ from src.application.runtime_cli_format import display_path as _display_path
 from src.application.runtime_cli_format import display_value as _value
 from src.application.runtime_cli_format import resolve_runtime_cli_path as _resolve_path
 from src.application.runtime_cli_format import yes_no as _yes_no
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_runs_cli import resolve_runtime_runs_root
 
 
@@ -137,7 +138,7 @@ def _resolve_logs_root(*, base: Path, logs_root: str | Path | None, profile_path
     runtime_root = profile.get("runtime_root")
     if runtime_root:
         return (_resolve_path(runtime_root, base=base) / "logs").resolve()
-    return (base / "logs").resolve()
+    return (resolve_runtime_root(repo_root=base).runtime_root / "logs").resolve()
 
 
 def _load_profile(profile_path: str | Path | None, *, base: Path) -> dict[str, Any]:

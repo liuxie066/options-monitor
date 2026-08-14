@@ -191,6 +191,9 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
   --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
 ```
 
+未显式传路径时，这两个工具按 `OM_RUNTIME_ROOT` 定位 `output_runs` 和 `logs`，
+未配置时才回退到 repo root。
+
 ### 候选解释
 
 ```bash
@@ -201,7 +204,8 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
   --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ```
 
-两者读取已有 artifact，不重跑扫描。
+两者读取已有 artifact，不重跑扫描；运行根路径按显式 `runtime_root`、
+`OM_RUNTIME_ROOT`、repo fallback 的顺序解析。
 
 `candidate_filter_explain` 还支持从通知投递证据定位轮次：`run_selector=latest_notification`
 解析该账户在 `notification_date`（ISO 日期，默认按运行时主机本地时区的今天）实际送达的

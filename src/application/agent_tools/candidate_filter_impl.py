@@ -17,6 +17,7 @@ from src.application.candidate_snapshot_manifest import (
 from src.application.notification_perception_read import (
     iter_notification_perception_events,
 )
+from src.application.runtime_paths import resolve_runtime_root
 
 
 _FUNCTION_MODE = {"sell_put": "put", "sell_call": "call"}
@@ -127,7 +128,10 @@ def candidate_filter_explain_tool(
             message=f"unsupported opening function: {function_filter}",
             hint="Supported functions: sell_put, sell_call.",
         )
-    base = Path(payload.get("runtime_root") or repo_base()).resolve()
+    base = resolve_runtime_root(
+        repo_root=repo_base(),
+        runtime_root=payload.get("runtime_root"),
+    ).runtime_root
     run_selector = str(payload.get("run_selector") or "").strip().lower() or None
     if run_selector is not None and run_selector not in _RUN_SELECTORS:
         raise AgentToolError(
