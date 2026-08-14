@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.22 - 2026-08-14
+
+### Bug Fixes
+- Required Copilot to re-check current read-only evidence before accepting a repeated historical diagnostic, preventing stale runtime-snapshot-unavailable answers from being reused when production artifacts are available.
+
 ## 1.13.21 - 2026-08-14
 
 ### Improvements
