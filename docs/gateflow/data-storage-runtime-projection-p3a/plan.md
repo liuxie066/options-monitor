@@ -239,7 +239,10 @@ Frozen acceptance limits:
 - steady-state checkpoint bytes <= `3 * one_resumable_state_bytes + 10%`
   metadata;
 - no-prefix-mutation fixture has zero full-prefix reader/hash calls;
-- candidate idempotency reads at most the submitted event ids by primary key;
+- candidate idempotency reads are primary-key lookups whose unique id universe
+  and maximum query width are each at most the submitted event ids; repeated
+  calls for the same id are reported separately and are not miscounted as
+  additional history rows;
 - eligible close resolution reads only the active accumulator plus at most the
   explicitly targeted record row; it never lists retained closed lots;
 - invalidation lookup p95 <= 50 ms;
@@ -1237,13 +1240,25 @@ apply/activate action.
 **Allowed files:**
 
 - new `src/application/ledger/position_projection_migration.py`;
+- `src/application/ledger/api.py`, limited to re-exporting the S5 migration,
+  status/read and loaded-projector fingerprint facades so non-ledger callers
+  preserve the existing public dependency boundary;
+- `src/application/ledger/position_projection_runtime.py`, limited to bounded
+  in-process fast/full/fallback and wall/CPU status summaries already required
+  by section 12; no per-event persistence;
 - `src/application/ledger/projection_verify.py`;
 - `src/interfaces/cli/option_positions.py`;
 - `src/application/research/performance_baseline.py`;
+- `src/application/research/storage_baseline.py`, limited to routing its ledger
+  path constant through the public ledger API;
 - `tests/test_option_positions_cli.py`;
 - `tests/test_research_performance_baseline.py`;
+- `tests/test_position_projection_facade_inventory.py`, limited to exact S5
+  migration/runtime/full-oracle call-site inventory;
 - focused migration/verification tests;
 - `docs/AGENT_WIKI.md`;
+- generated `docs/DEPENDENCY_GRAPH.md` and `docs/dependency_graph.mmd` when the
+  new production module changes the checked dependency inventory;
 - Gateflow artifacts for this work unit.
 
 **Exact changes:**

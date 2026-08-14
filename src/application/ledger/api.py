@@ -53,7 +53,10 @@ from src.application.ledger.commands import (
     summarize_broker_trade_close_candidates,
     verify_position_lot_projection,
 )
-from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.event_codec import (
+    trade_event_application_payload,
+    valid_void_target_event_id,
+)
 from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
@@ -106,6 +109,7 @@ from src.application.ledger.queries import (
     trade_event_projection_preview,
 )
 from src.application.ledger.store_resolution import (
+    LEDGER_DB_RELATIVE_PATH,
     LedgerStoreResolution,
     inspect_ledger_stores,
     ledger_store_write_guard,
@@ -113,6 +117,25 @@ from src.application.ledger.store_resolution import (
     resolve_ledger_store,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
+from src.application.ledger.position_projection_migration import (
+    ACCEPTANCE_SCHEMA as POSITION_PROJECTION_ACCEPTANCE_SCHEMA,
+    activate_position_projection_checkpoints,
+    apply_position_projection_migration,
+    build_position_projection_migration_inventory,
+    deactivate_position_projection_checkpoints,
+    position_projection_migration_status,
+    verify_position_projection_migration,
+)
+from src.application.ledger.position_projection_publication import (
+    read_current_position_projection,
+)
+from src.application.ledger.projector_implementation import (
+    compute_projector_implementation_fingerprint,
+    loaded_projector_implementation_fingerprint,
+)
+from src.application.ledger.position_projection_runtime import (
+    position_projection_runtime_telemetry,
+)
 from src.application.ledger.decision_snapshot import (
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
@@ -180,13 +203,19 @@ __all__ = [
     "canonical_source_economic_payload",
     "canonical_source_payload_hash",
     "LedgerPreflightError",
+    "LEDGER_DB_RELATIVE_PATH",
     "LedgerStoreResolution",
     "BrokerTradeOpenPreviewResult",
     "BrokerTradeOperation",
     "CloseTargetResolution",
     "compare_projection_lots",
+    "compute_projector_implementation_fingerprint",
+    "activate_position_projection_checkpoints",
+    "apply_position_projection_migration",
+    "build_position_projection_migration_inventory",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
+    "deactivate_position_projection_checkpoints",
     "discover_expired_lifecycle_cases",
     "ExpiredCloseDecision",
     "ExpiredCloseRunResult",
@@ -233,6 +262,11 @@ __all__ = [
     "position_lot_risk_view",
     "position_lot_snapshot",
     "position_projection_verify_state",
+    "position_projection_migration_status",
+    "position_projection_runtime_telemetry",
+    "POSITION_PROJECTION_ACCEPTANCE_SCHEMA",
+    "loaded_projector_implementation_fingerprint",
+    "read_current_position_projection",
     "read_decision_state_rows_many",
     "preview_broker_trade_close",
     "preview_broker_trade_open",
@@ -279,6 +313,7 @@ __all__ = [
     "summarize_broker_trade_close_candidates",
     "supersede_post_trade_combo_pair",
     "trade_event_economic_allocations",
+    "trade_event_application_payload",
     "trade_event_log",
     "trade_event_projection_preview",
     "valid_void_target_event_id",
@@ -286,6 +321,7 @@ __all__ = [
     "validate_combo_group_membership",
     "validate_position_fact_snapshot_contract",
     "verify_position_lot_projection",
+    "verify_position_projection_migration",
     "with_sqlite_repo_transaction",
     "POSITION_FACT_SNAPSHOT_CONTRACT",
     "decision_state_snapshot_fingerprint",
