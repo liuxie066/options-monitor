@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.23 - 2026-08-14
+
+### Bug Fixes
+- Allowed Phase 3A projection migration verification in archive-based releases to resolve and integrity-check the exact version tag through the controlled Git mirror, eliminating `source_commit_unavailable` without accepting modified production source.
+
 ## 1.13.22 - 2026-08-14
 
 ### Bug Fixes

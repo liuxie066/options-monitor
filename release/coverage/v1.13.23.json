@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.23",
+  "base": {
+    "tag": "v1.13.22",
+    "commit": "26bac4cd1a323ca36213f3627b773514d08bc113"
+  },
+  "reviewed_head": "0220003730d30c1b4821f5b1d47932ef014fe0f7",
+  "commits": [
+    {
+      "sha": "0220003730d30c1b4821f5b1d47932ef014fe0f7",
+      "subject": "fix(ledger): resolve source identity in archived releases"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed Phase 3A projection migration verification in archive-based releases to resolve and integrity-check the exact version tag through the controlled Git mirror, eliminating `source_commit_unavailable` without accepting modified production source.",
+      "commits": [
+        "0220003730d30c1b4821f5b1d47932ef014fe0f7"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
