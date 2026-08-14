@@ -75,7 +75,7 @@ def test_trade_event_writes_and_projection_publication_have_one_owner() -> None:
         {
             (
                 "src/application/ledger/position_projection_runtime.py",
-                "run_position_projection_in_transaction",
+                "_run_position_projection_in_transaction_impl",
             ): 1,
         }
     )
@@ -137,6 +137,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
                 "src/application/ledger/manual_trades.py",
                 "persist_manual_adjust_events>_run",
                 "'fast_if_safe'",
+            ): 1,
+            (
+                "src/application/ledger/position_projection_migration.py",
+                "apply_position_projection_migration",
+                "'forced_full'",
             ): 1,
             (
                 "src/application/ledger/position_projection_runtime.py",
@@ -213,6 +218,11 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "src/application/ledger/migration.py",
                 "shadow_replay_position_lot_snapshot",
                 "project_trade_events",
+            ): 1,
+            (
+                "src/application/ledger/position_projection_migration.py",
+                "_verify_from_conn",
+                "project_stored_trade_events_to_position_lots",
             ): 1,
             (
                 "src/application/ledger/position_projection_runtime.py",

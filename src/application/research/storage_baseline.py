@@ -20,7 +20,7 @@ import heapq
 from typing import AbstractSet, Any, Callable, Iterable, Mapping, Sequence
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.ledger.store_resolution import LEDGER_DB_RELATIVE_PATH
+from src.application.ledger.api import LEDGER_DB_RELATIVE_PATH
 
 
 SCHEMA_VERSION = "storage_runtime_baseline.v1"

@@ -17,8 +17,12 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.ledger.api import (
+    activate_position_projection_checkpoints,
     adopt_post_trade_combo_pair,
     adopt_existing_combo_identity,
+    apply_position_projection_migration,
+    build_position_projection_migration_inventory,
+    deactivate_position_projection_checkpoints,
     format_position_cash_secured,
     format_position_money,
     inspect_ledger_stores,
@@ -28,13 +32,16 @@ from src.application.ledger.api import (
     list_position_rows,
     list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
+    position_projection_migration_status,
     record_trade_event_void,
     reconcile_combo_pair_inferences,
     reject_post_trade_combo_pair,
     refresh_position_lot_projection,
+    resolve_ledger_store,
     resolve_position_data_config_path,
     preview_trade_event_void,
     verify_position_lot_projection,
+    verify_position_projection_migration,
     supersede_post_trade_combo_pair,
 )
 from src.application.daily_decision_brief_repository import read_combo_candidate_exposures
@@ -466,6 +473,53 @@ def main(argv: list[str] | None = None) -> int:
     p_rebuild.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_rebuild, high_risk=False)
 
+    p_projection_migration = sub.add_parser(
+        'projection-migration',
+        help='inventory, verify, activate, or deactivate checkpoint/tail projection',
+    )
+    projection_migration_sub = p_projection_migration.add_subparsers(
+        dest='projection_migration_cmd',
+        required=True,
+    )
+    for command_name, help_text in (
+        ('inventory', 'emit an exact read-only migration inventory'),
+        ('status', 'read bounded checkpoint/head readiness status'),
+    ):
+        command = projection_migration_sub.add_parser(command_name, help=help_text)
+        _add_runtime_root_arg(command)
+        command.add_argument('--format', default='json', choices=['json'])
+    p_projection_verify = projection_migration_sub.add_parser(
+        'verify',
+        help='run read-only full-oracle and optional runtime-shadow verification',
+    )
+    _add_runtime_root_arg(p_projection_verify)
+    p_projection_verify.add_argument('--shadow', action='store_true')
+    p_projection_verify.add_argument('--format', default='json', choices=['json'])
+    p_projection_apply = projection_migration_sub.add_parser(
+        'apply',
+        help='apply an exact frozen inventory and seed a disabled checkpoint',
+    )
+    _add_runtime_root_arg(p_projection_apply)
+    p_projection_apply.add_argument('--manifest', required=True)
+    p_projection_apply.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_projection_apply, high_risk=True)
+    p_projection_activate = projection_migration_sub.add_parser(
+        'activate',
+        help='enable checkpoint mode from exact acceptance and shadow evidence',
+    )
+    _add_runtime_root_arg(p_projection_activate)
+    p_projection_activate.add_argument('--acceptance-manifest', required=True)
+    p_projection_activate.add_argument('--shadow-manifest', required=True)
+    p_projection_activate.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_projection_activate, high_risk=True)
+    p_projection_deactivate = projection_migration_sub.add_parser(
+        'deactivate',
+        help='disable checkpoint mode without deleting projection state',
+    )
+    _add_runtime_root_arg(p_projection_deactivate)
+    p_projection_deactivate.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_projection_deactivate, high_risk=True)
+
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
     _add_runtime_root_arg(p_inspect)
     p_inspect.add_argument('--record-id', default=None)
@@ -889,7 +943,30 @@ def main(argv: list[str] | None = None) -> int:
 
     write_controls: dict[str, dict[str, bool]] = {}
     write_control_key = str(args.cmd)
-    if args.cmd == "lifecycle" and (
+    if args.cmd == "projection-migration" and getattr(
+        args, "projection_migration_cmd", None
+    ) in {"apply", "activate", "deactivate"}:
+        migration_command = str(args.projection_migration_cmd)
+        write_control_key = f"projection-migration:{migration_command}"
+        if (
+            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
+            and not bool(getattr(args, "apply", False))
+        ):
+            raise SystemExit(
+                f"option-positions projection-migration {migration_command} "
+                "requires --apply together with --confirm or --yes"
+            )
+        write_controls[write_control_key] = _resolve_write_control(
+            args,
+            command_name=f"option-positions projection-migration {migration_command}",
+            high_risk=True,
+        )
+        if not write_controls[write_control_key]["write_requested"]:
+            raise SystemExit(
+                f"option-positions projection-migration {migration_command} "
+                "requires --apply and --confirm or --yes"
+            )
+    elif args.cmd == "lifecycle" and (
         getattr(args, "lifecycle_cmd", None)
         in {
             "confirm-expired",
@@ -965,6 +1042,44 @@ def main(argv: list[str] | None = None) -> int:
         )
         if guard is None:
             return 2
+
+    if args.cmd == "projection-migration":
+        store = resolve_ledger_store(
+            data_config_path,
+            runtime_root=_runtime_root_arg(args),
+        )
+        sqlite_path = store.sqlite_path
+        command = str(args.projection_migration_cmd)
+        if command == "inventory":
+            payload = build_position_projection_migration_inventory(sqlite_path)
+        elif command == "status":
+            payload = position_projection_migration_status(sqlite_path)
+        elif command == "verify":
+            payload = verify_position_projection_migration(
+                sqlite_path,
+                shadow=bool(args.shadow),
+            )
+        elif command == "apply":
+            payload = apply_position_projection_migration(
+                sqlite_path,
+                _load_json_object(_resolve_path_under(args.manifest, base=base)),
+            )
+        elif command == "activate":
+            payload = activate_position_projection_checkpoints(
+                sqlite_path,
+                acceptance_manifest=_load_json_object(
+                    _resolve_path_under(args.acceptance_manifest, base=base)
+                ),
+                shadow_manifest=_load_json_object(
+                    _resolve_path_under(args.shadow_manifest, base=base)
+                ),
+            )
+        elif command == "deactivate":
+            payload = deactivate_position_projection_checkpoints(sqlite_path)
+        else:  # pragma: no cover - argparse owns the command set
+            raise SystemExit(f"unsupported projection migration command: {command}")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     _data_config, repo = resolve_option_positions_repo(
         base=base,
