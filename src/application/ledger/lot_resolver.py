@@ -18,7 +18,10 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
-from src.application.ledger.repository import require_option_positions_read_repo
+from src.application.ledger.repository import (
+    SQLiteOptionPositionsRepository,
+    require_option_positions_read_repo,
+)
 from src.infrastructure.feishu_bitable import safe_float
 
 
@@ -202,9 +205,25 @@ def normalize_close_candidate(item: dict[str, Any]) -> LotCloseCandidate | None:
     )
 
 
-def list_close_candidates(repo: Any) -> list[LotCloseCandidate]:
+def list_close_candidates(
+    repo: Any,
+    *,
+    account: str | None = None,
+    conn: Any | None = None,
+) -> list[LotCloseCandidate]:
     rows: list[LotCloseCandidate] = []
-    for item in load_close_candidate_records(repo):
+    candidate_repo = getattr(repo, "primary_repo", repo)
+    active_reader = getattr(candidate_repo, "list_active_position_lots", None)
+    source_rows = (
+        active_reader(account=str(account), conn=conn)
+        if (
+            account
+            and callable(active_reader)
+            and type(candidate_repo) is SQLiteOptionPositionsRepository
+        )
+        else load_close_candidate_records(repo)
+    )
+    for item in source_rows:
         candidate = normalize_close_candidate(item)
         if candidate is None:
             continue
@@ -213,8 +232,13 @@ def list_close_candidates(repo: Any) -> list[LotCloseCandidate]:
     return rows
 
 
-def resolve_unique_close_lot(repo: Any, selector: LotCloseSelector) -> LotCloseMatch:
-    semantic_candidates = _semantic_candidates(repo, selector)
+def resolve_unique_close_lot(
+    repo: Any,
+    selector: LotCloseSelector,
+    *,
+    conn: Any | None = None,
+) -> LotCloseMatch:
+    semantic_candidates = _semantic_candidates(repo, selector, conn=conn)
     exact_candidates = _exact_candidates(semantic_candidates, selector)
     eligible_candidates = [
         row for row in exact_candidates
@@ -255,8 +279,9 @@ def resolve_unique_close_target(
     selector: LotCloseSelector,
     *,
     source: str,
+    conn: Any | None = None,
 ) -> CloseTargetResolution:
-    match = resolve_unique_close_lot(repo, selector)
+    match = resolve_unique_close_lot(repo, selector, conn=conn)
     return CloseTargetResolution(
         source=str(source or "unknown"),
         strategy=match.matched_by,
@@ -265,7 +290,12 @@ def resolve_unique_close_target(
     )
 
 
-def resolve_fifo_close_lots(repo: Any, selector: LotCloseSelector) -> list[LotCloseMatch]:
+def resolve_fifo_close_lots(
+    repo: Any,
+    selector: LotCloseSelector,
+    *,
+    conn: Any | None = None,
+) -> list[LotCloseMatch]:
     remaining = int(selector.contracts_to_close or 0)
     if remaining <= 0:
         raise LotCloseResolutionError(
@@ -274,7 +304,10 @@ def resolve_fifo_close_lots(repo: Any, selector: LotCloseSelector) -> list[LotCl
             selector=selector,
         )
     matches: list[LotCloseMatch] = []
-    for item in _exact_candidates(_semantic_candidates(repo, selector), selector):
+    for item in _exact_candidates(
+        _semantic_candidates(repo, selector, conn=conn),
+        selector,
+    ):
         open_qty = int(item.contracts_open or 0)
         if open_qty <= 0:
             continue
@@ -313,8 +346,9 @@ def resolve_fifo_close_targets(
     selector: LotCloseSelector,
     *,
     source: str,
+    conn: Any | None = None,
 ) -> CloseTargetResolution:
-    matches = resolve_fifo_close_lots(repo, selector)
+    matches = resolve_fifo_close_lots(repo, selector, conn=conn)
     return CloseTargetResolution(
         source=str(source or "unknown"),
         strategy="strict_exact_fifo",
@@ -351,7 +385,7 @@ def find_unique_open_lot(
     side_norm = normalize_side(side)
     expiration_norm = _normalize_selector_expiration(expiration_ymd) if expiration_ymd not in (None, "") else ""
     matches = [
-        row for row in list_close_candidates(repo)
+        row for row in list_close_candidates(repo, account=account_norm)
         if (not broker_norm or row.broker == broker_norm)
         and row.account == account_norm
         and row.symbol == symbol_norm
@@ -373,6 +407,7 @@ def resolve_explicit_close_target(
     contracts_to_close: int,
     source: str,
     fields: dict[str, Any] | None = None,
+    conn: Any | None = None,
 ) -> CloseTargetResolution:
     resolved_record_id = str(record_id or "").strip()
     selector = _explicit_selector(
@@ -393,7 +428,11 @@ def resolve_explicit_close_target(
             selector=selector,
         )
 
-    candidate = _current_candidate_by_record_id(repo, resolved_record_id)
+    candidate = _current_candidate_by_record_id(
+        repo,
+        resolved_record_id,
+        conn=conn,
+    )
     if candidate is None:
         raise LotCloseResolutionError(
             "not_found",
@@ -439,9 +478,19 @@ def resolve_explicit_close_target(
     )
 
 
-def _semantic_candidates(repo: Any, selector: LotCloseSelector) -> list[LotCloseCandidate]:
+def _semantic_candidates(
+    repo: Any,
+    selector: LotCloseSelector,
+    *,
+    conn: Any | None = None,
+) -> list[LotCloseCandidate]:
     return [
-        row for row in list_close_candidates(repo)
+        row
+        for row in list_close_candidates(
+            repo,
+            account=selector.account,
+            conn=conn,
+        )
         if row.broker == selector.broker
         and row.account == selector.account
         and row.symbol == selector.symbol
@@ -460,7 +509,25 @@ def _exact_candidates(candidates: list[LotCloseCandidate], selector: LotCloseSel
     ]
 
 
-def _current_candidate_by_record_id(repo: Any, record_id: str) -> LotCloseCandidate | None:
+def _current_candidate_by_record_id(
+    repo: Any,
+    record_id: str,
+    *,
+    conn: Any | None = None,
+) -> LotCloseCandidate | None:
+    candidate_repo = require_option_positions_read_repo(repo)
+    exact_reader = getattr(candidate_repo, "get_position_lots_by_ids", None)
+    if (
+        callable(exact_reader)
+        and type(candidate_repo) is SQLiteOptionPositionsRepository
+    ):
+        rows = (
+            exact_reader((record_id,), conn=conn)
+            if conn is not None
+            else exact_reader((record_id,))
+        )
+        return normalize_close_candidate(rows[0]) if rows else None
+
     for item in load_close_candidate_records(repo):
         current_record_id = str(item.get("record_id") or item.get("id") or "").strip()
         if current_record_id != record_id:
@@ -468,6 +535,8 @@ def _current_candidate_by_record_id(repo: Any, record_id: str) -> LotCloseCandid
         return normalize_close_candidate(item)
 
     get_record_fields = getattr(repo, "get_record_fields", None)
+    if not callable(get_record_fields):
+        get_record_fields = getattr(candidate_repo, "get_record_fields", None)
     if not callable(get_record_fields):
         return None
     try:

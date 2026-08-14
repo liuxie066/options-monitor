@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from typing import Any, Callable, Sequence
@@ -9,12 +9,14 @@ from domain.domain.ledger import (
     EMPTY_PROJECTION_DIAGNOSTIC_SHA256,
     ResumableProjectionState,
 )
+from domain.domain.ledger.events import LedgerDiagnostic
 from src.application.ledger.event_codec import trade_event_application_payload
 from src.application.ledger.position_projection_publication import (
     PositionProjectionPublication,
     publish_full_position_projection,
 )
 from src.application.ledger.projector_implementation import (
+    ProjectorImplementationUnavailable,
     loaded_projector_implementation_fingerprint,
 )
 from src.application.ledger.publisher import (
@@ -49,10 +51,24 @@ class ProjectionRuntimeResult:
     tail_event_count: int
     tail_event_bytes: int
     publication: PositionProjectionPublication
+    created_flags: tuple[bool, ...] = ()
+    diagnostics: tuple[LedgerDiagnostic, ...] = ()
 
     @property
     def position_lot_count(self) -> int:
         return self.publication.position_lot_count
+
+
+@dataclass(frozen=True)
+class ProjectionPreviewResult:
+    mode_used: str
+    fallback_reason: str | None
+    source_generation: int
+    checkpoint_id: str | None
+    source_event_count: int
+    latest_event_time_ms: int
+    current_projection: Any
+    projection: Any
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,363 @@ def run_position_projection_fast_if_safe(
     )
 
 
+def run_position_projection_in_transaction(
+    repo: Any,
+    events: Sequence[Any] = (),
+    *,
+    conn: Any,
+    mode: str,
+    seed_checkpoint: bool = False,
+    failure_hook: Callable[[str], None] | None = None,
+) -> ProjectionRuntimeResult:
+    """Write events and publish their projection inside a caller-owned transaction."""
+
+    candidate = require_position_projection_publication_repo(repo)
+    if not isinstance(candidate, SQLiteOptionPositionsRepository):
+        raise TypeError("position projection runtime requires SQLite transaction authority")
+    if conn is None or not bool(getattr(conn, "in_transaction", False)):
+        raise ValueError("position projection runtime requires an active caller transaction")
+    if mode not in {"forced_full", "fast_if_safe"}:
+        raise ValueError(f"unsupported position projection runtime mode: {mode}")
+
+    created_flags = tuple(
+        bool(candidate.upsert_trade_event(event, conn=conn))
+        for event in events
+    )
+    _fail(failure_hook, "after_event_write")
+    try:
+        implementation = loaded_projector_implementation_fingerprint()
+    except ProjectorImplementationUnavailable:
+        result = _run_full_path(
+            candidate,
+            conn=conn,
+            mode_requested=mode,
+            fallback_reason="projector_implementation_unavailable",
+            seed_checkpoint=False,
+            implementation=None,
+            failure_hook=failure_hook,
+        )
+        return replace(result, created_flags=created_flags)
+
+    if mode == "fast_if_safe" and events and not any(created_flags):
+        unchanged = _unchanged_runtime_result_if_trusted(
+            candidate,
+            conn=conn,
+            mode_requested=mode,
+            implementation=implementation,
+        )
+        if unchanged is not None:
+            return replace(unchanged, created_flags=created_flags)
+    result = _run_in_transaction(
+        candidate,
+        conn=conn,
+        mode=mode,
+        seed_checkpoint=seed_checkpoint,
+        implementation=implementation,
+        failure_hook=failure_hook,
+    )
+    return replace(result, created_flags=created_flags)
+
+
+def preview_position_projection_append(
+    repo: Any,
+    events: Sequence[Any],
+) -> ProjectionPreviewResult:
+    """Project candidate events read-only from a trusted checkpoint when safe."""
+
+    candidate = getattr(repo, "primary_repo", repo)
+    if not isinstance(candidate, SQLiteOptionPositionsRepository):
+        if not callable(getattr(candidate, "list_trade_events", None)):
+            raise TypeError("option_positions repo does not expose list_trade_events")
+        return _preview_full(candidate, events, fallback_reason="sqlite_repository_required")
+    try:
+        implementation = loaded_projector_implementation_fingerprint()
+    except ProjectorImplementationUnavailable:
+        return _preview_full(
+            candidate,
+            events,
+            fallback_reason="projector_implementation_unavailable",
+        )
+    conn = candidate._connect()
+    try:
+        conn.execute("BEGIN")
+        source = candidate.read_position_projection_source_state(conn=conn)
+        if str(source.get("checkpoint_mode") or "disabled") != "enabled":
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason=f"checkpoint_mode_{source.get('checkpoint_mode') or 'disabled'}",
+            )
+        row = candidate.read_newest_trusted_position_projection_checkpoint(conn=conn)
+        if row is None:
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason="checkpoint_missing_or_invalidated",
+            )
+        try:
+            decoded = _decode_checkpoint(
+                row,
+                source=source,
+                schema_cookie=candidate.position_projection_schema_cookie(conn=conn),
+                implementation=implementation,
+            )
+        except (TypeError, ValueError):
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason="checkpoint_corrupt_or_incompatible",
+            )
+        tail_rows = candidate.list_position_projection_event_rows(
+            after=(
+                int(row["prefix_end_trade_time_ms"]),
+                str(row["prefix_end_event_id"]),
+            ),
+            conn=conn,
+        )
+        if int(source["source_generation"]) != int(row["source_generation"]) + len(
+            tail_rows
+        ):
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason="source_generation_not_strict_append",
+            )
+        tail_accounts = {
+            str(item.get("account") or "").strip()
+            for item in tail_rows
+            if str(item.get("account") or "").strip()
+        }
+        head_problem = _head_invariant_problem(
+            candidate,
+            conn=conn,
+            source=source,
+            checkpoint=decoded,
+            tail_accounts=tail_accounts,
+            implementation=implementation,
+        )
+        if head_problem is not None:
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason=head_problem,
+            )
+        current_projection = project_stored_trade_events_to_resumable_position_lots(
+            [_application_event(item["event_json"]) for item in tail_rows],
+            domain_state=decoded.domain_state,
+            publication_state=decoded.publication_state,
+            entry_mode="tail",
+        )
+        if not current_projection.eligible:
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason=(
+                    current_projection.full_replay_reason
+                    or "tail_projection_ineligible"
+                ),
+            )
+        latest_key = (
+            (int(tail_rows[-1]["trade_time_ms"]), str(tail_rows[-1]["event_id"]))
+            if tail_rows
+            else (
+                int(row["prefix_end_trade_time_ms"]),
+                str(row["prefix_end_event_id"]),
+            )
+        )
+        candidate_keys = sorted(_event_order_key(item) for item in events)
+        if candidate_keys and candidate_keys[0] <= latest_key:
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason="candidate_not_strict_append",
+            )
+        projection = (
+            project_stored_trade_events_to_resumable_position_lots(
+                list(events),
+                domain_state=current_projection.domain_state,
+                publication_state=current_projection.publication_state,
+                entry_mode="tail",
+            )
+            if events
+            else current_projection
+        )
+        if not projection.eligible:
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason=projection.full_replay_reason or "candidate_projection_ineligible",
+            )
+        return ProjectionPreviewResult(
+            mode_used="resumed_tail",
+            fallback_reason=None,
+            source_generation=int(source["source_generation"]),
+            checkpoint_id=str(row["checkpoint_id"]),
+            source_event_count=int(row["prefix_event_count"]) + len(tail_rows),
+            latest_event_time_ms=(
+                int(tail_rows[-1]["trade_time_ms"])
+                if tail_rows
+                else int(row["prefix_end_trade_time_ms"])
+            ),
+            current_projection=current_projection,
+            projection=projection,
+        )
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def compare_full_and_resumed_position_projection(repo: Any) -> dict[str, Any]:
+    """Compare the full oracle with the current checkpoint/tail projection read-only."""
+
+    candidate = getattr(repo, "primary_repo", repo)
+    if not isinstance(candidate, SQLiteOptionPositionsRepository):
+        raise TypeError("projection shadow comparison requires SQLite repository")
+    conn = candidate._connect()
+    try:
+        conn.execute("BEGIN")
+        full = _preview_full(
+            candidate,
+            (),
+            conn=conn,
+            fallback_reason="shadow_full_oracle",
+        )
+        stored_rows = {
+            str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
+            for item in candidate.list_position_lots(conn=conn)
+            if str(item.get("record_id") or "").strip()
+        }
+        source = candidate.read_position_projection_source_state(conn=conn)
+        if str(source.get("checkpoint_mode") or "disabled") != "enabled":
+            return {
+                "status": "unavailable",
+                "reason": f"checkpoint_mode_{source.get('checkpoint_mode') or 'disabled'}",
+                "source_generation": int(source["source_generation"]),
+            }
+    finally:
+        conn.rollback()
+        conn.close()
+    resumed = preview_position_projection_append(candidate, ())
+    if resumed.mode_used != "resumed_tail":
+        return {
+            "status": "unavailable",
+            "reason": resumed.fallback_reason,
+            "source_generation": resumed.source_generation,
+        }
+    if resumed.source_generation != full.source_generation:
+        return {
+            "status": "unavailable",
+            "reason": "source_generation_changed",
+            "source_generation": resumed.source_generation,
+            "full_source_generation": full.source_generation,
+        }
+    full_rows = {
+        item.record_id: dict(item.fields)
+        for item in full.projection.lots
+    }
+    full_active_state = full.projection.resumable_publication_state
+    if full_active_state is None:
+        return {
+            "status": "unavailable",
+            "reason": "full_oracle_not_resumable",
+            "source_generation": resumed.source_generation,
+        }
+    full_active_rows = {
+        lot_id: dict(fields)
+        for lot_id, fields in full_active_state.fields_by_lot_id.items()
+    }
+    resumed_rows = {
+        lot_id: dict(fields)
+        for lot_id, fields in resumed.projection.publication_state.fields_by_lot_id.items()
+    }
+    stored_mismatch_ids = {
+        record_id
+        for record_id in set(full_rows) | set(stored_rows)
+        if full_rows.get(record_id) != stored_rows.get(record_id)
+    }
+    active_mismatch_ids = {
+        record_id
+        for record_id in set(full_active_rows) | set(resumed_rows)
+        if full_active_rows.get(record_id) != resumed_rows.get(record_id)
+    }
+    mismatch_ids = sorted(stored_mismatch_ids | active_mismatch_ids)
+    return {
+        "status": "pass" if not mismatch_ids else "mismatch",
+        "reason": None if not mismatch_ids else "position_lot_mismatch",
+        "source_generation": resumed.source_generation,
+        "checkpoint_id": resumed.checkpoint_id,
+        "full_lot_count": len(full_rows),
+        "stored_lot_count": len(stored_rows),
+        "full_active_lot_count": len(full_active_rows),
+        "resumed_lot_count": len(resumed_rows),
+        "stored_mismatch_count": len(stored_mismatch_ids),
+        "active_mismatch_count": len(active_mismatch_ids),
+        "mismatch_count": len(mismatch_ids),
+        "mismatch_record_ids": mismatch_ids[:10],
+    }
+
+
+def _preview_full(
+    repo: Any,
+    events: Sequence[Any],
+    *,
+    conn: Any | None = None,
+    fallback_reason: str,
+) -> ProjectionPreviewResult:
+    stored = (
+        repo.list_trade_events(conn=conn)
+        if conn is not None
+        else repo.list_trade_events()
+    )
+    current_projection = project_stored_trade_events_to_position_lots(stored)
+    projection = (
+        project_stored_trade_events_to_position_lots([*stored, *events])
+        if events
+        else current_projection
+    )
+    return ProjectionPreviewResult(
+        mode_used="full",
+        fallback_reason=fallback_reason,
+        source_generation=(
+            int(repo.read_position_projection_source_state(conn=conn)["source_generation"])
+            if isinstance(repo, SQLiteOptionPositionsRepository)
+            else len(stored)
+        ),
+        checkpoint_id=None,
+        source_event_count=len(stored),
+        latest_event_time_ms=max(
+            (
+                int(item.get("trade_time_ms") or item.get("event_time_ms") or 0)
+                for item in stored
+                if isinstance(item, dict)
+            ),
+            default=0,
+        ),
+        current_projection=current_projection,
+        projection=projection,
+    )
+
+
+def _event_order_key(event: Any) -> tuple[int, str]:
+    if isinstance(event, dict):
+        return (
+            int(event.get("trade_time_ms") or event.get("event_time_ms") or 0),
+            str(event.get("event_id") or ""),
+        )
+    return (
+        int(getattr(event, "event_time_ms", 0) or 0),
+        str(getattr(event, "event_id", "") or ""),
+    )
+
+
 def _run_runtime(
     repo: Any,
     events: Sequence[Any],
@@ -123,31 +496,15 @@ def _run_runtime(
     candidate = require_position_projection_publication_repo(repo)
     if not isinstance(candidate, SQLiteOptionPositionsRepository):
         raise TypeError("position projection runtime requires SQLite transaction authority")
-    implementation = loaded_projector_implementation_fingerprint()
     conn = candidate._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        created = 0
-        for event in events:
-            created += int(candidate.upsert_trade_event(event, conn=conn))
-        _fail(failure_hook, "after_event_write")
-        if mode == "fast_if_safe" and events and created == 0:
-            result = _unchanged_runtime_result_if_trusted(
-                candidate,
-                conn=conn,
-                mode_requested=mode,
-                implementation=implementation,
-            )
-            if result is not None:
-                _fail(failure_hook, "before_commit")
-                conn.commit()
-                return result
-        result = _run_in_transaction(
+        result = run_position_projection_in_transaction(
             candidate,
+            events,
             conn=conn,
             mode=mode,
             seed_checkpoint=seed_checkpoint,
-            implementation=implementation,
             failure_hook=failure_hook,
         )
         _fail(failure_hook, "before_commit")
@@ -165,7 +522,7 @@ def _unchanged_runtime_result_if_trusted(
     *,
     conn: Any,
     mode_requested: str,
-    implementation: str,
+    implementation: str | None,
 ) -> ProjectionRuntimeResult | None:
     source = repo.read_position_projection_source_state(conn=conn)
     if (
@@ -480,6 +837,8 @@ def _run_full_path(
     checkpoint_id: str | None = None
     pruned: tuple[str, ...] = ()
     if seed_checkpoint:
+        if implementation is None:
+            raise RuntimeError("checkpoint publication requires implementation fingerprint")
         chain = initial_event_prefix_chain()
         for item in rows:
             chain = extend_event_prefix_chain(chain, str(item["event_json"]))
@@ -521,6 +880,7 @@ def _run_full_path(
         tail_event_count=0,
         tail_event_bytes=0,
         publication=publication,
+        diagnostics=tuple(projection.diagnostics),
     )
 
 
@@ -812,8 +1172,12 @@ __all__ = [
     "CHECKPOINT_ROTATE_EVENT_COUNT",
     "POSITION_PROJECTION_CHECKPOINT_SCHEMA",
     "ProjectionRuntimeResult",
+    "ProjectionPreviewResult",
     "extend_event_prefix_chain",
+    "compare_full_and_resumed_position_projection",
     "initial_event_prefix_chain",
     "run_position_projection_fast_if_safe",
     "run_position_projection_forced_full",
+    "run_position_projection_in_transaction",
+    "preview_position_projection_append",
 ]

@@ -68,15 +68,13 @@ from src.application.ledger.event_codec import (
     valid_void_target_event_id,
 )
 from src.application.ledger.external_event_key import broker_external_event_key
+from src.application.ledger.position_projection_runtime import (
+    run_position_projection_in_transaction,
+)
+from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
-)
-from src.application.ledger.position_projection_publication import (
-    publish_full_position_projection,
-)
-from src.application.ledger.projection_verify import (
-    compare_projection_lots,
 )
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
@@ -84,6 +82,19 @@ from src.application.cash_conversion import (
     attach_trade_event_cash_conversions,
     load_cash_fx_payload,
     utc_now_ms,
+)
+
+
+_APPEND_SAFE_EVENT_TYPES = frozenset(
+    {
+        "open",
+        "close",
+        "expire_close",
+        "assignment",
+        "exercise",
+        "adjust",
+        "verification",
+    }
 )
 
 
@@ -119,6 +130,54 @@ def safe_int_count(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _projection_mode_for_events(
+    events: Sequence[Any],
+    *,
+    force_full: bool = False,
+) -> str:
+    if force_full or any(
+        str(getattr(item, "event_type", "") or "").strip().lower()
+        not in _APPEND_SAFE_EVENT_TYPES
+        for item in events
+    ):
+        return "forced_full"
+    return "fast_if_safe"
+
+
+def _trade_events_by_id(
+    repo: Any,
+    event_ids: Sequence[str],
+    *,
+    conn: Any,
+) -> dict[str, dict[str, Any]]:
+    getter = getattr(repo, "get_trade_events_by_ids", None)
+    if not callable(getter):
+        raise TypeError("trade event persistence requires primary-key event lookup")
+    return {
+        str(item.get("event_id") or "").strip(): dict(item)
+        for item in getter(event_ids, conn=conn)
+        if isinstance(item, dict) and str(item.get("event_id") or "").strip()
+    }
+
+
+def _event_position_record_id(event: Any) -> str | None:
+    payload = dict(getattr(event, "raw_payload", {}) or {})
+    explicit = str(
+        payload.get("record_id")
+        or payload.get("target_lot_id")
+        or getattr(event, "target_lot_id", None)
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    if str(getattr(event, "event_type", "") or "").strip().lower() != "open":
+        return None
+    return str(
+        getattr(event, "lot_id", None)
+        or f"lot_{str(getattr(event, 'event_id', '') or '').strip()}"
+    ).strip() or None
 
 
 def _require_lifecycle_generation(
@@ -315,21 +374,21 @@ def _advance_settlement_admission_head(
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> ProjectionRefreshResult:
-        if conn is not None:
-            events = sqlite_repo.list_trade_events(conn=conn)
-            projection = project_stored_trade_events_to_position_lots(events)
-            ensure_projection_publishable(projection, operation="position projection rebuild")
-            inserted = publish_full_position_projection(sqlite_repo, projection.lots, conn=conn).position_lot_count
-        else:
-            events = sqlite_repo.list_trade_events()
-            projection = project_stored_trade_events_to_position_lots(events)
-            ensure_projection_publishable(projection, operation="position projection rebuild")
-            inserted = publish_full_position_projection(sqlite_repo, projection.lots).position_lot_count
+        if conn is None:
+            raise TypeError("position projection rebuild requires SQLite transaction authority")
+        event_count = int(
+            conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0]
+        )
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            conn=conn,
+            mode="forced_full",
+        )
         result = {
-            "trade_event_count": int(len(events)),
-            "position_lot_count": int(inserted),
+            "trade_event_count": event_count,
+            "position_lot_count": int(runtime.position_lot_count),
         }
-        result.update(projection_diagnostics_summary(projection.diagnostics))
+        result.update(projection_diagnostics_summary(runtime.diagnostics))
         return ProjectionRefreshResult.from_payload(result)
 
     return with_sqlite_repo_transaction(
@@ -341,16 +400,17 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
 
 def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> LedgerWriteResult:
+        if conn is None:
+            raise TypeError("trade event persistence requires SQLite transaction authority")
         storage_events = [
             _canonical_storage_event(item)
-            for item in _events_for_storage(sqlite_repo, event)
+            for item in _events_for_storage(sqlite_repo, event, conn=conn)
         ]
-        existing_events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
-        existing_by_id = {
-            str(item.get("event_id") or ""): item
-            for item in existing_events
-            if isinstance(item, dict) and str(item.get("event_id") or "")
-        }
+        existing_by_id = _trade_events_by_id(
+            sqlite_repo,
+            [item.event_id for item in storage_events],
+            conn=conn,
+        )
         fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
         storage_events = [
@@ -363,35 +423,19 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
             )
             for item in storage_events
         ]
-        if conn is not None:
-            created_flags = [sqlite_repo.upsert_trade_event(item, conn=conn) for item in storage_events]
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
-            ensure_projection_publishable(projection, operation="trade event persistence")
-            records = projection.lots
-            lot_count = publish_full_position_projection(sqlite_repo, records, conn=conn).position_lot_count
-        else:
-            created_flags = [sqlite_repo.upsert_trade_event(item) for item in storage_events]
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
-            ensure_projection_publishable(projection, operation="trade event persistence")
-            records = projection.lots
-            lot_count = publish_full_position_projection(sqlite_repo, records).position_lot_count
-        payload = storage_events[0].raw_payload or {}
-        explicit_record_id = str(payload.get("record_id") or "").strip()
-        record_id = explicit_record_id or next(
-            (
-                record.record_id
-                for record in records
-                if str(record.fields.get("source_event_id") or "").strip() == str(event.event_id).strip()
-            ),
-            "",
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            storage_events,
+            conn=conn,
+            mode=_projection_mode_for_events(storage_events),
         )
         result = {
             "event_id": event.event_id,
-            "record_id": record_id or None,
-            "created": any(created_flags),
-            "position_lot_count": int(lot_count),
+            "record_id": _event_position_record_id(storage_events[0]),
+            "created": any(runtime.created_flags),
+            "position_lot_count": int(runtime.position_lot_count),
         }
-        result.update(projection_diagnostics_summary(projection.diagnostics))
+        result.update(projection_diagnostics_summary(runtime.diagnostics))
         return LedgerWriteResult.from_payload(result)
 
     return with_sqlite_repo_transaction(
@@ -414,16 +458,18 @@ def persist_trade_event_with_combo_identity(
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("combo identity persistence requires SQLite transaction authority")
-        expanded = [_canonical_storage_event(item) for item in _events_for_storage(sqlite_repo, event)]
+        expanded = [
+            _canonical_storage_event(item)
+            for item in _events_for_storage(sqlite_repo, event, conn=conn)
+        ]
         if len(expanded) != 1 or expanded[0].event_type != "open":
             raise ValueError("combo identity persistence requires one explicitly targeted open event")
         storage_event = expanded[0]
-        existing_events = sqlite_repo.list_trade_events(conn=conn)
-        existing_by_id = {
-            str(item.get("event_id") or ""): item
-            for item in existing_events
-            if isinstance(item, dict) and str(item.get("event_id") or "")
-        }
+        existing_by_id = _trade_events_by_id(
+            sqlite_repo,
+            (storage_event.event_id,),
+            conn=conn,
+        )
         if storage_event.event_id in existing_by_id:
             storage_event = _event_with_existing_cash_conversions(
                 storage_event,
@@ -435,25 +481,23 @@ def persist_trade_event_with_combo_identity(
                 fx_payload=load_cash_fx_payload(sqlite_repo),
                 observed_at_ms=utc_now_ms(),
             )
-        created = sqlite_repo.upsert_trade_event(storage_event, conn=conn)
         group_id = str(intent.get("group_id") or "").strip()
         existing_identity = sqlite_repo.get_strategy_group_identity(group_id, conn=conn)
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            (storage_event,),
+            conn=conn,
+            mode="forced_full",
+        )
+        created = runtime.created_flags[0]
         if not created and existing_identity is None:
             raise ValueError("identity_missing_for_existing_second_leg")
-
-        projection = project_stored_trade_events_to_position_lots(
-            sqlite_repo.list_trade_events(conn=conn)
-        )
-        if projection.has_errors:
-            codes = ",".join(
-                sorted({item.code for item in projection.diagnostics if item.severity == "error"})
-            )
-            raise ValueError(f"combo identity projection failed: {codes}")
-        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
+        events = sqlite_repo.list_trade_events(conn=conn)
+        projected_lots = sqlite_repo.list_position_lots(conn=conn)
         records_by_open_event = {
-            str(record.fields.get("source_event_id") or "").strip(): record
-            for record in projection.lots
-            if str(record.fields.get("source_event_id") or "").strip()
+            str((record.get("fields") or {}).get("source_event_id") or "").strip(): record
+            for record in projected_lots
+            if str((record.get("fields") or {}).get("source_event_id") or "").strip()
         }
         first_leg = _combo_leg_from_projected_record(
             intent=intent,
@@ -485,8 +529,8 @@ def persist_trade_event_with_combo_identity(
             group_id=str(identity["group_id"]),
             account=str(identity["account"]),
             expected_symbol=str(identity["symbol"]),
-            trade_events=sqlite_repo.list_trade_events(conn=conn),
-            projected_position_lots=projection.lots,
+            trade_events=events,
+            projected_position_lots=projected_lots,
         )
         _assert_combo_membership_exact(
             membership,
@@ -507,8 +551,8 @@ def persist_trade_event_with_combo_identity(
             group_id=str(identity["group_id"]),
             account=str(identity["account"]),
             expected_symbol=str(identity["symbol"]),
-            trade_events=sqlite_repo.list_trade_events(conn=conn),
-            projected_position_lots=projection.lots,
+            trade_events=events,
+            projected_position_lots=projected_lots,
         )
         if membership_readback.generation_hash != membership.generation_hash:
             raise ValueError("combo identity membership generation changed")
@@ -520,7 +564,7 @@ def persist_trade_event_with_combo_identity(
             "identity_created": identity_created,
             "identity": identity,
             "membership": membership.fact,
-            "position_lot_count": len(projection.lots),
+            "position_lot_count": int(runtime.position_lot_count),
         }
 
     return with_sqlite_repo_transaction(
@@ -571,7 +615,9 @@ def adopt_existing_combo_identity_atomically(
             if key != "matched" and int(value) > 0
         }
         if projection_errors:
-            raise ValueError("combo identity adoption requires a matching trade_events projection")
+            raise ValueError(
+                "combo identity adoption requires a matching trade_events projection"
+            )
         existing = sqlite_repo.get_strategy_group_identity(
             group_value,
             conn=conn,
@@ -584,7 +630,10 @@ def adopt_existing_combo_identity_atomically(
                 != existing.get("identity_hash")
             ):
                 raise ValueError("strategy group identity conflict")
-        records_by_id = {str(record.record_id): record for record in projection.lots}
+        records_by_id = {
+            str(record.get("record_id") or ""): record
+            for record in current_lots
+        }
         events_by_id = {
             str(item.get("event_id") or ""): dict(item)
             for item in events
@@ -716,7 +765,11 @@ def _existing_combo_adoption_leg(
     event = events_by_id.get(event_value)
     if record is None or event is None:
         raise ValueError("combo identity adoption requires exact record and open event ids")
-    fields = dict(record.fields)
+    fields = dict(
+        record.get("fields", {})
+        if isinstance(record, dict)
+        else record.fields
+    )
     event_contract = dict(event.get("contract_key") or {}) if isinstance(event.get("contract_key"), dict) else {}
     option_type = str(fields.get("option_type") or "").strip().lower()
     position_side = str(fields.get("side") or "").strip().lower()
@@ -856,9 +909,19 @@ def _combo_leg_from_projected_record(
     expected_record_id = str(intent.get(f"{prefix}_expected_record_id") or "").strip()
     role = str(intent.get(f"{prefix}_role") or "").strip().lower()
     record = records_by_open_event.get(event_id)
-    if record is None or record.record_id != expected_record_id:
+    record_id = (
+        str(record.get("record_id") or "").strip()
+        if isinstance(record, dict)
+        else str(getattr(record, "record_id", "") or "").strip()
+    )
+    if record is None or record_id != expected_record_id:
         raise ValueError(f"combo identity {prefix} projected record mismatch")
-    fields = dict(record.fields)
+    fields = dict(
+        record.get("fields", {})
+        if isinstance(record, dict)
+        else getattr(record, "fields", {})
+        or {}
+    )
     expected_contracts = int(intent.get("expected_contracts") or 0)
     if int(fields.get("contracts") or 0) != expected_contracts:
         raise ValueError(f"combo identity {prefix} original quantity mismatch")
@@ -883,7 +946,7 @@ def _combo_leg_from_projected_record(
         "leg_role": role,
         "contracts": expected_contracts,
         "open_event_id": event_id,
-        "record_id": record.record_id,
+        "record_id": record_id,
         "contract_key": contract_key,
     }
 
@@ -987,10 +1050,20 @@ def _projected_remaining_by_lot(
     wanted = {str(item or "").strip() for item in target_lot_ids}
     remaining: dict[str, int] = {}
     for record in projection_lots:
-        record_id = str(getattr(record, "record_id", "") or "").strip()
+        record_id = str(
+            record.get("record_id")
+            if isinstance(record, dict)
+            else getattr(record, "record_id", "")
+            or ""
+        ).strip()
         if record_id not in wanted:
             continue
-        fields = dict(getattr(record, "fields", {}) or {})
+        fields = dict(
+            record.get("fields", {})
+            if isinstance(record, dict)
+            else getattr(record, "fields", {})
+            or {}
+        )
         remaining[record_id] = int(fields.get("contracts_open") or 0)
     missing = sorted(wanted - set(remaining))
     if missing:
@@ -1589,7 +1662,7 @@ def apply_lifecycle_allocation_atomically(
             if actual_remaining != expected_remaining:
                 raise ValueError("target_lot_quantity_drift")
 
-        correction_void_created: list[bool] = []
+        proposed_void_target_ids: set[str] = set()
         if correction_void_rows:
             effective_allocated_event_ids = {
                 str(
@@ -1629,15 +1702,9 @@ def apply_lifecycle_allocation_atomically(
                         "lifecycle correction target is not an "
                         "effective allocation event"
                     )
-                correction_void_created.append(
-                    sqlite_repo.upsert_trade_event(
-                        void_event,
-                        conn=conn,
-                    )
-                )
-            void_event_ids = _effective_void_target_ids(
-                sqlite_repo,
-                conn=conn,
+                proposed_void_target_ids.add(target_event_id)
+            void_event_ids = tuple(
+                sorted(set(void_event_ids) | proposed_void_target_ids)
             )
 
         canonical_summary, canonical_status = _validate_lifecycle_event_allocation_plan(
@@ -1800,19 +1867,15 @@ def apply_lifecycle_allocation_atomically(
             if close_claim is not None
             else False
         )
-        terminal_event_created = [
-            sqlite_repo.upsert_trade_event(item, conn=conn)
-            for item in event_rows
-        ]
-        projection = project_stored_trade_events_to_position_lots(
-            sqlite_repo.list_trade_events(conn=conn)
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            [*correction_void_rows, *event_rows],
+            conn=conn,
+            mode="forced_full",
         )
-        if projection.has_errors:
-            codes = ",".join(
-                sorted({item.code for item in projection.diagnostics if item.severity == "error"})
-            )
-            raise ValueError(f"lifecycle allocation projection failed: {codes}")
-        publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
+        correction_count = len(correction_void_rows)
+        correction_void_created = list(runtime.created_flags[:correction_count])
+        terminal_event_created = list(runtime.created_flags[correction_count:])
         allocation_created = [
             sqlite_repo.insert_trade_lifecycle_allocation(item, conn=conn)
             for item in allocation_rows
@@ -1859,13 +1922,15 @@ def apply_lifecycle_allocation_atomically(
             },
             **canonical_summary,
         }
+        target_lot_ids = list(
+            dict(lifecycle_case.get("target_contracts_by_lot") or {})
+        )
         projected_remaining = _projected_remaining_by_lot(
-            projection.lots,
-            target_lot_ids=list(
-                dict(
-                    lifecycle_case.get("target_contracts_by_lot") or {}
-                )
+            sqlite_repo.get_position_lots_by_ids(
+                target_lot_ids,
+                conn=conn,
             ),
+            target_lot_ids=target_lot_ids,
         )
         state_fingerprint = canonical_state_fingerprint(
             _lifecycle_state_payload(
@@ -2050,7 +2115,7 @@ def apply_lifecycle_allocation_atomically(
             "notification_outbox_id": notification_intent["outbox_id"],
             "notification_outbox_created": outbox_created,
             "notification_audit_codes": notification_audit_codes,
-            "position_lot_count": len(projection.lots),
+            "position_lot_count": int(runtime.position_lot_count),
             "admission_status": (
                 "admitted_semantic"
                 if admission is not None
@@ -3789,13 +3854,13 @@ def persist_trade_event_objects_atomically(
         raise ValueError("atomic trade persistence requires at least one event")
 
     def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
-        if (case_update or allocation_rows) and conn is None:
-            raise TypeError("lifecycle metadata persistence requires SQLite transaction authority")
+        if conn is None:
+            raise TypeError("atomic trade persistence requires SQLite transaction authority")
         storage_events: list[TradeEvent] = []
         for event in events:
             expanded = [
                 _canonical_storage_event(item)
-                for item in _events_for_storage(sqlite_repo, event)
+                for item in _events_for_storage(sqlite_repo, event, conn=conn)
             ]
             if len(expanded) != 1:
                 raise ValueError(
@@ -3807,16 +3872,11 @@ def persist_trade_event_objects_atomically(
         if len(set(event_ids)) != len(event_ids):
             raise ValueError("atomic trade persistence contains duplicate event_id")
 
-        existing_events = (
-            sqlite_repo.list_trade_events(conn=conn)
-            if conn is not None
-            else sqlite_repo.list_trade_events()
+        existing_by_id = _trade_events_by_id(
+            sqlite_repo,
+            event_ids,
+            conn=conn,
         )
-        existing_by_id = {
-            str(item.get("event_id") or ""): item
-            for item in existing_events
-            if isinstance(item, dict) and str(item.get("event_id") or "")
-        }
         fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
         storage_events = [
@@ -3829,26 +3889,16 @@ def persist_trade_event_objects_atomically(
             )
             for event in storage_events
         ]
-        created_flags = [
-            (
-                sqlite_repo.upsert_trade_event(event, conn=conn)
-                if conn is not None
-                else sqlite_repo.upsert_trade_event(event)
-            )
-            for event in storage_events
-        ]
-        stored = (
-            sqlite_repo.list_trade_events(conn=conn)
-            if conn is not None
-            else sqlite_repo.list_trade_events()
-        )
-        projection = project_stored_trade_events_to_position_lots(stored)
-        ensure_projection_publishable(projection, operation="atomic trade event persistence")
-        lot_count = publish_full_position_projection(
+        runtime = run_position_projection_in_transaction(
             sqlite_repo,
-            projection.lots,
+            storage_events,
             conn=conn,
-        ).position_lot_count
+            mode=_projection_mode_for_events(
+                storage_events,
+                force_full=bool(case_update or allocation_rows),
+            ),
+        )
+        created_flags = runtime.created_flags
         notification_intent = _normal_close_notification_intent(
             storage_events
         )
@@ -3914,7 +3964,7 @@ def persist_trade_event_objects_atomically(
             for row in allocation_rows:
                 insert_allocation(row, conn=conn)
             sqlite_repo.assert_foreign_keys_clean(conn=conn)
-        diagnostics = projection_diagnostics_summary(projection.diagnostics)
+        diagnostics = projection_diagnostics_summary(runtime.diagnostics)
         return [
             LedgerWriteResult.from_payload(
                 {
@@ -3929,7 +3979,7 @@ def persist_trade_event_objects_atomically(
                         or None
                     ),
                     "created": bool(created),
-                    "position_lot_count": int(lot_count),
+                    "position_lot_count": int(runtime.position_lot_count),
                     **diagnostics,
                     **(
                         {
@@ -3956,10 +4006,15 @@ def persist_trade_event_objects_atomically(
     )
 
 
-def _events_for_storage(repo: Any, event: Any) -> list[Any]:
+def _events_for_storage(
+    repo: Any,
+    event: Any,
+    *,
+    conn: Any | None = None,
+) -> list[Any]:
     if hasattr(event, "event_type") and not hasattr(event, "position_effect"):
         if bool(getattr(event, "is_close", False)) and not getattr(event, "target_lot_id", None):
-            return _canonical_close_events_for_storage(repo, event)
+            return _canonical_close_events_for_storage(repo, event, conn=conn)
         return [event]
     if str(event.position_effect or "").strip().lower() != "close":
         return [event]
@@ -3977,7 +4032,12 @@ def _events_for_storage(repo: Any, event: Any) -> list[Any]:
         contracts_to_close=event.contracts,
     )
     try:
-        resolution = resolve_fifo_close_targets(repo, selector, source="stored_trade_close")
+        resolution = resolve_fifo_close_targets(
+            repo,
+            selector,
+            source="stored_trade_close",
+            conn=conn,
+        )
     except LotCloseResolutionError as exc:
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []
@@ -4017,7 +4077,12 @@ def _close_position_side(event: Any) -> str:
     return str(event.side or "").strip().lower()
 
 
-def _canonical_close_events_for_storage(repo: Any, event: TradeEvent) -> list[TradeEvent]:
+def _canonical_close_events_for_storage(
+    repo: Any,
+    event: TradeEvent,
+    *,
+    conn: Any | None = None,
+) -> list[TradeEvent]:
     selector = LotCloseSelector.from_values(
         broker=event.contract_key.broker,
         account=event.contract_key.account,
@@ -4029,7 +4094,12 @@ def _canonical_close_events_for_storage(repo: Any, event: TradeEvent) -> list[Tr
         contracts_to_close=event.contracts,
     )
     try:
-        resolution = resolve_fifo_close_targets(repo, selector, source="stored_canonical_trade_close")
+        resolution = resolve_fifo_close_targets(
+            repo,
+            selector,
+            source="stored_canonical_trade_close",
+            conn=conn,
+        )
     except LotCloseResolutionError as exc:
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []

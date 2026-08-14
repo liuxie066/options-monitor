@@ -18,12 +18,9 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.publisher import (
-    ensure_projection_publishable,
-    project_stored_trade_events_to_position_lots,
-)
-from src.application.ledger.position_projection_publication import (
-    publish_full_position_projection,
+from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.position_projection_runtime import (
+    run_position_projection_in_transaction,
 )
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
@@ -228,20 +225,19 @@ def _bootstrap_event_raw_fields(event: Any) -> dict[str, Any]:
 
 def materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: list[Any]) -> int:
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> int:
-        if conn is not None:
-            for event in events:
-                sqlite_repo.upsert_trade_event(event, conn=conn)
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
-            _raise_if_local_bootstrap_projection_failed(events, projection)
-            ensure_projection_publishable(projection, operation="ledger bootstrap projection")
-            publish_full_position_projection(sqlite_repo, projection.lots, conn=conn)
-        else:
-            for event in events:
-                sqlite_repo.upsert_trade_event(event)
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
-            _raise_if_local_bootstrap_projection_failed(events, projection)
-            ensure_projection_publishable(projection, operation="ledger bootstrap projection")
-            publish_full_position_projection(sqlite_repo, projection.lots)
+        if conn is None:
+            raise TypeError("ledger bootstrap requires SQLite transaction authority")
+        _raise_if_local_bootstrap_projection_failed(
+            events,
+            project_stored_trade_events_to_position_lots(events),
+        )
+        run_position_projection_in_transaction(
+            sqlite_repo,
+            events,
+            conn=conn,
+            mode="forced_full",
+            seed_checkpoint=True,
+        )
         return len(events)
 
     return int(
@@ -294,9 +290,20 @@ def load_option_positions_repo(
         repo.bootstrap_status = "skipped_existing_trade_events"
         repo.bootstrap_message = "trade_events already present"
         if repo.count_position_lots() == 0:
-            projection = project_stored_trade_events_to_position_lots(repo.list_trade_events())
-            ensure_projection_publishable(projection, operation="ledger startup projection")
-            publish_full_position_projection(repo, projection.lots)
+            def _recover(sqlite_repo: Any, conn: sqlite3.Connection | None) -> None:
+                if conn is None:
+                    raise TypeError("ledger startup recovery requires SQLite transaction authority")
+                run_position_projection_in_transaction(
+                    sqlite_repo,
+                    conn=conn,
+                    mode="forced_full",
+                )
+
+            with_sqlite_repo_transaction(
+                repo,
+                _recover,
+                require_projection_publication=True,
+            )
         return repo
 
     if repo.count_position_lots() > 0:

@@ -669,7 +669,7 @@ def test_full_writer_sources_use_shared_publication_and_no_full_delete() -> None
     for path in writers:
         source = (root / path).read_text(encoding="utf-8")
         assert "replace_position_lots(" not in source
-        assert "publish_full_position_projection" in source
+        assert "run_position_projection_in_transaction" in source
     repository_source = (root / "src/application/ledger/repository.py").read_text(encoding="utf-8")
     assert 'execute("DELETE FROM position_lots")' not in repository_source
     assert "DELETE FROM position_lots WHERE record_id = ?" in repository_source

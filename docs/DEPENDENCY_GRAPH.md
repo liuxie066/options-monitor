@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 916 (`src`: 492, `domain`: 75, `scripts`: 9, `tests`: 340)
-- Internal import edges: 5963 total, 2485 production/script edges excluding tests
+- Python files scanned: 917 (`src`: 492, `domain`: 75, `scripts`: 9, `tests`: 341)
+- Internal import edges: 5967 total, 2485 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|379| domain
+  application -->|380| domain
   application -->|4| domain_services
   application -->|131| infrastructure
   application -->|41| storage
@@ -45,7 +45,7 @@ flowchart LR
   scripts -->|13| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2599| application
+  tests -->|2603| application
   tests -->|421| domain
   tests -->|2| domain_services
   tests -->|167| infrastructure
@@ -58,7 +58,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 379 |
+| application | domain | 380 |
 | interfaces | application | 140 |
 | application | infrastructure | 131 |
 | application | storage | 41 |
@@ -77,7 +77,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2599 |
+| tests | application | 2603 |
 | tests | domain | 421 |
 | tests | interfaces | 218 |
 | tests | infrastructure | 167 |
@@ -95,7 +95,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application | 113 |
 | src.application | src.infrastructure | 93 |
 | src.application.ledger | domain.domain | 49 |
-| src.application.ledger | domain.domain.ledger | 36 |
+| src.application.ledger | domain.domain.ledger | 37 |
 | src.application | domain.storage | 32 |
 | src.application | domain.domain.engine | 26 |
 | src.application.trades | domain.domain | 25 |
