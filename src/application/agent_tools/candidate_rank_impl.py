@@ -11,6 +11,7 @@ from src.application.candidate_snapshot_manifest import (
     load_latest_candidate_snapshot_bundle,
 )
 from src.application.opening_candidate_snapshot import ranked_opening_candidates
+from src.application.runtime_paths import resolve_runtime_root
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
@@ -38,7 +39,10 @@ def _snapshot(
             message="account is required",
             hint="Pass the logical account; run_id is optional.",
         )
-    base = Path(payload.get("runtime_root") or repo_base()).resolve()
+    base = resolve_runtime_root(
+        repo_root=repo_base(),
+        runtime_root=payload.get("runtime_root"),
+    ).runtime_root
     try:
         if str(payload.get("run_id") or "").strip():
             bundle = load_candidate_snapshot_bundle(
