@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 
@@ -412,6 +413,44 @@ def test_source_commit_requires_clean_production_source(
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     assert _REAL_SOURCE_COMMIT() == expected
+
+
+def test_source_commit_accepts_clean_archived_release_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=origin, check=True)
+    (origin / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (origin / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    for name in ("domain", "src", "scripts"):
+        path = origin / name
+        path.mkdir()
+        (path / "example.py").write_text(f"NAME = {name!r}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=origin, check=True)
+    subprocess.run(["git", "tag", "v1.2.3"], cwd=origin, check=True)
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=origin,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    install = tmp_path / "install"
+    release = install / "releases" / "1.2.3"
+    release.parent.mkdir(parents=True)
+    shutil.copytree(origin, release, ignore=shutil.ignore_patterns(".git"))
+    cache_repo = install / "_cache" / "git" / "options-monitor.git"
+    cache_repo.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", "--mirror", str(origin), str(cache_repo)], check=True)
+
+    assert _REAL_SOURCE_COMMIT(release) == expected
+    (release / "src" / "example.py").write_text("NAME = 'drift'\n", encoding="utf-8")
+    assert _REAL_SOURCE_COMMIT(release) is None
 
 
 def test_read_only_size_guard_ignores_ephemeral_shm_resize_only() -> None:
