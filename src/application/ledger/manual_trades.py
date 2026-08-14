@@ -24,9 +24,8 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.publisher import (
-    ensure_projection_publishable,
-    project_stored_trade_events_to_position_lots,
+from src.application.ledger.position_projection_runtime import (
+    run_position_projection_in_transaction,
 )
 from src.application.ledger.results import LedgerWriteResult
 from src.application.ledger.targets import assert_position_lot_target_matches_current_state
@@ -119,12 +118,18 @@ def assert_manual_request_event_matches(
     request_id: str,
     intent_hash: str,
 ) -> None:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    if not callable(list_trade_events):
-        return
-    for item in list_trade_events():
-        if not isinstance(item, dict) or str(item.get("event_id") or "").strip() != event_id:
-            continue
+    candidate = getattr(repo, "primary_repo", repo)
+    getter = getattr(candidate, "get_trade_events_by_ids", None)
+    rows = (
+        getter((event_id,))
+        if callable(getter)
+        else [
+            item
+            for item in candidate.list_trade_events()
+            if str(item.get("event_id") or "").strip() == event_id
+        ]
+    )
+    for item in rows:
         raw = item.get("raw_payload")
         payload = raw if isinstance(raw, dict) else {}
         if (
@@ -142,25 +147,28 @@ def _stable_manual_event_id(prefix: str, payload: dict[str, Any]) -> str:
 
 
 def _existing_trade_event_result(repo: Any, *, event_id: str, record_id: str | None = None) -> LedgerWriteResult | None:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    if not callable(list_trade_events):
+    candidate = getattr(repo, "primary_repo", repo)
+    getter = getattr(candidate, "get_trade_events_by_ids", None)
+    rows = (
+        getter((event_id,))
+        if callable(getter)
+        else [
+            item
+            for item in candidate.list_trade_events()
+            if str(item.get("event_id") or "").strip() == str(event_id).strip()
+        ]
+    )
+    if not rows:
         return None
-    raw_events = list_trade_events()
-    events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-    if not any(str(item.get("event_id") or "").strip() == str(event_id).strip() for item in events):
-        return None
-    list_position_lots = getattr(repo, "list_position_lots", None)
-    raw_position_lots = list_position_lots() if callable(list_position_lots) else []
-    current_lot_count = len(raw_position_lots) if isinstance(raw_position_lots, list) else 0
-    projection = project_stored_trade_events_to_position_lots(events)
-    result = {
-        "event_id": str(event_id),
-        "record_id": str(record_id).strip() if record_id else None,
-        "created": False,
-        "position_lot_count": int(current_lot_count),
-    }
-    result.update(projection_diagnostics_summary(projection.diagnostics))
-    return LedgerWriteResult.from_payload(result)
+    return LedgerWriteResult.from_payload(
+        {
+            "event_id": str(event_id),
+            "record_id": str(record_id).strip() if record_id else None,
+            "created": False,
+            "position_lot_count": int(candidate.count_position_lots()),
+            **projection_diagnostics_summary(()),
+        }
+    )
 
 
 def _manual_close_event_id(
@@ -612,32 +620,41 @@ def persist_manual_adjust_events(
         raise ValueError("manual adjustment batch requires at least one adjustment")
 
     def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
-        current_events = (
-            sqlite_repo.list_trade_events(conn=conn)
-            if conn is not None
-            else sqlite_repo.list_trade_events()
-        )
-        current_projection = project_stored_trade_events_to_position_lots(current_events)
-        ensure_projection_publishable(
-            current_projection,
-            operation="manual adjustment precondition projection",
+        if conn is None:
+            raise TypeError("manual adjustment batch requires SQLite transaction authority")
+        current_rows = sqlite_repo.get_position_lots_by_ids(
+            tuple(seen_record_ids),
+            conn=conn,
         )
         current_by_record_id = {
-            str(lot.record_id or "").strip(): dict(lot.fields)
-            for lot in current_projection.lots
-            if str(lot.record_id or "").strip()
+            str(row.get("record_id") or "").strip(): dict(row.get("fields") or {})
+            for row in current_rows
+            if str(row.get("record_id") or "").strip()
         }
         desired_group_ids = {
             str(item.get("strategy_group_id") or "").strip()
             for _record_id, _fields, item in validated
             if str(item.get("strategy_group_id") or "").strip()
         }
-        for record_id, fields in current_by_record_id.items():
-            if record_id in seen_record_ids:
-                continue
-            if str(fields.get("strategy_group_id") or "").strip() in desired_group_ids:
+        if desired_group_ids:
+            group_placeholders = ",".join("?" for _item in desired_group_ids)
+            target_placeholders = ",".join("?" for _item in seen_record_ids)
+            collision = conn.execute(
+                f"""
+                SELECT record_id
+                FROM position_lots
+                WHERE json_extract(fields_json, '$.strategy_group_id')
+                      IN ({group_placeholders})
+                  AND record_id NOT IN ({target_placeholders})
+                ORDER BY record_id ASC
+                LIMIT 1
+                """,
+                (*sorted(desired_group_ids), *sorted(seen_record_ids)),
+            ).fetchone()
+            if collision is not None:
                 raise ValueError(
-                    f"strategy_group_id is already assigned to another position lot: record_id={record_id}"
+                    "strategy_group_id is already assigned to another "
+                    f"position lot: record_id={collision['record_id']}"
                 )
 
         prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
@@ -654,33 +671,32 @@ def persist_manual_adjust_events(
             )
             prepared.append((record_id, event, patch_contract))
 
-        created_flags: list[bool] = []
-        for _record_id, event, _patch_contract in prepared:
-            created_flags.append(
-                bool(sqlite_repo.upsert_trade_event(event, conn=conn))
-                if conn is not None
-                else bool(sqlite_repo.upsert_trade_event(event))
-            )
-        events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
-        projection = project_stored_trade_events_to_position_lots(events)
-        ensure_projection_publishable(projection, operation="manual adjustment projection")
-        lot_count = (
-            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
-            if conn is not None
-            else sqlite_repo.replace_position_lots(projection.lots)
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            [event for _record_id, event, _patch_contract in prepared],
+            conn=conn,
+            mode="fast_if_safe",
         )
-        diagnostics = projection_diagnostics_summary(projection.diagnostics)
+        diagnostics = projection_diagnostics_summary(runtime.diagnostics)
         out: list[LedgerWriteResult] = []
-        for (record_id, event, patch_contract), created in zip(prepared, created_flags, strict=True):
+        for (record_id, event, patch_contract), created in zip(
+            prepared,
+            runtime.created_flags,
+            strict=True,
+        ):
             payload = {
                 "event_id": event.event_id,
                 "record_id": record_id,
                 "created": created,
-                "position_lot_count": int(lot_count),
+                "position_lot_count": int(runtime.position_lot_count),
                 **diagnostics,
                 "patch": patch_contract.to_dict(),
             }
             out.append(LedgerWriteResult.from_payload(payload))
         return out
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )

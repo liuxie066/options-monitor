@@ -74,6 +74,47 @@ class TradeEvent:
     def is_close(self) -> bool:
         return self.event_type in CLOSE_EVENT_TYPES
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TradeEvent":
+        if not isinstance(payload, dict):
+            raise TypeError("trade event payload must be an object")
+        contract_payload = payload.get("contract_key")
+        if not isinstance(contract_payload, dict):
+            raise ValueError("trade event contract_key must be an object")
+        return cls(
+            event_id=payload.get("event_id"),
+            event_type=payload.get("event_type"),
+            event_time_ms=payload.get("event_time_ms"),
+            contract_key=ContractKey.from_values(
+                broker=contract_payload.get("broker"),
+                account=contract_payload.get("account"),
+                underlying_symbol=(
+                    contract_payload.get("underlying_symbol")
+                    or contract_payload.get("symbol")
+                ),
+                option_type=contract_payload.get("option_type"),
+                position_side=(
+                    contract_payload.get("position_side")
+                    or contract_payload.get("side")
+                ),
+                strike=contract_payload.get("strike"),
+                expiration_ymd=(
+                    contract_payload.get("expiration_ymd")
+                    or contract_payload.get("expiration")
+                ),
+            ),
+            contracts=payload.get("contracts"),
+            price=payload.get("price"),
+            currency=payload.get("currency"),
+            source=payload.get("source"),
+            multiplier=payload.get("multiplier", 100.0),
+            fees=payload.get("fees", 0.0),
+            target_lot_id=payload.get("target_lot_id"),
+            target_event_id=payload.get("target_event_id"),
+            lot_id=payload.get("lot_id"),
+            raw_payload=payload.get("raw_payload") or {},
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,

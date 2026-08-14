@@ -1050,7 +1050,7 @@ def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path
     assert {item["raw_payload"]["source_deal_id"] for item in events} == {"same-deal-id"}
 
 
-def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_path: Path) -> None:
+def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill(tmp_path: Path) -> None:
     import sqlite3
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -1097,7 +1097,7 @@ def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_pa
     lot = repo.list_position_lots()[0]
     assert lot["fields"]["expiration"] == 1781827200000
     assert lot["fields"]["strike"] == 100.0
-    assert lot["fields"]["multiplier"] == 100
+    assert "multiplier" not in lot["fields"]
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
         cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()}
@@ -1107,9 +1107,20 @@ def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_pa
         ).fetchone()
     assert {"expiration", "strike", "multiplier"} <= cols
     assert row is not None
-    assert row["expiration"] == 1781827200000
-    assert row["strike"] == 100.0
-    assert row["multiplier"] == 100.0
+    assert row["expiration"] is None
+    assert row["strike"] is None
+    assert row["multiplier"] is None
+
+    assert repo.backfill_position_lot_contract_columns() == 1
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        migrated = conn.execute(
+            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
+            ("lot_legacy_1",),
+        ).fetchone()
+    assert migrated is not None
+    assert migrated["expiration"] == 1781827200000
+    assert migrated["strike"] == 100.0
+    assert migrated["multiplier"] == 100.0
 
 
 def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:

@@ -157,6 +157,106 @@ def _profile_artifact(
     return payload
 
 
+def _passing_phase_gate_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
+    distribution = module._timing_distribution([100] * 30)
+
+    def measurement(*, checkpoint_delta: int = 0) -> dict[str, Any]:
+        return {
+            "wall_time_ns": copy.deepcopy(distribution),
+            "cpu_time_ns": copy.deepcopy(distribution),
+            "call_count_max": {
+                "full_prefix_reader_calls": 0,
+                "full_lot_list_calls": 0,
+                "candidate_event_ids_requested": 1,
+                "candidate_event_ids_unique": 1,
+                "candidate_event_id_max_batch": 1,
+            },
+            "rows_returned_max": {"get_trade_events_by_ids": 0},
+            "checkpoint_row_deltas": [checkpoint_delta],
+            "checkpoint_state_byte_deltas": [1_000 if checkpoint_delta else 0],
+            "checkpoint_after_max": {
+                "row_count": 2 if checkpoint_delta else 1,
+                "state_bytes": 2_000 if checkpoint_delta else 1_000,
+                "one_state_bytes": 1_000,
+            },
+            "sqlite_growth_bytes": copy.deepcopy(distribution),
+        }
+
+    comparable = []
+    allocation_comparable = []
+    for key in ("single_combo_metadata_close", "atomic_batch_combo_metadata_adjust"):
+        fast = measurement()
+        comparable.append(
+            {
+                "key": key,
+                "forced_full": measurement(),
+                "fast": fast,
+                "parity": {"exact": True},
+                "improvement": {"wall_fraction": 0.9, "cpu_fraction": 0.9},
+            }
+        )
+        allocation_comparable.append(
+            {"key": key, "fast": {"component": {"python_peak_bytes": 1_024}}}
+        )
+    force_full = measurement()
+    timing = {
+        "schema_version": "data_storage_projection_phase3a_timing.v1",
+        "fixture_sha256": "f" * 64,
+        "setup_included": False,
+        "comparable_facades": comparable,
+        "force_full_facades": [
+            {
+                "key": "special_combo_identity_membership",
+                "reason": "immutable_identity_and_membership_transaction",
+                "measurement": force_full,
+            }
+        ],
+        "checkpoint": {
+            "no_rotation": measurement(),
+            "rotation_100_events": measurement(checkpoint_delta=1),
+            "rotation_1_mib": measurement(checkpoint_delta=1),
+        },
+        "current_reads": {
+            "current": measurement(),
+            "current_state_10x": measurement(),
+        },
+        "fingerprint_only": {
+            "current": {**measurement(), "rows": 100, "bytes": 1_000},
+            "retained_lots_10x": {
+                **measurement(),
+                "rows": 5_000,
+                "bytes": 50_000,
+                "guarantee": False,
+                "capacity_warning": None,
+            },
+        },
+        "invalidation_lookup": measurement(),
+        "loaded_projector_fingerprint_startup": {
+            **measurement(),
+            "output": {"matches_loaded": True},
+        },
+    }
+    allocation = {
+        "schema_version": "data_storage_projection_phase3a_allocation_profile.v1",
+        "fixture_sha256": "f" * 64,
+        "setup_included": False,
+        "comparable_facades": allocation_comparable,
+        "checkpoint": {
+            "rotation_100_events": {"component": {"python_peak_bytes": 1_024}},
+            "rotation_1_mib": {"component": {"python_peak_bytes": 1_024}},
+        },
+        "current_reads": {
+            "current": {"component": {"python_peak_bytes": 1_024}},
+            "current_state_10x": {"component": {"python_peak_bytes": 1_024}},
+        },
+        "fingerprint_only": {"component": {"python_peak_bytes": 1_024}},
+        "loaded_projector_fingerprint_startup": {
+            "component": {"python_peak_bytes": 1_024}
+        },
+    }
+    return timing, allocation
+
+
 def _fake_workers(
     *,
     repo_root: Path,
@@ -541,10 +641,10 @@ def test_reference_host_gate_requires_exact_fingerprint_and_both_history_subcase
     assert mismatch["components"]["existing_full_replay_writer"]["status"] == "not_comparable"
     assert matching["components"]["existing_full_replay_writer"]["status"] == "pass"
     assert matching["components"]["projector_only"]["status"] == "diagnostic_only"
-    assert matching["components"]["lot_diff_publication"]["status"] == "not_implemented"
+    assert matching["components"]["lot_diff_publication"]["status"] == "not_evaluable"
     assert matching["phase_3a_combined"] == {
         "status": "not_ready",
-        "reason": "lot_diff_publication_not_implemented",
+        "reason": "scenario_not_selected",
     }
 
 
@@ -814,7 +914,7 @@ def test_host_fingerprint_binds_cpu_and_hardware_model(
     assert first["fingerprint"] != second["fingerprint"]
 
 
-def test_parent_publishes_all_five_artifacts_atomically_and_labels_smoke(
+def test_parent_publishes_all_six_artifacts_atomically_and_labels_smoke(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -835,10 +935,151 @@ def test_parent_publishes_all_five_artifacts_atomically_and_labels_smoke(
     )
 
     assert result["run_label"] == "non_acceptance_smoke"
+    assert len(module.ARTIFACT_FILENAMES) == 6
     assert {path.name for path in output.iterdir()} == set(module.ARTIFACT_FILENAMES)
     decision = json.loads((output / "decision.json").read_text(encoding="utf-8"))
-    assert decision["components"]["lot_diff_publication"]["status"] == "not_implemented"
+    assert decision["components"]["lot_diff_publication"]["status"] == "not_evaluable"
     assert decision["phase_3a_combined"]["status"] == "not_ready"
+    acceptance = json.loads(
+        (output / "phase-3a-acceptance.json").read_text(encoding="utf-8")
+    )
+    assert acceptance["status"] == "fail"
+    assert acceptance["readiness"] == "not_ready"
+
+
+def test_phase_3a_gate_passes_only_complete_reference_evidence() -> None:
+    timing, allocation = _passing_phase_gate_inputs()
+
+    result = module._phase_3a_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="reference_host_match",
+    )
+
+    assert result["lot_diff_publication"]["status"] == "pass"
+    assert result["checkpoint_tail"]["status"] == "pass"
+    assert result["combined"] == {
+        "status": "ready",
+        "reason": "all_phase_3a_gates_pass",
+    }
+    assert result["evidence"]["retained_lots_10x_guarantee"] is False
+
+
+def test_phase_3a_gate_does_not_hide_non_checkpoint_failure() -> None:
+    timing, allocation = _passing_phase_gate_inputs()
+    timing["comparable_facades"][0]["fast"]["wall_time_ns"] = (
+        module._timing_distribution([module.PHASE_3A_WALL_LIMIT_NS + 1] * 30)
+    )
+
+    result = module._phase_3a_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="reference_host_match",
+    )
+
+    assert result["lot_diff_publication"]["status"] == "fail"
+    assert result["checkpoint_tail"]["status"] == "pass"
+    assert result["combined"]["status"] == "not_ready"
+
+
+def test_phase_3a_candidate_gate_counts_unique_ids_not_repeat_calls() -> None:
+    timing, allocation = _passing_phase_gate_inputs()
+    calls = timing["comparable_facades"][0]["fast"]["call_count_max"]
+    calls["candidate_event_ids_requested"] = 4
+
+    repeated_same_id = module._phase_3a_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="reference_host_match",
+    )
+    assert repeated_same_id["lot_diff_publication"]["status"] == "pass"
+
+    calls["candidate_event_ids_unique"] = 2
+    unbounded = module._phase_3a_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="reference_host_match",
+    )
+    assert "single_combo_metadata_close:candidate_id_lookup_unbounded" in unbounded[
+        "lot_diff_publication"
+    ]["failures"]
+
+
+def test_phase_3a_gate_rejects_checkpoint_write_between_rotations() -> None:
+    timing, allocation = _passing_phase_gate_inputs()
+    timing["checkpoint"]["no_rotation"]["checkpoint_row_deltas"] = [1]
+
+    result = module._phase_3a_gate(
+        timing=timing,
+        allocation=allocation,
+        run_label="acceptance_5_warmups_30_repetitions",
+        comparable=True,
+        comparison_reason="reference_host_match",
+    )
+
+    assert result["lot_diff_publication"]["status"] == "pass"
+    assert result["checkpoint_tail"]["status"] == "fail"
+    assert "checkpoint:no_rotation_row_write" in result["checkpoint_tail"]["failures"]
+
+
+def test_phase_3a_worker_validation_requires_exact_5_30_samples() -> None:
+    timing, allocation = _passing_phase_gate_inputs()
+    cpu = {
+        "schema_version": "data_storage_projection_phase3a_cpu_profile.v1",
+        "fixture_sha256": "f" * 64,
+        "setup_included": False,
+    }
+    fixture = {"phase_3a": {"fixture_sha256": "f" * 64}}
+
+    module._validate_phase_3a_worker_artifacts(
+        fixture_manifest=fixture,
+        timing={"phase_3a": timing},
+        cpu_profile={"phase_3a": cpu},
+        allocation_profile={"phase_3a": allocation},
+        repetitions=30,
+    )
+
+    timing["fingerprint_only"]["current"]["wall_time_ns"] = (
+        module._timing_distribution([100] * 29)
+    )
+    with pytest.raises(RuntimeError, match="sample count"):
+        module._validate_phase_3a_worker_artifacts(
+            fixture_manifest=fixture,
+            timing={"phase_3a": timing},
+            cpu_profile={"phase_3a": cpu},
+            allocation_profile={"phase_3a": allocation},
+            repetitions=30,
+        )
+
+
+def test_phase_3a_pair_uses_independent_identical_database_copies() -> None:
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        result = module._phase_3a_pair(
+            base,
+            operation="single_combo_metadata_close",
+            warmups=0,
+            repetitions=1,
+        )
+
+    assert result["fixture_reset"] == "independent_copies_same_base_sqlite"
+    assert result["forced_full"]["base_sqlite_sha256"] == result["fast"][
+        "base_sqlite_sha256"
+    ]
+    assert result["parity"]["exact"] is True
 
 
 def test_parent_failure_leaves_absent_output_unmodified(tmp_path: Path) -> None:

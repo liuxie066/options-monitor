@@ -4,10 +4,14 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast
 
 from domain.domain.ledger.position_fields import effective_expiration, now_ms
+from domain.domain.ledger.position_fingerprint import (
+    ordered_position_lots_fingerprint,
+)
 from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
 from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
@@ -18,6 +22,51 @@ from src.infrastructure.private_storage import (
     private_path,
     secure_sqlite_artifacts,
 )
+
+
+POSITION_PROJECTION_SCHEMA = "position_projection.v1"
+
+TRADE_EVENTS_COLUMN_CLASSIFICATION = {
+    "event_id": "integrity/identity",
+    "account": "projection-affecting",
+    "event_json": "projection-affecting",
+    "trade_time_ms": "projection-affecting",
+    "created_at_ms": "metadata-only",
+    "updated_at_ms": "metadata-only",
+}
+
+POSITION_LOTS_COLUMN_CLASSIFICATION = {
+    "record_id": "integrity/identity",
+    "account": "projection-affecting",
+    "fields_json": "projection-affecting",
+    "source_event_id": "projection-affecting",
+    "expiration": "projection-affecting",
+    "strike": "projection-affecting",
+    "multiplier": "projection-affecting",
+    "updated_at_ms": "metadata-only",
+}
+
+
+@dataclass(frozen=True)
+class PositionLotDiff:
+    added: int
+    changed: int
+    removed: int
+    unchanged: int
+    accounts: tuple[str, ...]
+    touched_accounts: tuple[str, ...]
+
+    @property
+    def lot_count(self) -> int:
+        return self.added + self.changed + self.unchanged
+
+
+@dataclass(frozen=True)
+class PositionProjectionAccountSnapshot:
+    account: str
+    fingerprint: str
+    lot_count: int
+    records: tuple[dict[str, Any], ...] = ()
 
 
 class OptionPositionsReadRepo(Protocol):
@@ -36,6 +85,27 @@ class OptionPositionsEventWriteRepo(OptionPositionsEventReadRepo, Protocol):
         *,
         conn: sqlite3.Connection | None = None,
     ) -> int: ...
+
+
+class PositionProjectionPublicationRepo(OptionPositionsEventWriteRepo, Protocol):
+    def apply_position_lot_diff(
+        self,
+        records: Sequence[PositionLotRecord],
+        *,
+        remove_missing: bool = True,
+        conn: sqlite3.Connection | None = None,
+    ) -> PositionLotDiff: ...
+    def publish_full_position_projection_heads(
+        self,
+        *,
+        implementation_fingerprint: str,
+        known_accounts: Sequence[str],
+        changed_accounts: Sequence[str],
+        full_verified: bool = True,
+        publish_source_implementation: bool = True,
+        readiness_prevalidated: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[int, bool, str | None]: ...
 
 
 class AssignedStockEventRepo(Protocol):
@@ -88,6 +158,59 @@ def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, 
     return expiration_ms, strike, multiplier
 
 
+def _position_lot_storage_values(
+    record: PositionLotRecord,
+) -> tuple[str, str, str, str | None, int | None, float | None, float | None]:
+    if not isinstance(record, PositionLotRecord):
+        raise TypeError("replace_position_lots requires PositionLotRecord records")
+    record_id = record.record_id
+    fields = record.fields
+    _validate_position_lot_fields(record_id=record_id, fields=fields)
+    account = str(fields.get("account") or "").strip()
+    if not account:
+        raise ValueError(f"position lot account is required: record_id={record_id}")
+    if account != account.lower():
+        raise ValueError(f"position lot account must be lowercase: record_id={record_id}")
+    fields_json = json.dumps(
+        fields,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
+    source_event_id = str(fields.get("source_event_id")) if fields.get("source_event_id") else None
+    return (
+        record_id,
+        account,
+        fields_json,
+        source_event_id,
+        int(expiration_ms) if expiration_ms is not None else None,
+        float(strike) if strike is not None else None,
+        float(multiplier) if multiplier is not None else None,
+    )
+
+
+def _canonical_existing_fields_json(raw: Any) -> str | None:
+    try:
+        fields = json.loads(str(raw or "{}"))
+        if not isinstance(fields, dict):
+            return None
+        return json.dumps(
+            fields,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _storage_scalar_matches(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(float(left) - float(right)) < 1e-9
+
+
 def _same_lifecycle_evidence_source(existing_raw_json: Any, payload: dict[str, Any]) -> bool:
     try:
         existing = json.loads(str(existing_raw_json or "{}"))
@@ -105,6 +228,493 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _create_index_if_table_empty(
+    conn: sqlite3.Connection,
+    *,
+    index_name: str,
+    table: str,
+    create_sql: str,
+) -> bool:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (index_name,),
+    ).fetchone()
+    if exists is not None:
+        return True
+    populated = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+    if populated is not None:
+        return False
+    conn.execute(create_sql)
+    return True
+
+
+def _projection_schema_cookie(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA schema_version").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _position_projection_column_contract(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    for table, expected in (
+        ("trade_events", TRADE_EVENTS_COLUMN_CLASSIFICATION),
+        ("position_lots", POSITION_LOTS_COLUMN_CLASSIFICATION),
+    ):
+        actual = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        out[table] = {
+            "missing": tuple(sorted(set(expected) - actual)),
+            "unclassified": tuple(sorted(actual - set(expected))),
+        }
+    return out
+
+
+def _position_projection_column_contract_is_closed(
+    conn: sqlite3.Connection,
+) -> bool:
+    return all(
+        not details["missing"] and not details["unclassified"]
+        for details in _position_projection_column_contract(conn).values()
+    )
+
+
+def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "trade_events", "account", "TEXT")
+    _add_column_if_missing(conn, "position_lots", "account", "TEXT")
+
+    _create_index_if_table_empty(
+        conn,
+        index_name="idx_trade_events_account_time",
+        table="trade_events",
+        create_sql=("CREATE INDEX idx_trade_events_account_time ON trade_events(account, trade_time_ms, event_id)"),
+    )
+    _create_index_if_table_empty(
+        conn,
+        index_name="idx_position_lots_account_expiration",
+        table="position_lots",
+        create_sql=(
+            "CREATE INDEX idx_position_lots_account_expiration ON position_lots(account, expiration, record_id)"
+        ),
+    )
+    _create_index_if_table_empty(
+        conn,
+        index_name="idx_position_lots_account_record",
+        table="position_lots",
+        create_sql=("CREATE INDEX idx_position_lots_account_record ON position_lots(account, record_id)"),
+    )
+
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS position_projection_source_state (
+          singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+          source_generation INTEGER NOT NULL DEFAULT 0,
+          projector_schema TEXT NOT NULL DEFAULT '{POSITION_PROJECTION_SCHEMA}',
+          projector_implementation_fingerprint TEXT,
+          sqlite_schema_cookie INTEGER,
+          checkpoint_mode TEXT NOT NULL DEFAULT 'disabled'
+            CHECK(checkpoint_mode IN ('disabled', 'enabled', 'untrusted')),
+          last_full_verified_source_generation INTEGER,
+          updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS position_projection_heads (
+          account TEXT PRIMARY KEY
+            CHECK(account != '' AND account = lower(account)),
+          lots_generation INTEGER NOT NULL DEFAULT 0,
+          built_source_generation INTEGER,
+          built_lots_generation INTEGER,
+          projection_fingerprint TEXT,
+          lot_count INTEGER NOT NULL DEFAULT 0 CHECK(lot_count >= 0),
+          projector_schema TEXT NOT NULL DEFAULT '{POSITION_PROJECTION_SCHEMA}',
+          projector_implementation_fingerprint TEXT,
+          status TEXT NOT NULL DEFAULT 'uninitialized'
+            CHECK(status IN ('uninitialized', 'trusted', 'untrusted')),
+          updated_at_ms INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_projection_checkpoints (
+          checkpoint_id TEXT PRIMARY KEY,
+          projector_schema TEXT NOT NULL,
+          projector_implementation_fingerprint TEXT NOT NULL,
+          prefix_event_count INTEGER NOT NULL CHECK(prefix_event_count >= 0),
+          prefix_end_trade_time_ms INTEGER NOT NULL CHECK(prefix_end_trade_time_ms >= 0),
+          prefix_end_event_id TEXT NOT NULL,
+          prefix_chain_sha256 TEXT NOT NULL,
+          source_generation INTEGER NOT NULL CHECK(source_generation >= 0),
+          sqlite_schema_cookie INTEGER NOT NULL CHECK(sqlite_schema_cookie >= 0),
+          accumulator_json BLOB NOT NULL,
+          accumulator_sha256 TEXT NOT NULL,
+          diagnostic_count INTEGER NOT NULL CHECK(diagnostic_count = 0),
+          diagnostic_sha256 TEXT NOT NULL,
+          state_bytes INTEGER NOT NULL CHECK(state_bytes > 0),
+          trust_status TEXT NOT NULL CHECK(trust_status IN ('trusted', 'invalid')),
+          verification_kind TEXT NOT NULL
+            CHECK(verification_kind IN ('full_oracle', 'derived')),
+          parent_checkpoint_id TEXT,
+          created_at_ms INTEGER NOT NULL,
+          verified_at_ms INTEGER NOT NULL,
+          invalidated_at_ms INTEGER,
+          invalidation_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_position_projection_checkpoints_selection
+        ON position_projection_checkpoints(
+          trust_status, prefix_event_count DESC, created_at_ms DESC,
+          checkpoint_id DESC
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO position_projection_source_state (
+          singleton_id, source_generation, projector_schema,
+          projector_implementation_fingerprint, sqlite_schema_cookie,
+          checkpoint_mode, last_full_verified_source_generation, updated_at_ms
+        ) VALUES (1, 0, ?, NULL, ?, 'disabled', NULL, ?)
+        """,
+        (POSITION_PROJECTION_SCHEMA, _projection_schema_cookie(conn), int(now_ms())),
+    )
+
+    event_new_account = (
+        "coalesce(nullif(trim(CAST(json_extract(NEW.event_json, "
+        "'$.contract_key.account') AS TEXT)), ''), "
+        "trim(CAST(json_extract(NEW.event_json, '$.account') AS TEXT)), '')"
+    )
+    event_old_account = (
+        "coalesce(nullif(trim(CAST(json_extract(OLD.event_json, "
+        "'$.contract_key.account') AS TEXT)), ''), "
+        "trim(CAST(json_extract(OLD.event_json, '$.account') AS TEXT)), '')"
+    )
+    event_new_type = (
+        "coalesce(lower(trim(CAST(json_extract(NEW.event_json, "
+        "'$.event_type') AS TEXT))), '')"
+    )
+    lot_new_account = "coalesce(trim(CAST(json_extract(NEW.fields_json, '$.account') AS TEXT)), '')"
+    lot_old_account = "coalesce(trim(CAST(json_extract(OLD.fields_json, '$.account') AS TEXT)), '')"
+    effective_new_lot_account = f"coalesce(NEW.account, {lot_new_account})"
+    effective_old_lot_account = f"coalesce(OLD.account, {lot_old_account})"
+
+    # S3 changes source triggers from generation-only to generation plus bounded
+    # checkpoint invalidation. Replace an S1 body once; reopening an S3 database
+    # must not churn SQLite's schema cookie.
+    for trigger_name in (
+        "trg_trade_events_source_insert",
+        "trg_trade_events_source_update",
+        "trg_trade_events_source_delete",
+    ):
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if row is not None and "position_projection_checkpoints" not in str(
+            row["sql"] or ""
+        ):
+            conn.execute(f"DROP TRIGGER {trigger_name}")
+
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_account_insert_guard
+        BEFORE INSERT ON trade_events
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.event_json) = 0 THEN RAISE(ABORT, 'invalid trade event JSON')
+            WHEN {event_new_account} != '' AND {event_new_account} != lower({event_new_account})
+              THEN RAISE(ABORT, 'trade event account must be lowercase')
+            WHEN NEW.account IS NOT NULL
+              AND (
+                NEW.account = ''
+                OR NEW.account != lower(NEW.account)
+                OR {event_new_account} = ''
+                OR NEW.account != {event_new_account}
+              )
+              THEN RAISE(ABORT, 'trade event account conflicts with event JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_account_update_guard
+        BEFORE UPDATE OF account, event_json ON trade_events
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.event_json) = 0 THEN RAISE(ABORT, 'invalid trade event JSON')
+            WHEN {event_new_account} != '' AND {event_new_account} != lower({event_new_account})
+              THEN RAISE(ABORT, 'trade event account must be lowercase')
+            WHEN NEW.account IS NOT NULL
+              AND (
+                NEW.account = ''
+                OR NEW.account != lower(NEW.account)
+                OR {event_new_account} = ''
+                OR NEW.account != {event_new_account}
+              )
+              THEN RAISE(ABORT, 'trade event account conflicts with event JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_source_insert
+        AFTER INSERT ON trade_events
+        BEGIN
+          UPDATE position_projection_source_state
+          SET source_generation = source_generation + 1,
+              updated_at_ms = NEW.updated_at_ms
+          WHERE singleton_id = 1;
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          )
+          SELECT {event_new_account}, 0, '{POSITION_PROJECTION_SCHEMA}',
+                 'uninitialized', NEW.updated_at_ms
+          WHERE {event_new_account} != ''
+            AND {event_new_account} = lower({event_new_account})
+          ON CONFLICT(account) DO NOTHING;
+          UPDATE position_projection_checkpoints
+          SET trust_status = 'invalid',
+              invalidated_at_ms = NEW.updated_at_ms,
+              invalidation_reason = CASE
+                WHEN {event_new_type} IN ('void', 'repair')
+                  THEN 'control_event_insert'
+                WHEN {event_new_type} NOT IN (
+                  'open', 'close', 'expire_close', 'assignment', 'exercise',
+                  'adjust', 'verification'
+                )
+                  THEN 'unclassified_event_insert'
+                ELSE 'prefix_intersection_insert'
+              END
+          WHERE trust_status = 'trusted'
+            AND (
+              {event_new_type} NOT IN (
+                'open', 'close', 'expire_close', 'assignment', 'exercise',
+                'adjust', 'verification'
+              )
+              OR prefix_end_trade_time_ms > NEW.trade_time_ms
+              OR (
+                prefix_end_trade_time_ms = NEW.trade_time_ms
+                AND prefix_end_event_id >= NEW.event_id
+              )
+            );
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_source_update
+        AFTER UPDATE OF event_id, account, event_json, trade_time_ms ON trade_events
+        WHEN OLD.event_id IS NOT NEW.event_id
+          OR OLD.account IS NOT NEW.account
+          OR OLD.event_json IS NOT NEW.event_json
+          OR OLD.trade_time_ms IS NOT NEW.trade_time_ms
+        BEGIN
+          UPDATE position_projection_source_state
+          SET source_generation = source_generation + 1,
+              updated_at_ms = NEW.updated_at_ms
+          WHERE singleton_id = 1;
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          )
+          SELECT {event_old_account}, 0, '{POSITION_PROJECTION_SCHEMA}',
+                 'uninitialized', NEW.updated_at_ms
+          WHERE {event_old_account} != ''
+            AND {event_old_account} = lower({event_old_account})
+          ON CONFLICT(account) DO NOTHING;
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          )
+          SELECT {event_new_account}, 0, '{POSITION_PROJECTION_SCHEMA}',
+                 'uninitialized', NEW.updated_at_ms
+          WHERE {event_new_account} != ''
+            AND {event_new_account} = lower({event_new_account})
+          ON CONFLICT(account) DO NOTHING;
+          UPDATE position_projection_checkpoints
+          SET trust_status = 'invalid',
+              invalidated_at_ms = NEW.updated_at_ms,
+              invalidation_reason = 'event_update'
+          WHERE trust_status = 'trusted';
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_source_delete
+        AFTER DELETE ON trade_events
+        BEGIN
+          UPDATE position_projection_source_state
+          SET source_generation = source_generation + 1,
+              updated_at_ms = OLD.updated_at_ms
+          WHERE singleton_id = 1;
+          UPDATE position_projection_checkpoints
+          SET trust_status = 'invalid',
+              invalidated_at_ms = OLD.updated_at_ms,
+              invalidation_reason = 'event_delete'
+          WHERE trust_status = 'trusted';
+        END
+        """
+    )
+
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_account_insert_guard
+        BEFORE INSERT ON position_lots
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.fields_json) = 0 THEN RAISE(ABORT, 'invalid position lot JSON')
+            WHEN {lot_new_account} = '' THEN RAISE(ABORT, 'position lot account is required')
+            WHEN {lot_new_account} != lower({lot_new_account})
+              THEN RAISE(ABORT, 'position lot account must be lowercase')
+            WHEN NEW.account IS NOT NULL AND NEW.account != {lot_new_account}
+              THEN RAISE(ABORT, 'position lot account conflicts with fields JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_account_update_guard
+        BEFORE UPDATE OF account, fields_json ON position_lots
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.fields_json) = 0 THEN RAISE(ABORT, 'invalid position lot JSON')
+            WHEN {lot_new_account} = '' THEN RAISE(ABORT, 'position lot account is required')
+            WHEN {lot_new_account} != lower({lot_new_account})
+              THEN RAISE(ABORT, 'position lot account must be lowercase')
+            WHEN NEW.account IS NOT NULL AND NEW.account != {lot_new_account}
+              THEN RAISE(ABORT, 'position lot account conflicts with fields JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_insert
+        AFTER INSERT ON position_lots
+        BEGIN
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          ) VALUES (
+            {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+            'uninitialized', NEW.updated_at_ms
+          )
+          ON CONFLICT(account) DO UPDATE SET
+            lots_generation = lots_generation + 1,
+            updated_at_ms = excluded.updated_at_ms;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_delete
+        AFTER DELETE ON position_lots
+        WHEN {effective_old_lot_account} != ''
+          AND {effective_old_lot_account} = lower({effective_old_lot_account})
+        BEGIN
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          ) VALUES (
+            {effective_old_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+            'uninitialized', OLD.updated_at_ms
+          )
+          ON CONFLICT(account) DO UPDATE SET
+            lots_generation = lots_generation + 1,
+            updated_at_ms = excluded.updated_at_ms;
+        END
+        """
+    )
+
+    lot_changed = " OR ".join(
+        (
+            "OLD.record_id IS NOT NEW.record_id",
+            "OLD.account IS NOT NEW.account",
+            "OLD.fields_json IS NOT NEW.fields_json",
+            "OLD.source_event_id IS NOT NEW.source_event_id",
+            "OLD.expiration IS NOT NEW.expiration",
+            "OLD.strike IS NOT NEW.strike",
+            "OLD.multiplier IS NOT NEW.multiplier",
+        )
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_same
+        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+          expiration, strike, multiplier ON position_lots
+        WHEN ({lot_changed})
+          AND {effective_old_lot_account} = {effective_new_lot_account}
+        BEGIN
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          ) VALUES (
+            {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+            'uninitialized', NEW.updated_at_ms
+          )
+          ON CONFLICT(account) DO UPDATE SET
+            lots_generation = lots_generation + 1,
+            updated_at_ms = excluded.updated_at_ms;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_old
+        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+          expiration, strike, multiplier ON position_lots
+        WHEN ({lot_changed})
+          AND {effective_old_lot_account} != {effective_new_lot_account}
+          AND {effective_old_lot_account} != ''
+          AND {effective_old_lot_account} = lower({effective_old_lot_account})
+        BEGIN
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          ) VALUES (
+            {effective_old_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+            'uninitialized', NEW.updated_at_ms
+          )
+          ON CONFLICT(account) DO UPDATE SET
+            lots_generation = lots_generation + 1,
+            updated_at_ms = excluded.updated_at_ms;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_position_lots_generation_update_new
+        AFTER UPDATE OF record_id, account, fields_json, source_event_id,
+          expiration, strike, multiplier ON position_lots
+        WHEN ({lot_changed})
+          AND {effective_old_lot_account} != {effective_new_lot_account}
+        BEGIN
+          INSERT INTO position_projection_heads (
+            account, lots_generation, projector_schema, status, updated_at_ms
+          ) VALUES (
+            {effective_new_lot_account}, 1, '{POSITION_PROJECTION_SCHEMA}',
+            'uninitialized', NEW.updated_at_ms
+          )
+          ON CONFLICT(account) DO UPDATE SET
+            lots_generation = lots_generation + 1,
+            updated_at_ms = excluded.updated_at_ms;
+        END
+        """
+    )
+    conn.execute(
+        """
+        UPDATE position_projection_source_state
+        SET sqlite_schema_cookie = ?, updated_at_ms = ?
+        WHERE singleton_id = 1
+          AND projector_implementation_fingerprint IS NULL
+        """,
+        (_projection_schema_cookie(conn), int(now_ms())),
+    )
 
 
 def _ensure_notification_outbox_v2(conn: sqlite3.Connection) -> None:
@@ -325,6 +935,7 @@ def _ensure_lifecycle_delivery_status_revision_v1(
 def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA recursive_triggers=ON")
     row = conn.execute("PRAGMA foreign_keys").fetchone()
     enabled = int(row[0]) if row is not None else 0
     if enabled != 1:
@@ -379,6 +990,7 @@ class SQLiteOptionPositionsRepository:
                 """
                 CREATE TABLE IF NOT EXISTS trade_events (
                   event_id TEXT PRIMARY KEY,
+                  account TEXT,
                   event_json TEXT NOT NULL,
                   trade_time_ms INTEGER NOT NULL,
                   created_at_ms INTEGER NOT NULL,
@@ -386,13 +998,17 @@ class SQLiteOptionPositionsRepository:
                 )
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_time ON trade_events(trade_time_ms, event_id)"
+            _create_index_if_table_empty(
+                conn,
+                index_name="idx_trade_events_trade_time",
+                table="trade_events",
+                create_sql=("CREATE INDEX idx_trade_events_trade_time ON trade_events(trade_time_ms, event_id)"),
             )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS position_lots (
                   record_id TEXT PRIMARY KEY,
+                  account TEXT,
                   fields_json TEXT NOT NULL,
                   source_event_id TEXT,
                   expiration INTEGER,
@@ -405,8 +1021,11 @@ class SQLiteOptionPositionsRepository:
             _add_column_if_missing(conn, "position_lots", "expiration", "INTEGER")
             _add_column_if_missing(conn, "position_lots", "strike", "REAL")
             _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_position_lots_expiration ON position_lots(expiration, record_id)"
+            _create_index_if_table_empty(
+                conn,
+                index_name="idx_position_lots_expiration",
+                table="position_lots",
+                create_sql=("CREATE INDEX idx_position_lots_expiration ON position_lots(expiration, record_id)"),
             )
             conn.execute(
                 """
@@ -793,13 +1412,21 @@ class SQLiteOptionPositionsRepository:
                 WHERE status = 'user_confirmed'
                 """
             )
-            self._backfill_position_lot_contract_columns(conn)
-            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-            if violations:
-                raise RuntimeError(f"SQLite foreign key check failed: {len(violations)} violation(s)")
+            _ensure_position_projection_schema(conn)
             conn.commit()
 
-    def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> None:
+    def backfill_position_lot_contract_columns(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        updated = 0
+        with self._optional_conn(conn, commit=True) as active_conn:
+            updated = self._backfill_position_lot_contract_columns(active_conn)
+        return updated
+
+    def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> int:
+        updated = 0
         rows = conn.execute(
             """
             SELECT record_id, fields_json, expiration, strike, multiplier
@@ -840,6 +1467,102 @@ class SQLiteOptionPositionsRepository:
                     str(row["record_id"]),
                 ),
             )
+            updated += 1
+        return updated
+
+    def backfill_position_projection_accounts(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        """Explicitly backfill normalized accounts after validating every row."""
+
+        with self._optional_conn(conn, commit=True) as active_conn:
+            event_updates: list[tuple[str, str]] = []
+            for row in active_conn.execute("SELECT event_id, account, event_json FROM trade_events ORDER BY event_id"):
+                try:
+                    payload = json.loads(str(row["event_json"] or "{}"))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"trade event JSON is invalid: event_id={row['event_id']}") from exc
+                contract_key = payload.get("contract_key") if isinstance(payload, dict) else None
+                account = str(
+                    (contract_key.get("account") if isinstance(contract_key, dict) else None)
+                    or (payload.get("account") if isinstance(payload, dict) else None)
+                    or ""
+                ).strip()
+                if not account or account != account.lower():
+                    raise ValueError(f"trade event account cannot be normalized: event_id={row['event_id']}")
+                stored = str(row["account"] or "").strip()
+                if stored and stored != account:
+                    raise ValueError(f"trade event account conflicts with JSON: event_id={row['event_id']}")
+                if not stored:
+                    event_updates.append((account, str(row["event_id"])))
+
+            lot_updates: list[tuple[str, str]] = []
+            for row in active_conn.execute(
+                "SELECT record_id, account, fields_json FROM position_lots ORDER BY record_id"
+            ):
+                try:
+                    fields = json.loads(str(row["fields_json"] or "{}"))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"position lot JSON is invalid: record_id={row['record_id']}") from exc
+                account = str(fields.get("account") if isinstance(fields, dict) else "").strip()
+                if not account or account != account.lower():
+                    raise ValueError(f"position lot account cannot be normalized: record_id={row['record_id']}")
+                stored = str(row["account"] or "").strip()
+                if stored and stored != account:
+                    raise ValueError(f"position lot account conflicts with JSON: record_id={row['record_id']}")
+                if not stored:
+                    lot_updates.append((account, str(row["record_id"])))
+
+            active_conn.executemany(
+                "UPDATE trade_events SET account = ? WHERE event_id = ?",
+                event_updates,
+            )
+            active_conn.executemany(
+                "UPDATE position_lots SET account = ? WHERE record_id = ?",
+                lot_updates,
+            )
+        return {
+            "trade_events_updated": len(event_updates),
+            "position_lots_updated": len(lot_updates),
+        }
+
+    def build_position_projection_indexes(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[str, ...]:
+        """Explicitly build normalized indexes for an already populated store."""
+
+        definitions = (
+            (
+                "idx_trade_events_trade_time",
+                "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_time "
+                "ON trade_events(trade_time_ms, event_id)",
+            ),
+            (
+                "idx_trade_events_account_time",
+                "CREATE INDEX IF NOT EXISTS idx_trade_events_account_time "
+                "ON trade_events(account, trade_time_ms, event_id)",
+            ),
+            (
+                "idx_position_lots_account_expiration",
+                "CREATE INDEX IF NOT EXISTS idx_position_lots_account_expiration "
+                "ON position_lots(account, expiration, record_id)",
+            ),
+            (
+                "idx_position_lots_account_record",
+                "CREATE INDEX IF NOT EXISTS idx_position_lots_account_record ON position_lots(account, record_id)",
+            ),
+        )
+        with self._optional_conn(conn, commit=True) as active_conn:
+            before = {
+                str(row["name"]) for row in active_conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+            }
+            for _name, create_sql in definitions:
+                active_conn.execute(create_sql)
+        return tuple(name for name, _sql in definitions if name not in before)
 
     def count_position_lots(self) -> int:
         with self._connect() as conn:
@@ -871,13 +1594,15 @@ class SQLiteOptionPositionsRepository:
             active_conn.execute(
                 """
                 INSERT INTO trade_events (
-                  event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
+                  event_id, account, event_json, trade_time_ms,
+                  created_at_ms, updated_at_ms
                 ) VALUES (
-                  ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     encoded.event_id,
+                    str(encoded.event.contract_key.account),
                     encoded.event_json,
                     encoded.event_time_ms,
                     ts,
@@ -894,6 +1619,69 @@ class SQLiteOptionPositionsRepository:
                 FROM trade_events
                 ORDER BY trade_time_ms ASC, event_id ASC
                 """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = json.loads(str(row["event_json"]) or "{}")
+            if isinstance(item, dict):
+                out.append(trade_event_application_payload(item))
+        return out
+
+    def list_position_projection_event_rows(
+        self,
+        *,
+        after: tuple[int, str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            if after is None:
+                rows = active_conn.execute(
+                    """
+                    SELECT event_id, account, event_json, trade_time_ms
+                    FROM trade_events
+                    ORDER BY trade_time_ms ASC, event_id ASC
+                    """
+                ).fetchall()
+            else:
+                rows = active_conn.execute(
+                    """
+                    SELECT event_id, account, event_json, trade_time_ms
+                    FROM trade_events
+                    WHERE trade_time_ms > ?
+                       OR (trade_time_ms = ? AND event_id > ?)
+                    ORDER BY trade_time_ms ASC, event_id ASC
+                    """,
+                    (int(after[0]), int(after[0]), str(after[1])),
+                ).fetchall()
+        return [
+            {
+                "event_id": str(row["event_id"]),
+                "account": row["account"],
+                "event_json": str(row["event_json"]),
+                "trade_time_ms": int(row["trade_time_ms"]),
+            }
+            for row in rows
+        ]
+
+    def get_trade_events_by_ids(
+        self,
+        event_ids: Sequence[str],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in event_ids))
+        if not normalized or any(not item for item in normalized):
+            return []
+        placeholders = ",".join("?" for _item in normalized)
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT event_json
+                FROM trade_events
+                WHERE event_id IN ({placeholders})
+                ORDER BY trade_time_ms ASC, event_id ASC
+                """,
+                normalized,
             ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -963,35 +1751,752 @@ class SQLiteOptionPositionsRepository:
         *,
         conn: sqlite3.Connection | None = None,
     ) -> int:
+        return self.apply_position_lot_diff(records, conn=conn).lot_count
+
+    def apply_position_lot_diff(
+        self,
+        records: Sequence[PositionLotRecord],
+        *,
+        remove_missing: bool = True,
+        conn: sqlite3.Connection | None = None,
+    ) -> PositionLotDiff:
+        desired: dict[
+            str,
+            tuple[str, str, str, str | None, int | None, float | None, float | None],
+        ] = {}
+        for record in records:
+            values = _position_lot_storage_values(record)
+            record_id = values[0]
+            if record_id in desired:
+                raise ValueError(f"duplicate position lot record_id: {record_id}")
+            desired[record_id] = values
+
+        added = 0
+        changed = 0
+        removed = 0
+        unchanged = 0
+        all_accounts = {values[1] for values in desired.values()}
+        touched_accounts: set[str] = set()
         ts = int(now_ms())
-        inserted = 0
         with self._optional_conn(conn, commit=True) as active_conn:
-            active_conn.execute("DELETE FROM position_lots")
-            for record in records:
-                if not isinstance(record, PositionLotRecord):
-                    raise TypeError("replace_position_lots requires PositionLotRecord records")
-                record_id = record.record_id
-                fields = record.fields
-                _validate_position_lot_fields(record_id=record_id, fields=fields)
-                expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
+            if remove_missing:
+                current_rows = active_conn.execute(
+                    """
+                    SELECT record_id, account, fields_json, source_event_id,
+                           expiration, strike, multiplier
+                    FROM position_lots
+                    ORDER BY record_id ASC
+                    """
+                ).fetchall()
+                prior_lot_count = len(current_rows)
+            else:
+                record_ids = tuple(desired)
+                if record_ids:
+                    placeholders = ",".join("?" for _item in record_ids)
+                    current_rows = active_conn.execute(
+                        f"""
+                        SELECT record_id, account, fields_json, source_event_id,
+                               expiration, strike, multiplier
+                        FROM position_lots
+                        WHERE record_id IN ({placeholders})
+                        ORDER BY record_id ASC
+                        """,
+                        record_ids,
+                    ).fetchall()
+                else:
+                    current_rows = []
+                head_rows = active_conn.execute(
+                    """
+                    SELECT account, lot_count
+                    FROM position_projection_heads
+                    ORDER BY account ASC
+                    """
+                ).fetchall()
+                all_accounts.update(str(row["account"]) for row in head_rows)
+                prior_lot_count = sum(int(row["lot_count"] or 0) for row in head_rows)
+            current_by_id = {str(row["record_id"]): row for row in current_rows}
+
+            for record_id, row in current_by_id.items():
+                old_account = str(row["account"] or "").strip()
+                if not old_account:
+                    raw_fields = json.loads(str(row["fields_json"]) or "{}")
+                    old_account = str(raw_fields.get("account") if isinstance(raw_fields, dict) else "").strip()
+                if old_account:
+                    all_accounts.add(old_account)
+                if record_id in desired or not remove_missing:
+                    continue
+                active_conn.execute(
+                    "DELETE FROM position_lots WHERE record_id = ?",
+                    (record_id,),
+                )
+                removed += 1
+                if old_account:
+                    touched_accounts.add(old_account)
+
+            for record_id, values in desired.items():
+                (
+                    _record_id,
+                    account,
+                    fields_json,
+                    source_event_id,
+                    expiration_ms,
+                    strike,
+                    multiplier,
+                ) = values
+                current = current_by_id.get(record_id)
+                if current is None:
+                    active_conn.execute(
+                        """
+                        INSERT INTO position_lots (
+                          record_id, account, fields_json, source_event_id,
+                          expiration, strike, multiplier, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (*values, ts),
+                    )
+                    added += 1
+                    touched_accounts.add(account)
+                    continue
+
+                raw_current_fields_json = str(current["fields_json"] or "{}")
+                current_fields_json = (
+                    raw_current_fields_json
+                    if raw_current_fields_json == fields_json
+                    else _canonical_existing_fields_json(raw_current_fields_json)
+                )
+                public_changed = current_fields_json != fields_json or current["source_event_id"] != source_event_id
+                scalar_conflict = any(
+                    current[column] is not None and not _storage_scalar_matches(current[column], desired_value)
+                    for column, desired_value in (
+                        ("expiration", expiration_ms),
+                        ("strike", strike),
+                        ("multiplier", multiplier),
+                    )
+                )
+                if not public_changed and not scalar_conflict:
+                    # Explicit migration owns historical sidecar backfill. Existing
+                    # public bytes remain unchanged even if a legacy scalar is null.
+                    unchanged += 1
+                    continue
+
+                old_fields = json.loads(str(current["fields_json"]) or "{}")
+                old_account = str(
+                    current["account"] or (old_fields.get("account") if isinstance(old_fields, dict) else "") or ""
+                ).strip()
                 active_conn.execute(
                     """
-                    INSERT INTO position_lots (
-                      record_id, fields_json, source_event_id, expiration, strike, multiplier, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    UPDATE position_lots
+                    SET account = ?, fields_json = ?, source_event_id = ?,
+                        expiration = ?, strike = ?, multiplier = ?, updated_at_ms = ?
+                    WHERE record_id = ?
                     """,
                     (
+                        account,
+                        fields_json,
+                        source_event_id,
+                        expiration_ms,
+                        strike,
+                        multiplier,
+                        ts,
                         record_id,
-                        json.dumps(fields, ensure_ascii=False, sort_keys=True),
-                        (str(fields.get("source_event_id")) if fields.get("source_event_id") else None),
-                        int(expiration_ms) if expiration_ms is not None else None,
-                        float(strike) if strike is not None else None,
-                        float(multiplier) if multiplier is not None else None,
+                    ),
+                )
+                changed += 1
+                touched_accounts.add(account)
+                if old_account:
+                    touched_accounts.add(old_account)
+
+        final_lot_count = len(desired) if remove_missing else prior_lot_count + added
+        unchanged_count = (
+            unchanged
+            if remove_missing
+            else max(0, final_lot_count - added - changed)
+        )
+        return PositionLotDiff(
+            added=added,
+            changed=changed,
+            removed=removed,
+            unchanged=unchanged_count,
+            accounts=tuple(sorted(all_accounts)),
+            touched_accounts=tuple(sorted(touched_accounts)),
+        )
+
+    def position_projection_column_contract(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, tuple[str, ...]]]:
+        with self._optional_conn(conn) as active_conn:
+            return _position_projection_column_contract(active_conn)
+
+    def position_projection_schema_cookie(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        with self._optional_conn(conn) as active_conn:
+            return _projection_schema_cookie(active_conn)
+
+    def position_projection_indexes_ready(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        required = {
+            "idx_trade_events_trade_time",
+            "idx_trade_events_account_time",
+            "idx_position_lots_account_expiration",
+            "idx_position_lots_account_record",
+        }
+        with self._optional_conn(conn) as active_conn:
+            present = {
+                str(row["name"])
+                for row in active_conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+            }
+        return required.issubset(present)
+
+    def position_projection_normalized_columns_ready(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        with self._optional_conn(conn) as active_conn:
+            event_problem = active_conn.execute(
+                """
+                SELECT 1
+                FROM trade_events
+                WHERE account IS NULL
+                   OR account = ''
+                   OR account != lower(account)
+                   OR account != coalesce(
+                        nullif(trim(CAST(json_extract(
+                          event_json, '$.contract_key.account'
+                        ) AS TEXT)), ''),
+                        trim(CAST(json_extract(event_json, '$.account') AS TEXT))
+                      )
+                LIMIT 1
+                """
+            ).fetchone()
+            lot_problem = active_conn.execute(
+                """
+                SELECT 1
+                FROM position_lots
+                WHERE account IS NULL
+                   OR account = ''
+                   OR account != lower(account)
+                   OR account != trim(CAST(
+                        json_extract(fields_json, '$.account') AS TEXT
+                      ))
+                   OR (
+                        json_extract(fields_json, '$.option_type') IN ('put', 'call')
+                        AND (expiration IS NULL OR strike IS NULL OR multiplier IS NULL)
+                   )
+                LIMIT 1
+                """
+            ).fetchone()
+        return event_problem is None and lot_problem is None
+
+    def list_position_projection_accounts(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[str, ...]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT account FROM position_projection_heads
+                ORDER BY account ASC
+                """
+            ).fetchall()
+        return tuple(str(row["account"]) for row in rows if str(row["account"] or "").strip())
+
+    def position_projection_account_snapshot(
+        self,
+        account: str,
+        *,
+        include_records: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> PositionProjectionAccountSnapshot:
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("position projection account must be lowercase")
+        with self._optional_conn(conn) as active_conn:
+            cursor = active_conn.execute(
+                """
+                SELECT record_id, fields_json, expiration, strike, multiplier
+                FROM position_lots
+                WHERE account = ?
+                ORDER BY record_id ASC
+                """,
+                (account_value,),
+            )
+            retained: list[dict[str, Any]] = []
+            lot_count = 0
+
+            def _ordered_rows():
+                nonlocal lot_count
+                for row in cursor:
+                    record = position_lot_row_to_record(row)
+                    lot_count += 1
+                    if include_records:
+                        retained.append(record)
+                    yield record
+
+            fingerprint = ordered_position_lots_fingerprint(_ordered_rows())
+        return PositionProjectionAccountSnapshot(
+            account=account_value,
+            fingerprint=fingerprint,
+            lot_count=lot_count,
+            records=tuple(retained),
+        )
+
+    def publish_full_position_projection_heads(
+        self,
+        *,
+        implementation_fingerprint: str,
+        known_accounts: Sequence[str],
+        changed_accounts: Sequence[str],
+        full_verified: bool = True,
+        publish_source_implementation: bool = True,
+        readiness_prevalidated: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[int, bool, str | None]:
+        fingerprint = str(implementation_fingerprint or "").strip()
+        if len(fingerprint) != 64:
+            raise ValueError("projector implementation fingerprint is required")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            source = active_conn.execute(
+                """
+                SELECT source_generation, sqlite_schema_cookie
+                FROM position_projection_source_state
+                WHERE singleton_id = 1
+                """
+            ).fetchone()
+            if source is None:
+                raise RuntimeError("position projection source state is missing")
+            source_generation = int(source["source_generation"])
+            schema_cookie = _projection_schema_cookie(active_conn)
+            ready = bool(readiness_prevalidated) or _position_projection_column_contract_is_closed(
+                active_conn
+            )
+            reason: str | None = None
+            if readiness_prevalidated:
+                pass
+            elif not ready:
+                reason = "column_contract_open"
+            elif not self.position_projection_indexes_ready(conn=active_conn):
+                ready = False
+                reason = "normalized_indexes_missing"
+            elif not self.position_projection_normalized_columns_ready(conn=active_conn):
+                ready = False
+                reason = "normalized_columns_incomplete"
+
+            accounts = set(self.list_position_projection_accounts(conn=active_conn))
+            accounts.update(str(item or "").strip() for item in known_accounts)
+            accounts.update(str(item or "").strip() for item in changed_accounts)
+            accounts = {account for account in accounts if account and account == account.lower()}
+            ts = int(now_ms())
+            total = 0
+            changed = {str(item or "").strip() for item in changed_accounts}
+            for account in sorted(accounts):
+                head = active_conn.execute(
+                    """
+                    SELECT lots_generation, built_lots_generation,
+                           projection_fingerprint, lot_count, status,
+                           projector_schema, projector_implementation_fingerprint
+                    FROM position_projection_heads
+                    WHERE account = ?
+                    """,
+                    (account,),
+                ).fetchone()
+                can_reuse = (
+                    account not in changed
+                    and head is not None
+                    and str(head["status"] or "") == "trusted"
+                    and str(head["projector_schema"] or "") == POSITION_PROJECTION_SCHEMA
+                    and str(head["projector_implementation_fingerprint"] or "") == fingerprint
+                    and head["built_lots_generation"] is not None
+                    and int(head["lots_generation"]) == int(head["built_lots_generation"])
+                    and bool(str(head["projection_fingerprint"] or ""))
+                )
+                if can_reuse:
+                    account_fingerprint = str(head["projection_fingerprint"])
+                    lot_count = int(head["lot_count"])
+                else:
+                    snapshot = self.position_projection_account_snapshot(
+                        account,
+                        conn=active_conn,
+                    )
+                    account_fingerprint = snapshot.fingerprint
+                    lot_count = snapshot.lot_count
+                total += lot_count
+                lots_generation = int(head["lots_generation"] or 0) if head else 0
+                active_conn.execute(
+                    """
+                    INSERT INTO position_projection_heads (
+                      account, lots_generation, built_source_generation,
+                      built_lots_generation, projection_fingerprint, lot_count,
+                      projector_schema, projector_implementation_fingerprint,
+                      status, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account) DO UPDATE SET
+                      built_source_generation = excluded.built_source_generation,
+                      built_lots_generation = excluded.built_lots_generation,
+                      projection_fingerprint = excluded.projection_fingerprint,
+                      lot_count = excluded.lot_count,
+                      projector_schema = excluded.projector_schema,
+                      projector_implementation_fingerprint =
+                        excluded.projector_implementation_fingerprint,
+                      status = excluded.status,
+                      updated_at_ms = excluded.updated_at_ms
+                    """,
+                    (
+                        account,
+                        lots_generation,
+                        source_generation,
+                        lots_generation,
+                        account_fingerprint,
+                        lot_count,
+                        POSITION_PROJECTION_SCHEMA,
+                        fingerprint,
+                        "trusted" if ready else "untrusted",
                         ts,
                     ),
                 )
-                inserted += 1
-        return inserted
+            active_conn.execute(
+                """
+                UPDATE position_projection_source_state
+                SET projector_schema = ?,
+                    projector_implementation_fingerprint = CASE
+                      WHEN ? THEN ?
+                      ELSE projector_implementation_fingerprint
+                    END,
+                    sqlite_schema_cookie = CASE
+                      WHEN ? THEN ?
+                      ELSE sqlite_schema_cookie
+                    END,
+                    last_full_verified_source_generation = CASE
+                      WHEN ? THEN ?
+                      ELSE last_full_verified_source_generation
+                    END,
+                    updated_at_ms = ?
+                WHERE singleton_id = 1
+                """,
+                (
+                    POSITION_PROJECTION_SCHEMA,
+                    1 if publish_source_implementation else 0,
+                    fingerprint,
+                    1 if publish_source_implementation else 0,
+                    schema_cookie,
+                    1 if full_verified else 0,
+                    source_generation,
+                    ts,
+                ),
+            )
+        return total, ready, reason
+
+    def read_position_projection_account_metadata(
+        self,
+        account: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("position projection account must be lowercase")
+        with self._optional_conn(conn) as active_conn:
+            source = active_conn.execute(
+                "SELECT * FROM position_projection_source_state WHERE singleton_id = 1"
+            ).fetchone()
+            head = active_conn.execute(
+                "SELECT * FROM position_projection_heads WHERE account = ?",
+                (account_value,),
+            ).fetchone()
+            cookie = _projection_schema_cookie(active_conn)
+        return {
+            "source": dict(source) if source is not None else None,
+            "head": dict(head) if head is not None else None,
+            "schema_cookie": cookie,
+        }
+
+    def read_position_projection_source_state(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                "SELECT * FROM position_projection_source_state WHERE singleton_id = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("position projection source state is missing")
+        return dict(row)
+
+    def set_position_projection_checkpoint_mode(
+        self,
+        mode: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        value = str(mode or "").strip().lower()
+        if value not in {"disabled", "enabled", "untrusted"}:
+            raise ValueError("checkpoint mode must be disabled, enabled, or untrusted")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            active_conn.execute(
+                """
+                UPDATE position_projection_source_state
+                SET checkpoint_mode = ?, updated_at_ms = ?
+                WHERE singleton_id = 1
+                """,
+                (value, int(now_ms())),
+            )
+
+    def list_position_projection_checkpoints(
+        self,
+        *,
+        trusted_only: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE trust_status = 'trusted'" if trusted_only else ""
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT * FROM position_projection_checkpoints
+                {where}
+                ORDER BY prefix_event_count DESC, created_at_ms DESC,
+                         checkpoint_id DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_newest_trusted_position_projection_checkpoint(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT * FROM position_projection_checkpoints
+                WHERE trust_status = 'trusted'
+                ORDER BY prefix_event_count DESC, created_at_ms DESC,
+                         checkpoint_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def insert_position_projection_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        columns = (
+            "checkpoint_id",
+            "projector_schema",
+            "projector_implementation_fingerprint",
+            "prefix_event_count",
+            "prefix_end_trade_time_ms",
+            "prefix_end_event_id",
+            "prefix_chain_sha256",
+            "source_generation",
+            "sqlite_schema_cookie",
+            "accumulator_json",
+            "accumulator_sha256",
+            "diagnostic_count",
+            "diagnostic_sha256",
+            "state_bytes",
+            "trust_status",
+            "verification_kind",
+            "parent_checkpoint_id",
+            "created_at_ms",
+            "verified_at_ms",
+            "invalidated_at_ms",
+            "invalidation_reason",
+        )
+        if set(checkpoint) != set(columns):
+            raise ValueError("position projection checkpoint fields differ from v1 schema")
+        placeholders = ",".join("?" for _item in columns)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT * FROM position_projection_checkpoints WHERE checkpoint_id = ?",
+                (checkpoint["checkpoint_id"],),
+            ).fetchone()
+            if existing is not None:
+                if checkpoint["verification_kind"] == "full_oracle":
+                    mutable_columns = tuple(
+                        column for column in columns if column != "checkpoint_id"
+                    )
+                    active_conn.execute(
+                        f"""
+                        UPDATE position_projection_checkpoints
+                        SET {','.join(f'{column} = ?' for column in mutable_columns)}
+                        WHERE checkpoint_id = ?
+                        """,
+                        (
+                            *(checkpoint[column] for column in mutable_columns),
+                            checkpoint["checkpoint_id"],
+                        ),
+                    )
+                    return
+                immutable = set(columns) - {
+                    "verification_kind",
+                    "parent_checkpoint_id",
+                    "created_at_ms",
+                    "verified_at_ms",
+                    "trust_status",
+                    "invalidated_at_ms",
+                    "invalidation_reason",
+                }
+                if any(existing[column] != checkpoint[column] for column in immutable):
+                    raise ValueError("checkpoint id conflicts with immutable payload")
+                return
+            active_conn.execute(
+                f"""
+                INSERT INTO position_projection_checkpoints ({','.join(columns)})
+                VALUES ({placeholders})
+                """,
+                tuple(checkpoint[column] for column in columns),
+            )
+
+    def invalidate_position_projection_checkpoints(
+        self,
+        *,
+        reason: str,
+        checkpoint_ids: Sequence[str] = (),
+        mark_mode_untrusted: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        reason_value = str(reason or "").strip()
+        if not reason_value:
+            raise ValueError("checkpoint invalidation reason is required")
+        normalized = tuple(
+            dict.fromkeys(str(item or "").strip() for item in checkpoint_ids)
+        )
+        with self._optional_conn(conn, commit=True) as active_conn:
+            ts = int(now_ms())
+            if normalized:
+                placeholders = ",".join("?" for _item in normalized)
+                cursor = active_conn.execute(
+                    f"""
+                    UPDATE position_projection_checkpoints
+                    SET trust_status = 'invalid', invalidated_at_ms = ?,
+                        invalidation_reason = ?
+                    WHERE trust_status = 'trusted'
+                      AND checkpoint_id IN ({placeholders})
+                    """,
+                    (ts, reason_value, *normalized),
+                )
+            else:
+                cursor = active_conn.execute(
+                    """
+                    UPDATE position_projection_checkpoints
+                    SET trust_status = 'invalid', invalidated_at_ms = ?,
+                        invalidation_reason = ?
+                    WHERE trust_status = 'trusted'
+                    """,
+                    (ts, reason_value),
+                )
+            if mark_mode_untrusted:
+                active_conn.execute(
+                    """
+                    UPDATE position_projection_source_state
+                    SET checkpoint_mode = 'untrusted', updated_at_ms = ?
+                    WHERE singleton_id = 1
+                    """,
+                    (ts,),
+                )
+        return int(cursor.rowcount)
+
+    def prune_position_projection_checkpoints(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[str, ...]:
+        with self._optional_conn(conn, commit=True) as active_conn:
+            invalid = active_conn.execute(
+                "SELECT checkpoint_id FROM position_projection_checkpoints WHERE trust_status = 'invalid'"
+            ).fetchall()
+            trusted = active_conn.execute(
+                """
+                SELECT checkpoint_id, verification_kind
+                FROM position_projection_checkpoints
+                WHERE trust_status = 'trusted'
+                ORDER BY prefix_event_count DESC, created_at_ms DESC,
+                         checkpoint_id DESC
+                """
+            ).fetchall()
+            keep = {str(row["checkpoint_id"]) for row in trusted[:2]}
+            full = next(
+                (
+                    str(row["checkpoint_id"])
+                    for row in trusted
+                    if str(row["verification_kind"]) == "full_oracle"
+                ),
+                None,
+            )
+            if full is not None:
+                keep.add(full)
+            removable = [*invalid, *trusted]
+            removed = tuple(
+                sorted(
+                    str(row["checkpoint_id"])
+                    for row in removable
+                    if str(row["checkpoint_id"]) not in keep
+                )
+            )
+            if removed:
+                placeholders = ",".join("?" for _item in removed)
+                active_conn.execute(
+                    f"DELETE FROM position_projection_checkpoints WHERE checkpoint_id IN ({placeholders})",
+                    removed,
+                )
+        return removed
+
+    def list_active_position_lots(
+        self,
+        *,
+        account: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        account_value = str(account or "").strip().lower()
+        if not account_value:
+            raise ValueError("position projection account is required")
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT record_id, fields_json, expiration, strike, multiplier
+                FROM position_lots
+                WHERE account = ?
+                  AND json_extract(fields_json, '$.status') = 'open'
+                ORDER BY expiration ASC, record_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        return [position_lot_row_to_record(row) for row in rows]
+
+    def get_position_lots_by_ids(
+        self,
+        record_ids: Sequence[str],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in record_ids))
+        if not normalized or any(not item for item in normalized):
+            return []
+        placeholders = ",".join("?" for _item in normalized)
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT record_id, fields_json, expiration, strike, multiplier
+                FROM position_lots
+                WHERE record_id IN ({placeholders})
+                ORDER BY record_id ASC
+                """,
+                normalized,
+            ).fetchall()
+        return [position_lot_row_to_record(row) for row in rows]
 
     def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         with self._optional_conn(conn) as active_conn:
@@ -999,7 +2504,7 @@ class SQLiteOptionPositionsRepository:
                 """
                 SELECT record_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
-                ORDER BY updated_at_ms DESC, record_id DESC
+                ORDER BY record_id DESC
                 """
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
@@ -3784,8 +5289,17 @@ def _lifecycle_case_immutable_payload(payload: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:
-    sqlite_repo = require_option_positions_event_write_repo(repo)
+def with_sqlite_repo_transaction(
+    repo: Any,
+    fn: Any,
+    *,
+    require_projection_publication: bool = False,
+) -> Any:
+    sqlite_repo = (
+        require_position_projection_publication_repo(repo)
+        if require_projection_publication
+        else require_option_positions_event_write_repo(repo)
+    )
     conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
     try:
         if conn is not None:
@@ -3826,3 +5340,16 @@ def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEvent
     if all(callable(getattr(candidate, name, None)) for name in required):
         return cast(OptionPositionsEventWriteRepo, candidate)
     raise TypeError("option_positions repo does not satisfy event write repository interface")
+
+
+def require_position_projection_publication_repo(
+    repo: Any,
+) -> PositionProjectionPublicationRepo:
+    candidate = require_option_positions_event_write_repo(repo)
+    required = (
+        "apply_position_lot_diff",
+        "publish_full_position_projection_heads",
+    )
+    if all(callable(getattr(candidate, name, None)) for name in required):
+        return cast(PositionProjectionPublicationRepo, candidate)
+    raise TypeError("option_positions repo does not satisfy projection publication interface")
