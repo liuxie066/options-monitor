@@ -11,12 +11,21 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.position_projection_publication import (
     read_current_position_projection,
 )
+from src.application.ledger.errors import LedgerPreflightError
+from src.application.ledger.preflight import _preflight_open_event, preflight_manual_close
 from src.application.ledger.position_projection_runtime import (
     CHECKPOINT_ROTATE_EVENT_COUNT,
+    compare_full_and_resumed_position_projection,
     extend_event_prefix_chain,
     initial_event_prefix_chain,
+    preview_position_projection_append,
     run_position_projection_fast_if_safe,
     run_position_projection_forced_full,
+    run_position_projection_in_transaction,
+)
+from src.application.ledger.writer import persist_trade_event_object
+from src.application.ledger.projector_implementation import (
+    ProjectorImplementationUnavailable,
 )
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
@@ -210,6 +219,193 @@ def test_forced_full_seed_then_strict_tail_uses_no_full_history(
     current = read_current_position_projection(repo, account="lx")
     assert current["status"] == "trusted"
     assert current["position_lots"][0]["fields"]["contracts_open"] == 1
+
+
+def test_resumed_preview_uses_checkpoint_without_reading_full_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
+        seed_checkpoint=True,
+    )
+    _enable(repo)
+
+    def _unexpected_full(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("resumed preview must not read the full event prefix")
+
+    monkeypatch.setattr(repo, "list_trade_events", _unexpected_full)
+    monkeypatch.setattr(repo, "list_position_lots", _unexpected_full)
+    monkeypatch.setattr(
+        "src.application.ledger.position_projection_runtime.project_stored_trade_events_to_position_lots",
+        _unexpected_full,
+    )
+    preview = preview_position_projection_append(
+        repo,
+        [
+            _event(
+                "partial",
+                "close",
+                2_000,
+                target_lot_id="lot-a",
+                contracts=1,
+                price=0.5,
+            )
+        ],
+    )
+
+    assert preview.mode_used == "resumed_tail"
+    assert preview.source_event_count == 1
+    assert preview.checkpoint_id
+    assert preview.projection.active_lots[0].fields["contracts_open"] == 1
+
+
+def test_public_single_writer_and_fifo_use_bounded_fast_runtime_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
+        seed_checkpoint=True,
+    )
+    _enable(repo)
+
+    def _unexpected_full(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("eligible public writer must not read full history")
+
+    monkeypatch.setattr(repo, "list_trade_events", _unexpected_full)
+    monkeypatch.setattr(repo, "list_position_lots", _unexpected_full)
+    monkeypatch.setattr(
+        "src.application.ledger.position_projection_runtime.project_stored_trade_events_to_position_lots",
+        _unexpected_full,
+    )
+    result = persist_trade_event_object(
+        repo,
+        _event(
+            "partial",
+            "close",
+            2_000,
+            contracts=1,
+            price=0.5,
+        ),
+    )
+
+    assert result.created is True
+    assert result.record_id == "lot-a"
+    assert result.position_lot_count == 1
+    assert result.details["projection_diagnostics"] == []
+
+
+def test_public_close_preflight_uses_bounded_resumed_preview_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
+        seed_checkpoint=True,
+    )
+    _enable(repo)
+    fields = repo.get_position_lot_fields("lot-a")
+    assert fields is not None
+
+    def _unexpected_full(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("eligible preflight must not read full history")
+
+    monkeypatch.setattr(repo, "list_trade_events", _unexpected_full)
+    monkeypatch.setattr(repo, "list_position_lots", _unexpected_full)
+    monkeypatch.setattr(
+        "src.application.ledger.position_projection_runtime.project_stored_trade_events_to_position_lots",
+        _unexpected_full,
+    )
+    result = preflight_manual_close(
+        repo,
+        record_id="lot-a",
+        fields=fields,
+        contracts_to_close=1,
+        close_price=0.5,
+        close_reason="test",
+        as_of_ms=2_000,
+    )
+
+    assert result.status == "ok"
+    assert result.contracts_open_before == 2
+    assert result.contracts_open_after == 1
+    assert result.details["projection_preview_mode"] == "resumed_tail"
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+def test_open_preflight_preserves_candidate_projection_error_contract(
+    tmp_path: Path,
+    checkpoint_enabled: bool,
+) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a")],
+        seed_checkpoint=True,
+    )
+    if checkpoint_enabled:
+        _enable(repo)
+
+    with pytest.raises(LedgerPreflightError) as exc_info:
+        _preflight_open_event(
+            repo,
+            event=_event("duplicate-lot", "open", 2_000, lot_id="lot-a"),
+            source="test",
+            operation_label="test open",
+        )
+
+    assert exc_info.value.code == "open_projection_invalid"
+    assert set(exc_info.value.details) == {"event_id", "errors"}
+    assert [item["code"] for item in exc_info.value.details["errors"]] == [
+        "duplicate_lot_id"
+    ]
+
+
+def test_read_only_shadow_reports_full_resumed_parity(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [
+            _event("closed-open", "open", 500, lot_id="lot-closed"),
+            _event(
+                "closed-close",
+                "close",
+                600,
+                target_lot_id="lot-closed",
+                price=0.5,
+            ),
+            _event("open", "open", 1_000, lot_id="lot-a", contracts=2),
+        ],
+        seed_checkpoint=True,
+    )
+    _enable(repo)
+    run_position_projection_fast_if_safe(
+        repo,
+        [
+            _event(
+                "partial",
+                "close",
+                2_000,
+                target_lot_id="lot-a",
+                contracts=1,
+                price=0.5,
+            )
+        ],
+    )
+
+    result = compare_full_and_resumed_position_projection(repo)
+
+    assert result["status"] == "pass"
+    assert result["mismatch_count"] == 0
+    assert result["full_lot_count"] == result["stored_lot_count"] == 2
+    assert result["full_active_lot_count"] == result["resumed_lot_count"] == 1
 
 
 def test_fast_path_avoids_global_readiness_and_all_checkpoint_payload_reads(
@@ -967,6 +1163,116 @@ def test_idempotent_retry_does_not_skip_stale_head_recovery(tmp_path: Path) -> N
     assert result.mode_used == "full"
     assert result.fallback_reason == "projection_head_stale"
     assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
+
+
+def test_caller_owned_runtime_does_not_commit_or_rollback(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    conn = repo._connect()  # type: ignore[attr-defined]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = run_position_projection_in_transaction(
+            repo,
+            [_event("open", "open", 1_000, lot_id="lot-a")],
+            conn=conn,
+            mode="forced_full",
+        )
+        assert result.created_flags == (True,)
+        assert result.diagnostics == ()
+        assert conn.in_transaction is True
+        assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 1
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert repo.list_trade_events() == []
+    assert repo.list_position_lots() == []
+
+
+def test_caller_owned_runtime_preserves_mixed_batch_created_order(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    existing = _event("open-a", "open", 1_000, lot_id="lot-a")
+    run_position_projection_forced_full(repo, [existing], seed_checkpoint=True)
+    _enable(repo)
+    conn = repo._connect()  # type: ignore[attr-defined]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = run_position_projection_in_transaction(
+            repo,
+            [existing, _event("open-b", "open", 2_000, lot_id="lot-b")],
+            conn=conn,
+            mode="fast_if_safe",
+        )
+        assert result.created_flags == (False, True)
+        assert result.mode_used == "fast_tail"
+        assert result.diagnostics == ()
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert [item["event_id"] for item in repo.list_trade_events()] == [
+        "open-a",
+        "open-b",
+    ]
+
+
+def test_caller_owned_runtime_error_leaves_rollback_to_caller(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    conn = repo._connect()  # type: ignore[attr-defined]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="target_lot_not_found"):
+            run_position_projection_in_transaction(
+                repo,
+                [
+                    _event(
+                        "close-missing",
+                        "close",
+                        1_000,
+                        target_lot_id="missing",
+                    )
+                ],
+                conn=conn,
+                mode="forced_full",
+            )
+        assert conn.in_transaction is True
+        assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 1
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert repo.list_trade_events() == []
+
+
+def test_unavailable_implementation_keeps_full_projection_compatible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+
+    def _unavailable() -> str:
+        raise ProjectorImplementationUnavailable("test")
+
+    monkeypatch.setattr(
+        "src.application.ledger.position_projection_runtime.loaded_projector_implementation_fingerprint",
+        _unavailable,
+    )
+    monkeypatch.setattr(
+        "src.application.ledger.position_projection_publication.loaded_projector_implementation_fingerprint",
+        _unavailable,
+    )
+    result = run_position_projection_fast_if_safe(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a")],
+    )
+
+    assert result.mode_used == "full"
+    assert result.fallback_reason == "projector_implementation_unavailable"
+    assert result.created_flags == (True,)
+    assert result.publication.heads_trusted is False
+    assert result.checkpoint_written is False
+    assert len(repo.list_position_lots()) == 1
 
 
 @pytest.mark.parametrize("mismatch", ["implementation", "schema_cookie"])

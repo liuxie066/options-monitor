@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from domain.domain.ledger import ContractKey, ProjectionResult, TradeEvent, project_trade_events
+from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
@@ -25,6 +25,10 @@ from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import effective_import_diagnostics, import_stored_trade_events
 from src.application.ledger.external_event_key import broker_external_event_key
+from src.application.ledger.position_projection_runtime import (
+    ProjectionPreviewResult,
+    preview_position_projection_append,
+)
 from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPreflightResult
 
 
@@ -316,26 +320,21 @@ def _preflight_trade_event_append(
     )
 
 
-def _current_trade_event_projection(
+def _preview_append_projection(
     repo: Any,
     *,
+    events: list[TradeEvent],
     operation_label: str,
     details: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[TradeEvent], ProjectionResult]:
-    source_events = _list_trade_events(repo)
-    imported_events, import_diagnostics = import_stored_trade_events(source_events)
-    projection = project_trade_events(imported_events)
-    import_errors = [
-        item.to_dict()
-        for item in effective_import_diagnostics(
-            ledger_events=imported_events,
-            import_diagnostics=import_diagnostics,
-            projection_diagnostics=projection.diagnostics,
-        )
-        if item.severity == "error"
-    ]
-    projection_errors = [item.to_dict() for item in projection.diagnostics if item.severity == "error"]
-    if import_errors or projection_errors:
+    candidate_error: tuple[str, str] | None = None,
+) -> ProjectionPreviewResult:
+    preview = preview_position_projection_append(repo, events)
+    import_errors, projection_errors = _preview_projection_errors(
+        preview.current_projection
+    )
+    if import_errors or projection_errors or not bool(
+        getattr(preview.current_projection, "eligible", True)
+    ):
         raise LedgerPreflightError(
             "ledger_shadow_invalid",
             f"{operation_label} ledger preflight found invalid current trade-event projection",
@@ -345,7 +344,66 @@ def _current_trade_event_projection(
                 "projection_errors": projection_errors,
             },
         )
-    return source_events, imported_events, projection
+    _candidate_import_errors, candidate_projection_errors = (
+        _preview_projection_errors(preview.projection)
+    )
+    if candidate_projection_errors or not bool(
+        getattr(preview.projection, "eligible", True)
+    ):
+        code, message = candidate_error or (
+            "ledger_shadow_invalid",
+            f"{operation_label} ledger preflight rejected projected trade event",
+        )
+        raise LedgerPreflightError(
+            code,
+            message,
+            details={**details, "errors": candidate_projection_errors},
+        )
+    return preview
+
+
+def _preview_projection_errors(projection: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    domain_diagnostics = list(
+        getattr(getattr(projection, "ledger_projection", None), "diagnostics", ())
+        or ()
+    )
+    domain_ids = {id(item) for item in domain_diagnostics}
+    import_errors = [
+        item.to_dict()
+        for item in list(getattr(projection, "diagnostics", ()) or ())
+        if item.severity == "error" and id(item) not in domain_ids
+    ]
+    projection_errors = [
+        item.to_dict() for item in domain_diagnostics if item.severity == "error"
+    ]
+    return import_errors, projection_errors
+
+
+def _preview_lots(preview: ProjectionPreviewResult) -> list[Any]:
+    projection = preview.projection
+    domain_state = getattr(projection, "domain_state", None)
+    if domain_state is not None:
+        return [item.to_position_lot() for item in domain_state.active_lots]
+    ledger_projection = getattr(projection, "ledger_projection", None)
+    return list(getattr(ledger_projection, "lots", ()) or ())
+
+
+def _preview_current_lots(preview: ProjectionPreviewResult) -> list[Any]:
+    current = preview.current_projection
+    domain_state = getattr(current, "domain_state", None)
+    if domain_state is not None:
+        return [item.to_position_lot() for item in domain_state.active_lots]
+    ledger_projection = getattr(current, "ledger_projection", None)
+    return list(getattr(ledger_projection, "lots", ()) or ())
+
+
+def _preview_details(preview: ProjectionPreviewResult) -> dict[str, Any]:
+    return {
+        "projection_preview_mode": preview.mode_used,
+        "projection_preview_fallback_reason": preview.fallback_reason,
+        "projection_source_generation": preview.source_generation,
+        "projection_checkpoint_id": preview.checkpoint_id,
+    }
 
 
 def _preflight_open_event(
@@ -362,21 +420,19 @@ def _preflight_open_event(
             details={"event_id": event.event_id, "contracts": int(event.contracts)},
         )
 
-    source_events, imported_events, current_projection = _current_trade_event_projection(
+    preview = _preview_append_projection(
         repo,
+        events=[event],
         operation_label=operation_label,
         details={"event_id": event.event_id},
-    )
-    open_projection = project_trade_events([*imported_events, event])
-    open_errors = [item.to_dict() for item in open_projection.diagnostics if item.severity == "error"]
-    if open_errors:
-        raise LedgerPreflightError(
+        candidate_error=(
             "open_projection_invalid",
             f"{operation_label} ledger preflight rejected projected open event",
-            details={"event_id": event.event_id, "errors": open_errors},
-        )
-
-    target_lot = next((lot for lot in open_projection.lots if lot.lot_id == event.lot_id), None)
+        ),
+    )
+    before_lots = _preview_current_lots(preview)
+    after_lots = _preview_lots(preview)
+    target_lot = next((lot for lot in after_lots if lot.lot_id == event.lot_id), None)
     if target_lot is None:
         raise LedgerPreflightError(
             "target_lot_not_projected",
@@ -385,12 +441,12 @@ def _preflight_open_event(
         )
     matching_before = sum(
         int(lot.contracts_open)
-        for lot in current_projection.lots
+        for lot in before_lots
         if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
     )
     matching_after = sum(
         int(lot.contracts_open)
-        for lot in open_projection.lots
+        for lot in after_lots
         if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
     )
     return LedgerPreflightResult(
@@ -407,10 +463,11 @@ def _preflight_open_event(
         contracts_open_after=int(target_lot.contracts_open),
         position_contracts_open_after=int(matching_after),
         event_time_ms=int(event.event_time_ms),
-        source_record_count=len(source_events),
-        imported_event_count=len(imported_events),
-        projection_diagnostic_count=len(current_projection.diagnostics),
+        source_record_count=preview.source_event_count,
+        imported_event_count=preview.source_event_count,
+        projection_diagnostic_count=0,
         reconciliation_issue_count=0,
+        details=_preview_details(preview),
     )
 
 
@@ -465,13 +522,17 @@ def _preflight_lot_close(
             details={"record_id": resolved_record_id, "contracts_open": current_open},
         )
 
-    source_events, imported_events, current_projection = _current_trade_event_projection(
+    current = _preview_append_projection(
         repo,
+        events=[],
         operation_label=operation_label,
         details={"record_id": resolved_record_id},
     )
-
-    target_lots = [lot for lot in current_projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
+    target_lots = [
+        lot
+        for lot in _preview_lots(current)
+        if lot.lot_id == resolved_record_id and lot.contracts_open > 0
+    ]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
@@ -507,7 +568,7 @@ def _preflight_lot_close(
             },
         )
 
-    event_time_ms = _preflight_event_time_ms(imported_events, as_of_ms=as_of_ms)
+    event_time_ms = max(int(as_of_ms or now_ms()), current.latest_event_time_ms + 1)
     close_event = TradeEvent(
         event_id=f"preflight:{source}:{resolved_record_id}:{event_time_ms}",
         event_type=event_type,
@@ -521,15 +582,20 @@ def _preflight_lot_close(
         target_lot_id=resolved_record_id,
         raw_payload={"record_id": resolved_record_id},
     )
-    close_projection = project_trade_events([*imported_events, close_event])
-    close_errors = [item.to_dict() for item in close_projection.diagnostics if item.severity == "error"]
-    if close_errors:
-        raise LedgerPreflightError(
+    after = _preview_append_projection(
+        repo,
+        events=[close_event],
+        operation_label=operation_label,
+        details={"record_id": resolved_record_id},
+        candidate_error=(
             "close_projection_invalid",
             f"{operation_label} ledger preflight rejected projected close event",
-            details={"record_id": resolved_record_id, "errors": close_errors},
-        )
-    projected_target = next((lot for lot in close_projection.lots if lot.lot_id == resolved_record_id), None)
+        ),
+    )
+    projected_target = next(
+        (lot for lot in _preview_lots(after) if lot.lot_id == resolved_record_id),
+        None,
+    )
     after_open = int(projected_target.contracts_open) if projected_target is not None else 0
     return LedgerPreflightResult(
         status="ok",
@@ -542,10 +608,11 @@ def _preflight_lot_close(
         contracts_to_close=int(contracts_to_close),
         contracts_open_after=after_open,
         event_time_ms=event_time_ms,
-        source_record_count=len(source_events),
-        imported_event_count=len(imported_events),
-        projection_diagnostic_count=len(current_projection.diagnostics),
+        source_record_count=current.source_event_count,
+        imported_event_count=current.source_event_count,
+        projection_diagnostic_count=0,
         reconciliation_issue_count=0,
+        details=_preview_details(current),
     )
 
 
@@ -590,13 +657,17 @@ def _preflight_lot_adjust(
             details={"record_id": resolved_record_id, "contracts_open": current_open},
         )
 
-    source_events, imported_events, current_projection = _current_trade_event_projection(
+    current = _preview_append_projection(
         repo,
+        events=[],
         operation_label=operation_label,
         details={"record_id": resolved_record_id},
     )
-
-    target_lots = [lot for lot in current_projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
+    target_lots = [
+        lot
+        for lot in _preview_lots(current)
+        if lot.lot_id == resolved_record_id and lot.contracts_open > 0
+    ]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
@@ -621,7 +692,7 @@ def _preflight_lot_adjust(
             },
         )
 
-    event_time_ms = _preflight_event_time_ms(imported_events, as_of_ms=as_of_ms)
+    event_time_ms = max(int(as_of_ms or now_ms()), current.latest_event_time_ms + 1)
     patch_contract = build_open_adjustment_patch_contract(
         current_fields,
         contracts=contracts,
@@ -658,14 +729,16 @@ def _preflight_lot_adjust(
             "patch": patch,
         },
     )
-    adjust_projection = project_trade_events([*imported_events, adjust_event])
-    adjust_errors = [item.to_dict() for item in adjust_projection.diagnostics if item.severity == "error"]
-    if adjust_errors:
-        raise LedgerPreflightError(
+    _preview_append_projection(
+        repo,
+        events=[adjust_event],
+        operation_label=operation_label,
+        details={"record_id": resolved_record_id},
+        candidate_error=(
             "adjust_projection_invalid",
             f"{operation_label} ledger preflight rejected projected adjust event",
-            details={"record_id": resolved_record_id, "errors": adjust_errors},
-        )
+        ),
+    )
     return ManualAdjustPreflightResult(
         fields=current_fields,
         patch_contract=patch_contract,
@@ -679,11 +752,14 @@ def _preflight_lot_adjust(
             contracts_open_before=int(target_lot.contracts_open),
             contracts_open_after=effective_contracts_open(adjusted_fields),
             event_time_ms=event_time_ms,
-            source_record_count=len(source_events),
-            imported_event_count=len(imported_events),
-            projection_diagnostic_count=len(current_projection.diagnostics),
+            source_record_count=current.source_event_count,
+            imported_event_count=current.source_event_count,
+            projection_diagnostic_count=0,
             reconciliation_issue_count=0,
-            details={"adjusted_contract_key": adjusted_key.to_dict()},
+            details={
+                "adjusted_contract_key": adjusted_key.to_dict(),
+                **_preview_details(current),
+            },
         ),
     )
 
@@ -873,20 +949,23 @@ def _duplicate_open_preflight(*, event: TradeEvent, result: dict[str, Any]) -> L
 
 def _existing_open_event_result(repo: Any, *, event_id: str, record_id: str | None) -> dict[str, Any] | None:
     candidate = getattr(repo, "primary_repo", repo)
-    list_trade_events = getattr(candidate, "list_trade_events", None)
-    if not callable(list_trade_events):
+    getter = getattr(candidate, "get_trade_events_by_ids", None)
+    rows = (
+        getter((event_id,))
+        if callable(getter)
+        else [
+            item
+            for item in candidate.list_trade_events()
+            if str(item.get("event_id") or "").strip() == str(event_id).strip()
+        ]
+    )
+    if not rows:
         return None
-    raw_events = list_trade_events()
-    events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-    if not any(str(item.get("event_id") or "").strip() == str(event_id).strip() for item in events):
-        return None
-    list_position_lots = getattr(candidate, "list_position_lots", None)
-    raw_position_lots = list_position_lots() if callable(list_position_lots) else []
     return {
         "event_id": str(event_id),
         "record_id": str(record_id).strip() if record_id else None,
         "created": False,
-        "position_lot_count": len(raw_position_lots) if isinstance(raw_position_lots, list) else 0,
+        "position_lot_count": int(candidate.count_position_lots()),
     }
 
 
@@ -953,9 +1032,3 @@ def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
-
-
-def _preflight_event_time_ms(events: list[TradeEvent], *, as_of_ms: int | None) -> int:
-    requested = int(as_of_ms or now_ms())
-    latest_snapshot_time = max((int(event.event_time_ms or 0) for event in events), default=0)
-    return max(requested, latest_snapshot_time + 1)

@@ -18,10 +18,10 @@ or other adjunct rows therefore cannot use those entrypoints without breaking
 atomicity.
 
 The existing facade results also expose full-projection diagnostics. The S3
-runtime does not return them and currently requires resumable state even after
-a publishable diagnostic-bearing full projection. Direct S4 integration would
-therefore either repeat the O(E) full replay merely to recover diagnostics or
-change established public behavior.
+runtime does not return them. Code review subsequently confirmed every current
+diagnostic is severity `error`, so successful results always carry the exact
+empty list and error-bearing projections fail before publication. S4 must
+preserve that contract without a second O(E) replay.
 
 ## Confirmed minimal amendment
 
@@ -31,10 +31,8 @@ S4 may additionally modify
 1. expose an application-internal entrypoint for an already-open SQLite
    transaction by reusing the existing S3 runtime core;
 2. preserve input-order event-created flags needed by existing facade results;
-3. return exact full-oracle diagnostics;
-4. allow publishable diagnostic-bearing full fallback without creating a
-   checkpoint, while keeping checkpoint/fast eligibility restricted to zero
-   diagnostics.
+3. return the exact empty diagnostic list on success and preserve the full
+   oracle's fail-before-publication behavior for every current diagnostic.
 
 The caller remains transaction owner. The runtime entrypoint must neither
 commit nor roll back it. No new schema, cache, authority, mode, configuration,
@@ -46,8 +44,6 @@ or production activation is allowed.
 - existing external runtime entrypoints retain their commit/rollback behavior;
 - created flags preserve candidate order and idempotent retry behavior;
 - fast/unchanged paths never load the full event prefix or full lot list;
-- a warning-bearing full fallback publishes the same lots and diagnostics as
-  the legacy full oracle and writes no checkpoint;
 - an error-bearing full projection remains fail-closed.
 
 ## Goal alignment

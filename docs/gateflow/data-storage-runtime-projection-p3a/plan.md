@@ -1197,10 +1197,9 @@ evidence later accepts it.
   hold the SQLite transaction; it must reuse the S3 implementation, require an
   active transaction, preserve input-order idempotency flags, and never commit
   or roll back the caller-owned transaction;
-- return the full oracle's exact diagnostics from full fallback while fast,
-  unchanged, and checkpoint-backed results remain eligible only with an empty
-  diagnostic list; a diagnostic-bearing full result must not create or rotate
-  a checkpoint;
+- preserve the full oracle's diagnostic contract: successful full, unchanged,
+  and checkpoint-backed results return the exact empty diagnostic list, while
+  every current diagnostic remains an error and fails before publication;
 - use resumed preflight for eligible candidates and retain full control preflight;
 - route the facade matrix in section 9 through the runtime with explicit mode;
 - replace candidate `existing_by_id` full-history maps with one primary-key
@@ -1217,8 +1216,8 @@ evidence later accepts it.
   fallback, rebuild/bootstrap recovery, error parity, full-prefix spy failures
   and full-lot-list spy failures on fast paths, explicit target-to-closed-lot
   fallback, account-crossing rejection, caller-owned transaction rollback,
-  exact input-order created flags, diagnostic-bearing full-fallback parity with
-  zero checkpoint publication, and `rg` inventory closure.
+  exact input-order created flags, successful empty-diagnostic and error
+  parity, and `rg` inventory closure.
 
 **Stop condition:** any event writer bypasses heads/diff publication or an
 existing public workflow changes semantics.

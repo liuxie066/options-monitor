@@ -336,6 +336,7 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
     )
 
     assert exc_info.value.code == "ledger_shadow_invalid"
+    assert exc_info.value.details["import_errors"] == []
     error_items = [
         *exc_info.value.details.get("import_errors", []),
         *exc_info.value.details.get("projection_errors", []),
@@ -376,5 +377,8 @@ def test_broker_open_preflight_keeps_active_import_error_fail_closed() -> None:
 
     assert exc_info.value.code == "ledger_shadow_invalid"
     assert [item["code"] for item in exc_info.value.details["import_errors"]] == [
+        "event_time_must_be_positive"
+    ]
+    assert [item["code"] for item in exc_info.value.details["projection_errors"]] == [
         "event_time_must_be_positive"
     ]

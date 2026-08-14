@@ -22,12 +22,8 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
-from src.application.ledger.publisher import (
-    ensure_projection_publishable,
-    project_stored_trade_events_to_position_lots,
-)
-from src.application.ledger.position_projection_publication import (
-    publish_full_position_projection,
+from src.application.ledger.position_projection_runtime import (
+    run_position_projection_in_transaction,
 )
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
@@ -505,29 +501,24 @@ def persist_manual_repair_event(
     repair_event = _preview_event_to_trade_event(preview.repair_event)
 
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
-        if conn is not None:
-            void_created = sqlite_repo.upsert_trade_event(void_event, conn=conn)
-            repair_created = sqlite_repo.upsert_trade_event(repair_event, conn=conn)
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
-            ensure_projection_publishable(projection, operation="trade event repair projection")
-            records = projection.lots
-            lot_count = publish_full_position_projection(sqlite_repo, records, conn=conn).position_lot_count
-        else:
-            void_created = sqlite_repo.upsert_trade_event(void_event)
-            repair_created = sqlite_repo.upsert_trade_event(repair_event)
-            projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
-            ensure_projection_publishable(projection, operation="trade event repair projection")
-            records = projection.lots
-            lot_count = publish_full_position_projection(sqlite_repo, records).position_lot_count
+        if conn is None:
+            raise TypeError("trade event repair requires SQLite transaction authority")
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            (void_event, repair_event),
+            conn=conn,
+            mode="forced_full",
+        )
+        void_created, repair_created = runtime.created_flags
         result = {
             "target_event_id": str(target_event_id),
             "void_event_id": void_event.event_id,
             "repair_event_id": repair_event.event_id,
             "void_created": bool(void_created),
             "repair_created": bool(repair_created),
-            "position_lot_count": int(lot_count),
+            "position_lot_count": int(runtime.position_lot_count),
         }
-        result.update(projection_diagnostics_summary(projection.diagnostics))
+        result.update(projection_diagnostics_summary(runtime.diagnostics))
         return result
 
     result = with_sqlite_repo_transaction(
