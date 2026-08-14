@@ -2,7 +2,7 @@
 
 - Work unit: `sell-put-top1-w1a`
 - Trigger: implementation validation
-- Accepted plan commit: `f5f9ea06`
+- Accepted plan commit: `ea03818d`
 - Decision: allow exactly `docs/DEPENDENCY_GRAPH.md` and `docs/dependency_graph.mmd` as generated W1A artifacts
 
 ## Evidence

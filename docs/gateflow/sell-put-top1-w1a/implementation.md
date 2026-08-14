@@ -2,9 +2,9 @@
 
 - Gate: `implementation`
 - Work unit: `sell-put-top1-w1a`
-- Accepted plan commit: `f5f9ea06`
+- Accepted plan commit: `ea03818d`
 - Branch: `feat/sell-put-top1-w1a`
-- Status: accepted slice `c3d73730`; aggregate Kimi DeepReview passed
+- Status: accepted slice `6bef11ea`; latest-main integration Kimi DeepReview passed
 
 ## Implemented scope
 
@@ -20,17 +20,15 @@
 - Ruff over all W1A production/test files: pass.
 - Pure source compile check: pass.
 - `git diff --check`: pass.
-- Dependency graph in isolated accepted-plan + W1A tree: pass, `production_modules=573`, `cycles=0`.
-- Live dirty-worktree dependency check: generated Markdown differs by exactly two test-to-domain imports owned by the pre-existing fee/assignment work unit; W1A Mermaid/production edges match.
+- Latest-main integrated dependency graph: pass, `production_modules=579`, `cycles=0`, and `--check` current.
+- Pre-rebase dirty-worktree dependency drift was owned by the preserved fee/assignment work; those changes were stashed before integration and are not part of W1A.
 - BasedPyright: unavailable (`No module named basedpyright`); not installed, as required by the accepted plan.
-- Full repository pytest: `4711 passed, 10 skipped, 3 failed, 5 warnings`.
-  - The HTTP failure was the sandbox denying a loopback socket bind; the exact test passed outside the sandbox (`1 passed`).
-  - The dependency-graph failure is the recorded unrelated fee/assignment dirty-test delta; accepted-plan + W1A isolated generation passes.
-  - The ledger public-API guard also fails in the clean accepted-plan + W1A tree and is therefore a pre-existing baseline failure.
+- Full repository pytest on latest main + W1A: `4818 passed, 10 skipped, 1 sandbox-only failure, 5 warnings`.
+  - The only failure was the sandbox denying a loopback socket bind; the exact test passed outside the sandbox (`1 passed`).
 
 ## Review boundary
 
-Kimi DeepReview must inspect only W1A files and artifacts against `docs/gateflow/sell-put-top1-w1a/plan.md`, with `f5f9ea06` as the accepted-plan base. Existing fee, assignment, performance, storage-plan, and AGENTS changes are excluded.
+Kimi DeepReview must inspect only W1A files and artifacts against `docs/gateflow/sell-put-top1-w1a/plan.md`, with `ea03818d` as the accepted-plan base. Existing fee, assignment, performance, storage-plan, and AGENTS changes are excluded.
 
 ## Kimi review closure
 
@@ -38,3 +36,4 @@ Kimi DeepReview must inspect only W1A files and artifacts against `docs/gateflow
 - First re-review: `docs/reviews/code-review-20260815-022735.md` closed the null-return finding as a false positive and found one low-severity status-boundary gap.
 - Fix: lawful empty `no_candidate` remains valid; missing, `partial_data`, `data_unavailable`, and mismatched Sell Put statuses now fail closed without changing the projection schema or Candidate Engine.
 - Final re-review: `docs/reviews/code-review-20260815-023230.md`, pass with no unresolved finding.
+- Latest-main integration review: `docs/reviews/code-review-20260815-024659.md`, pass with no finding; W1A code/test diff is equivalent before and after rebase.
