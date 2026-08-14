@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest  # pyright: ignore[reportMissingImports]
 
@@ -16,6 +17,146 @@ import src.application.ledger.writer as ledger_writer
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
+
+
+def test_projection_migration_inventory_uses_read_only_store_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    def inventory(path: Path) -> dict[str, str]:
+        captured["path"] = path
+        return {"path": str(path)}
+
+    monkeypatch.setattr(
+        cli_mod,
+        "build_position_projection_migration_inventory",
+        inventory,
+    )
+
+    assert cli_mod.main(
+        [
+            "--data-config",
+            str(data_config),
+            "projection-migration",
+            "inventory",
+        ]
+    ) == 0
+
+    assert captured["path"] == sqlite_path
+    assert json.loads(capsys.readouterr().out) == {"path": str(sqlite_path)}
+
+
+def test_projection_migration_writes_require_apply_and_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "inventory.json"
+    manifest.write_text('{"schema_version":"test"}\n', encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    common = [
+        "--data-config",
+        str(data_config),
+        "projection-migration",
+        "apply",
+        "--manifest",
+        str(manifest),
+    ]
+
+    with pytest.raises(SystemExit, match="requires --apply"):
+        cli_mod.main(common)
+    with pytest.raises(SystemExit, match="use --confirm or --yes"):
+        cli_mod.main([*common, "--apply"])
+
+    monkeypatch.setattr(cli_mod, "_guard_write", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "apply_position_projection_migration",
+        lambda path, payload: {
+            "operation": "apply",
+            "path": str(path),
+            "input_schema": payload["schema_version"],
+        },
+    )
+
+    assert cli_mod.main([*common, "--apply", "--confirm"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "operation": "apply",
+        "path": str(sqlite_path),
+        "input_schema": "test",
+    }
+
+
+def test_projection_migration_activate_requires_both_evidence_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    acceptance = tmp_path / "acceptance.json"
+    shadow = tmp_path / "shadow.json"
+    acceptance.write_text('{"kind":"acceptance"}\n', encoding="utf-8")
+    shadow.write_text('{"kind":"shadow"}\n', encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    monkeypatch.setattr(cli_mod, "_guard_write", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "activate_position_projection_checkpoints",
+        lambda path, **kwargs: {
+            "operation": "activate",
+            "path": str(path),
+            "acceptance": kwargs["acceptance_manifest"]["kind"],
+            "shadow": kwargs["shadow_manifest"]["kind"],
+        },
+    )
+
+    assert cli_mod.main(
+        [
+            "--data-config",
+            str(data_config),
+            "projection-migration",
+            "activate",
+            "--acceptance-manifest",
+            str(acceptance),
+            "--shadow-manifest",
+            str(shadow),
+            "--apply",
+            "--yes",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["operation"] == "activate"
 
 
 def test_combo_confirmation_mode_is_account_scoped_and_fail_closed(

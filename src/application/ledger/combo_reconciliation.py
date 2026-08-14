@@ -26,6 +26,9 @@ from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
 )
+from src.application.ledger.position_projection_runtime import (
+    run_position_projection_in_transaction,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
     with_sqlite_repo_transaction,
@@ -205,14 +208,17 @@ def adopt_post_trade_combo_pair(
                 event_time_ms=decision_ms,
             ),
         ]
-        for event in adjustment_events:
-            sqlite_repo.upsert_trade_event(event, conn=conn)
+        run_position_projection_in_transaction(
+            sqlite_repo,
+            adjustment_events,
+            conn=conn,
+            mode="forced_full",
+        )
         events = sqlite_repo.list_trade_events(conn=conn)
-        projection = project_stored_trade_events_to_position_lots(events)
-        ensure_projection_publishable(projection, operation="post-trade Combo adoption")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        projection_lots = sqlite_repo.list_position_lots(conn=conn)
         projected_by_id = {
-            str(item.record_id): item for item in projection.lots
+            str(item.get("record_id") or ""): item
+            for item in projection_lots
         }
         put_leg = _identity_leg(
             projected_by_id[str(inference["put_record_id"])],
@@ -233,7 +239,7 @@ def adopt_post_trade_combo_pair(
             account=str(inference["account"]),
             expected_symbol=str(inference["symbol"]),
             trade_events=events,
-            projected_position_lots=projection.lots,
+            projected_position_lots=projection_lots,
         )
         if (
             membership.fact.get("status") != "exact"
@@ -266,7 +272,11 @@ def adopt_post_trade_combo_pair(
             "inference": updated,
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def reject_post_trade_combo_pair(
@@ -396,28 +406,31 @@ def supersede_post_trade_combo_pair(
         }
         if not apply_changes:
             return preview
-        for event_id, target_id in zip(void_ids, adoption_ids, strict=True):
-            sqlite_repo.upsert_trade_event(
-                _combo_void_event(
+        void_events = [
+            _combo_void_event(
                     event_id=event_id,
                     target=by_id[target_id],
                     target_event_id=target_id,
                     inference_id=inference_value,
                     reason=reason_value,
                     event_time_ms=decision_ms,
-                ),
-                conn=conn,
-            )
+                )
+            for event_id, target_id in zip(void_ids, adoption_ids, strict=True)
+        ]
+        run_position_projection_in_transaction(
+            sqlite_repo,
+            void_events,
+            conn=conn,
+            mode="forced_full",
+        )
         events_after = sqlite_repo.list_trade_events(conn=conn)
-        projection = project_stored_trade_events_to_position_lots(events_after)
-        ensure_projection_publishable(projection, operation="post-trade Combo supersede")
-        sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+        projection_lots = sqlite_repo.list_position_lots(conn=conn)
         membership_after = resolve_combo_group_membership(
             group_id=group_id,
             account=str(inference["account"]),
             expected_symbol=str(inference["symbol"]),
             trade_events=events_after,
-            projected_position_lots=projection.lots,
+            projected_position_lots=projection_lots,
         )
         if membership_after.fact.get("status") == "exact":
             raise ValueError("superseded Combo membership remains exact")
@@ -438,7 +451,11 @@ def supersede_post_trade_combo_pair(
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {**preview, "membership": membership_after.fact, "inference": updated}
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
 
 
 def _reconcile_with_repo(
@@ -943,7 +960,16 @@ def _combo_adjust_event(
 
 
 def _identity_leg(record: Any, *, open_event_id: str) -> dict[str, Any]:
-    fields = dict(record.fields)
+    fields = dict(
+        record.get("fields", {})
+        if isinstance(record, Mapping)
+        else record.fields
+    )
+    record_id = str(
+        record.get("record_id")
+        if isinstance(record, Mapping)
+        else record.record_id
+    )
     contract_key = ContractKey.from_values(
         broker=fields.get("broker"),
         account=fields.get("account"),
@@ -962,7 +988,7 @@ def _identity_leg(record: Any, *, open_event_id: str) -> dict[str, Any]:
         "leg_role": str(fields.get("leg_role") or "").strip().lower(),
         "contracts": int(effective_contracts(fields) or 0),
         "open_event_id": str(open_event_id or "").strip(),
-        "record_id": str(record.record_id),
+        "record_id": record_id,
         "contract_key": contract_key.to_dict(),
         "currency": str(fields.get("currency") or "").strip().upper(),
         "multiplier": float(effective_multiplier(fields) or 0),
