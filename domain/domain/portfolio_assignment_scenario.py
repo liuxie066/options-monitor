@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
     FUTU_US_FEE_SCHEDULE_URL,
+    calc_futu_hk_terminal_fee,
     calc_futu_stock_fee,
 )
 from domain.domain.ledger.position_fields import normalize_broker
@@ -162,7 +163,11 @@ def _fee_fact(
     source = FUTU_HK_FEE_SCHEDULE_URL if currency == "HKD" else FUTU_US_FEE_SCHEDULE_URL
     base = {
         "basis": "assignment_at_strike",
-        "calculator": "domain.domain.fee_calc.calc_futu_stock_fee",
+        "calculator": (
+            "domain.domain.fee_calc.calc_futu_hk_terminal_fee"
+            if currency == "HKD"
+            else "domain.domain.fee_calc.calc_futu_stock_fee"
+        ),
         "currency": currency,
         "is_sell": option_type == "call",
         "shares": shares,
@@ -195,33 +200,32 @@ def _fee_fact(
             None,
             False,
         )
-    try:
-        estimated_native = Decimal(
-            str(
-                calc_futu_stock_fee(
-                    currency,
-                    float(strike),
-                    shares=shares,
-                    is_sell=option_type == "call",
+    if currency == "USD":
+        try:
+            estimated_native = Decimal(
+                str(
+                    calc_futu_stock_fee(
+                        currency,
+                        float(strike),
+                        shares=shares,
+                        is_sell=option_type == "call",
+                    )
                 )
             )
-        )
-    except (TypeError, ValueError, ArithmeticError):
-        return (
-            {
-                **base,
-                "status": "missing",
-                "estimated_stock_fee_native": None,
-                "fee_native": None,
-                "fee_cny": None,
-                "reason": "stock_fee_estimate_failed",
-            },
-            None,
-            False,
-        )
-
-    estimated_cny = estimated_native * exchange_rate
-    if currency == "USD":
+        except (TypeError, ValueError, ArithmeticError):
+            return (
+                {
+                    **base,
+                    "status": "missing",
+                    "estimated_stock_fee_native": None,
+                    "fee_native": None,
+                    "fee_cny": None,
+                    "reason": "stock_fee_estimate_failed",
+                },
+                None,
+                False,
+            )
+        estimated_cny = estimated_native * exchange_rate
         return (
             {
                 **base,
@@ -235,18 +239,30 @@ def _fee_fact(
             None,
             False,
         )
+    terminal = calc_futu_hk_terminal_fee(
+        "assignment",
+        order_price=float(strike),
+        shares=shares,
+        contracts=_integer(option.get("contracts_open")) or 0,
+    )
+    estimated_amount = terminal.get("estimated_amount")
+    estimated_native = Decimal(str(estimated_amount)) if estimated_amount is not None else None
+    estimated_cny = estimated_native * exchange_rate if estimated_native is not None else None
     return (
         {
             **base,
-            "status": "estimated",
+            "status": "missing",
             "estimated_stock_fee_native": _native_money(estimated_native),
             "estimated_stock_fee_cny": _money(estimated_cny),
-            "fee_native": _native_money(estimated_native),
-            "fee_cny": _money(estimated_cny),
-            "reason": "hk_assignment_stock_fee_excluding_assignment_exercise_fee",
+            "fee_native": None,
+            "fee_cny": None,
+            "reason": terminal["reason"],
+            "schedule_version": terminal["schedule_version"],
+            "fee_plan_ref": terminal["fee_plan_ref"],
+            "estimated_basis": terminal["estimated_basis"],
         },
-        estimated_cny,
-        True,
+        None,
+        False,
     )
 
 
