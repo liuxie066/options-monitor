@@ -4,7 +4,7 @@
 - Work unit: `sell-put-top1-w1a`
 - Accepted plan commit: `f5f9ea06`
 - Branch: `feat/sell-put-top1-w1a`
-- Status: implementation and Kimi review loop complete; pending accepted slice commit
+- Status: accepted slice `c3d73730`; aggregate Kimi DeepReview passed
 
 ## Implemented scope
 
