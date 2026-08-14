@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 from typing import Any, Callable, Iterator, Mapping
 
@@ -620,12 +621,58 @@ def _load_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
-def _source_commit() -> str | None:
-    root = Path(__file__).resolve().parents[3]
+def _source_commit(root: Path | None = None) -> str | None:
+    root = root or Path(__file__).resolve().parents[3]
+    git_prefix = ["git"]
+    git_env: dict[str, str] | None = None
+    commit_ref = "HEAD"
+    temp_index: tempfile.TemporaryDirectory[str] | None = None
+    if not (root / ".git").exists():
+        configured_cache = str(os.environ.get("OM_UPGRADE_CACHE_ROOT") or "").strip()
+        cache_root = (
+            Path(configured_cache).expanduser()
+            if configured_cache
+            else root.parent.parent / "_cache"
+        )
+        cache_repo = cache_root / "git" / "options-monitor.git"
+        try:
+            version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if root.parent.name != "releases" or not cache_repo.is_dir() or not version:
+            return None
+        git_prefix = [
+            "git",
+            f"--git-dir={cache_repo}",
+            f"--work-tree={root}",
+        ]
+        commit_ref = f"refs/tags/v{version}^{{commit}}"
+        temp_index = tempfile.TemporaryDirectory(prefix="om-source-identity-")
+        git_env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp_index.name) / "index")}
     try:
+        result = subprocess.run(
+            [*git_prefix, "rev-parse", "--verify", commit_ref],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=git_env,
+        )
+        commit = result.stdout.strip()
+        if temp_index is not None:
+            subprocess.run(
+                [*git_prefix, "read-tree", commit],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env,
+            )
         source_status = subprocess.run(
             [
-                "git",
+                *git_prefix,
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
@@ -639,20 +686,16 @@ def _source_commit() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=git_env,
         )
         if source_status.stdout.strip():
             return None
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout.strip() or None
+    finally:
+        if temp_index is not None:
+            temp_index.cleanup()
+    return commit or None
 
 
 def _verify_from_conn(
