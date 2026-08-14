@@ -1,0 +1,96 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.21",
+  "base": {
+    "tag": "v1.13.20",
+    "commit": "2a7bc5668ecda53d0b0d1c3d8856d976487b5d6f"
+  },
+  "reviewed_head": "869d53e7bf9c8fc329ea0129474f51ba4c7d0b6e",
+  "commits": [
+    {
+      "sha": "9f5d7af7df454aef35122a71d0b2ec33a1e67cc9",
+      "subject": "docs(gateflow): accept Phase 3A projection plan"
+    },
+    {
+      "sha": "82e8d9821a86aa81927c34e9fcaa4b32149dd386",
+      "subject": "feat(ledger): establish projection publication contract"
+    },
+    {
+      "sha": "d355193ac117e596b3515c8feb05a6e90045eacc",
+      "subject": "chore(gateflow): accept data-storage-runtime-projection-p3a S2"
+    },
+    {
+      "sha": "2127d0acd581ede9b5fd5322824301a3c331d667",
+      "subject": "chore(gateflow): accept data-storage-runtime-projection-p3a S3"
+    },
+    {
+      "sha": "5930e5ce16e369914e26684e538069f13ff1c60b",
+      "subject": "docs(gateflow): accept S4 projection runtime amendment"
+    },
+    {
+      "sha": "75d5dcc1e616c5deea82dd1de38945bf4e20f2d8",
+      "subject": "feat(ledger): route projection writers through runtime"
+    },
+    {
+      "sha": "59fbbee88137b71f8345d79d87ba1a66ed868f2a",
+      "subject": "feat(ledger): add projection migration acceptance gate"
+    },
+    {
+      "sha": "c1d759ae10352d2a5664739e2053bb396e698919",
+      "subject": "fix(agent): align runtime artifact roots"
+    },
+    {
+      "sha": "67276826711b268d989379dfdbc0a7cda01dd590",
+      "subject": "chore(gateflow): integrate latest main"
+    },
+    {
+      "sha": "869d53e7bf9c8fc329ea0129474f51ba4c7d0b6e",
+      "subject": "Merge pull request #155 from liuxie066/plan/data-storage-runtime-projection-p3a"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added a checkpoint-and-tail projection path with exact changed-lot publication for ordinary append-safe option-position writes, while retaining canonical full-history replay for recovery, audit, research, backtest, repair, and any trust mismatch. On the deterministic 10,000-event reference benchmark, writer p95 wall and CPU time improved by about 95%.",
+      "commits": [
+        "82e8d9821a86aa81927c34e9fcaa4b32149dd386",
+        "d355193ac117e596b3515c8feb05a6e90045eacc",
+        "2127d0acd581ede9b5fd5322824301a3c331d667",
+        "75d5dcc1e616c5deea82dd1de38945bf4e20f2d8",
+        "59fbbee88137b71f8345d79d87ba1a66ed868f2a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added read-only projection inventory, shadow verification, and status commands plus guarded apply, activate, and deactivate controls bound to the exact store, source, schema, implementation, and generation evidence. Release and upgrade leave checkpoint mode disabled until a separately authorized live activation.",
+      "commits": [
+        "59fbbee88137b71f8345d79d87ba1a66ed868f2a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Aligned Agent candidate, runtime-log, and runtime-run artifact resolution with the configured runtime root, so deployed tools read production artifacts instead of release-directory-local paths.",
+      "commits": [
+        "c1d759ae10352d2a5664739e2053bb396e698919"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9f5d7af7df454aef35122a71d0b2ec33a1e67cc9",
+      "reason": "docs-only Gateflow planning and review artifacts; no independent runtime behavior change"
+    },
+    {
+      "commit": "5930e5ce16e369914e26684e538069f13ff1c60b",
+      "reason": "docs-only Gateflow scope amendment and plan-review artifact; no independent runtime behavior change"
+    },
+    {
+      "commit": "67276826711b268d989379dfdbc0a7cda01dd590",
+      "reason": "integration merge for the runtime-root fix; its user-facing behavior is covered by the release note mapped to c1d759ae"
+    },
+    {
+      "commit": "869d53e7bf9c8fc329ea0129474f51ba4c7d0b6e",
+      "reason": "GitHub merge commit for the projection work unit; all runtime behavior is covered by the mapped feature and fix commits"
+    }
+  ]
+}

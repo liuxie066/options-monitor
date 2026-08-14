@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.13.21 - 2026-08-14
+
+### Improvements
+- Added a checkpoint-and-tail projection path with exact changed-lot publication for ordinary append-safe option-position writes, while retaining canonical full-history replay for recovery, audit, research, backtest, repair, and any trust mismatch. On the deterministic 10,000-event reference benchmark, writer p95 wall and CPU time improved by about 95%.
+- Added read-only projection inventory, shadow verification, and status commands plus guarded apply, activate, and deactivate controls bound to the exact store, source, schema, implementation, and generation evidence. Release and upgrade leave checkpoint mode disabled until a separately authorized live activation.
+
+### Bug Fixes
+- Aligned Agent candidate, runtime-log, and runtime-run artifact resolution with the configured runtime root, so deployed tools read production artifacts instead of release-directory-local paths.
+
 ## 1.13.20 - 2026-08-13
 
 ### Improvements
