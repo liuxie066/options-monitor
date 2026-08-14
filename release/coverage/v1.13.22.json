@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.13.22",
+  "base": {
+    "tag": "v1.13.21",
+    "commit": "33248a78c0dfabab13c241fc605ac8019980d6e7"
+  },
+  "reviewed_head": "a63c91d2e814946e9fa1051e1c57d82e53c207eb",
+  "commits": [
+    {
+      "sha": "a63c91d2e814946e9fa1051e1c57d82e53c207eb",
+      "subject": "fix(copilot): recheck stale no-evidence replies"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Required Copilot to re-check current read-only evidence before accepting a repeated historical diagnostic, preventing stale runtime-snapshot-unavailable answers from being reused when production artifacts are available.",
+      "commits": [
+        "a63c91d2e814946e9fa1051e1c57d82e53c207eb"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
