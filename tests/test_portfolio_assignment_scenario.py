@@ -155,7 +155,7 @@ def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
     )
 
     assert result["schema_version"] == "portfolio.assignment_scenario.v1"
-    assert result["status"] == "complete"
+    assert result["status"] == "partial"
     assert result["scope"]["include_long_options"] is False
     assert result["summary"] == {
         "assignment_count": 2,
@@ -167,8 +167,8 @@ def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
     assert result["cash_coverage"]["available_cash_and_mmf_cny"] == "120000.00"
     assert result["cash_coverage"]["gross_put_requirement_cny"] == "32200.00"
     assert result["cash_coverage"]["call_assignment_inflow_cny"] == "82800.00"
-    assert result["cash_coverage"]["total_fees_cny"] is not None
-    assert result["fee_summary"]["status"] == "complete"
+    assert result["cash_coverage"]["total_fees_cny"] is None
+    assert result["fee_summary"]["status"] == "partial"
     assert result["position_changes"][0]["opening_shares"] == "100"
     assert result["position_changes"][0]["put_assigned_shares"] == "100"
     assert result["position_changes"][0]["call_assigned_shares"] == "200"
@@ -176,8 +176,8 @@ def test_projects_put_and_call_with_cash_mmf_and_existing_holding():
     assert result["position_changes"][0]["liability_kind"] is None
     assert {row["record_id"] for row in result["assignments"]} == {"put-1", "call-1"}
     assert len(result["expiration_ladder"]) == 1
-    assert result["distribution"]["status"] == "complete"
-    assert result["distribution"]["gross_assets_cny"] is not None
+    assert result["distribution"]["status"] == "partial"
+    assert result["distribution"]["gross_assets_cny"] is None
 
 
 def test_uncovered_call_becomes_short_stock_liability_not_error():
@@ -205,14 +205,14 @@ def test_uncovered_call_becomes_short_stock_liability_not_error():
         snapshot=_snapshot(),
     )
 
-    assert result["status"] == "complete"
+    assert result["status"] == "partial"
     change = result["position_changes"][0]
     assert change["ending_shares"] == "-100"
     assert change["ending_market_value_cny"] == "-36800.00"
     assert change["liability_kind"] == "short_stock"
     liabilities = result["distribution"]["liabilities"]
     assert any(row["code"] == "0700.HK" and row["liability_cny"] == "36800.00" for row in liabilities)
-    assert result["cash_coverage"]["terminal_funding_gap_cny"] == "0.00"
+    assert result["cash_coverage"]["terminal_funding_gap_cny"] is None
 
 
 def test_us_assignment_uses_unified_stock_calculator_but_fails_closed_on_missing_rule():
@@ -264,6 +264,73 @@ def test_us_assignment_uses_unified_stock_calculator_but_fails_closed_on_missing
     assert result["cash_coverage"]["ending_cash_gross_cny"] == "72000.00"
     assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
     assert result["distribution"]["net_assets_cny"] is None
+
+
+def test_hk_assignment_stock_fee_estimate_fails_closed_without_account_plan():
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(
+            holdings=[
+                {
+                    "account": "lx",
+                    "broker": "富途",
+                    "code": "CNY-CASH",
+                    "name": "现金",
+                    "asset_type": "cash",
+                    "normalized_type": "cash",
+                    "quantity": 100000,
+                    "currency": "CNY",
+                    "market_value_cny": 100000,
+                }
+            ],
+            quotes=[_quote("0700.HK")],
+        ),
+        option_positions=[_option("put-hk", option_type="put", strike=350)],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "partial"
+    fee = result["fee_summary"]["items"][0]
+    assert fee["calculator"] == "domain.domain.fee_calc.calc_futu_hk_terminal_fee"
+    assert fee["estimated_stock_fee_native"] is not None
+    assert fee["estimated_stock_fee_cny"] is not None
+    assert fee["status"] == "missing"
+    assert fee["fee_native"] is None
+    assert fee["fee_cny"] is None
+    assert fee["reason"] == "hk_account_fee_plan_missing"
+    assert result["fee_summary"]["status"] == "partial"
+    assert result["fee_summary"]["total_fees_cny"] is None
+    assert result["cash_coverage"]["total_fees_cny"] is None
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
+    assert result["account_breakdown"][0]["ending_cash_net_estimated_cny"] is None
+
+
+def test_hk_assignment_rejects_unvalidated_account_fee_plan_payload():
+    option = _option("put-hk", option_type="put", strike=350)
+    option["account_fee_plan"] = {
+        "commission_free": False,
+        "platform_fee": 15.0,
+        "fee_plan_ref": "futu_hk_standard_fixed",
+    }
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(
+            holdings=[],
+            quotes=[_quote("0700.HK")],
+        ),
+        option_positions=[option],
+        snapshot=_snapshot(),
+    )
+
+    fee = result["fee_summary"]["items"][0]
+    assert fee["calculator"] == "domain.domain.fee_calc.calc_futu_hk_terminal_fee"
+    assert fee["status"] == "missing"
+    assert fee["fee_native"] is None
+    assert fee["fee_plan_ref"] is None
+    assert fee["estimated_stock_fee_native"] == "64.945000"
+    assert fee["estimated_basis"] == "standard_fixed_non_commission_free"
+    assert result["status"] == "partial"
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
 
 
 def test_missing_explicit_fx_never_infers_from_native_and_cny_prices():
@@ -324,7 +391,7 @@ def test_missing_spot_keeps_strike_cash_projection_when_fx_is_explicit():
 
     assert result["status"] == "partial"
     assert result["cash_coverage"]["gross_put_requirement_cny"] == "32200.00"
-    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is not None
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
     assert result["distribution"]["status"] == "partial"
     assert result["distribution"]["net_assets_cny"] is None
 
