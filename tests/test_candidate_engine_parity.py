@@ -16,6 +16,35 @@ def test_candidate_engine_put_rank_is_canonical() -> None:
     assert [r["contract_symbol"] for r in engine] == ["B", "C", "A"]
 
 
+def test_candidate_engine_omitted_profile_matches_explicit_production_default() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    rows = [
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "NVDA_PUT",
+            "period_net_return_on_cash_basis": 0.012,
+            "symbol_concentration_after": 0.40,
+        },
+        {
+            "symbol": "AMD",
+            "contract_symbol": "AMD_PUT",
+            "period_net_return_on_cash_basis": 0.011,
+            "symbol_concentration_after": 0.20,
+        },
+    ]
+
+    omitted = rank_candidate_rows(rows, mode="put")
+    explicit = rank_candidate_rows(
+        rows,
+        mode="put",
+        sell_put_ranking_profile="current_tie_break",
+    )
+
+    assert omitted == explicit
+    assert [row["contract_symbol"] for row in omitted] == ["AMD_PUT", "NVDA_PUT"]
+
+
 def test_candidate_engine_call_rank_is_canonical() -> None:
     from domain.domain.engine import rank_candidate_rows
 
