@@ -1314,6 +1314,105 @@ def test_truncated_model_answer_is_continued_and_joined() -> None:
     assert terminated.payload["reason"] == "final_answer"
 
 
+@pytest.mark.parametrize(
+    ("prior_answer", "expected_reason"),
+    (
+        (
+            "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
+            "因此无法确认 0700.HK 被哪些条件过滤。",
+            "repeated_prior_answer",
+        ),
+        ("结论：上次检查未取得结果。", "tool_reference_without_current_observation"),
+    ),
+)
+def test_stale_no_evidence_answer_rechecks_with_current_tool(
+    monkeypatch,
+    prior_answer: str,
+    expected_reason: str,
+) -> None:
+    stale_answer = (
+        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
+        "因此无法确认 0700.HK 被哪些条件过滤。"
+    )
+    request = replace(
+        _request(
+            "0700.HK 在 lx 账户为什么被过滤？",
+            context=(
+                {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
+                {"role": "assistant", "content": prior_answer},
+            ),
+            environment="channel",
+        ),
+        explicit_scope=CopilotScope(config_key="hk"),
+    )
+    prepared = prepare_contract(request, reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    model_calls = 0
+    tool_calls: list[tuple[str, dict]] = []
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        assert name in allowed_tools
+        tool_calls.append((name, dict(payload)))
+        return {
+            "ok": True,
+            "data": {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "status": "rejected",
+                "reason_counts": {"risk_iv_minus_rv": 33},
+            },
+        }
+
+    def model(model_request: ModelRequest) -> ModelTurn:
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls == 1:
+            return ModelTurn(text=stale_answer)
+        if model_calls == 2:
+            assert any(
+                item.get("role") == "system" and "not current evidence" in str(item.get("content"))
+                for item in model_request.messages
+            )
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        "candidate_filter_explain",
+                        {
+                            "account": "lx",
+                            "symbol": "0700.HK",
+                            "function": "sell_put",
+                            "run_selector": "latest_notification",
+                            "notification_date": "2026-08-14",
+                        },
+                    ),
+                )
+            )
+        assert any(item.get("role") == "tool" for item in model_request.messages)
+        return ModelTurn(text="结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。")
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    result = run_contract(prepared, model_runner=model)
+
+    assert result.status == "answered"
+    assert result.user_response == "结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。"
+    assert model_calls == 3
+    assert tool_calls == [
+        (
+            "candidate_filter_explain",
+            {
+                "config_key": "hk",
+                "account": "lx",
+                "symbol": "0700.HK",
+                "function": "sell_put",
+                "run_selector": "latest_notification",
+                "notification_date": "2026-08-14",
+            },
+        )
+    ]
+    event = next(event for event in result.events if event.type == "fresh_evidence_recheck_requested")
+    assert event.payload["reason"] == expected_reason
+
+
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
     calls: list[dict] = []
 

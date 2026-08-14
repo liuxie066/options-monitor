@@ -76,6 +76,7 @@ def run_engine(
     clock_fn = clock or time.monotonic
     started_at = clock_fn()
     consecutive_failed_batches = 0
+    fresh_evidence_recheck_used = False
 
     while state.iterations < max_iterations:
         stop = _stop_reason(
@@ -132,6 +133,33 @@ def run_engine(
                 )
                 continue
             text = _joined_answer(state.accumulated_text_parts, turn.text)
+            recheck_reason = (
+                _fresh_evidence_recheck_reason(state.manifest, text)
+                if not fresh_evidence_recheck_used
+                and not state.observations
+                and state.iterations < max_iterations
+                and state.tool_calls < max_tool_calls
+                else None
+            )
+            if recheck_reason:
+                fresh_evidence_recheck_used = True
+                state.messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The proposed answer is not supported by this run. Historical assistant replies "
+                            "and prior tool results are context, not current evidence. For an empirical question, "
+                            "call the relevant read-only tool now before answering. Do not mention internal tool "
+                            "names in the final response."
+                        ),
+                    }
+                )
+                record_event(
+                    "fresh_evidence_recheck_requested",
+                    {"reason": recheck_reason, "iteration": state.iterations},
+                    None,
+                )
+                continue
             record_event(
                 "agent_terminated",
                 {
@@ -911,6 +939,20 @@ def _remaining_seconds(timeout_seconds: float, started_at: float, clock: Clock) 
 
 def _joined_answer(parts: list[str], final_text: str) -> str:
     return "".join([*parts, final_text]).strip()
+
+
+def _fresh_evidence_recheck_reason(manifest: SceneManifest, text: str) -> str | None:
+    normalized = " ".join(text.split())
+    if any(
+        normalized == " ".join(str(message.get("content") or "").split())
+        for message in manifest.messages
+        if message.get("role") == "assistant"
+    ):
+        return "repeated_prior_answer"
+    folded = normalized.casefold()
+    if any(str(name).casefold() in folded for name in manifest.allowed_tools if str(name).strip()):
+        return "tool_reference_without_current_observation"
+    return None
 
 
 def _model_error_category(exc: Exception) -> str:
