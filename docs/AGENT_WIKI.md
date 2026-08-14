@@ -194,7 +194,8 @@ The output directory must be absent or empty. The runner never opens a runtime
 ledger: it derives bounded dimensions from aggregate baseline metadata, creates
 fresh temporary SQLite ledgers, and atomically publishes `fixture-manifest.json`,
 `timing.json`, `cpu-profile.json`, `allocation-profile.json`, and
-`decision.json`. Omit `--baseline` to use deterministic safe defaults.
+`decision.json`, plus `phase-3a-acceptance.json`. Omit `--baseline` to use
+deterministic safe defaults.
 
 Timing uses 5 warmups and 30 measured repetitions by default. Lower values are
 allowed for plumbing checks but are labeled `non_acceptance_smoke`. `cProfile`
@@ -222,10 +223,23 @@ designated reference run should repeat with:
 
 Without an exact match, timing is still reported but the writer gate is
 `not_comparable`. `projector_only` is diagnostic evidence, not a writer pass.
-Because diff publication is not implemented in Phase 1,
-`lot_diff_publication=not_implemented` and the combined Phase 3A decision stays
-`not_ready`; the command never enables checkpointing, tiering, migration, or
-runtime mutation.
+For checkpoint/tail acceptance, first produce a passing read-only shadow
+manifest for the exact target store, then run:
+
+```bash
+./.venv/bin/python scripts/benchmark_data_storage_projection.py \
+  --scenario phase_3a \
+  --reference-host-fingerprint <recorded-sha256> \
+  --shadow-manifest ./projection-shadow.json \
+  --output-dir ./projection-benchmark-phase3a
+```
+
+Only the default 5 warmups / 30 repetitions on the exact reference host can
+produce `lot_diff_publication=pass`, `checkpoint_tail=pass`, combined
+`ready`, and a passing acceptance manifest. The benchmark uses synthetic
+ledgers and never applies a migration or enables a runtime store. The
+`retained_lots_10x` fingerprint result is a capacity diagnostic with
+`retained_lots_10x_guarantee=false`, not a hidden activation gate.
 
 ### Scopes
 
@@ -431,6 +445,63 @@ Rules:
 - Feishu `option_positions` is retired and must not be used for bootstrap, sync, or strategy reads.
 - Non-ledger runtime code must enter through `src/application/ledger/api.py`.
 - Do not patch projected state directly when the canonical event chain is wrong.
+
+#### Current projection authority and resumable checkpoints
+
+`trade_events` remains the canonical history and `position_lots` remains the
+authoritative current projection. A row in `position_projection_checkpoints`
+is only a bounded resumable cache: it stores active continuation state, never
+replaces event history, and cannot authorize a read unless source/head/schema/
+implementation generations match exactly.
+
+Ordinary append-safe writers may resume from the newest trusted checkpoint and
+apply only its ordered tail. Explicit rebuild, audit, historical allocation,
+Strategy Lab, backtest, void/repair, unsafe ordering, or any trust mismatch use
+the canonical full history. Therefore checkpoint activation does not reduce
+research or backtest fidelity and does not delete closed lots or events.
+
+Checkpoint cadence is fixed in code: rotate after 100 tail events or 1 MiB of
+canonical tail bytes, whichever comes first. Ordinary writes between rotations
+write no checkpoint payload. Retention keeps at most the newest two trusted
+checkpoints plus the newest distinct full-oracle seed (`K <= 3`).
+
+Read-only operator surfaces:
+
+```bash
+./om option-positions --data-config <data.json> projection-migration inventory
+./om option-positions --data-config <data.json> projection-migration verify --shadow
+./om option-positions --data-config <data.json> projection-migration status
+```
+
+`inventory` and `verify --shadow` open the selected SQLite store read-only.
+`status` reports checkpoint mode/K/bytes, source and lot generations, last full
+verification, loaded implementation fingerprint timing, fingerprint rows/
+bytes, and bounded process-local fast/full/fallback wall/CPU summaries.
+`source_generation_mismatch`, `lots_generation_mismatch`, schema-cookie or
+implementation mismatch, an untrusted/missing checkpoint, or parity failure
+means the trusted path is unavailable; use full `verify`/rebuild and generate
+fresh evidence rather than overriding the reason.
+
+Write transitions are deliberately separate and require both the normal local
+write guard and high-risk confirmation:
+
+```bash
+./om option-positions --data-config <data.json> projection-migration apply \
+  --manifest <inventory.json> --apply --confirm
+./om option-positions --data-config <data.json> projection-migration activate \
+  --acceptance-manifest <phase-3a-acceptance.json> \
+  --shadow-manifest <projection-shadow.json> --apply --confirm
+./om option-positions --data-config <data.json> projection-migration deactivate \
+  --apply --confirm
+```
+
+`apply` backfills/indexes and seeds a trusted checkpoint but leaves mode
+disabled. `activate` requires exact current-store, source-commit, schema,
+implementation, generation, reference-host, benchmark, and shadow bindings.
+`deactivate` disables checkpoint use without deleting events, lots, heads, or
+checkpoints. Merging this source does not authorize a live apply/activate,
+release, deployment, service change, notification, broker write, or deletion;
+each remains a separate explicit operator action.
 
 #### Option Performance And Portfolio Bridges
 

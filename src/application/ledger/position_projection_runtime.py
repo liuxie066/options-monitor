@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, replace
 import hashlib
 import json
+from threading import Lock
+import time
 from typing import Any, Callable, Sequence
 
 from domain.domain.ledger import (
@@ -37,6 +40,11 @@ CHECKPOINT_ROTATE_EVENT_COUNT = 100
 CHECKPOINT_ROTATE_EVENT_BYTES = 1_048_576
 MAX_CHECKPOINT_STATE_BYTES = 64 * 1_048_576
 _EVENT_PREFIX_SEED = b"position_projection_event_prefix.v1"
+_RUNTIME_TELEMETRY_SAMPLE_LIMIT = 256
+_RUNTIME_TELEMETRY: deque[dict[str, Any]] = deque(
+    maxlen=_RUNTIME_TELEMETRY_SAMPLE_LIMIT
+)
+_RUNTIME_TELEMETRY_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -139,6 +147,43 @@ def run_position_projection_in_transaction(
 ) -> ProjectionRuntimeResult:
     """Write events and publish their projection inside a caller-owned transaction."""
 
+    wall_start = time.perf_counter_ns()
+    cpu_start = time.process_time_ns()
+    try:
+        result = _run_position_projection_in_transaction_impl(
+            repo,
+            events,
+            conn=conn,
+            mode=mode,
+            seed_checkpoint=seed_checkpoint,
+            failure_hook=failure_hook,
+        )
+    except Exception as exc:
+        _record_runtime_telemetry(
+            result=None,
+            wall_ns=time.perf_counter_ns() - wall_start,
+            cpu_ns=time.process_time_ns() - cpu_start,
+            error_type=type(exc).__name__,
+        )
+        raise
+    _record_runtime_telemetry(
+        result=result,
+        wall_ns=time.perf_counter_ns() - wall_start,
+        cpu_ns=time.process_time_ns() - cpu_start,
+    )
+    return result
+
+
+def _run_position_projection_in_transaction_impl(
+    repo: Any,
+    events: Sequence[Any] = (),
+    *,
+    conn: Any,
+    mode: str,
+    seed_checkpoint: bool = False,
+    failure_hook: Callable[[str], None] | None = None,
+) -> ProjectionRuntimeResult:
+
     candidate = require_position_projection_publication_repo(repo)
     if not isinstance(candidate, SQLiteOptionPositionsRepository):
         raise TypeError("position projection runtime requires SQLite transaction authority")
@@ -184,6 +229,74 @@ def run_position_projection_in_transaction(
         failure_hook=failure_hook,
     )
     return replace(result, created_flags=created_flags)
+
+
+def _record_runtime_telemetry(
+    *,
+    result: ProjectionRuntimeResult | None,
+    wall_ns: int,
+    cpu_ns: int,
+    error_type: str | None = None,
+) -> None:
+    sample = {
+        "mode_used": result.mode_used if result is not None else "error",
+        "fallback_reason": (
+            result.fallback_reason if result is not None else f"error:{error_type or 'unknown'}"
+        ),
+        "wall_ns": int(wall_ns),
+        "cpu_ns": int(cpu_ns),
+        "checkpoint_written": bool(result and result.checkpoint_written),
+        "tail_event_count": int(result.tail_event_count if result is not None else 0),
+        "tail_event_bytes": int(result.tail_event_bytes if result is not None else 0),
+        "fingerprint_rows": int(result.position_lot_count if result is not None else 0),
+    }
+    with _RUNTIME_TELEMETRY_LOCK:
+        _RUNTIME_TELEMETRY.append(sample)
+
+
+def _telemetry_summary(values: Sequence[int]) -> dict[str, int]:
+    ordered = sorted(int(value) for value in values)
+    if not ordered:
+        return {"sample_count": 0, "min": 0, "median": 0, "p95": 0, "max": 0}
+    return {
+        "sample_count": len(ordered),
+        "min": ordered[0],
+        "median": ordered[(len(ordered) - 1) // 2],
+        "p95": ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)],
+        "max": ordered[-1],
+    }
+
+
+def position_projection_runtime_telemetry() -> dict[str, Any]:
+    """Return bounded process-local runtime evidence; never writes ledger state."""
+
+    with _RUNTIME_TELEMETRY_LOCK:
+        samples = tuple(_RUNTIME_TELEMETRY)
+    mode_counts: dict[str, int] = {}
+    fallback_counts: dict[str, int] = {}
+    for sample in samples:
+        mode = str(sample["mode_used"])
+        mode_counts[mode] = mode_counts.get(mode, 0) + 1
+        reason = sample.get("fallback_reason")
+        if reason:
+            key = str(reason)
+            fallback_counts[key] = fallback_counts.get(key, 0) + 1
+    return {
+        "schema_version": "position_projection_runtime_telemetry.v1",
+        "scope": "current_process_bounded",
+        "sample_limit": _RUNTIME_TELEMETRY_SAMPLE_LIMIT,
+        "sample_count": len(samples),
+        "mode_counts": dict(sorted(mode_counts.items())),
+        "fallback_reason_counts": dict(sorted(fallback_counts.items())),
+        "wall_time_ns": _telemetry_summary([int(row["wall_ns"]) for row in samples]),
+        "cpu_time_ns": _telemetry_summary([int(row["cpu_ns"]) for row in samples]),
+        "checkpoint_write_count": sum(bool(row["checkpoint_written"]) for row in samples),
+        "tail_event_count": sum(int(row["tail_event_count"]) for row in samples),
+        "tail_event_bytes": sum(int(row["tail_event_bytes"]) for row in samples),
+        "fingerprint_rows": _telemetry_summary(
+            [int(row["fingerprint_rows"]) for row in samples]
+        ),
+    }
 
 
 def preview_position_projection_append(
@@ -1179,5 +1292,6 @@ __all__ = [
     "run_position_projection_fast_if_safe",
     "run_position_projection_forced_full",
     "run_position_projection_in_transaction",
+    "position_projection_runtime_telemetry",
     "preview_position_projection_append",
 ]

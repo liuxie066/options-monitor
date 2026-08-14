@@ -24,14 +24,23 @@ import tracemalloc
 from typing import Any, Callable, Iterator, Mapping, Sequence
 import zlib
 
+from domain.domain.combo_identity import build_combo_identity_intent
 from domain.domain.ledger import ContractKey, TradeEvent
-from src.application.ledger.event_codec import (
-    encode_trade_event_for_storage,
+from src.application.ledger.api import (
+    apply_position_projection_migration,
+    build_position_projection_migration_inventory,
+    compute_projector_implementation_fingerprint,
+    LEDGER_DB_RELATIVE_PATH,
+    loaded_projector_implementation_fingerprint,
+    open_position_ledger,
+    project_trade_event_log as project_stored_trade_events_to_position_lots,
+    read_current_position_projection,
+    record_combo_trade_open,
+    record_manual_position_adjustments,
+    record_manual_position_close,
+    refresh_position_lot_projection as rebuild_position_lots_from_trade_events,
     trade_event_application_payload,
 )
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
-from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.ledger.writer import rebuild_position_lots_from_trade_events
 from src.application.research.storage_baseline import collect_storage_runtime_baseline
 
 try:
@@ -45,6 +54,8 @@ TIMING_SCHEMA = "data_storage_projection_timing.v1"
 CPU_PROFILE_SCHEMA = "data_storage_projection_cpu_profile.v1"
 ALLOCATION_PROFILE_SCHEMA = "data_storage_projection_allocation_profile.v1"
 DECISION_SCHEMA = "data_storage_projection_gate_decision.v1"
+PHASE_3A_ACCEPTANCE_SCHEMA = "data_storage_projection_phase3a_acceptance.v1"
+PHASE_3A_FIXTURE_SCHEMA = "data_storage_projection_phase3a_fixture.v1"
 WORKER_SPEC_SCHEMA = "data_storage_projection_worker_spec.v1"
 SEED = 20260813
 DEFAULT_WARMUPS = 5
@@ -68,12 +79,25 @@ STORAGE_STATUS_PARTITION_COUNT = 10_000
 STORAGE_STATUS_WALL_LIMIT_NS = 5_000_000_000
 STORAGE_STATUS_ALLOCATION_LIMIT_BYTES = 64 * 1024 * 1024
 STORAGE_STATUS_OBSERVED_AT = datetime(2026, 8, 13, tzinfo=timezone.utc)
+PHASE_3A_EVENT_COUNT = 10_000
+PHASE_3A_LOT_COUNT = 100
+PHASE_3A_STATE_10X_LOT_COUNT = 1_000
+PHASE_3A_WALL_LIMIT_NS = 500_000_000
+PHASE_3A_CPU_LIMIT_NS = 500_000_000
+PHASE_3A_READ_CURRENT_LIMIT_NS = 50_000_000
+PHASE_3A_READ_STATE_10X_LIMIT_NS = 200_000_000
+PHASE_3A_INVALIDATION_LIMIT_NS = 50_000_000
+PHASE_3A_FINGERPRINT_STARTUP_LIMIT_NS = 50_000_000
+PHASE_3A_ALLOCATION_FLOOR_BYTES = 64 * 1024 * 1024
+PHASE_3A_READ_ALLOCATION_LIMIT_BYTES = 16 * 1024 * 1024
+PHASE_3A_FINGERPRINT_ALLOCATION_LIMIT_BYTES = 8 * 1024 * 1024
 ARTIFACT_FILENAMES = (
     "fixture-manifest.json",
     "timing.json",
     "cpu-profile.json",
     "allocation-profile.json",
     "decision.json",
+    "phase-3a-acceptance.json",
 )
 PUBLIC_SCENARIOS = (
     "all",
@@ -82,6 +106,7 @@ PUBLIC_SCENARIOS = (
     "current_state_10x",
     "account_fanout",
     "research_storage_status",
+    "phase_3a",
 )
 
 
@@ -107,6 +132,7 @@ def run_data_storage_projection_benchmark(
     repetitions: int = DEFAULT_REPETITIONS,
     seed: int = SEED,
     reference_host_fingerprint: str | None = None,
+    shadow_manifest: str | Path | Mapping[str, Any] | None = None,
     worker_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic fixtures and publish a complete local evidence set.
@@ -132,7 +158,12 @@ def run_data_storage_projection_benchmark(
         if "history_10x" in selected or "research_storage_status" in selected
         else None
     )
-    if not scenario_specs and storage_status_spec is None:
+    phase_3a_spec = (
+        _phase_3a_fixture_spec(seed=fixture_seed)
+        if "phase_3a" in selected
+        else None
+    )
+    if not scenario_specs and storage_status_spec is None and phase_3a_spec is None:
         raise ValueError("benchmark selection produced no scenarios")
     host = _host_profile()
     run_label = (
@@ -148,6 +179,7 @@ def run_data_storage_projection_benchmark(
         host=host,
         run_label=run_label,
         storage_status_spec=storage_status_spec,
+        phase_3a_spec=phase_3a_spec,
     )
     worker_spec = {
         "schema_version": WORKER_SPEC_SCHEMA,
@@ -157,6 +189,7 @@ def run_data_storage_projection_benchmark(
         "run_label": run_label,
         "scenarios": scenario_specs,
         "research_storage_status": storage_status_spec,
+        "phase_3a": phase_3a_spec,
     }
     run_worker = worker_runner or _run_worker_process
     timing = run_worker(repo_root=base, mode="timing", worker_spec=worker_spec)
@@ -178,6 +211,10 @@ def run_data_storage_projection_benchmark(
         reference_host_fingerprint=reference_fingerprint,
         allocation_profile=allocation_profile,
     )
+    acceptance = _build_phase_3a_acceptance(
+        decision=decision,
+        shadow_manifest=_load_shadow_manifest(shadow_manifest, repo_root=base),
+    )
     target = _publish_artifact_set(
         output_dir=output_dir,
         repo_root=base,
@@ -187,18 +224,23 @@ def run_data_storage_projection_benchmark(
             "cpu-profile.json": cpu_profile,
             "allocation-profile.json": allocation_profile,
             "decision.json": decision,
+            "phase-3a-acceptance.json": acceptance,
         },
     )
     return {
         "status": "complete",
         "output_dir": str(target),
         "run_label": run_label,
-        "scenario_count": len(scenario_specs),
+        "scenario_count": len(scenario_specs) + int(phase_3a_spec is not None),
         "fixture_set_sha256": fixture_manifest["fixture_set_sha256"],
         "host_fingerprint": host["fingerprint"],
         "existing_full_replay_writer": decision["components"]["existing_full_replay_writer"],
         "research_storage_status": decision["components"]["research_storage_status"],
         "phase_3a_combined": decision["phase_3a_combined"],
+        "phase_3a_acceptance": {
+            "status": acceptance["status"],
+            "readiness": acceptance["readiness"],
+        },
     }
 
 
@@ -553,6 +595,72 @@ def _storage_status_spec(*, seed: int) -> dict[str, Any]:
     }
 
 
+def _phase_3a_fixture_spec(*, seed: int) -> dict[str, Any]:
+    reference = _scenario_spec(
+        key="phase_3a.runtime",
+        axis="phase_3a",
+        event_count=PHASE_3A_EVENT_COUNT,
+        lot_count=PHASE_3A_LOT_COUNT,
+        account_count=1,
+        payload_bytes=MIN_PAYLOAD_BYTES,
+        shape="fixed_open_lots_with_verifications",
+        axis_status="evaluable",
+        classification="synthetic_checkpoint_tail_reference",
+    )
+    current_state_10x = _scenario_spec(
+        key="phase_3a.current_state_10x",
+        axis="phase_3a",
+        event_count=PHASE_3A_EVENT_COUNT,
+        lot_count=PHASE_3A_STATE_10X_LOT_COUNT,
+        account_count=1,
+        payload_bytes=MIN_PAYLOAD_BYTES,
+        shape="fixed_open_lots_with_verifications",
+        axis_status="evaluable",
+        classification="synthetic_current_state_10x",
+    )
+    retained_lots_10x = _scenario_spec(
+        key="phase_3a.retained_lots_10x",
+        axis="phase_3a",
+        event_count=PHASE_3A_EVENT_COUNT,
+        lot_count=PHASE_3A_EVENT_COUNT // 2,
+        account_count=1,
+        payload_bytes=MIN_PAYLOAD_BYTES,
+        shape="open_close_pairs",
+        axis_status="diagnostic_only",
+        classification="synthetic_retained_closed_lots_capacity",
+    )
+    references = [reference, current_state_10x, retained_lots_10x]
+    identities = []
+    for item in references:
+        events = _build_synthetic_events(item, seed=seed)
+        identities.append(
+            {
+                "key": item["key"],
+                "fixture_sha256": _events_sha256(events),
+                "effective_dimensions": item["effective_dimensions"],
+            }
+        )
+    identity = {
+        "schema_version": PHASE_3A_FIXTURE_SCHEMA,
+        "seed": int(seed),
+        "references": identities,
+        "comparable_facades": [
+            "single_combo_metadata_close",
+            "atomic_batch_combo_metadata_adjust",
+        ],
+        "force_full_facades": ["special_combo_identity_membership"],
+        "rotation_boundaries": ["100_events", "1_mib"],
+    }
+    return {
+        "schema_version": PHASE_3A_FIXTURE_SCHEMA,
+        "fixture_sha256": _sha256_json(identity),
+        "fixture_identity": identity,
+        "reference": reference,
+        "current_state_10x": current_state_10x,
+        "retained_lots_10x": retained_lots_10x,
+    }
+
+
 def _build_fixture_manifest(
     *,
     repo_root: Path,
@@ -562,6 +670,7 @@ def _build_fixture_manifest(
     host: dict[str, Any],
     run_label: str,
     storage_status_spec: Mapping[str, Any] | None = None,
+    phase_3a_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenarios: list[dict[str, Any]] = []
     fixture_hashes: list[str] = []
@@ -581,6 +690,8 @@ def _build_fixture_manifest(
     fixture_set_items: list[Any] = list(fixture_hashes)
     if storage_status_spec is not None:
         fixture_set_items.append(str(storage_status_spec.get("fixture_sha256") or ""))
+    if phase_3a_spec is not None:
+        fixture_set_items.append(str(phase_3a_spec.get("fixture_sha256") or ""))
     return {
         "schema_version": FIXTURE_SCHEMA,
         "fixture_seed": int(seed),
@@ -618,6 +729,7 @@ def _build_fixture_manifest(
         },
         "scenarios": scenarios,
         "research_storage_status": dict(storage_status_spec) if storage_status_spec is not None else None,
+        "phase_3a": dict(phase_3a_spec) if phase_3a_spec is not None else None,
     }
 
 
@@ -727,6 +839,7 @@ def _synthetic_event(
     event_id = f"bench-{slug}-{sequence:06d}-{event_type}"
     lot_id = f"lot-{slug}-{lot_index:06d}"
     entropy_class = ("low", "median", "high")[sequence % 3]
+    phase_3a_call = scenario_key.startswith("phase_3a.") and lot_index % 2 == 1
     raw_payload = {
         "benchmark_schema": FIXTURE_SCHEMA,
         "fixture_seed": int(seed),
@@ -739,17 +852,37 @@ def _synthetic_event(
             size=payload_bytes,
         ),
         "source_type": "synthetic_benchmark",
-        "side": "buy" if event_type == "close" else "sell",
+        "side": (
+            "sell"
+            if event_type == "close" and phase_3a_call
+            else "buy"
+            if event_type == "close"
+            else "buy"
+            if phase_3a_call
+            else "sell"
+        ),
     }
+    if (
+        scenario_key == "phase_3a.runtime"
+        and event_type == "open"
+        and lot_index == 0
+    ):
+        raw_payload.update(
+            strategy="combo_yield",
+            leg_role="funding_put",
+            strategy_group_id="bench-special-combo",
+            yield_enhancement_mode="same_expiry_pair",
+            strategy_snapshot={"schema_version": "benchmark_strategy_snapshot.v1"},
+        )
     if event_type == "close":
         raw_payload["close_type"] = "buy_to_close"
     contract_key = ContractKey.from_values(
         broker="futu",
         account=f"bench{account_index:02d}",
         underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
-        strike=10.0 + (lot_index * 0.01),
+        option_type="call" if phase_3a_call else "put",
+        position_side="long" if phase_3a_call else "short",
+        strike=(20.0 if phase_3a_call else 10.0) + (lot_index * 0.01),
         expiration_ymd="2028-12-15",
     )
     event = TradeEvent(
@@ -767,10 +900,6 @@ def _synthetic_event(
         lot_id=lot_id if event_type == "open" else None,
         raw_payload=raw_payload,
     )
-    # The real writer reads canonical storage rows through the compatibility
-    # adapter before projection. Feed the projector-only component the same
-    # public stored-event shape so parity tests compare the measured components,
-    # not an incidental pre-adapter representation.
     return trade_event_application_payload(event.to_dict())
 
 
@@ -1074,7 +1203,10 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
     storage_status_spec = worker_spec.get("research_storage_status")
     if storage_status_spec is not None and not isinstance(storage_status_spec, Mapping):
         raise ValueError("research storage status worker spec is invalid")
-    if not raw_scenarios and storage_status_spec is None:
+    phase_3a_spec = worker_spec.get("phase_3a")
+    if phase_3a_spec is not None and not isinstance(phase_3a_spec, Mapping):
+        raise ValueError("Phase 3A worker spec is invalid")
+    if not raw_scenarios and storage_status_spec is None and phase_3a_spec is None:
         raise ValueError("worker spec has no measurable scenarios")
     if mode == "timing":
         rows = [
@@ -1091,6 +1223,16 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             if isinstance(storage_status_spec, Mapping)
             else None
         )
+        phase_3a = (
+            _measure_phase_3a_timing(
+                phase_3a_spec,
+                seed=seed,
+                warmups=warmups,
+                repetitions=repetitions,
+            )
+            if isinstance(phase_3a_spec, Mapping)
+            else None
+        )
         return {
             "schema_version": TIMING_SCHEMA,
             "measurement_mode": "timing_without_profiler",
@@ -1102,12 +1244,18 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "clock_authority": ["time.perf_counter_ns", "time.process_time_ns"],
             "scenarios": rows,
             "research_storage_status": storage_status,
+            "phase_3a": phase_3a,
         }
     if mode == "cpu":
         rows = [_measure_cpu_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
         storage_status = (
             _measure_storage_status_cpu(storage_status_spec)
             if isinstance(storage_status_spec, Mapping)
+            else None
+        )
+        phase_3a = (
+            _measure_phase_3a_cpu(phase_3a_spec, seed=seed)
+            if isinstance(phase_3a_spec, Mapping)
             else None
         )
         return {
@@ -1117,12 +1265,18 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "tracemalloc_enabled": False,
             "scenarios": rows,
             "research_storage_status": storage_status,
+            "phase_3a": phase_3a,
         }
     if mode == "allocation":
         rows = [_measure_allocation_scenario(spec, seed=seed) for spec in raw_scenarios if isinstance(spec, dict)]
         storage_status = (
             _measure_storage_status_allocation(storage_status_spec)
             if isinstance(storage_status_spec, Mapping)
+            else None
+        )
+        phase_3a = (
+            _measure_phase_3a_allocation(phase_3a_spec, seed=seed)
+            if isinstance(phase_3a_spec, Mapping)
             else None
         )
         return {
@@ -1132,6 +1286,7 @@ def _worker_payload(*, mode: str, worker_spec: Mapping[str, Any]) -> dict[str, A
             "cprofile_enabled": False,
             "scenarios": rows,
             "research_storage_status": storage_status,
+            "phase_3a": phase_3a,
         }
     raise ValueError(f"unsupported worker mode: {mode}")
 
@@ -1289,6 +1444,990 @@ def _measure_storage_status_allocation(spec: Mapping[str, Any]) -> dict[str, Any
         }
 
 
+def _phase_3a_record_id(spec: Mapping[str, Any], index: int) -> str:
+    slug = str(spec.get("key") or "").replace(".", "-").replace("_", "-")
+    return f"lot-{slug}-{int(index):06d}"
+
+
+def _phase_3a_open_event_id(spec: Mapping[str, Any], index: int) -> str:
+    slug = str(spec.get("key") or "").replace(".", "-").replace("_", "-")
+    return f"bench-{slug}-{int(index):06d}-open"
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _insert_phase_3a_events(repo: Any, events: Sequence[dict[str, Any]]) -> None:
+    now_ms = 1_900_000_000_000
+    rows = [
+        (
+            str(event["event_id"]),
+            str((event.get("contract_key") or {}).get("account") or ""),
+            json.dumps(event, ensure_ascii=False, sort_keys=True),
+            int(event["event_time_ms"]),
+            now_ms,
+            now_ms,
+        )
+        for event in events
+    ]
+    conn = repo._connect()
+    try:
+        conn.executemany(
+            "INSERT INTO trade_events "
+            "(event_id,account,event_json,trade_time_ms,created_at_ms,updated_at_ms) "
+            "VALUES (?,?,?,?,?,?)",
+            rows,
+        )
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _temporary_phase_3a_base(
+    spec: Mapping[str, Any],
+    *,
+    seed: int,
+) -> Iterator[dict[str, Any]]:
+    events = _build_synthetic_events(spec, seed=seed)
+    with tempfile.TemporaryDirectory(prefix="om-phase3a-base-") as temp_name:
+        root = Path(temp_name)
+        data_config = root / "data.json"
+        data_config.write_text("{}\n", encoding="utf-8")
+        repo = open_position_ledger(data_config)
+        _insert_phase_3a_events(repo, events)
+        inventory = build_position_projection_migration_inventory(repo.db_path)
+        apply_result = apply_position_projection_migration(repo.db_path, inventory)
+        conn = repo._connect()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+        db_path = Path(repo.db_path)
+        yield {
+            "repo": repo,
+            "db_path": db_path,
+            "fixture_sha256": _events_sha256(events),
+            "sqlite_sha256": _file_sha256(db_path),
+            "spec": dict(spec),
+            "apply": apply_result,
+        }
+
+
+def _phase_3a_tail_events(*, count: int, payload_bytes: int = 256) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    key = ContractKey.from_values(
+        broker="futu",
+        account="bench00",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=10,
+        expiration_ymd="2028-12-15",
+    )
+    for index in range(int(count)):
+        event = TradeEvent(
+            event_id=f"bench-phase3a-tail-{payload_bytes}-{index:06d}",
+            event_type="verification",
+            event_time_ms=1_850_000_000_000 + index,
+            contract_key=key,
+            contracts=0,
+            price=0,
+            currency="USD",
+            source="synthetic_benchmark",
+            multiplier=100,
+            raw_payload={
+                "source_type": "synthetic_benchmark",
+                "synthetic_filler": "R" * max(1, int(payload_bytes)),
+            },
+        )
+        events.append(trade_event_application_payload(event.to_dict()))
+    return events
+
+
+@contextmanager
+def _temporary_phase_3a_clone(
+    base: Mapping[str, Any],
+    *,
+    checkpoint_mode: str,
+    tail_events: Sequence[dict[str, Any]] = (),
+) -> Iterator[dict[str, Any]]:
+    with tempfile.TemporaryDirectory(prefix="om-phase3a-run-") as temp_name:
+        root = Path(temp_name)
+        data_config = root / "data.json"
+        data_config.write_text("{}\n", encoding="utf-8")
+        db_path = root / LEDGER_DB_RELATIVE_PATH
+        db_path.parent.mkdir(parents=True)
+        shutil.copy2(Path(base["db_path"]), db_path)
+        repo = open_position_ledger(data_config)
+        repo.set_position_projection_checkpoint_mode(checkpoint_mode)
+        if tail_events:
+            _insert_phase_3a_events(repo, tail_events)
+        yield {
+            "repo": repo,
+            "db_path": db_path,
+            "fixture_sha256": str(base["fixture_sha256"]),
+            "sqlite_sha256": str(base["sqlite_sha256"]),
+        }
+
+
+@contextmanager
+def _instrument_phase_3a_repo(repo: Any) -> Iterator[dict[str, Any]]:
+    counters: dict[str, Any] = {
+        "method_calls": {},
+        "rows_returned": {},
+        "full_prefix_reader_calls": 0,
+        "full_lot_list_calls": 0,
+        "candidate_event_ids_requested": 0,
+        "candidate_event_id_max_batch": 0,
+        "candidate_event_id_request_counts": {},
+        "sql_statements": {"total": 0, "select": 0, "insert": 0, "update": 0, "delete": 0},
+    }
+    originals: dict[str, Any] = {}
+    original_connect = repo._connect
+
+    def traced_connect() -> sqlite3.Connection:
+        conn = original_connect()
+
+        def trace(statement: str) -> None:
+            normalized = str(statement or "").lstrip().lower()
+            counters["sql_statements"]["total"] += 1
+            for operation in ("select", "insert", "update", "delete"):
+                if normalized.startswith(operation):
+                    counters["sql_statements"][operation] += 1
+                    break
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    repo._connect = traced_connect
+    method_names = (
+        "list_position_projection_event_rows",
+        "list_trade_events",
+        "list_position_lots",
+        "get_trade_events_by_ids",
+        "list_active_position_lots",
+        "get_position_lots_by_ids",
+        "position_projection_account_snapshot",
+    )
+
+    def wrapper(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+        def measured(*args: Any, **kwargs: Any) -> Any:
+            counters["method_calls"][name] = counters["method_calls"].get(name, 0) + 1
+            if name == "list_position_projection_event_rows" and kwargs.get("after") is None:
+                counters["full_prefix_reader_calls"] += 1
+            if name in {"list_trade_events", "list_position_lots"}:
+                if name == "list_position_lots":
+                    counters["full_lot_list_calls"] += 1
+                else:
+                    counters["full_prefix_reader_calls"] += 1
+            if name == "get_trade_events_by_ids":
+                requested = tuple(args[0] if args else kwargs.get("event_ids", ()) or ())
+                counters["candidate_event_ids_requested"] += len(requested)
+                counters["candidate_event_id_max_batch"] = max(
+                    int(counters["candidate_event_id_max_batch"]),
+                    len(requested),
+                )
+                request_counts = counters["candidate_event_id_request_counts"]
+                for event_id in requested:
+                    key = str(event_id)
+                    request_counts[key] = int(request_counts.get(key, 0)) + 1
+            result = original(*args, **kwargs)
+            row_count = (
+                len(result)
+                if isinstance(result, (list, tuple))
+                else int(getattr(result, "lot_count", 0) or 0)
+            )
+            counters["rows_returned"][name] = counters["rows_returned"].get(name, 0) + row_count
+            return result
+
+        return measured
+
+    try:
+        for name in method_names:
+            original = getattr(repo, name, None)
+            if callable(original):
+                originals[name] = original
+                setattr(repo, name, wrapper(name, original))
+        yield counters
+    finally:
+        repo._connect = original_connect
+        for name, original in originals.items():
+            setattr(repo, name, original)
+
+
+def _phase_3a_checkpoint_stats(repo: Any) -> dict[str, int]:
+    rows = repo.list_position_projection_checkpoints()
+    return {
+        "row_count": len(rows),
+        "state_bytes": sum(int(row.get("state_bytes") or 0) for row in rows),
+        "max_state_bytes": max((int(row.get("state_bytes") or 0) for row in rows), default=0),
+    }
+
+
+def _phase_3a_lot_fingerprint(db_path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    rows = 0
+    payload_bytes = 0
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            "SELECT record_id,fields_json FROM position_lots ORDER BY record_id"
+        )
+        for record_id, fields_json in cursor:
+            payload = _canonical_json_bytes([str(record_id), str(fields_json)])
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+            rows += 1
+            payload_bytes += len(payload)
+    return {"sha256": digest.hexdigest(), "rows": rows, "bytes": payload_bytes}
+
+
+def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
+    if key == "single_combo_metadata_close":
+        return record_manual_position_close(
+            repo,
+            record_id=_phase_3a_record_id(spec, 0),
+            contracts_to_close=1,
+            close_price=0.5,
+            close_reason="phase_3a_benchmark",
+            as_of_ms=1_900_000_000_000,
+        )
+    if key == "atomic_batch_combo_metadata_adjust":
+        group_id = "bench-ordinary-combo"
+        return record_manual_position_adjustments(
+            repo,
+            [
+                {
+                    "record_id": _phase_3a_record_id(spec, index),
+                    "strategy": "combo_yield",
+                    "leg_role": role,
+                    "strategy_group_id": group_id,
+                    "yield_enhancement_mode": "same_expiry_pair",
+                    "strategy_snapshot": {
+                        "schema_version": "benchmark_strategy_snapshot.v1"
+                    },
+                    "as_of_ms": 1_900_000_000_100 + index,
+                }
+                for index, role in ((2, "funding_put"), (3, "participation_call"))
+            ],
+        )
+    if key == "special_combo_identity_membership":
+        put_key = ContractKey.from_values(
+            broker="futu",
+            account="bench00",
+            underlying_symbol="NVDA",
+            option_type="put",
+            position_side="short",
+            strike=10,
+            expiration_ymd="2028-12-15",
+        )
+        call_key = ContractKey.from_values(
+            broker="futu",
+            account="bench00",
+            underlying_symbol="NVDA",
+            option_type="call",
+            position_side="long",
+            strike=25,
+            expiration_ymd="2028-12-15",
+        )
+        event = TradeEvent(
+            event_id="bench-phase3a-special-call-open",
+            event_type="open",
+            event_time_ms=1_900_000_000_500,
+            contract_key=call_key,
+            contracts=1,
+            price=0.5,
+            currency="USD",
+            source="synthetic_benchmark",
+            multiplier=100,
+            lot_id="lot-phase3a-special-call",
+            raw_payload={
+                "strategy": "combo_yield",
+                "leg_role": "participation_call",
+                "strategy_group_id": "bench-special-combo",
+                "yield_enhancement_mode": "same_expiry_pair",
+            },
+        )
+        intent = build_combo_identity_intent(
+            first_leg={
+                "strategy_group_id": "bench-special-combo",
+                "strategy": "combo_yield",
+                "leg_role": "funding_put",
+                "account": "bench00",
+                "symbol": "NVDA",
+                "contracts": 1,
+                "open_event_id": _phase_3a_open_event_id(spec, 0),
+                "record_id": _phase_3a_record_id(spec, 0),
+                "contract_key": put_key.to_dict(),
+            },
+            second_leg={
+                "strategy_group_id": "bench-special-combo",
+                "strategy": "combo_yield",
+                "leg_role": "participation_call",
+                "account": "bench00",
+                "symbol": "NVDA",
+                "contracts": 1,
+                "open_event_id": event.event_id,
+                "record_id": str(event.lot_id),
+                "contract_key": call_key.to_dict(),
+            },
+        )
+        return record_combo_trade_open(repo, event=event, combo_identity_intent=intent)
+    raise ValueError(f"unsupported Phase 3A operation: {key}")
+
+
+def _measure_phase_3a_once(
+    base: Mapping[str, Any],
+    *,
+    operation: str,
+    checkpoint_mode: str,
+    tail_events: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    with _temporary_phase_3a_clone(
+        base,
+        checkpoint_mode=checkpoint_mode,
+        tail_events=tail_events,
+    ) as context:
+        repo = context["repo"]
+        before_checkpoint = _phase_3a_checkpoint_stats(repo)
+        before_sizes = _sqlite_sizes(context["db_path"])
+        with _instrument_phase_3a_repo(repo) as counters:
+            wall_start = time.perf_counter_ns()
+            cpu_start = time.process_time_ns()
+            _phase_3a_operation(repo, key=operation, spec=base["spec"])
+            cpu_ns = time.process_time_ns() - cpu_start
+            wall_ns = time.perf_counter_ns() - wall_start
+        after_checkpoint = _phase_3a_checkpoint_stats(repo)
+        after_sizes = _sqlite_sizes(context["db_path"])
+        output = _phase_3a_lot_fingerprint(context["db_path"])
+        conn = repo._connect()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+        steady_sizes = _sqlite_sizes(context["db_path"])
+        return {
+            "fixture_sha256": context["fixture_sha256"],
+            "base_sqlite_sha256": context["sqlite_sha256"],
+            "checkpoint_mode": checkpoint_mode,
+            "wall_ns": wall_ns,
+            "cpu_ns": cpu_ns,
+            "counters": counters,
+            "checkpoint": {
+                "before": before_checkpoint,
+                "after": after_checkpoint,
+                "row_delta": after_checkpoint["row_count"] - before_checkpoint["row_count"],
+                "state_bytes_delta": after_checkpoint["state_bytes"] - before_checkpoint["state_bytes"],
+            },
+            "sqlite_bytes": {
+                "before": before_sizes,
+                "after_before_checkpoint": after_sizes,
+                "steady_after_truncate": steady_sizes,
+            },
+            "output": output,
+        }
+
+
+def _phase_3a_sample_summary(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("Phase 3A samples are empty")
+    wall = [int(item["wall_ns"]) for item in samples]
+    cpu = [int(item["cpu_ns"]) for item in samples]
+    fingerprints = sorted({str((item.get("output") or {}).get("sha256") or "") for item in samples})
+    counter_keys = (
+        "full_prefix_reader_calls",
+        "full_lot_list_calls",
+        "candidate_event_ids_requested",
+        "candidate_event_id_max_batch",
+    )
+    counter_max = {
+        key: max(int((item.get("counters") or {}).get(key) or 0) for item in samples)
+        for key in counter_keys
+    }
+    candidate_event_ids_unique_max = max(
+        len((item.get("counters") or {}).get("candidate_event_id_request_counts", {}))
+        for item in samples
+    )
+    method_names = sorted(
+        {
+            name
+            for item in samples
+            for name in (item.get("counters") or {}).get("method_calls", {})
+        }
+    )
+    method_call_max = {
+        name: max(
+            int((item.get("counters") or {}).get("method_calls", {}).get(name, 0))
+            for item in samples
+        )
+        for name in method_names
+    }
+    row_names = sorted(
+        {
+            name
+            for item in samples
+            for name in (item.get("counters") or {}).get("rows_returned", {})
+        }
+    )
+    row_max = {
+        name: max(
+            int((item.get("counters") or {}).get("rows_returned", {}).get(name, 0))
+            for item in samples
+        )
+        for name in row_names
+    }
+    sql_names = ("total", "select", "insert", "update", "delete")
+    sql_max = {
+        name: max(
+            int((item.get("counters") or {}).get("sql_statements", {}).get(name, 0))
+            for item in samples
+        )
+        for name in sql_names
+    }
+    sqlite_growth = [
+        int(item["sqlite_bytes"]["after_before_checkpoint"]["total_bytes"])
+        - int(item["sqlite_bytes"]["before"]["total_bytes"])
+        for item in samples
+    ]
+    return {
+        "wall_time_ns": _timing_distribution(wall),
+        "cpu_time_ns": _timing_distribution(cpu),
+        "output_fingerprints": fingerprints,
+        "output_fingerprint_stable": len(fingerprints) == 1 and bool(fingerprints[0]),
+        "fixture_sha256": str(samples[0].get("fixture_sha256") or ""),
+        "base_sqlite_sha256": str(samples[0].get("base_sqlite_sha256") or ""),
+        "checkpoint_mode": str(samples[0].get("checkpoint_mode") or ""),
+        "call_count_max": {
+            **counter_max,
+            "candidate_event_ids_unique": candidate_event_ids_unique_max,
+            "methods": method_call_max,
+        },
+        "rows_returned_max": row_max,
+        "sql_statement_max": sql_max,
+        "checkpoint_row_deltas": sorted(
+            {int((item.get("checkpoint") or {}).get("row_delta") or 0) for item in samples}
+        ),
+        "checkpoint_state_byte_deltas": sorted(
+            {int((item.get("checkpoint") or {}).get("state_bytes_delta") or 0) for item in samples}
+        ),
+        "checkpoint_after_max": {
+            "row_count": max(int(item["checkpoint"]["after"]["row_count"]) for item in samples),
+            "state_bytes": max(int(item["checkpoint"]["after"]["state_bytes"]) for item in samples),
+            "one_state_bytes": max(int(item["checkpoint"]["after"]["max_state_bytes"]) for item in samples),
+        },
+        "sqlite_growth_bytes": _timing_distribution(sqlite_growth),
+        "sqlite_peak_total_bytes": max(
+            int(item["sqlite_bytes"]["after_before_checkpoint"]["total_bytes"])
+            for item in samples
+        ),
+        "sqlite_steady_total_bytes": max(
+            int(item["sqlite_bytes"]["steady_after_truncate"]["total_bytes"])
+            for item in samples
+        ),
+    }
+
+
+def _measure_phase_3a_distribution(
+    base: Mapping[str, Any],
+    *,
+    operation: str,
+    checkpoint_mode: str,
+    warmups: int,
+    repetitions: int,
+    tail_events: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    for _ in range(warmups):
+        _measure_phase_3a_once(
+            base,
+            operation=operation,
+            checkpoint_mode=checkpoint_mode,
+            tail_events=tail_events,
+        )
+    samples = [
+        _measure_phase_3a_once(
+            base,
+            operation=operation,
+            checkpoint_mode=checkpoint_mode,
+            tail_events=tail_events,
+        )
+        for _ in range(repetitions)
+    ]
+    return _phase_3a_sample_summary(samples)
+
+
+def _phase_3a_pair(
+    base: Mapping[str, Any],
+    *,
+    operation: str,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    forced = _measure_phase_3a_distribution(
+        base,
+        operation=operation,
+        checkpoint_mode="disabled",
+        warmups=warmups,
+        repetitions=repetitions,
+    )
+    fast = _measure_phase_3a_distribution(
+        base,
+        operation=operation,
+        checkpoint_mode="enabled",
+        warmups=warmups,
+        repetitions=repetitions,
+    )
+    forced_wall = int(forced["wall_time_ns"]["p95"])
+    forced_cpu = int(forced["cpu_time_ns"]["p95"])
+    fast_wall = int(fast["wall_time_ns"]["p95"])
+    fast_cpu = int(fast["cpu_time_ns"]["p95"])
+    parity = bool(
+        forced["output_fingerprint_stable"]
+        and fast["output_fingerprint_stable"]
+        and forced["output_fingerprints"] == fast["output_fingerprints"]
+        and forced["fixture_sha256"] == fast["fixture_sha256"]
+        and forced["base_sqlite_sha256"] == fast["base_sqlite_sha256"]
+    )
+    return {
+        "key": operation,
+        "fixture_reset": "independent_copies_same_base_sqlite",
+        "forced_full": forced,
+        "fast": fast,
+        "parity": {"exact": parity},
+        "improvement": {
+            "wall_fraction": round(1.0 - fast_wall / max(1, forced_wall), 6),
+            "cpu_fraction": round(1.0 - fast_cpu / max(1, forced_cpu), 6),
+        },
+    }
+
+
+def _timed_phase_3a_read(
+    fn: Callable[[], Any],
+    *,
+    warmups: int,
+    repetitions: int,
+    output_fn: Callable[[Any], dict[str, Any]],
+) -> dict[str, Any]:
+    result: Any = None
+    for _ in range(warmups):
+        result = fn()
+    wall_samples: list[int] = []
+    cpu_samples: list[int] = []
+    for _ in range(repetitions):
+        wall_start = time.perf_counter_ns()
+        cpu_start = time.process_time_ns()
+        result = fn()
+        cpu_samples.append(time.process_time_ns() - cpu_start)
+        wall_samples.append(time.perf_counter_ns() - wall_start)
+    if result is None:
+        result = fn()
+    return {
+        "wall_time_ns": _timing_distribution(wall_samples),
+        "cpu_time_ns": _timing_distribution(cpu_samples),
+        "output": output_fn(result),
+    }
+
+
+def _phase_3a_current_read(
+    base: Mapping[str, Any],
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    return _timed_phase_3a_read(
+        lambda: read_current_position_projection(base["repo"], account="bench00"),
+        warmups=warmups,
+        repetitions=repetitions,
+        output_fn=lambda result: {
+            "status": result.get("status"),
+            "lot_count": result.get("lot_count"),
+            "projection_fingerprint": result.get("projection_fingerprint"),
+        },
+    )
+
+
+def _phase_3a_fingerprint_only(
+    base: Mapping[str, Any],
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    measured = _timed_phase_3a_read(
+        lambda: base["repo"].position_projection_account_snapshot("bench00"),
+        warmups=warmups,
+        repetitions=repetitions,
+        output_fn=lambda result: {
+            "lot_count": int(result.lot_count),
+            "fingerprint": str(result.fingerprint),
+        },
+    )
+    with sqlite3.connect(base["db_path"]) as conn:
+        row = conn.execute(
+            "SELECT count(*),coalesce(sum(length(fields_json)),0) "
+            "FROM position_lots WHERE account='bench00'"
+        ).fetchone()
+    measured["rows"] = int(row[0] or 0)
+    measured["bytes"] = int(row[1] or 0)
+    return measured
+
+
+def _phase_3a_invalidation_lookup(
+    base: Mapping[str, Any],
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    backdated = _phase_3a_tail_events(count=1)[0]
+    backdated["event_id"] = "bench-phase3a-backdated-invalidation"
+    backdated["event_time_ms"] = 1_700_000_000_000
+    with _temporary_phase_3a_clone(
+        base,
+        checkpoint_mode="enabled",
+        tail_events=(backdated,),
+    ) as context:
+        return _timed_phase_3a_read(
+            lambda: context["repo"].read_newest_trusted_position_projection_checkpoint(),
+            warmups=warmups,
+            repetitions=repetitions,
+            output_fn=lambda result: {"trusted_checkpoint_found": result is not None},
+        )
+
+
+def _phase_3a_loaded_fingerprint_timing(
+    *,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    measured = _timed_phase_3a_read(
+        compute_projector_implementation_fingerprint,
+        warmups=warmups,
+        repetitions=repetitions,
+        output_fn=lambda result: {
+            "fingerprint": str(result),
+            "matches_loaded": str(result) == loaded_projector_implementation_fingerprint(),
+        },
+    )
+    measured["ledger_history_reads"] = 0
+    return measured
+
+
+def _phase_3a_index_migration(base: Mapping[str, Any]) -> dict[str, Any]:
+    with _temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+        conn = context["repo"]._connect()
+        try:
+            for index in (
+                "idx_trade_events_account_time",
+                "idx_position_lots_account_expiration",
+                "idx_position_lots_account_record",
+            ):
+                conn.execute(f"DROP INDEX IF EXISTS {index}")
+            conn.commit()
+        finally:
+            conn.close()
+        inventory = build_position_projection_migration_inventory(context["db_path"])
+        result = apply_position_projection_migration(context["db_path"], inventory)
+        return {
+            "indexes_created": result["indexes_created"],
+            "index_timing": result["index_timing"],
+            "total_timing": result["timing"],
+            "sqlite_bytes": result["sqlite_bytes"],
+        }
+
+
+def _measure_phase_3a_timing(
+    spec: Mapping[str, Any],
+    *,
+    seed: int,
+    warmups: int,
+    repetitions: int,
+) -> dict[str, Any]:
+    reference_spec = spec.get("reference")
+    state_spec = spec.get("current_state_10x")
+    retained_spec = spec.get("retained_lots_10x")
+    if not all(isinstance(item, Mapping) for item in (reference_spec, state_spec, retained_spec)):
+        raise ValueError("Phase 3A fixture specifications are incomplete")
+    with _temporary_phase_3a_base(reference_spec, seed=seed) as reference:
+        comparable = [
+            _phase_3a_pair(
+                reference,
+                operation=operation,
+                warmups=warmups,
+                repetitions=repetitions,
+            )
+            for operation in (
+                "single_combo_metadata_close",
+                "atomic_batch_combo_metadata_adjust",
+            )
+        ]
+        no_rotation = comparable[0]["fast"]
+        rotation_100 = _measure_phase_3a_distribution(
+            reference,
+            operation="single_combo_metadata_close",
+            checkpoint_mode="enabled",
+            warmups=warmups,
+            repetitions=repetitions,
+            tail_events=_phase_3a_tail_events(count=99),
+        )
+        rotation_1_mib = _measure_phase_3a_distribution(
+            reference,
+            operation="single_combo_metadata_close",
+            checkpoint_mode="enabled",
+            warmups=warmups,
+            repetitions=repetitions,
+            tail_events=_phase_3a_tail_events(count=1, payload_bytes=1_048_576),
+        )
+        force_full = _measure_phase_3a_distribution(
+            reference,
+            operation="special_combo_identity_membership",
+            checkpoint_mode="enabled",
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+        current_read = _phase_3a_current_read(
+            reference,
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+        fingerprint_current = _phase_3a_fingerprint_only(
+            reference,
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+        invalidation = _phase_3a_invalidation_lookup(
+            reference,
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+        index_migration = _phase_3a_index_migration(reference)
+    with _temporary_phase_3a_base(state_spec, seed=seed) as state_10x:
+        state_read = _phase_3a_current_read(
+            state_10x,
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+    with _temporary_phase_3a_base(retained_spec, seed=seed) as retained_10x:
+        retained = _phase_3a_fingerprint_only(
+            retained_10x,
+            warmups=warmups,
+            repetitions=repetitions,
+        )
+    return {
+        "schema_version": "data_storage_projection_phase3a_timing.v1",
+        "fixture_sha256": str(spec.get("fixture_sha256") or ""),
+        "setup_included": False,
+        "comparable_facades": comparable,
+        "checkpoint": {
+            "no_rotation": no_rotation,
+            "rotation_100_events": rotation_100,
+            "rotation_1_mib": rotation_1_mib,
+        },
+        "force_full_facades": [
+            {
+                "key": "special_combo_identity_membership",
+                "reason": "immutable_identity_and_membership_transaction",
+                "measurement": force_full,
+            }
+        ],
+        "current_reads": {
+            "current": current_read,
+            "current_state_10x": state_read,
+        },
+        "fingerprint_only": {
+            "current": fingerprint_current,
+            "retained_lots_10x": {
+                **retained,
+                "guarantee": False,
+                "capacity_warning": (
+                    "diagnostic exceeds current 500 ms wall/CPU boundary"
+                    if (
+                        int(retained["wall_time_ns"]["p95"]) > PHASE_3A_WALL_LIMIT_NS
+                        or int(retained["cpu_time_ns"]["p95"]) > PHASE_3A_CPU_LIMIT_NS
+                    )
+                    else None
+                ),
+            },
+        },
+        "invalidation_lookup": invalidation,
+        "loaded_projector_fingerprint_startup": _phase_3a_loaded_fingerprint_timing(
+            warmups=warmups,
+            repetitions=repetitions,
+        ),
+        "index_migration": index_migration,
+    }
+
+
+def _phase_3a_profile_operation(
+    base: Mapping[str, Any],
+    *,
+    operation: str,
+    checkpoint_mode: str,
+    allocation: bool,
+    tail_events: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    with _temporary_phase_3a_clone(
+        base,
+        checkpoint_mode=checkpoint_mode,
+        tail_events=tail_events,
+    ) as context:
+        repo = context["repo"]
+        before = _phase_3a_checkpoint_stats(repo)
+        with _instrument_phase_3a_repo(repo) as counters:
+            runner = _allocation_call if allocation else _profile_call
+            profile, _output = runner(
+                lambda: _phase_3a_operation(repo, key=operation, spec=base["spec"]),
+                output_fn=lambda _result: {"completed": True},
+            )
+        after = _phase_3a_checkpoint_stats(repo)
+        return {
+            "key": operation,
+            "checkpoint_mode": checkpoint_mode,
+            "component": profile,
+            "call_counts": counters,
+            "checkpoint": {
+                "row_delta": after["row_count"] - before["row_count"],
+                "state_bytes_delta": after["state_bytes"] - before["state_bytes"],
+                "after": after,
+            },
+            "output": _phase_3a_lot_fingerprint(context["db_path"]),
+        }
+
+
+def _measure_phase_3a_cpu(spec: Mapping[str, Any], *, seed: int) -> dict[str, Any]:
+    reference_spec = spec.get("reference")
+    if not isinstance(reference_spec, Mapping):
+        raise ValueError("Phase 3A reference fixture is missing")
+    with _temporary_phase_3a_base(reference_spec, seed=seed) as reference:
+        comparable = [
+            {
+                "key": operation,
+                "forced_full": _phase_3a_profile_operation(
+                    reference,
+                    operation=operation,
+                    checkpoint_mode="disabled",
+                    allocation=False,
+                ),
+                "fast": _phase_3a_profile_operation(
+                    reference,
+                    operation=operation,
+                    checkpoint_mode="enabled",
+                    allocation=False,
+                ),
+            }
+            for operation in (
+                "single_combo_metadata_close",
+                "atomic_batch_combo_metadata_adjust",
+            )
+        ]
+        force_full = _phase_3a_profile_operation(
+            reference,
+            operation="special_combo_identity_membership",
+            checkpoint_mode="enabled",
+            allocation=False,
+        )
+    return {
+        "schema_version": "data_storage_projection_phase3a_cpu_profile.v1",
+        "fixture_sha256": str(spec.get("fixture_sha256") or ""),
+        "setup_included": False,
+        "comparable_facades": comparable,
+        "force_full_facades": [
+            {
+                "key": "special_combo_identity_membership",
+                "reason": "immutable_identity_and_membership_transaction",
+                "measurement": force_full,
+            }
+        ],
+    }
+
+
+def _measure_phase_3a_allocation(spec: Mapping[str, Any], *, seed: int) -> dict[str, Any]:
+    reference_spec = spec.get("reference")
+    state_spec = spec.get("current_state_10x")
+    if not isinstance(reference_spec, Mapping) or not isinstance(state_spec, Mapping):
+        raise ValueError("Phase 3A allocation fixtures are missing")
+    with _temporary_phase_3a_base(reference_spec, seed=seed) as reference:
+        comparable = [
+            {
+                "key": operation,
+                "fast": _phase_3a_profile_operation(
+                    reference,
+                    operation=operation,
+                    checkpoint_mode="enabled",
+                    allocation=True,
+                ),
+            }
+            for operation in (
+                "single_combo_metadata_close",
+                "atomic_batch_combo_metadata_adjust",
+            )
+        ]
+        rotations = {
+            "rotation_100_events": _phase_3a_profile_operation(
+                reference,
+                operation="single_combo_metadata_close",
+                checkpoint_mode="enabled",
+                allocation=True,
+                tail_events=_phase_3a_tail_events(count=99),
+            ),
+            "rotation_1_mib": _phase_3a_profile_operation(
+                reference,
+                operation="single_combo_metadata_close",
+                checkpoint_mode="enabled",
+                allocation=True,
+                tail_events=_phase_3a_tail_events(count=1, payload_bytes=1_048_576),
+            ),
+        }
+        current_read, current_output = _allocation_call(
+            lambda: read_current_position_projection(reference["repo"], account="bench00"),
+            output_fn=lambda result: {
+                "status": result.get("status"),
+                "lot_count": result.get("lot_count"),
+            },
+        )
+        fingerprint, fingerprint_output = _allocation_call(
+            lambda: reference["repo"].position_projection_account_snapshot("bench00"),
+            output_fn=lambda result: {
+                "lot_count": result.lot_count,
+                "fingerprint": result.fingerprint,
+            },
+        )
+    with _temporary_phase_3a_base(state_spec, seed=seed) as state_10x:
+        state_read, state_output = _allocation_call(
+            lambda: read_current_position_projection(state_10x["repo"], account="bench00"),
+            output_fn=lambda result: {
+                "status": result.get("status"),
+                "lot_count": result.get("lot_count"),
+            },
+        )
+    startup, startup_output = _allocation_call(
+        compute_projector_implementation_fingerprint,
+        output_fn=lambda result: {
+            "fingerprint": str(result),
+            "matches_loaded": str(result) == loaded_projector_implementation_fingerprint(),
+        },
+    )
+    return {
+        "schema_version": "data_storage_projection_phase3a_allocation_profile.v1",
+        "fixture_sha256": str(spec.get("fixture_sha256") or ""),
+        "setup_included": False,
+        "comparable_facades": comparable,
+        "checkpoint": rotations,
+        "current_reads": {
+            "current": {"component": current_read, "output": current_output},
+            "current_state_10x": {"component": state_read, "output": state_output},
+        },
+        "fingerprint_only": {"component": fingerprint, "output": fingerprint_output},
+        "loaded_projector_fingerprint_startup": {
+            "component": startup,
+            "output": startup_output,
+        },
+    }
+
+
 def _measure_timing_scenario(
     spec: Mapping[str, Any],
     *,
@@ -1419,23 +2558,23 @@ def _timing_distribution(samples: Sequence[int]) -> dict[str, Any]:
 @contextmanager
 def _temporary_writer(events: Sequence[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="om-synthetic-ledger-") as temp_name:
-        db_path = Path(temp_name) / "synthetic-option-positions.sqlite3"
-        repo = SQLiteOptionPositionsRepository(db_path)
+        data_config = Path(temp_name) / "data.json"
+        data_config.write_text("{}\n", encoding="utf-8")
+        repo = open_position_ledger(data_config)
+        db_path = Path(repo.db_path)
         keeper = repo._connect()
         try:
             now_ms = 1_800_000_000_000
-            rows = []
-            for event in events:
-                encoded = encode_trade_event_for_storage(event)
-                rows.append(
-                    (
-                        encoded.event_id,
-                        encoded.event_json,
-                        encoded.event_time_ms,
-                        now_ms,
-                        now_ms,
-                    )
+            rows = [
+                (
+                    str(event["event_id"]),
+                    json.dumps(event, ensure_ascii=False, sort_keys=True),
+                    int(event["event_time_ms"]),
+                    now_ms,
+                    now_ms,
                 )
+                for event in events
+            ]
             keeper.executemany(
                 "INSERT INTO trade_events "
                 "(event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms) "
@@ -1766,6 +2905,13 @@ def _validate_worker_artifacts(
                 or actual_storage.get("setup_included") is not False
             ):
                 raise RuntimeError("research storage status worker identity mismatch")
+    _validate_phase_3a_worker_artifacts(
+        fixture_manifest=fixture_manifest,
+        timing=timing,
+        cpu_profile=cpu_profile,
+        allocation_profile=allocation_profile,
+        repetitions=expected_repetitions,
+    )
     for item in timing.get("scenarios", []):
         components = item.get("components") if isinstance(item, Mapping) else None
         if not isinstance(components, Mapping):
@@ -1796,6 +2942,120 @@ def _validate_worker_artifacts(
             repetitions=expected_repetitions,
             label="research_storage_status.cpu_time_ns",
         )
+
+
+def _validate_phase_3a_worker_artifacts(
+    *,
+    fixture_manifest: Mapping[str, Any],
+    timing: Mapping[str, Any],
+    cpu_profile: Mapping[str, Any],
+    allocation_profile: Mapping[str, Any],
+    repetitions: int,
+) -> None:
+    expected = fixture_manifest.get("phase_3a")
+    artifacts = (
+        (timing, "data_storage_projection_phase3a_timing.v1"),
+        (cpu_profile, "data_storage_projection_phase3a_cpu_profile.v1"),
+        (allocation_profile, "data_storage_projection_phase3a_allocation_profile.v1"),
+    )
+    if expected is None:
+        if any(artifact.get("phase_3a") is not None for artifact, _schema in artifacts):
+            raise RuntimeError("unexpected Phase 3A worker artifact")
+        return
+    if not isinstance(expected, Mapping):
+        raise RuntimeError("Phase 3A fixture manifest is invalid")
+    expected_hash = str(expected.get("fixture_sha256") or "")
+    for artifact, schema in artifacts:
+        payload = artifact.get("phase_3a")
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema_version") != schema
+            or payload.get("fixture_sha256") != expected_hash
+            or payload.get("setup_included") is not False
+        ):
+            raise RuntimeError(f"Phase 3A worker artifact contract failed: {schema}")
+    phase_timing = timing["phase_3a"]
+    comparable = phase_timing.get("comparable_facades")
+    if not isinstance(comparable, list) or {row.get("key") for row in comparable} != {
+        "single_combo_metadata_close",
+        "atomic_batch_combo_metadata_adjust",
+    }:
+        raise RuntimeError("Phase 3A comparable facade set is incomplete")
+    for row in comparable:
+        for mode in ("forced_full", "fast"):
+            payload = row.get(mode)
+            if not isinstance(payload, Mapping):
+                raise RuntimeError(f"Phase 3A timing mode is missing: {mode}")
+            _validate_timing_distribution(
+                payload.get("wall_time_ns"),
+                repetitions=repetitions,
+                label=f"phase_3a.{row.get('key')}.{mode}.wall_time_ns",
+            )
+            _validate_timing_distribution(
+                payload.get("cpu_time_ns"),
+                repetitions=repetitions,
+                label=f"phase_3a.{row.get('key')}.{mode}.cpu_time_ns",
+            )
+    force_full = phase_timing.get("force_full_facades")
+    if not isinstance(force_full, list) or {row.get("key") for row in force_full} != {
+        "special_combo_identity_membership"
+    }:
+        raise RuntimeError("Phase 3A force-full facade set is incomplete")
+    for row in force_full:
+        payload = row.get("measurement")
+        if not isinstance(payload, Mapping) or not row.get("reason"):
+            raise RuntimeError("Phase 3A force-full measurement is incomplete")
+        for clock in ("wall_time_ns", "cpu_time_ns"):
+            _validate_timing_distribution(
+                payload.get(clock),
+                repetitions=repetitions,
+                label=f"phase_3a.{row.get('key')}.{clock}",
+            )
+    checkpoint = phase_timing.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        raise RuntimeError("Phase 3A checkpoint timing is missing")
+    for key in ("no_rotation", "rotation_100_events", "rotation_1_mib"):
+        payload = checkpoint.get(key)
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"Phase 3A checkpoint timing is missing: {key}")
+        for clock in ("wall_time_ns", "cpu_time_ns"):
+            _validate_timing_distribution(
+                payload.get(clock),
+                repetitions=repetitions,
+                label=f"phase_3a.checkpoint.{key}.{clock}",
+            )
+    for key, payload in dict(phase_timing.get("current_reads") or {}).items():
+        for clock in ("wall_time_ns", "cpu_time_ns"):
+            _validate_timing_distribution(
+                payload.get(clock) if isinstance(payload, Mapping) else None,
+                repetitions=repetitions,
+                label=f"phase_3a.current_reads.{key}.{clock}",
+            )
+    fingerprints = phase_timing.get("fingerprint_only")
+    if not isinstance(fingerprints, Mapping) or set(fingerprints) != {
+        "current",
+        "retained_lots_10x",
+    }:
+        raise RuntimeError("Phase 3A fingerprint timing set is incomplete")
+    for key, payload in fingerprints.items():
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"Phase 3A fingerprint timing is missing: {key}")
+        for clock in ("wall_time_ns", "cpu_time_ns"):
+            _validate_timing_distribution(
+                payload.get(clock),
+                repetitions=repetitions,
+                label=f"phase_3a.fingerprint_only.{key}.{clock}",
+            )
+    for key in ("invalidation_lookup", "loaded_projector_fingerprint_startup"):
+        payload = phase_timing.get(key)
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"Phase 3A timing is missing: {key}")
+        for clock in ("wall_time_ns", "cpu_time_ns"):
+            _validate_timing_distribution(
+                payload.get(clock),
+                repetitions=repetitions,
+                label=f"phase_3a.{key}.{clock}",
+            )
 
 
 def _validate_timing_distribution(value: Any, *, repetitions: int, label: str) -> None:
@@ -1912,6 +3172,17 @@ def _build_gate_decision(
         comparable=comparable,
         comparison_reason=comparison_reason,
     )
+    phase_3a = _phase_3a_gate(
+        timing=timing.get("phase_3a"),
+        allocation=(
+            allocation_profile.get("phase_3a")
+            if isinstance(allocation_profile, Mapping)
+            else None
+        ),
+        run_label=str(timing.get("run_label") or ""),
+        comparable=comparable,
+        comparison_reason=comparison_reason,
+    )
     return {
         "schema_version": DECISION_SCHEMA,
         "reference_host": {
@@ -1927,6 +3198,10 @@ def _build_gate_decision(
             "research_storage_status_wall_p95_ns": STORAGE_STATUS_WALL_LIMIT_NS,
             "research_storage_status_python_peak_bytes": STORAGE_STATUS_ALLOCATION_LIMIT_BYTES,
             "required_subcases": list(history_keys),
+            "phase_3a_wall_p95_ns": PHASE_3A_WALL_LIMIT_NS,
+            "phase_3a_cpu_p95_ns": PHASE_3A_CPU_LIMIT_NS,
+            "phase_3a_minimum_improvement_fraction": 0.5,
+            "phase_3a_checkpoint_k": 3,
         },
         "components": {
             "projector_only": {
@@ -1944,16 +3219,230 @@ def _build_gate_decision(
                 "python_peak_bytes": storage_peak_allocation,
                 "fixture": STORAGE_STATUS_KEY,
             },
-            "lot_diff_publication": {
-                "status": "not_implemented",
-                "reason": "phase_3a_diff_publication_is_out_of_scope_for_phase_1",
-            },
+            "lot_diff_publication": phase_3a["lot_diff_publication"],
+            "checkpoint_tail": phase_3a["checkpoint_tail"],
         },
-        "phase_3a_combined": {
-            "status": "not_ready",
-            "reason": "lot_diff_publication_not_implemented",
-        },
+        "phase_3a_combined": phase_3a["combined"],
+        "phase_3a_evidence": phase_3a["evidence"],
         "automatic_actions": [],
+    }
+
+
+def _phase_3a_gate(
+    *,
+    timing: Any,
+    allocation: Any,
+    run_label: str,
+    comparable: bool,
+    comparison_reason: str,
+) -> dict[str, Any]:
+    unavailable_reason = None
+    if not isinstance(timing, Mapping) or not isinstance(allocation, Mapping):
+        unavailable_reason = "scenario_not_selected"
+    elif run_label != "acceptance_5_warmups_30_repetitions":
+        unavailable_reason = "non_acceptance_smoke"
+    elif not comparable:
+        unavailable_reason = comparison_reason
+    if unavailable_reason is not None:
+        status = "not_comparable" if "host" in unavailable_reason else "not_evaluable"
+        component = {"status": status, "reason": unavailable_reason, "failures": []}
+        return {
+            "lot_diff_publication": dict(component),
+            "checkpoint_tail": dict(component),
+            "combined": {"status": "not_ready", "reason": unavailable_reason},
+            "evidence": {
+                "resource_failures": [],
+                "parity_failures": [],
+                "retained_lots_10x_guarantee": False,
+            },
+        }
+
+    resource_failures: list[str] = []
+    parity_failures: list[str] = []
+    comparable_rows = timing.get("comparable_facades")
+    allocation_rows = {
+        str(row.get("key") or ""): row
+        for row in allocation.get("comparable_facades", [])
+        if isinstance(row, Mapping)
+    }
+    if not isinstance(comparable_rows, list):
+        comparable_rows = []
+    for row in comparable_rows:
+        key = str(row.get("key") or "")
+        fast = row.get("fast") if isinstance(row, Mapping) else None
+        improvement = row.get("improvement") if isinstance(row, Mapping) else None
+        if not isinstance(fast, Mapping) or not isinstance(improvement, Mapping):
+            resource_failures.append(f"{key}:measurement_missing")
+            continue
+        if not bool((row.get("parity") or {}).get("exact")):
+            parity_failures.append(f"{key}:forced_fast_output_mismatch")
+        if int(fast["wall_time_ns"]["p95"]) > PHASE_3A_WALL_LIMIT_NS:
+            resource_failures.append(f"{key}:wall_p95_exceeded")
+        if int(fast["cpu_time_ns"]["p95"]) > PHASE_3A_CPU_LIMIT_NS:
+            resource_failures.append(f"{key}:cpu_p95_exceeded")
+        if float(improvement.get("wall_fraction") or 0.0) < 0.5:
+            resource_failures.append(f"{key}:wall_improvement_below_50_percent")
+        if float(improvement.get("cpu_fraction") or 0.0) < 0.5:
+            resource_failures.append(f"{key}:cpu_improvement_below_50_percent")
+        calls = fast.get("call_count_max") or {}
+        if int(calls.get("full_prefix_reader_calls") or 0) != 0:
+            resource_failures.append(f"{key}:full_prefix_read")
+        if int(calls.get("full_lot_list_calls") or 0) != 0:
+            resource_failures.append(f"{key}:full_lot_list_read")
+        expected_ids = 2 if key.startswith("atomic_batch") else 1
+        required_candidate_metrics = {
+            "candidate_event_ids_unique",
+            "candidate_event_id_max_batch",
+        }
+        if not required_candidate_metrics.issubset(calls):
+            resource_failures.append(f"{key}:candidate_id_measurement_missing")
+        elif (
+            int(calls.get("candidate_event_ids_unique") or 0) > expected_ids
+            or int(calls.get("candidate_event_id_max_batch") or 0) > expected_ids
+            or int((fast.get("rows_returned_max") or {}).get("get_trade_events_by_ids") or 0)
+            > expected_ids
+        ):
+            resource_failures.append(f"{key}:candidate_id_lookup_unbounded")
+        if fast.get("checkpoint_row_deltas") != [0]:
+            resource_failures.append(f"{key}:unexpected_checkpoint_row_write")
+        if fast.get("checkpoint_state_byte_deltas") != [0]:
+            resource_failures.append(f"{key}:unexpected_checkpoint_payload_write")
+        allocation_row = allocation_rows.get(key)
+        component = (
+            ((allocation_row or {}).get("fast") or {}).get("component")
+            if isinstance(allocation_row, Mapping)
+            else None
+        )
+        peak = int((component or {}).get("python_peak_bytes") or -1)
+        one_state = int((fast.get("checkpoint_after_max") or {}).get("one_state_bytes") or 0)
+        if peak < 0 or peak > max(PHASE_3A_ALLOCATION_FLOOR_BYTES, 2 * one_state):
+            resource_failures.append(f"{key}:allocation_limit_exceeded")
+
+    required_keys = {
+        "single_combo_metadata_close",
+        "atomic_batch_combo_metadata_adjust",
+    }
+    if {str(row.get("key") or "") for row in comparable_rows} != required_keys:
+        resource_failures.append("comparable_facade_set_incomplete")
+
+    checkpoint = timing.get("checkpoint") or {}
+    allocation_checkpoint = allocation.get("checkpoint") or {}
+    no_rotation = checkpoint.get("no_rotation")
+    if not isinstance(no_rotation, Mapping):
+        resource_failures.append("checkpoint:no_rotation_missing")
+    else:
+        if no_rotation.get("checkpoint_row_deltas") != [0]:
+            resource_failures.append("checkpoint:no_rotation_row_write")
+        if no_rotation.get("checkpoint_state_byte_deltas") != [0]:
+            resource_failures.append("checkpoint:no_rotation_payload_write")
+    for key in ("rotation_100_events", "rotation_1_mib"):
+        measured = checkpoint.get(key)
+        allocated = allocation_checkpoint.get(key)
+        if not isinstance(measured, Mapping) or not isinstance(allocated, Mapping):
+            resource_failures.append(f"checkpoint:{key}:measurement_missing")
+            continue
+        if int(measured["wall_time_ns"]["p95"]) > PHASE_3A_WALL_LIMIT_NS:
+            resource_failures.append(f"checkpoint:{key}:wall_p95_exceeded")
+        if int(measured["cpu_time_ns"]["p95"]) > PHASE_3A_CPU_LIMIT_NS:
+            resource_failures.append(f"checkpoint:{key}:cpu_p95_exceeded")
+        if measured.get("checkpoint_row_deltas") != [1]:
+            resource_failures.append(f"checkpoint:{key}:rotation_row_count")
+        after = measured.get("checkpoint_after_max") or {}
+        if int(after.get("row_count") or 0) > 3:
+            resource_failures.append(f"checkpoint:{key}:k_exceeded")
+        one_state = int(after.get("one_state_bytes") or 0)
+        state_bytes = int(after.get("state_bytes") or 0)
+        if one_state <= 0 or state_bytes > int(one_state * 3 * 1.1):
+            resource_failures.append(f"checkpoint:{key}:steady_space_exceeded")
+        growth = int((measured.get("sqlite_growth_bytes") or {}).get("p95") or 0)
+        if growth > max(PHASE_3A_ALLOCATION_FLOOR_BYTES, 2 * one_state):
+            resource_failures.append(f"checkpoint:{key}:wal_growth_exceeded")
+        peak = int(((allocated.get("component") or {}).get("python_peak_bytes") or -1))
+        if peak < 0 or peak > max(PHASE_3A_ALLOCATION_FLOOR_BYTES, 2 * one_state):
+            resource_failures.append(f"checkpoint:{key}:allocation_limit_exceeded")
+
+    current_reads = timing.get("current_reads") or {}
+    allocation_reads = allocation.get("current_reads") or {}
+    for key, limit in (
+        ("current", PHASE_3A_READ_CURRENT_LIMIT_NS),
+        ("current_state_10x", PHASE_3A_READ_STATE_10X_LIMIT_NS),
+    ):
+        measured = current_reads.get(key)
+        allocated = allocation_reads.get(key)
+        if not isinstance(measured, Mapping) or int(measured["wall_time_ns"]["p95"]) > limit:
+            resource_failures.append(f"current_read:{key}:wall_p95_exceeded")
+        if key == "current":
+            peak = int((((allocated or {}).get("component") or {}).get("python_peak_bytes") or -1))
+            if peak < 0 or peak > PHASE_3A_READ_ALLOCATION_LIMIT_BYTES:
+                resource_failures.append("current_read:current:allocation_limit_exceeded")
+
+    invalidation = timing.get("invalidation_lookup")
+    if (
+        not isinstance(invalidation, Mapping)
+        or int(invalidation["wall_time_ns"]["p95"]) > PHASE_3A_INVALIDATION_LIMIT_NS
+    ):
+        resource_failures.append("invalidation_lookup:wall_p95_exceeded")
+    startup = timing.get("loaded_projector_fingerprint_startup")
+    startup_allocation = allocation.get("loaded_projector_fingerprint_startup")
+    if not isinstance(startup, Mapping):
+        resource_failures.append("projector_fingerprint_startup:missing")
+    else:
+        if int(startup["wall_time_ns"]["p95"]) > PHASE_3A_FINGERPRINT_STARTUP_LIMIT_NS:
+            resource_failures.append("projector_fingerprint_startup:wall_p95_exceeded")
+        if int(startup["cpu_time_ns"]["p95"]) > PHASE_3A_FINGERPRINT_STARTUP_LIMIT_NS:
+            resource_failures.append("projector_fingerprint_startup:cpu_p95_exceeded")
+        if not bool((startup.get("output") or {}).get("matches_loaded")):
+            parity_failures.append("projector_fingerprint_startup:loaded_mismatch")
+    startup_peak = int(
+        (((startup_allocation or {}).get("component") or {}).get("python_peak_bytes") or -1)
+    )
+    if startup_peak < 0 or startup_peak > PHASE_3A_FINGERPRINT_ALLOCATION_LIMIT_BYTES:
+        resource_failures.append("projector_fingerprint_startup:allocation_limit_exceeded")
+
+    fingerprint = ((timing.get("fingerprint_only") or {}).get("current") or {})
+    if not isinstance(fingerprint, Mapping):
+        resource_failures.append("fingerprint_current:missing")
+    else:
+        if int(fingerprint["wall_time_ns"]["p95"]) > PHASE_3A_WALL_LIMIT_NS:
+            resource_failures.append("fingerprint_current:wall_p95_exceeded")
+        if int(fingerprint["cpu_time_ns"]["p95"]) > PHASE_3A_CPU_LIMIT_NS:
+            resource_failures.append("fingerprint_current:cpu_p95_exceeded")
+    fingerprint_peak = int(
+        (((allocation.get("fingerprint_only") or {}).get("component") or {}).get("python_peak_bytes") or -1)
+    )
+    fingerprint_bytes = int(fingerprint.get("bytes") or 0) if isinstance(fingerprint, Mapping) else 0
+    if fingerprint_peak < 0 or fingerprint_peak > max(
+        PHASE_3A_ALLOCATION_FLOOR_BYTES,
+        2 * fingerprint_bytes,
+    ):
+        resource_failures.append("fingerprint_current:allocation_limit_exceeded")
+
+    retained = ((timing.get("fingerprint_only") or {}).get("retained_lots_10x") or {})
+    failures = sorted(set(resource_failures + parity_failures))
+    status = "pass" if not failures else "fail"
+    lot_diff_failures = [item for item in failures if not item.startswith("checkpoint:")]
+    checkpoint_failures = [item for item in failures if item.startswith("checkpoint:")]
+    return {
+        "lot_diff_publication": {
+            "status": "pass" if not lot_diff_failures else "fail",
+            "reason": "within_frozen_limits" if not lot_diff_failures else "lot_diff_gate_failed",
+            "failures": lot_diff_failures,
+        },
+        "checkpoint_tail": {
+            "status": "pass" if not checkpoint_failures else "fail",
+            "reason": "within_frozen_limits" if not checkpoint_failures else "checkpoint_gate_failed",
+            "failures": checkpoint_failures,
+        },
+        "combined": {
+            "status": "ready" if status == "pass" else "not_ready",
+            "reason": "all_phase_3a_gates_pass" if status == "pass" else "phase_3a_gate_failed",
+        },
+        "evidence": {
+            "resource_failures": sorted(set(resource_failures)),
+            "parity_failures": sorted(set(parity_failures)),
+            "retained_lots_10x_guarantee": False,
+            "retained_lots_10x": dict(retained),
+        },
     }
 
 
@@ -1990,6 +3479,110 @@ def _storage_status_gate(
     if wall_p95 > STORAGE_STATUS_WALL_LIMIT_NS:
         return "fail", "frozen_wall_limit_exceeded", wall_p95, peak
     return "pass", "within_frozen_limits", wall_p95, peak
+
+
+def _load_shadow_manifest(
+    value: str | Path | Mapping[str, Any] | None,
+    *,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        payload = dict(value)
+    else:
+        raw = Path(value).expanduser()
+        path = raw if raw.is_absolute() else repo_root / raw
+        path = path.resolve(strict=True)
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("shadow manifest must be a bounded regular JSON file")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"shadow manifest is not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("shadow manifest must be a JSON object")
+    if payload.get("schema_version") != "position_projection_migration_verify.v1":
+        raise ValueError("shadow manifest schema is invalid")
+    supplied = str(payload.get("manifest_hash") or "")
+    unsigned = {key: item for key, item in payload.items() if key != "manifest_hash"}
+    if len(supplied) != 64 or supplied != _sha256_json(unsigned):
+        raise ValueError("shadow manifest hash mismatch")
+    return payload
+
+
+def _seal_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    unsigned = dict(payload)
+    unsigned.pop("manifest_hash", None)
+    return {**unsigned, "manifest_hash": _sha256_json(unsigned)}
+
+
+def _build_phase_3a_acceptance(
+    *,
+    decision: Mapping[str, Any],
+    shadow_manifest: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    phase = decision.get("phase_3a_combined")
+    evidence = decision.get("phase_3a_evidence")
+    resource_failures = list(
+        (evidence.get("resource_failures") if isinstance(evidence, Mapping) else [])
+        or []
+    )
+    parity_failures = list(
+        (evidence.get("parity_failures") if isinstance(evidence, Mapping) else [])
+        or []
+    )
+    reasons: list[str] = []
+    benchmark_ready = isinstance(phase, Mapping) and phase.get("status") == "ready"
+    if not benchmark_ready:
+        reasons.append(str((phase or {}).get("reason") or "benchmark_not_ready"))
+        resource_failures.append("benchmark_not_ready")
+    binding = None
+    shadow_ready = bool(
+        isinstance(shadow_manifest, Mapping)
+        and shadow_manifest.get("status") == "pass"
+        and shadow_manifest.get("readiness") == "ready"
+        and shadow_manifest.get("mode") == "shadow"
+        and not shadow_manifest.get("resource_failures")
+        and not shadow_manifest.get("parity_failures")
+        and isinstance(shadow_manifest.get("store_binding"), Mapping)
+    )
+    if shadow_ready:
+        binding = dict(shadow_manifest["store_binding"])
+    else:
+        reasons.append("passing_shadow_manifest_required")
+        resource_failures.append("shadow_manifest_not_ready")
+    resource_failures = sorted(set(str(item) for item in resource_failures))
+    parity_failures = sorted(set(str(item) for item in parity_failures))
+    ready = benchmark_ready and shadow_ready and not resource_failures and not parity_failures
+    return _seal_manifest(
+        {
+            "schema_version": PHASE_3A_ACCEPTANCE_SCHEMA,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "status": "pass" if ready else "fail",
+            "readiness": "ready" if ready else "not_ready",
+            "reasons": sorted(set(reasons)),
+            "store_binding": binding,
+            "reference_host": dict(decision.get("reference_host") or {}),
+            "components": {
+                "lot_diff_publication": dict(
+                    (decision.get("components") or {}).get("lot_diff_publication") or {}
+                ),
+                "checkpoint_tail": dict(
+                    (decision.get("components") or {}).get("checkpoint_tail") or {}
+                ),
+                "combined": dict(phase or {}),
+            },
+            "resource_failures": resource_failures,
+            "parity_failures": parity_failures,
+            "retained_lots_10x_guarantee": False,
+            "retained_lots_10x": dict(
+                (evidence.get("retained_lots_10x") if isinstance(evidence, Mapping) else {})
+                or {}
+            ),
+            "automatic_actions": [],
+        }
+    )
 
 
 def _resolve_output_dir(value: str | Path, *, repo_root: Path) -> tuple[Path, bool]:
@@ -2061,6 +3654,7 @@ def _validate_published_files(directory: Path) -> None:
         "cpu-profile.json": CPU_PROFILE_SCHEMA,
         "allocation-profile.json": ALLOCATION_PROFILE_SCHEMA,
         "decision.json": DECISION_SCHEMA,
+        "phase-3a-acceptance.json": PHASE_3A_ACCEPTANCE_SCHEMA,
     }
     for filename, schema in expected_schemas.items():
         payload = json.loads((directory / filename).read_text(encoding="utf-8"))
@@ -2094,6 +3688,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-host-fingerprint",
         help="Exact host-profile SHA-256 required before absolute timing decisions are allowed",
     )
+    parser.add_argument(
+        "--shadow-manifest",
+        help="Passing read-only projection-migration shadow manifest used only to bind acceptance",
+    )
     parser.add_argument("--_worker-mode", choices=("timing", "cpu", "allocation"), help=argparse.SUPPRESS)
     parser.add_argument("--_worker-spec", help=argparse.SUPPRESS)
     return parser
@@ -2119,6 +3717,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repetitions=args.repetitions,
             seed=args.seed,
             reference_host_fingerprint=args.reference_host_fingerprint,
+            shadow_manifest=args.shadow_manifest,
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
@@ -2131,6 +3730,7 @@ __all__ = [
     "CPU_PROFILE_SCHEMA",
     "DECISION_SCHEMA",
     "FIXTURE_SCHEMA",
+    "PHASE_3A_ACCEPTANCE_SCHEMA",
     "TIMING_SCHEMA",
     "build_parser",
     "main",
