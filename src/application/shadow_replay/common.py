@@ -210,8 +210,11 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(
-        path,
+    _atomic_write_text(path, render_json_text(payload))
+
+
+def render_json_text(payload: dict[str, Any]) -> str:
+    return (
         json.dumps(
             payload,
             ensure_ascii=False,
@@ -219,7 +222,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
             sort_keys=True,
             allow_nan=False,
         )
-        + "\n",
+        + "\n"
     )
 
 
