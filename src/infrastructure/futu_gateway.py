@@ -11,11 +11,13 @@ Centralizes:
 
 import ast
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
 import logging
-from numbers import Integral
+import math
+from numbers import Integral, Real
 from pathlib import Path
 import random
 import time
@@ -875,6 +877,42 @@ class FutuGateway:
             self._raise_mapped(exc, action="request_history_kline")
         raise AssertionError("unreachable")
 
+    def get_exact_expiration_close(
+        self,
+        *,
+        code: str,
+        expiration: str,
+    ) -> dict[str, Any] | None:
+        action = "get_exact_expiration_close"
+        try:
+            normalized_code, normalized_expiration = (
+                _normalize_exact_expiration_close_request(code, expiration)
+            )
+        except Exception as exc:
+            self._raise_mapped(exc, action=action)
+        quote = self._quote_client()
+        try:
+            params = _normalize_history_kline_kwargs(
+                {
+                    "code": normalized_code,
+                    "start": normalized_expiration,
+                    "end": normalized_expiration,
+                    "ktype": "K_DAY",
+                    "autype": "NONE",
+                    "fields": ["time_key", "close"],
+                    "max_count": 2,
+                }
+            )
+            params["page_req_key"] = None
+            return _normalize_exact_expiration_close_response(
+                quote.request_history_kline(**params),
+                code=normalized_code,
+                expiration=normalized_expiration,
+            )
+        except Exception as exc:
+            self._raise_mapped(exc, action=action)
+        raise AssertionError("unreachable")
+
     def get_history_kl_quota(self) -> dict[str, Any]:
         quote = self._quote_client()
         try:
@@ -941,6 +979,115 @@ def _normalize_history_kline_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     elif fields in (None, "", ()):
         params.pop("fields", None)
     return {key: value for key, value in params.items() if value is not None}
+
+
+def _normalize_exact_expiration_close_request(
+    code: Any,
+    expiration: Any,
+) -> tuple[str, str]:
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("exact-expiration close code must be non-empty text")
+    if (
+        not isinstance(expiration, str)
+        or expiration != expiration.strip()
+    ):
+        raise ValueError(
+            "exact-expiration close expiration must use YYYY-MM-DD"
+        )
+    try:
+        parsed_expiration = date.fromisoformat(expiration)
+    except ValueError as exc:
+        raise ValueError(
+            "exact-expiration close expiration must use YYYY-MM-DD"
+        ) from exc
+    if parsed_expiration.isoformat() != expiration:
+        raise ValueError(
+            "exact-expiration close expiration must use YYYY-MM-DD"
+        )
+    return code.strip().upper(), expiration
+
+
+def _normalize_exact_expiration_close_response(
+    result: Any,
+    *,
+    code: str,
+    expiration: str,
+) -> dict[str, Any] | None:
+    if not isinstance(result, tuple) or len(result) != 3:
+        raise ValueError(
+            "exact-expiration close result must be a (ret, data, page_req_key) tuple"
+        )
+    ret, data, page_req_key = result
+    if isinstance(ret, bool) or not isinstance(ret, Integral):
+        raise ValueError("exact-expiration close ret must be an integer")
+    if int(ret) != 0:
+        raise RuntimeError(data)
+    if page_req_key not in (None, "", b""):
+        raise ValueError("exact-expiration close result must not be paginated")
+
+    to_dict = getattr(data, "to_dict", None)
+    columns = getattr(data, "columns", None)
+    if not callable(to_dict) or columns is None:
+        raise ValueError("exact-expiration close data must be a DataFrame")
+    try:
+        column_names = list(columns)
+    except TypeError as exc:
+        raise ValueError(
+            "exact-expiration close columns must be iterable"
+        ) from exc
+    if any(column_names.count(name) != 1 for name in ("code", "time_key", "close")):
+        raise ValueError(
+            "exact-expiration close data must contain code, time_key, and close"
+        )
+    rows = to_dict(orient="records")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("exact-expiration close rows must be a list of objects")
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("exact-expiration close data must contain at most one row")
+
+    row = rows[0]
+    row_code = row.get("code")
+    if (
+        not isinstance(row_code, str)
+        or not row_code.strip()
+        or row_code.strip().upper() != code
+    ):
+        raise ValueError("exact-expiration close row code does not match request")
+
+    time_key = row.get("time_key")
+    if (
+        not isinstance(time_key, str)
+        or time_key != time_key.strip()
+        or len(time_key) not in (10, 19)
+    ):
+        raise ValueError("exact-expiration close time_key is not canonical")
+    time_format = "%Y-%m-%d" if len(time_key) == 10 else "%Y-%m-%d %H:%M:%S"
+    try:
+        parsed_time = time.strptime(time_key, time_format)
+    except ValueError as exc:
+        raise ValueError(
+            "exact-expiration close time_key is not canonical"
+        ) from exc
+    if time.strftime(time_format, parsed_time) != time_key:
+        raise ValueError("exact-expiration close time_key is not canonical")
+    if time_key[:10] != expiration:
+        raise ValueError("exact-expiration close row date does not match request")
+
+    close = row.get("close")
+    if (
+        isinstance(close, bool)
+        or not isinstance(close, Real)
+        or not math.isfinite(float(close))
+        or float(close) <= 0
+    ):
+        raise ValueError("exact-expiration close must be a positive finite number")
+    return {
+        "code": code,
+        "expiration": expiration,
+        "close": float(close),
+    }
 
 
 def _normalize_history_kline_quota_response(result: Any) -> dict[str, Any]:
