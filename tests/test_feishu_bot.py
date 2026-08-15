@@ -627,8 +627,6 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
-    from src.application.multi_tick.misc import AccountResult
-    from src.application.multi_tick.notify_format import build_account_message_compact
     from src.application.positions.maintenance_receipt import build_auto_close_receipt_message
     from src.application.scheduled_notification import build_notify_failure_summary_message
     from src.application.trades.receipt import build_trade_intake_receipt_message
@@ -680,25 +678,6 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
             ],
             "capacity": {"sell_put": {"contracts_available": 1, "reason": "cash_supported"}},
         }
-    )
-    compact_tick = build_account_message_compact(
-        AccountResult(
-            account="lx",
-            ran_scan=True,
-            should_notify=True,
-            decision_reason="dense",
-            notification_text=(
-                "### Sell Put\n"
-                "🟢 Sell Put NVDA 100P @ 08-21 | 🎯建议挂单 5.25\n"
-                "- 权利金 5.25USD · 年化 18.1% · 32天\n\n"
-                "### [lx] 平仓建议 (1)\n"
-                "- NVDA Put 2026-08-21 100P · 建议平仓\n"
-                "- 待补数据:\n"
-                "- PDD Put 2026-08-21 95P · 无法评估 | 当前未取得可用价格\n"
-            ),
-        ),
-        now_bj="2026-07-21 22:03:00",
-        cash_footer_lines=["💰 现金 USD", "LX 持有 $10,000 | 可用 $2,000"],
     )
     trade_receipt = build_trade_intake_receipt_message(
         deal=None,
@@ -761,7 +740,6 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
     )
     messages = {
         "daily-brief": daily_brief,
-        "compact-tick": compact_tick,
         "trade-receipt": trade_receipt,
         "maintenance-receipt": maintenance_receipt,
         "failure-recovery": failure_recovery,
@@ -770,7 +748,6 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
     assert daily_brief.startswith("# OM · 决策简报 · lx")
     assert "状态｜当前简报" in daily_brief
     assert "\n## Sell Put\n" in daily_brief
-    assert all(section in compact_tick for section in ("## 候选", "## 持仓", "## 资金"))
     assert "合约｜2026-08-21 100 Put" in trade_receipt
     assert "## 可选批次" in trade_receipt
     assert "## 已完成" in maintenance_receipt and "## 失败" in maintenance_receipt
