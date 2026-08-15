@@ -93,7 +93,7 @@ Research evidence handoff for MacBook Codex:
 |---|---|---|
 | Candidate filter/rank logic | `domain/domain/engine/candidate_engine.py` | Do not add parallel ranking in application scan adapters |
 | Candidate trace / ranking diagnostics | `src/application/agent_tools/candidate_filter_impl.py`, `src/application/agent_tools/candidate_rank_impl.py` | Keep analysis read-only unless explicitly designing a write path |
-| Notification text | `src/application/daily_decision_brief_renderer.py`; compatibility formatting in `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py` | Keep Markdown-friendly Chinese text; Daily Brief owns ordinary scheduled delivery |
+| Notification text | `src/application/daily_decision_brief_renderer.py`; compatibility formatting in `src/application/notify_symbols.py` | Keep Markdown-friendly Chinese text; Daily Brief owns ordinary scheduled delivery |
 | Close-advice policy | `domain/domain/close_advice.py` | Runner assembles I/O; scoring policy stays in domain |
 | Option-position projection | `domain/domain/ledger/projection.py` | `trade_events -> projection -> position_lots` is canonical |
 | Ledger application boundary | `src/application/ledger/api.py` | Non-ledger modules must not import ledger internals directly |
@@ -145,7 +145,7 @@ Use focused checks for the area touched, then add broader checks when risk warra
 ./.venv/bin/python -m pytest tests/test_research.py
 
 # Notification formatting
-./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py
+./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py
 
 # Tick behavior
 ./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py

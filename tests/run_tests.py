@@ -48,7 +48,6 @@ CRITICAL_MODULES = [
     "test_notify_symbols_markdown",
     "test_sell_call_min_annualized_resolution",
     "test_sell_put_min_annualized_resolution",
-    "test_multi_tick_notify_format",
     "test_http_json_http_error_handling",
     "test_feishu_bitable",
     "test_option_candidate_strategy",
