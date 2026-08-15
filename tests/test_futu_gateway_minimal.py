@@ -415,6 +415,129 @@ def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatc
     assert gateway.backend.quote.kwargs["fields"] == ["date-time", "close"]
 
 
+def test_gateway_history_kline_quota_returns_strict_compact_facts() -> None:
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_history_kl_quota(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return (
+                0,
+                (
+                    2,
+                    98,
+                    [
+                        {
+                            "code": "us.nvda",
+                            "name": "NVIDIA",
+                            "request_time": "2026-08-15 09:31:00",
+                        },
+                        {
+                            "code": "HK.00700",
+                            "name": "Tencent",
+                            "request_time": "2026-08-14 15:59:00",
+                        },
+                    ],
+                ),
+            )
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+
+    assert gateway.get_history_kl_quota() == {
+        "used_quota": 2,
+        "remain_quota": 98,
+        "detail_list": [
+            {
+                "code": "HK.00700",
+                "request_time": "2026-08-14 15:59:00",
+            },
+            {
+                "code": "US.NVDA",
+                "request_time": "2026-08-15 09:31:00",
+            },
+        ],
+    }
+    assert gateway.backend.quote.calls == [{"get_detail": True}]
+
+
+def test_gateway_history_kline_quota_rejects_invalid_provider_facts() -> None:
+    import pytest
+
+    from src.infrastructure.futu_gateway import FutuGatewayError, build_futu_gateway
+
+    class FakeQuote:
+        result = None
+
+        def get_history_kl_quota(self, **_kwargs):
+            return self.result
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    valid_detail = {
+        "code": "HK.00700",
+        "request_time": "2026-08-14 15:59:00",
+    }
+    invalid_results = [
+        None,
+        (0,),
+        (False, (0, 0, [])),
+        (1, "provider denied quota request"),
+        (0, None),
+        (0, (True, 1, [valid_detail])),
+        (0, ("1", 1, [valid_detail])),
+        (0, (-1, 1, [])),
+        (0, (1, 1, [])),
+        (0, (1, 1, "not-a-list")),
+        (0, (1, 1, [{}])),
+        (
+            0,
+            (
+                1,
+                1,
+                [{"code": "HK.00700", "request_time": "not-a-time"}],
+            ),
+        ),
+        (
+            0,
+            (
+                1,
+                1,
+                [{"code": "HK.00700", "request_time": "2026-02-30 09:00:00"}],
+            ),
+        ),
+        (0, (2, 1, [valid_detail, dict(valid_detail)])),
+    ]
+
+    for result in invalid_results:
+        gateway.backend.quote.result = result
+        with pytest.raises(FutuGatewayError, match="get_history_kl_quota failed"):
+            gateway.get_history_kl_quota()
+
+
 def test_gateway_market_state_delegates_to_quote_client() -> None:
     from src.infrastructure.futu_gateway import build_futu_gateway
 
