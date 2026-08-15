@@ -8,6 +8,8 @@ from domain.domain.engine import (
     CANDIDATE_STAGE_ORDER,
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+    SELL_PUT_RANKING_CONTRACT_VERSION,
+    SELL_PUT_RANKING_PROFILES,
     build_candidate_reject,
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
@@ -290,6 +292,158 @@ def test_select_best_candidate_per_symbol_preserves_canonical_symbol_winner() ->
     ]
     winners = select_best_candidate_per_symbol(rows, mode="put")
     assert {row["contract_symbol"] for row in winners} == {"NVDA_HIGH", "AMD_ONLY"}
+
+
+def test_sell_put_ranking_profiles_have_exact_cross_symbol_orders() -> None:
+    rows = [
+        _policy_row(
+            symbol="A",
+            contract_symbol="A_PUT",
+            period_net_return_on_cash_basis=0.0200,
+            net_assignment_discount_pct=0.05,
+            symbol_concentration_after=0.50,
+        ),
+        _policy_row(
+            symbol="B",
+            contract_symbol="B_PUT",
+            period_net_return_on_cash_basis=0.0185,
+            net_assignment_discount_pct=0.04,
+            symbol_concentration_after=0.20,
+        ),
+        _policy_row(
+            symbol="C",
+            contract_symbol="C_PUT",
+            period_net_return_on_cash_basis=0.0150,
+            net_assignment_discount_pct=0.10,
+            symbol_concentration_after=0.10,
+        ),
+        _policy_row(
+            symbol="D",
+            contract_symbol="D_PUT",
+            period_net_return_on_cash_basis=0.0300,
+            net_assignment_discount_pct=0.20,
+            symbol_concentration_after=None,
+        ),
+    ]
+
+    def order(profile: str) -> list[str]:
+        return [
+            row["contract_symbol"]
+            for row in rank_candidate_rows(
+                rows,
+                mode="put",
+                sell_put_ranking_profile=profile,
+            )
+        ]
+
+    assert SELL_PUT_RANKING_CONTRACT_VERSION == "sell_put_ranking_profile.v1"
+    assert SELL_PUT_RANKING_PROFILES == {
+        "without_concentration",
+        "current_tie_break",
+        "concentration_first",
+    }
+    assert order("current_tie_break") == ["D_PUT", "B_PUT", "A_PUT", "C_PUT"]
+    assert order("without_concentration") == ["D_PUT", "A_PUT", "B_PUT", "C_PUT"]
+    assert order("concentration_first") == ["C_PUT", "B_PUT", "A_PUT", "D_PUT"]
+
+
+def test_current_tie_break_ranks_known_return_before_null_return() -> None:
+    rows = [
+        _policy_row(
+            symbol="NULL",
+            contract_symbol="NULL_RETURN",
+            period_net_return_on_cash_basis=None,
+            annualized_net_return_on_cash_basis=None,
+            net_assignment_discount_pct=0.99,
+            symbol_concentration_after=0.0,
+        ),
+        _policy_row(
+            symbol="KNOWN",
+            contract_symbol="KNOWN_RETURN",
+            period_net_return_on_cash_basis=0.01,
+            net_assignment_discount_pct=0.0,
+            symbol_concentration_after=0.99,
+        ),
+    ]
+
+    assert [
+        row["contract_symbol"]
+        for row in rank_candidate_rows(
+            rows,
+            mode="put",
+            sell_put_ranking_profile="current_tie_break",
+        )
+    ] == ["KNOWN_RETURN", "NULL_RETURN"]
+
+
+def test_concentration_first_uses_existing_ties_inside_equal_concentration() -> None:
+    rows = [
+        _policy_row(
+            symbol="E",
+            contract_symbol="E_PUT",
+            period_net_return_on_cash_basis=0.010,
+            net_assignment_discount_pct=0.02,
+            symbol_concentration_after=0.20,
+        ),
+        _policy_row(
+            symbol="F",
+            contract_symbol="F_PUT",
+            period_net_return_on_cash_basis=0.009,
+            net_assignment_discount_pct=0.10,
+            symbol_concentration_after=0.20,
+        ),
+    ]
+
+    assert [
+        row["contract_symbol"]
+        for row in rank_candidate_rows(
+            rows,
+            mode="put",
+            sell_put_ranking_profile="concentration_first",
+        )
+    ] == ["F_PUT", "E_PUT"]
+
+
+def test_sell_put_profiles_do_not_change_within_symbol_ranking() -> None:
+    rows = [
+        _policy_row(
+            symbol="NVDA",
+            contract_symbol="NVDA_HIGH",
+            period_net_return_on_cash_basis=0.020,
+            net_assignment_discount_pct=0.02,
+        ),
+        _policy_row(
+            symbol="NVDA",
+            contract_symbol="NVDA_NEAR_SAFER",
+            period_net_return_on_cash_basis=0.019,
+            net_assignment_discount_pct=0.10,
+        ),
+    ]
+
+    for profile in SELL_PUT_RANKING_PROFILES:
+        assert [
+            row["contract_symbol"]
+            for row in rank_candidate_rows(
+                rows,
+                mode="put",
+                sell_put_ranking_profile=profile,
+            )
+        ] == ["NVDA_NEAR_SAFER", "NVDA_HIGH"]
+
+
+def test_sell_put_profiles_reject_covered_call_and_unknown_names() -> None:
+    with pytest.raises(ValueError, match="cannot rank Covered Call"):
+        rank_candidate_rows(
+            [_policy_row(mode="call")],
+            mode="call",
+            sell_put_ranking_profile="without_concentration",
+        )
+    with pytest.raises(ValueError, match="unsupported Sell Put ranking profile"):
+        rank_candidate_rows(
+            [_policy_row()],
+            mode="put",
+            sell_put_ranking_profile="unknown",
+        )
 
 
 def test_rank_api_has_no_score_weight_compatibility_alias() -> None:
