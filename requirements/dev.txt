@@ -1,5 +1,7 @@
 -r runtime.txt
 pytest
+pytest-xdist
+pytest-timeout
 basedpyright
 ruff
 jsonschema>=4.23,<5

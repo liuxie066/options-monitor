@@ -163,7 +163,7 @@ def run_candidate_scan(
             symbol=symbol,
             mode=config.mode,
         )
-        for _, raw_row in data.iterrows():
+        for raw_row in data.to_dict("records"):
             contract = CandidateContractInput.from_row(raw_row, mode=config.mode)
             metrics = deps.compute_metrics_fn(contract)
             base_values = _base_values(contract, metrics or {})

@@ -103,7 +103,7 @@ def render_yield_enhancement_alerts(
         atomic_write_text(output_file, text)
         return text
 
-    blocks = [render_one(row) for _, row in top_df.iterrows()]
+    blocks = [render_one(row) for row in top_df.to_dict("records")]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"
     atomic_write_text(output_file, text)
     return text
