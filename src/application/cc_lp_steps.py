@@ -149,11 +149,12 @@ def run_cc_lp_scan(
         return pd.DataFrame()
 
     rows: list[dict[str, Any]] = []
+    put_rows = df_puts.to_dict("records")
     for call_row in df_calls.to_dict("records"):
         call_leg = _call_leg_from_required_data(call_row)
         if call_leg is None:
             continue
-        for put_row in df_puts.to_dict("records"):
+        for put_row in put_rows:
             put_leg = _put_leg_from_required_data(put_row)
             if put_leg is None:
                 continue
