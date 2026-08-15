@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
     FUTU_US_FEE_SCHEDULE_URL,
+    calc_futu_hk_terminal_fee,
     calc_futu_option_fee,
     calc_futu_stock_fee,
     extract_actual_fees,
@@ -225,8 +226,10 @@ def _stock_event_shares(event: dict[str, Any]) -> int:
     except Exception:
         return 0
 
+
 def _stock_event_price(event: dict[str, Any]) -> float | None:
     return safe_float(event.get("price") if event.get("price") not in (None, "") else event.get("avg_price"))
+
 
 def _source_option_lot_id(event: dict[str, Any], option_rows: list[dict[str, Any]]) -> str | None:
     explicit = str(event.get("target_lot_id") or "").strip()
@@ -370,6 +373,22 @@ def _option_fee_fact(event: dict[str, Any], *, component: str) -> dict[str, Any]
     multiplier = int(abs(float(event.get("multiplier") or 0)))
     close_type = _event_close_type(event)
     if price == 0 and close_type in {EXPIRE_AUTO_CLOSE, "assignment", "exercise"}:
+        currency = normalize_currency(event.get("currency"))
+        if close_type == EXPIRE_AUTO_CLOSE and currency == "HKD":
+            terminal = calc_futu_hk_terminal_fee(
+                "expired_worthless",
+                contracts=contracts,
+            )
+            return {
+                "component": component,
+                "basis": terminal["basis"],
+                "amount": _round_money(terminal["amount"]) if terminal["amount"] is not None else 0.0,
+                "source": terminal["source"],
+                "reason": terminal["reason"],
+                "schedule_version": terminal["schedule_version"],
+                "fee_plan_ref": terminal.get("fee_plan_ref"),
+                "estimated_amount": terminal.get("estimated_amount"),
+            }
         return {
             "component": component,
             "basis": "estimated",
@@ -458,6 +477,36 @@ def _stock_fee_fact(
             "source": source,
             "reason": "us_assignment_fee_rule_not_explicit",
         }
+    if transaction_kind == "assignment" and currency == "HKD":
+        terminal = calc_futu_hk_terminal_fee(
+            "assignment",
+            order_price=(
+                value.get("price")
+                if value.get("price") not in (None, "")
+                else value.get("avg_price")
+            ),
+            shares=(
+                value.get("shares")
+                if value.get("shares") not in (None, "")
+                else value.get("quantity")
+            ),
+            contracts=(
+                value.get("contracts")
+                if value.get("contracts") not in (None, "")
+                else value.get("option_contracts")
+            ),
+        )
+        return {
+            "component": component,
+            "basis": terminal["basis"],
+            "amount": _round_money(terminal["amount"]) if terminal["amount"] is not None else 0.0,
+            "source": terminal["source"],
+            "reason": terminal["reason"],
+            "schedule_version": terminal["schedule_version"],
+            "fee_plan_ref": terminal["fee_plan_ref"],
+            "estimated_amount": terminal["estimated_amount"],
+            "estimated_basis": terminal["estimated_basis"],
+        }
     if currency not in {"USD", "HKD"} or shares <= 0 or price is None or price <= 0:
         return {
             "component": component,
@@ -481,11 +530,7 @@ def _stock_fee_fact(
         "basis": "estimated",
         "amount": _round_money(amount),
         "source": source,
-        "reason": (
-            "hk_assignment_stock_fee_excluding_assignment_exercise_fee"
-            if transaction_kind == "assignment"
-            else "standard_fixed_stock_fee_schedule_estimate"
-        ),
+        "reason": "standard_fixed_stock_fee_schedule_estimate",
     }
 
 def _scale_fee_fact(fact: dict[str, Any], ratio: float) -> dict[str, Any]:
@@ -761,20 +806,30 @@ def _lifecycle_efficiency_summary(rows: list[dict[str, Any]]) -> list[dict[str, 
             {"account": key[0], "currency": key[1], "lifecycle_quality": key[2], "lifecycle_count": 0, "lifecycle_pnl_net": 0.0, "capital_days": 0.0},
         )
         bucket["lifecycle_count"] += 1
-        if row.get("lifecycle_pnl_net") is not None:
+        if row.get("lifecycle_pnl_net") is None:
+            bucket["lifecycle_pnl_net"] = None
+        elif bucket["lifecycle_pnl_net"] is not None:
             bucket["lifecycle_pnl_net"] += float(row["lifecycle_pnl_net"])
         if row.get("capital_days") is not None:
             bucket["capital_days"] += float(row["capital_days"])
     out: list[dict[str, Any]] = []
     for bucket in buckets.values():
-        net = _round_money(bucket["lifecycle_pnl_net"])
+        net = (
+            _round_money(bucket["lifecycle_pnl_net"])
+            if bucket["lifecycle_pnl_net"] is not None
+            else None
+        )
         capital_days = round(float(bucket["capital_days"]), 6)
         out.append(
             {
                 **bucket,
                 "lifecycle_pnl_net": net,
                 "capital_days": capital_days,
-                "annualized_capital_efficiency": round(net * 365 / capital_days, 8) if capital_days > 0 else None,
+                "annualized_capital_efficiency": (
+                    round(net * 365 / capital_days, 8)
+                    if net is not None and capital_days > 0
+                    else None
+                ),
             }
         )
     return sorted(out, key=lambda row: (row["account"], row["currency"], row["lifecycle_quality"]))
@@ -970,6 +1025,7 @@ def project_assigned_stock_lifecycle(
                 "broker": broker,
                 "symbol": symbol,
                 "currency": normalize_currency(stock.get("currency")) or currency,
+                "contracts": assigned_contracts,
             },
             component="assignment_stock_fee",
             transaction_kind="assignment",
@@ -1287,9 +1343,10 @@ def project_assigned_stock_lifecycle(
             if stock_pnl_gross is not None
             else None
         )
+        fees_complete = not fee_summary["fee_missing_components"]
         lifecycle_pnl_net = (
             _round_money(lifecycle_pnl_gross - float(fee_summary["fees_used"]))
-            if lifecycle_pnl_gross is not None
+            if lifecycle_pnl_gross is not None and fees_complete
             else None
         )
         annualized_capital_efficiency = (
