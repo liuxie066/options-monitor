@@ -9,6 +9,7 @@ RANKING_MODULE = ROOT / "src/application/strategy_lab/top1/ranking.py"
 CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
 ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
 STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
+RESEARCH_MODULE = ROOT / "src/application/strategy_lab/top1/research.py"
 RECOMMENDATION_POINT_MODULE = ROOT / "src/application/recommendation_point.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
 EXPERIMENT_STORE_MODULE = (
@@ -91,6 +92,23 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "datetime",
         "typing",
         "scipy.stats",
+    }
+    assert _imports(RESEARCH_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "math",
+        "re",
+        "collections.abc",
+        "datetime",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "domain.domain.fee_calc",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.corpus",
+        "src.application.strategy_lab.top1.economics",
+        "src.application.strategy_lab.top1.ranking",
+        "src.application.strategy_lab.top1.statistics",
     }
 
 
@@ -185,4 +203,5 @@ def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
         imports = _imports(path)
         assert "src.application.strategy_lab.top1.lifecycle" not in imports
         assert "src.application.strategy_lab.top1.corpus" not in imports
+        assert "src.application.strategy_lab.top1.research" not in imports
         assert "src.infrastructure.strategy_lab.experiment_store" not in imports
