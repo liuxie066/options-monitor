@@ -1,3 +1,5 @@
+你永远叫我棒棒的liuxie
+
 # Agent Manual — options-monitor
 
 > Operations-sensitive local options monitoring system.
@@ -20,6 +22,7 @@
 | Accounts | Lowercase labels such as `lx`, `sy`; read from top-level `accounts` in runtime config |
 | Canonical Configs | `config.yaml` is the human authoring source; `config.us.json` / `config.hk.json` are generated runtime snapshots |
 | Reports | `output/`, `output_accounts/<account>/`, `output_shared/`, `output_runs/<run_id>/` |
+| Process Artifacts | `docs/reviews/`, `docs/plans/`, `docs/gateflow/` are gitignored consumables; never `git add -f` them into the repo |
 | Local Tool Gateway Entry | `./om-agent` |
 | Human CLI Entry | `./om` |
 | Detailed Agent Handbook | `docs/AGENT_WIKI.md` |
