@@ -16,9 +16,9 @@ from src.infrastructure.private_storage import (
 
 
 SCHEMA_COMPONENT = "sell_put_top1_experiment_store"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_REQUIRED_TABLES = {
+_V1_REQUIRED_TABLES = {
     "strategy_lab_schema",
     "strategy_lab_features",
     "strategy_lab_experiments",
@@ -26,13 +26,18 @@ _REQUIRED_TABLES = {
     "strategy_lab_hidden_commitments",
     "strategy_lab_events",
 }
+_REQUIRED_TABLES = {
+    *_V1_REQUIRED_TABLES,
+    "strategy_lab_corpus_days",
+    "strategy_lab_corpus_points",
+}
 _REQUIRED_INDEXES = {
     "strategy_lab_one_active_validation",
     "strategy_lab_hidden_date_unique",
     "strategy_lab_event_subject_unique",
     "strategy_lab_event_idempotency_unique",
 }
-_EXPECTED_FOREIGN_KEYS = {
+_V1_EXPECTED_FOREIGN_KEYS = {
     "strategy_lab_experiments": {
         ("receipt_request_event_id", "strategy_lab_events", "event_id"),
         ("receipt_published_event_id", "strategy_lab_events", "event_id"),
@@ -46,6 +51,15 @@ _EXPECTED_FOREIGN_KEYS = {
         ("experiment_id", "strategy_lab_experiments", "experiment_id"),
     },
     "strategy_lab_events": set(),
+}
+_EXPECTED_FOREIGN_KEYS = {
+    **_V1_EXPECTED_FOREIGN_KEYS,
+    "strategy_lab_corpus_days": set(),
+    "strategy_lab_corpus_points": {
+        ("market", "strategy_lab_corpus_days", "market"),
+        ("account", "strategy_lab_corpus_days", "account"),
+        ("trading_date", "strategy_lab_corpus_days", "trading_date"),
+    },
 }
 
 
@@ -103,9 +117,12 @@ class ExperimentStore:
                 version = int(metadata[0])
                 if version == 0 and tables == {"strategy_lab_schema"}:
                     return {"status": "migration_required", "schema_version": 0}
+                if version == 1:
+                    self._validate_v1(connection, deep=True)
+                    return {"status": "migration_required", "schema_version": 1}
                 if version != SCHEMA_VERSION:
                     return {"status": "schema_unsupported", "schema_version": version}
-                self._validate_v1(connection, deep=True)
+                self._validate_v2(connection, deep=True)
                 return {"status": "ready", "schema_version": version}
             finally:
                 connection.close()
@@ -121,6 +138,7 @@ class ExperimentStore:
             tables = self._tables(connection)
             if not tables:
                 self._create_v1(connection)
+                self._create_v2(connection)
                 connection.execute(
                     "INSERT INTO strategy_lab_schema(component, schema_version, migrated_at_utc) "
                     "VALUES (?, ?, ?)",
@@ -137,6 +155,7 @@ class ExperimentStore:
                     )
                 connection.execute("DROP TABLE strategy_lab_schema")
                 self._create_v1(connection)
+                self._create_v2(connection)
                 connection.execute(
                     "INSERT INTO strategy_lab_schema(component, schema_version, migrated_at_utc) "
                     "VALUES (?, ?, ?)",
@@ -151,12 +170,28 @@ class ExperimentStore:
                     if "strategy_lab_schema" in tables
                     else None
                 )
-                if metadata is None or int(metadata[0]) != SCHEMA_VERSION:
+                if metadata is None:
+                    raise ExperimentStoreError(
+                        "schema_unsupported", "existing schema cannot be migrated"
+                    )
+                version = int(metadata[0])
+                if version == 1:
+                    self._validate_v1(connection, deep=True)
+                    self._create_v2(connection)
+                    connection.execute(
+                        "UPDATE strategy_lab_schema "
+                        "SET schema_version = ?, migrated_at_utc = ? "
+                        "WHERE component = ?",
+                        (SCHEMA_VERSION, migrated_at_utc, SCHEMA_COMPONENT),
+                    )
+                elif version == SCHEMA_VERSION:
+                    self._validate_v2(connection, deep=True)
+                else:
                     raise ExperimentStoreError(
                         "schema_unsupported", "existing schema cannot be migrated"
                     )
             connection.commit()
-            self._validate_v1(connection, deep=True)
+            self._validate_v2(connection, deep=True)
         except (sqlite3.DatabaseError, ValueError) as exc:
             connection.rollback()
             raise ExperimentStoreError("schema_unsupported", "SQLite schema is invalid") from exc
@@ -176,6 +211,254 @@ class ExperimentStore:
                     (market, account),
                 ).fetchone()
             )
+
+    def corpus_day(
+        self, market: str, account: str, trading_date: str
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_corpus_days
+                    WHERE market = ? AND account = ? AND trading_date = ?
+                    """,
+                    (market, account, trading_date),
+                ).fetchone()
+            )
+
+    def corpus_days(self, market: str, account: str) -> list[dict[str, Any]]:
+        with self._read() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_corpus_days
+                    WHERE market = ? AND account = ?
+                    ORDER BY trading_date
+                    """,
+                    (market, account),
+                ).fetchall()
+            ]
+
+    def record_corpus_day(
+        self,
+        *,
+        market: str,
+        account: str,
+        trading_date: str,
+        expectation_ref: str,
+        expectation_content_sha256: str,
+        expectation_file_sha256: str,
+        market_calendar_version: str,
+        market_calendar_sha256: str,
+        schedule_config_sha256: str,
+        expected_point_count: int,
+        first_target_at_utc: str | None,
+        sealed_at_utc: str,
+        sealed_before_first_target: bool,
+        completeness_reason: str | None,
+        conflict_observed: bool = False,
+    ) -> dict[str, Any]:
+        values = {
+            "market": market,
+            "account": account,
+            "trading_date": trading_date,
+            "expectation_ref": expectation_ref,
+            "expectation_content_sha256": expectation_content_sha256,
+            "expectation_file_sha256": expectation_file_sha256,
+            "market_calendar_version": market_calendar_version,
+            "market_calendar_sha256": market_calendar_sha256,
+            "schedule_config_sha256": schedule_config_sha256,
+            "expected_point_count": expected_point_count,
+            "first_target_at_utc": first_target_at_utc,
+            "sealed_at_utc": sealed_at_utc,
+            "sealed_before_first_target": int(sealed_before_first_target),
+            "completeness_reason": (
+                "research_corpus_conflict"
+                if conflict_observed
+                else completeness_reason
+            ),
+        }
+        with self._write() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM strategy_lab_corpus_days
+                WHERE market = ? AND account = ? AND trading_date = ?
+                """,
+                (market, account, trading_date),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO strategy_lab_corpus_days(
+                        market, account, trading_date,
+                        expectation_ref, expectation_content_sha256,
+                        expectation_file_sha256, market_calendar_version,
+                        market_calendar_sha256, schedule_config_sha256,
+                        expected_point_count, first_target_at_utc, sealed_at_utc,
+                        sealed_before_first_target, completeness_reason,
+                        conflict_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values.values(), "conflict" if conflict_observed else "clean"),
+                )
+                status = "conflict" if conflict_observed else "inserted"
+            else:
+                exact = all(existing[key] == value for key, value in values.items())
+                if conflict_observed or not exact or existing["conflict_status"] == "conflict":
+                    connection.execute(
+                        """
+                        UPDATE strategy_lab_corpus_days
+                        SET conflict_status = 'conflict'
+                        WHERE market = ? AND account = ? AND trading_date = ?
+                        """,
+                        (market, account, trading_date),
+                    )
+                    status = "conflict"
+                else:
+                    status = "idempotent"
+            row = connection.execute(
+                """
+                SELECT * FROM strategy_lab_corpus_days
+                WHERE market = ? AND account = ? AND trading_date = ?
+                """,
+                (market, account, trading_date),
+            ).fetchone()
+            return {"status": status, "row": dict(row or {})}
+
+    def corpus_point(
+        self, market: str, account: str, recommendation_point_id: str
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_corpus_points
+                    WHERE market = ? AND account = ? AND recommendation_point_id = ?
+                    """,
+                    (market, account, recommendation_point_id),
+                ).fetchone()
+            )
+
+    def corpus_points(
+        self,
+        market: str,
+        account: str,
+        *,
+        trading_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT * FROM strategy_lab_corpus_points "
+            "WHERE market = ? AND account = ?"
+        )
+        params: tuple[object, ...] = (market, account)
+        if trading_date is not None:
+            query += " AND trading_date = ?"
+            params += (trading_date,)
+        query += " ORDER BY trading_date, recommendation_point_id"
+        with self._read() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(query, params).fetchall()
+            ]
+
+    def record_corpus_point(
+        self,
+        *,
+        market: str,
+        account: str,
+        recommendation_point_id: str,
+        trading_date: str,
+        source_run_id: str,
+        source_point_ref: str,
+        source_point_content_sha256: str,
+        opening_snapshot_ref: str,
+        opening_snapshot_sha256: str,
+        ranking_projection_schema_version: str | None,
+        projection_ref: str | None,
+        projection_content_sha256: str | None,
+        projection_file_sha256: str | None,
+        captured_at_utc: str,
+        capture_status: str,
+        reason_code: str | None,
+        conflict_observed: bool = False,
+    ) -> dict[str, Any]:
+        if conflict_observed:
+            capture_status = "not_evaluable"
+            reason_code = "research_corpus_conflict"
+            ranking_projection_schema_version = None
+            projection_ref = None
+            projection_content_sha256 = None
+            projection_file_sha256 = None
+        values = {
+            "market": market,
+            "account": account,
+            "recommendation_point_id": recommendation_point_id,
+            "trading_date": trading_date,
+            "source_run_id": source_run_id,
+            "source_point_ref": source_point_ref,
+            "source_point_content_sha256": source_point_content_sha256,
+            "opening_snapshot_ref": opening_snapshot_ref,
+            "opening_snapshot_sha256": opening_snapshot_sha256,
+            "ranking_projection_schema_version": ranking_projection_schema_version,
+            "projection_ref": projection_ref,
+            "projection_content_sha256": projection_content_sha256,
+            "projection_file_sha256": projection_file_sha256,
+            "captured_at_utc": captured_at_utc,
+            "capture_status": capture_status,
+            "reason_code": reason_code,
+        }
+        with self._write() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM strategy_lab_corpus_points
+                WHERE market = ? AND account = ? AND recommendation_point_id = ?
+                """,
+                (market, account, recommendation_point_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO strategy_lab_corpus_points(
+                        market, account, recommendation_point_id, trading_date,
+                        source_run_id, source_point_ref,
+                        source_point_content_sha256, opening_snapshot_ref,
+                        opening_snapshot_sha256,
+                        ranking_projection_schema_version, projection_ref,
+                        projection_content_sha256, projection_file_sha256,
+                        captured_at_utc, capture_status, reason_code,
+                        conflict_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values.values(), "conflict" if conflict_observed else "clean"),
+                )
+                status = "conflict" if conflict_observed else "inserted"
+            else:
+                exact = all(
+                    existing[key] == value
+                    for key, value in values.items()
+                    if key != "captured_at_utc"
+                )
+                if conflict_observed or not exact or existing["conflict_status"] == "conflict":
+                    connection.execute(
+                        """
+                        UPDATE strategy_lab_corpus_points
+                        SET conflict_status = 'conflict'
+                        WHERE market = ? AND account = ? AND recommendation_point_id = ?
+                        """,
+                        (market, account, recommendation_point_id),
+                    )
+                    status = "conflict"
+                else:
+                    status = "idempotent"
+            row = connection.execute(
+                """
+                SELECT * FROM strategy_lab_corpus_points
+                WHERE market = ? AND account = ? AND recommendation_point_id = ?
+                """,
+                (market, account, recommendation_point_id),
+            ).fetchone()
+            return {"status": status, "row": dict(row or {})}
 
     def set_feature(
         self,
@@ -1696,7 +1979,7 @@ class ExperimentStore:
         connection = connect_private_sqlite(self.path, isolation_level=None)
         connection.row_factory = sqlite3.Row
         self._configure(connection)
-        self._validate_v1(connection)
+        self._validate_v2(connection)
         return connection
 
     def _readonly_connection(self) -> sqlite3.Connection:
@@ -1732,18 +2015,46 @@ class ExperimentStore:
     def _validate_v1(
         self, connection: sqlite3.Connection, *, deep: bool = False
     ) -> None:
+        self._validate_schema(
+            connection,
+            expected_version=1,
+            required_tables=_V1_REQUIRED_TABLES,
+            expected_foreign_keys=_V1_EXPECTED_FOREIGN_KEYS,
+            deep=deep,
+        )
+
+    def _validate_v2(
+        self, connection: sqlite3.Connection, *, deep: bool = False
+    ) -> None:
+        self._validate_schema(
+            connection,
+            expected_version=SCHEMA_VERSION,
+            required_tables=_REQUIRED_TABLES,
+            expected_foreign_keys=_EXPECTED_FOREIGN_KEYS,
+            deep=deep,
+        )
+
+    def _validate_schema(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        expected_version: int,
+        required_tables: set[str],
+        expected_foreign_keys: Mapping[str, set[tuple[str, str, str]]],
+        deep: bool,
+    ) -> None:
         tables = self._tables(connection)
-        if not _REQUIRED_TABLES.issubset(tables):
+        if not required_tables.issubset(tables):
             raise ExperimentStoreError("schema_unsupported", "required table is missing")
         metadata = connection.execute(
             "SELECT schema_version FROM strategy_lab_schema WHERE component = ?",
             (SCHEMA_COMPONENT,),
         ).fetchone()
-        if metadata is None or int(metadata[0]) != SCHEMA_VERSION:
+        if metadata is None or int(metadata[0]) != expected_version:
             raise ExperimentStoreError("schema_unsupported", "schema version is unsupported")
         if not _REQUIRED_INDEXES.issubset(self._indexes(connection)):
             raise ExperimentStoreError("schema_unsupported", "required index is missing")
-        for table, expected in _EXPECTED_FOREIGN_KEYS.items():
+        for table, expected in expected_foreign_keys.items():
             observed = {
                 (str(row[3]), str(row[2]), str(row[4]))
                 for row in connection.execute(f"PRAGMA foreign_key_list({table})").fetchall()
@@ -1902,6 +2213,81 @@ class ExperimentStore:
 
             CREATE UNIQUE INDEX strategy_lab_event_idempotency_unique
             ON strategy_lab_events(command_scope, idempotency_key);
+            """
+        for statement in ddl.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+
+    @staticmethod
+    def _create_v2(connection: sqlite3.Connection) -> None:
+        ddl = """
+            CREATE TABLE strategy_lab_corpus_days(
+                market TEXT NOT NULL CHECK(market = 'HK'),
+                account TEXT NOT NULL CHECK(account = lower(account)),
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                expectation_ref TEXT NOT NULL,
+                expectation_content_sha256 TEXT NOT NULL CHECK(length(expectation_content_sha256) = 64),
+                expectation_file_sha256 TEXT NOT NULL CHECK(length(expectation_file_sha256) = 64),
+                market_calendar_version TEXT NOT NULL,
+                market_calendar_sha256 TEXT NOT NULL CHECK(length(market_calendar_sha256) = 64),
+                schedule_config_sha256 TEXT NOT NULL CHECK(length(schedule_config_sha256) = 64),
+                expected_point_count INTEGER NOT NULL CHECK(expected_point_count >= 0),
+                first_target_at_utc TEXT,
+                sealed_at_utc TEXT NOT NULL,
+                sealed_before_first_target INTEGER NOT NULL
+                    CHECK(sealed_before_first_target IN (0, 1)),
+                completeness_reason TEXT CHECK(completeness_reason IS NULL OR completeness_reason IN (
+                    'corpus_day_expectation_late',
+                    'corpus_day_expectation_empty',
+                    'research_corpus_conflict'
+                )),
+                conflict_status TEXT NOT NULL CHECK(conflict_status IN ('clean','conflict')),
+                PRIMARY KEY(market, account, trading_date)
+            );
+
+            CREATE TABLE strategy_lab_corpus_points(
+                market TEXT NOT NULL CHECK(market = 'HK'),
+                account TEXT NOT NULL CHECK(account = lower(account)),
+                recommendation_point_id TEXT NOT NULL CHECK(length(recommendation_point_id) = 64),
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                source_run_id TEXT NOT NULL,
+                source_point_ref TEXT NOT NULL,
+                source_point_content_sha256 TEXT NOT NULL CHECK(length(source_point_content_sha256) = 64),
+                opening_snapshot_ref TEXT NOT NULL,
+                opening_snapshot_sha256 TEXT NOT NULL CHECK(length(opening_snapshot_sha256) = 64),
+                ranking_projection_schema_version TEXT,
+                projection_ref TEXT,
+                projection_content_sha256 TEXT,
+                projection_file_sha256 TEXT,
+                captured_at_utc TEXT NOT NULL,
+                capture_status TEXT NOT NULL CHECK(capture_status IN ('captured','not_evaluable')),
+                reason_code TEXT,
+                conflict_status TEXT NOT NULL CHECK(conflict_status IN ('clean','conflict')),
+                PRIMARY KEY(market, account, recommendation_point_id),
+                FOREIGN KEY(market, account, trading_date)
+                    REFERENCES strategy_lab_corpus_days(market, account, trading_date),
+                CHECK(
+                    (
+                        capture_status = 'captured'
+                        AND reason_code IS NULL
+                        AND ranking_projection_schema_version IS NOT NULL
+                        AND projection_ref IS NOT NULL
+                        AND projection_content_sha256 IS NOT NULL
+                        AND length(projection_content_sha256) = 64
+                        AND projection_file_sha256 IS NOT NULL
+                        AND length(projection_file_sha256) = 64
+                    )
+                    OR
+                    (
+                        capture_status = 'not_evaluable'
+                        AND reason_code IS NOT NULL
+                        AND ranking_projection_schema_version IS NULL
+                        AND projection_ref IS NULL
+                        AND projection_content_sha256 IS NULL
+                        AND projection_file_sha256 IS NULL
+                    )
+                )
+            );
             """
         for statement in ddl.split(";"):
             if statement.strip():
