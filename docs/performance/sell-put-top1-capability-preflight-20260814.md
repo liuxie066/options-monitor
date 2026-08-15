@@ -14,7 +14,7 @@
 
 **W0R runtime_no_go；HK terminal fee source contract locked**
 
-HK 终态费用公式与 domain 统一入口已为 green：`fee_calc.py` 现在是 HK 股票交收七项公式和 assignment/exercise/expired-worthless 终态费用的唯一算术来源，并区分 assignment 零行使费、exercise HK$2/张和 expired-worthless 零费用。该源码合同可作为 W1B 纯经济计算的前置，但 `lx` 当前佣金减免/平台收费套餐仍没有可审计 receipt；两个现有 consumer 不信任普通 event/position mapping 中的 `account_fee_plan`，因此正确 fail closed，不产出客户净费用。history K-line quota gateway/rate-limit 源码合同已为 green，但 live quota receipt 仍为 unknown；OpenD live receipt、observation、calendar/K-line 和 exact-expiration terms capacity 也仍为 unknown，所以 provider-dependent research/validation 与真实试点继续禁止。40 日语料不足单独记为 `research_corpus_warming`。
+HK 终态费用公式与 domain 统一入口已为 green：`fee_calc.py` 现在是 HK 股票交收七项公式和 assignment/exercise/expired-worthless 终态费用的唯一算术来源，并区分 assignment 零行使费、exercise HK$2/张和 expired-worthless 零费用。该源码合同可作为 W1B 纯经济计算的前置，但 `lx` 当前佣金减免/平台收费套餐仍没有可审计 receipt；两个现有 consumer 不信任普通 event/position mapping 中的 `account_fee_plan`，因此正确 fail closed，不产出客户净费用。history K-Line quota 和未复权 exact-expiration close 的 project source contract 已为 green，但 live quota/close receipt 仍为 unknown；OpenD live observation、calendar 和 exact-expiration terms capacity 也仍为 unknown，所以 provider-dependent research/validation 与真实试点继续禁止。40 日语料不足单独记为 `research_corpus_warming`。
 
 ## 实际执行命令
 
@@ -173,7 +173,7 @@ git status --short --branch
 | HK assignment/exercise/expiry 净费用 | **provider/domain green，account evidence red** | 官方公式已在 `calc_futu_hk_terminal_fee()` 版本化实现，HK stock 七项算术仅保留在 `fee_calc.py` 一处；实际 broker fee provenance 仍优先。缺 `lx` 当前 `commission_free/platform_fee/fee_plan_ref` receipt 时返回 `basis=missing, amount=None`，只保留明确标记的标准固定式审计估算，不代替客户净费用 |
 | OpenD observation | **unknown** | raw snapshot/batch path 存在；live provider 不可达，旧 US/NVDA 样本不能证明 HK 最大 cardinality 300s 上界 |
 | 交易日历 | **unknown** | `get_trading_days_with_receipt()` 与单测存在；无本轮 live receipt |
-| 未复权 exact-expiration K_DAY | **red / unknown** | gateway 能规范化 `K_DAY`/`NONE`，但当前生产 consumer 使用 QFQ；无 exact-expiration receipt/validator，且 live provider 无 receipt |
+| 未复权 exact-expiration K_DAY | **SDK/project source green；live unknown** | `FutuGateway.get_exact_expiration_close()` 固定同日起止、`K_DAY/NONE` 和 `time_key/close`，严格校验 DataFrame shape、分页、唯一 code/date 及正有限 close；当前 QFQ consumer 未改变，且无 live receipt |
 | history K-line quota | **SDK/project source green；live unknown** | gateway 严格暴露 `get_history_kl_quota(get_detail=True)` 的紧凑事实，`OpenDFetchLimits` 有独立 `history_kline` endpoint；尚无 live receipt、额度充分性或生产共存证明 |
 | expiry terms chain capacity | **unknown** | generic `get_option_chain()` 存在，HK config 为 9 calls/30s、max wait 600s；无 exact-expiration terms receipt、真实 max fixture 或 duration upper bound |
 | advance cadence/timeout | **unknown** | 缺真实 observation/terms max 与 duration，不能闭合 readiness 公式 |
@@ -426,7 +426,7 @@ Capability 状态不变：OpenD live receipt、quota、交易日历、`K_DAY/NON
 | project gateway | green | `FutuGateway.get_history_kl_quota()` 强制 `get_detail=True`，严格拒绝错误 ret、畸形/负数/布尔额度、缺失或重复标的、明细数量冲突及非法时间；只返回 `used_quota`、`remain_quota` 和排序后的 `code/request_time`。 |
 | history endpoint config | green | `runtime.opend_rate_limits.history_kline` 由既有 config owner 解析，默认遵循官方首页请求上限 `60 calls / 30s`，`max_wait_sec=30s`；没有进入现有 candidate fetch/discovery kwargs。 |
 | live quota receipt | **unknown** | 本 work unit 没有 provider 调用；当前账户剩余额度、七日明细与响应耗时仍未证明。 |
-| W0R overall | **runtime_no_go** | 账户 fee-plan、calendar、`K_DAY/NONE` exact-expiration close、observation/terms capacity 与 live quota 仍未闭合。 |
+| W0R overall | **runtime_no_go** | 账户 fee-plan、calendar、live exact-expiration close、observation/terms capacity 与 live quota 仍未闭合。 |
 
 ### 本地验证
 
@@ -437,3 +437,28 @@ Capability 状态不变：OpenD live receipt、quota、交易日历、`K_DAY/NON
 - `git diff --check`：通过。
 
 该实施只把 **project source capability** 从 red 变为 green，不把 SDK 合同当成 live account receipt，也不授权 W5 provider runner 或真实实验。下一步仍需独立 W0R work unit 和明确的 live probe 授权。
+
+## W0R exact-expiration close 源码边界实施
+
+- 完成时间：`2026-08-15T11:26:47Z`（UTC）。
+- 范围：只补项目内只读 gateway 的精确到期日未复权收盘价边界；未启动或调用 OpenD，未查询账户，未写生产配置、limiter state、SDK log 或 runtime artifact。
+
+### 实施后 capability
+
+| 子项 | 状态 | 证据与决定 |
+|---|---|---|
+| SDK request contract | green | 已安装 SDK 支持同日起止、`K_DAY`、`AuType.NONE`、选择 `time_key/close`、`max_count` 及 continuation key。 |
+| project gateway | green | `FutuGateway.get_exact_expiration_close()` 只接受带 `code/time_key/close` 列的 SDK DataFrame shape；严格拒绝错误 ret、分页、畸形/多行数据、code/date 冲突及非正或非有限 close，只返回紧凑的 `code/expiration/close`，合法空表返回 `None`。 |
+| generic QFQ path | unchanged | 现有 `request_history_kline()` 与 `_fetch_qfq_history_rows()` 未修改，本 work unit 没有改变生产波动率采集语义。 |
+| live close receipt | **unknown** | 本 work unit 没有 provider 调用；真实 `time_key`、到期日可用性、响应耗时和容量仍未证明。 |
+| W0R overall | **runtime_no_go** | 账户 fee-plan、calendar、live exact-expiration close、observation/terms capacity 与 live quota 仍未闭合。 |
+
+### 本地验证
+
+- strict fake-provider focused tests：`25 passed`；
+- QFQ history 与 Top1 research 邻接回归：`26 passed`；
+- Ruff：通过；
+- dependency graph：`production_modules=590, cycles=0`；
+- `git diff --check`：通过。
+
+该实施只把 exact-expiration close 的 **project source capability** 从 red 变为 green；`None` 仅表示 provider 成功返回合法空表，未来 W5 runner 仍负责调用时机、缺失原因、quota/rate-limit、重试、回执绑定/存储和发布。它不把源码合同当成 live evidence，也不授权真实研究或试点。

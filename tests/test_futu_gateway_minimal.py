@@ -415,6 +415,225 @@ def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatc
     assert gateway.backend.quote.kwargs["fields"] == ["date-time", "close"]
 
 
+def test_gateway_exact_expiration_close_requests_and_returns_bound_fact(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    fake_futu = SimpleNamespace(
+        KLType=SimpleNamespace(K_DAY="k-day"),
+        AuType=SimpleNamespace(NONE="none"),
+        KL_FIELD=SimpleNamespace(DATE_TIME="date-time", CLOSE="close"),
+    )
+    monkeypatch.setitem(sys.modules, "futu", fake_futu)
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.calls = []
+            self.result = (
+                0,
+                pd.DataFrame(
+                    [
+                        {
+                            "code": "us.nvda",
+                            "name": "NVIDIA",
+                            "time_key": "2026-08-21 00:00:00",
+                            "close": 900.25,
+                        }
+                    ]
+                ),
+                None,
+            )
+
+        def request_history_kline(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return self.result
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+
+    assert gateway.get_exact_expiration_close(
+        code=" us.nvda ",
+        expiration="2026-08-21",
+    ) == {
+        "code": "US.NVDA",
+        "expiration": "2026-08-21",
+        "close": 900.25,
+    }
+    assert gateway.backend.quote.calls == [
+        {
+            "code": "US.NVDA",
+            "start": "2026-08-21",
+            "end": "2026-08-21",
+            "ktype": "k-day",
+            "autype": "none",
+            "fields": ["date-time", "close"],
+            "max_count": 2,
+            "page_req_key": None,
+        }
+    ]
+
+    gateway.backend.quote.result = (
+        0,
+        pd.DataFrame(columns=["code", "name", "time_key", "close"]),
+        None,
+    )
+    assert gateway.get_exact_expiration_close(
+        code="US.NVDA",
+        expiration="2026-08-21",
+    ) is None
+
+
+def test_gateway_exact_expiration_close_rejects_input_before_quote_access() -> None:
+    import pytest
+
+    from src.infrastructure.futu_gateway import FutuGatewayError, build_futu_gateway
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.quote_accesses = 0
+
+        def _ensure_quote_client(self):
+            self.quote_accesses += 1
+            raise AssertionError("quote client must not be acquired")
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    invalid_inputs = [
+        {"code": "", "expiration": "2026-08-21"},
+        {"code": None, "expiration": "2026-08-21"},
+        {"code": "US.NVDA", "expiration": None},
+        {"code": "US.NVDA", "expiration": " 2026-08-21"},
+        {"code": "US.NVDA", "expiration": "2026-8-21"},
+        {"code": "US.NVDA", "expiration": "2026-02-30"},
+    ]
+
+    for kwargs in invalid_inputs:
+        with pytest.raises(
+            FutuGatewayError,
+            match="get_exact_expiration_close failed",
+        ):
+            gateway.get_exact_expiration_close(**kwargs)
+
+    assert gateway.backend.quote_accesses == 0
+
+
+def test_gateway_exact_expiration_close_rejects_invalid_provider_facts() -> None:
+    import pandas as pd
+    import pytest
+
+    from src.infrastructure.futu_gateway import (
+        FutuGatewayError,
+        FutuGatewayRateLimitError,
+        build_futu_gateway,
+    )
+
+    valid_row = {
+        "code": "US.NVDA",
+        "time_key": "2026-08-21",
+        "close": 900.25,
+    }
+
+    class FakeFrame:
+        columns = ["code", "time_key", "close"]
+
+        def __init__(self, records) -> None:
+            self.records = records
+
+        def to_dict(self, *, orient: str):
+            assert orient == "records"
+            return self.records
+
+    class FakeQuote:
+        result = None
+
+        def request_history_kline(self, **_kwargs):
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    valid_frame = pd.DataFrame([valid_row])
+    invalid_results = [
+        None,
+        (0, valid_frame),
+        (False, valid_frame, None),
+        (0.0, valid_frame, None),
+        (1, "provider denied history request", None),
+        (0, valid_frame, b"next-page"),
+        (0, None, None),
+        (0, [], None),
+        (0, pd.DataFrame(columns=["code", "time_key"]), None),
+        (0, FakeFrame({}), None),
+        (0, FakeFrame(["not-an-object"]), None),
+        (0, pd.DataFrame([valid_row, valid_row]), None),
+        (0, pd.DataFrame([{**valid_row, "code": "US.TSLA"}]), None),
+        (
+            0,
+            pd.DataFrame([{**valid_row, "time_key": "2026-08-20"}]),
+            None,
+        ),
+        (
+            0,
+            pd.DataFrame([{**valid_row, "time_key": "2026-08-21T00:00:00"}]),
+            None,
+        ),
+        (0, pd.DataFrame([{**valid_row, "close": "900.25"}]), None),
+        (0, pd.DataFrame([{**valid_row, "close": True}]), None),
+        (0, pd.DataFrame([{**valid_row, "close": 0.0}]), None),
+        (0, pd.DataFrame([{**valid_row, "close": -1.0}]), None),
+        (0, pd.DataFrame([{**valid_row, "close": float("nan")}]), None),
+        (0, pd.DataFrame([{**valid_row, "close": float("inf")}]), None),
+    ]
+
+    for result in invalid_results:
+        gateway.backend.quote.result = result
+        with pytest.raises(
+            FutuGatewayError,
+            match="get_exact_expiration_close failed",
+        ):
+            gateway.get_exact_expiration_close(
+                code="US.NVDA",
+                expiration="2026-08-21",
+            )
+
+    gateway.backend.quote.result = RuntimeError("rate limit")
+    with pytest.raises(FutuGatewayRateLimitError):
+        gateway.get_exact_expiration_close(
+            code="US.NVDA",
+            expiration="2026-08-21",
+        )
+
+
 def test_gateway_history_kline_quota_returns_strict_compact_facts() -> None:
     from src.infrastructure.futu_gateway import build_futu_gateway
 
