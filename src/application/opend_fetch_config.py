@@ -15,6 +15,9 @@ _SNAPSHOT_DEFAULT_MAX_WAIT_SEC = 30.0
 _EXPIRATION_DEFAULT_MAX_CALLS = 60
 _EXPIRATION_DEFAULT_WINDOW_SEC = 30.0
 _EXPIRATION_DEFAULT_MAX_WAIT_SEC = 30.0
+_HISTORY_KLINE_DEFAULT_MAX_CALLS = 60
+_HISTORY_KLINE_DEFAULT_WINDOW_SEC = 30.0
+_HISTORY_KLINE_DEFAULT_MAX_WAIT_SEC = 30.0
 _BATCH_DEFAULT_MARKET_SNAPSHOT = 200
 _FALLBACK_MAX_CODES_DEFAULT = 100
 _FALLBACK_BATCH_SIZE_DEFAULT = 20
@@ -36,6 +39,7 @@ OPEND_RATE_LIMIT_ENDPOINT_ALIASES = {
     "option_chain": ("option_chain", "chain", "get_option_chain"),
     "market_snapshot": ("market_snapshot", "snapshot", "get_market_snapshot"),
     "option_expiration": ("option_expiration", "expiration", "get_option_expiration_date"),
+    "history_kline": ("history_kline",),
 }
 OPEND_RATE_LIMIT_ENDPOINT_KEYS = frozenset(
     key
@@ -85,6 +89,7 @@ class OpenDFetchLimits:
     option_chain: OpenDEndpointRateLimit
     market_snapshot: OpenDEndpointRateLimit
     option_expiration: OpenDEndpointRateLimit
+    history_kline: OpenDEndpointRateLimit
 
     @classmethod
     def from_flat_kwargs(
@@ -119,6 +124,12 @@ class OpenDFetchLimits:
                 max_wait_sec=expiration_max_wait_sec,
                 defaults=_EXPIRATION_DEFAULTS,
             ),
+            history_kline=OpenDEndpointRateLimit.from_values(
+                window_sec=None,
+                max_calls=None,
+                max_wait_sec=None,
+                defaults=_HISTORY_KLINE_DEFAULTS,
+            ),
         )
 
     def as_config(self) -> dict[str, dict[str, float | int]]:
@@ -126,6 +137,7 @@ class OpenDFetchLimits:
             "option_chain": self.option_chain.as_config(),
             "market_snapshot": self.market_snapshot.as_config(),
             "option_expiration": self.option_expiration.as_config(),
+            "history_kline": self.history_kline.as_config(),
         }
 
     def fetch_kwargs(self) -> dict[str, float | int]:
@@ -191,6 +203,11 @@ _EXPIRATION_DEFAULTS = {
     "window_sec": _EXPIRATION_DEFAULT_WINDOW_SEC,
     "max_calls": _EXPIRATION_DEFAULT_MAX_CALLS,
     "max_wait_sec": _EXPIRATION_DEFAULT_MAX_WAIT_SEC,
+}
+_HISTORY_KLINE_DEFAULTS = {
+    "window_sec": _HISTORY_KLINE_DEFAULT_WINDOW_SEC,
+    "max_calls": _HISTORY_KLINE_DEFAULT_MAX_CALLS,
+    "max_wait_sec": _HISTORY_KLINE_DEFAULT_MAX_WAIT_SEC,
 }
 
 
@@ -265,6 +282,11 @@ def resolve_opend_fetch_limits(config: dict[str, Any] | None) -> OpenDFetchLimit
             config,
             endpoint="option_expiration",
             defaults=_EXPIRATION_DEFAULTS,
+        ),
+        history_kline=_endpoint_rate_limit(
+            config,
+            endpoint="history_kline",
+            defaults=_HISTORY_KLINE_DEFAULTS,
         ),
     )
 
