@@ -909,12 +909,24 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
     ],
 )
 def test_symbol_monitoring_reports_combo_capture_status(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     combo_summary: dict,
     expected_status: str,
     expected_reason: str | None,
 ) -> None:
     from src.application import symbol_monitoring as mod
+
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
 
     captured_statuses: list[dict] = []
     captured_required_data: dict = {}
