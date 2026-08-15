@@ -544,7 +544,7 @@ def keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[li
         ]
     except Exception:
         try:
-            for _, row in snap.iterrows():
+            for row in snap.to_dict("records"):
                 records.append({column: row.get(column) for column in keep})
         except Exception:
             return [], keep

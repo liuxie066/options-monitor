@@ -662,7 +662,7 @@ def _load_yield_enhancement_call_legs_by_expiration(
         "policy_call_min_volume": liquidity.min_volume,
         "policy_call_max_spread_ratio": liquidity.max_spread_ratio,
     }
-    for _, raw in raw_calls.iterrows():
+    for raw in raw_calls.to_dict("records"):
         leg = _call_leg_from_required_data(raw)
         if leg is None:
             reject_counts["call_leg_invalid"] += 1
@@ -778,7 +778,7 @@ def _build_yield_enhancement_pair_rows(
         "policy_min_net_credit_annualized": _safe_float(cfg.get("min_net_credit_annualized")),
         "policy_max_combo_spread_ratio": _safe_float(cfg.get("max_combo_spread_ratio")),
     }
-    for _, raw in df.iterrows():
+    for raw in df.to_dict("records"):
         put_leg = _put_leg_from_sell_put_row(raw)
         if put_leg is None:
             reject_counts["put_leg_invalid"] += 1
