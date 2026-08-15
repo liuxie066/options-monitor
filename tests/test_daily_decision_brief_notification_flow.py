@@ -164,6 +164,10 @@ def _request(
     scheduler_by_account = {
         account: {
             "in_run_window": True,
+            "should_run_scan": not delivery_only,
+            "now_utc": (
+                "2026-07-21T14:00:30Z" if fixed else "2026-07-21T14:30:30Z"
+            ),
             "now_market": "2026-07-21T10:10:00-04:00" if delivery_only else target,
             "scheduled_scan_target_market": None if delivery_only else target,
             "scheduled_target_market": None if delivery_only or not fixed else target,
@@ -212,10 +216,18 @@ def _patch_assembler(monkeypatch, *, blocked: bool = False, candidate: bool = Tr
     )
 
 
-def _patch_sender(monkeypatch, *, result: dict | None = None, calls: list[dict] | None = None) -> None:
+def _patch_sender(
+    monkeypatch,
+    *,
+    result: dict | None = None,
+    calls: list[dict] | None = None,
+    order: list[str] | None = None,
+) -> None:
     import src.application.tick_notification_flow as mod
 
     def send(**kwargs):
+        if order is not None:
+            order.append("provider")
         if calls is not None:
             calls.append(dict(kwargs))
         return result or {
@@ -724,11 +736,20 @@ def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, t
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
+    observer_calls: list[str] = []
+    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
+    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
+    monkeypatch.setattr(
+        mod,
+        "capture_scheduled_recommendation_point",
+        lambda *_args, **_kwargs: observer_calls.append("observer"),
+    )
     bundle = _request(tmp_path, run_id="commit-fail")
     bundle.request = replace(bundle.request, commit_scan_targets_fn=lambda _targets: (_ for _ in ()).throw(OSError("state write failed")))
     with pytest.raises(OSError, match="state write failed"):
         mod.run_tick_notification_flow(bundle.request)
     assert calls == []
+    assert observer_calls == []
     pending = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
@@ -752,6 +773,145 @@ def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, t
     assert confirmed["delivery_key"] == pending["delivery_key"]
     assert confirmed["message_sha256"] == pending["message_sha256"]
     assert confirmed["status"] == "confirmed"
+
+
+@pytest.mark.parametrize("observer_fails", (False, True))
+def test_recommendation_point_observer_runs_after_commit_before_provider_and_is_best_effort(
+    monkeypatch,
+    tmp_path: Path,
+    observer_fails: bool,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    order: list[str] = []
+    _patch_sender(monkeypatch, order=order)
+    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
+    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
+
+    def capture(*_args, **_kwargs):
+        order.append("observer")
+        if observer_fails:
+            raise mod.RecommendationPointError(
+                "official_point_unavailable",
+                "injected observer failure",
+            )
+        return "published", {"recommendation_point_id": "p" * 64}
+
+    monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
+    bundle = _request(tmp_path, run_id=f"observer-{observer_fails}")
+    bundle.request = replace(
+        bundle.request,
+        commit_scan_targets_fn=lambda _targets: order.append("commit"),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert order == ["commit", "observer", "provider"]
+    actions = [event["action"] for event in bundle.request.audit_helper.events]
+    assert (
+        "recommendation_point_gap"
+        if observer_fails
+        else "recommendation_point_captured"
+    ) in actions
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "disabled",
+        "manual",
+        "force",
+        "delivery_only",
+        "not_run",
+        "target_missing",
+        "target_mismatch",
+        "source_unavailable",
+    ),
+)
+def test_recommendation_point_observer_excludes_ineligible_paths(
+    monkeypatch,
+    tmp_path: Path,
+    case: str,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    bundle = _request(
+        tmp_path,
+        run_id=f"observer-excluded-{case}",
+        delivery_only=case == "delivery_only",
+        trigger_kind=case if case in {"manual", "force"} else "scheduled",
+    )
+    if case == "not_run":
+        bundle.request = replace(bundle.request, ran_pipeline_accounts=())
+    if case == "target_mismatch":
+        bundle.request = replace(
+            bundle.request,
+            scheduled_scan_targets_by_account={"lx": HALF_TARGET},
+        )
+    if case == "target_missing":
+        bundle.request = replace(
+            bundle.request,
+            scheduled_scan_targets_by_account={},
+        )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "strategy_lab_top1_available",
+        lambda: case != "disabled",
+    )
+    monkeypatch.setattr(
+        mod,
+        "source_commit_sha",
+        lambda _root: None if case == "source_unavailable" else "c" * 40,
+    )
+    monkeypatch.setattr(
+        mod,
+        "capture_scheduled_recommendation_point",
+        lambda *_args, **_kwargs: calls.append("capture"),
+    )
+
+    mod._observe_recommendation_points_best_effort(bundle.request)
+
+    assert calls == []
+
+
+def test_recommendation_point_observer_isolates_accounts(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    bundle = _request(
+        tmp_path,
+        run_id="observer-account-isolation",
+        accounts=("lx", "sy"),
+    )
+    bundle.request = replace(
+        bundle.request,
+        ran_pipeline_accounts=("lx", "lx", "sy"),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
+    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
+
+    def capture(_base, _run_id, account, _decision, **_kwargs):
+        calls.append(account)
+        if account == "lx":
+            raise mod.RecommendationPointError(
+                "official_point_unavailable",
+                "injected account failure",
+            )
+        return "published", {"recommendation_point_id": "p" * 64}
+
+    monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
+
+    mod._observe_recommendation_points_best_effort(bundle.request)
+
+    assert calls == ["lx", "sy"]
+    point_events = [
+        event
+        for event in bundle.request.audit_helper.events
+        if event["action"].startswith("recommendation_point_")
+    ]
+    assert [event["extra"]["account"] for event in point_events] == ["lx", "sy"]
+    assert [event["status"] for event in point_events] == ["degraded", "ok"]
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:
