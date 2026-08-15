@@ -9,8 +9,23 @@ RANKING_MODULE = ROOT / "src/application/strategy_lab/top1/ranking.py"
 CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
 ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
 STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
+RESEARCH_MODULE = ROOT / "src/application/strategy_lab/top1/research.py"
 RECOMMENDATION_POINT_MODULE = ROOT / "src/application/recommendation_point.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
+EXPERIMENT_STORE_MODULE = (
+    ROOT / "src/infrastructure/strategy_lab/experiment_store.py"
+)
+LIFECYCLE_MODULE = ROOT / "src/application/strategy_lab/top1/lifecycle.py"
+TERMINAL_PROJECTION_MODULE = (
+    ROOT / "src/application/strategy_lab/top1/terminal_projection.py"
+)
+CORPUS_MODULE = ROOT / "src/application/strategy_lab/top1/corpus.py"
+PRODUCTION_TICK_MODULES = (
+    ROOT / "src/application/multi_account_tick.py",
+    ROOT / "src/application/tick_account_execution.py",
+    ROOT / "src/application/tick_notification_flow.py",
+    RECOMMENDATION_POINT_MODULE,
+)
 
 
 def _imports(path: Path) -> set[str]:
@@ -78,6 +93,23 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "typing",
         "scipy.stats",
     }
+    assert _imports(RESEARCH_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "math",
+        "re",
+        "collections.abc",
+        "datetime",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "domain.domain.fee_calc",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.corpus",
+        "src.application.strategy_lab.top1.economics",
+        "src.application.strategy_lab.top1.ranking",
+        "src.application.strategy_lab.top1.statistics",
+    }
 
 
 def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
@@ -97,3 +129,79 @@ def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
         "src.application.strategy_lab.top1.ranking",
         "src.application.tick_run_workspace",
     }
+
+
+def test_top1_store_imports_only_stdlib_and_private_storage() -> None:
+    assert _imports(EXPERIMENT_STORE_MODULE) <= {
+        "__future__",
+        "contextlib",
+        "hashlib",
+        "json",
+        "pathlib",
+        "sqlite3",
+        "typing",
+        "urllib.parse",
+        "src.infrastructure.private_storage",
+    }
+
+
+def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> None:
+    assert _imports(LIFECYCLE_MODULE) <= {
+        "__future__",
+        "datetime",
+        "hashlib",
+        "json",
+        "pathlib",
+        "re",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "src.application.recommendation_point",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+    assert _imports(TERMINAL_PROJECTION_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "json",
+        "os",
+        "pathlib",
+        "stat",
+        "tempfile",
+        "typing",
+        "src.application.shadow_replay.common",
+        "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+
+    assert _imports(CORPUS_MODULE) <= {
+        "__future__",
+        "collections.abc",
+        "datetime",
+        "hashlib",
+        "json",
+        "pathlib",
+        "re",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "src.application.candidate_snapshot_contract",
+        "src.application.opening_candidate_snapshot",
+        "src.application.recommendation_point",
+        "src.application.scan_scheduler",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.lifecycle",
+        "src.application.strategy_lab.top1.ranking",
+        "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+
+
+def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
+    for path in PRODUCTION_TICK_MODULES:
+        imports = _imports(path)
+        assert "src.application.strategy_lab.top1.lifecycle" not in imports
+        assert "src.application.strategy_lab.top1.corpus" not in imports
+        assert "src.application.strategy_lab.top1.research" not in imports
+        assert "src.infrastructure.strategy_lab.experiment_store" not in imports
