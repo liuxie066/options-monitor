@@ -875,6 +875,16 @@ class FutuGateway:
             self._raise_mapped(exc, action="request_history_kline")
         raise AssertionError("unreachable")
 
+    def get_history_kl_quota(self) -> dict[str, Any]:
+        quote = self._quote_client()
+        try:
+            return _normalize_history_kline_quota_response(
+                quote.get_history_kl_quota(get_detail=True)
+            )
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_history_kl_quota")
+        raise AssertionError("unreachable")
+
     def get_earnings_calendar(
         self,
         *,
@@ -931,6 +941,77 @@ def _normalize_history_kline_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     elif fields in (None, "", ()):
         params.pop("fields", None)
     return {key: value for key, value in params.items() if value is not None}
+
+
+def _normalize_history_kline_quota_response(result: Any) -> dict[str, Any]:
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise ValueError("history K-line quota result must be a (ret, payload) tuple")
+    ret, payload = result
+    if isinstance(ret, bool) or not isinstance(ret, Integral):
+        raise ValueError("history K-line quota ret must be an integer")
+    if int(ret) != 0:
+        raise RuntimeError(payload)
+    if not isinstance(payload, (list, tuple)) or len(payload) != 3:
+        raise ValueError("history K-line quota payload must contain used, remaining, and details")
+
+    used_quota = _non_negative_integral(payload[0], "used_quota")
+    remain_quota = _non_negative_integral(payload[1], "remain_quota")
+    raw_details = payload[2]
+    if not isinstance(raw_details, (list, tuple)):
+        raise ValueError("history K-line quota detail_list must be a list")
+
+    details: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for raw_detail in raw_details:
+        if not isinstance(raw_detail, dict):
+            raise ValueError("history K-line quota detail must be an object")
+        code = raw_detail.get("code")
+        request_time = raw_detail.get("request_time")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("history K-line quota detail code must be non-empty")
+        normalized_code = code.strip().upper()
+        if normalized_code in seen_codes:
+            raise ValueError("history K-line quota detail codes must be unique")
+        if (
+            not isinstance(request_time, str)
+            or not request_time
+            or request_time != request_time.strip()
+        ):
+            raise ValueError("history K-line quota request_time must be canonical text")
+        try:
+            parsed_time = time.strptime(request_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError as exc:
+            raise ValueError(
+                "history K-line quota request_time must use YYYY-MM-DD HH:MM:SS"
+            ) from exc
+        if time.strftime("%Y-%m-%d %H:%M:%S", parsed_time) != request_time:
+            raise ValueError(
+                "history K-line quota request_time must use YYYY-MM-DD HH:MM:SS"
+            )
+        seen_codes.add(normalized_code)
+        details.append(
+            {
+                "code": normalized_code,
+                "request_time": request_time,
+            }
+        )
+
+    if len(details) != used_quota:
+        raise ValueError("history K-line quota detail count must equal used_quota")
+    return {
+        "used_quota": used_quota,
+        "remain_quota": remain_quota,
+        "detail_list": sorted(
+            details,
+            key=lambda item: (item["code"], item["request_time"]),
+        ),
+    }
+
+
+def _non_negative_integral(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0:
+        raise ValueError(f"history K-line quota {label} must be a non-negative integer")
+    return int(value)
 
 
 def _futu_enum_value(namespace: str, value: Any) -> Any:
