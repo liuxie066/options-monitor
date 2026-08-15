@@ -9,6 +9,7 @@ RANKING_MODULE = ROOT / "src/application/strategy_lab/top1/ranking.py"
 CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
 ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
 STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
+RECOMMENDATION_POINT_MODULE = ROOT / "src/application/recommendation_point.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
 
 
@@ -76,4 +77,23 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "datetime",
         "typing",
         "scipy.stats",
+    }
+
+
+def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
+    assert _imports(RECOMMENDATION_POINT_MODULE) <= {
+        "__future__",
+        "collections.abc",
+        "hashlib",
+        "json",
+        "os",
+        "pathlib",
+        "re",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "src.application.candidate_snapshot_contract",
+        "src.application.candidate_snapshot_manifest",
+        "src.application.opening_candidate_snapshot",
+        "src.application.strategy_lab.top1.ranking",
+        "src.application.tick_run_workspace",
     }
