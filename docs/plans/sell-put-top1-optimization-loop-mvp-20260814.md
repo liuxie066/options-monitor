@@ -178,7 +178,7 @@ draft -> research -> validation -> concluded
 
 - `topic_id`：跨期延续的研究主题；
 - `experiment_id`：本期唯一 ID；
-- `market` 和单一小写 `account`；
+- `market` 固定使用生产端 canonical 大写 `HK`，并绑定单一小写 `account`；
 - `baseline_version`：已采纳 Sell Put Top1 默认排序的逻辑版本，不是项目 Release 版本；
 - `initial_account_config_sha256`、`initial_strategy_policy_sha256` 与 `initial_source_commit_sha`：由实验创建事件只作初始 provenance 记录，不进入 research/validation spec hash；后续每个正式 point 记录自己的三个值，变化本身不触发 abort；
 - `accepted_set_contract_version`：首发固定为 `same_point_producer_accepted_set.v1`，表示每个 point 的 baseline 与当前阶段全部对比 arms 必须共用该 point 由生产端封存的 `U_rank`，variant 不得改变 accepted/rejected 集合；
@@ -242,7 +242,7 @@ validation 一旦开始，提前终止仍将整个已承诺 20 日 hidden window
   "schema_version": "sell_put_top1_experiment_spec.v1",
   "topic_id": "...",
   "experiment_id": "...",
-  "market": "hk",
+  "market": "HK",
   "account": "lx",
   "hypothesis": {
     "hypothesis_type": "sell_put_ranking",

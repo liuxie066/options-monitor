@@ -1,4 +1,5 @@
 pandas
 pyyaml
+scipy
 futu-api>=10.9.6908
 jsonschema>=4.23,<5
