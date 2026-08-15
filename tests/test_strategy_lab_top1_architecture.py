@@ -6,6 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RANKING_MODULE = ROOT / "src/application/strategy_lab/top1/ranking.py"
+CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
+ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
+STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
 
 
@@ -39,3 +42,38 @@ def test_candidate_engine_does_not_depend_on_strategy_lab() -> None:
         module.startswith("src.application.strategy_lab")
         for module in _imports(CANDIDATE_ENGINE)
     )
+
+
+def test_top1_core_imports_only_approved_pure_owners() -> None:
+    assert _imports(CONTRACTS_MODULE) <= {
+        "__future__",
+        "math",
+        "re",
+        "collections.abc",
+        "copy",
+        "datetime",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "domain.domain.engine",
+        "domain.domain.fee_calc",
+        "src.application.opening_candidate_snapshot",
+        "src.application.strategy_lab.top1.ranking",
+    }
+    assert _imports(ECONOMICS_MODULE) <= {
+        "__future__",
+        "math",
+        "collections.abc",
+        "datetime",
+        "typing",
+        "domain.domain.fee_calc",
+    }
+    assert _imports(STATISTICS_MODULE) <= {
+        "__future__",
+        "math",
+        "statistics",
+        "collections",
+        "collections.abc",
+        "datetime",
+        "typing",
+        "scipy.stats",
+    }
