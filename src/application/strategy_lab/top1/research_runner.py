@@ -24,19 +24,25 @@ from src.application.strategy_lab.top1.lifecycle import (
     start_research,
 )
 from src.application.strategy_lab.top1.research import (
+    INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
     RESEARCH_CLOSE_RECEIPT_SCHEMA,
-    RESEARCH_EVALUATION_INPUT_SCHEMA,
-    RESEARCH_EVALUATION_SCHEMA,
     ResearchEvaluationError,
+    build_internal_research_revision,
     evaluate_research,
     required_research_close_keys,
+    validate_internal_research_revision,
+)
+from src.application.strategy_lab.top1.research_artifacts import (
+    ResearchArtifactError,
+    load_materialized_research_input,
+    load_recorded_research_revision,
 )
 from src.application.strategy_lab.top1.terminal_projection import (
     publish_exact_text,
     recover_terminal_projection,
 )
 from src.infrastructure.futu_gateway import FutuGateway
-from src.infrastructure.private_storage import open_private_text, private_path
+from src.infrastructure.private_storage import private_path
 from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStore,
     ExperimentStoreError,
@@ -67,50 +73,12 @@ def _hash(value: object, label: str) -> str:
     return value
 
 
-def _safe_ref(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
-        _fail("research_artifact_invalid", f"{label} must be canonical text")
-    parts = value.split("/")
-    if value.startswith("/") or "\\" in value or any(
-        part in {"", ".", ".."} for part in parts
-    ):
-        _fail("research_artifact_invalid", f"{label} must be a safe relative ref")
-    return value
-
-
 def _file_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
 def _derived_key(idempotency_key: str, step: str) -> str:
     return hashlib.sha256(f"{idempotency_key}\0{step}".encode("utf-8")).hexdigest()
-
-
-def _read_canonical_json(
-    artifact_root: str | Path,
-    *,
-    ref: object,
-    expected_file_sha256: object,
-    label: str,
-) -> dict[str, Any]:
-    relative_ref = _safe_ref(ref, f"{label}.ref")
-    expected_hash = _hash(expected_file_sha256, f"{label}.file_sha256")
-    path = private_path(artifact_root).joinpath(*relative_ref.split("/"))
-    try:
-        with open_private_text(path) as handle:
-            text = handle.read()
-        content = text.encode("utf-8")
-        payload = json.loads(text)
-        canonical_text = render_json_text(payload) if isinstance(payload, dict) else None
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        raise ResearchRunnerError(
-            "research_artifact_invalid", f"{label} artifact cannot be read"
-        ) from exc
-    if _file_sha256(content) != expected_hash:
-        _fail("research_artifact_invalid", f"{label} file hash changed")
-    if canonical_text != text:
-        _fail("research_artifact_invalid", f"{label} bytes are not canonical JSON")
-    return cast(dict[str, Any], payload)
 
 
 def _load_spec(
@@ -174,57 +142,13 @@ def _require_effective_feature(
         _fail("feature_disabled", "Strategy Lab Top1 is disabled")
 
 
-def _load_dataset(
+def _materialized_input(
     artifact_root: str | Path, spec: Mapping[str, Any]
-) -> dict[str, Any]:
-    source = cast(Mapping[str, object], spec["research_source"])
-    return _read_canonical_json(
-        artifact_root,
-        ref=source["dataset_ref"],
-        expected_file_sha256=source["dataset_sha256"],
-        label="sealed_dataset",
-    )
-
-
-def _materialize_input(
-    artifact_root: str | Path,
-    *,
-    spec: dict[str, Any],
-    sealed_dataset: dict[str, Any],
 ) -> dict[str, object]:
-    raw_days = sealed_dataset.get("days")
-    if not isinstance(raw_days, list):
-        _fail("research_artifact_invalid", "sealed dataset days must be a list")
-    projections: list[dict[str, object]] = []
-    for raw_day in raw_days:
-        if not isinstance(raw_day, Mapping) or not isinstance(
-            raw_day.get("points"), list
-        ):
-            _fail("research_artifact_invalid", "sealed dataset point index is invalid")
-        for raw_point in cast(list[object], raw_day["points"]):
-            if not isinstance(raw_point, Mapping):
-                _fail("research_artifact_invalid", "sealed dataset point is invalid")
-            ref = raw_point.get("projection_ref")
-            projections.append(
-                {
-                    "projection_ref": ref,
-                    "projection": _read_canonical_json(
-                        artifact_root,
-                        ref=ref,
-                        expected_file_sha256=raw_point.get(
-                            "projection_file_sha256"
-                        ),
-                        label="ranking_projection",
-                    ),
-                }
-            )
-    return {
-        "schema_version": RESEARCH_EVALUATION_INPUT_SCHEMA,
-        "experiment_spec": spec,
-        "dataset_ref": spec["research_source"]["dataset_ref"],
-        "sealed_dataset": sealed_dataset,
-        "ranking_projections": projections,
-    }
+    try:
+        return load_materialized_research_input(artifact_root, spec)
+    except ResearchArtifactError as exc:
+        raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
 
 
 def _validated_quota(value: object) -> tuple[int, set[str]]:
@@ -268,9 +192,9 @@ def _close_receipts(
     market: str,
     account: str,
     requirements: list[tuple[str, str]],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, object] | None]:
     if not requirements:
-        return []
+        return [], None
     try:
         raw_quota = gateway.get_history_kl_quota()
     except Exception as exc:
@@ -279,8 +203,16 @@ def _close_receipts(
         ) from exc
     remaining, existing_codes = _validated_quota(raw_quota)
     required_codes = {stock_owner for stock_owner, _expiration in requirements}
-    if len(required_codes - existing_codes) > remaining:
+    new_codes = required_codes - existing_codes
+    if len(new_codes) > remaining:
         _fail("research_history_quota_insufficient", "history quota is insufficient")
+    quota_decision: dict[str, object] = {
+        "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+        "required_stock_owners": sorted(required_codes),
+        "already_counted_stock_owners": sorted(required_codes & existing_codes),
+        "new_stock_owners": sorted(new_codes),
+        "remain_quota": remaining,
+    }
 
     limit = resolve_opend_fetch_limits(dict(config or {})).history_kline
     receipts: list[dict[str, object]] = []
@@ -344,7 +276,7 @@ def _close_receipts(
                 "reason_detail": reason,
             }
         )
-    return receipts
+    return receipts, quota_decision
 
 
 def _evaluate(
@@ -367,13 +299,51 @@ def _requirements(
         raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
 
 
+def _revision(
+    dataset: dict[str, object],
+    *,
+    evaluation: dict[str, object],
+    fee_contract: object,
+    close_receipts: list[dict[str, object]],
+    quota_decision: object,
+    observed_at_utc: str,
+) -> dict[str, object]:
+    try:
+        return build_internal_research_revision(
+            dataset,
+            evaluation=evaluation,
+            fee_contract=fee_contract,
+            close_receipts=close_receipts,
+            quota_decision=quota_decision,
+            observed_at_utc=observed_at_utc,
+        )
+    except ResearchEvaluationError as exc:
+        raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
+
+
+def _recorded_evaluation(
+    artifact_root: str | Path,
+    *,
+    generation: Mapping[str, Any],
+    dataset: dict[str, object],
+) -> dict[str, object]:
+    try:
+        revision = load_recorded_research_revision(artifact_root, generation)
+        validated = validate_internal_research_revision(dataset, revision)
+    except ResearchArtifactError as exc:
+        raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
+    except ResearchEvaluationError as exc:
+        raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
+    return cast(dict[str, object], validated["evaluation"])
+
+
 def _record_revision(
     store: ExperimentStore,
     artifact_root: str | Path,
     *,
     experiment_id: str,
     generation: Mapping[str, Any],
-    evaluation: dict[str, object],
+    revision: dict[str, object],
     actor: str,
     occurred_at_utc: str,
     idempotency_key: str,
@@ -383,7 +353,7 @@ def _record_revision(
         f"strategy_lab/top1/experiments/{experiment_id}/generations/"
         "research.revision.1.json"
     )
-    text = render_json_text(evaluation)
+    text = render_json_text(revision)
     content = text.encode("utf-8")
     try:
         publish_exact_text(artifact_root, ref, content)
@@ -407,35 +377,6 @@ def _record_revision(
         raise ResearchRunnerError(
             "research_revision_conflict", "research revision cannot be recorded"
         ) from exc
-
-
-def _read_recorded_evaluation(
-    artifact_root: str | Path,
-    *,
-    generation: Mapping[str, Any],
-    experiment_id: str,
-    research_spec_sha256: str,
-    spec: Mapping[str, Any],
-    sealed_dataset: Mapping[str, Any],
-) -> dict[str, object]:
-    evaluation = _read_canonical_json(
-        artifact_root,
-        ref=generation["last_revision_ref"],
-        expected_file_sha256=generation["last_revision_file_sha256"],
-        label="research_revision",
-    )
-    source = cast(Mapping[str, object], spec["research_source"])
-    expected = {
-        "schema_version": RESEARCH_EVALUATION_SCHEMA,
-        "experiment_id": experiment_id,
-        "research_spec_sha256": research_spec_sha256,
-        "dataset_ref": source["dataset_ref"],
-        "dataset_sha256": source["dataset_sha256"],
-        "dataset_content_sha256": sealed_dataset.get("content_sha256"),
-    }
-    if any(evaluation.get(key) != value for key, value in expected.items()):
-        _fail("research_revision_conflict", "research revision binding changed")
-    return cast(dict[str, object], evaluation)
 
 
 def _finish_terminal(
@@ -497,16 +438,13 @@ def run_research(
         experiment_id=experiment_id,
         research_spec_sha256=research_spec_sha256,
     )
-    sealed_dataset = _load_dataset(artifact_root, spec)
+    dataset = _materialized_input(artifact_root, spec)
     generation = _research_generation(store, experiment_id)
     if generation is not None and int(generation["revision"]) == 1:
-        evaluation = _read_recorded_evaluation(
+        evaluation = _recorded_evaluation(
             artifact_root,
             generation=generation,
-            experiment_id=experiment_id,
-            research_spec_sha256=research_spec_sha256,
-            spec=spec,
-            sealed_dataset=sealed_dataset,
+            dataset=dataset,
         )
         _require_effective_feature(store, experiment=experiment, environ=environ)
         _finish_terminal(
@@ -526,11 +464,6 @@ def run_research(
     ):
         _fail("research_generation_conflict", "research generation state is unsupported")
 
-    dataset = _materialize_input(
-        artifact_root,
-        spec=spec,
-        sealed_dataset=sealed_dataset,
-    )
     requirements = _requirements(dataset, fee_contract)
     if generation is None:
         try:
@@ -552,7 +485,7 @@ def run_research(
     else:
         _require_effective_feature(store, experiment=experiment, environ=environ)
 
-    receipts = _close_receipts(
+    receipts, quota_decision = _close_receipts(
         artifact_root=artifact_root,
         config=config,
         gateway=gateway,
@@ -561,12 +494,20 @@ def run_research(
         requirements=requirements,
     )
     evaluation = _evaluate(dataset, receipts, fee_contract)
+    revision = _revision(
+        dataset,
+        evaluation=evaluation,
+        fee_contract=fee_contract,
+        close_receipts=receipts,
+        quota_decision=quota_decision,
+        observed_at_utc=occurred_at_utc,
+    )
     _record_revision(
         store,
         artifact_root,
         experiment_id=experiment_id,
         generation=generation,
-        evaluation=evaluation,
+        revision=revision,
         actor=actor,
         occurred_at_utc=occurred_at_utc,
         idempotency_key=idempotency_key,

@@ -620,10 +620,7 @@ def lock_challenger(
     store: ExperimentStore,
     validation_spec: object,
     *,
-    system_leader: str,
     challenger_variant_id: str,
-    research_receipt_ref: str,
-    research_receipt_file_sha256: str,
     trading_dates: Sequence[object],
     actor: str,
     occurred_at_utc: str,
@@ -631,13 +628,23 @@ def lock_challenger(
     artifact_root: str | Path,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
+    # Local imports avoid corpus -> lifecycle -> research -> corpus initialization.
+    from src.application.strategy_lab.top1.research import (
+        ResearchEvaluationError,
+        validate_internal_research_revision,
+    )
+    from src.application.strategy_lab.top1.research_artifacts import (
+        ResearchArtifactError,
+        load_materialized_research_input,
+        load_recorded_research_revision,
+    )
+
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    system_leader = _text(system_leader, "system_leader")
     challenger_variant_id = _text(challenger_variant_id, "challenger_variant_id")
-    if system_leader != challenger_variant_id or challenger_variant_id == "baseline":
-        _fail("experiment_invalid", "challenger must equal the non-baseline system leader")
+    if challenger_variant_id == "baseline":
+        _fail("experiment_invalid", "challenger must be non-baseline")
     try:
         spec = validate_experiment_spec(validation_spec)
     except Top1CoreContractError as exc:
@@ -668,8 +675,46 @@ def lock_challenger(
         ),
         None,
     )
-    if research_generation is None or research_generation["terminal_file_sha256"] is None:
+    if (
+        research_generation is None
+        or int(research_generation["revision"]) != 1
+        or research_generation["terminal_file_sha256"] is None
+        or research_generation["terminal_published_event_id"] is None
+    ):
         _fail("invalid_transition", "published research terminal is required")
+    try:
+        research_spec = {
+            key: value
+            for key, value in spec.items()
+            if key
+            not in {
+                "validation_evaluation",
+                "fill_observation",
+                "timer_binding",
+                "validation_metrics",
+            }
+        }
+        dataset = load_materialized_research_input(
+            artifact_root, research_spec
+        )
+        revision = load_recorded_research_revision(
+            artifact_root, research_generation
+        )
+        validated_revision = validate_internal_research_revision(dataset, revision)
+    except (ResearchArtifactError, ResearchEvaluationError) as exc:
+        _fail("experiment_conflict", f"research revision is invalid: {exc}")
+    evaluation = cast(Mapping[str, object], validated_revision["evaluation"])
+    if evaluation["selection"] != "research_leader":
+        _fail("invalid_transition", "research did not select a challenger")
+    if evaluation["leader_variant_id"] != challenger_variant_id:
+        _fail("experiment_invalid", "challenger does not match the research leader")
+    research_receipt_ref = _ref(
+        research_generation["last_revision_ref"], "research_receipt_ref"
+    )
+    research_receipt_file_sha256 = _hash(
+        research_generation["last_revision_file_sha256"],
+        "research_receipt_file_sha256",
+    )
     economics = cast(Mapping[str, object], spec["economics_contracts"])
     baseline = cast(Mapping[str, object], spec["baseline"])
     commitment = build_hidden_window_commitment(
@@ -712,10 +757,8 @@ def lock_challenger(
         research_spec_sha256=research_hash,
         validation_spec_sha256=validation_hash,
         research_leader=challenger_variant_id,
-        research_receipt_ref=_ref(research_receipt_ref, "research_receipt_ref"),
-        research_receipt_file_sha256=_hash(
-            research_receipt_file_sha256, "research_receipt_file_sha256"
-        ),
+        research_receipt_ref=research_receipt_ref,
+        research_receipt_file_sha256=research_receipt_file_sha256,
         commitment_json=compact_json(commitment),
         commitment_sha256=commitment_sha256,
         commitment_ref=commitment_ref,
