@@ -5,7 +5,7 @@
 - Accepted plan commit: `261bfc39`
 - Implementation base: `f39ede44` (merged PR #156 and PR #157)
 - Branch: `feat/sell-put-top1-w1b`
-- Status: implementation complete; initial Kimi DeepReview passed; pending accepted-slice commit
+- Status: accepted slice `898c41e0`; aggregate Kimi DeepReview passed
 
 ## Implemented scope
 
@@ -34,4 +34,4 @@
 
 ## Remaining gate boundary
 
-Commit only this accepted W1B slice, then run the required aggregate Kimi DeepReview against `origin/main`. Draft PR creation follows only after that review closes. Ready-for-review, merge, release, deploy, runtime writes, and real experiments remain outside this gate.
+The accepted W1B slice and required aggregate Kimi DeepReview are complete. Draft PR creation is the next gate. Ready-for-review, merge, release, deploy, runtime writes, and real experiments remain outside this gate.
