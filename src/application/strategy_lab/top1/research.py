@@ -528,11 +528,15 @@ def _insufficient_before_statistics(
     )
 
 
-def evaluate_research(
+def _validated_research_input(
     dataset: object,
-    close_receipts: object,
-    fee_contract: object,
-) -> dict[str, object]:
+) -> tuple[
+    dict[str, Any],
+    str,
+    dict[str, object],
+    list[dict[str, str]],
+    dict[str, dict[str, Any]],
+]:
     envelope = _mapping(dataset, "dataset")
     _exact_keys(envelope, _INPUT_KEYS, "dataset")
     if envelope["schema_version"] != RESEARCH_EVALUATION_INPUT_SCHEMA:
@@ -553,10 +557,20 @@ def evaluate_research(
         market=str(spec["market"]),
         account=str(spec["account"]),
     )
-    receipts = _validate_close_receipts(
-        close_receipts, market=str(spec["market"]), account=str(spec["account"])
-    )
-    fee_plan = _validate_fee_contract(fee_contract, spec=spec)
+    return spec, dataset_ref, sealed_dataset, point_rows, projections
+
+
+def _research_selections(
+    *,
+    spec: Mapping[str, object],
+    point_rows: list[dict[str, str]],
+    projections: Mapping[str, Mapping[str, Any]],
+) -> tuple[
+    list[tuple[str, str]],
+    dict[str, list[dict[str, object]]],
+    set[tuple[str, str]],
+    bool,
+]:
 
     variants: list[tuple[str, str]] = []
     for raw_variant in cast(list[object], spec["variants"])[1:]:
@@ -612,6 +626,46 @@ def evaluate_research(
                     "challenger_candidate": challenger_candidate,
                 }
             )
+    return variants, selections, required_close_keys, currency_mismatch
+
+
+def required_research_close_keys(
+    dataset: object,
+    fee_contract: object,
+) -> list[tuple[str, str]]:
+    spec, _dataset_ref, _sealed_dataset, point_rows, projections = (
+        _validated_research_input(dataset)
+    )
+    _ = _validate_fee_contract(fee_contract, spec=spec)
+    _variants, _selections, required_close_keys, currency_mismatch = (
+        _research_selections(
+            spec=spec,
+            point_rows=point_rows,
+            projections=projections,
+        )
+    )
+    return [] if currency_mismatch else sorted(required_close_keys)
+
+
+def evaluate_research(
+    dataset: object,
+    close_receipts: object,
+    fee_contract: object,
+) -> dict[str, object]:
+    spec, dataset_ref, sealed_dataset, point_rows, projections = (
+        _validated_research_input(dataset)
+    )
+    receipts = _validate_close_receipts(
+        close_receipts, market=str(spec["market"]), account=str(spec["account"])
+    )
+    fee_plan = _validate_fee_contract(fee_contract, spec=spec)
+    variants, selections, required_close_keys, currency_mismatch = (
+        _research_selections(
+            spec=spec,
+            point_rows=point_rows,
+            projections=projections,
+        )
+    )
     if currency_mismatch:
         return _insufficient_before_statistics(
             spec=spec,
@@ -835,4 +889,5 @@ __all__ = [
     "RESEARCH_EVALUATION_SCHEMA",
     "ResearchEvaluationError",
     "evaluate_research",
+    "required_research_close_keys",
 ]
