@@ -70,3 +70,8 @@ config.*.bak.*
 # Legacy runtime-only config variants (keep local)
 config.market_us.fallback_yahoo.json
 config.market_*.json.deprecated
+
+# Process artifacts (reviews/plans/gateflow are consumables, keep local only)
+docs/reviews/
+docs/plans/
+docs/gateflow/
