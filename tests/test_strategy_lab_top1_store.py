@@ -287,8 +287,8 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
     store = ExperimentStore(path)
     assert store.schema_state() == {"status": "not_initialized", "schema_version": None}
     assert not path.exists()
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 1}
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 1}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 2}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 2}
     assert stat_mode(path) == 0o600
     assert not Path(f"{path}-wal").exists()
     with sqlite3.connect(path) as connection:
@@ -305,6 +305,8 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
             "strategy_lab_generations",
             "strategy_lab_hidden_commitments",
             "strategy_lab_events",
+            "strategy_lab_corpus_days",
+            "strategy_lab_corpus_points",
         }
 
     v0_path = tmp_path / "v0.sqlite3"
@@ -316,7 +318,29 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
             "INSERT INTO strategy_lab_schema VALUES (?, 0, ?)",
             ("sell_put_top1_experiment_store", NOW),
         )
-    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 1
+    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 2
+
+    v1_path = tmp_path / "v1.sqlite3"
+    v1_store = ExperimentStore(v1_path)
+    v1_store.migrate(migrated_at_utc=NOW)
+    v1_store.set_feature(
+        market="HK",
+        account="lx",
+        enabled=True,
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="legacy-feature",
+    )
+    with sqlite3.connect(v1_path) as connection:
+        connection.execute("DROP TABLE strategy_lab_corpus_points")
+        connection.execute("DROP TABLE strategy_lab_corpus_days")
+        connection.execute("UPDATE strategy_lab_schema SET schema_version = 1")
+    assert v1_store.schema_state() == {"status": "migration_required", "schema_version": 1}
+    assert v1_store.migrate(migrated_at_utc=NOW) == {
+        "status": "ready",
+        "schema_version": 2,
+    }
+    assert v1_store.feature("HK", "lx")["user_opt_in"] == 1
 
     partial = tmp_path / "partial.sqlite3"
     with sqlite3.connect(partial) as connection:
