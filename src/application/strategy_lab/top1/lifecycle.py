@@ -851,124 +851,6 @@ def start_validation(
     )
 
 
-def commit_validation_point(
-    store: ExperimentStore,
-    *,
-    experiment_id: str,
-    point_id: str,
-    trading_date: str,
-    source_ref: str,
-    source_file_sha256: str,
-    revision: int,
-    manifest_ref: str,
-    manifest_file_sha256: str,
-    frozen_row_sha256: str,
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
-    artifact_root: str | Path,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    experiment_id = _segment(experiment_id, "experiment_id")
-    point_id = _segment(point_id, "point_id")
-    date_text = _text(trading_date, "trading_date")
-    try:
-        if date.fromisoformat(date_text).isoformat() != date_text:
-            raise ValueError
-    except ValueError:
-        _fail("experiment_invalid", "trading_date must be a canonical ISO date")
-    if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
-        _fail("experiment_invalid", "revision must be a positive integer")
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
-    return _call(
-        store.commit_validation_point,
-        experiment_id=experiment_id,
-        point_id=point_id,
-        trading_date=date_text,
-        source_ref=_ref(source_ref, "source_ref"),
-        source_file_sha256=_hash(source_file_sha256, "source_file_sha256"),
-        revision=revision,
-        manifest_ref=_ref(manifest_ref, "manifest_ref"),
-        manifest_file_sha256=_hash(
-            manifest_file_sha256, "manifest_file_sha256"
-        ),
-        frozen_row_sha256=_hash(frozen_row_sha256, "frozen_row_sha256"),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-    )
-
-
-def seal_validation_partition(
-    store: ExperimentStore,
-    *,
-    experiment_id: str,
-    trading_date: str,
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
-    artifact_root: str | Path,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    experiment_id = _segment(experiment_id, "experiment_id")
-    trading_date = _text(trading_date, "trading_date")
-    try:
-        if date.fromisoformat(trading_date).isoformat() != trading_date:
-            raise ValueError
-    except ValueError:
-        _fail("experiment_invalid", "trading_date must be a canonical ISO date")
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
-    terminal_request: Mapping[str, object] | None = None
-    if int(experiment["completed_validation_partitions"]) == 19:
-        hidden = next(
-            item
-            for item in _call(store.generations, experiment_id)
-            if item["generation_kind"] == "hidden"
-        )
-        terminal_request = build_generation_terminal_request(
-            hidden,
-            terminal_mode="completed",
-            reason=None,
-            disabled_scope=None,
-            occurred_at_utc=occurred_at_utc,
-        )
-    return _call(
-        store.seal_validation_partition,
-        experiment_id=experiment_id,
-        trading_date=trading_date,
-        terminal_request=terminal_request,
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-    )
-
-
 def terminate_experiment(
     store: ExperimentStore,
     *,
@@ -1128,6 +1010,8 @@ def read_public_status(
         environ=environ,
     )
     generations = _call(store.generations, experiment_id)
+    decisions = _call(store.validation_decisions, experiment_id)
+    jobs = _call(store.outcome_jobs, experiment_id)
     return {
         "schema_version": PUBLIC_STATUS_SCHEMA,
         "feature": feature,
@@ -1162,12 +1046,25 @@ def read_public_status(
             "terminal_mode": experiment["terminal_mode"],
             "terminal_reason": experiment["terminal_reason"],
             "disabled_scope": experiment["disabled_scope"],
+            "final_outcome_status": (
+                experiment["final_outcome_status"]
+                if experiment["phase"] == "concluded"
+                else None
+            ),
             "projection_state": (
                 "published"
                 if experiment["phase"] == "concluded"
                 else "pending"
                 if experiment["terminal_mode"] is not None
                 else "not_requested"
+            ),
+        },
+        "validation": {
+            "consumed_point_count": len(decisions),
+            "outcome_job_count": len(jobs),
+            "pending_outcome_count": sum(
+                item["status"] in {"pending_terms", "pending_outcome"}
+                for item in jobs
             ),
         },
         "generations": [
@@ -1212,7 +1109,6 @@ __all__ = [
     "authorize_research",
     "authorize_validation",
     "build_hidden_window_commitment",
-    "commit_validation_point",
     "effective_feature_status",
     "lock_challenger",
     "prepare_experiment",
@@ -1221,7 +1117,6 @@ __all__ = [
     "reconcile_disabled_experiments",
     "record_generation_revision",
     "seal_generation",
-    "seal_validation_partition",
     "set_account_opt_in",
     "start_research",
     "start_validation",

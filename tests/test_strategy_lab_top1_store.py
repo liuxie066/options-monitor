@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -36,13 +35,11 @@ from src.application.strategy_lab.top1.lifecycle import (
     authorize_research,
     authorize_validation,
     build_hidden_window_commitment,
-    commit_validation_point,
     effective_feature_status,
     prepare_experiment,
     read_public_receipt,
     read_public_status,
     seal_generation,
-    seal_validation_partition,
     set_account_opt_in,
     start_research,
     start_validation,
@@ -343,8 +340,8 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
     store = ExperimentStore(path)
     assert store.schema_state() == {"status": "not_initialized", "schema_version": None}
     assert not path.exists()
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 2}
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 2}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 3}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 3}
     assert stat_mode(path) == 0o600
     assert not Path(f"{path}-wal").exists()
     with sqlite3.connect(path) as connection:
@@ -363,6 +360,11 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
             "strategy_lab_events",
             "strategy_lab_corpus_days",
             "strategy_lab_corpus_points",
+            "strategy_lab_validation_decisions",
+            "strategy_lab_validation_days",
+            "strategy_lab_fill_observations",
+            "strategy_lab_outcome_jobs",
+            "strategy_lab_expiry_close_facts",
         }
 
     v0_path = tmp_path / "v0.sqlite3"
@@ -374,7 +376,7 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
             "INSERT INTO strategy_lab_schema VALUES (?, 0, ?)",
             ("sell_put_top1_experiment_store", NOW),
         )
-    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 2
+    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 3
 
     v1_path = tmp_path / "v1.sqlite3"
     v1_store = ExperimentStore(v1_path)
@@ -388,15 +390,48 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
         idempotency_key="legacy-feature",
     )
     with sqlite3.connect(v1_path) as connection:
+        connection.execute("DROP TABLE strategy_lab_expiry_close_facts")
+        connection.execute("DROP TABLE strategy_lab_outcome_jobs")
+        connection.execute("DROP TABLE strategy_lab_fill_observations")
+        connection.execute("DROP TABLE strategy_lab_validation_days")
+        connection.execute("DROP TABLE strategy_lab_validation_decisions")
         connection.execute("DROP TABLE strategy_lab_corpus_points")
         connection.execute("DROP TABLE strategy_lab_corpus_days")
         connection.execute("UPDATE strategy_lab_schema SET schema_version = 1")
     assert v1_store.schema_state() == {"status": "migration_required", "schema_version": 1}
     assert v1_store.migrate(migrated_at_utc=NOW) == {
         "status": "ready",
-        "schema_version": 2,
+        "schema_version": 3,
     }
     assert v1_store.feature("HK", "lx")["user_opt_in"] == 1
+
+    v2_path = tmp_path / "v2.sqlite3"
+    v2_store = ExperimentStore(v2_path)
+    v2_store.migrate(migrated_at_utc=NOW)
+    _enable(v2_store, tmp_path / "v2-artifacts", idempotency_key="v2-feature")
+    prepare_experiment(
+        v2_store,
+        _spec("v2-preserved"),
+        provenance={"source_commit_sha": "commit-v2", "config_sha256": SHA_B},
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="v2-prepare",
+        artifact_root=tmp_path / "v2-artifacts",
+        environ=AVAILABLE,
+    )
+    with sqlite3.connect(v2_path) as connection:
+        connection.execute("DROP TABLE strategy_lab_expiry_close_facts")
+        connection.execute("DROP TABLE strategy_lab_outcome_jobs")
+        connection.execute("DROP TABLE strategy_lab_fill_observations")
+        connection.execute("DROP TABLE strategy_lab_validation_days")
+        connection.execute("DROP TABLE strategy_lab_validation_decisions")
+        connection.execute("UPDATE strategy_lab_schema SET schema_version = 2")
+    assert v2_store.migrate(migrated_at_utc=NOW) == {
+        "status": "ready",
+        "schema_version": 3,
+    }
+    assert v2_store.experiment("v2-preserved")["topic_id"] == "topic-v2-preserved"
+    assert v2_store.events("v2-preserved")[0]["event_type"] == "experiment_prepared"
 
     partial = tmp_path / "partial.sqlite3"
     with sqlite3.connect(partial) as connection:
@@ -454,7 +489,7 @@ def test_exact_publisher_adopts_bytes_and_rejects_conflict_or_symlink(
         publish_exact_text(root, "unsafe/result.json", b"{}\n")
 
 
-def test_separate_authorization_day20_and_hidden_status(tmp_path: Path) -> None:
+def test_separate_authorization_starts_evidence_bound_validation(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"
     _enable(store, root)
@@ -483,112 +518,17 @@ def test_separate_authorization_day20_and_hidden_status(tmp_path: Path) -> None:
         artifact_root=root,
         environ=AVAILABLE,
     )
-    for index, trading_date in enumerate(dates, start=1):
-        kwargs = dict(
-            experiment_id="experiment-a",
-            point_id=f"point-{index}",
-            trading_date=trading_date,
-            source_ref=f"points/{index}.json",
-            source_file_sha256=SHA_A,
-            revision=index,
-            manifest_ref=f"hidden/{index}.json",
-            manifest_file_sha256=SHA_B,
-            frozen_row_sha256=SHA_C,
-            actor="runner",
-            occurred_at_utc=NOW,
-            idempotency_key=f"point-{index}",
-            artifact_root=root,
-            environ=AVAILABLE,
-        )
-        if index == 1:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [
-                    executor.submit(commit_validation_point, store, **kwargs),
-                    executor.submit(
-                        commit_validation_point,
-                        store,
-                        **{**kwargs, "idempotency_key": "point-1-alias"},
-                    ),
-                ]
-                for future in futures:
-                    future.result()
-            assert len(
-                [
-                    event
-                    for event in store.events("experiment-a")
-                    if event["event_type"] == "validation_point_committed"
-                ]
-            ) == 1
-            with pytest.raises(Top1LifecycleError) as conflict_info:
-                commit_validation_point(
-                    store,
-                    **{
-                        **kwargs,
-                        "point_id": "different-point",
-                        "source_file_sha256": SHA_C,
-                        "idempotency_key": "point-1-alias",
-                    },
-                )
-            assert conflict_info.value.reason_code == "experiment_conflict"
-        else:
-            commit_validation_point(store, **kwargs)
-        seal_validation_partition(
-            store,
-            experiment_id="experiment-a",
-            trading_date=trading_date,
-            actor="runner",
-            occurred_at_utc=NOW,
-            idempotency_key=f"partition-{index}",
-            artifact_root=root,
-            environ=AVAILABLE,
-        )
-        if index == 1:
-            with pytest.raises(Top1LifecycleError) as late_info:
-                commit_validation_point(
-                    store,
-                    experiment_id="experiment-a",
-                    point_id="late-day-one",
-                    trading_date=trading_date,
-                    source_ref="points/late-day-one.json",
-                    source_file_sha256=SHA_A,
-                    revision=2,
-                    manifest_ref="hidden/late-day-one.json",
-                    manifest_file_sha256=SHA_B,
-                    frozen_row_sha256=SHA_C,
-                    actor="runner",
-                    occurred_at_utc=NOW,
-                    idempotency_key="late-day-one",
-                    artifact_root=root,
-                    environ=AVAILABLE,
-                )
-            assert late_info.value.reason_code == "late_write"
-        state = store.experiment("experiment-a")
-        if index == 19:
-            assert state["validation_progress"] == "collecting_decisions"
     state = store.experiment("experiment-a")
-    assert state["completed_validation_partitions"] == 20
-    assert state["validation_progress"] == "awaiting_outcomes"
-    with pytest.raises(Top1LifecycleError) as exc_info:
-        commit_validation_point(
-            store,
-            experiment_id="experiment-a",
-            point_id="late-point",
-            trading_date=dates[-1],
-            source_ref="points/late.json",
-            source_file_sha256=SHA_A,
-            revision=21,
-            manifest_ref="hidden/late.json",
-            manifest_file_sha256=SHA_B,
-            frozen_row_sha256=SHA_C,
-            actor="runner",
-            occurred_at_utc=NOW,
-            idempotency_key="late-point",
-            artifact_root=root,
-            environ=AVAILABLE,
-        )
-    assert exc_info.value.reason_code == "late_write"
+    assert state["completed_validation_partitions"] == 0
+    assert state["validation_progress"] == "collecting_decisions"
+    assert {row["generation_kind"] for row in store.generations("experiment-a")} == {
+        "research",
+        "hidden",
+        "outcome",
+    }
+    assert not hasattr(store, "commit_validation_point")
+    assert not hasattr(store, "seal_validation_partition")
     public = json.dumps(read_public_status(store, experiment_id="experiment-a"))
-    assert "point-1" not in public
     assert "daily_delta" not in public
     assert read_public_receipt(store, experiment_id="experiment-a") is None
 

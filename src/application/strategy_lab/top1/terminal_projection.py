@@ -125,15 +125,9 @@ def build_generation_terminal_request(
     }
 
 
-def build_aborted_receipt_request(
-    experiment: Mapping[str, object],
+def _generation_views(
     generations: Sequence[Mapping[str, object]],
     generation_requests: Sequence[Mapping[str, object]],
-    *,
-    reason: str,
-    disabled_scope: str | None,
-    occurred_at_utc: str,
-    terminated_at_partition: int | None,
 ) -> dict[str, object]:
     request_by_kind = {
         str(item["generation_kind"]): item for item in generation_requests
@@ -168,6 +162,20 @@ def build_aborted_receipt_request(
             "content_sha256": row["terminal_content_sha256"],
             "file_sha256": row["terminal_file_sha256"],
         }
+    return generation_views
+
+
+def build_aborted_receipt_request(
+    experiment: Mapping[str, object],
+    generations: Sequence[Mapping[str, object]],
+    generation_requests: Sequence[Mapping[str, object]],
+    *,
+    reason: str,
+    disabled_scope: str | None,
+    occurred_at_utc: str,
+    terminated_at_partition: int | None,
+) -> dict[str, object]:
+    generation_views = _generation_views(generations, generation_requests)
 
     experiment_id = str(experiment["experiment_id"])
     payload: dict[str, Any] = {
@@ -194,6 +202,61 @@ def build_aborted_receipt_request(
         "generations": generation_views,
         "outcome_status": "insufficient_evidence",
         "metrics": None,
+    }
+    attach_artifact_provenance(
+        payload,
+        artifact_kind="sell_put_top1_experiment_receipt",
+        source_generation={"generation_id": f"experiment:{experiment_id}:terminal"},
+    )
+    ref = f"strategy_lab/top1/experiments/{experiment_id}/experiment_receipt.json"
+    return {"experiment_id": experiment_id, **_projection_request(ref, payload)}
+
+
+def build_completed_receipt_request(
+    experiment: Mapping[str, object],
+    generations: Sequence[Mapping[str, object]],
+    outcome_terminal_request: Mapping[str, object],
+    *,
+    final_outcome_status: str,
+    result: Mapping[str, object],
+    coverage: Mapping[str, object],
+    contract_versions: Mapping[str, object],
+    occurred_at_utc: str,
+) -> dict[str, object]:
+    if final_outcome_status not in {
+        "candidate_for_adoption",
+        "keep_baseline",
+        "insufficient_evidence",
+    }:
+        raise ValueError("completed outcome status is invalid")
+    generation_views = _generation_views(generations, [outcome_terminal_request])
+    experiment_id = str(experiment["experiment_id"])
+    payload: dict[str, Any] = {
+        "schema_version": EXPERIMENT_RECEIPT_SCHEMA,
+        "experiment_id": experiment_id,
+        "topic_id": experiment["topic_id"],
+        "market": experiment["market"],
+        "account": experiment["account"],
+        "strategy_family": experiment["strategy_family"],
+        "terminal": {
+            "mode": "completed",
+            "reason": None,
+            "disabled_scope": None,
+            "occurred_at_utc": occurred_at_utc,
+            "terminated_at_partition": 20,
+        },
+        "bindings": {
+            "research_spec_sha256": experiment["research_spec_sha256"],
+            "validation_spec_sha256": experiment["validation_spec_sha256"],
+            "hidden_window_commitment_sha256": experiment[
+                "proposed_commitment_sha256"
+            ],
+        },
+        "contract_versions": dict(contract_versions),
+        "generations": generation_views,
+        "outcome_status": final_outcome_status,
+        "coverage": dict(coverage),
+        "metrics": dict(result),
     }
     attach_artifact_provenance(
         payload,
@@ -313,6 +376,7 @@ __all__ = [
     "EXPERIMENT_RECEIPT_SCHEMA",
     "GENERATION_TERMINAL_SCHEMA",
     "build_aborted_receipt_request",
+    "build_completed_receipt_request",
     "build_generation_terminal_request",
     "publish_exact_text",
     "recover_terminal_projection",
