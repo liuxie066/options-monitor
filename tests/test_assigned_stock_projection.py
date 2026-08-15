@@ -4,7 +4,11 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.domain.assigned_stock import project_assigned_stock_lifecycle
+from domain.domain.assigned_stock import (
+    _option_fee_fact,
+    _stock_fee_fact,
+    project_assigned_stock_lifecycle,
+)
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -54,6 +58,7 @@ def _base_projection(
     extra_events: list[dict[str, Any]] | None = None,
     extra_option_lots: list[dict[str, Any]] | None = None,
     extra_allocations: list[dict[str, Any]] | None = None,
+    assignment_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     opened_at = _ms("2026-04-03T10:00:00")
     assigned_at = _ms("2026-05-01T10:00:00")
@@ -74,7 +79,7 @@ def _base_projection(
         at="2026-05-01T10:00:00",
         price=0,
         strike=100,
-        raw_payload={
+        raw_payload=assignment_payload or {
             "close_type": "assignment",
             "fee_provenance": {"basis": "actual", "source": "test"},
             "stock_settlement": {
@@ -361,3 +366,138 @@ def test_covered_call_fails_closed_when_assigned_shares_are_sold_before_call_end
 
     assert report["assigned_stock_lots"][0]["covered_call_pnl"] == 0
     assert any(row["status"] == "covered_call_unallocated" for row in report["assigned_stock_review_rows"])
+
+
+def test_hk_assignment_stock_fee_fails_closed_and_suppresses_net_outputs() -> None:
+    fee_fact = _stock_fee_fact(
+        {
+            "broker": "富途",
+            "currency": "HKD",
+            "shares": 100,
+            "price": 400,
+            "contracts": 1,
+        },
+        component="assignment_stock_fee",
+        transaction_kind="assignment",
+    )
+    assert fee_fact["basis"] == "missing"
+    assert fee_fact["reason"] == "hk_account_fee_plan_missing"
+    assert fee_fact["estimated_amount"] is not None
+
+    report = _base_projection(
+        assignment_payload={
+            "close_type": "assignment",
+            "fee_provenance": {"basis": "actual", "source": "test"},
+            "stock_settlement": {
+                "side": "buy",
+                "shares": 100,
+                "price": 400,
+                "currency": "HKD",
+            },
+        }
+    )
+    row = report["assigned_stock_lots"][0]
+    assert "assignment_stock_fee" in row["fee_missing_components"]
+    assert row["lifecycle_pnl_net"] is None
+    assert row["annualized_capital_efficiency"] is None
+    summary = report["lifecycle_efficiency_summary"][0]
+    assert summary["lifecycle_pnl_net"] is None
+    assert summary["annualized_capital_efficiency"] is None
+
+
+def test_hk_assignment_projection_rejects_unvalidated_fee_plan_payload() -> None:
+    row = _base_projection(
+        assignment_payload={
+            "close_type": "assignment",
+            "fee_provenance": {"basis": "actual", "source": "test"},
+            "account_fee_plan": {
+                "commission_free": False,
+                "platform_fee": 15.0,
+                "fee_plan_ref": "futu_hk_standard_fixed",
+            },
+            "stock_settlement": {
+                "side": "buy",
+                "shares": 100,
+                "price": 450,
+                "currency": "HKD",
+            },
+        }
+    )["assigned_stock_lots"][0]
+
+    assignment_fee = next(
+        fact for fact in row["fee_evidence"] if fact["component"] == "assignment_stock_fee"
+    )
+    assert assignment_fee["basis"] == "missing"
+    assert assignment_fee["reason"] == "hk_account_fee_plan_missing"
+    assert assignment_fee["estimated_amount"] == 79.215
+    assert "fee_plan_ref" not in assignment_fee
+    assert row["lifecycle_pnl_net"] is None
+    assert row["annualized_capital_efficiency"] is None
+
+
+def test_hk_assignment_fee_rejects_lossy_raw_numeric_inputs() -> None:
+    for field, value in (
+        ("shares", True),
+        ("shares", 100.5),
+        ("price", float("nan")),
+        ("contracts", True),
+        ("contracts", 1.5),
+    ):
+        inputs = {
+            "broker": "富途",
+            "currency": "HKD",
+            "shares": 100,
+            "price": 450,
+            "contracts": 1,
+        }
+        inputs[field] = value
+        fact = _stock_fee_fact(
+            inputs,
+            component="assignment_stock_fee",
+            transaction_kind="assignment",
+        )
+        assert fact["basis"] == "missing"
+        assert fact["reason"] == "stock_fee_inputs_incomplete"
+        assert fact["estimated_amount"] is None
+
+
+def test_hk_assignment_actual_fee_precedes_terminal_estimate() -> None:
+    fact = _stock_fee_fact(
+        {
+            "broker": "富途",
+            "currency": "HKD",
+            "shares": 100,
+            "price": 450,
+            "contracts": 1,
+            "fees": 12.5,
+            "fee_provenance": {"basis": "actual", "source": "broker_receipt"},
+        },
+        component="assignment_stock_fee",
+        transaction_kind="assignment",
+    )
+    assert fact == {
+        "component": "assignment_stock_fee",
+        "basis": "actual",
+        "amount": 12.5,
+        "source": "broker_receipt",
+        "reason": "stored_actual_fee",
+    }
+
+
+def test_hk_expired_worthless_option_leg_has_explicit_zero_fee_policy() -> None:
+    fact = _option_fee_fact(
+        {
+            "event_type": "expire_auto_close",
+            "currency": "HKD",
+            "price": 0,
+            "contracts": 1,
+            "multiplier": 100,
+        },
+        component="put_expired_option_fee",
+    )
+    assert fact["basis"] == "estimated"
+    assert fact["amount"] == 0.0
+    assert fact["reason"] == "hk_expired_worthless_no_fee"
+    assert fact["estimated_amount"] == 0.0
+    assert fact["source"] == "https://www.futuhk.com/en/support/topic2_335"
+    assert fact["schedule_version"] == "futu_hk_terminal_fee.v1"
