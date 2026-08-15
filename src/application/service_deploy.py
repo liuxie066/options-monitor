@@ -27,6 +27,7 @@ from src.application.secret_store import (
     legacy_secret_env_names,
 )
 from src.application.settings import build_effective_env
+from src.application.payload_helpers import first_text as _first_text
 
 
 ServiceTarget = Literal["systemd", "launchd"]
@@ -236,14 +237,6 @@ def _wechat_clawbot_inbound_config_from_yaml(*, repo_root: Path, config_yaml_pat
         return {}
     wechat_clawbot = inbound.get("wechat_clawbot")
     return dict(wechat_clawbot) if isinstance(wechat_clawbot, dict) else {}
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
 
 
 def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> Path:

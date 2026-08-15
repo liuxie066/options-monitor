@@ -11,6 +11,7 @@ from src.application.secret_store import (
     resolve_secret_status,
 )
 from src.application.settings import build_effective_env
+from src.application.payload_helpers import as_dict as _dict
 
 
 DEFAULT_FEISHU_APP_ID_ENV = "OM_FEISHU_APP_ID"
@@ -20,10 +21,6 @@ DEFAULT_FEISHU_BOT_APP_ID_ENV = "OM_FEISHU_BOT_APP_ID"
 DEFAULT_FEISHU_BOT_APP_SECRET_ENV = "OM_FEISHU_BOT_APP_SECRET"
 DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV = "OM_FEISHU_BOT_USER_OPEN_ID"
 DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV = "OM_FEISHU_BOT_ALLOWED_OPEN_IDS"
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 def _text(value: Any) -> str:

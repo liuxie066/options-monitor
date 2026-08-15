@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+from src.application.payload_helpers import text_sha256 as _sha256
 
 
 FEISHU_REPLY_ENVELOPE_SCHEMA_VERSION = "feishu-conversation-reply.v1"
@@ -414,10 +415,6 @@ def _flatten_non_table_markdown(value: str) -> str:
     text = re.sub(r"(?m)^\s*[-+*]\s+", "• ", text)
     text = text.replace("**", "").replace("__", "").replace("```", "").replace("`", "")
     return text.strip()
-
-
-def _sha256(value: str) -> str:
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 __all__ = [

@@ -18,6 +18,12 @@ from src.application.secret_resolver import (
 )
 from src.application.secret_store import FEISHU_BOT_APP_SECRET, SecretError, resolve_secret_status
 from src.application.service_deploy import service_status_from_profile
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text
+from functools import partial
+
+
+_first_text = partial(first_text, default="")
 
 
 MaskPathFn = Callable[[Any], str | None]
@@ -478,18 +484,6 @@ def _assistant_config_path_from_payload(payload: dict[str, Any]) -> tuple[Path |
 def _resolve_path(value: str | Path, *, base: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else (base / path).resolve()
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _first_text(*values: Any) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return ""
 
 
 def _split_csv(value: Any) -> tuple[str, ...]:

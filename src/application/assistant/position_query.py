@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.payload_helpers import optional_text as _optional_text
 
 
 PositionStatus = Literal["open", "close", "all"]
@@ -350,11 +351,6 @@ def _normalize_limit(value: Any) -> int:
     if value in (None, ""):
         return 50
     return max(1, min(int(value), 500))
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _optional_int(value: Any) -> int:

@@ -26,6 +26,8 @@ from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.secret_store import SecretError, resolve_secret_status
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -1955,18 +1957,6 @@ def _nested(payload: Any, *keys: str) -> Any:
             return None
         cur = cur.get(key)
     return cur
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
 
 
 def _latest_run_auto_close_failures(latest_run_payload: dict[str, Any] | None) -> list[dict[str, Any]]:

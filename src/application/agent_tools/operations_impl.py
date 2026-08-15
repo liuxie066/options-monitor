@@ -9,6 +9,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import assigned_stock_event_log, ledger_store_payload
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trade_time_format import add_trade_time_beijing
+from src.application.payload_helpers import as_dict as _dict
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:
@@ -55,10 +56,6 @@ def _scalar_text(value: Any, *, default: str = "") -> str:
 def _optional_text(value: Any) -> str | None:
     text = _scalar_text(value)
     return text or None
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
 
 
 def _bool_flag(value: Any) -> bool:

@@ -11,6 +11,8 @@ from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.renderer import render_pending_operations
 from src.application.assistant.turn_result import copilot_events_from_response_data, copilot_trace_from_response_data
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 
 OPERATION_TIMELINE_SCHEMA_VERSION = "operation-timeline-v1"
@@ -908,10 +910,6 @@ def _loads(value: Any) -> dict[str, Any]:
     return _dict(decoded)
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
 def _nested(payload: Any, *keys: str) -> Any:
     cur = payload
     for key in keys:
@@ -919,14 +917,6 @@ def _nested(payload: Any, *keys: str) -> Any:
             return None
         cur = cur.get(key)
     return cur
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
 
 
 def _string_list(values: Any) -> list[str]:

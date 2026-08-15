@@ -10,6 +10,7 @@ from src.application.channels.feishu_reply_renderer import (
     sanitize_feishu_markdown,
     truncate_feishu_markdown,
 )
+from src.application.payload_helpers import text_sha256 as _sha256
 
 
 FEISHU_NOTIFICATION_ENVELOPE_SCHEMA_VERSION = "feishu-proactive-notification.v1"
@@ -164,10 +165,6 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _sha256(value: str) -> str:
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 __all__ = [

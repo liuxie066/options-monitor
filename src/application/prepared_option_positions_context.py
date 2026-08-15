@@ -36,6 +36,11 @@ from src.application.tick_run_workspace import (
     write_account_run_state_bytes_once_safely,
 )
 from src.infrastructure.exchange_rates import exchange_rate_observation_status
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: PreparedOptionPositionsContextError(m))
 
 
 PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA = (
@@ -729,13 +734,6 @@ def _json_bytes(payload: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise PreparedOptionPositionsContextError(f"{field} is required")
-    return text
 
 
 def _required_sha256(value: Any, field: str) -> str:

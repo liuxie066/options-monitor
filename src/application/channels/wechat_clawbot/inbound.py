@@ -47,6 +47,8 @@ from src.application.channels.wechat_clawbot.state_store import WechatClawbotSta
 from src.application.conversation_scope import wechat_window_conversation_id
 from src.application.copilot.host_store import CopilotHostStore
 from src.infrastructure.io_utils import utc_now
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -1156,14 +1158,6 @@ def _normalize_config_key(value: str | None) -> str | None:
     return text
 
 
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
-
-
 def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any]:
     from src.application.assistant.config_loader import load_assistant_config
 
@@ -1255,7 +1249,3 @@ def _single_instance_lock(lock_path: str | os.PathLike[str] | None) -> Any:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return cast(dict[str, Any], value) if isinstance(value, dict) else {}

@@ -10,6 +10,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.payload_helpers import required_text
+
+
+_required_text = required_text
 
 
 # Persisted quote receipts predate the Close Advice simplification. Keep the
@@ -291,13 +295,6 @@ def _source_kind(value: Any) -> str:
     if kind != "quotes":
         raise ValueError(f"unsupported source kind: {value}")
     return kind
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError(f"{field} is required")
-    return text
 
 
 def _optional_text(value: Any, field: str) -> str | None:

@@ -4,6 +4,7 @@ from typing import Any, Callable, cast
 
 from src.application.assistant.capability_catalog import command_help_text
 from src.application.assistant.contracts import ControlCommand
+from src.application.payload_helpers import as_dict as _dict
 
 
 HELP_TEXT = command_help_text()
@@ -1514,10 +1515,6 @@ def _run_id_from_path(path: Any) -> str | None:
     if not text:
         return None
     return text.rstrip("/").split("/")[-1] or text
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 def _list(value: Any) -> list[Any]:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.operation_signature import require_operation_hmac_key
 from src.application.settings import build_effective_env
+from src.application.payload_helpers import positive_int_or as _positive_int
 
 
 DEFAULT_CONFIRM_TTL_SECONDS = 600
@@ -175,14 +176,6 @@ def _enforce_base_write_allowed(
 
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _positive_int(value: str | None, *, default: int) -> int:
-    try:
-        parsed = int(str(value or "").strip())
-    except Exception:
-        return default
-    return parsed if parsed > 0 else default
 
 
 def _parse_sender_entries(value: str | None) -> tuple[str, ...]:

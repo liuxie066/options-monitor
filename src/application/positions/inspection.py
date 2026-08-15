@@ -21,6 +21,7 @@ from src.application.ledger.api import (
     trade_event_log,
 )
 from src.application.trade_time_format import format_trade_time_beijing
+from src.application.payload_helpers import optional_text as _optional_text
 
 
 __all__ = ["build_lot_event_history", "inspect_projection_state"]
@@ -38,11 +39,6 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _optional_text(value: object) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _identity_matches_payload(

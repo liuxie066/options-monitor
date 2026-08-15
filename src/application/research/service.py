@@ -10,6 +10,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.research.checks import run_deterministic_checks
 from src.application.research.evidence import collect_evidence, redacted_evidence
 from src.application.settings.effective import parse_env_file
+from src.application.payload_helpers import as_dict as _dict
 
 
 SCHEMA_VERSION = "research.v1"
@@ -651,10 +652,6 @@ def _resolve_output_path(value: Any, *, base: Path, default: Path) -> Path:
             details={"path": _relative(path, base=base)},
         ) from exc
     return path
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 def _nested(payload: Any, *keys: str) -> Any:

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any
+from src.application.payload_helpers import first_text
+from functools import partial
+
+
+_first_text = partial(first_text, default="")
 
 
 def normalize_conversation_scope(
@@ -68,14 +73,6 @@ def _route_target_key(target: str) -> str:
         parts = [part for part in text.split(":") if part]
         return parts[-1] if parts else text
     return text
-
-
-def _first_text(*values: Any) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return ""
 
 
 __all__ = [
