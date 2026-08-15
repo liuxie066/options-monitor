@@ -10,6 +10,9 @@ CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
 ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
 STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
 RESEARCH_MODULE = ROOT / "src/application/strategy_lab/top1/research.py"
+RESEARCH_RUNNER_MODULE = (
+    ROOT / "src/application/strategy_lab/top1/research_runner.py"
+)
 RECOMMENDATION_POINT_MODULE = ROOT / "src/application/recommendation_point.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
 EXPERIMENT_STORE_MODULE = (
@@ -193,6 +196,27 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.strategy_lab.top1.lifecycle",
         "src.application.strategy_lab.top1.ranking",
         "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+
+    assert _imports(RESEARCH_RUNNER_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "json",
+        "math",
+        "re",
+        "collections.abc",
+        "pathlib",
+        "typing",
+        "src.application.opend_call_coordinator",
+        "src.application.opend_fetch_config",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.lifecycle",
+        "src.application.strategy_lab.top1.research",
+        "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.futu_gateway",
         "src.infrastructure.private_storage",
         "src.infrastructure.strategy_lab.experiment_store",
     }
