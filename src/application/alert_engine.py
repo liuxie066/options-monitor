@@ -662,14 +662,14 @@ def _numeric_sort_desc(value: object) -> float:
         return float("inf")
 
 
-def _alert_row_sort_key(row: pd.Series) -> tuple[object, ...]:
+def _alert_row_sort_key(row: dict[str, Any]) -> tuple[object, ...]:
     strategy = canonical_strategy_id(str(row.get('strategy') or ''))
     symbol = str(row.get('symbol') or '').strip().upper()
     contract = str(row.get('top_contract') or '').strip()
     if strategy == STRATEGY_YIELD_ENHANCEMENT:
         return (
             _ALERT_STRATEGY_ORDER.get(strategy, 99),
-            *yield_enhancement_rank_key(row.to_dict()),
+            *yield_enhancement_rank_key(row),
         )
     return (
         _ALERT_STRATEGY_ORDER.get(strategy, 99),
@@ -692,7 +692,7 @@ def build_alert_text(summary: pd.DataFrame, *, symbol_display_map: dict[str, str
     medium_rows: list[tuple[tuple[object, ...], str]] = []
     low_rows: list[tuple[tuple[object, ...], str]] = []
 
-    for _, row in summary.iterrows():
+    for row in summary.to_dict("records"):
         level, comment = classify_alert(row)
         if not level:
             continue
@@ -758,7 +758,7 @@ def build_changes_text(current: pd.DataFrame, previous: pd.DataFrame) -> str:
 
     if previous.empty:
         lines.append('这是第一份快照，后续运行才会开始比较变化。')
-        for _, row in current.sort_values(['symbol', 'strategy']).iterrows():
+        for row in current.sort_values(['symbol', 'strategy']).to_dict("records"):
             if int(row.get('candidate_count', 0) or 0) > 0:
                 lines.append(f"- 初始记录: {top_pick_line(row)}")
         return '\n'.join(lines) + '\n'
@@ -769,7 +769,7 @@ def build_changes_text(current: pd.DataFrame, previous: pd.DataFrame) -> str:
     merged = cur.merge(prev, on=key_cols, how='outer', suffixes=('_cur', '_prev'))
 
     changes: list[str] = []
-    for _, row in merged.sort_values(key_cols).iterrows():
+    for row in merged.sort_values(key_cols).to_dict("records"):
         symbol = row['symbol']
         strategy = row['strategy']
         cur_count = int(row.get('candidate_count_cur', 0) or 0) if not pd.isna(row.get('candidate_count_cur')) else 0

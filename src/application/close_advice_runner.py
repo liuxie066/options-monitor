@@ -230,8 +230,7 @@ def load_required_data_quotes(
         df = safe_read_csv(path)
         if df.empty:
             continue
-        for _, row0 in df.iterrows():
-            row = row0.to_dict()
+        for row in df.to_dict("records"):
             key = _quote_key(
                 row.get("symbol") or sym_from_name,
                 row.get("option_type"),
@@ -265,8 +264,7 @@ def load_required_data_coverage(
         df = safe_read_csv(path)
         if df.empty:
             continue
-        for _, row0 in df.iterrows():
-            row = row0.to_dict()
+        for row in df.to_dict("records"):
             key = _quote_key(
                 row.get("symbol") or sym_from_name,
                 row.get("option_type"),
@@ -1450,8 +1448,7 @@ def _load_frozen_required_data_quotes(
             raise RequiredDataSnapshotError(
                 f"{symbol} sealed required-data CSV is unreadable"
             ) from exc
-        for _, row0 in frame.iterrows():
-            row = row0.to_dict()
+        for row in frame.to_dict("records"):
             key = _quote_key(
                 row.get("symbol") or symbol,
                 row.get("option_type"),
