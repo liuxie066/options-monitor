@@ -106,7 +106,7 @@ freeze_research_dataset(
 
 Exact fields:
 
-- schema, `HK|US`, lowercase account, canonical trading date;
+- schema, first-release `HK`, lowercase account, canonical trading date; US remains a separately confirmed capability expansion under the parent design;
 - market-calendar version/hash and canonical schedule-config hash;
 - original `sealed_at_utc`, first target UTC, and `sealed_before_first_target`;
 - all canonical UTC `scheduled_scan_targets_market` in order;
