@@ -52,11 +52,18 @@ from src.application.notification_delivery_adapter import (
     notification_target_reference,
     select_notification_delivery_adapter,
 )
+from src.application.candidate_snapshot_contract import utc_timestamp
+from src.application.recommendation_point import (
+    RecommendationPointError,
+    capture_scheduled_recommendation_point,
+    strategy_lab_top1_available,
+)
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
     build_per_account_delivery_batch,
     execute_per_account_delivery,
 )
+from src.application.source_identity import source_commit_sha
 from src.infrastructure.io_utils import read_json, utc_now
 
 
@@ -151,6 +158,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     results_count = len(request.results)
 
     _commit_scan_targets_before_delivery(request)
+    _observe_recommendation_points_best_effort(request)
 
     if str(request.trigger_kind or "manual").strip().lower() != "scheduled":
         reason = "non_scheduled_ordinary_notification_disabled"
@@ -665,6 +673,154 @@ def _commit_scan_targets_before_delivery(request: TickNotificationRequest) -> No
             extra={"targets": targets},
         )
         raise
+
+
+def _observe_recommendation_points_best_effort(
+    request: TickNotificationRequest,
+) -> None:
+    """Capture official scheduled points without changing production control flow."""
+
+    try:
+        _observe_recommendation_points(request)
+    except Exception as exc:
+        _audit_recommendation_point(
+            request,
+            "recommendation_point_gap",
+            status="degraded",
+            reason_code="official_point_observer_failed",
+            message=str(exc),
+        )
+
+
+def _observe_recommendation_points(request: TickNotificationRequest) -> None:
+    if (
+        request.delivery_only
+        or str(request.trigger_kind or "manual").strip().lower() != "scheduled"
+        or not strategy_lab_top1_available()
+    ):
+        return
+    decisions = request.scheduler_decisions_by_account or {}
+    targets = request.scheduled_scan_targets_by_account or {}
+    eligible: list[tuple[str, Mapping[str, Any]]] = []
+    ran_accounts = dict.fromkeys(
+        str(raw_account or "").strip().lower()
+        for raw_account in request.ran_pipeline_accounts
+    )
+    for account in ran_accounts:
+        decision = decisions.get(account)
+        committed_target = _canonical_recommendation_target(targets.get(account))
+        scheduler_target = _canonical_recommendation_target(
+            decision.get("scheduled_scan_target_market")
+            if isinstance(decision, Mapping)
+            else None
+        )
+        if (
+            not account
+            or not isinstance(decision, Mapping)
+            or decision.get("should_run_scan") is not True
+            or committed_target is None
+            or scheduler_target != committed_target
+        ):
+            _audit_recommendation_point(
+                request,
+                "recommendation_point_gap",
+                status="degraded",
+                account=account or None,
+                reason_code="official_point_identity_missing",
+            )
+            continue
+        eligible.append((account, decision))
+    if not eligible:
+        return
+    source_sha = source_commit_sha((request.repo_root or request.base).resolve())
+    if source_sha is None:
+        for account, _decision in eligible:
+            _audit_recommendation_point(
+                request,
+                "recommendation_point_gap",
+                status="degraded",
+                account=account,
+                reason_code="official_point_source_unavailable",
+            )
+        return
+    for account, decision in eligible:
+        try:
+            publication, point = capture_scheduled_recommendation_point(
+                request.base,
+                request.run_id,
+                account,
+                decision,
+                source_commit_sha=source_sha,
+            )
+        except RecommendationPointError as exc:
+            _audit_recommendation_point(
+                request,
+                "recommendation_point_gap",
+                status="degraded",
+                account=account,
+                reason_code=exc.reason_code,
+                message=str(exc),
+            )
+            continue
+        except Exception as exc:
+            _audit_recommendation_point(
+                request,
+                "recommendation_point_gap",
+                status="degraded",
+                account=account,
+                reason_code="official_point_observer_failed",
+                message=str(exc),
+            )
+            continue
+        _audit_recommendation_point(
+            request,
+            "recommendation_point_captured",
+            status="ok",
+            account=account,
+            publication=publication,
+            recommendation_point_id=point.get("recommendation_point_id"),
+        )
+
+
+def _canonical_recommendation_target(value: Any) -> str | None:
+    try:
+        return utc_timestamp(value, "scheduled_scan_target_market")
+    except Exception:
+        return None
+
+
+def _audit_recommendation_point(
+    request: TickNotificationRequest,
+    action: str,
+    *,
+    status: str,
+    account: str | None = None,
+    reason_code: str | None = None,
+    message: str | None = None,
+    publication: str | None = None,
+    recommendation_point_id: Any = None,
+) -> None:
+    extra = {
+        key: value
+        for key, value in {
+            "account": account,
+            "reason_code": reason_code,
+            "publication": publication,
+            "recommendation_point_id": recommendation_point_id,
+        }.items()
+        if value is not None
+    }
+    try:
+        request.audit_helper.audit(
+            "strategy_lab",
+            action,
+            run_id=request.run_id,
+            status=status,
+            message=message,
+            extra=extra,
+        )
+    except Exception:
+        return
 
 
 def _daily_brief_limits(config: dict[str, Any]) -> dict[str, Any]:
