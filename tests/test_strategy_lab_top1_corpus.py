@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+import shutil
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +18,18 @@ from src.application.recommendation_point import (
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.strategy_lab.top1.corpus import (
     CORPUS_COMMAND_RESULT_SCHEMA,
+    CORPUS_STATUS_SCHEMA,
+    DATASET_FREEZE_RESULT_SCHEMA,
+    RESEARCH_WINDOW_FACTS_SCHEMA,
+    SEALED_HISTORICAL_DATASET_SCHEMA,
     CorpusError,
     capture_recommendation_point,
+    freeze_research_dataset,
+    read_corpus_status,
     seal_day_expectation,
 )
 from src.application.strategy_lab.top1.lifecycle import set_account_opt_in
+from src.application.strategy_lab.top1.ranking import Top1RankingError
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
@@ -36,6 +45,19 @@ def _schedule(*, start_plus_min: int = 10, enabled: bool = True) -> dict[str, An
         "timezone": "Asia/Hong_Kong",
         "run_window": {"start": "09:50", "end": "10:10"},
         "run_points": {"start_plus_min": start_plus_min},
+    }
+
+
+def _multi_point_schedule() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "run_window": {"start": "09:30", "end": "10:20"},
+        "run_points": {
+            "start_plus_min": 10,
+            "hourly_minute": 0,
+            "end_minus_min": 10,
+        },
     }
 
 
@@ -84,12 +106,17 @@ def _enable(store: ExperimentStore, artifact_root: Path) -> None:
     )
 
 
-def _target_for(day: str, *, minute: int = 0) -> str:
-    return f"{day}T10:{minute:02d}:00+08:00"
+def _target_for(day: str, *, hour: int = 10, minute: int = 0) -> str:
+    return f"{day}T{hour:02d}:{minute:02d}:00+08:00"
 
 
-def _scheduler(day: str, *, minute: int = 0) -> dict[str, Any]:
-    target = datetime.fromisoformat(_target_for(day, minute=minute))
+def _scheduler(
+    day: str,
+    *,
+    hour: int = 10,
+    minute: int = 0,
+) -> dict[str, Any]:
+    target = datetime.fromisoformat(_target_for(day, hour=hour, minute=minute))
     now_utc = target.astimezone(timezone.utc) + timedelta(seconds=30)
     return {
         "should_run_scan": True,
@@ -103,6 +130,7 @@ def _publish_source_point(
     *,
     run_id: str,
     day: str,
+    hour: int = 10,
     minute: int = 0,
     accepted: bool = True,
     rejected: bool = False,
@@ -118,7 +146,7 @@ def _publish_source_point(
         source_root,
         run_id,
         "lx",
-        _scheduler(day, minute=minute),
+        _scheduler(day, hour=hour, minute=minute),
         source_commit_sha=SOURCE_SHA,
     )
     assert publication == "published"
@@ -148,6 +176,52 @@ def _seal(
         sealed_at_utc=sealed_at or f"{day}T01:00:00Z",
         environ=AVAILABLE,
     )
+
+
+def _trading_days(start: str, count: int) -> list[str]:
+    current = date.fromisoformat(start)
+    days: list[str] = []
+    while len(days) < count:
+        if current.weekday() < 5:
+            days.append(current.isoformat())
+        current += timedelta(days=1)
+    return days
+
+
+def _window_facts(
+    days: list[str],
+    *,
+    latest_mature_trading_date: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": RESEARCH_WINDOW_FACTS_SCHEMA,
+        "market": "HK",
+        "account": "lx",
+        "cutoff_at_utc": f"{days[-1]}T08:00:00Z",
+        "cutoff_trading_date": days[-1],
+        "market_calendar_version": "hk-calendar.fixture.v1",
+        "market_calendar_ref": "evidence/hk-calendar.fixture.json",
+        "market_calendar_sha256": CALENDAR_HASH,
+        "trading_calendar_dates": days,
+        "trading_calendar_dates_sha256": canonical_sha256(days),
+        "latest_mature_trading_date": (
+            days[-1]
+            if latest_mature_trading_date is None
+            else latest_mature_trading_date
+        ),
+        "maturity_evidence_ref": "evidence/hk-maturity.fixture.json",
+        "maturity_evidence_sha256": "b" * 64,
+        "recommendation_point_selector": "official_scheduled_sell_put.v1",
+    }
+    payload["content_sha256"] = canonical_sha256(payload)
+    return payload
+
+
+def _rehash(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["content_sha256"] = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "content_sha256"}
+    )
+    return payload
 
 
 def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> None:
@@ -450,6 +524,35 @@ def test_capture_rejects_missing_late_and_unexpected_denominators(
     ) is None
 
 
+def test_capture_rejects_a_timestamp_before_the_official_decision(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    _enable(store, artifact_root)
+    day = "2026-07-21"
+    _seal(store, artifact_root, day=day)
+    point_ref, point = _publish_source_point(
+        source_root,
+        run_id="capture-before-decision",
+        day=day,
+    )
+
+    with pytest.raises(CorpusError) as raised:
+        capture_recommendation_point(
+            store,
+            source_root,
+            artifact_root,
+            point_ref=point_ref,
+            trading_date=day,
+            captured_at_utc="2026-07-21T02:00:00Z",
+            environ=AVAILABLE,
+        )
+    assert raised.value.reason_code == "corpus_input_invalid"
+    assert store.corpus_point("HK", "lx", point["recommendation_point_id"]) is None
+
+
 def test_no_candidate_and_incomplete_points_are_durable_terminal_facts(
     tmp_path: Path,
 ) -> None:
@@ -604,3 +707,387 @@ def test_missing_or_invalid_opening_snapshot_is_recorded_not_evaluable(
     assert store.corpus_point(
         "HK", "lx", conflict_point["recommendation_point_id"]
     )["reason_code"] == "opening_snapshot_conflict"
+
+
+def test_status_counts_clean_not_evaluable_conflicting_and_missing(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    _enable(store, artifact_root)
+
+    _seal(
+        store,
+        artifact_root,
+        day="2026-07-21",
+        sealed_at="2026-07-21T02:00:00Z",
+    )
+    _seal(store, artifact_root, day="2026-07-22")
+    partial_ref, partial_point = _publish_source_point(
+        source_root,
+        run_id="status-partial",
+        day="2026-07-22",
+    )
+    partial_point["terminal_sell_put_status"] = "partial_data"
+    partial_point["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in partial_point.items()
+            if key != "content_sha256"
+        }
+    )
+    (source_root / partial_ref).write_text(
+        json.dumps(
+            partial_point,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=partial_ref,
+        trading_date="2026-07-22",
+        captured_at_utc="2026-07-22T02:01:00Z",
+        environ=AVAILABLE,
+    )
+    _seal(store, artifact_root, day="2026-07-23")
+    _seal(
+        store,
+        artifact_root,
+        day="2026-07-23",
+        schedule=_schedule(start_plus_min=5),
+    )
+
+    assert read_corpus_status(store, market="HK", account="lx") == {
+        "schema_version": CORPUS_STATUS_SCHEMA,
+        "market": "HK",
+        "account": "lx",
+        "days_total": 3,
+        "days_on_time": 1,
+        "days_not_evaluable": 1,
+        "days_conflicting": 1,
+        "expected_points_total": 3,
+        "points_captured": 0,
+        "points_not_evaluable": 1,
+        "points_conflicting": 0,
+        "points_missing": 2,
+        "earliest_trading_date": "2026-07-21",
+        "latest_trading_date": "2026-07-23",
+        "ranking_projection_schema_version": "sell_put_ranking_projection.v1",
+    }
+
+
+def test_freeze_exact_40_days_survives_source_deletion_and_never_falls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    _enable(store, artifact_root)
+    all_days = _trading_days("2026-01-05", 41)
+    first_window = all_days[:40]
+    for index, trading_date in enumerate(first_window):
+        targets = [(9, 40), (10, 0), (10, 10)] if index == 0 else [(10, 0)]
+        assert _seal(
+            store,
+            artifact_root,
+            day=trading_date,
+            schedule=_multi_point_schedule() if index == 0 else _schedule(),
+        )["status"] == "published"
+        for hour, minute in targets:
+            point_ref, _point = _publish_source_point(
+                source_root,
+                run_id=f"freeze-{index:02d}-{hour:02d}{minute:02d}",
+                day=trading_date,
+                hour=hour,
+                minute=minute,
+                accepted=False,
+            )
+            target = datetime.fromisoformat(
+                _target_for(trading_date, hour=hour, minute=minute)
+            )
+            captured_at = (target.astimezone(timezone.utc) + timedelta(minutes=1))
+            captured = capture_recommendation_point(
+                store,
+                source_root,
+                artifact_root,
+                point_ref=point_ref,
+                trading_date=trading_date,
+                captured_at_utc=captured_at.isoformat().replace("+00:00", "Z"),
+                environ=AVAILABLE,
+            )
+            assert captured["status"] == "published"
+
+    status = read_corpus_status(store, market="HK", account="lx")
+    assert status == {
+        "schema_version": CORPUS_STATUS_SCHEMA,
+        "market": "HK",
+        "account": "lx",
+        "days_total": 40,
+        "days_on_time": 40,
+        "days_not_evaluable": 0,
+        "days_conflicting": 0,
+        "expected_points_total": 42,
+        "points_captured": 42,
+        "points_not_evaluable": 0,
+        "points_conflicting": 0,
+        "points_missing": 0,
+        "earliest_trading_date": first_window[0],
+        "latest_trading_date": first_window[-1],
+        "ranking_projection_schema_version": "sell_put_ranking_projection.v1",
+    }
+
+    facts = _window_facts(first_window)
+    frozen = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=facts,
+        environ=AVAILABLE,
+    )
+    assert frozen["schema_version"] == DATASET_FREEZE_RESULT_SCHEMA
+    assert set(frozen) == {
+        "schema_version",
+        "status",
+        "reason_code",
+        "market",
+        "account",
+        "window_facts_content_sha256",
+        "selected_trading_dates",
+        "dataset_ref",
+        "dataset_sha256",
+        "dataset_content_sha256",
+    }
+    assert (frozen["status"], frozen["reason_code"]) == ("ready", None)
+    assert frozen["selected_trading_dates"] == first_window
+    dataset_path = artifact_root / str(frozen["dataset_ref"])
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    assert dataset["schema_version"] == SEALED_HISTORICAL_DATASET_SCHEMA
+    assert dataset["selected_trading_dates"] == first_window
+    assert [item["trading_date"] for item in dataset["days"]] == first_window
+    assert [len(item["points"]) for item in dataset["days"]] == [3] + [1] * 39
+    assert "candidates" not in json.dumps(dataset)
+    assert dataset["content_sha256"] == canonical_sha256(
+        {key: value for key, value in dataset.items() if key != "content_sha256"}
+    )
+
+    shutil.rmtree(source_root / "output_runs")
+    repeated = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=facts,
+        environ=AVAILABLE,
+    )
+    assert repeated == frozen
+
+    too_early_cutoff = json.loads(json.dumps(facts))
+    too_early_cutoff["cutoff_at_utc"] = f"{first_window[-1]}T00:30:00Z"
+    _rehash(too_early_cutoff)
+    cutoff_blocked = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=too_early_cutoff,
+        environ=AVAILABLE,
+    )
+    assert (cutoff_blocked["reason_code"], cutoff_blocked["dataset_ref"]) == (
+        "research_dataset_coverage_missing",
+        None,
+    )
+
+    first_point = store.corpus_points(
+        "HK", "lx", trading_date=first_window[0]
+    )[0]
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE strategy_lab_corpus_points "
+            "SET ranking_projection_schema_version = ? "
+            "WHERE market = ? AND account = ? AND recommendation_point_id = ?",
+            (
+                "sell_put_ranking_projection.v0",
+                "HK",
+                "lx",
+                first_point["recommendation_point_id"],
+            ),
+        )
+    assert freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=facts,
+        environ=AVAILABLE,
+    )["reason_code"] == "research_dataset_coverage_missing"
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE strategy_lab_corpus_points "
+            "SET ranking_projection_schema_version = ? "
+            "WHERE market = ? AND account = ? AND recommendation_point_id = ?",
+            (
+                "sell_put_ranking_projection.v1",
+                "HK",
+                "lx",
+                first_point["recommendation_point_id"],
+            ),
+        )
+
+    calendar_drift = json.loads(json.dumps(facts))
+    calendar_drift["market_calendar_version"] = "hk-calendar.fixture.v2"
+    calendar_drift["market_calendar_sha256"] = "f" * 64
+    _rehash(calendar_drift)
+    assert freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=calendar_drift,
+        environ=AVAILABLE,
+    )["reason_code"] == "research_dataset_coverage_missing"
+
+    with monkeypatch.context() as patcher:
+        def _parity_failure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise Top1RankingError(
+                "baseline_rank_parity_mismatch", "fixture parity mismatch"
+            )
+
+        patcher.setattr(
+            "src.application.strategy_lab.top1.corpus.rerank_recommendation_point",
+            _parity_failure,
+        )
+        assert freeze_research_dataset(
+            store,
+            artifact_root,
+            window_facts=facts,
+            environ=AVAILABLE,
+        )["reason_code"] == "research_dataset_coverage_missing"
+
+    latest_day = all_days[-1]
+    assert _seal(store, artifact_root, day=latest_day)["status"] == "published"
+    latest_facts = _window_facts(all_days)
+    latest_gap = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=latest_facts,
+        environ=AVAILABLE,
+    )
+    assert latest_gap["selected_trading_dates"] == all_days[1:]
+    assert (latest_gap["status"], latest_gap["reason_code"]) == (
+        "blocked",
+        "research_dataset_coverage_missing",
+    )
+    assert latest_gap["dataset_ref"] is None
+
+    tampered_point = store.corpus_points(
+        "HK", "lx", trading_date=all_days[1]
+    )[0]
+    (artifact_root / str(tampered_point["projection_ref"])).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    conflict = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=latest_facts,
+        environ=AVAILABLE,
+    )
+    assert (conflict["status"], conflict["reason_code"]) == (
+        "blocked",
+        "research_corpus_conflict",
+    )
+
+
+def test_freeze_validates_window_facts_feature_gate_and_warming(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    days = _trading_days("2026-01-05", 39)
+    facts = _window_facts(days)
+
+    invalid_required_days_values: list[Any] = [True, 1, 39, 40.0, 41, "40"]
+    for invalid_required_days in invalid_required_days_values:
+        with pytest.raises(CorpusError) as raised:
+            freeze_research_dataset(
+                store,
+                artifact_root,
+                window_facts=facts,
+                required_days=invalid_required_days,
+                environ=AVAILABLE,
+            )
+        assert raised.value.reason_code == "corpus_input_invalid"
+
+    feature_off = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=facts,
+        environ=AVAILABLE,
+    )
+    assert (feature_off["status"], feature_off["reason_code"]) == (
+        "blocked",
+        "feature_disabled",
+    )
+    assert not (artifact_root / "strategy_lab/top1/corpus").exists()
+
+    _enable(store, artifact_root)
+    warming = freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=facts,
+        environ=AVAILABLE,
+    )
+    assert (warming["status"], warming["reason_code"]) == (
+        "blocked",
+        "research_corpus_warming",
+    )
+
+    invalid_payloads: list[dict[str, Any]] = []
+    extra_key = json.loads(json.dumps(facts))
+    extra_key["unexpected"] = True
+    invalid_payloads.append(extra_key)
+    unsafe_ref = json.loads(json.dumps(facts))
+    unsafe_ref["market_calendar_ref"] = "../calendar.json"
+    invalid_payloads.append(_rehash(unsafe_ref))
+    unordered = json.loads(json.dumps(facts))
+    unordered["trading_calendar_dates"][0:2] = reversed(
+        unordered["trading_calendar_dates"][0:2]
+    )
+    unordered["trading_calendar_dates_sha256"] = canonical_sha256(
+        unordered["trading_calendar_dates"]
+    )
+    invalid_payloads.append(_rehash(unordered))
+    bad_cutoff = json.loads(json.dumps(facts))
+    bad_cutoff["cutoff_trading_date"] = "2025-12-31"
+    invalid_payloads.append(_rehash(bad_cutoff))
+    bad_mature = json.loads(json.dumps(facts))
+    bad_mature["latest_mature_trading_date"] = "2025-12-31"
+    invalid_payloads.append(_rehash(bad_mature))
+    bad_selector = json.loads(json.dumps(facts))
+    bad_selector["recommendation_point_selector"] = "other.v1"
+    invalid_payloads.append(_rehash(bad_selector))
+    bad_dates_hash = json.loads(json.dumps(facts))
+    bad_dates_hash["trading_calendar_dates_sha256"] = "d" * 64
+    invalid_payloads.append(_rehash(bad_dates_hash))
+    bad_content_hash = json.loads(json.dumps(facts))
+    bad_content_hash["content_sha256"] = "e" * 64
+    invalid_payloads.append(bad_content_hash)
+
+    for invalid in invalid_payloads:
+        with pytest.raises(CorpusError) as raised:
+            freeze_research_dataset(
+                store,
+                artifact_root,
+                window_facts=invalid,
+                environ=AVAILABLE,
+            )
+        assert raised.value.reason_code == "corpus_input_invalid"
+
+    no_mature = json.loads(json.dumps(_window_facts(_trading_days("2026-01-05", 40))))
+    no_mature["latest_mature_trading_date"] = None
+    _rehash(no_mature)
+    assert freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=no_mature,
+        environ=AVAILABLE,
+    )["reason_code"] == "research_corpus_warming"

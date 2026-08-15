@@ -31,8 +31,11 @@ from src.application.strategy_lab.top1.lifecycle import (
     effective_feature_status,
 )
 from src.application.strategy_lab.top1.ranking import (
+    RANKING_PROJECTION_SCHEMA_VERSION,
     Top1RankingError,
     build_ranking_projection,
+    rerank_recommendation_point,
+    validate_ranking_projection,
 )
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
 from src.infrastructure.private_storage import open_private_text, private_path
@@ -44,6 +47,11 @@ from src.infrastructure.strategy_lab.experiment_store import (
 
 CORPUS_DAY_EXPECTATION_SCHEMA = "corpus_day_expectation.v1"
 CORPUS_COMMAND_RESULT_SCHEMA = "sell_put_top1_corpus_command_result.v1"
+CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
+RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
+SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
+DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
+RECOMMENDATION_POINT_SELECTOR = "official_scheduled_sell_put.v1"
 
 _EXPECTATION_FIELDS = frozenset(
     {
@@ -59,6 +67,25 @@ _EXPECTATION_FIELDS = frozenset(
         "sealed_before_first_target",
         "scheduled_scan_targets_market",
         "expected_recommendation_point_ids",
+        "content_sha256",
+    }
+)
+_WINDOW_FACT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "market",
+        "account",
+        "cutoff_at_utc",
+        "cutoff_trading_date",
+        "market_calendar_version",
+        "market_calendar_ref",
+        "market_calendar_sha256",
+        "trading_calendar_dates",
+        "trading_calendar_dates_sha256",
+        "latest_mature_trading_date",
+        "maturity_evidence_ref",
+        "maturity_evidence_sha256",
+        "recommendation_point_selector",
         "content_sha256",
     }
 )
@@ -137,6 +164,16 @@ def _hash(value: object, label: str) -> str:
     return text
 
 
+def _relative_ref(value: object, label: str) -> str:
+    text = _text(value, label)
+    parts = text.split("/")
+    if text.startswith("/") or "\\" in text or any(
+        part in {"", ".", ".."} for part in parts
+    ):
+        _fail("corpus_input_invalid", f"{label} must be a safe relative POSIX path")
+    return text
+
+
 def _expectation_ref(market: str, account: str, trading_date: str) -> str:
     return (
         f"strategy_lab/top1/corpus/{market.lower()}/{account}/days/"
@@ -146,6 +183,13 @@ def _expectation_ref(market: str, account: str, trading_date: str) -> str:
 
 def _projection_ref(market: str, account: str, point_id: str) -> str:
     return f"strategy_lab/top1/corpus/{market.lower()}/{account}/points/{point_id}.json"
+
+
+def _dataset_ref(market: str, account: str, content_sha256: str) -> str:
+    return (
+        f"strategy_lab/top1/corpus/{market.lower()}/{account}/datasets/"
+        f"{content_sha256}.json"
+    )
 
 
 def _render(payload: dict[str, Any]) -> bytes:
@@ -681,6 +725,8 @@ def capture_recommendation_point(
     market, account = _identity(point["market"], point["account"])
     if point["run_id"] != run_id or account != account_from_ref:
         _fail("corpus_artifact_invalid", "point ref and body identity do not match")
+    if _before(captured_at, str(point["decision_at_utc"])):
+        _fail("corpus_input_invalid", "captured_at_utc cannot precede decision_at_utc")
     if not _feature_enabled(
         store, market=market, account=account, environ=environ
     ):
@@ -894,10 +940,436 @@ def capture_recommendation_point(
     )
 
 
+def _validate_window_facts(window_facts: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(window_facts, Mapping):
+        _fail("corpus_input_invalid", "window_facts must be an object")
+    item = dict(window_facts)
+    if set(item) != _WINDOW_FACT_FIELDS:
+        _fail("corpus_input_invalid", "window_facts keys are invalid")
+    if item["schema_version"] != RESEARCH_WINDOW_FACTS_SCHEMA:
+        _fail("corpus_input_invalid", "window_facts schema is invalid")
+    market, account = _identity(item["market"], item["account"])
+    cutoff_at = _timestamp(item["cutoff_at_utc"], "cutoff_at_utc")
+    cutoff_day = _trading_date(item["cutoff_trading_date"])
+    calendar_version = _text(
+        item["market_calendar_version"], "market_calendar_version"
+    )
+    calendar_ref = _relative_ref(item["market_calendar_ref"], "market_calendar_ref")
+    calendar_hash = _hash(
+        item["market_calendar_sha256"], "market_calendar_sha256"
+    )
+    raw_dates = item["trading_calendar_dates"]
+    if not isinstance(raw_dates, list) or not raw_dates:
+        _fail(
+            "corpus_input_invalid",
+            "trading_calendar_dates must be a non-empty list",
+        )
+    dates = [_trading_date(value) for value in raw_dates]
+    if dates != sorted(set(dates)):
+        _fail(
+            "corpus_input_invalid",
+            "trading_calendar_dates must be strictly increasing and unique",
+        )
+    if dates[-1] != cutoff_day:
+        _fail(
+            "corpus_input_invalid",
+            "trading_calendar_dates must end at cutoff_trading_date",
+        )
+    dates_hash = _hash(
+        item["trading_calendar_dates_sha256"],
+        "trading_calendar_dates_sha256",
+    )
+    if dates_hash != canonical_sha256(dates):
+        _fail(
+            "corpus_input_invalid",
+            "trading_calendar_dates_sha256 does not match",
+        )
+    latest_mature = item["latest_mature_trading_date"]
+    if latest_mature is not None:
+        latest_mature = _trading_date(latest_mature)
+        if latest_mature not in dates:
+            _fail(
+                "corpus_input_invalid",
+                "latest_mature_trading_date must be in trading_calendar_dates",
+            )
+    maturity_ref = _relative_ref(
+        item["maturity_evidence_ref"], "maturity_evidence_ref"
+    )
+    maturity_hash = _hash(
+        item["maturity_evidence_sha256"], "maturity_evidence_sha256"
+    )
+    if item["recommendation_point_selector"] != RECOMMENDATION_POINT_SELECTOR:
+        _fail("corpus_input_invalid", "recommendation_point_selector is invalid")
+    content_hash = _hash(item["content_sha256"], "content_sha256")
+    if canonical_sha256(
+        {key: value for key, value in item.items() if key != "content_sha256"}
+    ) != content_hash:
+        _fail("corpus_input_invalid", "window_facts content_sha256 does not match")
+    return {
+        **item,
+        "market": market,
+        "account": account,
+        "cutoff_at_utc": cutoff_at,
+        "cutoff_trading_date": cutoff_day,
+        "market_calendar_version": calendar_version,
+        "market_calendar_ref": calendar_ref,
+        "market_calendar_sha256": calendar_hash,
+        "trading_calendar_dates": dates,
+        "trading_calendar_dates_sha256": dates_hash,
+        "latest_mature_trading_date": latest_mature,
+        "maturity_evidence_ref": maturity_ref,
+        "maturity_evidence_sha256": maturity_hash,
+        "content_sha256": content_hash,
+    }
+
+
+def _read_indexed_projection(
+    artifact_root: str | Path,
+    row: Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    point_id = str(row["recommendation_point_id"])
+    ref = row["projection_ref"]
+    if ref != _projection_ref(str(row["market"]), str(row["account"]), point_id):
+        _fail("corpus_artifact_invalid", "ranking projection ref is invalid")
+    path = private_path(artifact_root).joinpath(*str(ref).split("/"))
+    try:
+        with open_private_text(path) as handle:
+            content = handle.read().encode("utf-8")
+        payload = json.loads(content.decode("utf-8"))
+        item = validate_ranking_projection(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, Top1RankingError) as exc:
+        raise CorpusError(
+            "corpus_artifact_invalid", "ranking projection artifact is invalid"
+        ) from exc
+    if content != _render(item):
+        _fail("corpus_artifact_invalid", "ranking projection bytes are not canonical")
+    expected = {
+        "schema_version": row["ranking_projection_schema_version"],
+        "market": row["market"],
+        "account": row["account"],
+        "recommendation_point_id": point_id,
+        "run_id": row["source_run_id"],
+        "opening_snapshot_ref": row["opening_snapshot_ref"],
+        "opening_snapshot_sha256": row["opening_snapshot_sha256"],
+    }
+    if any(item[key] != value for key, value in expected.items()):
+        _fail("corpus_artifact_invalid", "ranking projection index binding does not match")
+    if (
+        item["artifact_provenance"]["content_sha256"]
+        != row["projection_content_sha256"]
+        or _file_sha256(content) != row["projection_file_sha256"]
+    ):
+        _fail("corpus_artifact_invalid", "ranking projection hashes do not match")
+    return item, content
+
+
+def read_corpus_status(
+    store: ExperimentStore,
+    *,
+    market: str,
+    account: str,
+) -> dict[str, Any]:
+    market, account = _identity(market, account)
+    days = _store_call(store.corpus_days, market, account)
+    points = _store_call(store.corpus_points, market, account)
+    clean_days = [row for row in days if row["conflict_status"] == "clean"]
+    clean_points = [row for row in points if row["conflict_status"] == "clean"]
+    expected_points = sum(int(row["expected_point_count"]) for row in days)
+    return {
+        "schema_version": CORPUS_STATUS_SCHEMA,
+        "market": market,
+        "account": account,
+        "days_total": len(days),
+        "days_on_time": sum(
+            row["completeness_reason"] is None for row in clean_days
+        ),
+        "days_not_evaluable": sum(
+            row["completeness_reason"] is not None for row in clean_days
+        ),
+        "days_conflicting": len(days) - len(clean_days),
+        "expected_points_total": expected_points,
+        "points_captured": sum(
+            row["capture_status"] == "captured" for row in clean_points
+        ),
+        "points_not_evaluable": sum(
+            row["capture_status"] == "not_evaluable" for row in clean_points
+        ),
+        "points_conflicting": len(points) - len(clean_points),
+        "points_missing": max(expected_points - len(points), 0),
+        "earliest_trading_date": days[0]["trading_date"] if days else None,
+        "latest_trading_date": days[-1]["trading_date"] if days else None,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+    }
+
+
+def _freeze_result(
+    facts: Mapping[str, Any],
+    *,
+    status: str,
+    reason_code: str | None,
+    selected_dates: list[str],
+    dataset_ref: str | None = None,
+    dataset_sha256: str | None = None,
+    dataset_content_sha256: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": DATASET_FREEZE_RESULT_SCHEMA,
+        "status": status,
+        "reason_code": reason_code,
+        "market": facts["market"],
+        "account": facts["account"],
+        "window_facts_content_sha256": facts["content_sha256"],
+        "selected_trading_dates": selected_dates,
+        "dataset_ref": dataset_ref,
+        "dataset_sha256": dataset_sha256,
+        "dataset_content_sha256": dataset_content_sha256,
+    }
+
+
+def freeze_research_dataset(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    window_facts: Mapping[str, Any],
+    required_days: int = 40,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    if (
+        isinstance(required_days, bool)
+        or not isinstance(required_days, int)
+        or required_days != 40
+    ):
+        _fail("corpus_input_invalid", "required_days must equal 40")
+    facts = _validate_window_facts(window_facts)
+    market = str(facts["market"])
+    account = str(facts["account"])
+    if not _feature_enabled(
+        store, market=market, account=account, environ=environ
+    ):
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="feature_disabled",
+            selected_dates=[],
+        )
+
+    dates = list(facts["trading_calendar_dates"])
+    latest_mature = facts["latest_mature_trading_date"]
+    if latest_mature is None:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_corpus_warming",
+            selected_dates=[],
+        )
+    mature_index = dates.index(latest_mature)
+    if mature_index + 1 < required_days:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_corpus_warming",
+            selected_dates=[],
+        )
+    selected_dates = dates[mature_index - required_days + 1 : mature_index + 1]
+    days_by_date = {
+        row["trading_date"]: row
+        for row in _store_call(store.corpus_days, market, account)
+    }
+    points_by_date: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in _store_call(store.corpus_points, market, account):
+        points_by_date.setdefault(str(row["trading_date"]), {})[
+            str(row["recommendation_point_id"])
+        ] = row
+
+    has_conflict = False
+    has_coverage_gap = False
+    dataset_days: list[dict[str, Any]] = []
+    for trading_date in selected_dates:
+        day_row = days_by_date.get(trading_date)
+        if day_row is None:
+            has_coverage_gap = True
+            continue
+        if day_row["conflict_status"] == "conflict":
+            has_conflict = True
+            continue
+        try:
+            expectation, expectation_content = _read_indexed_expectation(
+                artifact_root, day_row
+            )
+        except CorpusError:
+            has_conflict = True
+            continue
+        if day_row["completeness_reason"] is not None:
+            has_coverage_gap = True
+            continue
+        if (
+            day_row["market_calendar_version"]
+            != facts["market_calendar_version"]
+            or day_row["market_calendar_sha256"]
+            != facts["market_calendar_sha256"]
+        ):
+            has_coverage_gap = True
+            continue
+        if not _before(
+            str(expectation["sealed_at_utc"]), str(facts["cutoff_at_utc"])
+        ):
+            has_coverage_gap = True
+            continue
+        expected_ids = list(expectation["expected_recommendation_point_ids"])
+        if not expected_ids:
+            has_coverage_gap = True
+            continue
+        point_rows = points_by_date.get(trading_date, {})
+        if set(point_rows) - set(expected_ids):
+            has_conflict = True
+        if set(expected_ids) - set(point_rows):
+            has_coverage_gap = True
+
+        dataset_points: list[dict[str, Any]] = []
+        for point_id in expected_ids:
+            point_row = point_rows.get(point_id)
+            if point_row is None:
+                continue
+            if point_row["conflict_status"] == "conflict":
+                has_conflict = True
+                continue
+            if (
+                point_row["capture_status"] != "captured"
+                or point_row["reason_code"] is not None
+            ):
+                has_coverage_gap = True
+                continue
+            if (
+                point_row["ranking_projection_schema_version"]
+                != RANKING_PROJECTION_SCHEMA_VERSION
+            ):
+                has_coverage_gap = True
+                continue
+            try:
+                captured_at = _timestamp(
+                    point_row["captured_at_utc"], "captured_at_utc"
+                )
+            except CorpusError:
+                has_conflict = True
+                continue
+            try:
+                projection, projection_content = _read_indexed_projection(
+                    artifact_root, point_row
+                )
+            except CorpusError:
+                has_conflict = True
+                continue
+            decision_at = str(projection["decision_at_utc"])
+            if _before(captured_at, decision_at):
+                has_conflict = True
+                continue
+            if not _before(decision_at, str(facts["cutoff_at_utc"])) or not _before(
+                captured_at, str(facts["cutoff_at_utc"])
+            ):
+                has_coverage_gap = True
+                continue
+            try:
+                rerank_recommendation_point(
+                    projection, ranking_profile="current_tie_break"
+                )
+            except Top1RankingError:
+                has_coverage_gap = True
+                continue
+            dataset_points.append(
+                {
+                    "recommendation_point_id": point_id,
+                    "projection_ref": point_row["projection_ref"],
+                    "projection_content_sha256": projection[
+                        "artifact_provenance"
+                    ]["content_sha256"],
+                    "projection_file_sha256": _file_sha256(projection_content),
+                }
+            )
+        if len(dataset_points) == len(expected_ids):
+            dataset_days.append(
+                {
+                    "trading_date": trading_date,
+                    "expectation_ref": day_row["expectation_ref"],
+                    "expectation_content_sha256": expectation["content_sha256"],
+                    "expectation_file_sha256": _file_sha256(expectation_content),
+                    "points": dataset_points,
+                }
+            )
+
+    if has_conflict:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_corpus_conflict",
+            selected_dates=selected_dates,
+        )
+    if has_coverage_gap or len(dataset_days) != required_days:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_dataset_coverage_missing",
+            selected_dates=selected_dates,
+        )
+
+    dataset: dict[str, Any] = {
+        "schema_version": SEALED_HISTORICAL_DATASET_SCHEMA,
+        "market": market,
+        "account": account,
+        "cutoff_at_utc": facts["cutoff_at_utc"],
+        "cutoff_trading_date": facts["cutoff_trading_date"],
+        "required_days": required_days,
+        "window_facts_content_sha256": facts["content_sha256"],
+        "market_calendar_version": facts["market_calendar_version"],
+        "market_calendar_ref": facts["market_calendar_ref"],
+        "market_calendar_sha256": facts["market_calendar_sha256"],
+        "trading_calendar_dates_sha256": facts[
+            "trading_calendar_dates_sha256"
+        ],
+        "latest_mature_trading_date": latest_mature,
+        "maturity_evidence_ref": facts["maturity_evidence_ref"],
+        "maturity_evidence_sha256": facts["maturity_evidence_sha256"],
+        "recommendation_point_selector": RECOMMENDATION_POINT_SELECTOR,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+        "selected_trading_dates": selected_dates,
+        "days": dataset_days,
+    }
+    dataset["content_sha256"] = canonical_sha256(dataset)
+    content = _render(dataset)
+    ref = _dataset_ref(market, account, dataset["content_sha256"])
+    try:
+        publish_exact_text(artifact_root, ref, content)
+    except ValueError:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_corpus_conflict",
+            selected_dates=selected_dates,
+        )
+    except OSError as exc:
+        raise CorpusError(
+            "corpus_artifact_conflict", "research dataset cannot be published"
+        ) from exc
+    return _freeze_result(
+        facts,
+        status="ready",
+        reason_code=None,
+        selected_dates=selected_dates,
+        dataset_ref=ref,
+        dataset_sha256=_file_sha256(content),
+        dataset_content_sha256=dataset["content_sha256"],
+    )
+
+
 __all__ = [
     "CORPUS_COMMAND_RESULT_SCHEMA",
     "CORPUS_DAY_EXPECTATION_SCHEMA",
+    "CORPUS_STATUS_SCHEMA",
+    "DATASET_FREEZE_RESULT_SCHEMA",
+    "RESEARCH_WINDOW_FACTS_SCHEMA",
+    "SEALED_HISTORICAL_DATASET_SCHEMA",
     "CorpusError",
     "capture_recommendation_point",
+    "freeze_research_dataset",
+    "read_corpus_status",
     "seal_day_expectation",
 ]
