@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -10,12 +11,14 @@ from typing import Any
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     SELL_PUT_RANKING_CONTRACT_VERSION,
     SELL_PUT_RANKING_PROFILES,
 )
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.application.opening_candidate_snapshot import OPENING_CANDIDATE_SNAPSHOT_SCHEMA
+from src.application.shadow_replay.common import artifact_content_sha256, render_json_text
 from src.application.strategy_lab.top1.contracts import (
     ACCEPTED_SET_CONTRACT_VERSION,
     EXPERIMENT_SPEC_SCHEMA_VERSION,
@@ -26,14 +29,15 @@ from src.application.strategy_lab.top1.contracts import (
     VALIDATION_METRIC_CONTRACT_VERSION,
     build_behavior_binding,
     build_research_spec_sha256,
+    build_validation_spec_sha256,
 )
 from src.application.strategy_lab.top1.lifecycle import (
     Top1LifecycleError,
     authorize_research,
     authorize_validation,
+    build_hidden_window_commitment,
     commit_validation_point,
     effective_feature_status,
-    lock_challenger,
     prepare_experiment,
     read_public_receipt,
     read_public_status,
@@ -52,6 +56,7 @@ from src.application.strategy_lab.top1.terminal_projection import (
 from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStore,
     ExperimentStoreError,
+    compact_json,
 )
 
 
@@ -247,6 +252,66 @@ def _ready_research(store: ExperimentStore, root: Path, experiment_id: str) -> N
     recover_terminal_projection(store, root)
 
 
+def _lock_store_challenger(
+    store: ExperimentStore,
+    *,
+    experiment_id: str,
+    trading_dates: list[str],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    spec = _spec(experiment_id, validation=True)
+    research = next(
+        item
+        for item in store.generations(experiment_id)
+        if item["generation_kind"] == "research"
+    )
+    research_hash = build_research_spec_sha256(spec)
+    terminal_hash = str(research["terminal_file_sha256"])
+    commitment = build_hidden_window_commitment(
+        experiment_id=experiment_id,
+        account="lx",
+        trading_dates=trading_dates,
+        market_calendar_version=str(
+            spec["economics_contracts"]["market_calendar_version"]
+        ),
+        challenger_variant_id="level-1",
+        research_spec_sha256=research_hash,
+        research_terminal_file_sha256=terminal_hash,
+        behavior_binding_sha256=str(spec["baseline"]["behavior_binding_sha256"]),
+    )
+    commitment_sha = canonical_sha256(commitment)
+    commitment_text = render_json_text(commitment)
+    return store.lock_challenger(
+        experiment_id=experiment_id,
+        spec_json=compact_json(spec),
+        research_spec_sha256=research_hash,
+        validation_spec_sha256=build_validation_spec_sha256(
+            spec,
+            research_terminal_sha256=terminal_hash,
+            challenger_variant_id="level-1",
+            hidden_window_commitment_sha256=commitment_sha,
+        ),
+        research_leader="level-1",
+        research_receipt_ref=(
+            f"strategy_lab/top1/{experiment_id}/research-receipt.json"
+        ),
+        research_receipt_file_sha256=terminal_hash,
+        commitment_json=compact_json(commitment),
+        commitment_sha256=commitment_sha,
+        commitment_ref=(
+            f"strategy_lab/top1/experiments/{experiment_id}/"
+            f"hidden_window_commitments/{commitment_sha}.json"
+        ),
+        commitment_content_sha256=artifact_content_sha256(commitment),
+        commitment_file_sha256=hashlib.sha256(
+            commitment_text.encode("utf-8")
+        ).hexdigest(),
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key=idempotency_key,
+    )
+
+
 def _ready_validation(
     store: ExperimentStore,
     root: Path,
@@ -254,20 +319,11 @@ def _ready_validation(
     trading_dates: list[str],
 ) -> dict[str, Any]:
     _ready_research(store, root, experiment_id)
-    research = store.generations(experiment_id)[0]
-    locked = lock_challenger(
+    locked = _lock_store_challenger(
         store,
-        _spec(experiment_id, validation=True),
-        system_leader="level-1",
-        challenger_variant_id="level-1",
-        research_receipt_ref=f"strategy_lab/top1/{experiment_id}/research-receipt.json",
-        research_receipt_file_sha256=str(research["terminal_file_sha256"]),
+        experiment_id=experiment_id,
         trading_dates=trading_dates,
-        actor="human",
-        occurred_at_utc=NOW,
         idempotency_key=f"lock-{experiment_id}",
-        artifact_root=root,
-        environ=AVAILABLE,
     )
     authorize_validation(
         store,
@@ -619,24 +675,11 @@ def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None
     assert (root / orphan_ref).is_file()
 
     replacement_dates = _dates(date(2027, 3, 1))
-    research = next(
-        row
-        for row in store.generations("experiment-overlap")
-        if row["generation_kind"] == "research"
-    )
-    relocked = lock_challenger(
+    relocked = _lock_store_challenger(
         store,
-        _spec("experiment-overlap", validation=True),
-        system_leader="level-1",
-        challenger_variant_id="level-1",
-        research_receipt_ref="strategy_lab/top1/experiment-overlap/research-receipt.json",
-        research_receipt_file_sha256=str(research["terminal_file_sha256"]),
+        experiment_id="experiment-overlap",
         trading_dates=replacement_dates,
-        actor="human",
-        occurred_at_utc=NOW,
         idempotency_key="relock-overlap",
-        artifact_root=root,
-        environ=AVAILABLE,
     )
     replacement_ref = str(relocked["proposed_commitment_ref"])
     assert not (root / replacement_ref).exists()

@@ -10,6 +10,12 @@ CONTRACTS_MODULE = ROOT / "src/application/strategy_lab/top1/contracts.py"
 ECONOMICS_MODULE = ROOT / "src/application/strategy_lab/top1/economics.py"
 STATISTICS_MODULE = ROOT / "src/application/strategy_lab/top1/statistics.py"
 RESEARCH_MODULE = ROOT / "src/application/strategy_lab/top1/research.py"
+RESEARCH_RUNNER_MODULE = (
+    ROOT / "src/application/strategy_lab/top1/research_runner.py"
+)
+RESEARCH_ARTIFACTS_MODULE = (
+    ROOT / "src/application/strategy_lab/top1/research_artifacts.py"
+)
 RECOMMENDATION_POINT_MODULE = ROOT / "src/application/recommendation_point.py"
 CANDIDATE_ENGINE = ROOT / "domain/domain/engine/candidate_engine.py"
 EXPERIMENT_STORE_MODULE = (
@@ -158,6 +164,8 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.recommendation_point",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.research",
+        "src.application.strategy_lab.top1.research_artifacts",
         "src.application.strategy_lab.top1.terminal_projection",
         "src.infrastructure.strategy_lab.experiment_store",
     }
@@ -197,6 +205,40 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.infrastructure.strategy_lab.experiment_store",
     }
 
+    assert _imports(RESEARCH_RUNNER_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "json",
+        "math",
+        "re",
+        "collections.abc",
+        "pathlib",
+        "typing",
+        "src.application.opend_call_coordinator",
+        "src.application.opend_fetch_config",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.lifecycle",
+        "src.application.strategy_lab.top1.research",
+        "src.application.strategy_lab.top1.research_artifacts",
+        "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.futu_gateway",
+        "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+    assert _imports(RESEARCH_ARTIFACTS_MODULE) <= {
+        "__future__",
+        "hashlib",
+        "json",
+        "re",
+        "collections.abc",
+        "pathlib",
+        "typing",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.research",
+        "src.infrastructure.private_storage",
+    }
+
 
 def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
     for path in PRODUCTION_TICK_MODULES:
@@ -204,4 +246,5 @@ def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
         assert "src.application.strategy_lab.top1.lifecycle" not in imports
         assert "src.application.strategy_lab.top1.corpus" not in imports
         assert "src.application.strategy_lab.top1.research" not in imports
+        assert "src.application.strategy_lab.top1.research_artifacts" not in imports
         assert "src.infrastructure.strategy_lab.experiment_store" not in imports
