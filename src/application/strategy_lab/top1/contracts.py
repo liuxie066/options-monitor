@@ -29,6 +29,8 @@ RESEARCH_METRIC_CONTRACT_VERSION = "counterfactual_expiry_efficiency.v1"
 VALIDATION_FILL_CONTRACT_VERSION = "scheduled_point_first_observed_cross.v1"
 VALIDATION_METRIC_CONTRACT_VERSION = "sell_put_top1_paired_daily_efficiency.v1"
 EXPIRY_OUTCOME_CONTRACT_VERSION = "expiry_outcome_at_underlier_close.v1"
+SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
+RECOMMENDATION_POINT_SELECTOR = "official_scheduled_sell_put.v1"
 
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _BEHAVIOR_KEYS = frozenset(
