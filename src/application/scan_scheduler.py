@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.application.agent_tool_contracts import AgentToolError
 
@@ -412,6 +413,54 @@ def _scheduled_scan_targets(
         gates=gates,
     )
     return sorted(set(report_targets) | set(candidate_targets)), set(report_targets)
+
+
+def scheduled_scan_targets_for_date(
+    schedule_cfg: dict[str, Any],
+    trading_date: date | str,
+) -> list[datetime]:
+    """Return the scheduler's exact scan targets for one declared trading date."""
+
+    if not isinstance(schedule_cfg, dict):
+        raise ValueError("schedule_cfg must be an object")
+    try:
+        if isinstance(trading_date, date):
+            day = trading_date
+            raw_day = None
+        else:
+            raw_day = trading_date
+            day = date.fromisoformat(raw_day)
+    except ValueError as exc:
+        raise ValueError("trading_date must be an ISO date") from exc
+    if raw_day is not None and day.isoformat() != raw_day:
+        raise ValueError("trading_date must be a canonical ISO date")
+    if not bool(schedule_cfg.get('enabled', True)):
+        return []
+
+    try:
+        market_tz = ZoneInfo(str(schedule_cfg.get('timezone') or 'America/New_York'))
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("schedule timezone is invalid") from exc
+    run_start, run_end, breaks = _resolve_run_window(schedule_cfg)
+    run_points = schedule_cfg.get('run_points')
+    if not isinstance(run_points, dict) or not run_points:
+        run_points = {'start_plus_min': 10, 'hourly_minute': 0, 'end_minus_min': 10}
+    gates = schedule_cfg.get('gates')
+    if not isinstance(gates, list):
+        gates = []
+    try:
+        targets, _report_targets = _scheduled_scan_targets(
+            now_market=datetime.combine(day, time(0), tzinfo=market_tz),
+            market_tz=market_tz,
+            run_start=run_start,
+            run_end=run_end,
+            breaks=breaks,
+            run_points=run_points,
+            gates=gates,
+        )
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("schedule gate timezone is invalid") from exc
+    return targets
 
 
 # Compatibility for tests/operators that still inspect the old private helper.
