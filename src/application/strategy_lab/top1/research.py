@@ -4,7 +4,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, NoReturn, cast
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -34,6 +34,10 @@ from src.application.strategy_lab.top1.statistics import (
 RESEARCH_EVALUATION_INPUT_SCHEMA = "sell_put_top1_research_evaluation_input.v1"
 RESEARCH_CLOSE_RECEIPT_SCHEMA = "sell_put_top1_research_close_receipt.v1"
 RESEARCH_EVALUATION_SCHEMA = "sell_put_top1_research_evaluation.v1"
+INTERNAL_RESEARCH_REVISION_SCHEMA = "sell_put_top1_research_revision.v1"
+INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA = (
+    "sell_put_top1_research_quota_decision.v1"
+)
 
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _INPUT_KEYS = frozenset(
@@ -115,6 +119,21 @@ _FEE_KEYS = frozenset(
     {"market", "account", "fee_schedule_version", "account_fee_plan"}
 )
 _FEE_PLAN_KEYS = frozenset({"commission_free", "platform_fee", "fee_plan_ref"})
+_REVISION_KEYS = frozenset(
+    {"schema_version", "evaluation", "fee_contract", "history_kline_evidence"}
+)
+_HISTORY_EVIDENCE_KEYS = frozenset(
+    {"observed_at_utc", "page_complete", "quota_decision", "close_receipts"}
+)
+_QUOTA_DECISION_KEYS = frozenset(
+    {
+        "schema_version",
+        "required_stock_owners",
+        "already_counted_stock_owners",
+        "new_stock_owners",
+        "remain_quota",
+    }
+)
 _STAT_FIELDS = (
     "required_days",
     "effective_days",
@@ -880,6 +899,197 @@ def evaluate_research(
         reason_details=[],
         variant_results=variant_results,
         missing_receipts=[],
+    )
+
+
+def _utc_timestamp(value: object, label: str) -> str:
+    text = _text(value, label)
+    if not text.endswith("Z") or "T" not in text:
+        _fail("research_revision_conflict", f"{label} must be an ISO-8601 UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00")
+    except ValueError as exc:
+        raise ResearchEvaluationError(
+            "research_revision_conflict",
+            f"{label} must be an ISO-8601 UTC timestamp",
+        ) from exc
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        _fail("research_revision_conflict", f"{label} must be UTC")
+    return text
+
+
+def _normalized_fee_contract(
+    value: object, *, spec: Mapping[str, object]
+) -> dict[str, object]:
+    item = _mapping(value, "research_revision.fee_contract")
+    plan = _validate_fee_contract(item, spec=spec)
+    return {
+        "market": spec["market"],
+        "account": spec["account"],
+        "fee_schedule_version": item["fee_schedule_version"],
+        "account_fee_plan": dict(plan) if plan is not None else None,
+    }
+
+
+def _sorted_owner_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list):
+        _fail("research_revision_conflict", f"{label} must be a list")
+    owners = [_text(item, label) for item in cast(list[object], value)]
+    if owners != sorted(set(owners)):
+        _fail("research_revision_conflict", f"{label} must be sorted and unique")
+    return owners
+
+
+def _validated_quota_decision(
+    value: object,
+    *,
+    required_owners: list[str],
+) -> dict[str, object]:
+    item = _mapping(value, "research_revision.quota_decision")
+    _exact_keys(
+        item,
+        _QUOTA_DECISION_KEYS,
+        "research_revision.quota_decision",
+        reason_code="research_revision_conflict",
+    )
+    if item["schema_version"] != INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA:
+        _fail("research_revision_conflict", "quota decision schema is unsupported")
+    required = _sorted_owner_list(
+        item["required_stock_owners"], "quota_decision.required_stock_owners"
+    )
+    counted = _sorted_owner_list(
+        item["already_counted_stock_owners"],
+        "quota_decision.already_counted_stock_owners",
+    )
+    new = _sorted_owner_list(
+        item["new_stock_owners"], "quota_decision.new_stock_owners"
+    )
+    remaining = item["remain_quota"]
+    if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+        _fail("research_revision_conflict", "quota decision remaining value is invalid")
+    if (
+        required != required_owners
+        or set(counted) & set(new)
+        or sorted([*counted, *new]) != required
+        or len(new) > remaining
+    ):
+        _fail("research_revision_conflict", "quota decision does not cover requirements")
+    return {
+        "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+        "required_stock_owners": required,
+        "already_counted_stock_owners": counted,
+        "new_stock_owners": new,
+        "remain_quota": remaining,
+    }
+
+
+def validate_internal_research_revision(
+    dataset: object,
+    value: object,
+) -> dict[str, object]:
+    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections = (
+        _validated_research_input(dataset)
+    )
+    revision = _mapping(value, "research_revision")
+    _exact_keys(
+        revision,
+        _REVISION_KEYS,
+        "research_revision",
+        reason_code="research_revision_conflict",
+    )
+    if revision["schema_version"] != INTERNAL_RESEARCH_REVISION_SCHEMA:
+        _fail("research_revision_conflict", "research revision schema is unsupported")
+
+    fee_contract = _normalized_fee_contract(revision["fee_contract"], spec=spec)
+    requirements = required_research_close_keys(dataset, fee_contract)
+    required_owners = sorted({owner for owner, _expiration in requirements})
+    history = revision["history_kline_evidence"]
+    close_receipts: list[dict[str, object]] = []
+    normalized_history: dict[str, object] | None = None
+    if requirements:
+        history_item = _mapping(history, "research_revision.history_kline_evidence")
+        _exact_keys(
+            history_item,
+            _HISTORY_EVIDENCE_KEYS,
+            "research_revision.history_kline_evidence",
+            reason_code="research_revision_conflict",
+        )
+        if history_item["page_complete"] is not True:
+            _fail("research_revision_conflict", "history pages are incomplete")
+        observed_at_utc = _utc_timestamp(
+            history_item["observed_at_utc"], "history_kline_evidence.observed_at_utc"
+        )
+        quota_decision = _validated_quota_decision(
+            history_item["quota_decision"], required_owners=required_owners
+        )
+        raw_receipts = history_item["close_receipts"]
+        indexed = _validate_close_receipts(
+            raw_receipts,
+            market=str(spec["market"]),
+            account=str(spec["account"]),
+        )
+        if set(indexed) != set(requirements) or any(
+            len(indexed[key]) != 1 for key in requirements
+        ):
+            _fail("research_revision_conflict", "close receipts do not cover requirements")
+        close_receipts = [indexed[key][0] for key in requirements]
+        if raw_receipts != close_receipts:
+            _fail("research_revision_conflict", "close receipts are not canonical")
+        normalized_history = {
+            "observed_at_utc": observed_at_utc,
+            "page_complete": True,
+            "quota_decision": quota_decision,
+            "close_receipts": close_receipts,
+        }
+    elif history is not None:
+        _fail("research_revision_conflict", "history evidence is unexpected")
+
+    evaluation = dict(_mapping(revision["evaluation"], "research_revision.evaluation"))
+    expected_evaluation = evaluate_research(dataset, close_receipts, fee_contract)
+    if evaluation != expected_evaluation:
+        _fail("research_revision_conflict", "research evaluation does not match evidence")
+    normalized = {
+        "schema_version": INTERNAL_RESEARCH_REVISION_SCHEMA,
+        "evaluation": evaluation,
+        "fee_contract": fee_contract,
+        "history_kline_evidence": normalized_history,
+    }
+    if dict(revision) != normalized:
+        _fail("research_revision_conflict", "research revision is not canonical")
+    return normalized
+
+
+def build_internal_research_revision(
+    dataset: object,
+    *,
+    evaluation: object,
+    fee_contract: object,
+    close_receipts: list[dict[str, object]],
+    quota_decision: object,
+    observed_at_utc: str,
+) -> dict[str, object]:
+    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections = (
+        _validated_research_input(dataset)
+    )
+    normalized_fee = _normalized_fee_contract(fee_contract, spec=spec)
+    history = (
+        {
+            "observed_at_utc": observed_at_utc,
+            "page_complete": True,
+            "quota_decision": quota_decision,
+            "close_receipts": close_receipts,
+        }
+        if close_receipts
+        else None
+    )
+    return validate_internal_research_revision(
+        dataset,
+        {
+            "schema_version": INTERNAL_RESEARCH_REVISION_SCHEMA,
+            "evaluation": evaluation,
+            "fee_contract": normalized_fee,
+            "history_kline_evidence": history,
+        },
     )
 
 

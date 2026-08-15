@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +10,20 @@ import pytest
 import src.application.strategy_lab.top1.research_runner as runner_module
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.lifecycle import (
+    Top1LifecycleError,
     authorize_research,
+    lock_challenger,
     prepare_experiment,
     record_generation_revision,
     set_account_opt_in,
     start_research,
 )
-from src.application.strategy_lab.top1.research import evaluate_research
+from src.application.strategy_lab.top1.research import (
+    INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+    INTERNAL_RESEARCH_REVISION_SCHEMA,
+    build_internal_research_revision,
+    evaluate_research,
+)
 from src.application.strategy_lab.top1.research_runner import (
     ResearchRunnerError,
     run_research,
@@ -29,6 +37,8 @@ from tests.test_strategy_lab_top1_research import (
     _fee_contract,
     _receipts,
     _set_variants,
+    _spec,
+    _trading_days,
 )
 
 
@@ -89,6 +99,24 @@ def _publish_case(root: Path, case: dict[str, Any]) -> None:
             item["projection_ref"],
             render_json_text(item["projection"]).encode("utf-8"),
         )
+
+
+def _revision(case: dict[str, Any]) -> dict[str, object]:
+    receipts = _receipts()
+    return build_internal_research_revision(
+        case,
+        evaluation=evaluate_research(case, receipts, _fee_contract()),
+        fee_contract=_fee_contract(),
+        close_receipts=receipts,
+        quota_decision={
+            "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+            "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+            "already_counted_stock_owners": ["HK.0700"],
+            "new_stock_owners": ["HK.3690", "HK.9988"],
+            "remain_quota": 2,
+        },
+        observed_at_utc=NOW,
+    )
 
 
 def _prepared(
@@ -188,6 +216,21 @@ def test_runner_deduplicates_closes_and_recovers_terminal_without_provider_repla
     generation = store.generations(case["experiment_spec"]["experiment_id"])[0]
     assert generation["revision"] == 1
     assert generation["terminal_published_event_id"] is None
+    revision_path = root.joinpath(*str(generation["last_revision_ref"]).split("/"))
+    revision = json.loads(revision_path.read_text(encoding="utf-8"))
+    assert revision["schema_version"] == INTERNAL_RESEARCH_REVISION_SCHEMA
+    assert revision["fee_contract"] == _fee_contract()
+    evidence = revision["history_kline_evidence"]
+    assert evidence["observed_at_utc"] == NOW
+    assert evidence["page_complete"] is True
+    assert evidence["quota_decision"] == {
+        "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+        "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+        "already_counted_stock_owners": ["HK.0700"],
+        "new_stock_owners": ["HK.3690", "HK.9988"],
+        "remain_quota": 2,
+    }
+    assert evidence["close_receipts"] == _receipts()
 
     monkeypatch.setattr(runner_module, "recover_terminal_projection", recover)
     result = _run(store, root, case, research_hash, gateway)
@@ -220,6 +263,40 @@ def test_runner_skips_provider_when_top1_does_not_change(
     assert result["selection"] == "no_research_winner"
     assert gateway.quota_calls == 0
     assert gateway.close_calls == []
+
+
+@pytest.mark.parametrize("mode", ["no_research_winner", "insufficient_evidence"])
+def test_m3_rejects_research_without_a_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    same_top1 = mode == "no_research_winner"
+    store, root, case, research_hash = _prepared(tmp_path, same_top1=same_top1)
+    gateway = FakeGateway(close_value=None)
+    monkeypatch.setattr(runner_module, "rate_limited_opend_call", _direct_limiter)
+
+    result = _run(store, root, case, research_hash, gateway)
+    assert result["selection"] == mode
+    variants = (
+        (("same", "current_tie_break"),)
+        if same_top1
+        else (
+            ("without", "without_concentration"),
+            ("concentration", "concentration_first"),
+        )
+    )
+    with pytest.raises(Top1LifecycleError) as exc_info:
+        lock_challenger(
+            store,
+            _spec(case["sealed_dataset"], variants=variants, validation=True),
+            challenger_variant_id="same" if same_top1 else "concentration",
+            trading_dates=_trading_days("2026-10-02", 20),
+            actor="human",
+            occurred_at_utc=NOW,
+            idempotency_key=f"lock-{mode}",
+            artifact_root=root,
+            environ=AVAILABLE,
+        )
+    assert exc_info.value.reason_code == "invalid_transition"
 
 
 @pytest.mark.parametrize("tampered_bytes", [b"\xff", b'{"value": 1e999}\n'])
@@ -351,7 +428,7 @@ def test_runner_checks_feature_gate_before_completed_revision_replay(
     assert generation["terminal_published_event_id"] == published_event_id
 
 
-def test_runner_rejects_hash_valid_foreign_revision_without_sealing(
+def test_runner_rejects_revision_when_evidence_and_evaluation_disagree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, root, case, research_hash = _prepared(tmp_path)
@@ -367,13 +444,15 @@ def test_runner_rejects_hash_valid_foreign_revision_without_sealing(
         environ=AVAILABLE,
     )
     generation = store.generations(experiment_id)[0]
-    foreign = evaluate_research(case, _receipts(), _fee_contract())
-    foreign["experiment_id"] = "another-experiment"
+    revision = _revision(case)
+    revision["history_kline_evidence"]["close_receipts"][0][
+        "underlier_close"
+    ] = 1.0
     ref = (
         f"strategy_lab/top1/experiments/{experiment_id}/generations/"
         "research.revision.1.json"
     )
-    content = render_json_text(foreign).encode("utf-8")
+    content = render_json_text(revision).encode("utf-8")
     publish_exact_text(root, ref, content)
     record_generation_revision(
         store,
@@ -385,7 +464,7 @@ def test_runner_rejects_hash_valid_foreign_revision_without_sealing(
         frozen_row_sha256=str(generation["frozen_row_content_sha256"]),
         actor="runner",
         occurred_at_utc=NOW,
-        idempotency_key="foreign-revision",
+        idempotency_key="inconsistent-revision",
         artifact_root=root,
         environ=AVAILABLE,
     )

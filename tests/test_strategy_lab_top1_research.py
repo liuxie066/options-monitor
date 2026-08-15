@@ -48,6 +48,7 @@ from src.application.strategy_lab.top1.lifecycle import (
     authorize_research,
     lock_challenger,
     prepare_experiment,
+    record_generation_revision,
     seal_generation,
     set_account_opt_in,
     start_research,
@@ -59,13 +60,16 @@ from src.application.strategy_lab.top1.ranking import (
     build_ranking_projection,
 )
 from src.application.strategy_lab.top1.research import (
+    INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
     RESEARCH_CLOSE_RECEIPT_SCHEMA,
     RESEARCH_EVALUATION_INPUT_SCHEMA,
     RESEARCH_EVALUATION_SCHEMA,
     ResearchEvaluationError,
+    build_internal_research_revision,
     evaluate_research,
 )
 from src.application.strategy_lab.top1.terminal_projection import (
+    publish_exact_text,
     recover_terminal_projection,
 )
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
@@ -868,6 +872,52 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         artifact_root=tmp_path,
         environ=AVAILABLE,
     )
+    publish_exact_text(
+        tmp_path,
+        research_case["dataset_ref"],
+        render_json_text(research_case["sealed_dataset"]).encode("utf-8"),
+    )
+    for item in research_case["ranking_projections"]:
+        publish_exact_text(
+            tmp_path,
+            item["projection_ref"],
+            render_json_text(item["projection"]).encode("utf-8"),
+        )
+    revision = build_internal_research_revision(
+        research_case,
+        evaluation=evaluation,
+        fee_contract=_fee_contract(),
+        close_receipts=_receipts(),
+        quota_decision={
+            "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
+            "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+            "already_counted_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+            "new_stock_owners": [],
+            "remain_quota": 0,
+        },
+        observed_at_utc="2026-08-15T03:03:00Z",
+    )
+    revision_ref = (
+        "strategy_lab/top1/experiments/experiment-w5-evaluator/generations/"
+        "research.revision.1.json"
+    )
+    revision_content = render_json_text(revision).encode("utf-8")
+    publish_exact_text(tmp_path, revision_ref, revision_content)
+    generation = store.generations(spec["experiment_id"])[0]
+    record_generation_revision(
+        store,
+        experiment_id=spec["experiment_id"],
+        generation_kind="research",
+        revision=1,
+        revision_ref=revision_ref,
+        revision_file_sha256=hashlib.sha256(revision_content).hexdigest(),
+        frozen_row_sha256=str(generation["frozen_row_content_sha256"]),
+        actor="runner",
+        occurred_at_utc="2026-08-15T03:03:30Z",
+        idempotency_key="record-research-m3-seam",
+        artifact_root=tmp_path,
+        environ=AVAILABLE,
+    )
     seal_generation(
         store,
         experiment_id=spec["experiment_id"],
@@ -879,7 +929,7 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         environ=AVAILABLE,
     )
     recover_terminal_projection(store, tmp_path)
-    terminal_sha = store.generations(spec["experiment_id"])[0]["terminal_file_sha256"]
+    generation = store.generations(spec["experiment_id"])[0]
     validation_spec = _spec(
         research_case["sealed_dataset"],
         variants=(
@@ -889,14 +939,11 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         validation=True,
     )
     hidden_days = _trading_days("2026-08-04", 20)
-    with pytest.raises(Top1LifecycleError, match="system leader"):
+    with pytest.raises(Top1LifecycleError) as wrong_leader:
         lock_challenger(
             store,
             validation_spec,
-            system_leader=str(leader),
             challenger_variant_id="without",
-            research_receipt_ref="strategy_lab/top1/research-receipt.json",
-            research_receipt_file_sha256=str(terminal_sha),
             trading_dates=hidden_days,
             actor="human",
             occurred_at_utc="2026-08-15T03:05:00Z",
@@ -904,13 +951,29 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
             artifact_root=tmp_path,
             environ=AVAILABLE,
         )
+    assert wrong_leader.value.reason_code == "experiment_invalid", str(
+        wrong_leader.value
+    )
+    revision_path = tmp_path.joinpath(*revision_ref.split("/"))
+    revision_path.write_bytes(b"{}\n")
+    with pytest.raises(Top1LifecycleError) as tampered_revision:
+        lock_challenger(
+            store,
+            validation_spec,
+            challenger_variant_id=str(leader),
+            trading_dates=hidden_days,
+            actor="human",
+            occurred_at_utc="2026-08-15T03:05:30Z",
+            idempotency_key="tampered-revision-m3-seam",
+            artifact_root=tmp_path,
+            environ=AVAILABLE,
+        )
+    assert tampered_revision.value.reason_code == "experiment_conflict"
+    revision_path.write_bytes(revision_content)
     locked = lock_challenger(
         store,
         validation_spec,
-        system_leader=str(leader),
         challenger_variant_id=str(leader),
-        research_receipt_ref="strategy_lab/top1/research-receipt.json",
-        research_receipt_file_sha256=str(terminal_sha),
         trading_dates=hidden_days,
         actor="human",
         occurred_at_utc="2026-08-15T03:06:00Z",
@@ -919,6 +982,23 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         environ=AVAILABLE,
     )
     assert locked["validation_authorization_status"] == "unconfirmed"
+    assert locked["research_receipt_ref"] == generation["last_revision_ref"]
+    assert locked["research_receipt_file_sha256"] == generation[
+        "last_revision_file_sha256"
+    ]
+    relocked = lock_challenger(
+        store,
+        validation_spec,
+        challenger_variant_id=str(leader),
+        trading_dates=_trading_days("2026-09-01", 20),
+        actor="human",
+        occurred_at_utc="2026-08-15T03:06:30Z",
+        idempotency_key="relock-leader-m3-seam",
+        artifact_root=tmp_path,
+        environ=AVAILABLE,
+    )
+    assert relocked["research_receipt_ref"] == generation["last_revision_ref"]
+    locked = relocked
     with pytest.raises(Top1LifecycleError) as exc_info:
         start_validation(
             store,
