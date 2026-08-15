@@ -198,6 +198,7 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.recommendation_point",
         "src.application.scan_scheduler",
         "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
         "src.application.strategy_lab.top1.lifecycle",
         "src.application.strategy_lab.top1.ranking",
         "src.application.strategy_lab.top1.terminal_projection",

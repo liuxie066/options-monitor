@@ -11,13 +11,11 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
+    RECOMMENDATION_POINT_SELECTOR,
+    SEALED_HISTORICAL_DATASET_SCHEMA,
     Top1CoreContractError,
     build_research_spec_sha256,
     validate_experiment_spec,
-)
-from src.application.strategy_lab.top1.corpus import (
-    RECOMMENDATION_POINT_SELECTOR,
-    SEALED_HISTORICAL_DATASET_SCHEMA,
 )
 from src.application.strategy_lab.top1.economics import calculate_expiry_efficiency
 from src.application.strategy_lab.top1.ranking import (

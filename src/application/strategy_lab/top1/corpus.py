@@ -26,6 +26,10 @@ from src.application.recommendation_point import (
 )
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.shadow_replay.common import render_json_text
+from src.application.strategy_lab.top1.contracts import (
+    RECOMMENDATION_POINT_SELECTOR,
+    SEALED_HISTORICAL_DATASET_SCHEMA,
+)
 from src.application.strategy_lab.top1.lifecycle import (
     Top1LifecycleError,
     effective_feature_status,
@@ -49,9 +53,7 @@ CORPUS_DAY_EXPECTATION_SCHEMA = "corpus_day_expectation.v1"
 CORPUS_COMMAND_RESULT_SCHEMA = "sell_put_top1_corpus_command_result.v1"
 CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
 RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
-SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
-RECOMMENDATION_POINT_SELECTOR = "official_scheduled_sell_put.v1"
 
 _EXPECTATION_FIELDS = frozenset(
     {
