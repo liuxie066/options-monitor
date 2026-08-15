@@ -18,6 +18,7 @@ LIFECYCLE_MODULE = ROOT / "src/application/strategy_lab/top1/lifecycle.py"
 TERMINAL_PROJECTION_MODULE = (
     ROOT / "src/application/strategy_lab/top1/terminal_projection.py"
 )
+CORPUS_MODULE = ROOT / "src/application/strategy_lab/top1/corpus.py"
 PRODUCTION_TICK_MODULES = (
     ROOT / "src/application/multi_account_tick.py",
     ROOT / "src/application/tick_account_execution.py",
@@ -156,9 +157,32 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.infrastructure.strategy_lab.experiment_store",
     }
 
+    assert _imports(CORPUS_MODULE) <= {
+        "__future__",
+        "collections.abc",
+        "datetime",
+        "hashlib",
+        "json",
+        "pathlib",
+        "re",
+        "typing",
+        "domain.domain.decision_state_fingerprint",
+        "src.application.candidate_snapshot_contract",
+        "src.application.opening_candidate_snapshot",
+        "src.application.recommendation_point",
+        "src.application.scan_scheduler",
+        "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.lifecycle",
+        "src.application.strategy_lab.top1.ranking",
+        "src.application.strategy_lab.top1.terminal_projection",
+        "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+
 
 def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
     for path in PRODUCTION_TICK_MODULES:
         imports = _imports(path)
         assert "src.application.strategy_lab.top1.lifecycle" not in imports
+        assert "src.application.strategy_lab.top1.corpus" not in imports
         assert "src.infrastructure.strategy_lab.experiment_store" not in imports
