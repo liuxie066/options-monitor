@@ -30,7 +30,7 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
         lines.append('无结果。')
     else:
         ordered = df.sort_values(['symbol', 'strategy'])
-        for _, r in ordered.iterrows():
+        for r in ordered.to_dict("records"):
             lines.append(format_summary_row(r))
 
     if not is_scheduled:
