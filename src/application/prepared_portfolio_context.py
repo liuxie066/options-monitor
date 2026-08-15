@@ -47,6 +47,11 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: PreparedPortfolioContextError(m))
 
 
 PREPARED_PORTFOLIO_CONTEXT_SCHEMA = "prepared_portfolio_context.v1"
@@ -827,13 +832,6 @@ def _cleanup_worker_processes(
                 process.wait()
             except Exception:
                 pass
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise PreparedPortfolioContextError(f"{field} is required")
-    return text
 
 
 def _required_sha256(value: Any, field: str) -> str:

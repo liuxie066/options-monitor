@@ -8,6 +8,8 @@ from typing import Any
 
 from src.application.copilot.contracts import ExecutionContract, SceneManifest
 from src.application.copilot.tools import available_read_tools
+from src.application.payload_helpers import positive_int_or as _positive_int
+from src.application.payload_helpers import text_sha256 as _sha256
 
 
 GENERAL_SCENE = "om_chat"
@@ -205,18 +207,6 @@ def _runtime_context(
         f"{rendered}",
         fixed_tool_input,
     )
-
-
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
 
 
 __all__ = [

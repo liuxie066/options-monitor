@@ -23,6 +23,12 @@ from src.application.assistant.operation_policy import enforce_monitor_run_allow
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint
 from src.application.symbol_mutations import normalize_symbol_read
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: AgentToolError(code="INPUT_ERROR", message=m))
 
 
 PREVIEW_INTENTS = frozenset({"monitor_run_now"})
@@ -654,18 +660,4 @@ def _clip_output(value: Any) -> str:
     if len(text) <= _OUTPUT_LIMIT:
         return text
     return text[: _OUTPUT_LIMIT - 3] + "..."
-
-
-def _required_text(value: Any, name: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise AgentToolError(code="INPUT_ERROR", message=f"{name} is required")
-    return text
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
 __all__ = ["MONITOR_RUNNER", "handle_monitor_run_operation", "render_monitor_run_response"]

@@ -30,6 +30,11 @@ from src.application.pipeline_watchlist import (
     resolve_watchlist_item_runtime_config,
 )
 from src.infrastructure.io_utils import atomic_write_json
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: CloseAdviceRequiredDataPlanError(m))
 
 
 CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA = "close_advice_required_data_plan.v1"
@@ -607,13 +612,6 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise CloseAdviceRequiredDataPlanError(f"{field} is required")
-    return text
 
 
 def _utc_iso(value: datetime) -> str:

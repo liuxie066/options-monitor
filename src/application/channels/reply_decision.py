@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 
 PERMISSION_DENIED_CODE = "PERMISSION_DENIED"
@@ -108,18 +110,6 @@ def trim_reply(value: str, *, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 20)].rstrip() + "\n...(truncated)"
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
 
 
 __all__ = [

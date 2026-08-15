@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from domain.domain.symbol_identity import canonical_symbol
+from src.application.payload_helpers import optional_text as _optional_text
 
 
 SOURCE_CONSUMPTION_SCHEMA = "trade_lifecycle_source_consumption.v1"
@@ -174,11 +175,6 @@ def _first_value(payload: dict[str, Any], *keys: str) -> Any:
         if payload.get(key) not in (None, ""):
             return payload[key]
     return None
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _optional_lower(value: Any) -> str | None:

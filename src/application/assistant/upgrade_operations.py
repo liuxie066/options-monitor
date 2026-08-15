@@ -26,6 +26,7 @@ from src.application.service_upgrade import compare_versions, default_releases_r
 from src.application.settings import build_effective_env
 from src.application.secret_resolver import resolve_feishu_bot_config
 from src.infrastructure.feishu_bot import reply_text_message
+from src.application.payload_helpers import optional_text as _optional_text
 
 
 PREVIEW_INTENTS = frozenset({"upgrade_now"})
@@ -1144,8 +1145,3 @@ def _version_from_release_tag(value: Any) -> str | None:
 
 def _upgrade_response_has_value(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None

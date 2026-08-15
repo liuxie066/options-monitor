@@ -69,6 +69,7 @@ from src.application.strategy_scan_status import (
 from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
+from src.application.payload_helpers import positive_int_or as _positive_int
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -2434,14 +2435,6 @@ def _coerce_utc(value: datetime | None) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def _positive_int(value: Any, *, default: int) -> int:
-    try:
-        out = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    return out if out > 0 else default
 
 
 def _number(value: Any) -> float | None:

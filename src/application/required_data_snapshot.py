@@ -30,6 +30,11 @@ from src.application.required_data_plan_identity import (
     validate_required_data_expected_fetch_contract,
 )
 from src.infrastructure.io_utils import atomic_write_json
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: RequiredDataSnapshotError(m))
 
 
 REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA = "required_data_snapshot_manifest.v1"
@@ -1163,13 +1168,6 @@ def _failed_manifest_entry(
             or "RequiredDataFetchError"
         ).strip(),
     }
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise RequiredDataSnapshotError(f"{field} is required")
-    return text
 
 
 def _manifest_timestamp(value: Any, field: str) -> datetime:

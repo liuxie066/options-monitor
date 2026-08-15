@@ -27,6 +27,11 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: OpeningCandidateSnapshotError(m))
 
 
 OPENING_CANDIDATE_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v1"
@@ -1312,13 +1317,6 @@ def _mode(value: Any) -> str:
     if mode not in {"put", "call"}:
         raise OpeningCandidateSnapshotError("opening candidate strategy mode is invalid")
     return mode
-
-
-def _required_text(value: Any, field: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise OpeningCandidateSnapshotError(f"{field} is required")
-    return text
 
 
 def _sha256(value: Any, field: str) -> str:

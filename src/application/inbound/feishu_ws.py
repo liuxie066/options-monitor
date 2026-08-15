@@ -50,6 +50,8 @@ from src.infrastructure.feishu_bitable import (
 )
 from src.infrastructure.feishu_bot import FEISHU_REPLY_TOO_LARGE, add_message_reaction, reply_message
 from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available, start_feishu_ws_client
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 
 DEFAULT_FEISHU_REPLY_MAX_CHARS = 3500
@@ -1222,10 +1224,6 @@ def _opaque_reference(kind: str, value: Any) -> str | None:
     return f"{kind}:sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     try:
@@ -1272,14 +1270,6 @@ def _config_positive_int(explicit: int | None, configured: Any, *, default: int)
     except Exception:
         value = default
     return max(1, value)
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None
 
 
 @contextmanager

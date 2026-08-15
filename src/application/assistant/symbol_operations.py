@@ -29,6 +29,12 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: AgentToolError(code="NEEDS_CLARIFICATION", message=m))
 
 
 LIST_INTENTS = frozenset({"symbol_list"})
@@ -716,15 +722,3 @@ def _optional_float(value: Any, field_name: str) -> float | None:
         return float(value)
     except Exception as exc:
         raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be a number") from exc
-
-
-def _required_text(value: Any, field_name: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{field_name} is required")
-    return text
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None

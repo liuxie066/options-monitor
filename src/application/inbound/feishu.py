@@ -7,6 +7,8 @@ from typing import Any, Callable, cast
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.policy import check_sender_allowed
+from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import first_text as _first_text
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 
@@ -228,15 +230,3 @@ def _clean_text(text: str | None) -> str | None:
     value = re.sub(r"<at\b[^>]*>.*?</at>", "", value, flags=re.IGNORECASE | re.DOTALL)
     value = re.sub(r"\s+", " ", value).strip()
     return value or None
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
-
-
-def _first_text(*values: Any) -> str | None:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return None

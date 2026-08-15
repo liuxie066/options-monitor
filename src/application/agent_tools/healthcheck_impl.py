@@ -16,10 +16,7 @@ from src.application.secret_resolver import (
     resolve_feishu_holdings_config,
 )
 from src.application.service_deploy import load_service_profile, service_status_from_profile
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+from src.application.payload_helpers import as_dict as _dict
 
 
 def _quote_probe_message(probe: dict[str, Any], *, ready: bool) -> str:

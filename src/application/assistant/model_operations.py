@@ -25,6 +25,12 @@ from src.application.config_authoring_transaction import config_source_sha256, p
 from src.application.config_yaml import default_yaml_assistant_config_path, default_yaml_config_path, load_yaml_config_file
 from src.application.runtime_config_freshness import GENERATED_KEY
 from src.application.config_yaml import RESOLVED_KEY
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: AgentToolError(code="NEEDS_CLARIFICATION", message=m))
 
 
 LIST_INTENTS = frozenset({"model_list"})
@@ -490,18 +496,4 @@ def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
     if not isinstance(markets, dict):
         return []
     return [market for market in ("us", "hk") if isinstance(markets.get(market), dict)]
-
-
-def _required_text(value: Any, field_name: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{field_name} is required")
-    return text
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
 __all__ = ["handle_model_operation", "render_model_response"]

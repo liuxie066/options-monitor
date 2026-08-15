@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.llm_provider_registry import provider_spec
+from src.application.payload_helpers import as_dict as _dict
 
 
 DEFAULT_LLM_API_KEY_ENV = "OM_LLM_API_KEY"
@@ -109,10 +110,6 @@ class AssistantSettings:
         if not self.enabled or not self.copilot.enabled:
             return frozenset()
         return self.copilot.toolsets
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 def _bool(value: Any, *, default: bool) -> bool:

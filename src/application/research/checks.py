@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from src.application.payload_helpers import as_dict as _dict
 
 
 SEVERITY_ORDER = {"info": 0, "warn": 1, "fail": 2}
@@ -317,10 +318,6 @@ def _finding(*, severity: str, category: str, code: str, message: str, evidence:
         "message": message,
         "evidence": evidence,
     }
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 def _json_payload(file_info: Any) -> dict[str, Any]:

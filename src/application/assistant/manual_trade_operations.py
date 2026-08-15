@@ -34,6 +34,12 @@ from src.application.positions.workflows import (
 )
 from src.application.strategy_policy import resolve_position_strategy
 from src.application.symbol_aliases import symbol_aliases_from_config
+from src.application.payload_helpers import optional_text as _optional_text
+from src.application.payload_helpers import required_text
+from functools import partial
+
+
+_required_text = partial(required_text, error=lambda m: AgentToolError(code="NEEDS_CLARIFICATION", message=m))
 
 
 PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"})
@@ -1078,18 +1084,6 @@ def _require_fields(args: dict[str, Any], keys: tuple[str, ...], *, action: str)
     missing = [key for key in keys if args.get(key) in (None, "")]
     if missing:
         raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{action}缺少字段：" + "、".join(missing), hint="示例：记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
-
-
-def _required_text(value: Any, field_name: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{field_name} is required")
-    return text
-
-
-def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _positive_int(value: Any, field_name: str) -> int:
