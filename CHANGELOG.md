@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.14.0 - 2026-08-16
+
+### New Features
+- Added an opt-in experimental HK/lx Sell Put Top1 optimization loop that captures official recommendation points, compares baseline and challenger ranking profiles on a frozen 40-trading-day research corpus, validates the locked challenger over a separate 20-trading-day hidden window, and advances through an auditable scheduled runner without changing production strategy configuration or automatically adopting a winner. Its explicit W0R preflight records compact HK calendar, account fee-plan, quote, exact-expiration terms, history-quota, and exact-expiration close receipts while keeping raw provider responses out of storage.
+
+### Improvements
+- Reduced candidate scanning, Close Advice loading, alert rendering, and combo construction overhead by replacing pandas row iteration in hot paths with record materialization and by reusing the materialized put-leg set across call combinations.
+
 ## 1.13.23 - 2026-08-14
 
 ### Bug Fixes
