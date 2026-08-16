@@ -57,8 +57,6 @@ _EVENT_TYPES = frozenset(
         "agent_start",
         "turn_start",
         "model_turn_completed",
-        "tool_execution_start",
-        "tool_execution_end",
         "turn_end",
         "agent_end",
     }
@@ -101,6 +99,11 @@ def _safe_failure(
             "retryable": bool(retryable),
         },
     }
+
+
+def _stderr_summary(stderr_bytes: bytes) -> str:
+    text = stderr_bytes.decode("utf-8", errors="replace").strip()
+    return text if text else ""
 
 
 def _validate_start_payload(payload: Any) -> None:
@@ -276,8 +279,6 @@ def _encode_envelope(
 def _decode_line(line: bytes) -> dict[str, Any] | None:
     if not line.endswith(b"\n"):
         return None
-    if line.endswith(b"\r\n"):
-        line = line[:-2] + b"\n"
     body = line.rstrip(b"\r\n")
     if not body:
         return None
@@ -369,8 +370,6 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
         if data["stop_reason"] not in _STOP_REASONS:
             raise ValueError("turn event stop_reason is not allowed")
         _validate_usage(data["usage"])
-    else:
-        raise ValueError("tool events are not allowed in S1")
 
 
 def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
@@ -519,6 +518,7 @@ def run_pi_agent(
     decision_written = False
     decision: str | None = None
     stdout_buffer = b""
+    stderr_buffer = b""
     final_result: dict[str, Any] | None = None
     final_error: dict[str, Any] | None = None
     final_ok: bool | None = None
@@ -578,8 +578,8 @@ def run_pi_agent(
                         chunk = os.read(process.stderr.fileno(), 65536)
                     except (BlockingIOError, OSError):
                         chunk = b""
-                    if not chunk:
-                        continue
+                    if chunk:
+                        stderr_buffer += chunk
                     continue
                 if key.fileobj is process.stdout:
                     try:
@@ -596,12 +596,24 @@ def run_pi_agent(
                             # startup failure (non-zero, zero envelopes) is not
                             # mistaken for an in-run process death.
                             exit_code = process.poll()
+                            try:
+                                while True:
+                                    tail = os.read(process.stderr.fileno(), 65536)
+                                    if not tail:
+                                        break
+                                    stderr_buffer += tail
+                            except (BlockingIOError, OSError):
+                                pass
                             _stop_child(process)
                             if exit_code not in (None, 0):
+                                detail = _stderr_summary(stderr_buffer)
+                                message = "child failed before protocol established"
+                                if detail:
+                                    message = f"{message}: {detail}"
                                 return _safe_failure(
                                     "PI_RUNTIME_UNAVAILABLE",
                                     "spawn",
-                                    "child failed before protocol established",
+                                    message,
                                     False,
                                 )
                             return _safe_failure("PI_PROCESS_EXITED", "process", "child exited before terminal", True)
@@ -654,6 +666,11 @@ def run_pi_agent(
                                 if saw_terminal:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal after terminal", False)
+                                if cancel_sent:
+                                    # Host cancellation is already the durable
+                                    # winner; the buffered proposal is superseded.
+                                    # Do not open a second admission decision.
+                                    continue
                                 _validate_terminal_payload(payload, final=False)
                                 if on_proposed is None:
                                     _stop_child(process)

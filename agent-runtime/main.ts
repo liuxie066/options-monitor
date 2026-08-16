@@ -326,28 +326,12 @@ function makeAssistantMessage(
 }
 
 function waitAbortOrDelay(signal: AbortSignal | undefined, ms: number): Promise<void> {
+  const sources: AbortSignal[] = [AbortSignal.timeout(ms)];
+  if (signal) sources.push(signal);
+  const combined = AbortSignal.any(sources);
+  if (combined.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve();
-      return;
-    }
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onAbort = () => {
-      if (timer) clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        resolve();
-      }
-    };
-    timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      if (!settled) {
-        settled = true;
-        resolve();
-      }
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
+    combined.addEventListener("abort", () => resolve(), { once: true });
   });
 }
 
@@ -610,7 +594,11 @@ async function run(): Promise<void> {
 }
 
 process.stdin.on("error", () => {});
-run().catch((err) => {
-  process.stderr.write(`diagnostic: ${String(err)}\n`);
-  process.exitCode = 1;
-});
+run().then(
+  () => process.stdin.destroy(),
+  (err) => {
+    process.stderr.write(`diagnostic: ${String(err)}\n`);
+    process.exitCode = 1;
+    process.stdin.destroy();
+  }
+);

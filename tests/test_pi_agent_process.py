@@ -203,6 +203,7 @@ def test_pre_identity_nonzero_exit(tmp_path):
     assert result["error"]["code"] == "PI_RUNTIME_UNAVAILABLE"
     assert result["error"]["stage"] == "spawn"
     assert result["error"]["retryable"] is False
+    assert "boom" in result["error"]["message"]
 
 
 def test_timeout(tmp_path):
@@ -368,3 +369,75 @@ def test_terminal_then_hang_preserves_validated_result(tmp_path):
     assert result["ok"] is True
     assert result["result"]["status"] == "answered"
     assert result["result"]["text"] == "hello"
+
+
+_CANCEL_RACE_CHILD = """
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const rec = (type, seq, payload) =>
+  process.stdout.write(JSON.stringify({
+    protocol: "om-pi-ipc.v1", type, request_id: "req_1", run_id: "run_1",
+    seq, payload,
+  }) + "\\n");
+let n = 0;
+rl.on("line", (line) => {
+  n += 1;
+  if (n === 1) {
+    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+    rec("agent.event", 2, { event_type: "agent_start", data: {} });
+    rec("agent.event", 3, { event_type: "turn_start", data: {} });
+    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", usage: {} } });
+    rec("agent.event", 5, { event_type: "turn_end", data: { stop_reason: "stop", usage: {} } });
+    rec("agent.event", 6, { event_type: "agent_end", data: {} });
+    rec("run.proposed", 7, { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} });
+  } else if (n === 2) {
+    // Python already sent run.cancel before reading the proposal; the child
+    // answers with a cancelled final, not an answered commit.
+    rec("run.final", 8, { status: "cancelled", text: "", control_request: null, termination_reason: "aborted", usage: {}, committed: false });
+    process.exit(0);
+  }
+});
+"""
+
+
+def test_cancel_beats_fast_proposal(tmp_path):
+    entry = _write_fake(tmp_path, _CANCEL_RACE_CHILD)
+    calls = {"n": 0}
+
+    def is_cancelled():
+        calls["n"] += 1
+        # False for the pre-spawn check, True on the first loop iteration so
+        # the host cancellation is written before the buffered proposal.
+        return calls["n"] > 1
+
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        is_cancelled=is_cancelled,
+        on_proposed=lambda p: "commit",
+        runtime_entry=entry,
+    )
+    assert result["ok"] is True
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["committed"] is False
+
+
+def test_real_runtime_exits_promptly_on_commit():
+    import time
+
+    t0 = time.monotonic()
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_proposed=lambda p: "commit",
+    )
+    elapsed = time.monotonic() - t0
+    assert result["ok"] is True
+    assert result["result"]["committed"] is True
+    # Before the stdin-destroy fix the child hung for the fixed 1s grace +
+    # SIGTERM. After the fix it exits cleanly well under that window.
+    assert elapsed < 0.8
