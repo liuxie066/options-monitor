@@ -58,6 +58,7 @@ from src.interfaces.cli.option_performance import (
     add_option_performance_commands,
     handle_option_performance_command,
 )
+from src.interfaces.cli.options_data_ops import add_options_data_commands, handle_options_data_command
 from src.interfaces.cli.portfolio_ops import (
     add_portfolio_commands,
     handle_portfolio_command,
@@ -110,6 +111,7 @@ from src.interfaces.cli.settings_ops import (
     inspect_effective_settings,
 )
 from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check
+from src.interfaces.cli.xueqiu_ops import add_xueqiu_commands, handle_xueqiu_command
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -157,6 +159,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     add_daily_brief_commands(sub)
     add_quality_commands(sub)
+    add_xueqiu_commands(sub)
+    add_options_data_commands(sub)
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -323,6 +327,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "quality":
             result = handle_quality_command(args)
             return int(result) if isinstance(result, int) else _print(result)
+
+        if args.command == "xueqiu":
+            return _print(handle_xueqiu_command(args))
+
+        if args.command == "options-data":
+            return _print(handle_options_data_command(args))
 
         if args.command in {"scheduler", "sell-put-cash"}:
             return handle_scheduler_command(
