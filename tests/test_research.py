@@ -230,6 +230,70 @@ def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Pat
             )
 
 
+def test_storage_cleanup_preview_cli_is_read_only(monkeypatch, tmp_path: Path) -> None:
+    from src.application.research import historical_cleanup
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        historical_cleanup,
+        "build_historical_cleanup_preview",
+        lambda **kwargs: calls.append(kwargs)
+        or {"schema_version": "historical_cleanup_preview.v1", "preview_ready": False},
+    )
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    args = parse_args(
+        [
+            "research",
+            "storage-cleanup-preview",
+            "--runtime-root",
+            str(runtime),
+            "--ledger-sqlite",
+            "ledger.sqlite3",
+            "--lifecycle-inventory",
+            "lifecycle.json",
+            "--quality-cutover-evidence",
+            "quality.json",
+            "--backup-proof",
+            "backup.json",
+            "--history-report",
+            "before.json",
+            "--allow-external-ledger",
+        ]
+    )
+
+    response = handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+    assert response["tool_name"] == "research.storage-cleanup-preview"
+    assert calls == [
+        {
+            "repo_root": tmp_path,
+            "runtime_root": str(runtime),
+            "ledger_sqlite": "ledger.sqlite3",
+            "lifecycle_inventory": "lifecycle.json",
+            "quality_cutover_evidence": "quality.json",
+            "backup_proof": "backup.json",
+            "history_reports": ["before.json"],
+            "allow_external_ledger": True,
+        }
+    ]
+    for forbidden in ("--confirm", "--delete"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    "research",
+                    "storage-cleanup-preview",
+                    "--runtime-root",
+                    str(runtime),
+                    "--lifecycle-inventory",
+                    "lifecycle.json",
+                    forbidden,
+                ]
+            )
+
+
 class _ToolKwargs(TypedDict):
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
     repo_base: Callable[[], Path]
