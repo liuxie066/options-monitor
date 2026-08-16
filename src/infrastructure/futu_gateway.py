@@ -566,6 +566,10 @@ class FutuGatewayTransientError(FutuGatewayError):
     code = "TRANSIENT"
 
 
+class FutuGatewayDataContractError(FutuGatewayError):
+    code = "DATA_CONTRACT"
+
+
 class FutuGatewayCapabilityUnavailableError(FutuGatewayError):
     code = "CAPABILITY_UNAVAILABLE"
 
@@ -913,6 +917,45 @@ class FutuGateway:
             self._raise_mapped(exc, action=action)
         raise AssertionError("unreachable")
 
+    def get_exact_expiration_option_terms(
+        self,
+        *,
+        code: str,
+        expiration: str,
+        contract_symbol: str,
+    ) -> dict[str, Any] | None:
+        action = "get_exact_expiration_option_terms"
+        try:
+            normalized_code, normalized_expiration = (
+                _normalize_exact_expiration_close_request(code, expiration)
+            )
+            normalized_contract = _non_empty_upper(
+                contract_symbol, "exact-expiration contract_symbol"
+            )
+        except Exception as exc:
+            self._raise_mapped(exc, action=action)
+        try:
+            result = self.get_option_chain(
+                code=normalized_code,
+                start=normalized_expiration,
+                end=normalized_expiration,
+                option_type="PUT",
+                is_force_refresh=True,
+            )
+        except Exception as exc:
+            self._raise_mapped(exc, action=action)
+        try:
+            return _normalize_exact_expiration_option_terms_response(
+                result,
+                code=normalized_code,
+                expiration=normalized_expiration,
+                contract_symbol=normalized_contract,
+            )
+        except ValueError as exc:
+            raise FutuGatewayDataContractError(
+                f"{action} failed: {exc}", raw_error=exc
+            ) from exc
+
     def get_history_kl_quota(self) -> dict[str, Any]:
         quote = self._quote_client()
         try:
@@ -1005,6 +1048,90 @@ def _normalize_exact_expiration_close_request(
             "exact-expiration close expiration must use YYYY-MM-DD"
         )
     return code.strip().upper(), expiration
+
+
+def _non_empty_upper(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be non-empty text")
+    return value.strip().upper()
+
+
+def _provider_rows(value: Any, label: str) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        if any(not isinstance(row, dict) for row in value):
+            raise ValueError(f"{label} rows must be objects")
+        return [dict(row) for row in value]
+    to_dict = getattr(value, "to_dict", None)
+    columns = getattr(value, "columns", None)
+    if not callable(to_dict) or columns is None:
+        raise ValueError(f"{label} must be a DataFrame or row list")
+    names = list(columns)
+    if len(names) != len(set(names)):
+        raise ValueError(f"{label} columns must be unique")
+    rows = to_dict(orient="records")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError(f"{label} rows must be objects")
+    return [dict(row) for row in rows]
+
+
+def _positive_real(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise ValueError(f"{label} must be a positive finite number")
+    return float(value)
+
+
+def _normalize_exact_expiration_option_terms_response(
+    value: Any,
+    *,
+    code: str,
+    expiration: str,
+    contract_symbol: str,
+) -> dict[str, Any] | None:
+    matches = [
+        row
+        for row in _provider_rows(value, "exact-expiration option terms")
+        if str(row.get("code") or "").strip().upper() == contract_symbol
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("exact-expiration option terms must uniquely match contract")
+    row = matches[0]
+    owner = _non_empty_upper(row.get("stock_owner"), "option stock_owner")
+    observed_expiration = str(
+        row.get("strike_time") or row.get("expiration") or ""
+    ).strip()
+    if owner != code or observed_expiration != expiration:
+        raise ValueError("exact-expiration option identity does not match request")
+    option_type = _non_empty_upper(row.get("option_type"), "option_type").rsplit(
+        ".", 1
+    )[-1]
+    standard_type = _non_empty_upper(
+        row.get("option_standard_type"), "option_standard_type"
+    ).rsplit(".", 1)[-1]
+    if option_type != "PUT" or standard_type != "STANDARD":
+        raise ValueError("exact-expiration option must be a standard PUT")
+    multiplier_value = row.get("lot_size", row.get("option_contract_size"))
+    multiplier = _positive_real(multiplier_value, "option multiplier")
+    if not multiplier.is_integer():
+        raise ValueError("option multiplier must be an integer")
+    return {
+        "contract_symbol": contract_symbol,
+        "stock_owner": owner,
+        "expiration": expiration,
+        "option_type": option_type,
+        "option_standard_type": standard_type,
+        "strike": _positive_real(
+            row.get("strike_price", row.get("strike")), "option strike"
+        ),
+        "multiplier": int(multiplier),
+        "currency": _non_empty_upper(row.get("currency"), "option currency"),
+    }
 
 
 def _normalize_exact_expiration_close_response(

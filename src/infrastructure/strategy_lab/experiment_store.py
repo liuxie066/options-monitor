@@ -16,7 +16,7 @@ from src.infrastructure.private_storage import (
 
 
 SCHEMA_COMPONENT = "sell_put_top1_experiment_store"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _V1_REQUIRED_TABLES = {
     "strategy_lab_schema",
@@ -26,16 +26,29 @@ _V1_REQUIRED_TABLES = {
     "strategy_lab_hidden_commitments",
     "strategy_lab_events",
 }
-_REQUIRED_TABLES = {
+_V2_REQUIRED_TABLES = {
     *_V1_REQUIRED_TABLES,
     "strategy_lab_corpus_days",
     "strategy_lab_corpus_points",
 }
-_REQUIRED_INDEXES = {
+_REQUIRED_TABLES = {
+    *_V2_REQUIRED_TABLES,
+    "strategy_lab_validation_decisions",
+    "strategy_lab_validation_days",
+    "strategy_lab_fill_observations",
+    "strategy_lab_outcome_jobs",
+    "strategy_lab_expiry_close_facts",
+}
+_V2_REQUIRED_INDEXES = {
     "strategy_lab_one_active_validation",
     "strategy_lab_hidden_date_unique",
     "strategy_lab_event_subject_unique",
     "strategy_lab_event_idempotency_unique",
+}
+_REQUIRED_INDEXES = {
+    *_V2_REQUIRED_INDEXES,
+    "strategy_lab_validation_decision_order",
+    "strategy_lab_outcome_job_status",
 }
 _V1_EXPECTED_FOREIGN_KEYS = {
     "strategy_lab_experiments": {
@@ -52,7 +65,7 @@ _V1_EXPECTED_FOREIGN_KEYS = {
     },
     "strategy_lab_events": set(),
 }
-_EXPECTED_FOREIGN_KEYS = {
+_V2_EXPECTED_FOREIGN_KEYS = {
     **_V1_EXPECTED_FOREIGN_KEYS,
     "strategy_lab_corpus_days": set(),
     "strategy_lab_corpus_points": {
@@ -61,6 +74,72 @@ _EXPECTED_FOREIGN_KEYS = {
         ("trading_date", "strategy_lab_corpus_days", "trading_date"),
     },
 }
+_EXPECTED_FOREIGN_KEYS = {
+    **_V2_EXPECTED_FOREIGN_KEYS,
+    "strategy_lab_validation_decisions": {
+        ("experiment_id", "strategy_lab_experiments", "experiment_id"),
+    },
+    "strategy_lab_validation_days": {
+        ("experiment_id", "strategy_lab_experiments", "experiment_id"),
+    },
+    "strategy_lab_fill_observations": {
+        ("experiment_id", "strategy_lab_experiments", "experiment_id"),
+    },
+    "strategy_lab_outcome_jobs": {
+        ("experiment_id", "strategy_lab_experiments", "experiment_id"),
+    },
+    "strategy_lab_expiry_close_facts": {
+        ("experiment_id", "strategy_lab_experiments", "experiment_id"),
+    },
+}
+
+_EXPERIMENT_COLUMNS = (
+    "experiment_id",
+    "topic_id",
+    "market",
+    "account",
+    "strategy_family",
+    "spec_json",
+    "research_spec_sha256",
+    "validation_spec_sha256",
+    "source_provenance_json",
+    "phase",
+    "research_progress",
+    "validation_progress",
+    "blocked_reason",
+    "completed_validation_partitions",
+    "research_authorization_status",
+    "research_authorized_hash",
+    "research_authorized_actor",
+    "research_authorized_at_utc",
+    "validation_authorization_status",
+    "validation_authorized_hash",
+    "validation_authorized_actor",
+    "validation_authorized_at_utc",
+    "research_leader",
+    "research_receipt_ref",
+    "research_receipt_file_sha256",
+    "proposed_commitment_json",
+    "proposed_commitment_sha256",
+    "proposed_commitment_ref",
+    "proposed_commitment_content_sha256",
+    "proposed_commitment_file_sha256",
+    "terminal_mode",
+    "terminal_reason",
+    "disabled_scope",
+    "terminal_at_utc",
+    "terminated_at_partition",
+    "final_outcome_status",
+    "receipt_request_event_id",
+    "receipt_published_event_id",
+    "receipt_ref",
+    "receipt_content_sha256",
+    "receipt_file_sha256",
+    "receipt_published_at_utc",
+    "created_at_utc",
+    "updated_at_utc",
+    "state_version",
+)
 
 
 class ExperimentStoreError(RuntimeError):
@@ -120,9 +199,12 @@ class ExperimentStore:
                 if version == 1:
                     self._validate_v1(connection, deep=True)
                     return {"status": "migration_required", "schema_version": 1}
+                if version == 2:
+                    self._validate_v2(connection, deep=True)
+                    return {"status": "migration_required", "schema_version": 2}
                 if version != SCHEMA_VERSION:
                     return {"status": "schema_unsupported", "schema_version": version}
-                self._validate_v2(connection, deep=True)
+                self._validate_v3(connection, deep=True)
                 return {"status": "ready", "schema_version": version}
             finally:
                 connection.close()
@@ -132,8 +214,15 @@ class ExperimentStore:
     def migrate(self, *, migrated_at_utc: str) -> dict[str, object]:
         connection = connect_private_sqlite(self.path, isolation_level=None)
         connection.row_factory = sqlite3.Row
+        committed = False
+        foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        legacy_alter = int(
+            connection.execute("PRAGMA legacy_alter_table").fetchone()[0]
+        )
         try:
-            self._configure(connection)
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("PRAGMA legacy_alter_table=ON")
             connection.execute("BEGIN IMMEDIATE")
             tables = self._tables(connection)
             if not tables:
@@ -142,7 +231,7 @@ class ExperimentStore:
                 connection.execute(
                     "INSERT INTO strategy_lab_schema(component, schema_version, migrated_at_utc) "
                     "VALUES (?, ?, ?)",
-                    (SCHEMA_COMPONENT, SCHEMA_VERSION, migrated_at_utc),
+                    (SCHEMA_COMPONENT, 2, migrated_at_utc),
                 )
             elif tables == {"strategy_lab_schema"}:
                 metadata = connection.execute(
@@ -159,7 +248,7 @@ class ExperimentStore:
                 connection.execute(
                     "INSERT INTO strategy_lab_schema(component, schema_version, migrated_at_utc) "
                     "VALUES (?, ?, ?)",
-                    (SCHEMA_COMPONENT, SCHEMA_VERSION, migrated_at_utc),
+                    (SCHEMA_COMPONENT, 2, migrated_at_utc),
                 )
             else:
                 metadata = (
@@ -182,25 +271,55 @@ class ExperimentStore:
                         "UPDATE strategy_lab_schema "
                         "SET schema_version = ?, migrated_at_utc = ? "
                         "WHERE component = ?",
-                        (SCHEMA_VERSION, migrated_at_utc, SCHEMA_COMPONENT),
+                        (2, migrated_at_utc, SCHEMA_COMPONENT),
                     )
-                elif version == SCHEMA_VERSION:
+                elif version == 2:
                     self._validate_v2(connection, deep=True)
+                elif version == SCHEMA_VERSION:
+                    self._validate_v3(connection, deep=True)
                 else:
                     raise ExperimentStoreError(
                         "schema_unsupported", "existing schema cannot be migrated"
                     )
+            metadata = connection.execute(
+                "SELECT schema_version FROM strategy_lab_schema WHERE component = ?",
+                (SCHEMA_COMPONENT,),
+            ).fetchone()
+            if metadata is None:
+                raise ExperimentStoreError(
+                    "schema_unsupported", "schema metadata is missing"
+                )
+            if int(metadata[0]) == 2:
+                self._migrate_v2_to_v3(connection)
+                connection.execute(
+                    "UPDATE strategy_lab_schema "
+                    "SET schema_version = ?, migrated_at_utc = ? WHERE component = ?",
+                    (SCHEMA_VERSION, migrated_at_utc, SCHEMA_COMPONENT),
+                )
+            self._validate_v3(connection, deep=True)
             connection.commit()
-            self._validate_v2(connection, deep=True)
+            committed = True
         except (sqlite3.DatabaseError, ValueError) as exc:
-            connection.rollback()
+            if connection.in_transaction:
+                connection.rollback()
             raise ExperimentStoreError("schema_unsupported", "SQLite schema is invalid") from exc
         except BaseException:
-            connection.rollback()
+            if connection.in_transaction:
+                connection.rollback()
             raise
         finally:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.execute(f"PRAGMA legacy_alter_table={legacy_alter}")
+            connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
             connection.close()
             secure_sqlite_artifacts(self.path)
+        if committed:
+            verify = self._readonly_connection()
+            try:
+                self._validate_v3(verify, deep=True)
+            finally:
+                verify.close()
         return {"status": "ready", "schema_version": SCHEMA_VERSION}
 
     def feature(self, market: str, account: str) -> dict[str, Any] | None:
@@ -1120,6 +1239,23 @@ class ExperimentStore:
             )
             connection.execute(
                 """
+                INSERT INTO strategy_lab_generations(
+                    experiment_id, generation_kind, state, revision,
+                    last_revision_ref, last_revision_file_sha256,
+                    frozen_row_content_sha256, created_at_utc, updated_at_utc
+                ) VALUES (?, 'outcome', 'open', 0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    current["proposed_commitment_ref"],
+                    current["proposed_commitment_file_sha256"],
+                    current["proposed_commitment_content_sha256"],
+                    occurred_at_utc,
+                    occurred_at_utc,
+                ),
+            )
+            connection.execute(
+                """
                 UPDATE strategy_lab_experiments SET
                     phase = 'validation', validation_progress = 'collecting_decisions',
                     completed_validation_partitions = 0,
@@ -1130,44 +1266,75 @@ class ExperimentStore:
             )
             return self._required_experiment(connection, experiment_id)
 
-    def commit_validation_point(
+    def commit_validation_decision(
         self,
         *,
         experiment_id: str,
-        point_id: str,
-        trading_date: str,
-        source_ref: str,
-        source_file_sha256: str,
+        expected_state_version: int,
+        decision: Mapping[str, object],
+        gap_observations: Sequence[Mapping[str, object]],
+        fill_status_updates: Sequence[Mapping[str, object]],
+        day: Mapping[str, object] | None,
         revision: int,
-        manifest_ref: str,
-        manifest_file_sha256: str,
+        revision_ref: str,
+        revision_file_sha256: str,
         frozen_row_sha256: str,
+        terminal_request: Mapping[str, object] | None,
         actor: str,
         occurred_at_utc: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        point_id = str(decision["recommendation_point_id"])
         request = {
             "experiment_id": experiment_id,
-            "point_id": point_id,
-            "trading_date": trading_date,
-            "source_ref": source_ref,
-            "source_file_sha256": source_file_sha256,
+            "expected_state_version": expected_state_version,
+            "decision_sha256": _sha256_text(compact_json(decision)),
+            "gap_observations_sha256": _sha256_text(compact_json(gap_observations)),
+            "fill_status_updates_sha256": _sha256_text(
+                compact_json(fill_status_updates)
+            ),
+            "day_sha256": _sha256_text(compact_json(day)) if day else None,
             "revision": revision,
-            "manifest_ref": manifest_ref,
-            "manifest_file_sha256": manifest_file_sha256,
+            "revision_ref": revision_ref,
+            "revision_file_sha256": revision_file_sha256,
             "frozen_row_sha256": frozen_row_sha256,
+            "terminal_request_sha256": (
+                _sha256_text(compact_json(terminal_request))
+                if terminal_request is not None
+                else None
+            ),
         }
-        scope = f"experiment:{experiment_id}:validation-point"
+        scope = f"experiment:{experiment_id}:validation-decision"
         with self._write() as connection:
             replay = self._command_event(connection, scope, idempotency_key)
             if replay is not None:
                 self._assert_event_replay(replay, request, actor, occurred_at_utc)
-                return self._required_generation(connection, experiment_id, "hidden")
-            experiment = self._required_experiment(connection, experiment_id)
-            generation = self._required_generation(connection, experiment_id, "hidden")
+                return self._required_validation_decision(
+                    connection, experiment_id, point_id
+                )
+            experiment, generation, open_date = self._validation_open_state(
+                connection, experiment_id, expected_state_version
+            )
+            if str(decision["trading_date"]) != open_date:
+                raise ExperimentStoreError(
+                    "experiment_conflict", "decision date is not open"
+                )
+            observed_index = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM strategy_lab_validation_decisions
+                    WHERE experiment_id = ? AND trading_date = ?
+                    """,
+                    (experiment_id, open_date),
+                ).fetchone()[0]
+            )
+            if int(decision["point_index"]) != observed_index:
+                raise ExperimentStoreError(
+                    "experiment_conflict", "decision point is out of order"
+                )
             _, inserted = self._claim_event(
                 connection,
-                event_type="validation_point_committed",
+                event_type="validation_decision_committed",
                 subject_key=f"experiment:{experiment_id}:point:{point_id}",
                 command_scope=scope,
                 idempotency_key=idempotency_key,
@@ -1178,139 +1345,64 @@ class ExperimentStore:
                 generation_kind="hidden",
             )
             if not inserted:
-                return generation
-            if experiment["terminal_mode"] is not None or not (
-                experiment["phase"] == "validation"
-                and experiment["validation_progress"] == "collecting_decisions"
-                and generation["terminal_request_event_id"] is None
-            ):
-                raise ExperimentStoreError("late_write", "validation intake is closed")
-            committed_date = connection.execute(
-                """
-                SELECT 1 FROM strategy_lab_hidden_commitments
-                WHERE experiment_id = ? AND trading_date = ?
-                """,
-                (experiment_id, trading_date),
-            ).fetchone()
-            if committed_date is None:
-                raise ExperimentStoreError(
-                    "experiment_conflict", "point date is outside commitment"
-                )
-            next_date = connection.execute(
-                """
-                SELECT trading_date FROM strategy_lab_hidden_commitments
-                WHERE experiment_id = ? ORDER BY trading_date LIMIT 1 OFFSET ?
-                """,
-                (experiment_id, int(experiment["completed_validation_partitions"])),
-            ).fetchone()
-            if next_date is None or str(next_date[0]) != trading_date:
-                raise ExperimentStoreError(
-                    "late_write", "point date partition is not open"
-                )
-            if revision != int(generation["revision"]) + 1:
-                raise ExperimentStoreError(
-                    "generation_conflict", "hidden revision is not next"
+                return self._required_validation_decision(
+                    connection, experiment_id, point_id
                 )
             connection.execute(
                 """
-                UPDATE strategy_lab_generations SET
-                    revision = ?, last_revision_ref = ?,
-                    last_revision_file_sha256 = ?, frozen_row_content_sha256 = ?,
-                    updated_at_utc = ?
-                WHERE experiment_id = ? AND generation_kind = 'hidden'
+                INSERT INTO strategy_lab_validation_decisions(
+                    experiment_id, recommendation_point_id, trading_date,
+                    point_index, source_status, expectation_ref,
+                    expectation_content_sha256, target_at_utc, source_ref,
+                    source_file_sha256, source_content_sha256, hard_risk_status,
+                    baseline_json, challenger_json, baseline_fill_status,
+                    challenger_fill_status, reason_code, created_at_utc,
+                    updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    revision,
-                    manifest_ref,
-                    manifest_file_sha256,
-                    frozen_row_sha256,
-                    occurred_at_utc,
                     experiment_id,
+                    point_id,
+                    decision["trading_date"],
+                    decision["point_index"],
+                    decision["source_status"],
+                    decision["expectation_ref"],
+                    decision["expectation_content_sha256"],
+                    decision["target_at_utc"],
+                    decision.get("source_ref"),
+                    decision.get("source_file_sha256"),
+                    decision.get("source_content_sha256"),
+                    decision["hard_risk_status"],
+                    decision.get("baseline_json"),
+                    decision.get("challenger_json"),
+                    decision.get("baseline_fill_status"),
+                    decision.get("challenger_fill_status"),
+                    decision.get("reason_code"),
+                    occurred_at_utc,
+                    occurred_at_utc,
                 ),
             )
-            return self._required_generation(connection, experiment_id, "hidden")
-
-    def seal_validation_partition(
-        self,
-        *,
-        experiment_id: str,
-        trading_date: str,
-        terminal_request: Mapping[str, object] | None,
-        actor: str,
-        occurred_at_utc: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        request = {
-            "experiment_id": experiment_id,
-            "trading_date": trading_date,
-            "terminal_request_sha256": (
-                _sha256_text(compact_json(terminal_request))
-                if terminal_request is not None
-                else None
-            ),
-        }
-        scope = f"experiment:{experiment_id}:validation-partition"
-        with self._write() as connection:
-            replay = self._command_event(connection, scope, idempotency_key)
-            if replay is not None:
-                self._assert_event_replay(replay, request, actor, occurred_at_utc)
-                return self._required_experiment(connection, experiment_id)
-            experiment = self._required_experiment(connection, experiment_id)
-            generation = self._required_generation(connection, experiment_id, "hidden")
-            _, inserted = self._claim_event(
-                connection,
-                event_type="validation_partition_sealed",
-                subject_key=f"experiment:{experiment_id}:partition:{trading_date}",
-                command_scope=scope,
-                idempotency_key=idempotency_key,
-                actor=actor,
-                occurred_at_utc=occurred_at_utc,
-                payload=request,
-                experiment_id=experiment_id,
-                generation_kind="hidden",
+            self._insert_fill_observations(
+                connection, experiment_id, gap_observations, occurred_at_utc
             )
-            if not inserted:
-                return experiment
-            if experiment["terminal_mode"] is not None or not (
-                experiment["phase"] == "validation"
-                and experiment["validation_progress"] == "collecting_decisions"
-                and generation["terminal_request_event_id"] is None
-            ):
-                raise ExperimentStoreError("late_write", "validation intake is closed")
-            dates = [
-                str(row[0])
-                for row in connection.execute(
-                    """
-                    SELECT trading_date FROM strategy_lab_hidden_commitments
-                    WHERE experiment_id = ? ORDER BY trading_date
-                    """,
-                    (experiment_id,),
-                ).fetchall()
-            ]
-            completed = int(experiment["completed_validation_partitions"])
-            if completed >= len(dates) or dates[completed] != trading_date:
-                raise ExperimentStoreError(
-                    "experiment_conflict", "partition is not the next commitment date"
-                )
-            point_rows = connection.execute(
-                """
-                SELECT payload_json FROM strategy_lab_events
-                WHERE experiment_id = ? AND event_type = 'validation_point_committed'
-                """,
-                (experiment_id,),
-            ).fetchall()
-            if not any(
-                json.loads(str(row[0])).get("trading_date") == trading_date
-                for row in point_rows
-            ):
-                raise ExperimentStoreError(
-                    "experiment_conflict", "partition has no committed point"
-                )
-            is_final = completed + 1 == 20
-            if is_final != (terminal_request is not None):
-                raise ExperimentStoreError(
-                    "experiment_conflict", "terminal request is required only on day 20"
-                )
+            self._apply_fill_status_updates(
+                connection, experiment_id, fill_status_updates, occurred_at_utc
+            )
+            completed, progress = self._apply_validation_day(
+                connection,
+                experiment=experiment,
+                day=day,
+                occurred_at_utc=occurred_at_utc,
+            )
+            self._advance_generation(
+                connection,
+                generation=generation,
+                revision=revision,
+                revision_ref=revision_ref,
+                revision_file_sha256=revision_file_sha256,
+                frozen_row_sha256=frozen_row_sha256,
+                occurred_at_utc=occurred_at_utc,
+            )
             if terminal_request is not None:
                 self._request_generation_terminal(
                     connection,
@@ -1321,16 +1413,528 @@ class ExperimentStore:
                     occurred_at_utc=occurred_at_utc,
                     idempotency_key=f"{idempotency_key}:hidden-terminal",
                 )
+            if (completed == 20) != (terminal_request is not None):
+                raise ExperimentStoreError(
+                    "experiment_conflict", "day-20 terminal binding is invalid"
+                )
             connection.execute(
                 """
                 UPDATE strategy_lab_experiments SET
-                    completed_validation_partitions = ?,
-                    validation_progress = CASE WHEN ? THEN 'awaiting_outcomes'
-                                               ELSE validation_progress END,
+                    completed_validation_partitions = ?, validation_progress = ?,
                     updated_at_utc = ?, state_version = state_version + 1
                 WHERE experiment_id = ?
                 """,
-                (completed + 1, int(is_final), occurred_at_utc, experiment_id),
+                (completed, progress, occurred_at_utc, experiment_id),
+            )
+            return self._required_validation_decision(
+                connection, experiment_id, point_id
+            )
+
+    def commit_validation_observation_batch(
+        self,
+        *,
+        experiment_id: str,
+        expected_state_version: int,
+        observed_point_id: str,
+        observations: Sequence[Mapping[str, object]],
+        fill_status_updates: Sequence[Mapping[str, object]],
+        new_jobs: Sequence[Mapping[str, object]],
+        day: Mapping[str, object] | None,
+        revision: int,
+        revision_ref: str,
+        revision_file_sha256: str,
+        frozen_row_sha256: str,
+        terminal_request: Mapping[str, object] | None,
+        actor: str,
+        occurred_at_utc: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = {
+            "experiment_id": experiment_id,
+            "expected_state_version": expected_state_version,
+            "observed_point_id": observed_point_id,
+            "observations_sha256": _sha256_text(compact_json(observations)),
+            "fill_status_updates_sha256": _sha256_text(
+                compact_json(fill_status_updates)
+            ),
+            "new_jobs_sha256": _sha256_text(compact_json(new_jobs)),
+            "day_sha256": _sha256_text(compact_json(day)) if day else None,
+            "revision": revision,
+            "revision_ref": revision_ref,
+            "revision_file_sha256": revision_file_sha256,
+            "frozen_row_sha256": frozen_row_sha256,
+            "terminal_request_sha256": (
+                _sha256_text(compact_json(terminal_request))
+                if terminal_request is not None
+                else None
+            ),
+        }
+        scope = f"experiment:{experiment_id}:validation-observation"
+        with self._write() as connection:
+            replay = self._command_event(connection, scope, idempotency_key)
+            if replay is not None:
+                self._assert_event_replay(replay, request, actor, occurred_at_utc)
+                return {"status": "idempotent", "observed_point_id": observed_point_id}
+            experiment, generation, open_date = self._validation_open_state(
+                connection, experiment_id, expected_state_version
+            )
+            decision = self._required_validation_decision(
+                connection, experiment_id, observed_point_id
+            )
+            if decision["trading_date"] != open_date:
+                raise ExperimentStoreError(
+                    "experiment_conflict", "observation point date is not open"
+                )
+            _, inserted = self._claim_event(
+                connection,
+                event_type="validation_observation_committed",
+                subject_key=f"experiment:{experiment_id}:observation:{observed_point_id}",
+                command_scope=scope,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                payload=request,
+                experiment_id=experiment_id,
+                generation_kind="hidden",
+            )
+            if not inserted:
+                return {"status": "idempotent", "observed_point_id": observed_point_id}
+            self._insert_fill_observations(
+                connection, experiment_id, observations, occurred_at_utc
+            )
+            self._apply_fill_status_updates(
+                connection, experiment_id, fill_status_updates, occurred_at_utc
+            )
+            self._insert_outcome_jobs(
+                connection, experiment_id, new_jobs, occurred_at_utc
+            )
+            completed, progress = self._apply_validation_day(
+                connection,
+                experiment=experiment,
+                day=day,
+                occurred_at_utc=occurred_at_utc,
+            )
+            self._advance_generation(
+                connection,
+                generation=generation,
+                revision=revision,
+                revision_ref=revision_ref,
+                revision_file_sha256=revision_file_sha256,
+                frozen_row_sha256=frozen_row_sha256,
+                occurred_at_utc=occurred_at_utc,
+            )
+            if terminal_request is not None:
+                self._request_generation_terminal(
+                    connection,
+                    experiment_id=experiment_id,
+                    generation_kind="hidden",
+                    request=terminal_request,
+                    actor=actor,
+                    occurred_at_utc=occurred_at_utc,
+                    idempotency_key=f"{idempotency_key}:hidden-terminal",
+                )
+            if (completed == 20) != (terminal_request is not None):
+                raise ExperimentStoreError(
+                    "experiment_conflict", "day-20 terminal binding is invalid"
+                )
+            connection.execute(
+                """
+                UPDATE strategy_lab_experiments SET
+                    completed_validation_partitions = ?, validation_progress = ?,
+                    updated_at_utc = ?, state_version = state_version + 1
+                WHERE experiment_id = ?
+                """,
+                (completed, progress, occurred_at_utc, experiment_id),
+            )
+            return {"status": "committed", "observed_point_id": observed_point_id}
+
+    def commit_validation_day_gap(
+        self,
+        *,
+        experiment_id: str,
+        expected_state_version: int,
+        day: Mapping[str, object],
+        revision: int,
+        revision_ref: str,
+        revision_file_sha256: str,
+        frozen_row_sha256: str,
+        terminal_request: Mapping[str, object] | None,
+        actor: str,
+        occurred_at_utc: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        trading_date = str(day["trading_date"])
+        request = {
+            "experiment_id": experiment_id,
+            "expected_state_version": expected_state_version,
+            "day_sha256": _sha256_text(compact_json(day)),
+            "revision": revision,
+            "revision_ref": revision_ref,
+            "revision_file_sha256": revision_file_sha256,
+            "frozen_row_sha256": frozen_row_sha256,
+            "terminal_request_sha256": (
+                _sha256_text(compact_json(terminal_request))
+                if terminal_request is not None
+                else None
+            ),
+        }
+        scope = f"experiment:{experiment_id}:validation-day-gap"
+        with self._write() as connection:
+            replay = self._command_event(connection, scope, idempotency_key)
+            if replay is not None:
+                self._assert_event_replay(replay, request, actor, occurred_at_utc)
+                return self._required_experiment(connection, experiment_id)
+            experiment, generation, open_date = self._validation_open_state(
+                connection, experiment_id, expected_state_version
+            )
+            if trading_date != open_date or not (
+                day.get("expected_point_count") is None
+                and int(day["consumed_point_count"]) == 0
+                and day["hard_risk_status"] == "missing"
+            ):
+                raise ExperimentStoreError(
+                    "experiment_conflict", "whole-day gap is invalid"
+                )
+            _, inserted = self._claim_event(
+                connection,
+                event_type="validation_day_gap_committed",
+                subject_key=f"experiment:{experiment_id}:day-gap:{trading_date}",
+                command_scope=scope,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                payload=request,
+                experiment_id=experiment_id,
+                generation_kind="hidden",
+            )
+            if not inserted:
+                return self._required_experiment(connection, experiment_id)
+            completed, progress = self._apply_validation_day(
+                connection,
+                experiment=experiment,
+                day=day,
+                occurred_at_utc=occurred_at_utc,
+            )
+            self._advance_generation(
+                connection,
+                generation=generation,
+                revision=revision,
+                revision_ref=revision_ref,
+                revision_file_sha256=revision_file_sha256,
+                frozen_row_sha256=frozen_row_sha256,
+                occurred_at_utc=occurred_at_utc,
+            )
+            if terminal_request is not None:
+                self._request_generation_terminal(
+                    connection,
+                    experiment_id=experiment_id,
+                    generation_kind="hidden",
+                    request=terminal_request,
+                    actor=actor,
+                    occurred_at_utc=occurred_at_utc,
+                    idempotency_key=f"{idempotency_key}:hidden-terminal",
+                )
+            if (completed == 20) != (terminal_request is not None):
+                raise ExperimentStoreError(
+                    "experiment_conflict", "day-20 terminal binding is invalid"
+                )
+            connection.execute(
+                """
+                UPDATE strategy_lab_experiments SET
+                    completed_validation_partitions = ?, validation_progress = ?,
+                    updated_at_utc = ?, state_version = state_version + 1
+                WHERE experiment_id = ?
+                """,
+                (completed, progress, occurred_at_utc, experiment_id),
+            )
+            return self._required_experiment(connection, experiment_id)
+
+    def commit_outcome_batch(
+        self,
+        *,
+        experiment_id: str,
+        expected_state_version: int,
+        job_updates: Sequence[Mapping[str, object]],
+        close_fact: Mapping[str, object] | None,
+        revision: int,
+        revision_ref: str,
+        revision_file_sha256: str,
+        frozen_row_sha256: str,
+        actor: str,
+        occurred_at_utc: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = {
+            "experiment_id": experiment_id,
+            "expected_state_version": expected_state_version,
+            "job_updates_sha256": _sha256_text(compact_json(job_updates)),
+            "close_fact_sha256": (
+                _sha256_text(compact_json(close_fact)) if close_fact else None
+            ),
+            "revision": revision,
+            "revision_ref": revision_ref,
+            "revision_file_sha256": revision_file_sha256,
+            "frozen_row_sha256": frozen_row_sha256,
+        }
+        scope = f"experiment:{experiment_id}:outcome"
+        with self._write() as connection:
+            replay = self._command_event(connection, scope, idempotency_key)
+            if replay is not None:
+                self._assert_event_replay(replay, request, actor, occurred_at_utc)
+                return self._required_experiment(connection, experiment_id)
+            experiment = self._required_experiment(connection, experiment_id)
+            generation = self._required_generation(connection, experiment_id, "outcome")
+            if int(experiment["state_version"]) != expected_state_version:
+                raise ExperimentStoreError("stale_snapshot", "experiment changed")
+            if experiment["terminal_mode"] is not None or not (
+                experiment["phase"] == "validation"
+                and experiment["validation_progress"]
+                in {"collecting_decisions", "awaiting_outcomes"}
+                and generation["terminal_request_event_id"] is None
+            ):
+                raise ExperimentStoreError("late_write", "outcome intake is closed")
+            self._claim_event(
+                connection,
+                event_type="outcome_batch_committed",
+                subject_key=f"experiment:{experiment_id}:outcome-revision:{revision}",
+                command_scope=scope,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                payload=request,
+                experiment_id=experiment_id,
+                generation_kind="outcome",
+            )
+            if close_fact is not None:
+                self._insert_expiry_close_fact(connection, experiment_id, close_fact)
+            evidence_failed = False
+            for update in job_updates:
+                job = self._required_outcome_job(
+                    connection,
+                    experiment_id,
+                    str(update["target_point_id"]),
+                    str(update["arm"]),
+                )
+                expected = str(update["expected_status"])
+                target = str(update["status"])
+                if job["status"] != expected or (expected, target) not in {
+                    ("pending_terms", "pending_terms"),
+                    ("pending_terms", "pending_outcome"),
+                    ("pending_terms", "outcome_unavailable"),
+                    ("pending_outcome", "pending_outcome"),
+                    ("pending_outcome", "evaluable"),
+                    ("pending_outcome", "outcome_unavailable"),
+                }:
+                    raise ExperimentStoreError(
+                        "stale_snapshot", "outcome job transition changed"
+                    )
+                if target == "evaluable" and (
+                    update.get("result_json") is None
+                    or update.get("result_sha256") is None
+                ):
+                    raise ExperimentStoreError(
+                        "experiment_conflict", "evaluable outcome result is missing"
+                    )
+                if target == "outcome_unavailable" and not update.get("reason_code"):
+                    raise ExperimentStoreError(
+                        "experiment_conflict", "unavailable outcome reason is missing"
+                    )
+                connection.execute(
+                    """
+                    UPDATE strategy_lab_outcome_jobs SET
+                        status = ?, terms_point_id = COALESCE(?, terms_point_id),
+                        terms_json = COALESCE(?, terms_json),
+                        terms_sha256 = COALESCE(?, terms_sha256),
+                        result_json = COALESCE(?, result_json),
+                        result_sha256 = COALESCE(?, result_sha256),
+                        reason_code = ?, last_attempt_at_utc = ?, updated_at_utc = ?
+                    WHERE experiment_id = ? AND target_point_id = ? AND arm = ?
+                    """,
+                    (
+                        target,
+                        update.get("terms_point_id"),
+                        update.get("terms_json"),
+                        update.get("terms_sha256"),
+                        update.get("result_json"),
+                        update.get("result_sha256"),
+                        update.get("reason_code"),
+                        update.get("last_attempt_at_utc"),
+                        occurred_at_utc,
+                        experiment_id,
+                        update["target_point_id"],
+                        update["arm"],
+                    ),
+                )
+                evidence_failed = evidence_failed or target == "outcome_unavailable"
+            completed = int(experiment["completed_validation_partitions"])
+            if completed == 20 and evidence_failed:
+                connection.execute(
+                    """
+                    UPDATE strategy_lab_outcome_jobs SET
+                        status = 'not_required_after_evidence_failure',
+                        reason_code = 'required_outcome_missing', updated_at_utc = ?
+                    WHERE experiment_id = ?
+                      AND status IN ('pending_terms','pending_outcome')
+                    """,
+                    (occurred_at_utc, experiment_id),
+                )
+            pending = connection.execute(
+                """
+                SELECT 1 FROM strategy_lab_outcome_jobs
+                WHERE experiment_id = ?
+                  AND status IN ('pending_terms','pending_outcome') LIMIT 1
+                """,
+                (experiment_id,),
+            ).fetchone()
+            progress = (
+                "collecting_decisions"
+                if completed < 20
+                else "awaiting_outcomes"
+                if pending is not None
+                else "ready_to_conclude"
+            )
+            self._advance_generation(
+                connection,
+                generation=generation,
+                revision=revision,
+                revision_ref=revision_ref,
+                revision_file_sha256=revision_file_sha256,
+                frozen_row_sha256=frozen_row_sha256,
+                occurred_at_utc=occurred_at_utc,
+            )
+            connection.execute(
+                """
+                UPDATE strategy_lab_experiments SET
+                    validation_progress = ?, updated_at_utc = ?,
+                    state_version = state_version + 1
+                WHERE experiment_id = ?
+                """,
+                (progress, occurred_at_utc, experiment_id),
+            )
+            return self._required_experiment(connection, experiment_id)
+
+    def complete_validation(
+        self,
+        *,
+        experiment_id: str,
+        expected_state_version: int,
+        final_outcome_status: str,
+        result_sha256: str,
+        revision: int,
+        revision_ref: str,
+        revision_file_sha256: str,
+        frozen_row_sha256: str,
+        outcome_terminal_request: Mapping[str, object],
+        receipt_request: Mapping[str, object],
+        actor: str,
+        occurred_at_utc: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = {
+            "experiment_id": experiment_id,
+            "expected_state_version": expected_state_version,
+            "final_outcome_status": final_outcome_status,
+            "result_sha256": result_sha256,
+            "revision": revision,
+            "revision_ref": revision_ref,
+            "revision_file_sha256": revision_file_sha256,
+            "frozen_row_sha256": frozen_row_sha256,
+            "outcome_terminal_request_sha256": _sha256_text(
+                compact_json(outcome_terminal_request)
+            ),
+            "receipt_request_sha256": _sha256_text(compact_json(receipt_request)),
+        }
+        scope = f"experiment:{experiment_id}:complete-validation"
+        with self._write() as connection:
+            replay = self._command_event(connection, scope, idempotency_key)
+            if replay is not None:
+                self._assert_event_replay(replay, request, actor, occurred_at_utc)
+                return self._required_experiment(connection, experiment_id)
+            experiment = self._required_experiment(connection, experiment_id)
+            generation = self._required_generation(connection, experiment_id, "outcome")
+            hidden = self._required_generation(connection, experiment_id, "hidden")
+            if int(experiment["state_version"]) != expected_state_version:
+                raise ExperimentStoreError("stale_snapshot", "experiment changed")
+            if final_outcome_status not in {
+                "candidate_for_adoption",
+                "keep_baseline",
+                "insufficient_evidence",
+            }:
+                raise ExperimentStoreError(
+                    "experiment_conflict", "final outcome status is invalid"
+                )
+            pending = connection.execute(
+                """
+                SELECT 1 FROM strategy_lab_outcome_jobs
+                WHERE experiment_id = ?
+                  AND status IN ('pending_terms','pending_outcome') LIMIT 1
+                """,
+                (experiment_id,),
+            ).fetchone()
+            if experiment["terminal_mode"] is not None or not (
+                experiment["phase"] == "validation"
+                and experiment["validation_progress"] == "ready_to_conclude"
+                and int(experiment["completed_validation_partitions"]) == 20
+                and hidden["terminal_request_event_id"] is not None
+                and generation["terminal_request_event_id"] is None
+                and pending is None
+            ):
+                raise ExperimentStoreError(
+                    "invalid_transition", "validation is not ready to conclude"
+                )
+            self._claim_event(
+                connection,
+                event_type="validation_completed",
+                subject_key=f"experiment:{experiment_id}:completed",
+                command_scope=scope,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                payload=request,
+                experiment_id=experiment_id,
+                generation_kind="outcome",
+            )
+            self._advance_generation(
+                connection,
+                generation=generation,
+                revision=revision,
+                revision_ref=revision_ref,
+                revision_file_sha256=revision_file_sha256,
+                frozen_row_sha256=frozen_row_sha256,
+                occurred_at_utc=occurred_at_utc,
+            )
+            connection.execute(
+                """
+                UPDATE strategy_lab_experiments SET
+                    terminal_mode = 'completed', terminal_at_utc = ?,
+                    final_outcome_status = ?, updated_at_utc = ?,
+                    state_version = state_version + 1
+                WHERE experiment_id = ?
+                """,
+                (
+                    occurred_at_utc,
+                    final_outcome_status,
+                    occurred_at_utc,
+                    experiment_id,
+                ),
+            )
+            self._request_generation_terminal(
+                connection,
+                experiment_id=experiment_id,
+                generation_kind="outcome",
+                request=outcome_terminal_request,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                idempotency_key=f"{idempotency_key}:outcome-terminal",
+                allow_experiment_terminal=True,
+            )
+            self._request_receipt(
+                connection,
+                experiment_id=experiment_id,
+                request=receipt_request,
+                actor=actor,
+                occurred_at_utc=occurred_at_utc,
+                idempotency_key=f"{idempotency_key}:receipt",
             )
             return self._required_experiment(connection, experiment_id)
 
@@ -1425,6 +2029,16 @@ class ExperimentStore:
                     experiment_id,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE strategy_lab_outcome_jobs SET
+                    status = 'not_required_after_evidence_failure',
+                    reason_code = ?, updated_at_utc = ?
+                WHERE experiment_id = ?
+                  AND status IN ('pending_terms','pending_outcome')
+                """,
+                (reason, occurred_at_utc, experiment_id),
+            )
             for item in generation_requests:
                 self._request_generation_terminal(
                     connection,
@@ -1490,6 +2104,141 @@ class ExperimentStore:
                     (experiment_id,),
                 ).fetchall()
             ]
+
+    def validation_decision(
+        self, experiment_id: str, recommendation_point_id: str
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_validation_decisions
+                    WHERE experiment_id = ? AND recommendation_point_id = ?
+                    """,
+                    (experiment_id, recommendation_point_id),
+                ).fetchone()
+            )
+
+    def validation_decisions(self, experiment_id: str) -> list[dict[str, Any]]:
+        with self._read() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_validation_decisions
+                    WHERE experiment_id = ?
+                    ORDER BY trading_date, point_index
+                    """,
+                    (experiment_id,),
+                ).fetchall()
+            ]
+
+    def validation_days(self, experiment_id: str) -> list[dict[str, Any]]:
+        with self._read() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_validation_days
+                    WHERE experiment_id = ? ORDER BY trading_date
+                    """,
+                    (experiment_id,),
+                ).fetchall()
+            ]
+
+    def validation_day(
+        self, experiment_id: str, trading_date: str
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_validation_days
+                    WHERE experiment_id = ? AND trading_date = ?
+                    """,
+                    (experiment_id, trading_date),
+                ).fetchone()
+            )
+
+    def fill_observations(
+        self,
+        experiment_id: str,
+        *,
+        observed_point_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT * FROM strategy_lab_fill_observations "
+            "WHERE experiment_id = ?"
+        )
+        params: tuple[object, ...] = (experiment_id,)
+        if observed_point_id is not None:
+            query += " AND observed_point_id = ?"
+            params += (observed_point_id,)
+        query += " ORDER BY trading_date, target_point_id, arm, observed_point_id"
+        with self._read() as connection:
+            return [dict(row) for row in connection.execute(query, params).fetchall()]
+
+    def validation_observation_committed(
+        self, experiment_id: str, observed_point_id: str
+    ) -> bool:
+        with self._read() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM strategy_lab_events
+                    WHERE event_type = 'validation_observation_committed'
+                      AND subject_key = ?
+                    """,
+                    (f"experiment:{experiment_id}:observation:{observed_point_id}",),
+                ).fetchone()
+                is not None
+            )
+
+    def outcome_jobs(self, experiment_id: str) -> list[dict[str, Any]]:
+        with self._read() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_outcome_jobs
+                    WHERE experiment_id = ? ORDER BY due_at_utc, target_point_id, arm
+                    """,
+                    (experiment_id,),
+                ).fetchall()
+            ]
+
+    def outcome_job(
+        self, experiment_id: str, target_point_id: str, arm: str
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_outcome_jobs
+                    WHERE experiment_id = ? AND target_point_id = ? AND arm = ?
+                    """,
+                    (experiment_id, target_point_id, arm),
+                ).fetchone()
+            )
+
+    def expiry_close_fact(
+        self,
+        experiment_id: str,
+        stock_owner: str,
+        expiration: str,
+        contract_version: str,
+    ) -> dict[str, Any] | None:
+        with self._read() as connection:
+            return _row(
+                connection.execute(
+                    """
+                    SELECT * FROM strategy_lab_expiry_close_facts
+                    WHERE experiment_id = ? AND stock_owner = ?
+                      AND expiration = ? AND contract_version = ?
+                    """,
+                    (experiment_id, stock_owner, expiration, contract_version),
+                ).fetchone()
+            )
 
     def pending_projections(
         self, *, experiment_id: str | None = None
@@ -1921,6 +2670,373 @@ class ExperimentStore:
             (command_scope, idempotency_key),
         ).fetchone()
 
+    def _validation_open_state(
+        self,
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        expected_state_version: int,
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        experiment = self._required_experiment(connection, experiment_id)
+        if int(experiment["state_version"]) != expected_state_version:
+            raise ExperimentStoreError("stale_snapshot", "experiment changed")
+        generation = self._required_generation(connection, experiment_id, "hidden")
+        if experiment["terminal_mode"] is not None or not (
+            experiment["phase"] == "validation"
+            and experiment["validation_progress"] == "collecting_decisions"
+            and generation["terminal_request_event_id"] is None
+        ):
+            raise ExperimentStoreError("late_write", "validation intake is closed")
+        next_date = connection.execute(
+            """
+            SELECT trading_date FROM strategy_lab_hidden_commitments
+            WHERE experiment_id = ? ORDER BY trading_date LIMIT 1 OFFSET ?
+            """,
+            (experiment_id, int(experiment["completed_validation_partitions"])),
+        ).fetchone()
+        if next_date is None:
+            raise ExperimentStoreError(
+                "experiment_conflict", "no validation date is open"
+            )
+        return experiment, generation, str(next_date[0])
+
+    @staticmethod
+    def _advance_generation(
+        connection: sqlite3.Connection,
+        *,
+        generation: Mapping[str, object],
+        revision: int,
+        revision_ref: str,
+        revision_file_sha256: str,
+        frozen_row_sha256: str,
+        occurred_at_utc: str,
+    ) -> None:
+        if revision != int(generation["revision"]) + 1:
+            raise ExperimentStoreError(
+                "generation_conflict", "generation revision is not next"
+            )
+        connection.execute(
+            """
+            UPDATE strategy_lab_generations SET
+                revision = ?, last_revision_ref = ?,
+                last_revision_file_sha256 = ?, frozen_row_content_sha256 = ?,
+                updated_at_utc = ?
+            WHERE experiment_id = ? AND generation_kind = ?
+              AND terminal_request_event_id IS NULL
+            """,
+            (
+                revision,
+                revision_ref,
+                revision_file_sha256,
+                frozen_row_sha256,
+                occurred_at_utc,
+                generation["experiment_id"],
+                generation["generation_kind"],
+            ),
+        )
+        if connection.execute("SELECT changes()").fetchone()[0] != 1:
+            raise ExperimentStoreError("late_write", "generation is terminal")
+
+    @staticmethod
+    def _insert_fill_observations(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        observations: Sequence[Mapping[str, object]],
+        occurred_at_utc: str,
+    ) -> None:
+        for observation in observations:
+            connection.execute(
+                """
+                INSERT INTO strategy_lab_fill_observations(
+                    experiment_id, target_point_id, arm, observed_point_id,
+                    trading_date, observation_status, crossing,
+                    observation_json, observation_sha256, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    observation["target_point_id"],
+                    observation["arm"],
+                    observation["observed_point_id"],
+                    observation["trading_date"],
+                    observation["observation_status"],
+                    observation.get("crossing"),
+                    observation["observation_json"],
+                    observation["observation_sha256"],
+                    occurred_at_utc,
+                ),
+            )
+
+    @staticmethod
+    def _apply_fill_status_updates(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        updates: Sequence[Mapping[str, object]],
+        occurred_at_utc: str,
+    ) -> None:
+        for update in updates:
+            arm = str(update["arm"])
+            if arm not in {"baseline", "challenger"}:
+                raise ExperimentStoreError(
+                    "experiment_conflict", "fill update arm is invalid"
+                )
+            column = f"{arm}_fill_status"
+            row = connection.execute(
+                f"""
+                SELECT {column} FROM strategy_lab_validation_decisions
+                WHERE experiment_id = ? AND recommendation_point_id = ?
+                """,
+                (experiment_id, update["target_point_id"]),
+            ).fetchone()
+            if row is None or row[0] != "monitoring":
+                raise ExperimentStoreError(
+                    "experiment_conflict", "fill monitor is not active"
+                )
+            connection.execute(
+                f"""
+                UPDATE strategy_lab_validation_decisions
+                SET {column} = ?, updated_at_utc = ?
+                WHERE experiment_id = ? AND recommendation_point_id = ?
+                """,
+                (
+                    update["fill_status"],
+                    occurred_at_utc,
+                    experiment_id,
+                    update["target_point_id"],
+                ),
+            )
+
+    @staticmethod
+    def _insert_outcome_jobs(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        jobs: Sequence[Mapping[str, object]],
+        occurred_at_utc: str,
+    ) -> None:
+        for job in jobs:
+            connection.execute(
+                """
+                INSERT INTO strategy_lab_outcome_jobs(
+                    experiment_id, target_point_id, arm, trading_date,
+                    contract_symbol, stock_owner, expiration, due_at_utc,
+                    deadline_at_utc, status, job_json, job_sha256,
+                    created_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_terms', ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    job["target_point_id"],
+                    job["arm"],
+                    job["trading_date"],
+                    job["contract_symbol"],
+                    job["stock_owner"],
+                    job["expiration"],
+                    job["due_at_utc"],
+                    job["deadline_at_utc"],
+                    job["job_json"],
+                    job["job_sha256"],
+                    occurred_at_utc,
+                    occurred_at_utc,
+                ),
+            )
+
+    @staticmethod
+    def _insert_expiry_close_fact(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        fact: Mapping[str, object],
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO strategy_lab_expiry_close_facts(
+                experiment_id, stock_owner, expiration, contract_version,
+                status, fact_json, fact_sha256, created_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(experiment_id, stock_owner, expiration, contract_version)
+            DO NOTHING
+            """,
+            (
+                experiment_id,
+                fact["stock_owner"],
+                fact["expiration"],
+                fact["contract_version"],
+                fact["status"],
+                fact["fact_json"],
+                fact["fact_sha256"],
+                fact["created_at_utc"],
+            ),
+        )
+        existing = connection.execute(
+            """
+            SELECT status, fact_json, fact_sha256
+            FROM strategy_lab_expiry_close_facts
+            WHERE experiment_id = ? AND stock_owner = ?
+              AND expiration = ? AND contract_version = ?
+            """,
+            (
+                experiment_id,
+                fact["stock_owner"],
+                fact["expiration"],
+                fact["contract_version"],
+            ),
+        ).fetchone()
+        if existing is None or (
+            existing["status"], existing["fact_json"], existing["fact_sha256"]
+        ) != (fact["status"], fact["fact_json"], fact["fact_sha256"]):
+            raise ExperimentStoreError(
+                "natural_fact_conflict", "expiration close fact changed"
+            )
+
+    def _apply_validation_day(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        experiment: Mapping[str, object],
+        day: Mapping[str, object] | None,
+        occurred_at_utc: str,
+    ) -> tuple[int, str]:
+        completed = int(experiment["completed_validation_partitions"])
+        if day is None:
+            return completed, "collecting_decisions"
+        experiment_id = str(experiment["experiment_id"])
+        dates = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT trading_date FROM strategy_lab_hidden_commitments
+                WHERE experiment_id = ? ORDER BY trading_date
+                """,
+                (experiment_id,),
+            ).fetchall()
+        ]
+        if completed >= len(dates) or str(day["trading_date"]) != dates[completed]:
+            raise ExperimentStoreError(
+                "experiment_conflict", "validation day is not the next commitment date"
+            )
+        decision_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM strategy_lab_validation_decisions
+                WHERE experiment_id = ? AND trading_date = ?
+                """,
+                (experiment_id, day["trading_date"]),
+            ).fetchone()[0]
+        )
+        if int(day["consumed_point_count"]) != decision_count:
+            raise ExperimentStoreError(
+                "experiment_conflict", "validation day point count changed"
+            )
+        expected_count = day.get("expected_point_count")
+        if expected_count is not None and int(expected_count) != decision_count:
+            raise ExperimentStoreError(
+                "experiment_conflict", "validation day is not complete"
+            )
+        connection.execute(
+            """
+            INSERT INTO strategy_lab_validation_days(
+                experiment_id, trading_date, expectation_ref,
+                expectation_content_sha256, expectation_file_sha256,
+                expected_point_count, consumed_point_count, hard_risk_status,
+                reason_code, deadline_at_utc, daily_json, sealed_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                day["trading_date"],
+                day.get("expectation_ref"),
+                day.get("expectation_content_sha256"),
+                day.get("expectation_file_sha256"),
+                expected_count,
+                day["consumed_point_count"],
+                day["hard_risk_status"],
+                day.get("reason_code"),
+                day.get("deadline_at_utc"),
+                day.get("daily_json"),
+                occurred_at_utc,
+            ),
+        )
+        completed += 1
+        if completed < 20:
+            return completed, "collecting_decisions"
+        missing = connection.execute(
+            """
+            SELECT 1 FROM strategy_lab_validation_days
+            WHERE experiment_id = ? AND hard_risk_status = 'missing' LIMIT 1
+            """,
+            (experiment_id,),
+        ).fetchone()
+        outcome_failure = connection.execute(
+            """
+            SELECT 1 FROM strategy_lab_outcome_jobs
+            WHERE experiment_id = ? AND status = 'outcome_unavailable' LIMIT 1
+            """,
+            (experiment_id,),
+        ).fetchone()
+        if missing is not None or outcome_failure is not None:
+            connection.execute(
+                """
+                UPDATE strategy_lab_outcome_jobs SET
+                    status = 'not_required_after_evidence_failure',
+                    reason_code = ?, updated_at_utc = ?
+                WHERE experiment_id = ? AND status IN ('pending_terms','pending_outcome')
+                """,
+                (
+                    "risk_evidence_missing"
+                    if missing is not None
+                    else "required_outcome_missing",
+                    occurred_at_utc,
+                    experiment_id,
+                ),
+            )
+            return completed, "ready_to_conclude"
+        pending = connection.execute(
+            """
+            SELECT 1 FROM strategy_lab_outcome_jobs
+            WHERE experiment_id = ? AND status IN ('pending_terms','pending_outcome')
+            LIMIT 1
+            """,
+            (experiment_id,),
+        ).fetchone()
+        return completed, "awaiting_outcomes" if pending is not None else "ready_to_conclude"
+
+    @staticmethod
+    def _required_validation_decision(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        recommendation_point_id: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            """
+            SELECT * FROM strategy_lab_validation_decisions
+            WHERE experiment_id = ? AND recommendation_point_id = ?
+            """,
+            (experiment_id, recommendation_point_id),
+        ).fetchone()
+        if row is None:
+            raise ExperimentStoreError(
+                "experiment_conflict", "validation decision does not exist"
+            )
+        return dict(row)
+
+    @staticmethod
+    def _required_outcome_job(
+        connection: sqlite3.Connection,
+        experiment_id: str,
+        target_point_id: str,
+        arm: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            """
+            SELECT * FROM strategy_lab_outcome_jobs
+            WHERE experiment_id = ? AND target_point_id = ? AND arm = ?
+            """,
+            (experiment_id, target_point_id, arm),
+        ).fetchone()
+        if row is None:
+            raise ExperimentStoreError(
+                "experiment_conflict", "outcome job does not exist"
+            )
+        return dict(row)
+
     @staticmethod
     def _required_experiment(
         connection: sqlite3.Connection, experiment_id: str
@@ -1979,7 +3095,7 @@ class ExperimentStore:
         connection = connect_private_sqlite(self.path, isolation_level=None)
         connection.row_factory = sqlite3.Row
         self._configure(connection)
-        self._validate_v2(connection)
+        self._validate_v3(connection)
         return connection
 
     def _readonly_connection(self) -> sqlite3.Connection:
@@ -2019,6 +3135,7 @@ class ExperimentStore:
             connection,
             expected_version=1,
             required_tables=_V1_REQUIRED_TABLES,
+            required_indexes=_V2_REQUIRED_INDEXES,
             expected_foreign_keys=_V1_EXPECTED_FOREIGN_KEYS,
             deep=deep,
         )
@@ -2028,8 +3145,21 @@ class ExperimentStore:
     ) -> None:
         self._validate_schema(
             connection,
+            expected_version=2,
+            required_tables=_V2_REQUIRED_TABLES,
+            required_indexes=_V2_REQUIRED_INDEXES,
+            expected_foreign_keys=_V2_EXPECTED_FOREIGN_KEYS,
+            deep=deep,
+        )
+
+    def _validate_v3(
+        self, connection: sqlite3.Connection, *, deep: bool = False
+    ) -> None:
+        self._validate_schema(
+            connection,
             expected_version=SCHEMA_VERSION,
             required_tables=_REQUIRED_TABLES,
+            required_indexes=_REQUIRED_INDEXES,
             expected_foreign_keys=_EXPECTED_FOREIGN_KEYS,
             deep=deep,
         )
@@ -2040,6 +3170,7 @@ class ExperimentStore:
         *,
         expected_version: int,
         required_tables: set[str],
+        required_indexes: set[str],
         expected_foreign_keys: Mapping[str, set[tuple[str, str, str]]],
         deep: bool,
     ) -> None:
@@ -2052,7 +3183,7 @@ class ExperimentStore:
         ).fetchone()
         if metadata is None or int(metadata[0]) != expected_version:
             raise ExperimentStoreError("schema_unsupported", "schema version is unsupported")
-        if not _REQUIRED_INDEXES.issubset(self._indexes(connection)):
+        if not required_indexes.issubset(self._indexes(connection)):
             raise ExperimentStoreError("schema_unsupported", "required index is missing")
         for table, expected in expected_foreign_keys.items():
             observed = {
@@ -2289,6 +3420,225 @@ class ExperimentStore:
                 )
             );
             """
+        for statement in ddl.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+
+    @staticmethod
+    def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+        connection.execute("DROP INDEX strategy_lab_one_active_validation")
+        connection.execute(
+            "ALTER TABLE strategy_lab_experiments "
+            "RENAME TO strategy_lab_experiments_v2"
+        )
+        ExperimentStore._create_v3_experiment_table(connection)
+        columns = ", ".join(_EXPERIMENT_COLUMNS)
+        connection.execute(
+            f"INSERT INTO strategy_lab_experiments({columns}) "
+            f"SELECT {columns} FROM strategy_lab_experiments_v2"
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX strategy_lab_one_active_validation
+            ON strategy_lab_experiments(market, account, strategy_family)
+            WHERE terminal_mode IS NULL
+              AND phase = 'validation'
+              AND validation_progress = 'collecting_decisions'
+            """
+        )
+        ExperimentStore._create_v3_validation_tables(connection)
+        connection.execute("DROP TABLE strategy_lab_experiments_v2")
+
+    @staticmethod
+    def _create_v3_experiment_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE strategy_lab_experiments(
+                experiment_id TEXT PRIMARY KEY,
+                topic_id TEXT NOT NULL,
+                market TEXT NOT NULL CHECK(market = 'HK'),
+                account TEXT NOT NULL,
+                strategy_family TEXT NOT NULL CHECK(strategy_family = 'sell_put'),
+                spec_json TEXT NOT NULL,
+                research_spec_sha256 TEXT NOT NULL,
+                validation_spec_sha256 TEXT,
+                source_provenance_json TEXT NOT NULL,
+                phase TEXT NOT NULL CHECK(phase IN ('draft','research','validation','concluded')),
+                research_progress TEXT CHECK(research_progress IS NULL OR research_progress IN (
+                    'building_dataset','ready_to_compare','challenger_locked'
+                )),
+                validation_progress TEXT CHECK(validation_progress IS NULL OR validation_progress IN (
+                    'collecting_decisions','awaiting_outcomes','ready_to_conclude'
+                )),
+                blocked_reason TEXT,
+                completed_validation_partitions INTEGER NOT NULL DEFAULT 0
+                    CHECK(completed_validation_partitions BETWEEN 0 AND 20),
+                research_authorization_status TEXT NOT NULL
+                    CHECK(research_authorization_status IN ('unconfirmed','confirmed')),
+                research_authorized_hash TEXT,
+                research_authorized_actor TEXT,
+                research_authorized_at_utc TEXT,
+                validation_authorization_status TEXT NOT NULL
+                    CHECK(validation_authorization_status IN ('unconfirmed','confirmed')),
+                validation_authorized_hash TEXT,
+                validation_authorized_actor TEXT,
+                validation_authorized_at_utc TEXT,
+                research_leader TEXT,
+                research_receipt_ref TEXT,
+                research_receipt_file_sha256 TEXT,
+                proposed_commitment_json TEXT,
+                proposed_commitment_sha256 TEXT,
+                proposed_commitment_ref TEXT,
+                proposed_commitment_content_sha256 TEXT,
+                proposed_commitment_file_sha256 TEXT,
+                terminal_mode TEXT CHECK(
+                    terminal_mode IS NULL OR terminal_mode IN ('completed','aborted')
+                ),
+                terminal_reason TEXT,
+                disabled_scope TEXT CHECK(
+                    disabled_scope IS NULL OR disabled_scope IN ('user','maintainer')
+                ),
+                terminal_at_utc TEXT,
+                terminated_at_partition INTEGER CHECK(
+                    terminated_at_partition IS NULL OR terminated_at_partition BETWEEN 0 AND 20
+                ),
+                final_outcome_status TEXT CHECK(
+                    final_outcome_status IS NULL OR final_outcome_status IN (
+                        'candidate_for_adoption','keep_baseline','insufficient_evidence'
+                    )
+                ),
+                receipt_request_event_id TEXT,
+                receipt_published_event_id TEXT,
+                receipt_ref TEXT,
+                receipt_content_sha256 TEXT,
+                receipt_file_sha256 TEXT,
+                receipt_published_at_utc TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                state_version INTEGER NOT NULL CHECK(state_version >= 1),
+                FOREIGN KEY(receipt_request_event_id) REFERENCES strategy_lab_events(event_id),
+                FOREIGN KEY(receipt_published_event_id) REFERENCES strategy_lab_events(event_id)
+            )
+            """
+        )
+
+    @staticmethod
+    def _create_v3_validation_tables(connection: sqlite3.Connection) -> None:
+        ddl = """
+            CREATE TABLE strategy_lab_validation_decisions(
+                experiment_id TEXT NOT NULL,
+                recommendation_point_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                point_index INTEGER NOT NULL CHECK(point_index >= 0),
+                source_status TEXT NOT NULL CHECK(source_status IN (
+                    'available','not_evaluable','missing_after_deadline'
+                )),
+                expectation_ref TEXT NOT NULL,
+                expectation_content_sha256 TEXT NOT NULL CHECK(length(expectation_content_sha256) = 64),
+                target_at_utc TEXT NOT NULL,
+                source_ref TEXT,
+                source_file_sha256 TEXT CHECK(source_file_sha256 IS NULL OR length(source_file_sha256) = 64),
+                source_content_sha256 TEXT CHECK(source_content_sha256 IS NULL OR length(source_content_sha256) = 64),
+                hard_risk_status TEXT NOT NULL CHECK(hard_risk_status IN ('passed','violated','missing')),
+                baseline_json TEXT CHECK(baseline_json IS NULL OR length(baseline_json) <= 4096),
+                challenger_json TEXT CHECK(challenger_json IS NULL OR length(challenger_json) <= 4096),
+                baseline_fill_status TEXT CHECK(baseline_fill_status IS NULL OR baseline_fill_status IN (
+                    'monitoring','observed_fill','no_observed_fill','not_evaluable'
+                )),
+                challenger_fill_status TEXT CHECK(challenger_fill_status IS NULL OR challenger_fill_status IN (
+                    'monitoring','observed_fill','no_observed_fill','not_evaluable'
+                )),
+                reason_code TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY(experiment_id, recommendation_point_id),
+                FOREIGN KEY(experiment_id) REFERENCES strategy_lab_experiments(experiment_id)
+            );
+
+            CREATE TABLE strategy_lab_validation_days(
+                experiment_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                expectation_ref TEXT,
+                expectation_content_sha256 TEXT CHECK(
+                    expectation_content_sha256 IS NULL OR length(expectation_content_sha256) = 64
+                ),
+                expectation_file_sha256 TEXT CHECK(
+                    expectation_file_sha256 IS NULL OR length(expectation_file_sha256) = 64
+                ),
+                expected_point_count INTEGER CHECK(expected_point_count IS NULL OR expected_point_count > 0),
+                consumed_point_count INTEGER NOT NULL CHECK(consumed_point_count >= 0),
+                hard_risk_status TEXT NOT NULL CHECK(hard_risk_status IN ('passed','violated','missing')),
+                reason_code TEXT,
+                deadline_at_utc TEXT,
+                daily_json TEXT CHECK(daily_json IS NULL OR length(daily_json) <= 8192),
+                sealed_at_utc TEXT NOT NULL,
+                PRIMARY KEY(experiment_id, trading_date),
+                FOREIGN KEY(experiment_id) REFERENCES strategy_lab_experiments(experiment_id)
+            );
+
+            CREATE TABLE strategy_lab_fill_observations(
+                experiment_id TEXT NOT NULL,
+                target_point_id TEXT NOT NULL,
+                arm TEXT NOT NULL CHECK(arm IN ('baseline','challenger')),
+                observed_point_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                observation_status TEXT NOT NULL CHECK(observation_status IN ('quote','gap')),
+                crossing INTEGER CHECK(crossing IS NULL OR crossing IN (0, 1)),
+                observation_json TEXT NOT NULL CHECK(length(observation_json) <= 4096),
+                observation_sha256 TEXT NOT NULL CHECK(length(observation_sha256) = 64),
+                created_at_utc TEXT NOT NULL,
+                PRIMARY KEY(experiment_id, target_point_id, arm, observed_point_id),
+                FOREIGN KEY(experiment_id) REFERENCES strategy_lab_experiments(experiment_id)
+            );
+
+            CREATE TABLE strategy_lab_outcome_jobs(
+                experiment_id TEXT NOT NULL,
+                target_point_id TEXT NOT NULL,
+                arm TEXT NOT NULL CHECK(arm IN ('baseline','challenger')),
+                trading_date TEXT NOT NULL CHECK(length(trading_date) = 10),
+                contract_symbol TEXT NOT NULL,
+                stock_owner TEXT NOT NULL,
+                expiration TEXT NOT NULL CHECK(length(expiration) = 10),
+                due_at_utc TEXT NOT NULL,
+                deadline_at_utc TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending_terms','pending_outcome','evaluable','outcome_unavailable',
+                    'not_required_after_evidence_failure'
+                )),
+                job_json TEXT NOT NULL CHECK(length(job_json) <= 4096),
+                job_sha256 TEXT NOT NULL CHECK(length(job_sha256) = 64),
+                terms_point_id TEXT,
+                terms_json TEXT CHECK(terms_json IS NULL OR length(terms_json) <= 4096),
+                terms_sha256 TEXT CHECK(terms_sha256 IS NULL OR length(terms_sha256) = 64),
+                result_json TEXT CHECK(result_json IS NULL OR length(result_json) <= 4096),
+                result_sha256 TEXT CHECK(result_sha256 IS NULL OR length(result_sha256) = 64),
+                reason_code TEXT,
+                last_attempt_at_utc TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY(experiment_id, target_point_id, arm),
+                FOREIGN KEY(experiment_id) REFERENCES strategy_lab_experiments(experiment_id)
+            );
+
+            CREATE TABLE strategy_lab_expiry_close_facts(
+                experiment_id TEXT NOT NULL,
+                stock_owner TEXT NOT NULL,
+                expiration TEXT NOT NULL CHECK(length(expiration) = 10),
+                contract_version TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('available','unavailable')),
+                fact_json TEXT NOT NULL CHECK(length(fact_json) <= 4096),
+                fact_sha256 TEXT NOT NULL CHECK(length(fact_sha256) = 64),
+                created_at_utc TEXT NOT NULL,
+                PRIMARY KEY(experiment_id, stock_owner, expiration, contract_version),
+                FOREIGN KEY(experiment_id) REFERENCES strategy_lab_experiments(experiment_id)
+            );
+
+            CREATE UNIQUE INDEX strategy_lab_validation_decision_order
+            ON strategy_lab_validation_decisions(experiment_id, trading_date, point_index);
+
+            CREATE INDEX strategy_lab_outcome_job_status
+            ON strategy_lab_outcome_jobs(experiment_id, status, due_at_utc);
+        """
         for statement in ddl.split(";"):
             if statement.strip():
                 connection.execute(statement)
