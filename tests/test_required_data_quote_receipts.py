@@ -15,6 +15,7 @@ from src.application.opend_symbol_outputs import (
     resolve_exact_fresh_required_data_quote_receipt,
     save_outputs,
 )
+from src.application.required_data_blobs import load_required_data_scan_blob
 from src.application.source_receipts import (
     SourceReceiptError,
     validate_source_receipt,
@@ -376,6 +377,72 @@ def test_quote_receipt_binds_exact_json_csv_and_fetch_policy(
     assert bundle["expected_fetch_contract"] == expected_contract
     assert bundle["fetch_policy"] == _policy()
     assert receipt_path.is_file()
+
+
+def test_quote_receipt_can_root_exact_canonical_scan_blob(tmp_path: Path) -> None:
+    fetch_plan = _fetch_plan()
+    expected_contract = _contract(fetch_plan)
+    raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        _required_payload(),
+        output_root=tmp_path,
+    )
+    _path, receipt = publish_required_data_quote_snapshot(
+        runtime_root=tmp_path,
+        producer_root=tmp_path,
+        producer_run_id="run-1",
+        symbol="NVDA",
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan=fetch_plan,
+        fetch_policy=_policy(),
+        expected_fetch_contract=expected_contract,
+        source_observed_at=NOW,
+        completed_at=NOW + timedelta(seconds=1),
+        now=NOW + timedelta(seconds=1),
+    )
+    validated = validate_source_receipt(
+        receipt,
+        producer_root=tmp_path,
+        now=NOW + timedelta(seconds=2),
+        expected_source_kind="quotes",
+    )
+    bundle = json.loads(validated["payload_bytes"])
+    loaded = load_required_data_scan_blob(
+        runtime_root=tmp_path,
+        blob_ref=bundle["scan_blob_ref"],
+    )
+    resolved = resolve_exact_fresh_required_data_quote_receipt(
+        runtime_root=tmp_path,
+        producer_root=tmp_path,
+        symbol="NVDA",
+        now=NOW + timedelta(seconds=2),
+        expected_producer_run_id="run-1",
+        expected_fetch_contract=expected_contract,
+    )
+
+    assert loaded["raw_json_bytes"] == raw_path.read_bytes()
+    assert loaded["required_data_csv_bytes"] == csv_path.read_bytes()
+    assert base64.b64decode(bundle["raw_json_base64"]) == raw_path.read_bytes()
+    assert base64.b64decode(bundle["required_data_csv_base64"]) == csv_path.read_bytes()
+    assert resolved is not None
+    assert resolved["read_source"] == "canonical_blob"
+    assert resolved["legacy_shadow_match"] is True
+
+    blob_path = tmp_path / bundle["scan_blob_ref"]["blob_relpath"]
+    blob_path.write_bytes(b"corrupt")
+    assert (
+        resolve_exact_fresh_required_data_quote_receipt(
+            runtime_root=tmp_path,
+            producer_root=tmp_path,
+            symbol="NVDA",
+            now=NOW + timedelta(seconds=2),
+            expected_producer_run_id="run-1",
+            expected_fetch_contract=expected_contract,
+        )
+        is None
+    )
 
 
 def test_quote_receipt_rejects_partial_required_data_payload(

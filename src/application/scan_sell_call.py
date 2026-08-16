@@ -203,6 +203,7 @@ def run_sell_call_scan(
         Callable[[list[dict[str, Any]]], None] | None
     ) = None,
     quote_freshness_now_utc: datetime | None = None,
+    required_data_frames: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """计算 Covered Call 候选，并返回类型化内存结果。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
@@ -239,6 +240,7 @@ def run_sell_call_scan(
             min_net_income=float(min_net_income),
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
+            required_data_frames=required_data_frames,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=_make_compute_metrics(avg_cost, now_utc=scan_now_utc),

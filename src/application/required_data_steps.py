@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-from typing import Any
+from typing import Any, Callable
 
 from src.application import pipeline_fetch_models
 from src.application.opend_symbol_outputs import (
@@ -38,7 +38,9 @@ from src.application.required_data_planning import RequiredDataFetchPlanBundle
 from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
 )
-from src.application.required_data_snapshot import resolve_frozen_required_data
+from src.application.required_data_snapshot import (
+    resolve_frozen_required_data_csv_bytes,
+)
 
 
 def ensure_required_data(
@@ -65,6 +67,7 @@ def ensure_required_data(
     source_producer_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
+    required_data_csv_bytes_sink_fn: Callable[[bytes], None] | None = None,
 ) -> dict[str, Any] | None:
     sym = symbol
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
@@ -72,12 +75,15 @@ def ensure_required_data(
     if not (want_put or want_call):
         return None
     if required_data_snapshot_manifest is not None:
-        return resolve_frozen_required_data(
+        evidence, csv_bytes = resolve_frozen_required_data_csv_bytes(
             manifest_path=required_data_snapshot_manifest,
             expected_run_id=str(required_data_snapshot_run_id or ""),
             symbol=sym,
             required_data_root=required_data_dir,
         )
+        if required_data_csv_bytes_sink_fn is not None:
+            required_data_csv_bytes_sink_fn(csv_bytes)
+        return evidence
 
     src = 'opend'
     producer_run_id = str(source_producer_run_id or "").strip()
@@ -348,6 +354,7 @@ def ensure_required_data(
         if not producer_run_id:
             return None
         return resolve_exact_fresh_required_data_quote_receipt(
+            runtime_root=base,
             producer_root=required_data_dir,
             symbol=sym,
             expected_producer_run_id=producer_run_id,

@@ -180,6 +180,52 @@ explicit. Capacity warnings and cold-candidate rows are read-only decision
 previews; this command has no move, delete, compact, checkpoint, repair, or
 notification action.
 
+Canonical scan-blob garbage collection has a separate read-only preview:
+
+```bash
+./om research storage-gc-preview --runtime-root /var/lib/options-monitor
+```
+
+It keeps runs within 14 days or among the latest 200, verifies every blob
+reachable from protected manifests, and reports only unreachable blobs older
+than the 24-hour orphan grace period. Any invalid protected manifest or
+missing/corrupt referenced blob suppresses all candidates. There is no confirm
+or delete mode.
+
+Sealed required-data snapshots also publish one deterministic gzip payload per
+symbol at
+`output_shared/blobs/sha256/<first-two-hex>/<sha256>.json.gz`; the run's
+`state/required_data_snapshot_manifest.json` is the commit/root that retains the
+exact blob reference. During the compatibility window the producer still writes
+the legacy JSON, CSV, and inline base64 fields. A sealed reader prefers the blob
+when its reference exists, falls back only when the reference is absent, and
+fails closed instead of hiding a bad reference with legacy data. Shadow Replay
+surfaces payload-free `required_data_read_source_counts` and
+`required_data_legacy_read_count`; archive collection transfers only blob hashes
+reachable from selected run roots, never the whole shared blob store.
+
+The frozen consumer boundary is deliberate: ordinary scan/filter steps receive
+the single frame materialized by the sealed snapshot resolver; Close Advice,
+Daily Brief, Shadow Replay, and Strategy Lab consume the same sealed bytes.
+Prefetch, multiplier enrichment, coverage checks, quote-cache validation, and
+request-local materialization tools operate before sealing and therefore still
+use their producer workspace. Archive CSV checks are legacy-presence checks,
+while archive retention and replay use manifest blob references.
+
+The Phase 6 storage harness uses a checked-in metadata-only p99 descriptor and
+deterministic synthetic rows; it has no production-runtime input:
+
+```bash
+./.venv/bin/python scripts/benchmark_required_data_scan_blobs.py \
+  --profile canonical --output docs/gateflow/scan-blob-canonical-performance.json
+./.venv/bin/python scripts/benchmark_required_data_scan_blobs.py \
+  --profile dual_output --output docs/gateflow/scan-blob-dual-output-performance.json
+```
+
+The default 5 warmups and 30 repetitions are the formal labels. Lower counts
+are plumbing smoke only. Formal benchmark receipts remain gitignored process
+evidence and are not source-release artifacts.
+
 To measure the current canonical position projector and the real SQLite full-
 replay writer on deterministic synthetic data:
 

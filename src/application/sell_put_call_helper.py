@@ -504,14 +504,22 @@ def _put_leg_passes_assignment_bounds(put_leg: YieldEnhancementLeg, sell_put_cfg
     return put_leg.strike <= effective_max_strike
 
 
-def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
+def _load_required_data_calls(
+    *,
+    input_root: Path,
+    symbol: str,
+    required_data_frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
-    try:
-        df = pd.read_csv(path)
-    except EmptyDataError:
-        return pd.DataFrame()
-    except Exception as exc:
-        raise RuntimeError(f"failed to read Combo Yield required-data calls: {path}") from exc
+    if required_data_frame is not None:
+        df = required_data_frame.copy()
+    else:
+        try:
+            df = pd.read_csv(path)
+        except EmptyDataError:
+            return pd.DataFrame()
+        except Exception as exc:
+            raise RuntimeError(f"failed to read Combo Yield required-data calls: {path}") from exc
     if df.empty:
         return pd.DataFrame()
     if "option_type" not in df.columns:
@@ -633,8 +641,13 @@ def _load_yield_enhancement_call_legs_by_expiration(
     call_window: Any,
     liquidity: Any,
     diagnostics: list[dict[str, Any]],
+    required_data_frame: pd.DataFrame | None = None,
 ) -> tuple[dict[str, list[YieldEnhancementLeg]], Counter[str]]:
-    raw_calls = _load_required_data_calls(input_root=input_root, symbol=symbol)
+    raw_calls = _load_required_data_calls(
+        input_root=input_root,
+        symbol=symbol,
+        required_data_frame=required_data_frame,
+    )
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
     reject_counts: Counter[str] = Counter()
     if raw_calls.empty:
@@ -919,6 +932,7 @@ def find_sell_put_yield_enhancement_pairs(
     yield_enhancement_cfg: dict[str, Any] | None,
     sell_put_cfg: dict[str, Any] | None = None,
     global_yield_enhancement_liquidity: dict[str, Any] | None = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
     policy = derive_yield_enhancement_policy(
@@ -952,6 +966,7 @@ def find_sell_put_yield_enhancement_pairs(
         call_window=call_window,
         liquidity=liquidity,
         diagnostics=diagnostics,
+        required_data_frame=required_data_frame,
     )
 
     pair_rows = _build_yield_enhancement_pair_rows(

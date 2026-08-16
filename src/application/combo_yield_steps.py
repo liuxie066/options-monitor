@@ -162,6 +162,7 @@ def run_combo_yield_scan_and_summarize(
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -198,6 +199,11 @@ def run_combo_yield_scan_and_summarize(
         strategy_family=COMBO_YIELD_FAMILY,
         strategy_profile=yield_enhancement_policy.mode,
         calculation_decision_sink_fn=funding_put_decisions.extend,
+        required_data_frames=(
+            {symbol: required_data_frame}
+            if required_data_frame is not None
+            else None
+        ),
     )
     if not isinstance(scanned_put_universe, pd.DataFrame):
         raise RuntimeError(
@@ -242,6 +248,7 @@ def run_combo_yield_scan_and_summarize(
         yield_enhancement_cfg=yield_enhancement_cfg,
         sell_put_cfg=yield_sp,
         global_yield_enhancement_liquidity=(symbol_cfg.get("_global_yield_enhancement_liquidity") or {}),
+        required_data_frame=required_data_frame,
     )
     pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
     pair_diagnostics["run_id"] = scope.get("run_id")
@@ -397,6 +404,7 @@ def run_combo_yield_for_symbol_and_summarize(
     global_sell_put_liquidity: dict[str, Any] | None = None,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
@@ -415,6 +423,7 @@ def run_combo_yield_for_symbol_and_summarize(
             exchange_rate_converter=exchange_rate_converter,
             portfolio_ctx=portfolio_ctx,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
+            required_data_frame=required_data_frame,
         )
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
@@ -439,6 +448,7 @@ def run_combo_yield_for_symbol_and_summarize(
         is_scheduled=is_scheduled,
         cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
         combo_evidence_sink_fn=combo_evidence_sink_fn,
+        required_data_frame=required_data_frame,
     )
     return summary
 
@@ -453,6 +463,7 @@ def run_cc_lp_variant(
     portfolio_ctx: dict[str, Any] | None,
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
@@ -468,6 +479,7 @@ def run_cc_lp_variant(
         stock=stock,
         global_sell_call_liquidity=global_sell_call_liquidity,
         strategy_profile=policy.mode,
+        required_data_frame=required_data_frame,
     )
     if combo_evidence_sink_fn is not None:
         combo_evidence_sink_fn(

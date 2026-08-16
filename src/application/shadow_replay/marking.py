@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import csv
 from datetime import datetime, timezone
+import io
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,10 @@ from src.application.shadow_replay.settlement import (
     mark_time,
 )
 from src.application.symbol_aliases import load_runtime_symbol_aliases
+from src.application.required_data_snapshot import (
+    load_required_data_snapshot_manifest,
+    resolve_frozen_required_data_csv_bytes,
+)
 
 
 def mark_shadow_replay_dataset(
@@ -215,6 +221,12 @@ def _mark_shadow_replay_dataset_unlocked(
         "summary": {
             "candidate_snapshot_count": len(candidate_snapshots),
             "required_data_quote_count": quote_index["quote_count"],
+            "required_data_read_source_counts": quote_index[
+                "read_source_counts"
+            ],
+            "required_data_legacy_read_count": quote_index[
+                "legacy_read_count"
+            ],
             "existing_mark_snapshot_count": 0 if replace else len(existing_marks),
             "generated_mark_snapshot_count": len(generated),
             "usable_mark_snapshot_count": usable_count,
@@ -689,15 +701,30 @@ def _load_required_data_quote_index(
     base: Path,
     allowed_paths: set[Path] | None = None,
 ) -> dict[str, Any]:
+    manifest_path = (
+        required_data_root.parent
+        / "state"
+        / "required_data_snapshot_manifest.json"
+    )
+    if manifest_path.exists() or manifest_path.is_symlink():
+        return _load_manifest_required_data_quote_index(
+            required_data_root=required_data_root,
+            manifest_path=manifest_path,
+            aliases=aliases,
+            base=base,
+            allowed_paths=allowed_paths,
+        )
     parsed = required_data_root / "parsed"
     source_dir = parsed if parsed.exists() and parsed.is_dir() else required_data_root
     by_contract: dict[str, dict[str, Any]] = {}
     by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     quote_count = 0
+    legacy_read_count = 0
     for path in sorted(source_dir.glob("*_required_data.csv")):
         if allowed_paths is not None and path.resolve() not in allowed_paths:
             continue
         symbol_from_name = path.name.removesuffix("_required_data.csv").upper()
+        legacy_read_count += 1
         source_mtime = datetime.fromtimestamp(
             path.stat().st_mtime,
             tz=timezone.utc,
@@ -718,7 +745,101 @@ def _load_required_data_quote_index(
             )
             if all(key):
                 by_key.setdefault(key, item)
-    return {"by_contract": by_contract, "by_key": by_key, "quote_count": quote_count}
+    return {
+        "by_contract": by_contract,
+        "by_key": by_key,
+        "quote_count": quote_count,
+        "read_source_counts": {
+            "canonical_blob": 0,
+            "legacy_snapshot": legacy_read_count,
+        },
+        "legacy_read_count": legacy_read_count,
+    }
+
+
+def _load_manifest_required_data_quote_index(
+    *,
+    required_data_root: Path,
+    manifest_path: Path,
+    aliases: Mapping[str, Any] | None,
+    base: Path,
+    allowed_paths: set[Path] | None,
+) -> dict[str, Any]:
+    run_id = required_data_root.parent.name
+    manifest, _root = load_required_data_snapshot_manifest(
+        manifest_path=manifest_path,
+        expected_run_id=run_id,
+        expected_required_data_root=required_data_root,
+    )
+    sealed_at = datetime.fromisoformat(
+        str(manifest["sealed_at_utc"]).replace("Z", "+00:00")
+    )
+    by_contract: dict[str, dict[str, Any]] = {}
+    by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    quote_count = 0
+    source_counts = {"canonical_blob": 0, "legacy_snapshot": 0}
+    for symbol, entry in sorted(dict(manifest["symbols"]).items()):
+        if not isinstance(entry, Mapping) or entry.get("status") != "ready":
+            continue
+        source_path = required_data_root / str(
+            entry.get("required_data_csv_relpath") or ""
+        )
+        if allowed_paths is not None and source_path.resolve() not in allowed_paths:
+            continue
+        evidence, csv_bytes = resolve_frozen_required_data_csv_bytes(
+            manifest_path=manifest_path,
+            expected_run_id=run_id,
+            symbol=symbol,
+            required_data_root=required_data_root,
+            now=sealed_at,
+        )
+        try:
+            rows = [
+                dict(row)
+                for row in csv.DictReader(
+                    io.StringIO(csv_bytes.decode("utf-8-sig"), newline="")
+                )
+            ]
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise ValueError(f"{symbol} required-data CSV is unreadable") from exc
+        read_source = str(evidence.get("read_source") or "legacy_snapshot")
+        if read_source not in source_counts:
+            raise ValueError(f"{symbol} required-data read source is invalid")
+        source_counts[read_source] += 1
+        source_label = safe_rel(source_path, base=base)
+        source_observed_at = (
+            datetime.fromtimestamp(
+                source_path.stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            if source_path.is_file() and not source_path.is_symlink()
+            else str(evidence.get("source_observed_at") or "")
+        )
+        for row_number, row in enumerate(rows, start=1):
+            quote_count += 1
+            item = dict(row)
+            item["_source_path"] = source_label
+            item["_source_row_number"] = row_number
+            item["_source_mtime_utc"] = source_observed_at
+            contract = text(
+                item.get("contract_symbol") or item.get("option_symbol")
+            ).upper()
+            if contract:
+                by_contract.setdefault(contract, item)
+            key = _quote_key_for_row(
+                item,
+                symbol_fallback=symbol,
+                aliases=aliases,
+            )
+            if all(key):
+                by_key.setdefault(key, item)
+    return {
+        "by_contract": by_contract,
+        "by_key": by_key,
+        "quote_count": quote_count,
+        "read_source_counts": source_counts,
+        "legacy_read_count": source_counts["legacy_snapshot"],
+    }
 
 
 def _quote_key_for_row(row: dict[str, Any], *, symbol_fallback: str | None, aliases: Mapping[str, Any] | None) -> tuple[str, str, str, str]:

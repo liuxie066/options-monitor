@@ -73,6 +73,7 @@ def run_sell_call_scan_and_summarize(
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Run the Covered Call opening policy in memory and summarize it."""
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
@@ -212,6 +213,11 @@ def run_sell_call_scan_and_summarize(
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
         calculation_decision_sink_fn=candidate_decisions.extend,
+        required_data_frames=(
+            {symbol: required_data_frame}
+            if required_data_frame is not None
+            else None
+        ),
     )
 
     if not df_cc.empty:
