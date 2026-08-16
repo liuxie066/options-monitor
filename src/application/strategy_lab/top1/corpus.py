@@ -40,7 +40,11 @@ from src.application.strategy_lab.top1.ranking import (
     validate_ranking_projection,
 )
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
-from src.infrastructure.private_storage import open_private_text, private_path
+from src.infrastructure.private_storage import (
+    atomic_write_private_text,
+    open_private_text,
+    private_path,
+)
 from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStore,
     ExperimentStoreError,
@@ -54,6 +58,9 @@ RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
 MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
 MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v1"
+_MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = (
+    "sell_put_top1_market_calendar_source_receipt.v1"
+)
 
 _CALENDAR_POINTER_FIELDS = frozenset(
     {
@@ -78,6 +85,17 @@ _CALENDAR_SNAPSHOT_FIELDS = frozenset(
         "content_sha256",
     }
 )
+_CALENDAR_SOURCE_FIELDS = frozenset(
+    {
+        "retcode",
+        "rows",
+        "coverage_complete",
+        "pagination_complete",
+        "page_count",
+    }
+)
+_CALENDAR_SOURCE_ROW_FIELDS = frozenset({"time", "trade_date_type"})
+_CALENDAR_SESSION_TYPES = frozenset({"WHOLE", "MORNING", "AFTERNOON"})
 
 _EXPECTATION_FIELDS = frozenset(
     {
@@ -385,6 +403,160 @@ def read_market_calendar_binding(
         snapshot_content_sha256=snapshot_content_hash,
         snapshot_file_sha256=snapshot_file_hash,
     )
+
+
+def _normalized_calendar_source_receipt(
+    receipt: object,
+    *,
+    market: str,
+    coverage_start: str,
+    coverage_end: str,
+) -> dict[str, Any]:
+    try:
+        if not isinstance(receipt, Mapping):
+            raise ValueError("receipt must be an object")
+        item = dict(receipt)
+        if set(item) != _CALENDAR_SOURCE_FIELDS:
+            raise ValueError("receipt keys are invalid")
+        if type(item["retcode"]) is not int or item["retcode"] != 0:
+            raise ValueError("receipt retcode is invalid")
+        if item["coverage_complete"] is not True:
+            raise ValueError("receipt coverage is incomplete")
+        if item["pagination_complete"] is not True:
+            raise ValueError("receipt pagination is incomplete")
+        if type(item["page_count"]) is not int or item["page_count"] != 1:
+            raise ValueError("receipt page count is invalid")
+        rows = item["rows"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("receipt rows are missing")
+        sessions: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_row in rows:
+            if not isinstance(raw_row, Mapping):
+                raise ValueError("receipt row must be an object")
+            row = dict(raw_row)
+            if set(row) != _CALENDAR_SOURCE_ROW_FIELDS:
+                raise ValueError("receipt row keys are invalid")
+            trading_date = _trading_date(row["time"])
+            session_type = _text(row["trade_date_type"], "trade_date_type")
+            if trading_date < coverage_start or trading_date > coverage_end:
+                raise ValueError("receipt row exceeds requested coverage")
+            if trading_date in seen:
+                raise ValueError("receipt contains duplicate trading dates")
+            if session_type not in _CALENDAR_SESSION_TYPES:
+                raise ValueError("receipt trade date type is invalid")
+            seen.add(trading_date)
+            sessions.append(
+                {"trading_date": trading_date, "trade_date_type": session_type}
+            )
+    except (CorpusError, KeyError, TypeError, ValueError) as exc:
+        raise CorpusError(
+            "market_calendar_source_invalid",
+            f"HK market calendar source receipt is invalid: {exc}",
+        ) from exc
+    return {
+        "schema_version": _MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA,
+        "source": "futu.request_trading_days",
+        "market": market,
+        "coverage_start": coverage_start,
+        "coverage_end": coverage_end,
+        "trading_sessions": sorted(
+            sessions, key=lambda value: value["trading_date"]
+        ),
+    }
+
+
+def refresh_market_calendar_binding(
+    artifact_root: str | Path,
+    *,
+    gateway: Any,
+    market: str,
+    market_calendar_version: str,
+    coverage_start: str,
+    coverage_end: str,
+    observed_at_utc: str,
+) -> dict[str, Any]:
+    """Collect and publish one compact, hash-bound HK trading calendar."""
+
+    market, _ = _identity(market, "calendar")
+    version = _text(market_calendar_version, "market_calendar_version")
+    start = _trading_date(coverage_start)
+    end = _trading_date(coverage_end)
+    observed_at = _timestamp(observed_at_utc, "observed_at_utc")
+    if start > end:
+        _fail("corpus_input_invalid", "market calendar coverage is reversed")
+    try:
+        receipt = gateway.get_trading_days_with_receipt(
+            market=market,
+            start=start,
+            end=end,
+        )
+    except Exception as exc:
+        raise CorpusError(
+            "market_calendar_source_unavailable",
+            "HK market calendar source is unavailable",
+        ) from exc
+    normalized_receipt = _normalized_calendar_source_receipt(
+        receipt,
+        market=market,
+        coverage_start=start,
+        coverage_end=end,
+    )
+    sessions = normalized_receipt["trading_sessions"]
+    trading_dates = [item["trading_date"] for item in sessions]
+    source_receipt_sha256 = canonical_sha256(normalized_receipt)
+
+    pointer_ref = _calendar_pointer_ref(market)
+    pointer_path = private_path(artifact_root).joinpath(*pointer_ref.split("/"))
+    if pointer_path.exists() or pointer_path.is_symlink():
+        current = read_market_calendar_binding(artifact_root, market=market)
+        expected = {
+            "market": market,
+            "market_calendar_version": version,
+            "coverage_start": start,
+            "coverage_end": end,
+            "trading_dates": trading_dates,
+            "source_receipt_sha256": source_receipt_sha256,
+        }
+        if all(current[key] == value for key, value in expected.items()):
+            return {"status": "unchanged", "binding": current}
+
+    snapshot: dict[str, Any] = {
+        "schema_version": MARKET_CALENDAR_SNAPSHOT_SCHEMA,
+        "market": market,
+        "market_calendar_version": version,
+        "coverage_start": start,
+        "coverage_end": end,
+        "trading_dates": trading_dates,
+        "source_receipt_sha256": source_receipt_sha256,
+        "observed_at_utc": observed_at,
+    }
+    snapshot["content_sha256"] = canonical_sha256(snapshot)
+    snapshot_content = _render(snapshot)
+    snapshot_ref = _calendar_snapshot_ref(market, snapshot["content_sha256"])
+    pointer: dict[str, Any] = {
+        "schema_version": MARKET_CALENDAR_POINTER_SCHEMA,
+        "market": market,
+        "snapshot_ref": snapshot_ref,
+        "snapshot_content_sha256": snapshot["content_sha256"],
+        "snapshot_file_sha256": _file_sha256(snapshot_content),
+    }
+    pointer["content_sha256"] = canonical_sha256(pointer)
+    try:
+        publish_exact_text(artifact_root, snapshot_ref, snapshot_content)
+        atomic_write_private_text(pointer_path, render_json_text(pointer))
+        binding = read_market_calendar_binding(artifact_root, market=market)
+    except (CorpusError, OSError, ValueError) as exc:
+        raise CorpusError(
+            "market_calendar_artifact_conflict",
+            "market calendar artifact cannot be published",
+        ) from exc
+    if binding["snapshot_content_sha256"] != snapshot["content_sha256"]:
+        _fail(
+            "market_calendar_artifact_conflict",
+            "published market calendar does not match the collected evidence",
+        )
+    return {"status": "published", "binding": binding}
 
 
 def _command_result(
@@ -1819,6 +1991,7 @@ __all__ = [
     "read_bound_market_calendar_snapshot",
     "read_corpus_status",
     "read_market_calendar_binding",
+    "refresh_market_calendar_binding",
     "read_validation_day_source",
     "read_validation_point_source",
     "seal_committed_day_expectation",
