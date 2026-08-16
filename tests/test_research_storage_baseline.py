@@ -568,6 +568,48 @@ def test_shadow_replay_integrity_file_map_counts_keyed_references(
     assert research["unique_declared_bytes"] == 3
 
 
+def test_shadow_replay_generation_partitions_are_reachable_and_classified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay.common import (
+        DATASET_FILES,
+        refresh_dataset_manifest,
+        write_jsonl,
+    )
+
+    root = _make_runtime(tmp_path)
+    dataset = root / "output_shared/research/shadow_replay/datasets/dataset-1"
+    for name in DATASET_FILES:
+        write_jsonl(
+            dataset / name,
+            (
+                [
+                    {
+                        "schema_version": "shadow_replay_candidate_snapshot.v1",
+                        "market": "US",
+                        "account": "lx",
+                        "decision_at_utc": "2026-08-17T00:00:00Z",
+                    }
+                ]
+                if name == DATASET_FILES[0]
+                else []
+            ),
+        )
+    refresh_dataset_manifest(dataset)
+
+    result = _collect(monkeypatch, tmp_path, root=root)
+    research = result["research_storage"]
+    classes = {
+        row["storage_class"]: row for row in result["runtime_storage"]["by_class"]
+    }
+
+    assert research["status"] == "complete"
+    assert research["protected_reference_failures"] == []
+    assert research["unmanifested_file_count"] == 0
+    assert classes["immutable_shared_partition"]["file_count"] == 1
+
+
 def test_combo_facet_parallel_file_and_hash_maps_are_joined(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

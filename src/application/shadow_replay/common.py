@@ -417,6 +417,10 @@ def dataset_integrity_payload(
 
 
 def refresh_dataset_manifest(dataset_dir: Path) -> dict[str, Any]:
+    from src.application.shadow_replay.generations import (
+        publish_dataset_generation,
+    )
+
     manifest_path = dataset_dir / "manifest.json"
     manifest: dict[str, Any] = {}
     if manifest_path.is_file():
@@ -429,18 +433,31 @@ def refresh_dataset_manifest(dataset_dir: Path) -> dict[str, Any]:
         manifest = payload
     previous = manifest.get("integrity")
     previous = previous if isinstance(previous, dict) else {}
-    generation_id = text(previous.get("generation_id")) or (
-        f"generation:{hashlib.sha256(str(dataset_dir).encode('utf-8')).hexdigest()[:24]}"
-    )
     revision = int(previous.get("revision") or 0) + 1
     manifest.setdefault("schema_version", DATASET_SCHEMA_VERSION)
     manifest.setdefault("dataset_id", dataset_dir.name)
     manifest.setdefault("dataset_dir", str(dataset_dir))
-    manifest["integrity"] = dataset_integrity_payload(
+    publication = publish_dataset_generation(
         dataset_dir,
-        generation_id=generation_id,
-        revision=revision,
+        dataset_manifest=manifest,
+        required_files=DATASET_FILES,
+        file_schemas=DATASET_FILE_SCHEMAS,
+        legacy_revision=revision,
     )
+    generation = publication["generation_ref"]
+    if (
+        publication["changed"] is False
+        and previous.get("files") == publication["integrity_files"]
+    ):
+        return manifest
+    manifest["generation"] = generation
+    manifest["integrity"] = {
+        "schema_version": "shadow_replay_dataset_integrity.v1",
+        "generation_id": generation["generation_id"],
+        "revision": revision,
+        "completed_at_utc": utc_now(),
+        "files": publication["integrity_files"],
+    }
     write_json(manifest_path, manifest)
     return manifest
 
@@ -488,11 +505,25 @@ def validate_dataset_integrity(
         raise ValueError(
             f"dataset integrity references missing file(s): {', '.join(extra)}"
         )
+    generation_ref = manifest.get("generation")
+    if generation_ref is not None:
+        from src.application.shadow_replay.generations import (
+            resolve_dataset_generation,
+        )
+
+        if not isinstance(generation_ref, dict):
+            raise ValueError("dataset generation reference is invalid")
+        resolved = resolve_dataset_generation(dataset_dir, generation_ref)
+        if resolved["generation_id"] != integrity.get("generation_id"):
+            raise ValueError("dataset generation id does not match integrity receipt")
+        if resolved["logical_summary"]["files"] != expected_files:
+            raise ValueError("dataset generation files do not match integrity receipt")
     return {
         "status": "verified",
         "generation_id": integrity.get("generation_id"),
         "revision": integrity.get("revision"),
         "files": expected_files,
+        "generation_ref": generation_ref,
     }
 
 

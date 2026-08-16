@@ -1299,6 +1299,50 @@ def test_strategy_lab_proposal_does_not_patch_candidate_count_only_experiment(tm
     assert "strict_outcome_dominance_required_for_patch" in proposal["limitations"]
 
 
+def test_strategy_lab_proposal_keeps_bound_generation_after_dataset_advances(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay.common import refresh_dataset_manifest
+    from src.application.strategy_lab import (
+        build_strategy_lab_proposal,
+        run_strategy_lab_experiment,
+    )
+
+    dataset = tmp_path / "dataset"
+    _write_readiness_dataset(dataset)
+    experiment_path = tmp_path / "experiment.json"
+    experiment = run_strategy_lab_experiment(
+        repo_root=tmp_path,
+        dataset=dataset,
+        min_sample=1,
+        output=experiment_path,
+    )
+    bound = experiment["artifact_provenance"]["source_generation"]
+
+    _write_jsonl(
+        dataset / "combo_pair_decisions.jsonl",
+        [
+            {
+                "schema_version": "combo_pair_decision.v1",
+                "market": "US",
+                "account": "lx",
+                "decision_at_utc": "2026-08-16T00:00:00Z",
+            }
+        ],
+    )
+    current = refresh_dataset_manifest(dataset)
+    proposal = build_strategy_lab_proposal(experiment=experiment_path)
+    errors = proposal["artifact_validation"]["experiment"]["errors"]
+
+    assert current["generation"]["generation_id"] != bound["generation_id"]
+    assert proposal["status"] != "display_only_untrusted"
+    assert {
+        "source_dataset_generation_mismatch",
+        "source_dataset_revision_mismatch",
+        "source_dataset_generation_unavailable",
+    }.isdisjoint(errors)
+
+
 def test_strategy_lab_proposal_requires_strict_outcome_dominance(
     monkeypatch,
     tmp_path: Path,

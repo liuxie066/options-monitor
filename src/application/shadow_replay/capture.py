@@ -7,7 +7,6 @@ import math
 import re
 import os
 import tempfile
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
@@ -60,6 +59,7 @@ from src.application.shadow_replay.common import (
     CLOSE_DECISION_EPISODE_SCHEMA_VERSION,
     CLOSE_DECISION_MARK_SCHEMA_VERSION,
     CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
+    DATASET_FILE_SCHEMAS,
     DATASET_FILES,
     DATASET_SCHEMA_VERSION,
     FILTER_DECISION_SCHEMA_VERSION,
@@ -70,7 +70,6 @@ from src.application.shadow_replay.common import (
     abs_first_float,
     account_hint,
     bind_legacy_decision_evidence,
-    dataset_integrity_payload,
     dataset_output_dir,
     default_dataset_id,
     first_float,
@@ -291,11 +290,25 @@ def build_shadow_replay_dataset(
             write_jsonl(staging / OPTIONAL_CLOSE_DATASET_FILES[1], [])
             write_jsonl(staging / OPTIONAL_CLOSE_DATASET_FILES[2], [])
         (staging / ".dataset.lock").touch()
-        manifest["integrity"] = dataset_integrity_payload(
-            staging,
-            generation_id=f"generation:{uuid.uuid4().hex}",
-            revision=1,
+        from src.application.shadow_replay.generations import (
+            publish_dataset_generation,
         )
+
+        publication = publish_dataset_generation(
+            staging,
+            dataset_manifest=manifest,
+            required_files=DATASET_FILES,
+            file_schemas=DATASET_FILE_SCHEMAS,
+            legacy_revision=1,
+        )
+        manifest["generation"] = publication["generation_ref"]
+        manifest["integrity"] = {
+            "schema_version": "shadow_replay_dataset_integrity.v1",
+            "generation_id": publication["generation_ref"]["generation_id"],
+            "revision": 1,
+            "completed_at_utc": utc_now(),
+            "files": publication["integrity_files"],
+        }
         write_json(staging / "manifest.json", manifest)
         os.replace(staging, target)
     return manifest

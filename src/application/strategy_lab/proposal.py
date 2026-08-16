@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,23 @@ def _experiment_source_errors(
     dataset_value = source_generation.get("dataset_dir")
     if not dataset_value:
         return ["source_dataset_missing"]
+    generation_ref = source_generation.get("generation_ref")
+    if isinstance(generation_ref, dict):
+        from src.application.shadow_replay.generations import (
+            ResearchGenerationError,
+            resolve_dataset_generation,
+        )
+
+        try:
+            resolved = resolve_dataset_generation(
+                dataset_dir_from_arg(dataset_value),
+                generation_ref,
+            )
+        except (OSError, ValueError, ResearchGenerationError):
+            return ["source_dataset_generation_unavailable"]
+        if resolved.get("generation_id") != source_generation.get("generation_id"):
+            return ["source_dataset_generation_mismatch"]
+        return []
     try:
         current = validate_dataset_integrity(dataset_dir_from_arg(dataset_value))
     except ValueError:
@@ -232,12 +250,25 @@ def _experiment_semantic_errors(
     except (TypeError, ValueError):
         return ["experiment_min_sample_invalid"]
     try:
-        recomputed = run_strategy_lab_experiment(
-            repo_root=repo_root_value,
-            dataset=dataset_value,
-            min_sample=min_sample,
-            auto=bool(summary.get("auto_generated_hypotheses", True)),
-        )
+        generation_ref = source_generation.get("generation_ref")
+        if isinstance(generation_ref, dict):
+            from src.application.shadow_replay.generations import (
+                materialized_dataset_generation,
+            )
+
+            source_context = materialized_dataset_generation(
+                dataset_dir_from_arg(dataset_value),
+                generation_ref,
+            )
+        else:
+            source_context = nullcontext(dataset_value)
+        with source_context as bound_dataset:
+            recomputed = run_strategy_lab_experiment(
+                repo_root=repo_root_value,
+                dataset=bound_dataset,
+                min_sample=min_sample,
+                auto=bool(summary.get("auto_generated_hypotheses", True)),
+            )
     except Exception:
         return ["experiment_gate_recompute_failed"]
     if _promotion_semantics(payload) != _promotion_semantics(recomputed):
