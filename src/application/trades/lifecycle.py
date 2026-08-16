@@ -23,9 +23,12 @@ from src.application.ledger.api import (
     BrokerTradeOperation,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
+    LegacySettlementSemanticUnavailable,
+    LifecycleAttemptAuditEnvelope,
     LotCloseResolutionError,
     record_lifecycle_assignment,
     record_lifecycle_exercise,
+    record_lifecycle_observation_attempt_atomically,
 )
 from domain.domain.symbol_identity import symbol_market
 from src.application.trades.deal_identity import active_ledger_events, broker_deal_key
@@ -357,6 +360,9 @@ def reconcile_polled_stock_settlement_evidence(
     evidence: dict[str, Any],
     apply_changes: bool,
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    consume_unresolved_attempt: bool = True,
 ) -> LifecycleTradeResolution:
     payload = dict(evidence or {})
     if (
@@ -373,6 +379,9 @@ def reconcile_polled_stock_settlement_evidence(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
+        consume_unresolved_attempt=consume_unresolved_attempt,
     )
 
 
@@ -382,6 +391,9 @@ def _resolve_stock_settlement_evidence(
     repo: Any,
     apply_changes: bool,
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    consume_unresolved_attempt: bool = True,
 ) -> LifecycleTradeResolution:
     matching_cases = _find_matching_option_cases(
         repo,
@@ -401,6 +413,10 @@ def _resolve_stock_settlement_evidence(
         ],
     }
     if not apply_changes:
+        if attempt_evidence is not None or attempt_audit is not None:
+            raise ValueError(
+                "polled settlement preview cannot consume an attempt"
+            )
         return LifecycleTradeResolution(
             handled=True,
             status="dry_run",
@@ -410,10 +426,34 @@ def _resolve_stock_settlement_evidence(
             diagnostics=diagnostics,
         )
 
+    if (attempt_evidence is None) != (attempt_audit is None):
+        raise ValueError(
+            "polled settlement attempt evidence and audit must be paired"
+        )
+
+    def _attempt_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+        if attempt_audit is None or not consume_unresolved_attempt:
+            return payload
+        assert attempt_evidence is not None
+        attempt_result = record_lifecycle_observation_attempt_atomically(
+            repo,
+            case_id=attempt_audit.case_id,
+            evidence=attempt_evidence,
+            expected_lifecycle_generation_token=str(
+                expected_lifecycle_generation_token or ""
+            ),
+            attempt_audit=attempt_audit,
+            direct_evidence=evidence,
+        )
+        return {**payload, "attempt_result": attempt_result}
+
     # Polled reconciliation carries a prepared generation token and must not
     # create an unbound evidence row before the transaction-local CAS.  The
     # paired lifecycle evidence is persisted later by the atomic writer.
-    if not str(expected_lifecycle_generation_token or "").strip():
+    if (
+        attempt_audit is None
+        and not str(expected_lifecycle_generation_token or "").strip()
+    ):
         try:
             _persist_broker_evidence_once(repo, evidence)
         except ValueError as exc:
@@ -446,7 +486,9 @@ def _resolve_stock_settlement_evidence(
                     diagnostics,
                 )
             ],
-            diagnostics={**diagnostics, "retryable": False},
+            diagnostics=_attempt_diagnostics(
+                {**diagnostics, "retryable": False}
+            ),
         )
     if (
         matching_case is not None
@@ -467,7 +509,9 @@ def _resolve_stock_settlement_evidence(
                     diagnostics,
                 )
             ],
-            diagnostics={**diagnostics, "retryable": False},
+            diagnostics=_attempt_diagnostics(
+                {**diagnostics, "retryable": False}
+            ),
         )
     if not matching_case:
         related_case = _find_contract_related_option_case(
@@ -502,10 +546,12 @@ def _resolve_stock_settlement_evidence(
                     diagnostics,
                 )
             ],
-            diagnostics={
-                **diagnostics,
-                "retryable": not outside_window,
-            },
+            diagnostics=_attempt_diagnostics(
+                {
+                    **diagnostics,
+                    "retryable": not outside_window,
+                }
+            ),
         )
     option_evidence = (
         dict(matching_case.get("_matched_option_evidence") or {})
@@ -528,7 +574,13 @@ def _resolve_stock_settlement_evidence(
             action="lifecycle",
             reason=str(decision.get("reason") or "stock_settlement_does_not_match_lifecycle"),
             operations=[_lifecycle_operation("lifecycle_needs_review", {**diagnostics, "decision": decision})],
-            diagnostics={**diagnostics, "decision": decision, "retryable": True},
+            diagnostics=_attempt_diagnostics(
+                {
+                    **diagnostics,
+                    "decision": decision,
+                    "retryable": True,
+                }
+            ),
         )
     return _write_lifecycle_close_from_case(
         repo,
@@ -540,6 +592,8 @@ def _resolve_stock_settlement_evidence(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
 
 
@@ -552,6 +606,8 @@ def _write_lifecycle_close_from_case(
     stock_evidence: dict[str, Any] | None,
     apply_changes: bool,
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> LifecycleTradeResolution:
     if not apply_changes:
         raise ValueError("lifecycle close write requires apply_changes")
@@ -573,9 +629,15 @@ def _write_lifecycle_close_from_case(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
     if v2_result is not None:
         return v2_result
+    if attempt_audit is not None:
+        raise LegacySettlementSemanticUnavailable(
+            "legacy_semantic_unavailable"
+        )
     settlement_contracts = _stock_settlement_contracts(case, stock)
     case_contracts = int(case.get("contracts") or 0)
     if settlement_contracts < case_contracts:
@@ -692,6 +754,8 @@ def _write_v2_lifecycle_close_from_case(
     stock_evidence: dict[str, Any],
     event_time_ms: int | None,
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> LifecycleTradeResolution | None:
     option_source_id = str(
         (option_evidence or {}).get("source_event_id") or ""
@@ -761,6 +825,8 @@ def _write_v2_lifecycle_close_from_case(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
     if (
         result.status == "needs_review"
@@ -772,6 +838,13 @@ def _write_v2_lifecycle_close_from_case(
         "option_evidence": option_evidence,
         "stock_evidence": stock_evidence,
     }
+    if (
+        isinstance(result.ledger_result, dict)
+        and result.ledger_result.get("audit_ordinal") is not None
+    ):
+        diagnostics["attempt_result"] = dict(
+            result.ledger_result
+        )
     if result.status in {"applied", "idempotent"}:
         read_model = (
             dict(result.lifecycle_read_model)

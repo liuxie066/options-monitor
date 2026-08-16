@@ -65,6 +65,9 @@ from src.application.ledger.preflight import (
 from src.application.ledger.repository import (
     require_option_positions_read_repo,
 )
+from src.application.ledger.lifecycle_attempt_audit import (
+    LifecycleAttemptAuditEnvelope,
+)
 from src.application.ledger.manual_trades import (
     assert_manual_request_event_matches,
     existing_manual_close_event_result,
@@ -2051,6 +2054,8 @@ def record_lifecycle_allocation(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: list[Any] | None = None,
     notification_transition_type: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     return apply_lifecycle_allocation_atomically(
         repo,
@@ -2068,6 +2073,8 @@ def record_lifecycle_allocation(
             correction_void_events or []
         ),
         notification_transition_type=notification_transition_type,
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
 
 
@@ -2109,6 +2116,8 @@ def record_lifecycle_evidence_issue(
     status: str,
     reason_codes: list[str],
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     return record_lifecycle_evidence_issue_atomically(
         repo,
@@ -2119,6 +2128,8 @@ def record_lifecycle_evidence_issue(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
 
 
@@ -2130,6 +2141,8 @@ def advance_lifecycle_case_state(
     derived_summary: dict[str, Any],
     public_transition: str | None,
     expected_lifecycle_generation_token: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     return advance_lifecycle_case_state_atomically(
         repo,
@@ -2140,6 +2153,8 @@ def advance_lifecycle_case_state(
         expected_lifecycle_generation_token=(
             expected_lifecycle_generation_token
         ),
+        evidence=evidence,
+        attempt_audit=attempt_audit,
     )
 
 

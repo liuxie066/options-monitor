@@ -15,6 +15,7 @@ from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
+    LifecycleAttemptAuditEnvelope,
     lifecycle_account_coherent_facts,
     lifecycle_case_coherent_facts,
     lifecycle_case_coherent_facts_many_from_account_snapshot,
@@ -708,6 +709,8 @@ def reconcile_lifecycle_evidence(
     correction_void_events: tuple[Any, ...] = (),
     notification_transition_type: str | None = None,
     refresh_read_model: bool = True,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> LifecycleReconciliationResult:
     try:
         normalized = _normalize_evidence(evidence)
@@ -792,6 +795,8 @@ def reconcile_lifecycle_evidence(
                 expected_lifecycle_generation_token
             ),
             refresh_read_model=refresh_read_model,
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
         )
 
     allocations = list(facts["allocations"])
@@ -848,6 +853,8 @@ def reconcile_lifecycle_evidence(
                 expected_lifecycle_generation_token
             ),
             refresh_read_model=refresh_read_model,
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
         )
 
     resolution = resolve_allocations(
@@ -927,6 +934,8 @@ def reconcile_lifecycle_evidence(
                 notification_transition_type=(
                     notification_transition_type
                 ),
+                attempt_evidence=attempt_evidence,
+                attempt_audit=attempt_audit,
             )
         return LifecycleReconciliationResult(
             status="idempotent" if apply_changes else "dry_run",
@@ -963,6 +972,8 @@ def reconcile_lifecycle_evidence(
                 expected_lifecycle_generation_token
             ),
             refresh_read_model=refresh_read_model,
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
         )
     plan = plan_evidence_allocation(
         case_id=matched_case_id,
@@ -986,6 +997,8 @@ def reconcile_lifecycle_evidence(
                 expected_lifecycle_generation_token
             ),
             refresh_read_model=refresh_read_model,
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
         )
     event_rows = [
         _terminal_event(
@@ -1050,6 +1063,8 @@ def reconcile_lifecycle_evidence(
         ),
         correction_void_events=list(correction_void_events),
         notification_transition_type=notification_transition_type,
+        attempt_evidence=attempt_evidence,
+        attempt_audit=attempt_audit,
     )
     return LifecycleReconciliationResult(
         status="applied",
@@ -1100,6 +1115,8 @@ def _record_issue_result(
     plan: AllocationPlan | None = None,
     expected_lifecycle_generation_token: str | None = None,
     refresh_read_model: bool = True,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> LifecycleReconciliationResult:
     case_id = str(lifecycle_case.get("case_id") or "")
     ledger_result = None
@@ -1113,6 +1130,8 @@ def _record_issue_result(
             expected_lifecycle_generation_token=(
                 expected_lifecycle_generation_token
             ),
+            attempt_evidence=attempt_evidence,
+            attempt_audit=attempt_audit,
         )
     return LifecycleReconciliationResult(
         status=status,

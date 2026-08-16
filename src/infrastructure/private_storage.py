@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import stat
@@ -161,13 +162,29 @@ def connect_private_sqlite(path: str | Path, **kwargs: Any) -> sqlite3.Connectio
 def secure_sqlite_artifacts(path: str | Path) -> None:
     target = private_path(path)
     for candidate in (target, *(Path(f"{target}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)):
-        if not candidate.exists() and not candidate.is_symlink():
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(candidate, flags)
+        except FileNotFoundError:
+            if candidate == target:
+                raise OSError(f"sensitive SQLite artifact is missing: {candidate.name}") from None
             continue
-        if candidate.is_symlink():
-            raise OSError(f"sensitive SQLite artifact must not be a symlink: {candidate.name}")
-        if not candidate.is_file():
-            raise OSError(f"sensitive SQLite artifact is not a regular file: {candidate.name}")
-        candidate.chmod(PRIVATE_FILE_MODE)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise OSError(f"sensitive SQLite artifact must not be a symlink: {candidate.name}") from exc
+            raise
+        try:
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise OSError(f"sensitive SQLite artifact is not a regular file: {candidate.name}")
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        finally:
+            os.close(descriptor)
 
 
 __all__ = [

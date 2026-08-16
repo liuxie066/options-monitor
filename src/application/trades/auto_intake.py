@@ -28,6 +28,7 @@ from src.application.trades.combo_reconciliation import (
 from src.application.trades.normalizer import normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state import (
+    append_lifecycle_attempt_checkpoint_seal,
     append_trade_intake_audit,
     load_trade_intake_state,
     upsert_deal_state,
@@ -1392,11 +1393,6 @@ def _run_listener_source_loop(
         snapshot_cache=lifecycle_delivery_snapshot_cache,
     )
     stop = stop_event or threading.Event()
-    settlement_broker_gateway = build_futu_gateway(
-        host=host,
-        port=port,
-        is_option_chain_cache_enabled=False,
-    )
     quote_route = resolve_futu_quote_route(cfg)
     quote_dependency_error = (
         None
@@ -1404,19 +1400,64 @@ def _run_listener_source_loop(
         else "; ".join(quote_route.errors)
         or f"canonical Futu quote route is {quote_route.status}"
     )
-    settlement_quote_gateway = (
-        build_futu_gateway(
-            host=str(quote_route.host),
-            port=int(quote_route.port or 0),
-            is_option_chain_cache_enabled=False,
-        )
-        if quote_route.ok
-        else None
-    )
+    settlement_broker_gateway = None
+    settlement_quote_gateway = None
     settlement_collector = None
+    checkpoint_seal_pending = True
+    checkpoint_reason = "process_startup"
+
+    def _settlement_seal_sink(payload: dict[str, Any]) -> None:
+        append_trade_intake_audit(audit_path, payload, durable=True)
+
+    def _persist_checkpoint_if_pending() -> None:
+        nonlocal checkpoint_reason
+        nonlocal checkpoint_seal_pending
+        if not checkpoint_seal_pending:
+            return
+        try:
+            append_lifecycle_attempt_checkpoint_seal(
+                audit_path,
+                repo,
+                account=str(source.get("account") or ""),
+                source_id=str(source.get("id") or source.get("account") or ""),
+                completed_at_ms=max(1, int(time.time() * 1000)),
+                reason=checkpoint_reason,
+            )
+        except Exception:
+            checkpoint_reason = "prior_seal_persist_failed"
+            raise
+        checkpoint_seal_pending = False
+
+    def _ensure_settlement_gateways() -> None:
+        nonlocal settlement_broker_gateway
+        nonlocal settlement_quote_gateway
+        _persist_checkpoint_if_pending()
+        if settlement_broker_gateway is not None:
+            return
+        try:
+            settlement_broker_gateway = build_futu_gateway(
+                host=host,
+                port=port,
+                is_option_chain_cache_enabled=False,
+            )
+            if quote_route.ok:
+                settlement_quote_gateway = build_futu_gateway(
+                    host=str(quote_route.host),
+                    port=int(quote_route.port or 0),
+                    is_option_chain_cache_enabled=False,
+                )
+        except Exception:
+            if settlement_broker_gateway is not None:
+                settlement_broker_gateway.close()
+            if settlement_quote_gateway is not None:
+                settlement_quote_gateway.close()
+            settlement_broker_gateway = None
+            settlement_quote_gateway = None
+            raise
 
     def _settlement_collector_factory():
         nonlocal settlement_collector
+        _ensure_settlement_gateways()
         if settlement_collector is None:
             settlement_collector = build_settlement_observation_collector(
                 repo=repo,
@@ -1438,7 +1479,8 @@ def _run_listener_source_loop(
     }
 
     def _close_settlement_gateways() -> None:
-        settlement_broker_gateway.close()
+        if settlement_broker_gateway is not None:
+            settlement_broker_gateway.close()
         if settlement_quote_gateway is not None:
             settlement_quote_gateway.close()
 
@@ -1455,6 +1497,8 @@ def _run_listener_source_loop(
         payload: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
+        if apply_changes:
+            _ensure_settlement_gateways()
         result = _process_payload(payload, **kwargs)
         if not apply_changes:
             return result
@@ -1747,7 +1791,11 @@ def _run_listener_source_loop(
                     )
                 )
                 if lifecycle_due:
+                    checkpoint_completed = False
                     try:
+                        _persist_checkpoint_if_pending()
+                        checkpoint_completed = True
+                        _ensure_settlement_gateways()
                         with process_lock:
                             due_result = (
                                 reconcile_due_lifecycle_cases_for_source(
@@ -1765,6 +1813,7 @@ def _run_listener_source_loop(
                                     process_metrics=(
                                         settlement_process_metrics
                                     ),
+                                    seal_sink=_settlement_seal_sink,
                                 )
                             )
                         status_state[
@@ -1774,7 +1823,31 @@ def _run_listener_source_loop(
                             "last_lifecycle_due_error",
                             None,
                         )
+                        if due_result.get("seal_status") == (
+                            "seal_persist_failed"
+                        ):
+                            checkpoint_seal_pending = True
+                            checkpoint_reason = (
+                                "prior_seal_persist_failed"
+                            )
                     except Exception as exc:
+                        if checkpoint_completed:
+                            checkpoint_seal_pending = True
+                            checkpoint_reason = (
+                                "prior_seal_persist_failed"
+                            )
+                        else:
+                            status_state[
+                                "last_lifecycle_due_reconciliation"
+                            ] = {
+                                "schema_version": (
+                                    "settlement_due_runtime.v1"
+                                ),
+                                "account": source.get("account"),
+                                "source_id": source.get("id"),
+                                "seal_status": "seal_persist_failed",
+                                "seal_error_class": type(exc).__name__,
+                            }
                         status_state[
                             "last_lifecycle_due_error"
                         ] = f"{type(exc).__name__}: {exc}"

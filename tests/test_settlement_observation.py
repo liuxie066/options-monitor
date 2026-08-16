@@ -18,11 +18,14 @@ from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
 )
 from src.application.ledger.api import (
+    advance_lifecycle_case_state,
     LegacySettlementSemanticUnavailable,
     SettlementAdmissionStateIncoherent,
     SettlementSemanticUnavailable,
     attach_settlement_semantics,
+    build_lifecycle_attempt_audit_envelope,
     lifecycle_case_coherent_facts,
+    record_lifecycle_attempt_audit_atomically,
     record_lifecycle_allocation,
     record_lifecycle_evidence_issue,
     settlement_evidence_id,
@@ -38,6 +41,9 @@ from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
     lifecycle_case_read_model,
     lifecycle_case_read_models_for_account,
+)
+from src.application.trades.lifecycle import (
+    reconcile_polled_stock_settlement_evidence,
 )
 from src.application.trades.settlement_attempts import (
     SETTLEMENT_OBSERVATION_CONTEXT_KEY,
@@ -762,6 +768,7 @@ class _Gateway:
             ]
         )
         self.history_deal_queries: list[dict] = []
+        self.history_order_queries: list[dict] = []
         self.position_queries: list[dict] = []
         self.calendar_queries: list[dict] = []
 
@@ -770,6 +777,7 @@ class _Gateway:
         return _complete_receipt(self.history_deal_rows)
 
     def get_history_orders(self, **kwargs: object) -> dict:
+        self.history_order_queries.append(dict(kwargs))
         return _complete_receipt(
             [
                 {
@@ -1000,6 +1008,119 @@ def test_provider_collection_and_reconciliation_reuse_account_snapshot(
     assert preview["decision"]["status"] == "resolved"
 
 
+def test_provider_start_callback_failure_queries_nothing(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    gateway = _Gateway()
+    collector = build_settlement_observation_collector(
+        repo=repo,
+        gateway=gateway,
+        futu_account_ids=["1001"],
+        now_ms_fn=lambda: now_ms,
+        source_id="lx",
+    )
+
+    def reject_provider_start() -> None:
+        raise RuntimeError("provider marker compare-and-set failed")
+
+    with pytest.raises(
+        RuntimeError,
+        match="provider marker compare-and-set failed",
+    ):
+        collector.collect_outcome(
+            lifecycle_case,
+            lifecycle_case_read_model(
+                repo,
+                case_id=str(lifecycle_case["case_id"]),
+                now_ms=now_ms,
+            ),
+            before_first_provider_io=reject_provider_start,
+        )
+
+    assert gateway.history_deal_queries == []
+    assert gateway.history_order_queries == []
+    assert gateway.position_queries == []
+    assert gateway.calendar_queries == []
+
+
+def test_provider_start_callback_runs_once_per_collection(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    gateway = _Gateway()
+    collector = build_settlement_observation_collector(
+        repo=repo,
+        gateway=gateway,
+        futu_account_ids=["1001"],
+        now_ms_fn=lambda: now_ms,
+        source_id="lx",
+    )
+    provider_starts: list[None] = []
+    read_model = lifecycle_case_read_model(
+        repo,
+        case_id=str(lifecycle_case["case_id"]),
+        now_ms=now_ms,
+    )
+
+    for expected_count in (1, 2):
+        outcome = collector.collect_outcome(
+            lifecycle_case,
+            read_model,
+            before_first_provider_io=lambda: provider_starts.append(None),
+        )
+
+        assert outcome.kind == "observed_complete"
+        assert len(provider_starts) == expected_count
+        assert len(gateway.history_deal_queries) == expected_count
+        assert len(gateway.history_order_queries) == expected_count
+        assert len(gateway.position_queries) == expected_count
+        assert len(gateway.calendar_queries) == expected_count
+
+
+def test_generation_mismatch_runs_no_provider_start_callback(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    gateway = _Gateway()
+    collector = build_settlement_observation_collector(
+        repo=repo,
+        gateway=gateway,
+        futu_account_ids=["1001"],
+        now_ms_fn=lambda: now_ms,
+        source_id="lx",
+    )
+    read_model = lifecycle_case_read_model(
+        repo,
+        case_id=str(lifecycle_case["case_id"]),
+        now_ms=now_ms,
+    )
+    read_model["lifecycle_generation_token"] = "stale"
+    provider_starts: list[None] = []
+
+    outcome = collector.collect_outcome(
+        lifecycle_case,
+        read_model,
+        before_first_provider_io=lambda: provider_starts.append(None),
+    )
+
+    assert outcome.kind == "stale_generation"
+    assert provider_starts == []
+    assert gateway.history_deal_queries == []
+    assert gateway.history_order_queries == []
+    assert gateway.position_queries == []
+    assert gateway.calendar_queries == []
+
+
 def test_missing_quote_dependency_preserves_broker_receipts_and_trade_environment(
     tmp_path: Path,
 ) -> None:
@@ -1091,6 +1212,7 @@ def test_test_only_missing_capabilities_share_generic_static_block(
     )
     now_ms = int(policy["settlement_deadline_ms"]) + 1
     gateway = _Gateway()
+    provider_starts: list[None] = []
     collector = build_settlement_observation_collector(
         repo=repo,
         gateway=gateway,
@@ -1110,12 +1232,15 @@ def test_test_only_missing_capabilities_share_generic_static_block(
             case_id=str(lifecycle_case["case_id"]),
             now_ms=now_ms,
         ),
+        before_first_provider_io=lambda: provider_starts.append(None),
     )
 
     assert collector.capability.missing_keys == (capability_key,)
     assert outcome.kind == "blocked_static"
     assert outcome.reason_code == "missing_static_capability"
+    assert provider_starts == []
     assert gateway.history_deal_queries == []
+    assert gateway.history_order_queries == []
     assert gateway.position_queries == []
     assert gateway.calendar_queries == []
 
@@ -1141,34 +1266,14 @@ def test_calendar_or_anchor_history_mismatch_blocks_observation(
     }.issubset(observation["incomplete_reason_codes"])
 
 
-def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
-    tmp_path: Path,
-) -> None:
-    repo, lifecycle_case, policy, _anchor_ms = (
-        _repo_with_pending_case(tmp_path)
-    )
+def _collect_stock_settlement_observation(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    lifecycle_case: dict,
+    policy: dict,
+    stock_deal_id: str,
+) -> tuple[dict, int]:
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
-    gateway = _Gateway(
-        history_deals=[
-            {
-                "deal_id": "option-close-1",
-                "acc_id": "1001",
-                "code": OPTION_CODE,
-                "price": "0",
-                "qty": 1,
-            },
-            {
-                "deal_id": "stock-settlement-1",
-                "acc_id": "1001",
-                "code": "US.NVDA",
-                "price": "100",
-                "qty": 100,
-                "trd_side": "BUY",
-                "trade_time_ms": stock_time_ms,
-                "order_id": "stock-order-1",
-            },
-        ]
-    )
     now_ms = int(policy["settlement_deadline_ms"]) + 1
     observation = collect_broker_settlement_observation(
         repo,
@@ -1178,19 +1283,296 @@ def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
             case_id=str(lifecycle_case["case_id"]),
             now_ms=now_ms,
         ),
-        gateway=gateway,
+        gateway=_Gateway(
+            history_deals=[
+                {
+                    "deal_id": "option-close-1",
+                    "acc_id": "1001",
+                    "code": OPTION_CODE,
+                    "price": "0",
+                    "qty": 1,
+                },
+                {
+                    "deal_id": stock_deal_id,
+                    "acc_id": "1001",
+                    "code": "US.NVDA",
+                    "price": "100",
+                    "qty": 100,
+                    "trd_side": "BUY",
+                    "trade_time_ms": stock_time_ms,
+                    "order_id": f"order:{stock_deal_id}",
+                },
+            ]
+        ),
         futu_account_id="1001",
         now_ms=now_ms,
     )
-
     assert observation["stock_settlement_present"] is True
     assert len(observation["stock_settlement_candidates"]) == 1
+    return observation, now_ms
+
+
+def _mismatched_polled_observation(observation: dict) -> dict:
+    mismatched = deepcopy(observation)
+    mismatched["stock_settlement_candidates"][0][
+        "observed_case_id"
+    ] = "other-case"
+    return mismatched
+
+
+def _polled_attempt_fixture(
+    tmp_path: Path,
+    *,
+    invocation_id: str,
+    mismatched: bool,
+) -> tuple[
+    SQLiteOptionPositionsRepository,
+    str,
+    int,
+    dict,
+    dict,
+    object,
+]:
+    repo, lifecycle_case, policy, _anchor_ms = (
+        _repo_with_pending_case(tmp_path)
+    )
+    observation, now_ms = _collect_stock_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        policy=policy,
+        stock_deal_id=f"stock-{invocation_id[-3:]}",
+    )
+    if mismatched:
+        observation = _mismatched_polled_observation(observation)
+    case_id = str(lifecycle_case["case_id"])
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id=invocation_id,
+        attempted_at_ms=now_ms,
+        outcome_kind="observed_complete",
+        observation=observation,
+    )
+    return (
+        repo,
+        case_id,
+        now_ms,
+        observation,
+        dict(observation["stock_settlement_candidates"][0]),
+        envelope,
+    )
+
+
+def test_polled_preview_rejects_attempt_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _now_ms, observation, candidate, envelope = (
+        _polled_attempt_fixture(
+            tmp_path,
+            invocation_id="123e4567-e89b-42d3-a456-426614174402",
+            mismatched=False,
+        )
+    )
+    before = repo.list_trade_lifecycle_evidence(case_id=case_id)
+
+    with pytest.raises(
+        ValueError,
+        match="polled settlement preview cannot consume an attempt",
+    ):
+        reconcile_polled_stock_settlement_evidence(
+            repo,
+            evidence=candidate,
+            apply_changes=False,
+            attempt_evidence=_settlement_issue_evidence(observation),
+            attempt_audit=envelope,
+        )
+
+    preview = reconcile_polled_stock_settlement_evidence(
+        repo,
+        evidence=candidate,
+        apply_changes=False,
+    )
+
+    assert preview.status == "dry_run"
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == before
+    assert repo.get_trade_lifecycle_evidence(
+        str(candidate["evidence_id"])
+    ) is None
+    assert repo.list_trade_lifecycle_attempt_audits(case_id=case_id) == []
+    assert repo.get_trade_lifecycle_settlement_admission_head(
+        case_id=case_id
+    ) is None
+
+
+def test_unresolved_polled_attempt_writes_direct_and_observation_atomically(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _now_ms, observation, candidate, envelope = (
+        _polled_attempt_fixture(
+            tmp_path,
+            invocation_id="123e4567-e89b-42d3-a456-426614174403",
+            mismatched=True,
+        )
+    )
+
+    resolution = reconcile_polled_stock_settlement_evidence(
+        repo,
+        evidence=candidate,
+        apply_changes=True,
+        expected_lifecycle_generation_token=str(
+            observation["expected_lifecycle_generation_token"]
+        ),
+        attempt_evidence=_settlement_issue_evidence(observation),
+        attempt_audit=envelope,
+    )
+
+    assert resolution.status == "unresolved"
+    assert resolution.reason == "polled_settlement_case_mismatch"
+    assert resolution.diagnostics["attempt_result"]["audit_ordinal"] == 1
+    assert (
+        resolution.diagnostics["attempt_result"]["admission_status"]
+        == "admitted_semantic"
+    )
+    assert repo.get_trade_lifecycle_evidence(
+        str(candidate["evidence_id"])
+    ) == candidate
+    admitted = repo.get_trade_lifecycle_evidence(
+        str(observation["observation_id"])
+    )
+    assert admitted is not None
+    assert admitted["observation"] == observation
+    assert admitted["semantic_fingerprint"] == (
+        observation["semantic_fingerprint"]
+    )
+    assert len(
+        repo.list_trade_lifecycle_attempt_audits(case_id=case_id)
+    ) == 1
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+
+def test_unresolved_polled_close_reason_falls_back_to_one_attempt_owner(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, now_ms, observation, candidate, envelope = (
+        _polled_attempt_fixture(
+            tmp_path,
+            invocation_id="123e4567-e89b-42d3-a456-426614174404",
+            mismatched=True,
+        )
+    )
+
     result = reconcile_lifecycle_close_reason(
         repo,
-        case_id=str(lifecycle_case["case_id"]),
+        case_id=case_id,
         now_ms=now_ms,
         observation=observation,
         apply_changes=True,
+        attempt_audit=envelope,
+    )
+
+    assert result["poll_settlement_results"][0]["status"] == "unresolved"
+    assert (
+        result["poll_settlement_results"][0]["reason"]
+        == "polled_settlement_case_mismatch"
+    )
+    assert result["write_result"]["audit_ordinal"] == 1
+    assert repo.get_trade_lifecycle_evidence(
+        str(candidate["evidence_id"])
+    ) is None
+    admitted = repo.get_trade_lifecycle_evidence(
+        str(observation["observation_id"])
+    )
+    assert admitted is not None
+    assert admitted["observation"] == observation
+    assert len(
+        repo.list_trade_lifecycle_attempt_audits(case_id=case_id)
+    ) == 1
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+
+def test_unresolved_polled_attempt_rolls_back_direct_and_observation(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _now_ms, observation, candidate, envelope = (
+        _polled_attempt_fixture(
+            tmp_path,
+            invocation_id="123e4567-e89b-42d3-a456-426614174405",
+            mismatched=True,
+        )
+    )
+    evidence_before = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    with repo._connect() as conn:  # noqa: SLF001 - atomic rollback fixture
+        conn.execute(
+            """
+            CREATE TRIGGER injected_polled_attempt_audit_failure
+            BEFORE INSERT ON trade_lifecycle_attempt_audits
+            BEGIN
+              SELECT RAISE(ABORT, 'injected polled audit failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="injected polled audit failure",
+    ):
+        reconcile_polled_stock_settlement_evidence(
+            repo,
+            evidence=candidate,
+            apply_changes=True,
+            expected_lifecycle_generation_token=str(
+                observation["expected_lifecycle_generation_token"]
+            ),
+            attempt_evidence=_settlement_issue_evidence(observation),
+            attempt_audit=envelope,
+        )
+
+    assert repo.list_trade_lifecycle_evidence(
+        case_id=case_id
+    ) == evidence_before
+    assert repo.get_trade_lifecycle_evidence(
+        str(candidate["evidence_id"])
+    ) is None
+    assert repo.get_trade_lifecycle_evidence(
+        str(observation["observation_id"])
+    ) is None
+    assert repo.list_trade_lifecycle_attempt_audits(case_id=case_id) == []
+    assert repo.get_trade_lifecycle_settlement_admission_head(
+        case_id=case_id
+    ) is None
+
+
+def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = (
+        _repo_with_pending_case(tmp_path)
+    )
+    observation, now_ms = _collect_stock_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        policy=policy,
+        stock_deal_id="stock-settlement-1",
+    )
+
+    case_id = str(lifecycle_case["case_id"])
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174401",
+        attempted_at_ms=now_ms,
+        outcome_kind="observed_complete",
+        observation=observation,
+    )
+    result = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+        observation=observation,
+        apply_changes=True,
+        attempt_audit=envelope,
     )
 
     assert result["poll_settlement_results"][0]["status"] == "applied"
@@ -1198,6 +1580,37 @@ def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
         result["lifecycle_read_model"]["close_reason"]
         == "assignment"
     )
+    assert result["write_result"] is None
+    attempt_result = result["poll_settlement_results"][0][
+        "diagnostics"
+    ]["attempt_result"]
+    assert attempt_result["audit_ordinal"] == 1
+    evidence_rows = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    pair = next(
+        item
+        for item in evidence_rows
+        if item.get("source_type") == "broker_settlement_pair"
+    )
+    admitted = next(
+        item
+        for item in evidence_rows
+        if item.get("evidence_id") == observation["observation_id"]
+    )
+    assert pair["evidence_type"] == "assignment"
+    assert set(pair["source_evidence_ids"]) == {
+        "anchor-1",
+        observation["stock_settlement_candidates"][0]["evidence_id"],
+    }
+    assert admitted["observation"] == observation
+    assert admitted["semantic_fingerprint"] == (
+        observation["semantic_fingerprint"]
+    )
+    assert len(
+        repo.list_trade_lifecycle_attempt_audits(case_id=case_id)
+    ) == 1
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
 
 
 def test_duplicate_polled_stock_settlement_is_applied_once(
@@ -1844,6 +2257,546 @@ def _record_issue(
     )
 
 
+@pytest.mark.parametrize(
+    ("gateway", "outcome_kind", "nested_allocation"),
+    [
+        (_Gateway(), "observed_complete", True),
+        (_IncompleteGateway(), "observed_incomplete", False),
+    ],
+)
+def test_close_reason_threads_one_attempt_to_terminal_owner(
+    tmp_path: Path,
+    gateway: _Gateway,
+    outcome_kind: str,
+    nested_allocation: bool,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=gateway,
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id=(
+            "123e4567-e89b-42d3-a456-426614174301"
+            if nested_allocation
+            else "123e4567-e89b-42d3-a456-426614174302"
+        ),
+        attempted_at_ms=now_ms,
+        outcome_kind=outcome_kind,
+        observation=observation,
+    )
+
+    result = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+        observation=observation,
+        apply_changes=True,
+        attempt_audit=envelope,
+    )
+    owner_result = result["write_result"]
+    if nested_allocation:
+        owner_result = owner_result["ledger_result"]
+
+    assert owner_result["audit_ordinal"] == 1
+    assert owner_result["admission_status"] == "admitted_semantic"
+    assert len(
+        repo.list_trade_lifecycle_attempt_audits(case_id=case_id)
+    ) == 1
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+
+def test_state_only_owner_appends_once_and_exact_replay_reads_no_business(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    timing = lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=int(policy["settlement_deadline_ms"]),
+    )
+    now_ms = int(timing["pairing_until_ms"]) + 1
+    assert now_ms < int(policy["settlement_deadline_ms"])
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=_Gateway(),
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174303",
+        attempted_at_ms=now_ms,
+        outcome_kind="observed_complete",
+        observation=observation,
+    )
+
+    first = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+        observation=observation,
+        apply_changes=True,
+        attempt_audit=envelope,
+    )
+    assert first["decision"]["status"] == "cause_pending"
+    assert first["write_result"]["audit_ordinal"] == 1
+    before = {
+        "case": repo.get_trade_lifecycle_case(case_id),
+        "evidence": repo.list_trade_lifecycle_evidence(case_id=case_id),
+        "audits": repo.list_trade_lifecycle_attempt_audits(case_id=case_id),
+        "notifications": repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        ),
+    }
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("exact invocation replay reached business reads")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(repo, "assert_foreign_keys_clean", forbidden)
+        guarded.setattr(repo, "get_trade_lifecycle_case", forbidden)
+        replay = advance_lifecycle_case_state(
+            repo,
+            case_id=case_id,
+            status="waiting_settlement_evidence",
+            derived_summary={},
+            public_transition=None,
+            expected_lifecycle_generation_token=str(
+                observation["expected_lifecycle_generation_token"]
+            ),
+            evidence=_settlement_issue_evidence(observation),
+            attempt_audit=envelope,
+        )
+
+    assert replay["audit_idempotent"] is True
+    assert replay["audit_ordinal"] == 1
+    assert repo.get_trade_lifecycle_case(case_id) == before["case"]
+    assert repo.list_trade_lifecycle_evidence(
+        case_id=case_id
+    ) == before["evidence"]
+    assert repo.list_trade_lifecycle_attempt_audits(
+        case_id=case_id
+    ) == before["audits"]
+    assert repo.list_trade_lifecycle_notifications(
+        case_id=case_id
+    ) == before["notifications"]
+
+
+@pytest.mark.parametrize(
+    ("gateway", "outcome_kind", "state_only"),
+    [
+        (_Gateway(), "observed_complete", False),
+        (_IncompleteGateway(), "observed_incomplete", False),
+        (_Gateway(), "observed_complete", True),
+    ],
+)
+def test_terminal_owner_rolls_back_business_when_audit_append_fails(
+    tmp_path: Path,
+    gateway: _Gateway,
+    outcome_kind: str,
+    state_only: bool,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    if state_only:
+        timing = lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=int(policy["settlement_deadline_ms"]),
+        )
+        now_ms = int(timing["pairing_until_ms"]) + 1
+    else:
+        now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=gateway,
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+    before = {
+        "case": repo.get_trade_lifecycle_case(case_id),
+        "evidence": repo.list_trade_lifecycle_evidence(case_id=case_id),
+        "events": repo.list_trade_events(),
+        "allocations": repo.list_trade_lifecycle_allocations(
+            case_id=case_id
+        ),
+        "notifications": repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        ),
+    }
+    with repo._connect() as conn:  # noqa: SLF001 - focused crash contract
+        conn.execute(
+            """
+            CREATE TRIGGER injected_terminal_owner_audit_failure
+            BEFORE INSERT ON trade_lifecycle_attempt_audits
+            BEGIN
+              SELECT RAISE(ABORT, 'injected terminal audit failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="injected terminal audit failure",
+    ):
+        reconcile_lifecycle_close_reason(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+            observation=observation,
+            apply_changes=True,
+            attempt_audit=build_lifecycle_attempt_audit_envelope(
+                case_id=case_id,
+                invocation_id=(
+                    "123e4567-e89b-42d3-a456-426614174306"
+                    if state_only
+                    else (
+                        "123e4567-e89b-42d3-a456-426614174304"
+                        if outcome_kind == "observed_complete"
+                        else "123e4567-e89b-42d3-a456-426614174305"
+                    )
+                ),
+                attempted_at_ms=now_ms,
+                outcome_kind=outcome_kind,
+                observation=observation,
+            ),
+        )
+
+    assert repo.get_trade_lifecycle_case(case_id) == before["case"]
+    assert repo.list_trade_lifecycle_evidence(
+        case_id=case_id
+    ) == before["evidence"]
+    assert repo.list_trade_events() == before["events"]
+    assert repo.list_trade_lifecycle_allocations(
+        case_id=case_id
+    ) == before["allocations"]
+    assert repo.list_trade_lifecycle_notifications(
+        case_id=case_id
+    ) == before["notifications"]
+    assert repo.list_trade_lifecycle_attempt_audits(case_id=case_id) == []
+
+
+def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=observed_at_ms,
+        ),
+        gateway=_IncompleteGateway(),
+        futu_account_id="1001",
+        now_ms=observed_at_ms,
+    )
+    def write(observed: dict, invocation_id: str) -> dict:
+        return record_lifecycle_evidence_issue(
+            repo,
+            case_id=case_id,
+            evidence=_settlement_issue_evidence(observed),
+            status="needs_review",
+            reason_codes=list(observed["incomplete_reason_codes"]),
+            expected_lifecycle_generation_token=str(
+                observed["expected_lifecycle_generation_token"]
+            ),
+            attempt_audit=build_lifecycle_attempt_audit_envelope(
+                case_id=case_id,
+                invocation_id=invocation_id,
+                attempted_at_ms=observed_at_ms,
+                outcome_kind="observed_incomplete",
+                observation=observed,
+            ),
+        )
+
+    first = write(
+        observation,
+        "123e4567-e89b-42d3-a456-426614174101",
+    )
+    evidence_after_first = repo.list_trade_lifecycle_evidence(
+        case_id=case_id
+    )
+    case_after_first = repo.get_trade_lifecycle_case(case_id)
+    outbox_after_first = repo.list_trade_lifecycle_notifications(
+        case_id=case_id
+    )
+    second_observation = _rebase_observation(
+        repo,
+        case_id=case_id,
+        observation=observation,
+        previous_evidence_id=str(observation["observation_id"]),
+    )
+    second = write(
+        second_observation,
+        "123e4567-e89b-42d3-a456-426614174102",
+    )
+
+    assert first["audit_ordinal"] == 1
+    assert second["audit_ordinal"] == 2
+    assert second["admission_status"] == "duplicate_semantic"
+    assert second["resolution_revision"] == first["resolution_revision"]
+    assert repo.list_trade_lifecycle_evidence(
+        case_id=case_id
+    ) == evidence_after_first
+    assert repo.get_trade_lifecycle_case(case_id) == case_after_first
+    assert repo.list_trade_lifecycle_notifications(
+        case_id=case_id
+    ) == outbox_after_first
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+    counts_before = {
+        table: len(rows)
+        for table, rows in {
+            "audit": repo.list_trade_lifecycle_attempt_audits(
+                case_id=case_id
+            ),
+            "evidence": repo.list_trade_lifecycle_evidence(
+                case_id=case_id
+            ),
+        }.items()
+    }
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("exact invocation replay reached business reads")
+
+    monkeypatch.setattr(repo, "assert_foreign_keys_clean", forbidden)
+    monkeypatch.setattr(repo, "get_trade_lifecycle_case", forbidden)
+    replay = write(
+        second_observation,
+        "123e4567-e89b-42d3-a456-426614174102",
+    )
+
+    assert replay["audit_idempotent"] is True
+    assert replay["audit_ordinal"] == 2
+    assert len(repo.list_trade_lifecycle_attempt_audits(case_id=case_id)) == counts_before[
+        "audit"
+    ]
+
+
+def test_issue_business_and_sidecar_roll_back_together_on_audit_failure(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=observed_at_ms,
+        ),
+        gateway=_IncompleteGateway(),
+        futu_account_id="1001",
+        now_ms=observed_at_ms,
+    )
+    case_before = repo.get_trade_lifecycle_case(case_id)
+    evidence_before = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    outbox_before = repo.list_trade_lifecycle_notifications(case_id=case_id)
+    with repo._connect() as conn:  # noqa: SLF001 - focused crash contract
+        conn.execute(
+            """
+            CREATE TRIGGER injected_owner_audit_failure
+            BEFORE INSERT ON trade_lifecycle_attempt_audits
+            BEGIN
+              SELECT RAISE(ABORT, 'injected owner audit failure');
+            END
+            """
+        )
+
+    try:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="injected owner audit failure",
+        ):
+            record_lifecycle_evidence_issue(
+                repo,
+                case_id=case_id,
+                evidence=_settlement_issue_evidence(observation),
+                status="needs_review",
+                reason_codes=list(observation["incomplete_reason_codes"]),
+                expected_lifecycle_generation_token=str(
+                    observation["expected_lifecycle_generation_token"]
+                ),
+                attempt_audit=build_lifecycle_attempt_audit_envelope(
+                    case_id=case_id,
+                    invocation_id="123e4567-e89b-42d3-a456-426614174111",
+                    attempted_at_ms=observed_at_ms,
+                    outcome_kind="observed_incomplete",
+                    observation=observation,
+                ),
+            )
+    finally:
+        with repo._connect() as conn:  # noqa: SLF001 - focused crash cleanup
+            conn.execute("DROP TRIGGER injected_owner_audit_failure")
+
+    assert repo.get_trade_lifecycle_case(case_id) == case_before
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence_before
+    assert repo.list_trade_lifecycle_notifications(case_id=case_id) == outbox_before
+    assert repo.get_trade_lifecycle_settlement_admission_head(
+        case_id=case_id
+    ) is None
+    with repo._connect() as conn:  # noqa: SLF001 - focused rollback proof
+        sidecar_count = sum(
+            int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in (
+                "trade_lifecycle_attempt_audit_heads",
+                "trade_lifecycle_attempt_audits",
+                "trade_lifecycle_observation_spans",
+                "trade_lifecycle_receipt_blobs",
+            )
+        )
+    assert sidecar_count == 0
+
+
+def test_cleanup_failure_warns_without_reclassifying_committed_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation_r0 = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=observed_at_ms,
+        ),
+        gateway=_IncompleteGateway(),
+        futu_account_id="1001",
+        now_ms=observed_at_ms,
+    )
+
+    def write(observed: dict, invocation_id: str) -> dict:
+        return record_lifecycle_evidence_issue(
+            repo,
+            case_id=case_id,
+            evidence=_settlement_issue_evidence(observed),
+            status="needs_review",
+            reason_codes=list(observed["incomplete_reason_codes"]),
+            expected_lifecycle_generation_token=str(
+                observed["expected_lifecycle_generation_token"]
+            ),
+            attempt_audit=build_lifecycle_attempt_audit_envelope(
+                case_id=case_id,
+                invocation_id=invocation_id,
+                attempted_at_ms=observed_at_ms,
+                outcome_kind="observed_incomplete",
+                observation=observed,
+            ),
+        )
+
+    write(observation_r0, "123e4567-e89b-42d3-a456-426614174121")
+    base_r1 = deepcopy(observation_r0)
+    base_r1["receipt_note"] = "R1"
+    observation_r1 = _rebase_observation(
+        repo,
+        case_id=case_id,
+        observation=base_r1,
+        previous_evidence_id=str(observation_r0["observation_id"]),
+    )
+    second = write(
+        observation_r1,
+        "123e4567-e89b-42d3-a456-426614174122",
+    )
+    assert "cleanup_warning" not in second
+    receipt_r1 = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174122",
+        attempted_at_ms=observed_at_ms,
+        outcome_kind="observed_incomplete",
+        observation=observation_r1,
+    ).receipt_sha256
+    assert receipt_r1 is not None
+    base_r2 = deepcopy(observation_r0)
+    base_r2["receipt_note"] = "R2"
+    observation_r2 = _rebase_observation(
+        repo,
+        case_id=case_id,
+        observation=base_r2,
+        previous_evidence_id=str(observation_r0["observation_id"]),
+    )
+    case_before = repo.get_trade_lifecycle_case(case_id)
+    outbox_before = repo.list_trade_lifecycle_notifications(case_id=case_id)
+
+    def fail_cleanup(_receipt_hash):
+        raise RuntimeError("injected cleanup failure")
+
+    monkeypatch.setattr(
+        repo,
+        "delete_unreferenced_trade_lifecycle_receipt_blob",
+        fail_cleanup,
+    )
+    third = write(
+        observation_r2,
+        "123e4567-e89b-42d3-a456-426614174123",
+    )
+
+    assert third["audit_ordinal"] == 3
+    assert third["admission_status"] == "duplicate_semantic"
+    assert third["cleanup_warning"] == {
+        "code": "receipt_blob_cleanup_failed",
+        "receipt_sha256": receipt_r1.hex(),
+        "error_class": "RuntimeError",
+    }
+    assert len(repo.list_trade_lifecycle_attempt_audits(case_id=case_id)) == 3
+    assert repo.get_trade_lifecycle_case(case_id) == case_before
+    assert repo.list_trade_lifecycle_notifications(case_id=case_id) == outbox_before
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+
 def test_issue_writer_rejects_tampered_frozen_semantic_projection(
     tmp_path: Path,
 ) -> None:
@@ -2269,6 +3222,88 @@ def test_terminal_settlement_duplicate_does_not_advance_business_state(
     assert repo.get_trade_lifecycle_case(case_id) == case_before
 
 
+def test_terminal_duplicate_opens_span_from_admitted_r0_and_audits_r1(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation_r0 = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=observed_at_ms,
+        ),
+        gateway=_Gateway(),
+        futu_account_id="1001",
+        now_ms=observed_at_ms,
+    )
+    first = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=observed_at_ms,
+        observation=observation_r0,
+        apply_changes=True,
+    )
+    assert (
+        first["write_result"]["ledger_result"]["admission_status"]
+        == "admitted_semantic"
+    )
+    case_before = repo.get_trade_lifecycle_case(case_id)
+    assert case_before is not None
+    evidence_before = repo.list_trade_lifecycle_evidence(case_id=case_id)
+    outbox_before = repo.list_trade_lifecycle_notifications(case_id=case_id)
+    observation_r1 = _rebase_observation(
+        repo,
+        case_id=case_id,
+        observation=observation_r0,
+        previous_evidence_id=str(observation_r0["observation_id"]),
+    )
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id=case_id,
+        invocation_id="123e4567-e89b-42d3-a456-426614174201",
+        attempted_at_ms=observed_at_ms + 1,
+        outcome_kind="observed_complete",
+        observation=observation_r1,
+    )
+
+    result = record_lifecycle_allocation(
+        repo,
+        case_id=case_id,
+        evidence=_settlement_terminal_evidence(observation_r1),
+        terminal_events=[],
+        allocations=[],
+        derived_status="ledger_written",
+        derived_summary=dict(case_before.get("derived_summary") or {}),
+        expected_lifecycle_generation_token=str(
+            observation_r1["expected_lifecycle_generation_token"]
+        ),
+        attempt_audit=envelope,
+    )
+
+    with repo._connect() as conn:  # noqa: SLF001 - focused span contract
+        span = dict(
+            conn.execute(
+                "SELECT * FROM trade_lifecycle_observation_spans"
+            ).fetchone()
+        )
+    assert result["audit_ordinal"] == 1
+    assert result["admission_status"] == "duplicate_semantic"
+    assert span["first_evidence_id"] == observation_r0["observation_id"]
+    assert span["last_receipt_sha256"] == envelope.receipt_sha256
+    assert span["first_evidence_receipt_sha256"] != envelope.receipt_sha256
+    assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence_before
+    assert repo.list_trade_lifecycle_notifications(case_id=case_id) == outbox_before
+    assert repo.get_trade_lifecycle_case(case_id) == case_before
+    assert repo.verify_trade_lifecycle_attempt_audit_case(
+        case_id=case_id
+    )["status"] == "valid"
+
+
 def test_terminal_settlement_duplicate_with_missing_allocation_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -2617,6 +3652,7 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
             }
 
     evidence_before = evidence_ids()
+    seals: list[dict] = []
     cases_before = {
         case_id: repo.get_trade_lifecycle_case(case_id)
         for case_id in case_ids
@@ -2640,6 +3676,7 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
         now_ms=start_ms,
         apply_changes=True,
         settlement_collector=collector,
+        seal_sink=seals.append,
     )
     for tick in range(1, 11):
         result = reconcile_due_lifecycle_cases_for_source(
@@ -2648,6 +3685,7 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
             now_ms=start_ms + tick * 60_000,
             apply_changes=True,
             settlement_collector=collector,
+            seal_sink=seals.append,
         )
 
     assert first["planned_case_count"] == 2
@@ -2725,6 +3763,7 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
         now_ms=start_ms + 11 * 60_000,
         apply_changes=True,
         settlement_collector=supported_collector,
+        seal_sink=seals.append,
     )
 
     assert supported["provider_attempt_count"] == 2
@@ -2733,6 +3772,8 @@ def test_blocked_ticks_do_not_rematerialize_large_account_evidence(
     assert len(supported_gateway.history_deal_queries) == 2
     assert len(supported_gateway.position_queries) == 2
     assert len(supported_gateway.calendar_queries) == 2
+    assert len(seals) == 1
+    assert seals[0]["head_count"] == 2
 
 
 def test_latest_legacy_observation_bootstraps_admission_head_without_duplicate(

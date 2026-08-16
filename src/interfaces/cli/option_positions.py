@@ -77,6 +77,10 @@ from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.trades.lifecycle_runtime import (
     reconcile_due_lifecycle_cases_for_source,
 )
+from src.application.trades.state import (
+    append_lifecycle_attempt_checkpoint_seal,
+    append_trade_intake_audit,
+)
 from src.application.trades.lifecycle_outbox import (
     dispatch_notification_batch_once,
     plan_notification_batch,
@@ -570,7 +574,16 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_lifecycle_confirm_expired, high_risk=True)
     p_lifecycle_due = lifecycle_sub.add_parser(
         'reconcile-due',
-        help='advance lifecycle cases whose pairing/deadline is due',
+        help=(
+            'preview due lifecycle cases locally without provider I/O; '
+            'only --apply --confirm uses providers and writes'
+        ),
+        description=(
+            'Default/--dry-run is a local plan: it does not require ready '
+            'broker/quote routes and does not construct or query provider '
+            'gateways. Only --apply --confirm (or --apply --yes) uses '
+            'providers and writes.'
+        ),
     )
     _add_runtime_root_arg(p_lifecycle_due)
     p_lifecycle_due.add_argument('--account', required=True)
@@ -1728,43 +1741,92 @@ def main(argv: list[str] | None = None) -> int:
             source = sources[0]
             if not str(source.get("account") or "").strip():
                 source["account"] = account_value
-            binding = resolve_account_broker_binding_sets(
-                [(None, cfg)]
-            ).get(account_value)
-            quote_route = resolve_futu_quote_route(cfg)
-            if binding is None or not binding.ok or not quote_route.ok:
-                raise SystemExit(
-                    "lifecycle reconcile-due requires valid broker and canonical quote routes"
+            if dry_run:
+                result = reconcile_due_lifecycle_cases_for_source(
+                    repo,
+                    source=source,
+                    now_ms=observed_at_ms,
+                    apply_changes=False,
                 )
-            broker_gateway = build_ready_futu_broker_gateway(
-                host=str(binding.host),
-                port=int(binding.port or 0),
-                expected_account_ids=binding.required_account_ids,
-                trd_env=str(binding.trd_env),
-                is_option_chain_cache_enabled=False,
-            )
-            quote_gateway = None
-            try:
-                quote_gateway = build_ready_futu_quote_gateway(
-                    host=str(quote_route.host),
-                    port=int(quote_route.port or 0),
+            else:
+                binding = resolve_account_broker_binding_sets(
+                    [(None, cfg)]
+                ).get(account_value)
+                quote_route = resolve_futu_quote_route(cfg)
+                if (
+                    binding is None
+                    or not binding.ok
+                    or not quote_route.ok
+                ):
+                    raise SystemExit(
+                        "lifecycle reconcile-due requires valid broker and canonical quote routes"
+                    )
+                audit_base = (
+                    Path(str(args.runtime_root)).expanduser().resolve()
+                    if getattr(args, "runtime_root", None)
+                    else base
+                )
+                audit_path = _resolve_path_under(
+                    source.get("audit_path")
+                    or "output_shared/state/auto_trade_intake_audit.jsonl",
+                    base=audit_base,
+                )
+
+                def seal_sink(payload: dict[str, Any]) -> None:
+                    append_trade_intake_audit(
+                        audit_path,
+                        payload,
+                        durable=True,
+                    )
+
+                try:
+                    append_lifecycle_attempt_checkpoint_seal(
+                        audit_path,
+                        repo,
+                        account=account_value,
+                        source_id=str(
+                            source.get("id") or account_value
+                        ),
+                        completed_at_ms=max(1, utc_now_ms()),
+                        reason="cli_apply",
+                    )
+                except Exception as exc:
+                    raise SystemExit(
+                        "lifecycle reconcile-due seal_persist_failed: "
+                        f"{type(exc).__name__}"
+                    ) from exc
+                broker_gateway = build_ready_futu_broker_gateway(
+                    host=str(binding.host),
+                    port=int(binding.port or 0),
+                    expected_account_ids=(
+                        binding.required_account_ids
+                    ),
+                    trd_env=str(binding.trd_env),
                     is_option_chain_cache_enabled=False,
                 )
-                result = (
-                    reconcile_due_lifecycle_cases_for_source(
-                        repo,
-                        source=source,
-                        broker_gateway=broker_gateway,
-                        quote_gateway=quote_gateway,
-                        trd_env=str(binding.trd_env),
-                        now_ms=observed_at_ms,
-                        apply_changes=not dry_run,
+                quote_gateway = None
+                try:
+                    quote_gateway = build_ready_futu_quote_gateway(
+                        host=str(quote_route.host),
+                        port=int(quote_route.port or 0),
+                        is_option_chain_cache_enabled=False,
                     )
-                )
-            finally:
-                broker_gateway.close()
-                if quote_gateway is not None:
-                    quote_gateway.close()
+                    result = (
+                        reconcile_due_lifecycle_cases_for_source(
+                            repo,
+                            source=source,
+                            broker_gateway=broker_gateway,
+                            quote_gateway=quote_gateway,
+                            trd_env=str(binding.trd_env),
+                            now_ms=observed_at_ms,
+                            apply_changes=True,
+                            seal_sink=seal_sink,
+                        )
+                    )
+                finally:
+                    broker_gateway.close()
+                    if quote_gateway is not None:
+                        quote_gateway.close()
             payload = attach_write_contract(
                 {
                     "operation": "lifecycle_reconcile_due",
@@ -1808,7 +1870,13 @@ def main(argv: list[str] | None = None) -> int:
                     default=str,
                 )
             )
-            return 0
+            return (
+                1
+                if not dry_run
+                and result.get("seal_status")
+                == "seal_persist_failed"
+                else 0
+            )
         if args.lifecycle_cmd == 'migration':
             if args.migration_cmd == 'inventory':
                 explicit_mapping = None

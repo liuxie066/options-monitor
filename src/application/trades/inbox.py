@@ -4,20 +4,86 @@ import hashlib
 import json
 import sqlite3
 import time
-from collections.abc import Iterable
+import uuid
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from src.application.ledger.api import (
+    LIFECYCLE_ATTEMPT_OUTCOME_CODES,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
+    lifecycle_attempt_diagnostic_sha256,
+)
+from src.application.trades.settlement_attempts import (
+    SettlementAttemptOutcome,
+    settlement_attempt_updates_after_outcome,
 )
 from src.infrastructure.private_storage import connect_private_sqlite
 
 
 SETTLEMENT_ATTEMPT_MIN_LEASE_MS = 120_000
 _SETTLEMENT_ATTEMPT_QUERY_BATCH_SIZE = 400
+_SETTLEMENT_INVOCATION_STATES = frozenset(
+    {
+        "reserved",
+        "provider_started",
+        "provider_finished",
+        "ledger_committed",
+        "ambiguous_provider_result",
+    }
+)
+_SETTLEMENT_PENDING_FIELDS = (
+    "pending_outcome_code",
+    "pending_semantic_fingerprint",
+    "pending_receipt_sha256",
+    "pending_diagnostic_sha256",
+    "pending_outcome_kind",
+    "pending_reason_code",
+    "pending_provider_code",
+    "pending_error_class",
+    "pending_retry_after_ms",
+    "pending_control_now_ms",
+)
+_SETTLEMENT_COMMITTED_FIELDS = (
+    "committed_audit_ordinal",
+    "committed_chain_sha256",
+)
+_SETTLEMENT_PENDING_CONTROL_FIELDS = (
+    "classification",
+    "outcome_kind",
+    "reason_code",
+    "provider_code",
+    "error_class",
+    "next_attempt_at_ms",
+    "last_attempt_at_ms",
+    "updated_at_ms",
+)
+_SETTLEMENT_INVOCATION_FIELDS = (
+    "invocation_id",
+    "invocation_state",
+    "invocation_attempted_at_ms",
+    *_SETTLEMENT_PENDING_FIELDS,
+    *_SETTLEMENT_COMMITTED_FIELDS,
+)
+_SETTLEMENT_INVOCATION_CLEAR_SQL = ", ".join(
+    f"{field} = NULL" for field in _SETTLEMENT_INVOCATION_FIELDS
+)
+_SETTLEMENT_CONTROL_KIND_BY_AUDIT_KIND = {
+    audit_kind: {
+        "stale_generation_after_call": "stale_generation",
+        "processing_failure_after_call": "unknown_error",
+        "legacy_semantic_unavailable_after_call": (
+            "legacy_semantic_unavailable"
+        ),
+    }.get(audit_kind, audit_kind)
+    for audit_kind in LIFECYCLE_ATTEMPT_OUTCOME_CODES
+}
+_SETTLEMENT_AUDIT_KIND_BY_CODE = {
+    int(code): audit_kind
+    for audit_kind, code in LIFECYCLE_ATTEMPT_OUTCOME_CODES.items()
+}
 
 
 class SettlementAttemptClaimOwnershipLost(RuntimeError):
@@ -427,13 +493,17 @@ def upsert_settlement_attempt_state(
     case_id = str(payload.get("case_id") or "").strip()
     if not source_id or not account or not case_id:
         raise ValueError("settlement attempt state identity is incomplete")
+    if any(payload.get(field) is not None for field in _SETTLEMENT_INVOCATION_FIELDS):
+        raise ValueError(
+            "generic settlement attempt upsert cannot mutate invocation state"
+        )
     inbox_path = Path(path)
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
             conn.execute(
-                """
+                f"""
                 INSERT INTO lifecycle_settlement_attempt_state (
                   source_id, account, case_id, case_scope_fingerprint,
                   provider_input_scope_fingerprint,
@@ -463,12 +533,21 @@ def upsert_settlement_attempt_state(
                   last_semantic_fingerprint = excluded.last_semantic_fingerprint,
                   claim_id = excluded.claim_id,
                   claim_until_ms = excluded.claim_until_ms,
-                  updated_at_ms = excluded.updated_at_ms
-                WHERE lifecycle_settlement_attempt_state.claim_id IS NULL
-                   OR lifecycle_settlement_attempt_state.claim_id = ''
-                   OR lifecycle_settlement_attempt_state.claim_until_ms IS NULL
-                   OR lifecycle_settlement_attempt_state.claim_until_ms <= excluded.updated_at_ms
-                   OR lifecycle_settlement_attempt_state.claim_id = excluded.claim_id
+                  updated_at_ms = excluded.updated_at_ms,
+                  invocation_writer_epoch =
+                    lifecycle_settlement_attempt_state.invocation_writer_epoch + 1,
+                  {_SETTLEMENT_INVOCATION_CLEAR_SQL}
+                WHERE (
+                  lifecycle_settlement_attempt_state.claim_id IS NULL
+                  OR lifecycle_settlement_attempt_state.claim_id = ''
+                  OR lifecycle_settlement_attempt_state.claim_until_ms IS NULL
+                  OR lifecycle_settlement_attempt_state.claim_until_ms <= excluded.updated_at_ms
+                  OR lifecycle_settlement_attempt_state.claim_id = excluded.claim_id
+                )
+                  AND (
+                    lifecycle_settlement_attempt_state.invocation_state IS NULL
+                    OR lifecycle_settlement_attempt_state.invocation_state = 'ledger_committed'
+                  )
                 """,
                 _settlement_attempt_values(
                     {
@@ -518,6 +597,7 @@ def claim_settlement_attempt(
                 WHERE source_id = ? AND account = ? AND case_id = ?
                   AND case_scope_fingerprint = ?
                   AND classification = 'provider_required'
+                  AND invocation_state IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
                   AND (
                     claim_id IS NULL OR claim_id = ''
@@ -540,6 +620,641 @@ def claim_settlement_attempt(
             )
             conn.commit()
             return int(cursor.rowcount or 0) == 1
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def reserve_settlement_attempt_invocation(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    case_scope_fingerprint: str,
+    claim_id: str,
+    now_ms: int,
+    lease_ms: int,
+) -> dict[str, Any] | None:
+    """Claim one provider attempt and durably reserve its UUIDv4."""
+
+    source_key = str(source_id or "").strip()
+    account_key = str(account or "").strip().lower()
+    case_key = str(case_id or "").strip()
+    scope_key = str(case_scope_fingerprint or "").strip()
+    claim_key = str(claim_id or "").strip()
+    if not all((source_key, account_key, case_key, scope_key, claim_key)):
+        raise ValueError("settlement invocation reservation scope is incomplete")
+    now_value = _positive_int(now_ms, field="now_ms")
+    lease_value = max(
+        SETTLEMENT_ATTEMPT_MIN_LEASE_MS,
+        int(lease_ms or 0),
+    )
+    candidate_invocation = str(uuid.uuid4())
+    inbox_path = Path(path)
+    inbox_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(_connect(inbox_path)) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET claim_id = ?, claim_until_ms = ?, updated_at_ms = ?,
+                    invocation_id = CASE
+                      WHEN invocation_state = 'reserved'
+                      THEN invocation_id
+                      ELSE ?
+                    END,
+                    invocation_state = 'reserved',
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    invocation_attempted_at_ms = NULL,
+                    pending_outcome_code = NULL,
+                    pending_semantic_fingerprint = NULL,
+                    pending_receipt_sha256 = NULL,
+                    pending_diagnostic_sha256 = NULL,
+                    pending_outcome_kind = NULL,
+                    pending_reason_code = NULL,
+                    pending_provider_code = NULL,
+                    pending_error_class = NULL,
+                    pending_retry_after_ms = NULL,
+                    pending_control_now_ms = NULL,
+                    committed_audit_ordinal = NULL,
+                    committed_chain_sha256 = NULL
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND case_scope_fingerprint = ?
+                  AND classification = 'provider_required'
+                  AND (
+                    invocation_state IS NULL
+                    OR invocation_state IN ('reserved', 'ledger_committed')
+                  )
+                  AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
+                  AND (
+                    claim_id IS NULL OR claim_id = ''
+                    OR claim_until_ms IS NULL OR claim_until_ms <= ?
+                    OR claim_id = ?
+                  )
+                """,
+                (
+                    claim_key,
+                    now_value + lease_value,
+                    now_value,
+                    candidate_invocation,
+                    source_key,
+                    account_key,
+                    case_key,
+                    scope_key,
+                    now_value,
+                    now_value,
+                    claim_key,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                conn.commit()
+                return None
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def mark_settlement_attempt_provider_started(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    claim_id: str,
+    invocation_id: str,
+    attempted_at_ms: int,
+) -> dict[str, Any]:
+    """CAS one reserved invocation immediately before its first provider I/O."""
+
+    source_key = _required_text(source_id, field="source_id")
+    account_key = _required_text(account, field="account").lower()
+    case_key = _required_text(case_id, field="case_id")
+    claim_key = _required_text(claim_id, field="claim_id")
+    invocation_key = _canonical_uuid_text(invocation_id)
+    attempted_value = _positive_int(
+        attempted_at_ms,
+        field="attempted_at_ms",
+    )
+    inbox_path = Path(path)
+    with closing(_connect(inbox_path)) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET invocation_state = 'provider_started',
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    invocation_attempted_at_ms = ?,
+                    updated_at_ms = ?
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND claim_id = ? AND invocation_id = ?
+                  AND invocation_state = 'reserved'
+                """,
+                (
+                    attempted_value,
+                    attempted_value,
+                    source_key,
+                    account_key,
+                    case_key,
+                    claim_key,
+                    invocation_key,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation provider-start CAS failed"
+                )
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def finish_settlement_attempt_provider_invocation(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    claim_id: str,
+    invocation_id: str,
+    outcome: SettlementAttemptOutcome,
+    outcome_code: int,
+    semantic_fingerprint: bytes | None,
+    receipt_sha256: bytes | None,
+    diagnostic_sha256: bytes | None,
+    control_now_ms: int,
+) -> dict[str, Any]:
+    """Persist compact provider output while retaining the pre-attempt base."""
+
+    source_key = _required_text(source_id, field="source_id")
+    account_key = _required_text(account, field="account").lower()
+    case_key = _required_text(case_id, field="case_id")
+    claim_key = _required_text(claim_id, field="claim_id")
+    invocation_key = _canonical_uuid_text(invocation_id)
+    control_now_value = _positive_int(
+        control_now_ms,
+        field="control_now_ms",
+    )
+    inbox_path = Path(path)
+    with closing(_connect(inbox_path)) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            if (
+                str(current.get("claim_id") or "") != claim_key
+                or current.get("invocation_id") != invocation_key
+                or current.get("invocation_state")
+                not in {"provider_started", "provider_finished"}
+            ):
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation provider-finish CAS failed"
+                )
+            stored_values = _settlement_provider_finished_values(
+                current,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+                outcome=outcome,
+                outcome_code=outcome_code,
+                semantic_fingerprint=semantic_fingerprint,
+                receipt_sha256=receipt_sha256,
+                diagnostic_sha256=diagnostic_sha256,
+                control_now_ms=control_now_value,
+            )
+            if current.get("invocation_state") == "provider_finished":
+                mismatched = _settlement_pending_mismatches(
+                    current,
+                    stored_values,
+                )
+                if mismatched:
+                    raise ValueError(
+                        "settlement provider-finish replay mismatch: "
+                        + ",".join(mismatched)
+                    )
+                conn.commit()
+                return current
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET classification = ?, outcome_kind = ?, reason_code = ?,
+                    provider_code = ?, error_class = ?,
+                    next_attempt_at_ms = ?, last_attempt_at_ms = ?,
+                    updated_at_ms = ?, invocation_state = 'provider_finished',
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    pending_outcome_code = ?,
+                    pending_semantic_fingerprint = ?,
+                    pending_receipt_sha256 = ?,
+                    pending_diagnostic_sha256 = ?,
+                    pending_outcome_kind = ?, pending_reason_code = ?,
+                    pending_provider_code = ?, pending_error_class = ?,
+                    pending_retry_after_ms = ?, pending_control_now_ms = ?,
+                    committed_audit_ordinal = NULL,
+                    committed_chain_sha256 = NULL
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND claim_id = ? AND invocation_id = ?
+                  AND invocation_state = 'provider_started'
+                """,
+                (
+                    *(
+                        stored_values[field]
+                        for field in _SETTLEMENT_PENDING_CONTROL_FIELDS
+                    ),
+                    outcome_code,
+                    semantic_fingerprint,
+                    receipt_sha256,
+                    diagnostic_sha256,
+                    outcome.kind,
+                    outcome.reason_code,
+                    outcome.provider_code,
+                    outcome.error_class,
+                    outcome.retry_after_ms,
+                    control_now_value,
+                    source_key,
+                    account_key,
+                    case_key,
+                    claim_key,
+                    invocation_key,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation provider-finish CAS failed"
+                )
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def replace_finished_settlement_attempt_provider_invocation(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    claim_id: str,
+    invocation_id: str,
+    outcome: SettlementAttemptOutcome,
+    outcome_code: int,
+    semantic_fingerprint: bytes | None,
+    receipt_sha256: bytes | None,
+    diagnostic_sha256: bytes | None,
+    control_now_ms: int,
+) -> dict[str, Any]:
+    """CAS-replace one uncommitted provider result after reclassification."""
+
+    source_key = _required_text(source_id, field="source_id")
+    account_key = _required_text(account, field="account").lower()
+    case_key = _required_text(case_id, field="case_id")
+    claim_key = _required_text(claim_id, field="claim_id")
+    invocation_key = _canonical_uuid_text(invocation_id)
+    control_now_value = _positive_int(
+        control_now_ms,
+        field="control_now_ms",
+    )
+    inbox_path = Path(path)
+    with closing(_connect(inbox_path)) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            if (
+                str(current.get("claim_id") or "") != claim_key
+                or current.get("invocation_id") != invocation_key
+                or current.get("invocation_state")
+                != "provider_finished"
+                or current.get("committed_audit_ordinal") is not None
+                or current.get("committed_chain_sha256") is not None
+            ):
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation provider-result replacement CAS failed"
+                )
+            stored_values = _settlement_provider_finished_values(
+                current,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+                outcome=outcome,
+                outcome_code=outcome_code,
+                semantic_fingerprint=semantic_fingerprint,
+                receipt_sha256=receipt_sha256,
+                diagnostic_sha256=diagnostic_sha256,
+                control_now_ms=control_now_value,
+            )
+            if not _settlement_pending_mismatches(
+                current,
+                stored_values,
+            ):
+                conn.commit()
+                return current
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET classification = ?, outcome_kind = ?, reason_code = ?,
+                    provider_code = ?, error_class = ?,
+                    next_attempt_at_ms = ?, last_attempt_at_ms = ?,
+                    updated_at_ms = ?,
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    pending_outcome_code = ?,
+                    pending_semantic_fingerprint = ?,
+                    pending_receipt_sha256 = ?,
+                    pending_diagnostic_sha256 = ?,
+                    pending_outcome_kind = ?, pending_reason_code = ?,
+                    pending_provider_code = ?, pending_error_class = ?,
+                    pending_retry_after_ms = ?, pending_control_now_ms = ?
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND claim_id = ? AND invocation_id = ?
+                  AND invocation_state = 'provider_finished'
+                  AND committed_audit_ordinal IS NULL
+                  AND committed_chain_sha256 IS NULL
+                """,
+                (
+                    *(
+                        stored_values[field]
+                        for field in _SETTLEMENT_PENDING_CONTROL_FIELDS
+                    ),
+                    outcome_code,
+                    semantic_fingerprint,
+                    receipt_sha256,
+                    diagnostic_sha256,
+                    outcome.kind,
+                    outcome.reason_code,
+                    outcome.provider_code,
+                    outcome.error_class,
+                    outcome.retry_after_ms,
+                    control_now_value,
+                    source_key,
+                    account_key,
+                    case_key,
+                    claim_key,
+                    invocation_key,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation provider-result replacement CAS failed"
+                )
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _settlement_provider_finished_values(
+    current: Mapping[str, Any],
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    outcome: SettlementAttemptOutcome,
+    outcome_code: int,
+    semantic_fingerprint: bytes | None,
+    receipt_sha256: bytes | None,
+    diagnostic_sha256: bytes | None,
+    control_now_ms: int,
+) -> dict[str, Any]:
+    if type(outcome) is not SettlementAttemptOutcome:
+        raise TypeError("settlement provider outcome is invalid")
+    if (
+        outcome.source_id != source_id
+        or outcome.account != account
+        or outcome.case_id != case_id
+    ):
+        raise ValueError("settlement provider outcome identity mismatch")
+    if (
+        outcome.contract_version
+        != current.get("collector_contract_version")
+        or outcome.capability_fingerprint
+        != current.get("capability_fingerprint")
+    ):
+        raise ValueError("settlement provider outcome contract mismatch")
+    pending = {
+        **current,
+        "invocation_state": "provider_finished",
+        "pending_outcome_code": outcome_code,
+        "pending_semantic_fingerprint": semantic_fingerprint,
+        "pending_receipt_sha256": receipt_sha256,
+        "pending_diagnostic_sha256": diagnostic_sha256,
+        "pending_outcome_kind": outcome.kind,
+        "pending_reason_code": outcome.reason_code,
+        "pending_provider_code": outcome.provider_code,
+        "pending_error_class": outcome.error_class,
+        "pending_retry_after_ms": outcome.retry_after_ms,
+        "pending_control_now_ms": control_now_ms,
+        "committed_audit_ordinal": None,
+        "committed_chain_sha256": None,
+    }
+    _validate_pending_settlement_outcome(pending)
+    projected = _pending_settlement_control_updates(pending)
+    return {
+        **pending,
+        **{
+            field: projected[field]
+            for field in _SETTLEMENT_PENDING_CONTROL_FIELDS
+        },
+    }
+
+
+def _settlement_pending_mismatches(
+    current: Mapping[str, Any],
+    stored_values: Mapping[str, Any],
+) -> list[str]:
+    return [
+        field
+        for field in (
+            *_SETTLEMENT_PENDING_FIELDS,
+            *_SETTLEMENT_PENDING_CONTROL_FIELDS,
+        )
+        if current.get(field) != stored_values.get(field)
+    ]
+
+
+def reconcile_settlement_attempt_invocation(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+    invocation_id: str,
+    audit: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify restart state or finish an exact compact ledger receipt."""
+
+    source_key = _required_text(source_id, field="source_id")
+    account_key = _required_text(account, field="account").lower()
+    case_key = _required_text(case_id, field="case_id")
+    invocation_key = _canonical_uuid_text(invocation_id)
+    inbox_path = Path(path)
+    with closing(_connect(inbox_path)) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            if current.get("invocation_id") != invocation_key:
+                raise ValueError("settlement invocation identity mismatch")
+            state = str(current.get("invocation_state") or "")
+            if state == "reserved":
+                if audit is not None:
+                    raise ValueError(
+                        "reserved settlement invocation conflicts with audit"
+                    )
+                conn.commit()
+                return current
+            if state == "ledger_committed" and audit is None:
+                conn.commit()
+                return current
+            if state == "provider_started" or (
+                state == "provider_finished" and audit is None
+            ):
+                conn.execute(
+                    """
+                    UPDATE lifecycle_settlement_attempt_state
+                    SET invocation_state = 'ambiguous_provider_result',
+                        invocation_writer_epoch = invocation_writer_epoch + 1,
+                        claim_id = NULL, claim_until_ms = NULL
+                    WHERE source_id = ? AND account = ? AND case_id = ?
+                      AND invocation_id = ? AND invocation_state = ?
+                    """,
+                    (
+                        source_key,
+                        account_key,
+                        case_key,
+                        invocation_key,
+                        state,
+                    ),
+                )
+                result = _read_settlement_attempt_row(
+                    conn,
+                    source_id=source_key,
+                    account=account_key,
+                    case_id=case_key,
+                )
+                conn.commit()
+                return result
+            if state == "ambiguous_provider_result":
+                conn.commit()
+                return current
+            if state not in {"provider_finished", "ledger_committed"}:
+                raise ValueError("settlement invocation state is not reconcilable")
+
+            ordinal, chain = _match_settlement_invocation_audit(
+                current,
+                audit,
+            )
+            if state == "ledger_committed":
+                if (
+                    current.get("committed_audit_ordinal") != ordinal
+                    or current.get("committed_chain_sha256") != chain
+                ):
+                    raise ValueError("settlement committed audit receipt mismatch")
+                conn.commit()
+                return current
+
+            projected = _pending_settlement_control_updates(current)
+            merged = {
+                **current,
+                **projected,
+                "claim_id": None,
+                "claim_until_ms": None,
+                "invocation_state": "ledger_committed",
+                "committed_audit_ordinal": ordinal,
+                "committed_chain_sha256": chain,
+            }
+            _validate_settlement_invocation_fields(merged)
+            values = _settlement_attempt_values(merged)
+            cursor = conn.execute(
+                """
+                UPDATE lifecycle_settlement_attempt_state
+                SET case_scope_fingerprint = ?,
+                    provider_input_scope_fingerprint = ?,
+                    collector_contract_version = ?,
+                    capability_fingerprint = ?, classification = ?,
+                    outcome_kind = ?, reason_code = ?, provider_code = ?,
+                    error_class = ?, attempt_count = ?, no_progress_count = ?,
+                    next_attempt_at_ms = ?, last_attempt_at_ms = ?,
+                    last_semantic_fingerprint = ?, claim_id = NULL,
+                    claim_until_ms = NULL, updated_at_ms = ?,
+                    invocation_state = 'ledger_committed',
+                    invocation_writer_epoch = invocation_writer_epoch + 1,
+                    committed_audit_ordinal = ?,
+                    committed_chain_sha256 = ?
+                WHERE source_id = ? AND account = ? AND case_id = ?
+                  AND invocation_id = ?
+                  AND invocation_state = 'provider_finished'
+                """,
+                (
+                    *values[3:17],
+                    values[19],
+                    ordinal,
+                    chain,
+                    source_key,
+                    account_key,
+                    case_key,
+                    invocation_key,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation reconciliation CAS failed"
+                )
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
+            conn.commit()
+            return result
         except Exception:
             conn.rollback()
             raise
@@ -699,7 +1414,10 @@ def renew_settlement_attempt_claim(
             cursor = conn.execute(
                 """
                 UPDATE lifecycle_settlement_attempt_state
-                SET claim_until_ms = ?
+                SET claim_until_ms = ?,
+                    invocation_writer_epoch = invocation_writer_epoch + CASE
+                      WHEN invocation_state IS NULL THEN 0 ELSE 1
+                    END
                 WHERE source_id = ? AND account = ? AND case_id = ?
                   AND case_scope_fingerprint = ?
                   AND classification = 'provider_required'
@@ -739,22 +1457,19 @@ def complete_settlement_attempt(
         _ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM lifecycle_settlement_attempt_state
-                WHERE source_id = ? AND account = ? AND case_id = ?
-                """,
-                (source_key, account_key, case_key),
-            ).fetchone()
-            if row is None:
-                raise SettlementAttemptClaimOwnershipLost(
-                    "settlement attempt state is unavailable"
-                )
-            current = _settlement_attempt_row(row)
+            current = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
             if str(current.get("claim_id") or "") != claim_key:
                 raise SettlementAttemptClaimOwnershipLost(
                     "settlement attempt claim ownership changed"
+                )
+            if current.get("invocation_state") not in {None, "reserved"}:
+                raise SettlementAttemptClaimOwnershipLost(
+                    "settlement invocation requires exact audit reconciliation"
                 )
             merged = {
                 **current,
@@ -767,7 +1482,7 @@ def complete_settlement_attempt(
             }
             values = _settlement_attempt_values(merged)
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE lifecycle_settlement_attempt_state
                 SET case_scope_fingerprint = ?,
                     provider_input_scope_fingerprint = ?,
@@ -785,7 +1500,11 @@ def complete_settlement_attempt(
                     last_semantic_fingerprint = ?,
                     claim_id = ?,
                     claim_until_ms = ?,
-                    updated_at_ms = ?
+                    updated_at_ms = ?,
+                    invocation_writer_epoch = invocation_writer_epoch + CASE
+                      WHEN invocation_state IS NULL THEN 0 ELSE 1
+                    END,
+                    {_SETTLEMENT_INVOCATION_CLEAR_SQL}
                 WHERE source_id = ? AND account = ? AND case_id = ?
                   AND claim_id = ?
                 """,
@@ -795,21 +1514,17 @@ def complete_settlement_attempt(
                 raise SettlementAttemptClaimOwnershipLost(
                     "settlement attempt claim ownership changed"
                 )
-            stored = conn.execute(
-                """
-                SELECT *
-                FROM lifecycle_settlement_attempt_state
-                WHERE source_id = ? AND account = ? AND case_id = ?
-                """,
-                (source_key, account_key, case_key),
-            ).fetchone()
+            result = _read_settlement_attempt_row(
+                conn,
+                source_id=source_key,
+                account=account_key,
+                case_id=case_key,
+            )
             conn.commit()
+            return result
         except Exception:
             conn.rollback()
             raise
-    if stored is None:
-        raise RuntimeError("settlement attempt state disappeared")
-    return _settlement_attempt_row(stored)
 
 
 def settlement_attempt_summary(
@@ -836,6 +1551,7 @@ def settlement_attempt_summary(
             "disabled_count": 0,
             "backoff_count": 0,
             "claimed_count": 0,
+            "ambiguous_provider_result_count": 0,
             "eligible_count": 0,
             "earliest_next_attempt_at_ms": None,
             "last_state_change": None,
@@ -845,18 +1561,15 @@ def settlement_attempt_summary(
             _ensure_schema(conn)
             rows = _fetch_settlement_attempt_rows(
                 conn,
-                columns=(
-                    "case_id, classification, outcome_kind, reason_code, "
-                    "provider_code, error_class, next_attempt_at_ms, "
-                    "claim_id, claim_until_ms, updated_at_ms"
-                ),
+                columns="*",
                 source_id=source_key,
                 account=account_key,
                 case_ids=normalized_case_ids,
             )
+    validated_rows = [_settlement_attempt_row(row) for row in rows]
     provider_rows = [
         row
-        for row in rows
+        for row in validated_rows
         if str(row["classification"] or "") == "provider_required"
     ]
     blocked = [
@@ -877,6 +1590,12 @@ def settlement_attempt_summary(
         if str(row["claim_id"] or "")
         and int(row["claim_until_ms"] or 0) > int(now_ms)
     ]
+    ambiguous = [
+        row
+        for row in validated_rows
+        if str(row["invocation_state"] or "")
+        == "ambiguous_provider_result"
+    ]
     backoff = [
         row
         for row in provider_rows
@@ -890,6 +1609,11 @@ def settlement_attempt_summary(
         and str(row["outcome_kind"] or "")
         != "legacy_semantic_unavailable"
         and str(row["outcome_kind"] or "") != "disabled"
+        and str(row["invocation_state"] or "") not in {
+            "provider_started",
+            "provider_finished",
+            "ambiguous_provider_result",
+        }
         and not (
             str(row["claim_id"] or "")
             and int(row["claim_until_ms"] or 0) > int(now_ms)
@@ -906,7 +1630,7 @@ def settlement_attempt_summary(
         and int(row["next_attempt_at_ms"]) > int(now_ms)
     ]
     latest_state = max(
-        rows,
+        validated_rows,
         key=lambda row: (
             int(row["updated_at_ms"] or 0),
             str(row["case_id"] or ""),
@@ -920,6 +1644,7 @@ def settlement_attempt_summary(
         "disabled_count": len(disabled),
         "backoff_count": len(backoff),
         "claimed_count": len(claimed),
+        "ambiguous_provider_result_count": len(ambiguous),
         "eligible_count": len(eligible),
         "earliest_next_attempt_at_ms": min(next_values)
         if next_values
@@ -1130,6 +1855,112 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "economic_payload_hash",
         "TEXT",
     )
+    existing_attempt_columns = {
+        str(row["name"])
+        for row in conn.execute(
+            "PRAGMA table_info(lifecycle_settlement_attempt_state)"
+        ).fetchall()
+    }
+    for column, sql_type in (
+        (
+            "invocation_writer_epoch",
+            "INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(typeof(invocation_writer_epoch) = 'integer' "
+            "AND invocation_writer_epoch >= 0)",
+        ),
+        (
+            "invocation_id",
+            "TEXT CHECK(invocation_id IS NULL OR "
+            "(typeof(invocation_id) = 'text' AND length(invocation_id) = 36))",
+        ),
+        (
+            "invocation_state",
+            "TEXT CHECK(invocation_state IS NULL OR invocation_state IN "
+            "('reserved', 'provider_started', 'provider_finished', "
+            "'ledger_committed', 'ambiguous_provider_result'))",
+        ),
+        (
+            "invocation_attempted_at_ms",
+            "INTEGER CHECK(invocation_attempted_at_ms IS NULL OR "
+            "(typeof(invocation_attempted_at_ms) = 'integer' "
+            "AND invocation_attempted_at_ms > 0))",
+        ),
+        (
+            "pending_outcome_code",
+            "INTEGER CHECK(pending_outcome_code IS NULL OR "
+            "(typeof(pending_outcome_code) = 'integer' "
+            "AND pending_outcome_code BETWEEN 1 AND 8))",
+        ),
+        *(
+            (
+                column,
+                f"BLOB CHECK({column} IS NULL OR "
+                f"(typeof({column}) = 'blob' AND length({column}) = 32))",
+            )
+            for column in (
+                "pending_semantic_fingerprint",
+                "pending_receipt_sha256",
+                "pending_diagnostic_sha256",
+                "committed_chain_sha256",
+            )
+        ),
+        *(
+            (
+                column,
+                f"TEXT CHECK({column} IS NULL OR typeof({column}) = 'text')",
+            )
+            for column in (
+                "pending_outcome_kind",
+                "pending_reason_code",
+                "pending_provider_code",
+                "pending_error_class",
+            )
+        ),
+        (
+            "pending_retry_after_ms",
+            "INTEGER CHECK(pending_retry_after_ms IS NULL OR "
+            "(typeof(pending_retry_after_ms) = 'integer' "
+            "AND pending_retry_after_ms >= 0))",
+        ),
+        (
+            "pending_control_now_ms",
+            "INTEGER CHECK(pending_control_now_ms IS NULL OR "
+            "(typeof(pending_control_now_ms) = 'integer' "
+            "AND pending_control_now_ms > 0))",
+        ),
+        (
+            "committed_audit_ordinal",
+            "INTEGER CHECK(committed_audit_ordinal IS NULL OR "
+            "(typeof(committed_audit_ordinal) = 'integer' "
+            "AND committed_audit_ordinal > 0))",
+        ),
+    ):
+        if column not in existing_attempt_columns:
+            conn.execute(
+                "ALTER TABLE lifecycle_settlement_attempt_state "
+                f"ADD COLUMN {column} {sql_type}"
+            )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_lifecycle_settlement_attempt_invocation_writer_fence
+        BEFORE UPDATE ON lifecycle_settlement_attempt_state
+        WHEN (
+          OLD.invocation_state IS NOT NULL
+          OR NEW.invocation_state IS NOT NULL
+        ) AND (
+          typeof(NEW.invocation_writer_epoch) != 'integer'
+          OR NEW.invocation_writer_epoch
+             != OLD.invocation_writer_epoch + 1
+        )
+        BEGIN
+          SELECT RAISE(
+            ABORT,
+            'lifecycle settlement invocation requires current writer'
+          );
+        END
+        """
+    )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_trade_inbox_retry
@@ -1206,6 +2037,147 @@ def _add_column_if_missing(
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
+def _read_settlement_attempt_row(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    account: str,
+    case_id: str,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM lifecycle_settlement_attempt_state
+        WHERE source_id = ? AND account = ? AND case_id = ?
+        """,
+        (source_id, account, case_id),
+    ).fetchone()
+    if row is None:
+        raise SettlementAttemptClaimOwnershipLost(
+            "settlement attempt state is unavailable"
+        )
+    return _settlement_attempt_row(row)
+
+
+def _pending_settlement_control_updates(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    outcome = SettlementAttemptOutcome(
+        kind=str(row["pending_outcome_kind"]),
+        source_id=str(row["source_id"]),
+        account=str(row["account"]),
+        case_id=str(row["case_id"]),
+        contract_version=str(row["collector_contract_version"]),
+        capability_fingerprint=str(row["capability_fingerprint"]),
+        reason_code=row.get("pending_reason_code"),
+        provider_code=row.get("pending_provider_code"),
+        error_class=row.get("pending_error_class"),
+        retry_after_ms=row.get("pending_retry_after_ms"),
+    )
+    semantic = row.get("pending_semantic_fingerprint")
+    return settlement_attempt_updates_after_outcome(
+        row,
+        outcome=outcome,
+        now_ms=int(row["pending_control_now_ms"]),
+        case_scope_fingerprint_value=str(
+            row["case_scope_fingerprint"]
+        ),
+        provider_input_scope_fingerprint_value=str(
+            row.get("provider_input_scope_fingerprint") or ""
+        ),
+        semantic_fingerprint=(
+            semantic.hex() if type(semantic) is bytes else None
+        ),
+        provider_attempted=True,
+    )
+
+
+def _assert_pending_control_projection(
+    row: Mapping[str, Any],
+    projected: Mapping[str, Any],
+) -> None:
+    mismatched = [
+        field
+        for field in _SETTLEMENT_PENDING_CONTROL_FIELDS
+        if row.get(field) != projected.get(field)
+    ]
+    if mismatched:
+        raise ValueError(
+            "pending settlement control projection mismatch: "
+            + ",".join(mismatched)
+        )
+
+
+def _match_settlement_invocation_audit(
+    current: Mapping[str, Any],
+    audit: Mapping[str, Any] | None,
+) -> tuple[int, bytes]:
+    if not isinstance(audit, Mapping):
+        raise ValueError("settlement invocation audit receipt is unavailable")
+    if audit.get("case_id") != current.get("case_id"):
+        raise ValueError("settlement invocation audit case mismatch")
+    expected_invocation = uuid.UUID(
+        _canonical_uuid_text(current.get("invocation_id"))
+    ).bytes
+    if _audit_invocation_bytes(audit.get("invocation_id")) != expected_invocation:
+        raise ValueError("settlement invocation audit identity mismatch")
+    if (
+        type(audit.get("attempted_at_ms")) is not int
+        or audit.get("attempted_at_ms")
+        != current.get("invocation_attempted_at_ms")
+        or type(audit.get("outcome_code")) is not int
+        or audit.get("outcome_code") != current.get("pending_outcome_code")
+    ):
+        raise ValueError("settlement invocation audit scalar mismatch")
+    for field, pending_field in (
+        ("semantic_fingerprint", "pending_semantic_fingerprint"),
+        ("receipt_sha256", "pending_receipt_sha256"),
+        ("diagnostic_sha256", "pending_diagnostic_sha256"),
+    ):
+        if _optional_sha256_blob(audit.get(field), field=field) != current.get(
+            pending_field
+        ):
+            raise ValueError(f"settlement invocation audit {field} mismatch")
+
+    ordinal = _positive_int(audit.get("ordinal"), field="audit.ordinal")
+    last_ordinal = _positive_int(
+        audit.get("last_ordinal"),
+        field="audit.last_ordinal",
+    )
+    if ordinal != last_ordinal:
+        raise ValueError("settlement invocation audit is not the current head")
+    if (
+        _audit_invocation_bytes(audit.get("last_invocation_id"))
+        != expected_invocation
+    ):
+        raise ValueError("settlement invocation audit head identity mismatch")
+    chain = _sha256_blob(
+        audit.get("chain_sha256"),
+        field="audit.chain_sha256",
+    )
+    span_ordinal = audit.get("span_ordinal")
+    if int(current["pending_outcome_code"]) in (1, 2):
+        _positive_int(span_ordinal, field="audit.span_ordinal")
+    elif span_ordinal is not None:
+        raise ValueError("failed settlement invocation audit carries a span")
+    return ordinal, chain
+
+
+def _audit_invocation_bytes(value: Any) -> bytes:
+    if type(value) is bytes:
+        if len(value) != 16:
+            raise ValueError("settlement audit invocation_id must be UUIDv4 bytes")
+        parsed = uuid.UUID(bytes=value)
+        if parsed.version != 4 or parsed.variant != uuid.RFC_4122:
+            raise ValueError("settlement audit invocation_id must be UUIDv4 bytes")
+        return value
+    return uuid.UUID(_canonical_uuid_text(value)).bytes
+
+
+def _optional_sha256_blob(value: Any, *, field: str) -> bytes | None:
+    return None if value is None else _sha256_blob(value, field=field)
+
+
 def _settlement_attempt_values(
     payload: dict[str, Any],
 ) -> tuple[Any, ...]:
@@ -1248,10 +2220,216 @@ def _settlement_attempt_values(
 
 
 def _settlement_attempt_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    result = {
         key: row[key]
         for key in row.keys()
     }
+    _validate_settlement_invocation_fields(result)
+    return result
+
+
+def _validate_settlement_invocation_fields(
+    row: Mapping[str, Any],
+) -> None:
+    writer_epoch = row.get("invocation_writer_epoch")
+    if type(writer_epoch) is not int or writer_epoch < 0:
+        raise ValueError(
+            "settlement invocation_writer_epoch must be a nonnegative integer"
+        )
+    state_value = row.get("invocation_state")
+    if state_value is None:
+        if any(row.get(field) is not None for field in _SETTLEMENT_INVOCATION_FIELDS):
+            raise ValueError(
+                "settlement invocation fields require invocation_state"
+            )
+        return
+    if type(state_value) is not str or state_value not in _SETTLEMENT_INVOCATION_STATES:
+        raise ValueError("settlement invocation_state is invalid")
+    _canonical_uuid_text(row.get("invocation_id"))
+
+    if state_value == "reserved":
+        _require_null_fields(
+            row,
+            (
+                "invocation_attempted_at_ms",
+                *_SETTLEMENT_PENDING_FIELDS,
+                *_SETTLEMENT_COMMITTED_FIELDS,
+            ),
+        )
+        return
+
+    _positive_int(
+        row.get("invocation_attempted_at_ms"),
+        field="invocation_attempted_at_ms",
+    )
+    if state_value == "provider_started":
+        _require_null_fields(
+            row,
+            (*_SETTLEMENT_PENDING_FIELDS, *_SETTLEMENT_COMMITTED_FIELDS),
+        )
+        return
+
+    has_pending = row.get("pending_outcome_code") is not None
+    if state_value == "ambiguous_provider_result" and not has_pending:
+        _require_null_fields(
+            row,
+            (*_SETTLEMENT_PENDING_FIELDS, *_SETTLEMENT_COMMITTED_FIELDS),
+        )
+        if row.get("claim_id") is not None or row.get("claim_until_ms") is not None:
+            raise ValueError("ambiguous settlement invocation cannot remain claimed")
+        return
+    _validate_pending_settlement_outcome(row)
+    for field, pending_field in (
+        ("outcome_kind", "pending_outcome_kind"),
+        ("reason_code", "pending_reason_code"),
+        ("provider_code", "pending_provider_code"),
+        ("error_class", "pending_error_class"),
+    ):
+        if row.get(field) != row.get(pending_field):
+            raise ValueError(
+                f"pending settlement control field mismatch: {field}"
+            )
+    if state_value in {
+        "provider_finished",
+        "ambiguous_provider_result",
+    }:
+        _assert_pending_control_projection(
+            row,
+            _pending_settlement_control_updates(row),
+        )
+
+    if state_value == "ledger_committed":
+        _positive_int(
+            row.get("committed_audit_ordinal"),
+            field="committed_audit_ordinal",
+        )
+        _sha256_blob(
+            row.get("committed_chain_sha256"),
+            field="committed_chain_sha256",
+        )
+        if row.get("claim_id") is not None or row.get("claim_until_ms") is not None:
+            raise ValueError("committed settlement invocation cannot remain claimed")
+        return
+    _require_null_fields(row, _SETTLEMENT_COMMITTED_FIELDS)
+    if state_value == "ambiguous_provider_result" and (
+        row.get("claim_id") is not None
+        or row.get("claim_until_ms") is not None
+    ):
+        raise ValueError("ambiguous settlement invocation cannot remain claimed")
+
+
+def _validate_pending_settlement_outcome(
+    row: Mapping[str, Any],
+) -> None:
+    outcome_code = _positive_int(
+        row.get("pending_outcome_code"),
+        field="pending_outcome_code",
+    )
+    audit_kind = _SETTLEMENT_AUDIT_KIND_BY_CODE.get(outcome_code)
+    if audit_kind is None:
+        raise ValueError("pending settlement outcome_code is unknown")
+    control_kind = _required_text(
+        row.get("pending_outcome_kind"),
+        field="pending_outcome_kind",
+    )
+    if control_kind != _SETTLEMENT_CONTROL_KIND_BY_AUDIT_KIND[audit_kind]:
+        raise ValueError("pending settlement outcome kind/code mismatch")
+    _positive_int(
+        row.get("pending_control_now_ms"),
+        field="pending_control_now_ms",
+    )
+    for field in (
+        "pending_reason_code",
+        "pending_provider_code",
+        "pending_error_class",
+    ):
+        _optional_text(row.get(field), field=field)
+    retry_after = row.get("pending_retry_after_ms")
+    if retry_after is not None and (
+        type(retry_after) is not int or retry_after < 0
+    ):
+        raise ValueError("pending_retry_after_ms must be a nonnegative integer")
+
+    semantic = row.get("pending_semantic_fingerprint")
+    receipt = row.get("pending_receipt_sha256")
+    diagnostic = row.get("pending_diagnostic_sha256")
+    if outcome_code in (1, 2):
+        _sha256_blob(semantic, field="pending_semantic_fingerprint")
+        _sha256_blob(receipt, field="pending_receipt_sha256")
+        if diagnostic is not None:
+            raise ValueError(
+                "observed pending settlement outcome carries diagnostic hash"
+            )
+        return
+    if semantic is not None or receipt is not None:
+        raise ValueError(
+            "failed pending settlement outcome carries observation hashes"
+        )
+    diagnostic_value = _sha256_blob(
+        diagnostic,
+        field="pending_diagnostic_sha256",
+    )
+    expected_diagnostic = lifecycle_attempt_diagnostic_sha256(
+        reason_code=row.get("pending_reason_code"),
+        provider_code=row.get("pending_provider_code"),
+        error_class=row.get("pending_error_class"),
+    )
+    if diagnostic_value != expected_diagnostic:
+        raise ValueError("pending settlement diagnostic hash mismatch")
+
+
+def _canonical_uuid_text(value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError("settlement invocation_id must be canonical UUIDv4 text")
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            "settlement invocation_id must be canonical UUIDv4 text"
+        ) from exc
+    if (
+        value != str(parsed)
+        or parsed.version != 4
+        or parsed.variant != uuid.RFC_4122
+    ):
+        raise ValueError("settlement invocation_id must be canonical UUIDv4 text")
+    return value
+
+
+def _sha256_blob(value: Any, *, field: str) -> bytes:
+    if type(value) is not bytes or len(value) != 32:
+        raise ValueError(f"{field} must be exactly 32 bytes")
+    return value
+
+
+def _positive_int(value: Any, *, field: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return value
+
+
+def _required_text(value: Any, *, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{field} must be non-empty normalized text")
+    return value
+
+
+def _optional_text(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    return _required_text(value, field=field)
+
+
+def _require_null_fields(
+    row: Mapping[str, Any],
+    fields: Iterable[str],
+) -> None:
+    present = [field for field in fields if row.get(field) is not None]
+    if present:
+        raise ValueError(
+            "settlement invocation fields must be null: "
+            + ",".join(present)
+        )
 
 
 __all__ = [
@@ -1264,11 +2442,16 @@ __all__ = [
     "get_settlement_attempt_state",
     "list_settlement_attempt_states",
     "list_retryable_trade_payloads",
+    "finish_settlement_attempt_provider_invocation",
     "mark_trade_payload_handled",
     "mark_trade_payload_retryable",
     "renew_settlement_attempt_claim",
     "renew_settlement_provider_batch_claim",
+    "mark_settlement_attempt_provider_started",
+    "reconcile_settlement_attempt_invocation",
+    "replace_finished_settlement_attempt_provider_invocation",
     "release_settlement_provider_batch_claim",
+    "reserve_settlement_attempt_invocation",
     "require_trade_inbox_store_readable",
     "settle_trade_payload_result",
     "settlement_attempt_summary",

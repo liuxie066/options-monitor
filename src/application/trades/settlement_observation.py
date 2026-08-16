@@ -53,6 +53,8 @@ class SettlementObservationCollector:
         self,
         lifecycle_case: dict[str, Any],
         read_model: dict[str, Any],
+        *,
+        before_first_provider_io: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         case_account_id = str(
             lifecycle_case.get("futu_account_id") or ""
@@ -71,12 +73,15 @@ class SettlementObservationCollector:
             futu_account_id=case_account_id,
             trd_env=self.trd_env,
             now_ms=int(self.now_ms_fn()),
+            before_first_provider_io=before_first_provider_io,
         )
 
     def collect_outcome(
         self,
         lifecycle_case: dict[str, Any],
         read_model: dict[str, Any],
+        *,
+        before_first_provider_io: Callable[[], None] | None = None,
     ) -> SettlementAttemptOutcome:
         case_id = str(lifecycle_case.get("case_id") or "").strip()
         account = str(
@@ -95,9 +100,30 @@ class SettlementObservationCollector:
                 reason_code="missing_static_capability",
                 error_class="missing_static",
             )
+        provider_io_started = False
+        provider_start_failed = False
+
+        def mark_provider_io_started() -> None:
+            nonlocal provider_io_started, provider_start_failed
+            if provider_io_started:
+                return
+            try:
+                if before_first_provider_io is not None:
+                    before_first_provider_io()
+            except Exception:
+                provider_start_failed = True
+                raise
+            provider_io_started = True
+
         try:
-            observation = self(lifecycle_case, read_model)
+            observation = self(
+                lifecycle_case,
+                read_model,
+                before_first_provider_io=mark_provider_io_started,
+            )
         except LifecycleObservationGenerationChanged:
+            if provider_start_failed:
+                raise
             return SettlementAttemptOutcome(
                 kind="stale_generation",
                 source_id=self.source_id,
@@ -111,6 +137,8 @@ class SettlementObservationCollector:
                 error_class="stale_generation",
             )
         except SettlementObservationDataError:
+            if provider_start_failed:
+                raise
             return SettlementAttemptOutcome(
                 kind="unknown_error",
                 source_id=self.source_id,
@@ -124,6 +152,8 @@ class SettlementObservationCollector:
                 error_class="case_data",
             )
         except Exception as exc:
+            if provider_start_failed:
+                raise
             return classify_exception_outcome(
                 exc,
                 source_id=self.source_id,
@@ -154,6 +184,7 @@ def collect_broker_settlement_observation(
     futu_account_id: str,
     trd_env: str = "REAL",
     now_ms: int,
+    before_first_provider_io: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Collect one frozen, fail-closed settlement observation."""
 
@@ -320,6 +351,7 @@ def collect_broker_settlement_observation(
         query=lambda: broker_gateway.get_history_deals(
             **query_base,
         ),
+        before_first_provider_io=before_first_provider_io,
     )
     receipts["history_deals"] = history_deals
     history_orders = _query_receipt(
@@ -329,6 +361,7 @@ def collect_broker_settlement_observation(
         query=lambda: broker_gateway.get_history_orders(
             **query_base,
         ),
+        before_first_provider_io=before_first_provider_io,
     )
     receipts["history_orders"] = history_orders
     positions = _query_receipt(
@@ -344,6 +377,7 @@ def collect_broker_settlement_observation(
             acc_id=account_id,
             refresh_cache=True,
         ),
+        before_first_provider_io=before_first_provider_io,
     )
     receipts["fresh_positions"] = positions
 
@@ -407,6 +441,7 @@ def collect_broker_settlement_observation(
                 start=calendar_start,
                 end=calendar_end,
             ),
+            before_first_provider_io=before_first_provider_io,
         )
     receipts["trading_calendar"] = calendar
     receipts["contract_metadata"] = (
@@ -712,7 +747,10 @@ def _query_receipt(
     query_input: dict[str, Any],
     observed_at_ms: int,
     query: Callable[[], Any],
+    before_first_provider_io: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    if before_first_provider_io is not None:
+        before_first_provider_io()
     try:
         result = query()
     except Exception as exc:

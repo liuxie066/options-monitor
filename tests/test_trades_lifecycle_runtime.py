@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sqlite3
 from threading import Event
+from typing import Any
+import uuid
 
 import pytest
 
@@ -10,13 +13,21 @@ from src.application.ledger.api import (
     LegacySettlementSemanticUnavailable,
     SettlementAdmissionStateIncoherent,
     SettlementSemanticUnavailable,
+    attach_settlement_semantics,
+    lifecycle_attempt_diagnostic_sha256,
+    record_lifecycle_attempt_audit_atomically,
 )
+from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades.inbox import (
     SettlementAttemptClaimOwnershipLost,
     claim_settlement_attempt,
     claim_settlement_provider_batch,
     enqueue_trade_payload,
+    finish_settlement_attempt_provider_invocation,
     get_settlement_attempt_state,
+    mark_settlement_attempt_provider_started,
+    reserve_settlement_attempt_invocation,
+    upsert_settlement_attempt_state,
 )
 from src.application.trades.lifecycle_runtime import (
     _registry_contract_metadata,
@@ -25,6 +36,9 @@ from src.application.trades.settlement_attempts import (
     SettlementAttemptOutcome,
     SettlementCapabilitySnapshot,
     SettlementCollectorContract,
+    case_scope_fingerprint,
+    prepare_provider_required_state,
+    provider_input_scope_fingerprint,
 )
 
 
@@ -61,24 +75,60 @@ def test_registry_contract_metadata_rejects_real_underlier_conflict() -> None:
         )
 
 
-def test_due_reconciliation_keeps_complete_source_account_id_set(monkeypatch) -> None:
+def test_due_reconciliation_keeps_complete_source_account_id_set(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     import src.application.trades.lifecycle_runtime as mod
 
     captured: dict = {}
 
     def build_collector(**kwargs):
         captured.update(kwargs)
-        return object()
+        return _Collector(supported=False)
 
-    def reconcile(_repo, **kwargs):
-        captured["reconcile"] = kwargs
-        return {"status": "ok"}
+    _patch_due_planner(
+        monkeypatch,
+        candidates=[_candidate("provider-1")],
+    )
 
     monkeypatch.setattr(mod, "build_settlement_observation_collector", build_collector)
+
+    mod.reconcile_due_lifecycle_cases_for_source(
+        _RuntimeAuditRepo(),
+        source={
+            **_runtime_source(tmp_path),
+            "futu_account_ids": ["1001", "1002"],
+        },
+        broker_gateway=object(),
+        quote_gateway=object(),
+        now_ms=1_000,
+        apply_changes=True,
+    )
+
+    assert captured["futu_account_ids"] == ["1001", "1002"]
+
+
+def test_due_reconciliation_preview_does_not_build_collector(monkeypatch) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    captured: dict = {}
+
+    def reconcile(_repo, **kwargs):
+        captured.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(
+        mod,
+        "build_settlement_observation_collector",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"collector built during preview: {kwargs}")
+        ),
+    )
     monkeypatch.setattr(mod, "reconcile_due_lifecycle_cases", reconcile)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source={"account": "lx", "futu_account_ids": ["1001", "1002"]},
         broker_gateway=object(),
         quote_gateway=object(),
@@ -87,8 +137,30 @@ def test_due_reconciliation_keeps_complete_source_account_id_set(monkeypatch) ->
     )
 
     assert result == {"status": "ok"}
-    assert captured["futu_account_ids"] == ["1001", "1002"]
-    assert captured["reconcile"]["account"] == "lx"
+    assert captured["account"] == "lx"
+    assert captured["observation_collector"] is None
+
+
+def test_applied_due_requires_seal_sink_before_provider() -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    factory_calls = 0
+
+    def collector_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("collector must not be built without a seal sink")
+
+    with pytest.raises(ValueError, match="requires a seal sink"):
+        mod.reconcile_due_lifecycle_cases_for_source(
+            object(),
+            source={"account": "lx", "futu_account_ids": ["1001"]},
+            now_ms=1_000,
+            apply_changes=True,
+            settlement_collector_factory=collector_factory,
+        )
+
+    assert factory_calls == 0
 
 
 def _candidate(case_id: str) -> dict:
@@ -131,6 +203,56 @@ def _read_model(case_id: str) -> dict:
     }
 
 
+def _observation(case_id: str) -> dict:
+    return attach_settlement_semantics(
+        {
+            "schema_version": "broker_settlement_observation.v2",
+            "case_id": case_id,
+            "account": "lx",
+            "futu_account_id": "1001",
+            "market": "US",
+            "contract_identity": {
+                "symbol": "NVDA",
+                "option_contract_code": "US.NVDA260821P100000",
+                "option_type": "put",
+                "position_side": "short",
+                "strike": "100.00",
+                "expiration_ymd": "2026-08-21",
+                "multiplier": 100,
+            },
+            "target_contracts_by_lot": {f"lot:{case_id}": 1},
+            "frozen_preterminal_remaining_by_lot": {
+                f"lot:{case_id}": 1
+            },
+            "anchor_option_deal_key": f"anchor:{case_id}",
+            "anchor_execution_time_ms": 1_000,
+            "observed_at_ms": 2_000,
+            "settlement_deadline_ms": 1_500,
+            "required_sources": ["anchor_option_close"],
+            "source_receipts": {
+                "anchor_option_close": {
+                    "status": "complete",
+                    "coverage_complete": True,
+                    "pagination_complete": True,
+                    "rows": [],
+                }
+            },
+            "stock_settlement_candidates": [],
+            "broker_option_position_absent": False,
+            "projection_matches_frozen_remaining": True,
+            "reservation_exclusive": True,
+            "competing_effective_consumption": False,
+            "stock_settlement_present": False,
+            "normal_order_present": False,
+            "complete": False,
+            "incomplete_reason_codes": [
+                "broker_option_position_present"
+            ],
+        },
+        evidence_kind="expire_close",
+    )
+
+
 class _Collector:
     def __init__(self, *, supported: bool, outcome_kind: str = "unknown_error") -> None:
         capability_state = "supported" if supported else "missing_static"
@@ -149,7 +271,15 @@ class _Collector:
         self.outcome_kind = outcome_kind
         self.calls = 0
 
-    def collect_outcome(self, lifecycle_case: dict, read_model: dict) -> SettlementAttemptOutcome:
+    def collect_outcome(
+        self,
+        lifecycle_case: dict,
+        read_model: dict,
+        *,
+        before_first_provider_io=None,
+    ) -> SettlementAttemptOutcome:
+        if before_first_provider_io is not None:
+            before_first_provider_io()
         self.calls += 1
         return SettlementAttemptOutcome(
             kind=self.outcome_kind,
@@ -163,13 +293,14 @@ class _Collector:
         )
 
 
-def _patch_due_planner(monkeypatch, *, candidates: list[dict]) -> dict[str, int]:
+def _patch_due_planner(monkeypatch, *, candidates: list[dict]) -> dict[str, Any]:
     import src.application.trades.lifecycle_runtime as mod
 
-    counts = {
+    counts: dict[str, Any] = {
         "account_reads": 0,
         "reconciliations": 0,
         "control_now_ms": 1_000,
+        "seals": [],
     }
     candidate_by_id = {
         str(item["lifecycle_case"]["case_id"]): item
@@ -230,6 +361,25 @@ def _patch_due_planner(monkeypatch, *, candidates: list[dict]) -> dict[str, int]
         "_settlement_control_wall_clock_ms",
         lambda: counts["control_now_ms"],
     )
+    monkeypatch.setattr(
+        mod,
+        "record_lifecycle_attempt_audit_atomically",
+        lambda repo, *, attempt_audit: repo.record_attempt(
+            attempt_audit
+        ),
+    )
+    reconcile_runtime = mod.reconcile_due_lifecycle_cases_for_source
+
+    def reconcile_with_test_sink(*args, **kwargs):
+        if kwargs.get("apply_changes"):
+            kwargs.setdefault("seal_sink", counts["seals"].append)
+        return reconcile_runtime(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "reconcile_due_lifecycle_cases_for_source",
+        reconcile_with_test_sink,
+    )
     return counts
 
 
@@ -244,13 +394,240 @@ def _runtime_source(tmp_path: Path, *, enabled: bool = True) -> dict:
     }
 
 
+def _expired_runtime_invocation(
+    path: Path,
+    *,
+    collector: _Collector,
+    finished: bool,
+) -> dict:
+    candidate = _candidate("provider-1")
+    read_model = _read_model("provider-1")
+    lifecycle_case = dict(candidate["lifecycle_case"])
+    state = prepare_provider_required_state(
+        None,
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+        case_scope_fingerprint_value=case_scope_fingerprint(candidate),
+        provider_input_scope_fingerprint_value=(
+            provider_input_scope_fingerprint(
+                lifecycle_case=lifecycle_case,
+                read_model=read_model,
+            )
+        ),
+        contract_version=collector.contract.contract_version,
+        capability_fingerprint=(
+            collector.capability.capability_fingerprint
+        ),
+        now_ms=1_000,
+    )
+    upsert_settlement_attempt_state(path, state=state)
+    reserved = reserve_settlement_attempt_invocation(
+        path,
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+        case_scope_fingerprint=str(state["case_scope_fingerprint"]),
+        claim_id="claim-1",
+        now_ms=1_000,
+        lease_ms=120_000,
+    )
+    assert reserved is not None
+    started = mark_settlement_attempt_provider_started(
+        path,
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+        claim_id="claim-1",
+        invocation_id=str(reserved["invocation_id"]),
+        attempted_at_ms=1_500,
+    )
+    if not finished:
+        return started
+    outcome = SettlementAttemptOutcome(
+        kind="unknown_error",
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+        contract_version=collector.contract.contract_version,
+        capability_fingerprint=(
+            collector.capability.capability_fingerprint
+        ),
+        reason_code="provider_failed",
+        error_class="ProviderError",
+    )
+    return finish_settlement_attempt_provider_invocation(
+        path,
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+        claim_id="claim-1",
+        invocation_id=str(started["invocation_id"]),
+        outcome=outcome,
+        outcome_code=4,
+        semantic_fingerprint=None,
+        receipt_sha256=None,
+        diagnostic_sha256=lifecycle_attempt_diagnostic_sha256(
+            reason_code=outcome.reason_code,
+            provider_code=outcome.provider_code,
+            error_class=outcome.error_class,
+        ),
+        control_now_ms=2_000,
+    )
+
+
+def _runtime_audit(state: dict) -> dict:
+    invocation = uuid.UUID(str(state["invocation_id"])).bytes
+    return {
+        "account": "lx",
+        "case_id": "provider-1",
+        "invocation_id": invocation,
+        "attempted_at_ms": 1_500,
+        "outcome_code": state["pending_outcome_code"],
+        "semantic_fingerprint": state["pending_semantic_fingerprint"],
+        "receipt_sha256": state["pending_receipt_sha256"],
+        "diagnostic_sha256": state["pending_diagnostic_sha256"],
+        "span_ordinal": None,
+        "ordinal": 1,
+        "last_ordinal": 1,
+        "last_invocation_id": invocation,
+        "chain_sha256": b"c" * 32,
+    }
+
+
+class _RuntimeAuditRepo:
+    def __init__(self, audit: dict | None = None) -> None:
+        self.audits: dict[tuple[str, str], dict] = {}
+        self.fallback_audit = audit
+        if audit is not None and "invocation_id" in audit:
+            invocation_id = str(
+                uuid.UUID(bytes=audit["invocation_id"])
+            )
+            self.audits[(str(audit["case_id"]), invocation_id)] = audit
+        self.lookups: list[tuple[str, str]] = []
+        self.writes: list[object] = []
+
+    def record_attempt(self, envelope) -> dict:
+        self.writes.append(envelope)
+        invocation_id = str(uuid.UUID(bytes=envelope.invocation_id))
+        ordinal = sum(
+            1
+            for case_id, _invocation_id in self.audits
+            if case_id == envelope.case_id
+        ) + 1
+        chain = hashlib.sha256(
+            envelope.invocation_id + ordinal.to_bytes(8, "big")
+        ).digest()
+        audit = {
+            "account": "lx",
+            "case_id": envelope.case_id,
+            "invocation_id": envelope.invocation_id,
+            "attempted_at_ms": envelope.attempted_at_ms,
+            "outcome_code": envelope.outcome_code,
+            "semantic_fingerprint": envelope.semantic_fingerprint,
+            "receipt_sha256": envelope.receipt_sha256,
+            "diagnostic_sha256": envelope.diagnostic_sha256,
+            "span_ordinal": ordinal if envelope.outcome_code in {1, 2} else None,
+            "ordinal": ordinal,
+            "last_ordinal": ordinal,
+            "last_invocation_id": envelope.invocation_id,
+            "chain_sha256": chain,
+        }
+        self.audits[(envelope.case_id, invocation_id)] = audit
+        return {
+            "audit_ordinal": ordinal,
+            "audit_chain_sha256": chain.hex(),
+        }
+
+    def get_trade_lifecycle_attempt_audit_by_invocation(
+        self,
+        *,
+        case_id: str,
+        invocation_id: str,
+    ) -> dict | None:
+        self.lookups.append((case_id, invocation_id))
+        return self.audits.get(
+            (case_id, str(uuid.UUID(str(invocation_id))))
+        ) or self.fallback_audit
+
+
+@pytest.mark.parametrize(
+    (
+        "finished",
+        "audit_mode",
+        "control_now_ms",
+        "expected_state",
+        "expected_lookup_count",
+    ),
+    [
+        (True, "exact", 200_000, "ledger_committed", 1),
+        (True, "none", 200_000, "ambiguous_provider_result", 1),
+        (False, "none", 200_000, "ambiguous_provider_result", 1),
+        (False, "present", 200_000, "ambiguous_provider_result", 1),
+        (True, "exact", 1_000, "provider_finished", 0),
+    ],
+)
+def test_runtime_recovers_only_expired_invocations_before_provider(
+    tmp_path: Path,
+    monkeypatch,
+    finished: bool,
+    audit_mode: str,
+    control_now_ms: int,
+    expected_state: str,
+    expected_lookup_count: int,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    counts = _patch_due_planner(
+        monkeypatch,
+        candidates=[_candidate("provider-1")],
+    )
+    counts["control_now_ms"] = control_now_ms
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    state = _expired_runtime_invocation(
+        source["inbox_path"],
+        collector=collector,
+        finished=finished,
+    )
+    audit = (
+        _runtime_audit(state)
+        if audit_mode == "exact"
+        else ({"case_id": "wrong-case"} if audit_mode == "present" else None)
+    )
+    repo = _RuntimeAuditRepo(audit)
+
+    result = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=1_000,
+        apply_changes=True,
+        settlement_collector=collector,
+    )
+
+    stored = get_settlement_attempt_state(
+        source["inbox_path"],
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+    )
+    assert stored is not None
+    assert stored["invocation_state"] == expected_state
+    assert len(repo.lookups) == expected_lookup_count
+    assert collector.calls == 0
+    assert result["provider_attempt_count"] == 0
+    assert len(counts["seals"]) == (
+        1 if expected_state == "ledger_committed" else 0
+    )
+
+
 def test_runtime_scopes_control_reads_to_current_candidates(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     import src.application.trades.lifecycle_runtime as mod
 
-    _patch_due_planner(
+    counts = _patch_due_planner(
         monkeypatch,
         candidates=[_candidate("provider-1")],
     )
@@ -279,7 +656,7 @@ def test_runtime_scopes_control_reads_to_current_candidates(
     monkeypatch.setattr(mod, "list_settlement_attempt_states", list_states)
     monkeypatch.setattr(mod, "settlement_attempt_summary", summarize)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=_runtime_source(tmp_path),
         now_ms=1_000,
         apply_changes=True,
@@ -309,7 +686,7 @@ def test_static_block_is_cached_before_account_wide_read(
     source = _runtime_source(tmp_path)
 
     first = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -318,7 +695,7 @@ def test_static_block_is_cached_before_account_wide_read(
     later = first
     for tick in range(1, 11):
         later = mod.reconcile_due_lifecycle_cases_for_source(
-            object(),
+        _RuntimeAuditRepo(),
             source=source,
             now_ms=1_000 + tick * 60_000,
             apply_changes=True,
@@ -365,7 +742,7 @@ def test_disabled_provider_branch_keeps_local_due_planning(
     collector = _Collector(supported=True)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=_runtime_source(tmp_path, enabled=False),
         now_ms=1_000,
         apply_changes=True,
@@ -403,7 +780,7 @@ def test_local_or_disabled_branch_does_not_construct_collector(
         raise AssertionError("collector must remain lazy")
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=_runtime_source(tmp_path, enabled=enabled),
         now_ms=1_000,
         apply_changes=True,
@@ -430,7 +807,7 @@ def test_unknown_error_uses_bounded_backoff_without_replanning(
     source = _runtime_source(tmp_path)
 
     first = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -438,7 +815,7 @@ def test_unknown_error_uses_bounded_backoff_without_replanning(
     )
     counts["control_now_ms"] = 61_000
     second = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=61_000,
         apply_changes=True,
@@ -446,7 +823,7 @@ def test_unknown_error_uses_bounded_backoff_without_replanning(
     )
     counts["control_now_ms"] = 301_000
     third = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=301_000,
         apply_changes=True,
@@ -458,6 +835,121 @@ def test_unknown_error_uses_bounded_backoff_without_replanning(
     assert collector.calls == 2
     assert counts["account_reads"] == 3
     assert third["control_summary"]["backoff_count"] == 1
+
+
+def test_provider_failure_commits_real_audit_before_inbox_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    counts = _patch_due_planner(
+        monkeypatch,
+        candidates=[_candidate("provider-1")],
+    )
+    monkeypatch.setattr(
+        mod,
+        "record_lifecycle_attempt_audit_atomically",
+        record_lifecycle_attempt_audit_atomically,
+    )
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "provider-1",
+            "case_key": "provider-1",
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "status": "waiting_settlement_evidence",
+        }
+    )
+    source = _runtime_source(tmp_path)
+
+    result = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=1_000,
+        apply_changes=True,
+        settlement_collector=_Collector(supported=True),
+    )
+    state = get_settlement_attempt_state(
+        source["inbox_path"],
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+    )
+    assert state is not None
+    audit = repo.get_trade_lifecycle_attempt_audit_by_invocation(
+        case_id="provider-1",
+        invocation_id=str(state["invocation_id"]),
+    )
+
+    assert result["control_status"] == "ok"
+    assert result["provider_attempt_count"] == 1
+    assert audit is not None
+    assert audit["outcome_code"] == 4
+    assert audit["ordinal"] == 1
+    assert state["invocation_state"] == "ledger_committed"
+    assert state["committed_audit_ordinal"] == audit["ordinal"]
+    assert state["committed_chain_sha256"] == audit["chain_sha256"]
+    assert result["seal_status"] == "sealed"
+    assert result["run_seal"] == counts["seals"][0]
+    assert result["run_seal"]["head_count"] == 1
+    assert result["provider_results"][0]["audit_ordinal"] == 1
+
+
+def test_seal_failure_does_not_recall_provider_or_reseal_stable_head(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    _patch_due_planner(
+        monkeypatch,
+        candidates=[_candidate("provider-1")],
+    )
+    repo = _RuntimeAuditRepo()
+    collector = _Collector(supported=True)
+    source = _runtime_source(tmp_path)
+
+    def fail_seal(_seal):
+        raise OSError("disk full")
+
+    failed = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=1_000,
+        apply_changes=True,
+        settlement_collector=collector,
+        seal_sink=fail_seal,
+    )
+    later_seals: list[dict] = []
+    second = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=1_000,
+        apply_changes=True,
+        settlement_collector=collector,
+        seal_sink=later_seals.append,
+    )
+    third = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=1_000,
+        apply_changes=True,
+        settlement_collector=collector,
+        seal_sink=later_seals.append,
+    )
+
+    assert failed["seal_status"] == "seal_persist_failed"
+    assert failed["seal_error_class"] == "OSError"
+    assert second["seal_status"] == "not_required"
+    assert third["seal_status"] == "not_required"
+    assert second["provider_attempt_count"] == 0
+    assert third["provider_attempt_count"] == 0
+    assert later_seals == []
+    assert collector.calls == 1
+    assert len(repo.writes) == 1
 
 
 def test_control_clock_is_independent_from_business_observation_time(
@@ -478,7 +970,11 @@ def test_control_clock_is_independent_from_business_observation_time(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             state = get_settlement_attempt_state(
                 source["inbox_path"],
                 source_id="lx",
@@ -494,7 +990,7 @@ def test_control_clock_is_independent_from_business_observation_time(
 
     collector = _ClaimInspectingCollector(supported=True)
     first = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=9_000_000,
         apply_changes=True,
@@ -502,7 +998,7 @@ def test_control_clock_is_independent_from_business_observation_time(
     )
     counts["control_now_ms"] = 61_000
     future_business_tick = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=99_000_000,
         apply_changes=True,
@@ -511,7 +1007,7 @@ def test_control_clock_is_independent_from_business_observation_time(
     counts["control_now_ms"] = 301_000
     historical_business_tick = (
         mod.reconcile_due_lifecycle_cases_for_source(
-            object(),
+        _RuntimeAuditRepo(),
             source=source,
             now_ms=1,
             apply_changes=True,
@@ -562,7 +1058,11 @@ def test_each_provider_case_is_claimed_immediately_before_its_call(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             nonlocal clock_ms, competing_claim_acquired
             case_id = str(lifecycle_case["case_id"])
             self.case_calls.append(case_id)
@@ -594,7 +1094,7 @@ def test_each_provider_case_is_claimed_immediately_before_its_call(
 
     collector = _SlowFirstCollector()
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -623,7 +1123,7 @@ def test_active_batch_leader_blocks_fallthrough_account_snapshot(
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
     initial = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -641,7 +1141,7 @@ def test_active_batch_leader_blocks_fallthrough_account_snapshot(
     assert leader_state is not None
 
     counts["control_now_ms"] = 301_000
-    assert claim_settlement_attempt(
+    assert reserve_settlement_attempt_invocation(
         source["inbox_path"],
         source_id="lx",
         account="lx",
@@ -654,7 +1154,7 @@ def test_active_batch_leader_blocks_fallthrough_account_snapshot(
         lease_ms=120_000,
     )
     overlapped = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=301_000,
         apply_changes=True,
@@ -691,7 +1191,7 @@ def test_failed_batch_leader_claim_does_not_fall_through_to_next_case(
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
     mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -703,16 +1203,16 @@ def test_failed_batch_leader_claim_does_not_fall_through_to_next_case(
 
     def reject_leader_claim(*_args, **kwargs):
         attempted_claims.append(str(kwargs["case_id"]))
-        return False
+        return None
 
     counts["control_now_ms"] = 301_000
     monkeypatch.setattr(
         mod,
-        "claim_settlement_attempt",
+        "reserve_settlement_attempt_invocation",
         reject_leader_claim,
     )
     overlapped = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=301_000,
         apply_changes=True,
@@ -742,33 +1242,31 @@ def test_batch_lease_survives_leader_completion_until_all_cases_finish(
     source = _runtime_source(tmp_path)
     outer_collector = _Collector(supported=True)
     overlapping_collector = _Collector(supported=True)
-    original_complete = mod.complete_settlement_attempt
+    original_reconcile = mod.reconcile_settlement_attempt_invocation
     overlap_started = False
     overlap_result: dict | None = None
 
-    def complete_then_overlap(*args, **kwargs):
+    def reconcile_then_overlap(*args, **kwargs):
         nonlocal overlap_started, overlap_result
-        completed = original_complete(*args, **kwargs)
+        completed = original_reconcile(*args, **kwargs)
         if kwargs["case_id"] == "provider-1" and not overlap_started:
             overlap_started = True
-            overlap_result = (
-                mod.reconcile_due_lifecycle_cases_for_source(
-                    object(),
-                    source=source,
-                    now_ms=1_000,
-                    apply_changes=True,
-                    settlement_collector=overlapping_collector,
-                )
+            overlap_result = mod.reconcile_due_lifecycle_cases_for_source(
+                _RuntimeAuditRepo(),
+                source=source,
+                now_ms=1_000,
+                apply_changes=True,
+                settlement_collector=overlapping_collector,
             )
         return completed
 
     monkeypatch.setattr(
         mod,
-        "complete_settlement_attempt",
-        complete_then_overlap,
+        "reconcile_settlement_attempt_invocation",
+        reconcile_then_overlap,
     )
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -828,7 +1326,11 @@ def test_running_provider_batch_renews_before_expiry(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             nonlocal monotonic_seconds, competing_batch_acquired
             monotonic_seconds = 121.0
             assert batch_renewed_after_original_expiry.wait(timeout=2)
@@ -843,7 +1345,7 @@ def test_running_provider_batch_renews_before_expiry(
             return super().collect_outcome(lifecycle_case, read_model)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -889,7 +1391,7 @@ def test_batch_release_ownership_loss_does_not_delete_new_owner(
         steal_then_release,
     )
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -986,7 +1488,11 @@ def test_preparation_guard_renews_leader_before_snapshot_handoff(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             nonlocal claim_until_at_provider
             state = get_settlement_attempt_state(
                 source["inbox_path"],
@@ -999,7 +1505,7 @@ def test_preparation_guard_renews_leader_before_snapshot_handoff(
             return super().collect_outcome(lifecycle_case, read_model)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1023,42 +1529,24 @@ def test_preparation_ownership_loss_skips_snapshot_and_provider(
         candidates=[_candidate("provider-1")],
     )
     source = _runtime_source(tmp_path)
-    original_renew = mod.renew_settlement_attempt_claim
     ownership_changed = False
+    lost_claim_id: str | None = None
 
-    def steal_before_preparation(*args, **kwargs):
-        nonlocal ownership_changed
+    def lose_before_preparation(*_args, **kwargs):
+        nonlocal lost_claim_id, ownership_changed
         if not ownership_changed:
-            current = get_settlement_attempt_state(
-                source["inbox_path"],
-                source_id="lx",
-                account="lx",
-                case_id="provider-1",
-            )
-            assert current is not None
-            assert claim_settlement_attempt(
-                source["inbox_path"],
-                source_id="lx",
-                account="lx",
-                case_id="provider-1",
-                case_scope_fingerprint=str(
-                    current["case_scope_fingerprint"]
-                ),
-                claim_id="competing-worker",
-                now_ms=122_000,
-                lease_ms=120_000,
-            )
             ownership_changed = True
-        return original_renew(*args, **kwargs)
+            lost_claim_id = str(kwargs["claim_id"])
+        return False
 
     monkeypatch.setattr(
         mod,
         "renew_settlement_attempt_claim",
-        steal_before_preparation,
+        lose_before_preparation,
     )
     collector = _Collector(supported=True)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1077,7 +1565,8 @@ def test_preparation_ownership_loss_skips_snapshot_and_provider(
     assert collector.calls == 0
     assert counts["account_reads"] == 1
     assert state is not None
-    assert state["claim_id"] == "competing-worker"
+    assert state["claim_id"] == lost_claim_id
+    assert state["invocation_state"] == "reserved"
 
 
 def test_running_provider_call_with_frozen_clock_renews_before_expiry(
@@ -1128,7 +1617,11 @@ def test_running_provider_call_with_frozen_clock_renews_before_expiry(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             nonlocal monotonic_seconds, competing_claim_acquired
             monotonic_seconds = 121.0
             assert renewed_after_original_expiry.wait(timeout=2)
@@ -1158,7 +1651,7 @@ def test_running_provider_call_with_frozen_clock_renews_before_expiry(
 
     collector = _SlowCollector()
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1193,29 +1686,14 @@ def test_lost_lease_skips_canonical_write_and_reports_typed_status(
     provider_started = Event()
     ownership_changed = Event()
     original_renew = mod.renew_settlement_attempt_claim
+    lost_claim_id: str | None = None
 
     def steal_then_renew(*args, **kwargs):
+        nonlocal lost_claim_id
         if provider_started.is_set() and not ownership_changed.is_set():
-            current = get_settlement_attempt_state(
-                source["inbox_path"],
-                source_id="lx",
-                account="lx",
-                case_id="provider-1",
-            )
-            assert current is not None
-            assert claim_settlement_attempt(
-                source["inbox_path"],
-                source_id="lx",
-                account="lx",
-                case_id="provider-1",
-                case_scope_fingerprint=str(
-                    current["case_scope_fingerprint"]
-                ),
-                claim_id="competing-worker",
-                now_ms=122_000,
-                lease_ms=120_000,
-            )
+            lost_claim_id = str(kwargs["claim_id"])
             ownership_changed.set()
+            return False
         return original_renew(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1245,7 +1723,11 @@ def test_lost_lease_skips_canonical_write_and_reports_typed_status(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             nonlocal clock_ms
             clock_ms = 122_000
             provider_started.set()
@@ -1260,12 +1742,12 @@ def test_lost_lease_skips_canonical_write_and_reports_typed_status(
                 capability_fingerprint=(
                     self.capability.capability_fingerprint
                 ),
-                observation={"semantic_fingerprint": "semantic-1"},
+                observation=_observation(str(lifecycle_case["case_id"])),
             )
 
     collector = _ObservedCollector()
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1285,19 +1767,22 @@ def test_lost_lease_skips_canonical_write_and_reports_typed_status(
     assert result["provider_attempt_count"] == 1
     assert result["provider_results"][0]["admission_status"] is None
     assert current is not None
-    assert current["claim_id"] == "competing-worker"
+    assert current["claim_id"] == lost_claim_id
+    assert current["invocation_state"] == "provider_started"
 
 
-def test_post_write_completion_ownership_loss_is_typed(
+def test_inbox_reconcile_failure_recovers_exact_without_duplicate_audit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     import src.application.trades.lifecycle_runtime as mod
 
-    _patch_due_planner(
+    counts = _patch_due_planner(
         monkeypatch,
         candidates=[_candidate("provider-1")],
     )
+    source = _runtime_source(tmp_path)
+    repo = _RuntimeAuditRepo()
     canonical_writes = 0
 
     class _ObservedCollector(_Collector):
@@ -1305,7 +1790,11 @@ def test_post_write_completion_ownership_loss_is_typed(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             self.calls += 1
             return SettlementAttemptOutcome(
                 kind="observed_incomplete",
@@ -1317,12 +1806,13 @@ def test_post_write_completion_ownership_loss_is_typed(
                     self.capability.capability_fingerprint
                 ),
                 reason_code="settlement_observation_incomplete",
-                observation={"semantic_fingerprint": "semantic-1"},
+                observation=_observation(str(lifecycle_case["case_id"])),
             )
 
     def committed_write(*_args, **_kwargs):
         nonlocal canonical_writes
         canonical_writes += 1
+        _args[0].record_attempt(_kwargs["attempt_audit"])
         return {"admission_status": "admitted_semantic"}
 
     monkeypatch.setattr(
@@ -1330,48 +1820,67 @@ def test_post_write_completion_ownership_loss_is_typed(
         "reconcile_lifecycle_close_reason",
         committed_write,
     )
-    monkeypatch.setattr(
-        mod,
-        "complete_settlement_attempt",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            SettlementAttemptClaimOwnershipLost(
+    original_reconcile = mod.reconcile_settlement_attempt_invocation
+    reconcile_failed = False
+
+    def fail_first_reconcile(*args, **kwargs):
+        nonlocal reconcile_failed
+        if not reconcile_failed:
+            reconcile_failed = True
+            raise SettlementAttemptClaimOwnershipLost(
                 "claim ownership changed after canonical commit"
             )
-        ),
+        return original_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "reconcile_settlement_attempt_invocation",
+        fail_first_reconcile,
     )
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
-        source=_runtime_source(tmp_path),
+    collector = _ObservedCollector(supported=True)
+    first = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
         now_ms=1_000,
         apply_changes=True,
-        settlement_collector=_ObservedCollector(supported=True),
+        settlement_collector=collector,
+    )
+    pending = get_settlement_attempt_state(
+        source["inbox_path"],
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
+    )
+
+    counts["control_now_ms"] = 200_000
+    restarted = mod.reconcile_due_lifecycle_cases_for_source(
+        repo,
+        source=source,
+        now_ms=200_000,
+        apply_changes=True,
+        settlement_collector=collector,
+    )
+    committed = get_settlement_attempt_state(
+        source["inbox_path"],
+        source_id="lx",
+        account="lx",
+        case_id="provider-1",
     )
 
     assert canonical_writes == 1
-    assert result["control_status"] == "claim_ownership_lost"
-    assert result["control_error_class"] == (
+    assert len(repo.writes) == 1
+    assert first["control_status"] == "claim_ownership_lost"
+    assert first["control_error_class"] == (
         "SettlementAttemptClaimOwnershipLost"
     )
-    assert result["provider_results"] == [
-        {
-            "case_id": "provider-1",
-            "outcome": {
-                "kind": "observed_incomplete",
-                "source_id": "lx",
-                "account": "lx",
-                "case_id": "provider-1",
-                "contract_version": "settlement_collector.v1",
-                "capability_fingerprint": "capability:supported",
-                "reason_code": "settlement_observation_incomplete",
-                "provider_code": None,
-                "error_class": None,
-                "retry_after_ms": None,
-            },
-            "semantic_fingerprint": "semantic-1",
-            "admission_status": "admitted_semantic",
-        }
-    ]
+    assert pending is not None
+    assert pending["invocation_state"] == "provider_finished"
+    assert restarted["provider_attempt_count"] == 0
+    assert committed is not None
+    assert committed["invocation_state"] == "ledger_committed"
+    assert committed["committed_audit_ordinal"] == 1
+    assert collector.calls == 1
 
 
 def test_terminal_summary_failure_returns_control_status(
@@ -1396,7 +1905,7 @@ def test_terminal_summary_failure_returns_control_status(
     )
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1465,7 +1974,11 @@ def test_runtime_only_permanently_blocks_legacy_semantic_failure(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             self.calls += 1
             return SettlementAttemptOutcome(
                 kind="observed_incomplete",
@@ -1477,7 +1990,7 @@ def test_runtime_only_permanently_blocks_legacy_semantic_failure(
                     self.capability.capability_fingerprint
                 ),
                 reason_code="settlement_observation_incomplete",
-                observation={"semantic_fingerprint": "semantic-1"},
+                observation=_observation(str(lifecycle_case["case_id"])),
             )
 
     def fail_semantic_admission(*_args, **_kwargs):
@@ -1488,9 +2001,24 @@ def test_runtime_only_permanently_blocks_legacy_semantic_failure(
         "reconcile_lifecycle_close_reason",
         fail_semantic_admission,
     )
+    replacements: list[dict] = []
+    original_replace = (
+        mod.replace_finished_settlement_attempt_provider_invocation
+    )
+
+    def capture_replacement(*args, **kwargs):
+        replacements.append(dict(kwargs))
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "replace_finished_settlement_attempt_provider_invocation",
+        capture_replacement,
+    )
     source = _runtime_source(tmp_path)
+    repo = _RuntimeAuditRepo()
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        repo,
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1518,6 +2046,20 @@ def test_runtime_only_permanently_blocks_legacy_semantic_failure(
     assert result["provider_results"][0]["outcome"]["error_class"] == (
         expected_error_class
     )
+    expected_audit_kind = (
+        "legacy_semantic_unavailable_after_call"
+        if expected_kind == "legacy_semantic_unavailable"
+        else "processing_failure_after_call"
+    )
+    assert len(replacements) == 1
+    assert replacements[0]["outcome_code"] == (
+        8 if expected_kind == "legacy_semantic_unavailable" else 7
+    )
+    assert replacements[0]["semantic_fingerprint"] is None
+    assert replacements[0]["receipt_sha256"] is None
+    assert len(repo.writes) == 1
+    assert repo.writes[0].outcome_kind == expected_audit_kind
+    assert state["invocation_state"] == "ledger_committed"
 
 
 def test_preclaimed_preparation_failure_completes_claim_without_provider(
@@ -1546,14 +2088,14 @@ def test_preclaimed_preparation_failure_completes_claim_without_provider(
     collector = _Collector(supported=True)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
         settlement_collector=collector,
     )
     repeated = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=2_000,
         apply_changes=True,
@@ -1597,14 +2139,18 @@ def test_collector_contract_exception_completes_claim_with_backoff(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             self.calls += 1
             raise TypeError("collector contract failure")
 
     source = _runtime_source(tmp_path)
     collector = _FailingCollector(supported=True)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1646,7 +2192,11 @@ def test_unexpected_reconciliation_exception_completes_claim_with_backoff(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             self.calls += 1
             return SettlementAttemptOutcome(
                 kind="observed_incomplete",
@@ -1657,7 +2207,7 @@ def test_unexpected_reconciliation_exception_completes_claim_with_backoff(
                 capability_fingerprint=(
                     self.capability.capability_fingerprint
                 ),
-                observation={"semantic_fingerprint": "semantic-1"},
+                observation=_observation(str(lifecycle_case["case_id"])),
             )
 
     monkeypatch.setattr(
@@ -1669,7 +2219,7 @@ def test_unexpected_reconciliation_exception_completes_claim_with_backoff(
     )
     source = _runtime_source(tmp_path)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1723,7 +2273,11 @@ def test_post_write_refresh_exception_completes_claim_with_backoff(
             self,
             lifecycle_case: dict,
             read_model: dict,
+            *,
+            before_first_provider_io=None,
         ) -> SettlementAttemptOutcome:
+            if before_first_provider_io is not None:
+                before_first_provider_io()
             self.calls += 1
             return SettlementAttemptOutcome(
                 kind="observed_incomplete",
@@ -1734,7 +2288,7 @@ def test_post_write_refresh_exception_completes_claim_with_backoff(
                 capability_fingerprint=(
                     self.capability.capability_fingerprint
                 ),
-                observation={"semantic_fingerprint": "semantic-1"},
+                observation=_observation(str(lifecycle_case["case_id"])),
             )
 
     monkeypatch.setattr(
@@ -1746,7 +2300,7 @@ def test_post_write_refresh_exception_completes_claim_with_backoff(
     )
     source = _runtime_source(tmp_path)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1761,9 +2315,7 @@ def test_post_write_refresh_exception_completes_claim_with_backoff(
 
     assert candidate_reads == 4
     assert result["provider_attempt_count"] == 1
-    assert result["provider_results"][0]["admission_status"] == (
-        "admitted_semantic"
-    )
+    assert result["provider_results"][0]["admission_status"] is None
     assert state is not None
     assert state["outcome_kind"] == "unknown_error"
     assert state["reason_code"] == "settlement_attempt_refresh_failed"
@@ -1794,7 +2346,7 @@ def test_initial_lease_guard_start_failure_completes_without_provider(
     collector = _Collector(supported=True)
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1847,7 +2399,7 @@ def test_post_refresh_guard_start_failure_completes_owned_claim(
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1889,13 +2441,36 @@ def test_completion_update_failure_uses_minimal_owned_fallback(
             ValueError("malformed control counters")
         ),
     )
+
+    class _PreCallCollector(_Collector):
+        def collect_outcome(
+            self,
+            lifecycle_case: dict,
+            read_model: dict,
+            *,
+            before_first_provider_io=None,
+        ) -> SettlementAttemptOutcome:
+            self.calls += 1
+            return SettlementAttemptOutcome(
+                kind="unknown_error",
+                source_id="lx",
+                account="lx",
+                case_id=str(lifecycle_case["case_id"]),
+                contract_version=self.contract.contract_version,
+                capability_fingerprint=(
+                    self.capability.capability_fingerprint
+                ),
+                reason_code="pre_call_cancelled",
+                error_class="local",
+            )
+
     source = _runtime_source(tmp_path)
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
-        settlement_collector=_Collector(supported=True),
+        settlement_collector=_PreCallCollector(supported=True),
     )
     state = get_settlement_attempt_state(
         source["inbox_path"],
@@ -1904,7 +2479,7 @@ def test_completion_update_failure_uses_minimal_owned_fallback(
         case_id="provider-1",
     )
 
-    assert result["provider_attempt_count"] == 1
+    assert result["provider_attempt_count"] == 0
     assert result["provider_results"][0]["outcome"]["reason_code"] == (
         "settlement_attempt_completion_failed"
     )
@@ -1912,7 +2487,7 @@ def test_completion_update_failure_uses_minimal_owned_fallback(
     assert state["outcome_kind"] == "unknown_error"
     assert state["reason_code"] == "settlement_attempt_completion_failed"
     assert state["error_class"] == "ValueError"
-    assert state["attempt_count"] == 1
+    assert state["attempt_count"] == 0
     assert state["next_attempt_at_ms"] == 301_000
     assert state["claim_id"] is None
     assert state["claim_until_ms"] is None
@@ -1932,7 +2507,7 @@ def test_restart_preserves_backoff_and_control_row_loss_allows_one_extra_call(
 
     first_collector = _Collector(supported=True)
     first = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -1940,7 +2515,7 @@ def test_restart_preserves_backoff_and_control_row_loss_allows_one_extra_call(
     )
     restarted_collector = _Collector(supported=True)
     restarted = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=61_000,
         apply_changes=True,
@@ -1958,14 +2533,14 @@ def test_restart_preserves_backoff_and_control_row_loss_allows_one_extra_call(
 
     recreated_collector = _Collector(supported=True)
     recreated = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=121_000,
         apply_changes=True,
         settlement_collector=recreated_collector,
     )
     bounded = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=181_000,
         apply_changes=True,
@@ -2011,7 +2586,7 @@ def test_control_store_failure_fails_provider_closed_but_runs_local_plan(
     )
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -2029,7 +2604,7 @@ def test_control_store_failure_fails_provider_closed_but_runs_local_plan(
     "failing_operation",
     [
         "upsert_settlement_attempt_state",
-        "claim_settlement_attempt",
+        "reserve_settlement_attempt_invocation",
     ],
 )
 def test_pre_provider_control_write_failure_fails_closed_after_local_plan(
@@ -2059,7 +2634,7 @@ def test_pre_provider_control_write_failure_fails_closed_after_local_plan(
     )
 
     result = mod.reconcile_due_lifecycle_cases_for_source(
-        object(),
+        _RuntimeAuditRepo(),
         source=source,
         now_ms=1_000,
         apply_changes=True,
@@ -2089,7 +2664,7 @@ def test_whole_inbox_corruption_remains_service_fatal(
 
     with pytest.raises(sqlite3.DatabaseError):
         mod.reconcile_due_lifecycle_cases_for_source(
-            object(),
+        _RuntimeAuditRepo(),
             source=source,
             now_ms=1_000,
             apply_changes=True,

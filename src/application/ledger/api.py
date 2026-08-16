@@ -163,12 +163,28 @@ from src.application.ledger.lifecycle_overlay import (
     lifecycle_evidence_facts,
     validate_account_lifecycle_resolution,
 )
+from src.application.ledger.lifecycle_attempt_audit import (
+    LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
+    LIFECYCLE_ATTEMPT_OUTCOME_CODES,
+    LIFECYCLE_ATTEMPT_RUN_SEAL_SCHEMA,
+    LifecycleAttemptAuditEnvelope,
+    build_lifecycle_attempt_audit_envelope,
+    build_lifecycle_attempt_run_seal,
+    compute_lifecycle_attempt_chain_sha256,
+    lifecycle_attempt_diagnostic_sha256,
+    validate_lifecycle_attempt_run_seal,
+    verify_lifecycle_attempt_run_seal,
+)
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
 )
 from src.application.ledger.repository import (
     with_sqlite_repo_transaction,
+)
+from src.application.ledger.writer import (
+    record_lifecycle_attempt_audit_atomically,
+    record_lifecycle_observation_attempt_atomically,
 )
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
@@ -247,6 +263,14 @@ __all__ = [
     "lifecycle_option_close_anchor_facts",
     "lifecycle_reconciliation_facts",
     "lifecycle_evidence_facts",
+    "LIFECYCLE_ATTEMPT_CHAIN_GENESIS",
+    "LIFECYCLE_ATTEMPT_OUTCOME_CODES",
+    "LIFECYCLE_ATTEMPT_RUN_SEAL_SCHEMA",
+    "LifecycleAttemptAuditEnvelope",
+    "build_lifecycle_attempt_audit_envelope",
+    "build_lifecycle_attempt_run_seal",
+    "lifecycle_attempt_diagnostic_sha256",
+    "compute_lifecycle_attempt_chain_sha256",
     "list_combo_pair_inferences",
     "ledger_store_payload",
     "ledger_store_write_guard",
@@ -289,6 +313,8 @@ __all__ = [
     "record_lifecycle_exercise",
     "record_lifecycle_expire_close",
     "record_lifecycle_allocation",
+    "record_lifecycle_attempt_audit_atomically",
+    "record_lifecycle_observation_attempt_atomically",
     "record_lifecycle_evidence_issue",
     "record_manual_assignment",
     "record_manual_exercise",
@@ -319,7 +345,9 @@ __all__ = [
     "valid_void_target_event_id",
     "validate_account_lifecycle_resolution",
     "validate_combo_group_membership",
+    "validate_lifecycle_attempt_run_seal",
     "validate_position_fact_snapshot_contract",
+    "verify_lifecycle_attempt_run_seal",
     "verify_position_lot_projection",
     "verify_position_projection_migration",
     "with_sqlite_repo_transaction",

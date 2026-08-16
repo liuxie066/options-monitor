@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -474,6 +475,175 @@ def test_source_listener_has_no_lifecycle_provider_send_path() -> None:
 
     assert "send_trade_lifecycle_outbox_payload" not in source
     assert "dispatch_notification" not in source
+
+
+def test_source_loop_retries_checkpoint_before_building_settlement_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+
+    class Repo:
+        def list_trade_lifecycle_attempt_audit_heads_for_account(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return []
+
+    class Listener:
+        def __init__(self, **_kwargs):
+            return None
+
+        def start(self, **_kwargs):
+            return None
+
+        def check_health(self):
+            return None
+
+        def close(self):
+            return None
+
+    class History:
+        def __init__(self, **_kwargs):
+            return None
+
+        def fetch(self):
+            return []
+
+        def close(self):
+            return None
+
+    class Gateway:
+        def close(self):
+            return None
+
+    class Stop:
+        stopped = False
+        waits = 0
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, _seconds):
+            self.waits += 1
+            if self.waits >= 2:
+                self.stopped = True
+            return self.stopped
+
+    original_checkpoint = (
+        auto_intake.append_lifecycle_attempt_checkpoint_seal
+    )
+    checkpoint_attempts = 0
+
+    def checkpoint(*args, **kwargs):
+        nonlocal checkpoint_attempts
+        checkpoint_attempts += 1
+        order.append(str(kwargs["reason"]))
+        if checkpoint_attempts == 1:
+            raise OSError("disk full")
+        return original_checkpoint(*args, **kwargs)
+
+    monotonic = 0
+
+    def next_monotonic():
+        nonlocal monotonic
+        monotonic += 61
+        return float(monotonic)
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(
+        auto_intake,
+        "append_lifecycle_attempt_checkpoint_seal",
+        checkpoint,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "build_futu_gateway",
+        lambda **_kwargs: order.append("gateway") or Gateway(),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_futu_quote_route",
+        lambda _cfg: SimpleNamespace(
+            ok=False,
+            errors=("quote unavailable",),
+            status="unavailable",
+            host=None,
+            port=None,
+        ),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "reconcile_due_lifecycle_cases_for_source",
+        lambda *_args, **kwargs: order.append("runtime")
+        or {
+            "seal_status": "not_required",
+            "run_seal": None,
+            "process_counters": kwargs["process_metrics"],
+        },
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "trade_inbox_summary",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "list_retryable_trade_payloads",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_refresh_lifecycle_delivery_status",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(auto_intake.time, "monotonic", next_monotonic)
+    source = {
+        "id": "lx",
+        "account": "lx",
+        "host": "127.0.0.1",
+        "port": 11111,
+        "state_path": tmp_path / "state.json",
+        "audit_path": tmp_path / "audit.jsonl",
+        "status_path": tmp_path / "status.json",
+        "inbox_path": tmp_path / "inbox.sqlite3",
+        "backfill_checkpoint_path": tmp_path / "backfill.json",
+        "account_mapping": {"1001": "lx"},
+        "futu_account_ids": ["1001"],
+        "backfill": {"enabled": False},
+    }
+
+    rc = auto_intake._run_listener_source_loop(
+        source=source,
+        repo=Repo(),
+        cfg={},
+        cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+        intake_cfg={
+            "mode": "apply",
+            "enabled": True,
+            "backfill": {"enabled": False},
+        },
+        apply_changes=True,
+        receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(),
+        stop_event=Stop(),
+    )
+
+    assert rc == 0
+    assert order == [
+        "process_startup",
+        "prior_seal_persist_failed",
+        "gateway",
+        "runtime",
+    ]
 
 
 def test_reconcile_intake_sources_defaults_to_every_account(

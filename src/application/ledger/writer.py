@@ -47,6 +47,9 @@ from src.application.ledger.lifecycle_overlay import (
     lifecycle_evidence_facts,
     resolve_lifecycle_account_rows,
 )
+from src.application.ledger.lifecycle_attempt_audit import (
+    LifecycleAttemptAuditEnvelope,
+)
 from src.application.ledger.lifecycle_settlement_semantics import (
     LegacySettlementSemanticUnavailable,
     SETTLEMENT_SEMANTIC_SCHEMA,
@@ -62,6 +65,8 @@ from src.application.ledger.notification_outbox import (
 )
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
+    canonical_source_economic_payload,
+    canonical_source_payload_hash,
 )
 from src.application.ledger.event_codec import (
     encode_trade_event_for_storage,
@@ -370,6 +375,157 @@ def _advance_settlement_admission_head(
         updated_at_ms=int(utc_now_ms()),
         conn=conn,
     )
+
+
+def _persist_settlement_admission_evidence(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    case_id: str,
+    evidence: dict[str, Any],
+    admission: dict[str, Any] | None,
+) -> tuple[bool, bool]:
+    if admission is None or bool(admission.get("duplicate")):
+        return False, False
+    evidence_id = str(admission.get("evidence_id") or "").strip()
+    if str(evidence.get("evidence_id") or "").strip() != evidence_id:
+        raise ValueError("settlement admission evidence identity mismatch")
+    if evidence.get("case_id") not in (None, "", case_id):
+        raise ValueError("lifecycle evidence is bound to another case")
+    existing = sqlite_repo.get_trade_lifecycle_evidence(
+        evidence_id,
+        conn=conn,
+    )
+    if existing is None:
+        created = sqlite_repo.insert_trade_lifecycle_evidence_once(
+            evidence,
+            conn=conn,
+        )
+    else:
+        _validate_existing_lifecycle_evidence(
+            existing=existing,
+            incoming=evidence,
+            case_id=case_id,
+        )
+        created = False
+    bound = sqlite_repo.bind_trade_lifecycle_evidence_case_once(
+        evidence_id=evidence_id,
+        case_id=case_id,
+        conn=conn,
+    )
+    return bool(created), bool(bound)
+
+
+def _persist_direct_stock_settlement_evidence(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    evidence: dict[str, Any],
+) -> bool:
+    evidence_id = str(evidence.get("evidence_id") or "").strip()
+    source_key = str(evidence.get("source_event_id") or "").strip()
+    if (
+        not evidence_id
+        or not source_key
+        or str(evidence.get("evidence_type") or "").strip().lower()
+        != "stock_settlement_leg"
+    ):
+        raise ValueError("direct stock settlement evidence is invalid")
+    incoming = canonical_source_economic_payload(
+        source_key=source_key,
+        source_role="stock_settlement",
+        payload=evidence,
+    )
+    existing = sqlite_repo.get_trade_lifecycle_evidence(
+        evidence_id,
+        conn=conn,
+    )
+    if existing is not None:
+        stored = canonical_source_economic_payload(
+            source_key=str(existing.get("source_event_id") or ""),
+            source_role="stock_settlement",
+            payload=existing,
+        )
+        if canonical_source_payload_hash(stored) != canonical_source_payload_hash(
+            incoming
+        ):
+            raise ValueError("lifecycle evidence economic payload conflict")
+        return False
+    return bool(
+        sqlite_repo.insert_trade_lifecycle_evidence_once(
+            evidence,
+            conn=conn,
+        )
+    )
+
+
+def _match_lifecycle_attempt_replay(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    case_id: str,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None,
+) -> dict[str, Any] | None:
+    if attempt_audit is None:
+        return None
+    if attempt_audit.case_id != case_id:
+        raise ValueError("lifecycle attempt audit case mismatch")
+    replay = sqlite_repo.match_trade_lifecycle_attempt_audit_invocation(
+        attempt_audit,
+        conn=conn,
+    )
+    if replay is not None:
+        return {
+            "case_id": case_id,
+            "admission_status": "duplicate_invocation",
+            **replay,
+        }
+    if attempt_audit.outcome_code not in (1, 2):
+        raise ValueError(
+            "lifecycle evidence writer requires an observed attempt audit"
+        )
+    return None
+
+
+def _append_lifecycle_observation_attempt(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None,
+    admission: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if attempt_audit is None:
+        return {}
+    if admission is None:
+        raise ValueError(
+            "lifecycle attempt audit requires semantic observation admission"
+        )
+    return sqlite_repo.append_trade_lifecycle_attempt_audit_in_transaction(
+        attempt_audit=attempt_audit,
+        first_evidence_id=str(admission.get("evidence_id") or "").strip(),
+        conn=conn,
+    )
+
+
+def _finish_lifecycle_attempt_cleanup(
+    repo: Any,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    cleanup_hash = result.pop("_cleanup_receipt_sha256", None)
+    if cleanup_hash is None:
+        return result
+    sqlite_repo = getattr(repo, "primary_repo", repo)
+    try:
+        sqlite_repo.delete_unreferenced_trade_lifecycle_receipt_blob(
+            cleanup_hash
+        )
+    except Exception as exc:
+        result["cleanup_warning"] = {
+            "code": "receipt_blob_cleanup_failed",
+            "receipt_sha256": cleanup_hash.hex(),
+            "error_class": type(exc).__name__[:128],
+        }
+    return result
 
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
@@ -1506,11 +1662,14 @@ def apply_lifecycle_allocation_atomically(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: Sequence[Any] = (),
     notification_transition_type: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     """Adopt evidence, terminal events, projection and allocations as one fact."""
 
     case_id_value = str(case_id or "").strip()
     evidence_payload = dict(evidence or {})
+    attempt_evidence_payload = dict(attempt_evidence or {})
     allocation_rows = [dict(item or {}) for item in allocations]
     event_rows = [_canonical_storage_event(item) for item in terminal_events]
     correction_void_rows = [
@@ -1521,6 +1680,18 @@ def apply_lifecycle_allocation_atomically(
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("lifecycle allocation requires SQLite transaction authority")
+        replay = _match_lifecycle_attempt_replay(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            attempt_audit=attempt_audit,
+        )
+        if replay is not None:
+            return replay
+        if attempt_evidence_payload and attempt_audit is None:
+            raise ValueError(
+                "lifecycle attempt evidence requires an attempt audit"
+            )
         _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
@@ -1537,12 +1708,22 @@ def apply_lifecycle_allocation_atomically(
             sqlite_repo,
             conn=conn,
             case_id=case_id_value,
-            evidence=evidence_payload,
+            evidence=(
+                attempt_evidence_payload or evidence_payload
+            ),
             expected_generation_token=(
                 expected_lifecycle_generation_token
             ),
         )
-        if admission is not None and bool(admission.get("duplicate")):
+        if attempt_audit is not None and admission is None:
+            raise ValueError(
+                "lifecycle allocation attempt audit requires observation admission"
+            )
+        if (
+            not attempt_evidence_payload
+            and admission is not None
+            and bool(admission.get("duplicate"))
+        ):
             duplicate_state = (
                 _require_duplicate_settlement_allocation_state(
                     sqlite_repo,
@@ -1553,6 +1734,12 @@ def apply_lifecycle_allocation_atomically(
                 )
             )
             current_summary = duplicate_state["summary"]
+            audit_result = _append_lifecycle_observation_attempt(
+                sqlite_repo,
+                conn=conn,
+                attempt_audit=attempt_audit,
+                admission=admission,
+            )
             return {
                 "case_id": case_id_value,
                 "evidence_id": admission["evidence_id"],
@@ -1586,7 +1773,16 @@ def apply_lifecycle_allocation_atomically(
                 "semantic_fingerprint": admission[
                     "semantic_fingerprint"
                 ],
+                **audit_result,
             }
+        if attempt_evidence_payload:
+            _persist_settlement_admission_evidence(
+                sqlite_repo,
+                conn=conn,
+                case_id=case_id_value,
+                evidence=attempt_evidence_payload,
+                admission=admission,
+            )
         _validate_broker_settlement_pair_for_write(
             sqlite_repo,
             conn=conn,
@@ -2092,6 +2288,12 @@ def apply_lifecycle_allocation_atomically(
             case_id=case_id_value,
             admission=admission,
         )
+        audit_result = _append_lifecycle_observation_attempt(
+            sqlite_repo,
+            conn=conn,
+            attempt_audit=attempt_audit,
+            admission=admission,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
@@ -2126,12 +2328,16 @@ def apply_lifecycle_allocation_atomically(
                 if admission is not None
                 else None
             ),
+            **audit_result,
         }
 
-    return with_sqlite_repo_transaction(
+    return _finish_lifecycle_attempt_cleanup(
         repo,
-        _run,
-        require_projection_publication=True,
+        with_sqlite_repo_transaction(
+            repo,
+            _run,
+            require_projection_publication=True,
+        ),
     )
 
 
@@ -2629,11 +2835,14 @@ def record_lifecycle_evidence_issue_atomically(
     status: str,
     reason_codes: Sequence[str],
     expected_lifecycle_generation_token: str | None = None,
+    attempt_evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     """Persist a uniquely matched evidence issue without creating terminal facts."""
 
     case_id_value = str(case_id or "").strip()
     evidence_payload = dict(evidence or {})
+    attempt_evidence_payload = dict(attempt_evidence or {})
     status_value = str(status or "").strip().lower()
     reasons = sorted(
         {
@@ -2650,6 +2859,18 @@ def record_lifecycle_evidence_issue_atomically(
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("lifecycle evidence issue requires SQLite transaction authority")
+        replay = _match_lifecycle_attempt_replay(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            attempt_audit=attempt_audit,
+        )
+        if replay is not None:
+            return replay
+        if attempt_evidence_payload and attempt_audit is None:
+            raise ValueError(
+                "lifecycle attempt evidence requires an attempt audit"
+            )
         _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
@@ -2666,12 +2887,22 @@ def record_lifecycle_evidence_issue_atomically(
             sqlite_repo,
             conn=conn,
             case_id=case_id_value,
-            evidence=evidence_payload,
+            evidence=(
+                attempt_evidence_payload or evidence_payload
+            ),
             expected_generation_token=(
                 expected_lifecycle_generation_token
             ),
         )
-        if admission is not None and bool(admission.get("duplicate")):
+        if attempt_audit is not None and admission is None:
+            raise ValueError(
+                "lifecycle evidence issue attempt audit requires observation admission"
+            )
+        if (
+            not attempt_evidence_payload
+            and admission is not None
+            and bool(admission.get("duplicate"))
+        ):
             duplicate_state = _require_duplicate_settlement_issue_state(
                 sqlite_repo,
                 conn=conn,
@@ -2681,6 +2912,12 @@ def record_lifecycle_evidence_issue_atomically(
                 requested_reasons=reasons,
             )
             prior_summary = duplicate_state["summary"]
+            audit_result = _append_lifecycle_observation_attempt(
+                sqlite_repo,
+                conn=conn,
+                attempt_audit=attempt_audit,
+                admission=admission,
+            )
             return {
                 "case_id": case_id_value,
                 "evidence_id": admission["evidence_id"],
@@ -2712,7 +2949,16 @@ def record_lifecycle_evidence_issue_atomically(
                 "semantic_fingerprint": admission[
                     "semantic_fingerprint"
                 ],
+                **audit_result,
             }
+        if attempt_evidence_payload:
+            _persist_settlement_admission_evidence(
+                sqlite_repo,
+                conn=conn,
+                case_id=case_id_value,
+                evidence=attempt_evidence_payload,
+                admission=admission,
+            )
         evidence_id = str(evidence_payload.get("evidence_id") or "").strip()
         if not evidence_id:
             raise ValueError("lifecycle evidence_id is required")
@@ -2970,6 +3216,12 @@ def record_lifecycle_evidence_issue_atomically(
             case_id=case_id_value,
             admission=admission,
         )
+        audit_result = _append_lifecycle_observation_attempt(
+            sqlite_repo,
+            conn=conn,
+            attempt_audit=attempt_audit,
+            admission=admission,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
@@ -2998,9 +3250,150 @@ def record_lifecycle_evidence_issue_atomically(
                 if admission is not None
                 else None
             ),
+            **audit_result,
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return _finish_lifecycle_attempt_cleanup(
+        repo,
+        with_sqlite_repo_transaction(repo, _run),
+    )
+
+
+def record_lifecycle_attempt_audit_atomically(
+    repo: Any,
+    *,
+    attempt_audit: LifecycleAttemptAuditEnvelope,
+) -> dict[str, Any]:
+    """Persist one provider failure/stale attempt without business mutation."""
+
+    if attempt_audit.outcome_code in (1, 2):
+        raise ValueError(
+            "audit-only lifecycle writer accepts only failed or stale attempts"
+        )
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError(
+                "lifecycle attempt audit requires SQLite transaction authority"
+            )
+        return sqlite_repo.append_trade_lifecycle_attempt_audit_in_transaction(
+            attempt_audit=attempt_audit,
+            conn=conn,
+        )
+
+    return _finish_lifecycle_attempt_cleanup(
+        repo,
+        with_sqlite_repo_transaction(repo, _run),
+    )
+
+
+def record_lifecycle_observation_attempt_atomically(
+    repo: Any,
+    *,
+    case_id: str,
+    evidence: dict[str, Any],
+    expected_lifecycle_generation_token: str,
+    attempt_audit: LifecycleAttemptAuditEnvelope,
+    direct_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Admit one provider observation without a business transition."""
+
+    case_id_value = str(case_id or "").strip()
+    evidence_payload = dict(evidence or {})
+    direct_evidence_payload = dict(direct_evidence or {})
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError(
+                "lifecycle observation attempt requires SQLite authority"
+            )
+        replay = _match_lifecycle_attempt_replay(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            attempt_audit=attempt_audit,
+        )
+        if replay is not None:
+            return replay
+        _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
+        if (
+            sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
+            is None
+        ):
+            raise ValueError(f"lifecycle case not found: {case_id_value}")
+        _require_lifecycle_generation(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
+        admission = _prepare_settlement_admission(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            evidence=evidence_payload,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
+        if admission is None:
+            raise ValueError(
+                "lifecycle observation attempt requires observation admission"
+            )
+        evidence_created, evidence_bound = (
+            _persist_settlement_admission_evidence(
+                sqlite_repo,
+                conn=conn,
+                case_id=case_id_value,
+                evidence=evidence_payload,
+                admission=admission,
+            )
+        )
+        direct_evidence_created = (
+            _persist_direct_stock_settlement_evidence(
+                sqlite_repo,
+                conn=conn,
+                evidence=direct_evidence_payload,
+            )
+            if direct_evidence_payload
+            else False
+        )
+        _advance_settlement_admission_head(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            admission=admission,
+        )
+        audit_result = _append_lifecycle_observation_attempt(
+            sqlite_repo,
+            conn=conn,
+            attempt_audit=attempt_audit,
+            admission=admission,
+        )
+        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        return {
+            "case_id": case_id_value,
+            "evidence_id": admission["evidence_id"],
+            "evidence_created": evidence_created,
+            "evidence_bound": evidence_bound,
+            "direct_evidence_created": direct_evidence_created,
+            "admission_status": (
+                "duplicate_semantic"
+                if bool(admission.get("duplicate"))
+                else "admitted_semantic"
+            ),
+            "semantic_fingerprint": admission[
+                "semantic_fingerprint"
+            ],
+            **audit_result,
+        }
+
+    return _finish_lifecycle_attempt_cleanup(
+        repo,
+        with_sqlite_repo_transaction(repo, _run),
+    )
 
 
 def advance_lifecycle_case_state_atomically(
@@ -3011,12 +3404,15 @@ def advance_lifecycle_case_state_atomically(
     derived_summary: dict[str, Any],
     public_transition: str | None,
     expected_lifecycle_generation_token: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
     """Advance a derived lifecycle state and optional fixed Outbox slot."""
 
     case_id_value = str(case_id or "").strip()
     status_value = str(status or "").strip().lower()
     summary_input = dict(derived_summary or {})
+    evidence_payload = dict(evidence or {})
     transition_value = str(public_transition or "").strip().lower()
     if not case_id_value or not status_value:
         raise ValueError("lifecycle state identity is incomplete")
@@ -3033,6 +3429,22 @@ def advance_lifecycle_case_state_atomically(
             raise TypeError(
                 "lifecycle state advance requires SQLite authority"
             )
+        replay = _match_lifecycle_attempt_replay(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            attempt_audit=attempt_audit,
+        )
+        if replay is not None:
+            return replay
+        if attempt_audit is None and evidence_payload:
+            raise ValueError(
+                "lifecycle state attempt evidence requires an attempt audit"
+            )
+        _require_settlement_foreign_keys_clean(
+            sqlite_repo,
+            conn=conn,
+        )
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
             case_id_value,
             conn=conn,
@@ -3048,6 +3460,28 @@ def advance_lifecycle_case_state_atomically(
             expected_generation_token=(
                 expected_lifecycle_generation_token
             ),
+        )
+        admission = _prepare_settlement_admission(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            evidence=evidence_payload,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
+        if attempt_audit is not None and admission is None:
+            raise ValueError(
+                "lifecycle state attempt audit requires observation admission"
+            )
+        evidence_created, evidence_bound = (
+            _persist_settlement_admission_evidence(
+                sqlite_repo,
+                conn=conn,
+                case_id=case_id_value,
+                evidence=evidence_payload,
+                admission=admission,
+            )
         )
         prior_summary = (
             dict(lifecycle_case.get("derived_summary") or {})
@@ -3246,9 +3680,37 @@ def advance_lifecycle_case_state_atomically(
                 conn=conn,
             )
         )
+        _advance_settlement_admission_head(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            admission=admission,
+        )
+        audit_result = _append_lifecycle_observation_attempt(
+            sqlite_repo,
+            conn=conn,
+            attempt_audit=attempt_audit,
+            admission=admission,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
+            "evidence_id": (
+                str(admission.get("evidence_id") or "").strip()
+                if admission is not None
+                else None
+            ),
+            "evidence_created": evidence_created,
+            "evidence_bound": evidence_bound,
+            "admission_status": (
+                "duplicate_semantic"
+                if admission is not None and bool(admission.get("duplicate"))
+                else (
+                    "admitted_semantic"
+                    if admission is not None
+                    else "not_applicable"
+                )
+            ),
             "status": status_value,
             "status_changed": status_changed,
             "business_state_changed": business_state_changed,
@@ -3261,9 +3723,13 @@ def advance_lifecycle_case_state_atomically(
             ),
             "notification_outbox_created": outbox_created,
             "notification_audit_codes": notification_audit_codes,
+            **audit_result,
         }
 
-    return with_sqlite_repo_transaction(repo, _run)
+    return _finish_lifecycle_attempt_cleanup(
+        repo,
+        with_sqlite_repo_transaction(repo, _run),
+    )
 
 
 def _validate_existing_lifecycle_evidence(
