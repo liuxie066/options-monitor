@@ -213,6 +213,13 @@ def _current_behavior_versions(spec: Mapping[str, object]) -> dict[str, str]:
     }
 
 
+def build_current_behavior_binding(payload: object) -> str:
+    """Calculate the installed binding without accepting a stored baseline hash."""
+
+    spec = _mapping(payload, "ExperimentSpec")
+    return build_behavior_binding(_current_behavior_versions(spec))
+
+
 def _validate_hypothesis(value: object) -> None:
     item = _mapping(value, "hypothesis")
     _exact_keys(

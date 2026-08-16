@@ -24,14 +24,23 @@ from src.application.strategy_lab.top1.corpus import (
     SEALED_HISTORICAL_DATASET_SCHEMA,
     CorpusError,
     capture_recommendation_point,
+    discover_recommendation_points,
     freeze_research_dataset,
+    read_market_calendar_binding,
     read_corpus_status,
+    seal_committed_day_expectation,
     seal_day_expectation,
 )
-from src.application.strategy_lab.top1.lifecycle import set_account_opt_in
+from src.application.strategy_lab.top1.lifecycle import (
+    build_hidden_window_commitment,
+    set_account_opt_in,
+)
 from src.application.strategy_lab.top1.ranking import Top1RankingError
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
-from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+from tests.candidate_evidence_helpers import (
+    seal_market_calendar_fixture,
+    seal_opening_candidate_fixture,
+)
 
 
 AVAILABLE = {"OM_STRATEGY_LAB_TOP1_AVAILABLE": "1"}
@@ -301,6 +310,88 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
             environ=AVAILABLE,
         )
     assert raised.value.reason_code == "corpus_input_invalid"
+
+
+def test_calendar_binding_is_content_addressed_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(CorpusError) as missing:
+        read_market_calendar_binding(tmp_path / "missing", market="HK")
+    assert missing.value.reason_code == "market_calendar_binding_unavailable"
+
+    days = _trading_days("2026-07-21", 20)
+    binding = seal_market_calendar_fixture(
+        tmp_path, days, version="hk-calendar.fixture.v1"
+    )
+    assert binding["trading_dates"] == days
+    snapshot_path = tmp_path.joinpath(*str(binding["snapshot_ref"]).split("/"))
+    snapshot_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(CorpusError) as tampered:
+        read_market_calendar_binding(tmp_path, market="HK")
+    assert tampered.value.reason_code == "market_calendar_binding_unavailable"
+
+
+def test_committed_denominator_rejects_later_schedule_drift(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    _enable(store, artifact_root)
+    days = _trading_days("2026-07-21", 20)
+    binding = seal_market_calendar_fixture(
+        artifact_root, days, version="hk-calendar.fixture.v1"
+    )
+    commitment = build_hidden_window_commitment(
+        experiment_id="experiment-denominator",
+        account="lx",
+        validation_start_trading_date=days[0],
+        market_calendar_binding=binding,
+        schedule=_multi_point_schedule(),
+        challenger_variant_id="challenger",
+        research_spec_sha256="a" * 64,
+        research_terminal_file_sha256="b" * 64,
+        behavior_binding_sha256="c" * 64,
+    )
+    committed_day = commitment["days"][0]
+    sealed = seal_committed_day_expectation(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        committed_day=committed_day,
+        market_calendar_version=str(commitment["market_calendar_version"]),
+        market_calendar_sha256=str(
+            commitment["market_calendar_snapshot_content_sha256"]
+        ),
+        schedule_config_sha256=str(commitment["schedule_config_sha256"]),
+        sealed_at_utc=f"{days[0]}T00:00:00Z",
+        environ=AVAILABLE,
+    )
+    assert sealed["status"] == "published"
+    drifted = _seal(
+        store,
+        artifact_root,
+        day=days[0],
+        sealed_at=f"{days[0]}T00:01:00Z",
+        schedule=_schedule(start_plus_min=5),
+    )
+    assert drifted["status"] == "conflict"
+
+
+def test_point_discovery_uses_the_validated_point_clock(tmp_path: Path) -> None:
+    point_ref, point = _publish_source_point(
+        tmp_path, run_id="run-clock", day="2026-07-21"
+    )
+    discovered = discover_recommendation_points(tmp_path, market="HK", account="lx")
+    assert discovered == [
+        {
+            "status": "available",
+            "point_ref": point_ref,
+            "recommendation_point_id": point["recommendation_point_id"],
+            "scheduled_scan_target_market": point[
+                "scheduled_scan_target_market"
+            ],
+            "trading_date": "2026-07-21",
+        }
+    ]
 
 
 def test_expectation_is_immutable_idempotent_and_conflict_marked(
