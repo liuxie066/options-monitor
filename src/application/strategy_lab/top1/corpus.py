@@ -57,7 +57,7 @@ CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
 RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
 MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
-MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v1"
+MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v2"
 _MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = (
     "sell_put_top1_market_calendar_source_receipt.v1"
 )
@@ -79,7 +79,7 @@ _CALENDAR_SNAPSHOT_FIELDS = frozenset(
         "market_calendar_version",
         "coverage_start",
         "coverage_end",
-        "trading_dates",
+        "trading_sessions",
         "source_receipt_sha256",
         "observed_at_utc",
         "content_sha256",
@@ -298,10 +298,19 @@ def _validate_calendar_snapshot(
         coverage_end = _trading_date(item["coverage_end"])
         if coverage_start > coverage_end:
             raise ValueError("snapshot coverage is reversed")
-        values = item["trading_dates"]
+        values = item["trading_sessions"]
         if not isinstance(values, list) or not values:
-            raise ValueError("snapshot trading dates are missing")
-        trading_dates = [_trading_date(value) for value in values]
+            raise ValueError("snapshot trading sessions are missing")
+        trading_dates: list[str] = []
+        for raw_session in values:
+            if not isinstance(raw_session, Mapping):
+                raise ValueError("snapshot trading session must be an object")
+            session = dict(raw_session)
+            if set(session) != {"trading_date", "trade_date_type"}:
+                raise ValueError("snapshot trading session keys are invalid")
+            trading_dates.append(_trading_date(session["trading_date"]))
+            if session["trade_date_type"] not in _CALENDAR_SESSION_TYPES:
+                raise ValueError("snapshot trade date type is invalid")
         if trading_dates != sorted(set(trading_dates)):
             raise ValueError("snapshot trading dates are not ordered and unique")
         if trading_dates[0] < coverage_start or trading_dates[-1] > coverage_end:
@@ -317,7 +326,7 @@ def _validate_calendar_snapshot(
             "market_calendar_binding_unavailable",
             f"market calendar snapshot is invalid: {exc}",
         ) from exc
-    return item
+    return {**item, "trading_dates": trading_dates}
 
 
 def read_bound_market_calendar_snapshot(
@@ -503,22 +512,26 @@ def refresh_market_calendar_binding(
         coverage_end=end,
     )
     sessions = normalized_receipt["trading_sessions"]
-    trading_dates = [item["trading_date"] for item in sessions]
     source_receipt_sha256 = canonical_sha256(normalized_receipt)
 
     pointer_ref = _calendar_pointer_ref(market)
     pointer_path = private_path(artifact_root).joinpath(*pointer_ref.split("/"))
     if pointer_path.exists() or pointer_path.is_symlink():
-        current = read_market_calendar_binding(artifact_root, market=market)
+        try:
+            current = read_market_calendar_binding(artifact_root, market=market)
+        except CorpusError:
+            current = None
         expected = {
             "market": market,
             "market_calendar_version": version,
             "coverage_start": start,
             "coverage_end": end,
-            "trading_dates": trading_dates,
+            "trading_sessions": sessions,
             "source_receipt_sha256": source_receipt_sha256,
         }
-        if all(current[key] == value for key, value in expected.items()):
+        if current is not None and all(
+            current[key] == value for key, value in expected.items()
+        ):
             return {"status": "unchanged", "binding": current}
 
     snapshot: dict[str, Any] = {
@@ -527,7 +540,7 @@ def refresh_market_calendar_binding(
         "market_calendar_version": version,
         "coverage_start": start,
         "coverage_end": end,
-        "trading_dates": trading_dates,
+        "trading_sessions": sessions,
         "source_receipt_sha256": source_receipt_sha256,
         "observed_at_utc": observed_at,
     }
@@ -961,6 +974,7 @@ def seal_day_expectation(
     market_calendar_version: str,
     market_calendar_sha256: str,
     sealed_at_utc: str,
+    trade_date_type: str = "WHOLE",
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     market, account = _identity(market, account)
@@ -983,7 +997,9 @@ def seal_day_expectation(
         )
 
     try:
-        targets = scheduled_scan_targets_for_date(dict(schedule), day)
+        targets = scheduled_scan_targets_for_date(
+            dict(schedule), day, trade_date_type=trade_date_type
+        )
         schedule_hash = canonical_sha256(dict(schedule))
     except (TypeError, ValueError) as exc:
         raise CorpusError("corpus_input_invalid", "schedule is invalid") from exc

@@ -418,6 +418,8 @@ def _scheduled_scan_targets(
 def scheduled_scan_targets_for_date(
     schedule_cfg: dict[str, Any],
     trading_date: date | str,
+    *,
+    trade_date_type: str = 'WHOLE',
 ) -> list[datetime]:
     """Return the scheduler's exact scan targets for one declared trading date."""
 
@@ -434,6 +436,8 @@ def scheduled_scan_targets_for_date(
         raise ValueError("trading_date must be an ISO date") from exc
     if raw_day is not None and day.isoformat() != raw_day:
         raise ValueError("trading_date must be a canonical ISO date")
+    if trade_date_type not in {'WHOLE', 'MORNING', 'AFTERNOON'}:
+        raise ValueError("trade_date_type is invalid")
     if not bool(schedule_cfg.get('enabled', True)):
         return []
 
@@ -460,6 +464,21 @@ def scheduled_scan_targets_for_date(
         )
     except ZoneInfoNotFoundError as exc:
         raise ValueError("schedule gate timezone is invalid") from exc
+    if trade_date_type != 'WHOLE':
+        if len(breaks) != 1:
+            raise ValueError("partial trading day requires one session break")
+        break_start, break_end = breaks[0]
+        if not run_start < break_start < break_end < run_end:
+            raise ValueError("partial trading day session break is invalid")
+        targets = [
+            target
+            for target in targets
+            if (
+                target.time() < break_start
+                if trade_date_type == 'MORNING'
+                else target.time() >= break_end
+            )
+        ]
     return targets
 
 

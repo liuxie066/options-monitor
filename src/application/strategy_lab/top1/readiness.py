@@ -76,18 +76,35 @@ def _calendar_ready(value: Mapping[str, Any] | None) -> bool:
     coverage_start = _date(value.get("coverage_start"))
     coverage_end = _date(value.get("coverage_end"))
     raw_dates = value.get("trading_dates")
-    if not isinstance(raw_dates, list):
+    raw_sessions = value.get("trading_sessions")
+    if not isinstance(raw_dates, list) or not isinstance(raw_sessions, list):
         return False
     trading_dates = [_date(item) for item in raw_dates]
+    session_dates: list[date | None] = []
+    for raw_session in raw_sessions:
+        if not isinstance(raw_session, Mapping) or set(raw_session) != {
+            "trading_date",
+            "trade_date_type",
+        }:
+            return False
+        if raw_session["trade_date_type"] not in {
+            "WHOLE",
+            "MORNING",
+            "AFTERNOON",
+        }:
+            return False
+        session_dates.append(_date(raw_session["trading_date"]))
     if coverage_start is None or coverage_end is None or any(
-        item is None for item in trading_dates
+        item is None for item in [*trading_dates, *session_dates]
     ):
         return False
     dates = [item for item in trading_dates if item is not None]
+    sessions = [item for item in session_dates if item is not None]
     return bool(
         coverage_start <= coverage_end
         and dates
         and dates == sorted(set(dates))
+        and sessions == dates
         and coverage_start <= dates[0] <= dates[-1] <= coverage_end
     )
 

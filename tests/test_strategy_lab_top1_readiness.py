@@ -73,6 +73,10 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
             "coverage_start": "2026-08-01",
             "coverage_end": "2026-12-31",
             "trading_dates": ["2026-08-01", "2026-12-31"],
+            "trading_sessions": [
+                {"trading_date": "2026-08-01", "trade_date_type": "WHOLE"},
+                {"trading_date": "2026-12-31", "trade_date_type": "WHOLE"},
+            ],
             "snapshot_ref": "calendar.json",
             "snapshot_content_sha256": "a" * 64,
             "snapshot_file_sha256": "c" * 64,
@@ -121,7 +125,18 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
         "source_delivery_blockers"
     ]
 
-    for invalid_calendar in ({}, {"market": "HK"}, {**common["calendar_binding"], "trading_dates": []}):
+    for invalid_calendar in (
+        {},
+        {"market": "HK"},
+        {**common["calendar_binding"], "trading_dates": []},
+        {
+            **common["calendar_binding"],
+            "trading_sessions": [
+                {"trading_date": "2026-08-01", "trade_date_type": "UNKNOWN"},
+                {"trading_date": "2026-12-31", "trade_date_type": "WHOLE"},
+            ],
+        },
+    ):
         blocked_calendar = build_top1_readiness(
             **{**common, "calendar_binding": invalid_calendar},
             capability_facts={name: True for name in CAPABILITY_FACTS},
