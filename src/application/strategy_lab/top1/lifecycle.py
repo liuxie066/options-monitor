@@ -1470,10 +1470,19 @@ def read_public_status(
     store: ExperimentStore,
     *,
     experiment_id: str,
+    expected_market: str | None = None,
+    expected_account: str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     experiment_id = _segment(experiment_id, "experiment_id")
     experiment = _call(store.experiment, experiment_id)
+    if (
+        expected_market is not None
+        and experiment["market"] != expected_market
+        or expected_account is not None
+        and experiment["account"] != expected_account
+    ):
+        _fail("experiment_conflict", "experiment identity changed")
     feature = effective_feature_status(
         store,
         market=str(experiment["market"]),

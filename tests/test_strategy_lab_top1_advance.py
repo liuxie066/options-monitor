@@ -94,7 +94,12 @@ def test_collecting_order_due_conclusion_and_peer_failure_isolation(
             "validation_progress": progress,
             "terminal_mode": None,
             "behavior_binding_drift": False,
-            "committed_days": [],
+            "commitment": {
+                "market_calendar_version": "hk-calendar.v1",
+                "market_calendar_snapshot_content_sha256": "a" * 64,
+                "schedule_config_sha256": "b" * 64,
+            },
+            "committed_days": [{"trading_date": "2026-08-16"}],
             "open_trading_date": "2026-08-17",
             "consumed_point_ids": [],
             "last_consumed_available_point_id": None,
@@ -108,6 +113,7 @@ def test_collecting_order_due_conclusion_and_peer_failure_isolation(
     monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(advance_module, "read_active_experiment_ids", active)
     monkeypatch.setattr(advance_module, "read_advance_context", context)
+    monkeypatch.setattr(advance_module, "seal_committed_day_expectation", _explode)
     monkeypatch.setattr(advance_module, "read_market_calendar_binding", lambda *_args, **_kwargs: _calendar())
     monkeypatch.setattr(advance_module, "discover_recommendation_points", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
@@ -169,6 +175,11 @@ def test_collecting_order_due_conclusion_and_peer_failure_isolation(
 
     assert calls == ["consume:p1", "observe:p1", "consume:p2", "observe:p2", "settle", "conclude"]
     assert result["status"] == "partial"
+    assert any(
+        item.get("reason_code") == "experiment_preflight_unavailable"
+        and item.get("trading_date") == "2026-08-16"
+        for item in result["corpus"]
+    )
     by_id = {item["experiment_id"]: item for item in result["experiments"]}
     assert by_id["bad"]["status"] == "failed"
     assert by_id["good"]["status"] == "ok"
@@ -237,6 +248,7 @@ def test_behavior_drift_terminates_without_loading_gateway(
 def test_hidden_window_overlap_blocks_sealing_and_collection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict_kind: str
 ) -> None:
+    expected_gateway = object()
     day_a = {
         "trading_date": "2026-08-17",
         "scheduled_scan_targets_market": ["2026-08-17T01:00:00Z"],
@@ -274,8 +286,12 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
                 "revision": "top1-advance.v1",
                 "advance_cadence_seconds": 60,
             },
-            "has_outcome_jobs": False,
+            "has_outcome_jobs": True,
         }
+
+    def settle(*_args: object, gateway: object, **_kwargs: object) -> dict[str, str]:
+        assert gateway is expected_gateway
+        return {"status": "ok"}
 
     monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
@@ -292,7 +308,7 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
     monkeypatch.setattr(
         advance_module,
         "settle_due_outcomes",
-        lambda *_args, **_kwargs: {"status": "ok"},
+        settle,
     )
     monkeypatch.setattr(
         advance_module,
@@ -307,8 +323,8 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
-        load_gateway=_explode,
+        load_readiness=lambda: {"validation_runtime_ready": True},
+        load_gateway=lambda: expected_gateway,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
         actor="timer",
@@ -385,8 +401,56 @@ def test_out_of_coverage_calendar_blocks_sealing_without_fallback(
     )
 
 
-def test_readiness_failure_makes_advance_partial(
+def test_active_experiment_read_failure_blocks_schedule_sealing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
+    monkeypatch.setattr(advance_module, "read_active_experiment_ids", _explode)
+    monkeypatch.setattr(
+        advance_module,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: _calendar(),
+    )
+    monkeypatch.setattr(advance_module, "seal_day_expectation", _explode)
+    monkeypatch.setattr(
+        advance_module, "discover_recommendation_points", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=60,
+        actor="timer",
+        occurred_at_utc="2026-08-17T01:00:00Z",
+        idempotency_key="account-preflight-error",
+        environ=AVAILABLE,
+    )
+
+    assert result["status"] == "partial"
+    assert any(
+        item.get("status") == "blocked"
+        and item.get("reason_code") == "experiment_preflight_unavailable"
+        for item in result["corpus"]
+    )
+
+
+@pytest.mark.parametrize("readiness_result", [False, None])
+def test_readiness_failure_makes_advance_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    readiness_result: bool | None,
 ) -> None:
     monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
@@ -413,7 +477,11 @@ def test_readiness_failure_makes_advance_partial(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=_explode,
+        load_readiness=(
+            (lambda: {"validation_runtime_ready": readiness_result})
+            if readiness_result is not None
+            else _explode
+        ),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -424,7 +492,76 @@ def test_readiness_failure_makes_advance_partial(
     )
 
     assert result["status"] == "partial"
-    assert result["readiness"]["reason_code"] == "advance_failed"
+    if readiness_result is None:
+        assert result["readiness"]["reason_code"] == "advance_failed"
+    else:
+        assert result["readiness"]["validation_runtime_ready"] is False
+
+
+def test_timer_binding_mismatch_is_partial_without_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = {
+        "experiment_id": "mismatch",
+        "phase": "validation",
+        "validation_progress": "awaiting_outcomes",
+        "terminal_mode": None,
+        "behavior_binding_drift": False,
+        "committed_days": [],
+        "timer_binding": {
+            "revision": "top1-advance.v1",
+            "advance_cadence_seconds": 61,
+        },
+        "has_outcome_jobs": True,
+    }
+    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
+    monkeypatch.setattr(
+        advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: ["mismatch"]
+    )
+    monkeypatch.setattr(
+        advance_module, "read_advance_context", lambda *_args, **_kwargs: context
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: _calendar(),
+    )
+    monkeypatch.setattr(
+        advance_module, "discover_recommendation_points", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "settle_due_outcomes",
+        lambda *_args, **_kwargs: {"status": "pending"},
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": True},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=60,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:00:00Z",
+        idempotency_key="timer-mismatch",
+        environ=AVAILABLE,
+    )
+
+    assert result["status"] == "partial"
+    assert any(
+        step.get("reason_code") == "timer_binding_mismatch"
+        for step in result["experiments"][0]["steps"]
+    )
 
 
 @pytest.mark.parametrize(

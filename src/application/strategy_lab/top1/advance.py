@@ -167,9 +167,13 @@ def advance_scheduled(
                 had_failure = True
             else:
                 committed_by_date[trading_date] = denominator
-    denominator_unknown = bool(context_error_ids) or any(
-        context["phase"] == "validation" and context["behavior_binding_drift"]
-        for context in contexts.values()
+    denominator_unknown = (
+        bool(result.get("account_error"))
+        or bool(context_error_ids)
+        or any(
+            context["phase"] == "validation" and context["behavior_binding_drift"]
+            for context in contexts.values()
+        )
     )
 
     schedule: Mapping[str, Any] | None = None
@@ -190,6 +194,15 @@ def advance_scheduled(
                     "operation": "seal_day_expectation",
                     "status": "blocked",
                     "reason_code": "hidden_window_overlap",
+                    "trading_date": today,
+                }
+            )
+        elif committed is not None and denominator_unknown:
+            result["corpus"].append(
+                {
+                    "operation": "seal_day_expectation",
+                    "status": "blocked",
+                    "reason_code": "experiment_preflight_unavailable",
                     "trading_date": today,
                 }
             )
@@ -300,6 +313,8 @@ def advance_scheduled(
             raise ValueError("readiness loader must return an object")
         result["readiness"] = dict(readiness)
         runtime_ready = readiness.get("validation_runtime_ready") is True
+        if not runtime_ready:
+            had_failure = True
     except Exception as exc:
         result["readiness"] = {"validation_runtime_ready": False, **_error(exc)}
         had_failure = True
@@ -322,6 +337,7 @@ def advance_scheduled(
                 {"operation": "provider_access", "status": "blocked", "reason_code": "timer_binding_mismatch"}
             )
             timer_reported.add(experiment_id)
+            had_failure = True
         if not runtime_ready or not timer_matches:
             return None
         if not gateway_loaded:

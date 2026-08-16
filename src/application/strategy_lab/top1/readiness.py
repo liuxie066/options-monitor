@@ -171,6 +171,8 @@ def build_top1_readiness(
         runtime_blockers.append("strategy_lab_top1_store_not_ready")
     if not feature_status or feature_status.get("effective") is not True:
         runtime_blockers.append("strategy_lab_top1_feature_disabled")
+    if corpus_status is None:
+        runtime_blockers.append("strategy_lab_top1_corpus_unavailable")
     if not _calendar_ready(calendar_binding):
         runtime_blockers.append("market_calendar_binding_unavailable")
     runtime_blockers.extend(

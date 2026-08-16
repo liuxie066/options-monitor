@@ -258,7 +258,12 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 "research.strategy-lab.top1-loop.status", store
             )
         try:
-            data = read_public_status(store, experiment_id=args.experiment_id)
+            data = read_public_status(
+                store,
+                experiment_id=args.experiment_id,
+                expected_market=args.market.upper(),
+                expected_account=args.account,
+            )
         except Exception as exc:
             raise AgentToolError(
                 code=str(getattr(exc, "reason_code", "STATE_ERROR")),
