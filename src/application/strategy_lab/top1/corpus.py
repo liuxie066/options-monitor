@@ -1065,6 +1065,111 @@ def _read_indexed_projection(
     return item, content
 
 
+def read_validation_day_source(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    trading_date: str,
+) -> dict[str, Any]:
+    """Read one indexed validation denominator without repairing producer data."""
+
+    market, account = _identity(market, account)
+    trading_date = _trading_date(trading_date)
+    row = _store_call(store.corpus_day, market, account, trading_date)
+    if row is None:
+        return {"status": "missing", "row": None, "expectation": None}
+    if row["conflict_status"] != "clean" or row["completeness_reason"] is not None:
+        return {
+            "status": "not_evaluable",
+            "reason_code": row["completeness_reason"] or "research_corpus_conflict",
+            "row": dict(row),
+            "expectation": None,
+        }
+    expectation, _content = _read_indexed_expectation(artifact_root, row)
+    if not expectation["expected_recommendation_point_ids"]:
+        return {
+            "status": "not_evaluable",
+            "reason_code": "corpus_day_expectation_empty",
+            "row": dict(row),
+            "expectation": expectation,
+        }
+    return {
+        "status": "available",
+        "reason_code": None,
+        "row": dict(row),
+        "expectation": expectation,
+    }
+
+
+def read_validation_point_source(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    trading_date: str,
+    recommendation_point_id: str,
+) -> dict[str, Any]:
+    """Read one point strictly bound to its canonical day expectation and index."""
+
+    day = read_validation_day_source(
+        store,
+        artifact_root,
+        market=market,
+        account=account,
+        trading_date=trading_date,
+    )
+    if day["status"] != "available":
+        return {**day, "point_row": None, "projection": None}
+    expectation = day["expectation"]
+    assert isinstance(expectation, dict)
+    expected_ids = expectation["expected_recommendation_point_ids"]
+    if recommendation_point_id not in expected_ids:
+        _fail(
+            "unexpected_recommendation_point",
+            "validation point is absent from the canonical expectation",
+        )
+    row = _store_call(
+        store.corpus_point, market, account, recommendation_point_id
+    )
+    if row is None:
+        return {
+            **day,
+            "status": "missing",
+            "reason_code": "corpus_point_missing",
+            "point_row": None,
+            "projection": None,
+        }
+    if row["trading_date"] != trading_date:
+        _fail("corpus_artifact_invalid", "point index trading date changed")
+    if row["conflict_status"] != "clean":
+        return {
+            **day,
+            "status": "not_evaluable",
+            "reason_code": "research_corpus_conflict",
+            "point_row": dict(row),
+            "projection": None,
+        }
+    if row["capture_status"] != "captured":
+        return {
+            **day,
+            "status": "not_evaluable",
+            "reason_code": row["reason_code"],
+            "point_row": dict(row),
+            "projection": None,
+        }
+    projection, _content = _read_indexed_projection(artifact_root, row)
+    return {
+        **day,
+        "status": "available",
+        "reason_code": None,
+        "point_row": dict(row),
+        "projection": projection,
+    }
+
+
 def read_corpus_status(
     store: ExperimentStore,
     *,
@@ -1373,5 +1478,7 @@ __all__ = [
     "capture_recommendation_point",
     "freeze_research_dataset",
     "read_corpus_status",
+    "read_validation_day_source",
+    "read_validation_point_source",
     "seal_day_expectation",
 ]

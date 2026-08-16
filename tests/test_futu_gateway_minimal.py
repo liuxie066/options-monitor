@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
     import sys
@@ -210,6 +212,73 @@ def test_get_trading_days_rejects_unknown_market() -> None:
 
     with pytest.raises(Exception, match="unsupported trade date market"):
         gw.get_trading_days(market="MOON", start="2026-08-01")
+
+
+def test_exact_expiration_option_terms_force_refresh_and_fail_closed() -> None:
+    from src.infrastructure.futu_gateway import (
+        FutuGatewayDataContractError,
+        build_futu_gateway,
+    )
+
+    row = {
+        "code": "HK.TCH261218P400000",
+        "stock_owner": "HK.0700",
+        "strike_time": "2026-12-18",
+        "option_type": "PUT",
+        "option_standard_type": "STANDARD",
+        "strike_price": 400.0,
+        "lot_size": 100,
+        "currency": "HKD",
+    }
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+    class FakeClient:
+        def __init__(self, _backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.rows = [row]
+
+        def get_option_chain(self, **kwargs: object) -> list[dict[str, object]]:
+            self.calls.append(dict(kwargs))
+            return self.rows
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    terms = gateway.get_exact_expiration_option_terms(
+        code="hk.0700",
+        expiration="2026-12-18",
+        contract_symbol="hk.tch261218p400000",
+    )
+
+    assert terms == {
+        "contract_symbol": "HK.TCH261218P400000",
+        "stock_owner": "HK.0700",
+        "expiration": "2026-12-18",
+        "option_type": "PUT",
+        "option_standard_type": "STANDARD",
+        "strike": 400.0,
+        "multiplier": 100,
+        "currency": "HKD",
+    }
+    assert gateway.client.calls == [
+        {
+            "code": "HK.0700",
+            "start": "2026-12-18",
+            "end": "2026-12-18",
+            "option_type": "PUT",
+            "is_force_refresh": True,
+        }
+    ]
+
+    gateway.client.rows = [row, dict(row)]
+    with pytest.raises(FutuGatewayDataContractError):
+        gateway.get_exact_expiration_option_terms(
+            code="HK.0700",
+            expiration="2026-12-18",
+            contract_symbol="HK.TCH261218P400000",
+        )
 
 
 def test_gateway_error_mapping_need_2fa() -> None:
