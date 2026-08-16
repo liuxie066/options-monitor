@@ -108,6 +108,7 @@ _SNAPSHOT_FINGERPRINT_METADATA_FIELDS = frozenset(
         "reason_codes",
         "snapshot_status",
         "source_observed_at",
+        "current_decision_read",
         "current_decision_shadow",
     }
 )
@@ -282,6 +283,10 @@ def decision_state_snapshot_from_rows(
             current_projection=current_projection,
             current_decision_now_ms=current_decision_now_ms,
         )
+        # Retain the exact Phase 3B read already supplied to this projection.
+        # This is observation metadata, not part of the legacy business
+        # fingerprint, and must never trigger another repository read.
+        snapshot["current_decision_read"] = dict(current_projection or {})
         return snapshot
     except Exception as exc:
         return _unavailable_snapshot(

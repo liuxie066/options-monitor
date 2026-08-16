@@ -311,6 +311,10 @@ def prepare_option_positions_contexts(
                         expected_account=account,
                         expected_broker=broker,
                     )
+                    application_received_at_utc = datetime.now(timezone.utc).isoformat()
+                    prepared_authority["application_received_at_utc"] = (
+                        application_received_at_utc
+                    )
                     manifest = _publish_ready_context(
                         base=base_path,
                         run_id=run_id_norm,
@@ -325,6 +329,7 @@ def prepare_option_positions_contexts(
                             or ""
                         ),
                         source_observed_at=observed_at_utc,
+                        application_received_at_utc=(application_received_at_utc),
                         fx_status=fx_status,
                         fx_observation_sha256=fx_observation_sha256,
                         fx_error_type=fx_error_type,
@@ -365,7 +370,7 @@ def prepare_option_positions_contexts(
     )
 
 
-def load_prepared_option_positions_context(
+def _load_prepared_option_positions_context_artifacts(
     *,
     manifest_path: Path,
     expected_base: Path,
@@ -545,7 +550,71 @@ def load_prepared_option_positions_context(
         raise PreparedOptionPositionsContextError(
             "prepared option decision snapshot fingerprint mismatch"
         )
-    return payload
+    return {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": manifest_bytes,
+        "payload_bytes": payload_bytes,
+    }
+
+
+def load_prepared_option_positions_context_receipt(
+    *,
+    manifest_path: Path,
+    expected_base: Path,
+    expected_run_id: str,
+    expected_account: str,
+    expected_account_config_sha256: str,
+    expected_manifest_sha256: str | None = None,
+    expected_runtime_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load bytes and expose only the owner-validated application receipt."""
+
+    receipt = _load_prepared_option_positions_context_artifacts(
+        manifest_path=manifest_path,
+        expected_base=expected_base,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_runtime_config=expected_runtime_config,
+    )
+    manifest = receipt["manifest"]
+    prepared = receipt["payload"]["prepared_authority"]
+    application_received_at_utc = _utc_application_receipt(
+        manifest.get("application_received_at_utc")
+    )
+    if (
+        str(prepared.get("application_received_at_utc") or "")
+        != application_received_at_utc
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option payload authority mismatch: application_received_at_utc"
+        )
+    return receipt
+
+
+def load_prepared_option_positions_context(
+    *,
+    manifest_path: Path,
+    expected_base: Path,
+    expected_run_id: str,
+    expected_account: str,
+    expected_account_config_sha256: str,
+    expected_manifest_sha256: str | None = None,
+    expected_runtime_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load the existing payload-only facade from a validated receipt."""
+
+    return _load_prepared_option_positions_context_artifacts(
+        manifest_path=manifest_path,
+        expected_base=expected_base,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_runtime_config=expected_runtime_config,
+    )["payload"]
 
 
 def exchange_rate_scalars_from_option_context(
@@ -599,6 +668,7 @@ def _publish_ready_context(
     ledger_generation_sha256: str,
     decision_state_fingerprint: str,
     source_observed_at: str,
+    application_received_at_utc: str,
     fx_status: str,
     fx_observation_sha256: str,
     fx_error_type: str | None,
@@ -622,6 +692,7 @@ def _publish_ready_context(
         "ledger_generation_sha256": ledger_generation_sha256,
         "decision_state_fingerprint": decision_state_fingerprint,
         "source_observed_at": source_observed_at,
+        "application_received_at_utc": application_received_at_utc,
         "fx_status": fx_status,
         "fx_observation_sha256": fx_observation_sha256,
     }
@@ -647,6 +718,7 @@ def _publish_unavailable_manifest(
     fx_observation_sha256: str,
     fx_error_type: str | None,
 ) -> dict[str, Any]:
+    application_received_at_utc = datetime.now(timezone.utc).isoformat()
     manifest: dict[str, Any] = {
         "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
         "run_id": run_id,
@@ -655,6 +727,7 @@ def _publish_unavailable_manifest(
         "reason": str(reason),
         "account_config_sha256": account_config_sha256,
         "source_observed_at": source_observed_at,
+        "application_received_at_utc": application_received_at_utc,
         "fx_status": fx_status,
         "fx_observation_sha256": fx_observation_sha256,
     }
@@ -766,6 +839,21 @@ def _required_sha256(value: Any, field: str) -> str:
     return digest
 
 
+def _utc_application_receipt(value: Any) -> str:
+    text = _required_text(value, "application_received_at_utc")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PreparedOptionPositionsContextError(
+            "application_received_at_utc is invalid"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise PreparedOptionPositionsContextError(
+            "application_received_at_utc must be UTC"
+        )
+    return text
+
+
 def _positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -783,5 +871,6 @@ __all__ = [
     "cny_per_currency_rates_from_option_context",
     "exchange_rate_scalars_from_option_context",
     "load_prepared_option_positions_context",
+    "load_prepared_option_positions_context_receipt",
     "prepare_option_positions_contexts",
 ]

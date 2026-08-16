@@ -30,6 +30,7 @@ from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
+    load_prepared_portfolio_context_receipt,
     prepare_portfolio_contexts,
 )
 from src.application.prepared_option_positions_context import (
@@ -37,6 +38,7 @@ from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsBatch,
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
+    load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
 )
 from src.application.required_data_prefetch_planning import (
@@ -60,12 +62,22 @@ from src.application.required_data_snapshot import (
     load_required_data_snapshot_manifest,
     seal_required_data_snapshot,
 )
+from src.application.candidate_snapshot_manifest import (
+    CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    load_candidate_snapshot_bundle,
+)
+from src.application.runtime_portfolio_snapshot import (
+    RuntimePortfolioSnapshotError,
+    assemble_runtime_portfolio_snapshot,
+    publish_runtime_portfolio_snapshot,
+)
 from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
     load_account_run_config,
     publish_account_run_config,
+    read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
     write_account_run_state_json_safely,
 )
@@ -1038,6 +1050,23 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             ran_pipeline_accounts.append(account)
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
+        if outcome.ran_pipeline:
+            _publish_runtime_portfolio_snapshot_shadow(
+                request=request,
+                account=account,
+                account_config_authority=account_config_authorities.get(account),
+                prepared_portfolio_manifest_path=(prepared_manifest_paths.get(account)),
+                prepared_portfolio_manifest_sha256=(
+                    prepared_manifest_sha256_by_account.get(account)
+                ),
+                prepared_option_manifest_path=(
+                    prepared_option_manifest_paths.get(account)
+                ),
+                prepared_option_manifest_sha256=(
+                    prepared_option_manifest_sha256_by_account.get(account)
+                ),
+                required_data_manifest_path=snapshot_manifest_path,
+            )
 
     return TickAccountExecutionOutcome(
         results=results,
@@ -1051,6 +1080,172 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         snapshot_manifest_sha256=snapshot_manifest_sha256,
         prepared_context_metrics=tuple(prepared_context_metrics),
     )
+
+
+def _publish_runtime_portfolio_snapshot_shadow(
+    *,
+    request: TickAccountExecutionRequest,
+    account: str,
+    account_config_authority: AccountRunConfigAuthority | None,
+    prepared_portfolio_manifest_path: Path | None,
+    prepared_portfolio_manifest_sha256: str | None,
+    prepared_option_manifest_path: Path | None,
+    prepared_option_manifest_sha256: str | None,
+    required_data_manifest_path: Path | None,
+) -> None:
+    """Publish the additive compact shadow without changing legacy results."""
+
+    status = "data_unavailable"
+    telemetry: dict[str, Any] = {"account": account}
+    try:
+        if account_config_authority is None:
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_INPUT_UNAVAILABLE",
+                "account config authority is unavailable",
+            )
+        if prepared_portfolio_manifest_path is None:
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_INPUT_UNAVAILABLE",
+                "prepared portfolio manifest is unavailable",
+            )
+        if prepared_option_manifest_path is None:
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_INPUT_UNAVAILABLE",
+                "prepared option manifest is unavailable",
+            )
+        if required_data_manifest_path is None:
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_INPUT_UNAVAILABLE",
+                "required-data manifest is unavailable",
+            )
+        config = load_account_run_config(
+            authority=account_config_authority,
+            base=request.base,
+            run_id=request.run_id,
+            account=account,
+        )
+        portfolio_receipt = load_prepared_portfolio_context_receipt(
+            manifest_path=prepared_portfolio_manifest_path,
+            expected_base=request.base,
+            expected_run_id=request.run_id,
+            expected_account=account,
+            expected_account_config_sha256=(
+                account_config_authority.account_config_sha256
+            ),
+            expected_manifest_sha256=prepared_portfolio_manifest_sha256,
+            expected_runtime_config=config,
+        )
+        option_receipt = load_prepared_option_positions_context_receipt(
+            manifest_path=prepared_option_manifest_path,
+            expected_base=request.base,
+            expected_run_id=request.run_id,
+            expected_account=account,
+            expected_account_config_sha256=(
+                account_config_authority.account_config_sha256
+            ),
+            expected_manifest_sha256=prepared_option_manifest_sha256,
+            expected_runtime_config=config,
+        )
+        portfolio_payload_bytes = portfolio_receipt.get("payload_bytes")
+        option_payload_bytes = option_receipt.get("payload_bytes")
+        if not isinstance(portfolio_payload_bytes, bytes) or not isinstance(
+            option_payload_bytes,
+            bytes,
+        ):
+            raise RuntimePortfolioSnapshotError(
+                "RUNTIME_PORTFOLIO_SNAPSHOT_INPUT_UNAVAILABLE",
+                "prepared owner payload is unavailable",
+            )
+
+        candidate_bundle = load_candidate_snapshot_bundle(
+            base=request.base,
+            run_id=request.run_id,
+            account=account,
+        )
+        candidate_manifest = candidate_bundle["manifest"]
+        candidate_manifest_bytes = read_account_run_state_bytes_safely(
+            base=request.base,
+            run_id=request.run_id,
+            account=account,
+            name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+        )
+        account_dir = (
+            Path(request.base).resolve()
+            / "output_runs"
+            / request.run_id
+            / "accounts"
+            / account
+        )
+        status_index_path = account_dir / str(
+            candidate_manifest["status_index"]["relpath"]
+        )
+        candidate_status_index_bytes = status_index_path.read_bytes()
+        owner_bytes = {
+            str(row["candidate_owner"]): (
+                read_account_run_state_bytes_safely(
+                    base=request.base,
+                    run_id=request.run_id,
+                    account=account,
+                    name=Path(str(row["relpath"])).name,
+                )
+            )
+            for row in candidate_manifest["owner_snapshots"]
+        }
+        snapshot, reference_payloads = assemble_runtime_portfolio_snapshot(
+            run_id=request.run_id,
+            account=account,
+            account_config_bytes=account_config_authority.canonical_bytes,
+            prepared_option_manifest_bytes=option_receipt["manifest_bytes"],
+            prepared_option_payload_bytes=option_payload_bytes,
+            prepared_portfolio_manifest_bytes=portfolio_receipt["manifest_bytes"],
+            prepared_portfolio_payload_bytes=portfolio_payload_bytes,
+            required_data_manifest_bytes=Path(required_data_manifest_path).read_bytes(),
+            candidate_manifest_bytes=candidate_manifest_bytes,
+            candidate_status_index_bytes=candidate_status_index_bytes,
+            candidate_owner_snapshot_bytes=owner_bytes,
+        )
+        path = publish_runtime_portfolio_snapshot(
+            base=request.base,
+            snapshot=snapshot,
+            reference_payloads=reference_payloads,
+        )
+        status = str(snapshot["status"])
+        telemetry.update(
+            {
+                "snapshot_status": status,
+                "reason_count": len(snapshot["reason_codes"]),
+                "content_sha256": snapshot["seal"]["content_sha256"],
+                "artifact_name": path.name,
+            }
+        )
+    except Exception as exc:
+        telemetry.update(
+            {
+                "snapshot_status": "data_unavailable",
+                "error_type": type(exc).__name__,
+                "error_code": getattr(exc, "code", None),
+            }
+        )
+    event_status = "ok" if status == "trusted" else "degraded"
+    try:
+        request.audit_helper.audit(
+            "write",
+            "runtime_portfolio_snapshot",
+            run_id=request.run_id,
+            account=account,
+            status=("ok" if status == "trusted" else "error"),
+            extra=telemetry,
+        )
+    except Exception:
+        pass
+    try:
+        request.runlog.safe_event(
+            "runtime_portfolio_snapshot",
+            event_status,
+            data=telemetry,
+        )
+    except Exception:
+        pass
 
 
 def _account_config_failure_outcome(

@@ -12,12 +12,20 @@ from src.application.multi_tick.misc import AccountResult
 
 
 class _RunLog:
-    def safe_event(self, *_args, **_kwargs):
+    def __init__(self):
+        self.events = []
+
+    def safe_event(self, *_args, **kwargs):
+        self.events.append(kwargs)
         return None
 
 
 class _Audit:
-    def audit(self, *_args, **_kwargs):
+    def __init__(self):
+        self.events = []
+
+    def audit(self, *_args, **kwargs):
+        self.events.append(kwargs)
         return None
 
     def fail_schema_validation(self, **_kwargs):
@@ -1062,3 +1070,151 @@ def test_config_drift_isolated_to_one_account_before_shared_prefetch(
         "ok",
     ]
     assert outcome.ran_pipeline_accounts == ["sy"]
+
+
+def test_runtime_snapshot_shadow_is_account_scoped_and_legacy_neutral(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+
+    assembly_calls: list[dict] = []
+    forbidden_reads = dict.fromkeys(
+        ("ledger_prepare", "portfolio_prepare", "ledger_open", "ledger_list"),
+        0,
+    )
+    audit = _Audit()
+    runlog = _RunLog()
+    request = SimpleNamespace(
+        base=tmp_path,
+        run_id="run-1",
+        audit_helper=audit,
+        runlog=runlog,
+    )
+    legacy = AccountResult("lx", True, True, "ok", "unchanged")
+    legacy_before = vars(legacy).copy()
+    required_path = tmp_path / "required.json"
+    required_path.write_bytes(b"required")
+
+    def _candidate_bundle(*, account: str, **_kwargs):
+        account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / account
+        status_path = account_dir / "status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_bytes(f"status:{account}".encode())
+        return {
+            "manifest": {
+                "status_index": {"relpath": "status.json"},
+                "owner_snapshots": [
+                    {
+                        "candidate_owner": "opening",
+                        "relpath": "state/opening.json",
+                    }
+                ],
+            }
+        }
+
+    def _assemble(**kwargs):
+        assembly_calls.append(kwargs)
+        account = kwargs["account"]
+        return (
+            {
+                "account": account,
+                "status": "trusted",
+                "reason_codes": [],
+                "seal": {"content_sha256": "a" * 64},
+            },
+            {"state/config.override.json": kwargs["account_config_bytes"]},
+        )
+
+    def _publish(*, snapshot: dict, **_kwargs):
+        if snapshot["account"] == "sy":
+            raise mod.RuntimePortfolioSnapshotError(
+                "ACCOUNT_RUN_STATE_CONFLICT",
+                "injected immutable conflict",
+            )
+        return tmp_path / "runtime_portfolio_snapshot.v1.json"
+
+    def _forbidden(name):
+        def _call(*_args, **_kwargs):
+            forbidden_reads[name] += 1
+
+        return _call
+
+    for attribute, counter in {
+        "prepare_option_positions_contexts": "ledger_prepare",
+        "prepare_portfolio_contexts": "portfolio_prepare",
+        "open_position_ledger_from_data_config": "ledger_open",
+        "list_position_lot_snapshots": "ledger_list",
+    }.items():
+        monkeypatch.setattr(mod, attribute, _forbidden(counter))
+    monkeypatch.setattr(
+        mod,
+        "load_account_run_config",
+        lambda **kwargs: {"portfolio": {"account": kwargs["account"]}},
+    )
+
+    def _receipt(kind):
+        return lambda **kwargs: {
+            key: f"{kind}-{part}:{kwargs['expected_account']}".encode()
+            for key, part in (
+                ("manifest_bytes", "manifest"),
+                ("payload_bytes", "payload"),
+            )
+        }
+
+    monkeypatch.setattr(
+        mod, "load_prepared_portfolio_context_receipt", _receipt("portfolio")
+    )
+    monkeypatch.setattr(
+        mod, "load_prepared_option_positions_context_receipt", _receipt("option")
+    )
+    monkeypatch.setattr(mod, "load_candidate_snapshot_bundle", _candidate_bundle)
+    monkeypatch.setattr(
+        mod,
+        "read_account_run_state_bytes_safely",
+        lambda *, account, name, **_kwargs: f"{name}:{account}".encode(),
+    )
+    monkeypatch.setattr(mod, "assemble_runtime_portfolio_snapshot", _assemble)
+    monkeypatch.setattr(mod, "publish_runtime_portfolio_snapshot", _publish)
+
+    for account in ("lx", "sy"):
+        authority = SimpleNamespace(
+            account_config_sha256=hashlib.sha256(account.encode()).hexdigest(),
+            canonical_bytes=f"config:{account}".encode(),
+        )
+        mod._publish_runtime_portfolio_snapshot_shadow(
+            request=request,
+            account=account,
+            account_config_authority=authority,
+            prepared_portfolio_manifest_path=tmp_path / f"portfolio-{account}",
+            prepared_portfolio_manifest_sha256="b" * 64,
+            prepared_option_manifest_path=tmp_path / f"option-{account}",
+            prepared_option_manifest_sha256="c" * 64,
+            required_data_manifest_path=required_path,
+        )
+
+    assert [call["account"] for call in assembly_calls] == ["lx", "sy"]
+    assert [call["account_config_bytes"] for call in assembly_calls] == [
+        b"config:lx",
+        b"config:sy",
+    ]
+    assert not any(forbidden_reads.values())
+    assert vars(legacy) == legacy_before
+    assert [event["account"] for event in audit.events] == ["lx", "sy"]
+    assert [event["status"] for event in audit.events] == ["ok", "error"]
+    assert all(len(event["extra"]) <= 5 for event in audit.events)
+    assert all(
+        set(event["extra"])
+        <= {
+            "account",
+            "snapshot_status",
+            "reason_count",
+            "content_sha256",
+            "artifact_name",
+            "error_type",
+            "error_code",
+        }
+        for event in audit.events
+    )
+    assert [event["data"]["account"] for event in runlog.events] == ["lx", "sy"]
+    assert runlog.events[1]["data"]["error_code"] == "ACCOUNT_RUN_STATE_CONFLICT"

@@ -704,6 +704,7 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
     )
 
     assert snapshot["snapshot_status"] == "trusted"
+    assert snapshot["current_decision_read"] == current
     assert snapshot["current_decision_shadow"]["status"] == "matched"
     assert snapshot["current_decision_shadow"]["mismatch_count"] == 0
     assert {item["section"] for item in snapshot["current_decision_shadow"]["sections"]} == {
