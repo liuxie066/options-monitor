@@ -17,6 +17,12 @@ from src.application.candidate_evidence_history import (
     summarize_run_candidate_evidence,
 )
 from src.application.shadow_replay import build_shadow_replay_dataset, mark_shadow_replay_dataset
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    load_required_data_scan_blob,
+    required_data_scan_blob_ref_identity,
+    validate_required_data_scan_blob_ref,
+)
 
 
 SCHEMA_VERSION = "research_archive.v2"
@@ -55,6 +61,43 @@ def read_json(path):
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+def scan_blob_refs(run_dir):
+    manifest_path = run_dir / "state" / "required_data_snapshot_manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return [], "absent", None
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return [], "invalid", "required-data snapshot manifest is unsafe"
+    manifest = read_json(manifest_path)
+    symbols = manifest.get("symbols")
+    if not isinstance(symbols, dict):
+        return [], "invalid", "required-data snapshot symbols are invalid"
+    refs = {}
+    try:
+        for entry in symbols.values():
+            if not isinstance(entry, dict) or "scan_blob_ref" not in entry:
+                continue
+            ref = entry["scan_blob_ref"]
+            digest = str(ref.get("blob_sha256") or "") if isinstance(ref, dict) else ""
+            relpath = str(ref.get("blob_relpath") or "") if isinstance(ref, dict) else ""
+            if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+                raise ValueError("blob hash is invalid")
+            if relpath != f"output_shared/blobs/sha256/{digest[:2]}/{digest}.json.gz":
+                raise ValueError("blob path is invalid")
+            previous = refs.get(digest)
+            stable = {key: value for key, value in ref.items() if key != "published_at_utc"}
+            previous_stable = (
+                {key: value for key, value in previous.items() if key != "published_at_utc"}
+                if isinstance(previous, dict)
+                else None
+            )
+            if previous_stable is not None and previous_stable != stable:
+                raise ValueError("blob references conflict")
+            if previous is None or str(ref.get("published_at_utc") or "") > str(previous.get("published_at_utc") or ""):
+                refs[digest] = ref
+    except (TypeError, ValueError) as exc:
+        return [], "invalid", str(exc)
+    return [refs[key] for key in sorted(refs)], "ready", None
 
 def critical_files(run_dir):
     candidate_manifests = relative_matches(run_dir, ("candidate_snapshot_manifest.v1.json",))
@@ -136,6 +179,7 @@ if runs_root.exists() and runs_root.is_dir():
             continue
         critical = critical_files(item)
         files = file_manifest(item)
+        blob_refs, blob_status, blob_error = scan_blob_refs(item)
         has_replay = has_replay_evidence(critical)
         if require_replay and not has_replay:
             continue
@@ -149,6 +193,9 @@ if runs_root.exists() and runs_root.is_dir():
             "critical_files": critical,
             "file_manifest": files,
             "content_digest": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "scan_blob_refs": blob_refs,
+            "scan_blob_reference_status": blob_status,
+            "scan_blob_reference_error": blob_error,
         })
 paths = {}
 for rel in ("output_shared/research", "output_shared/required_data", "logs"):
@@ -232,6 +279,10 @@ def archive_pull(
     )
     if source_inventory_metadata.get("source_host"):
         source["source_host"] = source_inventory_metadata["source_host"]
+    scan_blob_refs = _selected_scan_blob_refs(
+        source=source,
+        source_run_inventory=source_run_inventory,
+    )
     rel_dirs = [f"output_runs/{run_id}" for run_id in selected_runs]
     rel_dirs.extend(SYNC_RELATIVE_DIRS)
     if include_logs:
@@ -245,24 +296,52 @@ def archive_pull(
     )
     if inventory_operation:
         operations.append(inventory_operation)
-    for rel in rel_dirs:
-        destination = (
-            staging_root / rel
-            if staging_root is not None and rel.startswith("output_runs/")
-            else root / rel
-        )
+    sync_items = [(rel, True) for rel in rel_dirs]
+    sync_items.extend((str(ref["blob_relpath"]), False) for ref in scan_blob_refs)
+    for rel, is_directory in sync_items:
+        if staging_root is not None and rel.startswith("output_runs/"):
+            destination = staging_root / rel
+        elif is_directory:
+            destination = root / rel
+        else:
+            destination = (root / rel).parent
         if write:
             destination.mkdir(parents=True, exist_ok=True)
         command = _rsync_command(
             rsync_path=rsync_path,
-            source=_source_uri(source, rel),
+            source=_source_uri(source, rel, directory=is_directory),
             destination=destination,
             dry_run=not write,
         )
         operation = _run_command(command, run_cmd=run_cmd, timeout=600)
         if not operation.get("ok") and _optional_sync_dir(rel) and _rsync_missing_source(operation):
             operation = {**operation, "ok": True, "skipped": True, "reason": "source_dir_missing"}
-        operations.append(operation)
+        operations.append(
+            {
+                **operation,
+                "relative_path": rel,
+                "sync_kind": "directory" if is_directory else "scan_blob",
+            }
+        )
+
+    if write and all(bool(item.get("ok")) for item in operations):
+        for ref in scan_blob_refs:
+            try:
+                load_required_data_scan_blob(runtime_root=root, blob_ref=ref)
+                operation = {
+                    "ok": True,
+                    "sync_kind": "scan_blob_verify",
+                    "relative_path": str(ref["blob_relpath"]),
+                }
+            except RequiredDataBlobError as exc:
+                operation = {
+                    "ok": False,
+                    "sync_kind": "scan_blob_verify",
+                    "relative_path": str(ref["blob_relpath"]),
+                    "reason": "scan_blob_integrity_failed",
+                    "error": str(exc),
+                }
+            operations.append(operation)
 
     ok = all(bool(item.get("ok")) for item in operations)
     manifest: dict[str, Any] | None = None
@@ -348,6 +427,7 @@ def archive_pull(
                 selected_runs=selected_runs,
                 require_replay_evidence=require_replay_evidence,
                 include_logs=include_logs,
+                scan_blob_refs=scan_blob_refs,
                 operations=operations,
                 verify=verify,
                 now_fn=now_fn,
@@ -369,6 +449,7 @@ def archive_pull(
         "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
+        "scan_blob_refs": scan_blob_refs,
         "operations": operations,
         "manifest": manifest,
     }
@@ -530,10 +611,17 @@ def _mark_dataset_from_run_required_data(
     as_of: str,
 ) -> dict[str, Any]:
     required_root = required_data_dir.resolve()
+    blob_refs, blob_status, blob_error = _run_scan_blob_refs(
+        required_root.parent
+    )
     base_payload = {
         "required_data_root": str(required_root),
         "dataset_dir": str(dataset_dir.resolve()),
+        "scan_blob_refs": blob_refs,
+        "scan_blob_reference_status": blob_status,
     }
+    if blob_error:
+        base_payload["scan_blob_reference_error"] = blob_error
     if not required_root.exists() or not required_root.is_dir():
         return {**base_payload, "ok": True, "status": "skipped", "reason": "run_required_data_missing"}
     if not _has_required_data_csv(required_root):
@@ -567,6 +655,13 @@ def _mark_dataset_from_run_required_data(
 
 
 def _has_required_data_csv(required_root: Path) -> bool:
+    manifest_path = (
+        required_root.parent
+        / "state"
+        / "required_data_snapshot_manifest.json"
+    )
+    if manifest_path.exists() or manifest_path.is_symlink():
+        return True
     parsed = required_root / "parsed"
     source = parsed if parsed.exists() and parsed.is_dir() else required_root
     return any(path.is_file() for path in source.glob("*_required_data.csv"))
@@ -863,6 +958,67 @@ def _select_source_runs(
     )
 
 
+def _selected_scan_blob_refs(
+    *,
+    source: dict[str, Any],
+    source_run_inventory: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_hash: dict[str, dict[str, Any]] = {}
+    for run in source_run_inventory:
+        if run.get("scan_blob_reference_status") == "invalid":
+            raise AgentToolError(
+                code="SOURCE_INVENTORY_ERROR",
+                message=(
+                    f"invalid required-data blob refs for {run.get('run_id')}: "
+                    f"{run.get('scan_blob_reference_error') or 'unknown error'}"
+                ),
+            )
+        refs = run.get("scan_blob_refs") or []
+        if not isinstance(refs, list):
+            raise AgentToolError(
+                code="SOURCE_INVENTORY_ERROR",
+                message="required-data blob ref inventory is invalid",
+            )
+        for raw_ref in refs:
+            try:
+                ref = validate_required_data_scan_blob_ref(raw_ref)
+            except (TypeError, RequiredDataBlobError) as exc:
+                raise AgentToolError(
+                    code="SOURCE_INVENTORY_ERROR",
+                    message="required-data blob ref inventory is invalid",
+                ) from exc
+            digest = str(ref["blob_sha256"])
+            previous = by_hash.get(digest)
+            if previous is not None and (
+                required_data_scan_blob_ref_identity(previous)
+                != required_data_scan_blob_ref_identity(ref)
+            ):
+                raise AgentToolError(
+                    code="SOURCE_INVENTORY_ERROR",
+                    message="required-data blob ref inventory conflicts",
+                )
+            if previous is None or ref["published_at_utc"] > previous["published_at_utc"]:
+                by_hash[digest] = ref
+    refs = [by_hash[key] for key in sorted(by_hash)]
+    if source["kind"] == "local":
+        source_root = Path(source["runtime_root"])
+        for ref in refs:
+            try:
+                load_required_data_scan_blob(
+                    runtime_root=source_root,
+                    blob_ref=ref,
+                )
+            except RequiredDataBlobError as exc:
+                raise AgentToolError(
+                    code="SOURCE_INVENTORY_ERROR",
+                    message=(
+                        "referenced required-data blob is missing or corrupt: "
+                        f"{ref['blob_relpath']}"
+                    ),
+                ) from exc
+    return refs
+
+
 def _source_context(
     *,
     source_root: str | Path | None,
@@ -930,6 +1086,7 @@ def _source_run_dirs(
             continue
         critical = _critical_files(item)
         files = _file_manifest(item)
+        blob_refs, blob_status, blob_error = _run_scan_blob_refs(item)
         has_replay = _has_replay_evidence(critical)
         if require_replay_evidence and not has_replay:
             continue
@@ -944,9 +1101,51 @@ def _source_run_dirs(
                 "critical_files": critical,
                 "file_manifest": files,
                 "content_digest": _content_digest(files),
+                "scan_blob_refs": blob_refs,
+                "scan_blob_reference_status": blob_status,
+                "scan_blob_reference_error": blob_error,
             }
         )
     return out
+
+
+def _run_scan_blob_refs(
+    run_dir: Path,
+) -> tuple[list[dict[str, Any]], str, str | None]:
+    manifest_path = run_dir / "state" / "required_data_snapshot_manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return [], "absent", None
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return [], "invalid", "required-data snapshot manifest is unsafe"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        symbols = payload.get("symbols") if isinstance(payload, dict) else None
+        if not isinstance(symbols, dict):
+            raise ValueError("required-data snapshot symbols are invalid")
+        by_hash: dict[str, dict[str, Any]] = {}
+        for entry in symbols.values():
+            if not isinstance(entry, dict) or "scan_blob_ref" not in entry:
+                continue
+            ref = validate_required_data_scan_blob_ref(entry["scan_blob_ref"])
+            digest = str(ref["blob_sha256"])
+            previous = by_hash.get(digest)
+            if previous is not None and (
+                required_data_scan_blob_ref_identity(previous)
+                != required_data_scan_blob_ref_identity(ref)
+            ):
+                raise ValueError("required-data blob references conflict")
+            if previous is None or ref["published_at_utc"] > previous["published_at_utc"]:
+                by_hash[digest] = ref
+        return [by_hash[key] for key in sorted(by_hash)], "ready", None
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RequiredDataBlobError,
+    ) as exc:
+        return [], "invalid", f"{type(exc).__name__}: {exc}"
 
 
 def _rsync_command(*, rsync_path: str, source: str, destination: Path, dry_run: bool) -> list[str]:
@@ -968,11 +1167,18 @@ def _rsync_missing_source(operation: dict[str, Any]) -> bool:
     return any(token in stderr for token in ("(l)stat", "change_dir", "link_stat"))
 
 
-def _source_uri(source: dict[str, Any], rel: str) -> str:
+def _source_uri(
+    source: dict[str, Any],
+    rel: str,
+    *,
+    directory: bool = True,
+) -> str:
     rel_path = rel.strip("/")
     if source["kind"] == "local":
-        return str((Path(source["runtime_root"]) / rel_path).resolve()) + "/"
-    return f"{source['ssh_target']}:{str(source['runtime_root']).rstrip('/')}/{rel_path}/"
+        suffix = "/" if directory else ""
+        return str((Path(source["runtime_root"]) / rel_path).resolve()) + suffix
+    suffix = "/" if directory else ""
+    return f"{source['ssh_target']}:{str(source['runtime_root']).rstrip('/')}/{rel_path}{suffix}"
 
 
 def _sync_manifest(
@@ -985,6 +1191,7 @@ def _sync_manifest(
     selected_runs: list[str],
     require_replay_evidence: bool,
     include_logs: bool,
+    scan_blob_refs: list[dict[str, Any]],
     operations: list[dict[str, Any]],
     verify: dict[str, Any],
     now_fn: Callable[[], datetime] | None,
@@ -1002,6 +1209,7 @@ def _sync_manifest(
         "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
+        "scan_blob_refs": scan_blob_refs,
         "operation_count": len(operations),
         "operation_ok": all(bool(item.get("ok")) for item in operations),
         "verify_summary": verify.get("summary"),
@@ -1044,6 +1252,7 @@ def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
             for path in files
             for part in path.relative_to(run_dir).parts
         )
+        blob_refs, blob_status, blob_error = _run_scan_blob_refs(run_dir)
         out.append(
             {
                 "run_id": run_dir.name,
@@ -1064,6 +1273,9 @@ def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
                 ),
                 "candidate_evidence": classification,
                 "critical_files": critical,
+                "scan_blob_refs": blob_refs,
+                "scan_blob_reference_status": blob_status,
+                "scan_blob_reference_error": blob_error,
             }
         )
     return out

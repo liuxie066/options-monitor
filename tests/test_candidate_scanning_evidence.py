@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from domain.domain.engine.candidate_engine import (
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
-from src.application.candidate_scanning import evidence_summary_from_decisions
+from src.application.candidate_scanning import (
+    _load_required_data_rows,
+    evidence_summary_from_decisions,
+)
 from src.application.sell_call_steps import _evidence_scan_status as call_status
 from src.application.sell_put_steps import _evidence_scan_status as put_status
 
@@ -124,3 +128,32 @@ def test_summary_rejects_accepted_count_drift() -> None:
             decisions=[_decision(accepted=True)],
             accepted_count=0,
         )
+
+
+def test_supplied_required_data_frame_avoids_legacy_csv_read(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {"symbol": "NVDA", "option_type": "put"},
+            {"symbol": "NVDA", "option_type": "call"},
+        ]
+    )
+    monkeypatch.setattr(
+        "src.application.candidate_scanning.pd.read_csv",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical frame must avoid the legacy CSV")
+        ),
+    )
+
+    result = _load_required_data_rows(
+        input_root=tmp_path,
+        symbol="NVDA",
+        mode="put",
+        frames={"NVDA": frame},
+    )
+
+    assert result.to_dict("records") == [
+        {"symbol": "NVDA", "option_type": "put"}
+    ]

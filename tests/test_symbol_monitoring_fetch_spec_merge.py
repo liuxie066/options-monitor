@@ -159,6 +159,7 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
     import src.application.symbol_monitoring as mod
 
     captured: dict[str, object] = {}
+    scan_kwargs: dict[str, object] = {}
     monkeypatch.setattr(
         mod,
         "build_required_data_fetch_plan",
@@ -169,6 +170,17 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
 
     def _multiplier_writer(**_kwargs):
         raise AssertionError("frozen consumer must not rewrite required data")
+
+    def _ensure_required_data(**kwargs):
+        captured.update(kwargs)
+        kwargs["required_data_csv_bytes_sink_fn"](
+            b"symbol,option_type\nNVDA,put\n"
+        )
+        return {"snapshot_id": "snapshot-1", "receipt_relpath": "receipt.json"}
+
+    def _scan(**kwargs):
+        scan_kwargs.update(kwargs)
+        return {"strategy": "sell_put", "candidate_count": 0}
 
     deps = mod.SymbolMonitoringDependencies(
         build_converter_fn=lambda **_kwargs: object(),
@@ -184,14 +196,8 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             },
         )(),
         apply_multiplier_cache_fn=_multiplier_writer,
-        ensure_required_data_fn=lambda **kwargs: (
-            captured.update(kwargs)
-            or {"snapshot_id": "snapshot-1", "receipt_relpath": "receipt.json"}
-        ),
-        run_sell_put_scan_fn=lambda **_kwargs: {
-            "strategy": "sell_put",
-            "candidate_count": 0,
-        },
+        ensure_required_data_fn=_ensure_required_data,
+        run_sell_put_scan_fn=_scan,
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {
             "symbol": symbol,
             "strategy": "sell_put",
@@ -235,6 +241,9 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
     assert out[0]["candidate_count"] == 0
     assert captured["fetch_plan"] is None
     assert captured["required_data_snapshot_run_id"] == "run-1"
+    assert scan_kwargs["required_data_frame"].to_dict("records") == [
+        {"symbol": "NVDA", "option_type": "put"}
+    ]
 
 
 def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(

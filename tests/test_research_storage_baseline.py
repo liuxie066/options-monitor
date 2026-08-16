@@ -140,6 +140,51 @@ def _history_report(path: Path, *, root: Path, observed_at: str, unique_bytes: i
     )
 
 
+def _publish_scan_blob(root: Path, symbol: str) -> dict[str, Any]:
+    from src.application.required_data_blobs import publish_required_data_scan_blob
+
+    contract = f"{symbol}300101P00100000"
+    provider = {
+        "symbol": symbol,
+        "rows": [
+            {
+                "symbol": symbol,
+                "option_type": "put",
+                "expiration": "2030-01-01",
+                "contract_symbol": contract,
+                "strike": 100,
+                "multiplier": 100,
+            }
+        ],
+    }
+    raw_bytes = (json.dumps(provider, ensure_ascii=False, indent=2) + "\n").encode()
+    columns = [
+        "symbol",
+        "option_type",
+        "expiration",
+        "contract_symbol",
+        "strike",
+        "multiplier",
+    ]
+    csv_bytes = (
+        ",".join(columns)
+        + f"\n{symbol},put,2030-01-01,{contract},100,100\n"
+    ).encode()
+    return publish_required_data_scan_blob(
+        runtime_root=root,
+        symbol=symbol,
+        market="US",
+        raw_json_bytes=raw_bytes,
+        required_data_csv_bytes=csv_bytes,
+        columns=columns,
+    )
+
+
+def _write_scan_blob_manifest(path: Path, *refs: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"scan_blob_refs": list(refs)}), encoding="utf-8")
+
+
 def test_collect_returns_deterministic_schema_and_aggregate_sqlite_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -898,3 +943,202 @@ def test_tier_classification_is_preview_only() -> None:
     assert module._storage_tier(storage_class="sealed_run_artifact", age_days=999) == "hot"
     assert module._storage_tier(storage_class="research_artifact", age_days=30) == "hot"
     assert module._storage_tier(storage_class="research_artifact", age_days=31) == "warm"
+
+
+def test_scan_blob_gc_preview_marks_retained_and_research_roots_and_old_orphans(
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    expired_ref = _publish_scan_blob(root, "AAA")
+    latest_ref = _publish_scan_blob(root, "BBB")
+    research_ref = _publish_scan_blob(root, "CCC")
+    orphan_ref = _publish_scan_blob(root, "DDD")
+    newer_expired_ref = {
+        **expired_ref,
+        "published_at_utc": "2029-12-31T00:00:00Z",
+    }
+    base_timestamp = (observed_at.timestamp() - 30 * 86400)
+    for index in range(202):
+        run_dir = root / "output_runs" / f"run-{index:03d}"
+        run_dir.mkdir()
+        if index == 0:
+            _write_scan_blob_manifest(run_dir / "state/manifest.json", expired_ref)
+        elif index == 1:
+            _write_scan_blob_manifest(run_dir / "state/manifest.json", newer_expired_ref)
+        elif index == 2:
+            _write_scan_blob_manifest(run_dir / "state/manifest.json", latest_ref)
+        os.utime(run_dir, (base_timestamp + index, base_timestamp + index))
+    _write_scan_blob_manifest(
+        root / "output_shared/research/daily/manifest.json",
+        research_ref,
+    )
+    before = _tree_identity(root)
+
+    first = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: observed_at,
+    )
+    second = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: datetime(2030, 2, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert _tree_identity(root) == before
+    assert first["deletion_allowed"] is True
+    assert first["summary"]["run_count"] == 202
+    assert first["summary"]["retained_run_count"] == 200
+    assert first["reachable_blob_sha256"] == sorted(
+        [latest_ref["blob_sha256"], research_ref["blob_sha256"]]
+    )
+    assert {item["blob_sha256"] for item in first["candidates"]} == {
+        expired_ref["blob_sha256"],
+        orphan_ref["blob_sha256"],
+    }
+    expired_candidate = next(
+        item
+        for item in first["candidates"]
+        if item["blob_sha256"] == expired_ref["blob_sha256"]
+    )
+    assert expired_candidate["published_at_utc"] == "2029-12-31T00:00:00Z"
+    assert first["plan_sha256"] == second["plan_sha256"]
+    assert first["observed_at_utc"] != second["observed_at_utc"]
+    assert first["candidates"][0]["age_hours"] != second["candidates"][0]["age_hours"]
+
+    first_empty_root = _make_runtime(tmp_path / "first-empty", with_ledger=False)
+    second_empty_root = _make_runtime(tmp_path / "second-empty", with_ledger=False)
+    first_empty = module.preview_scan_blob_gc(
+        runtime_root=first_empty_root,
+        now_fn=lambda: observed_at,
+    )
+    second_empty = module.preview_scan_blob_gc(
+        runtime_root=second_empty_root,
+        now_fn=lambda: observed_at,
+    )
+    assert first_empty["summary"] == second_empty["summary"]
+    assert first_empty["plan_sha256"] != second_empty["plan_sha256"]
+
+
+def test_scan_blob_gc_preview_keeps_recent_run_outside_latest_200(tmp_path: Path) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 13 * 86400
+    for index in range(201):
+        run_dir = root / "output_runs" / f"run-{index:03d}"
+        run_dir.mkdir()
+        os.utime(run_dir, (timestamp, timestamp))
+
+    result = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: observed_at,
+    )
+
+    assert result["summary"]["run_count"] == 201
+    assert result["summary"]["retained_run_count"] == 201
+    assert result["deletion_allowed"] is True
+
+
+def test_scan_blob_gc_preview_rejects_runtime_root_symlink(tmp_path: Path) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    link = tmp_path / "runtime-link"
+    link.symlink_to(root, target_is_directory=True)
+
+    with pytest.raises(AgentToolError, match="must not be a symlink"):
+        module.preview_scan_blob_gc(runtime_root=link)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["manifest_invalid", "manifest_shape_invalid", "blob_missing", "blob_corrupt"],
+)
+def test_scan_blob_gc_preview_validates_expired_run_references(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    referenced_ref = _publish_scan_blob(root, "AAA")
+    _publish_scan_blob(root, "BBB")
+    base_timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run_dir = root / "output_runs" / f"run-{index:03d}"
+        run_dir.mkdir()
+        os.utime(run_dir, (base_timestamp + index, base_timestamp + index))
+    manifest = root / "output_runs/run-000/state/required_data_snapshot_manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": module.REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
+                "run_id": "run-000",
+                "symbols": {
+                    "AAA": {
+                        "status": "ready",
+                        "scan_blob_ref": referenced_ref,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(root / "output_runs/run-000", (base_timestamp, base_timestamp))
+    if fault == "manifest_invalid":
+        manifest.write_text("{", encoding="utf-8")
+    elif fault == "manifest_shape_invalid":
+        manifest.write_text("{}\n", encoding="utf-8")
+    elif fault == "blob_missing":
+        (root / referenced_ref["blob_relpath"]).unlink()
+    else:
+        (root / referenced_ref["blob_relpath"]).write_bytes(b"corrupt")
+
+    result = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: observed_at,
+    )
+
+    assert result["deletion_allowed"] is False
+    assert result["candidates"] == []
+    assert {item["reason"] for item in result["blockers"]} & {
+        "referencing_manifest_invalid",
+        "referenced_blob_missing_or_corrupt",
+    }
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("manifest_invalid", "referencing_manifest_invalid"),
+        ("blob_missing", "referenced_blob_missing_or_corrupt"),
+        ("blob_corrupt", "referenced_blob_missing_or_corrupt"),
+    ],
+)
+def test_scan_blob_gc_preview_blocks_all_candidates_on_protected_root_failure(
+    tmp_path: Path,
+    fault: str,
+    reason: str,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    referenced_ref = _publish_scan_blob(root, "AAA")
+    orphan_ref = _publish_scan_blob(root, "BBB")
+    manifest = root / "output_shared/research/dataset/manifest.json"
+    _write_scan_blob_manifest(manifest, referenced_ref)
+    if fault == "manifest_invalid":
+        manifest.write_text("{", encoding="utf-8")
+    elif fault == "blob_missing":
+        (root / referenced_ref["blob_relpath"]).unlink()
+    else:
+        (root / referenced_ref["blob_relpath"]).write_bytes(b"corrupt")
+
+    result = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert orphan_ref["blob_sha256"] not in {
+        item["blob_sha256"] for item in result["candidates"]
+    }
+    assert result["status"] == "data_unavailable"
+    assert result["deletion_allowed"] is False
+    assert result["candidates"] == []
+    assert reason in {item["reason"] for item in result["blockers"]}
+    assert result["safety"]["mutation_operations"] == 0

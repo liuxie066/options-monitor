@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fnmatch
+import hashlib
 import io
 import json
 import math
@@ -21,9 +22,20 @@ from typing import AbstractSet, Any, Callable, Iterable, Mapping, Sequence
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import LEDGER_DB_RELATIVE_PATH
+from src.application.required_data_blobs import (
+    REQUIRED_DATA_SCAN_BLOB_REF_SCHEMA,
+    RequiredDataBlobError,
+    load_required_data_scan_blob,
+    required_data_scan_blob_ref_identity,
+    validate_required_data_scan_blob_ref,
+)
+from src.application.required_data_snapshot import (
+    REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
+)
 
 
 SCHEMA_VERSION = "storage_runtime_baseline.v1"
+SCAN_BLOB_GC_PREVIEW_SCHEMA = "scan_blob_gc_preview.v1"
 SOURCE_INVENTORY_RELATIVE_PATH = Path("docs/architecture/data-storage-runtime-source-inventory.v1.json")
 RUNTIME_SUBROOTS = (
     "output_runs",
@@ -36,6 +48,9 @@ MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 LARGEST_FILE_LIMIT = 20
 SQLITE_SNAPSHOT_ATTEMPTS = 3
 GIB = 1024**3
+SCAN_BLOB_RUN_KEEP_DAYS = 14
+SCAN_BLOB_RUN_KEEP_COUNT = 200
+SCAN_BLOB_ORPHAN_GRACE_HOURS = 24
 
 # These are reporting heuristics only. They do not authorize movement or
 # deletion. Later tiering work must replace them with a reviewed backend policy.
@@ -173,6 +188,351 @@ def collect_storage_runtime_baseline(
             runtime_root=root,
             overwrite=overwrite,
         )
+    return result
+
+
+def preview_scan_blob_gc(
+    *,
+    runtime_root: str | Path,
+    now_fn: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic, read-only mark-and-sweep preview for scan blobs."""
+
+    if Path(runtime_root).expanduser().is_symlink():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="scan blob GC runtime root must not be a symlink",
+        )
+    root = _required_runtime_root(runtime_root)
+    observed_at = _utc_now(now_fn)
+    run_count, retained_run_ids, inventory_blockers = _gc_run_inventory(
+        root=root,
+        observed_at=observed_at,
+    )
+    file_rows, file_blockers = _gc_file_inventory(
+        root=root,
+        observed_at=observed_at,
+        retained_run_ids=retained_run_ids,
+    )
+    blockers = [*inventory_blockers, *file_blockers]
+    all_refs: dict[str, dict[str, Any]] = {}
+    protected_refs: dict[str, dict[str, Any]] = {}
+    unprotected_published_at: dict[str, datetime] = {}
+    protected_manifests: list[dict[str, Any]] = []
+    known_files = frozenset(str(row["path"]) for row in file_rows)
+
+    manifest_rows = [row for row in file_rows if _is_manifest_relpath(str(row["path"]))]
+    for row in manifest_rows:
+        relpath = str(row["path"])
+        path = root / relpath
+        protected = _gc_manifest_is_protected(relpath, retained_run_ids=retained_run_ids)
+        try:
+            if path.stat(follow_symlinks=False).st_size > MANIFEST_MAX_BYTES:
+                raise ValueError("manifest_too_large")
+            manifest_bytes = path.read_bytes()
+            payload = json.loads(manifest_bytes)
+            if not isinstance(payload, dict):
+                raise ValueError("manifest_not_object")
+            if path.name == "required_data_snapshot_manifest.json":
+                parts = Path(relpath).parts
+                if (
+                    payload.get("schema_version")
+                    != REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA
+                    or len(parts) < 4
+                    or payload.get("run_id") != parts[1]
+                    or not isinstance(payload.get("symbols"), dict)
+                ):
+                    raise ValueError("required_data_manifest_shape_invalid")
+            ref_index: dict[str, dict[str, Any]] = {}
+            _extract_manifest_references(
+                payload,
+                manifest_path=path,
+                root=root,
+                known_files=known_files,
+                scan_blob_refs=ref_index,
+            )
+            refs = [ref_index[key] for key in sorted(ref_index)]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, RequiredDataBlobError) as exc:
+            if (
+                protected
+                or path.name == "required_data_snapshot_manifest.json"
+                or isinstance(exc, RequiredDataBlobError)
+            ):
+                blockers.append(
+                    _gc_blocker(
+                        reason="referencing_manifest_invalid",
+                        path=relpath,
+                    )
+                )
+            continue
+        if protected:
+            protected_manifests.append(
+                {
+                    "path": relpath,
+                    "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                }
+            )
+        for ref in refs:
+            digest = str(ref["blob_sha256"])
+            previous = all_refs.get(digest)
+            if previous is not None and (
+                required_data_scan_blob_ref_identity(previous)
+                != required_data_scan_blob_ref_identity(ref)
+            ):
+                blockers.append(
+                    _gc_blocker(
+                        reason="blob_reference_conflict",
+                        path=relpath,
+                        digest=digest,
+                    )
+                )
+                continue
+            if previous is None or ref["published_at_utc"] > previous["published_at_utc"]:
+                all_refs[digest] = ref
+            if protected:
+                protected_refs[digest] = ref
+            else:
+                published_at = _parse_utc_timestamp(ref["published_at_utc"])
+                previous_time = unprotected_published_at.get(digest)
+                if previous_time is None or published_at > previous_time:
+                    unprotected_published_at[digest] = published_at
+
+    for digest, ref in sorted(all_refs.items()):
+        try:
+            load_required_data_scan_blob(runtime_root=root, blob_ref=ref)
+        except (OSError, RequiredDataBlobError, TypeError, ValueError):
+            blockers.append(
+                _gc_blocker(
+                    reason="referenced_blob_missing_or_corrupt",
+                    path=str(ref.get("blob_relpath") or ""),
+                    digest=digest,
+                )
+            )
+
+    blobs: dict[str, dict[str, Any]] = {}
+    for row in file_rows:
+        relpath = str(row["path"])
+        if not relpath.startswith("output_shared/blobs/sha256/"):
+            continue
+        name = Path(relpath).name
+        digest = name.removesuffix(".json.gz")
+        expected = f"output_shared/blobs/sha256/{digest[:2]}/{digest}.json.gz"
+        if (
+            not name.endswith(".json.gz")
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or relpath != expected
+        ):
+            continue
+        else:
+            blobs[digest] = row
+    candidate_rows: list[dict[str, Any]] = []
+    reachable = set(protected_refs)
+    for digest, row in sorted(blobs.items()):
+        if digest in reachable:
+            continue
+        published_at = unprotected_published_at.get(digest)
+        published_at_source = "unprotected_manifest_ref"
+        if published_at is None:
+            published_at = datetime.fromtimestamp(float(row["ctime"]), timezone.utc)
+            published_at_source = "filesystem_ctime"
+        age_hours = max(0.0, (observed_at - published_at).total_seconds() / 3600.0)
+        if age_hours < SCAN_BLOB_ORPHAN_GRACE_HOURS:
+            continue
+        candidate_rows.append(
+            {
+                "blob_sha256": digest,
+                "blob_relpath": row["path"],
+                "compressed_size_bytes": row["size_bytes"],
+                "published_at_utc": published_at.isoformat().replace("+00:00", "Z"),
+                "published_at_source": published_at_source,
+                "age_hours": round(age_hours, 3),
+                "action": "preview_only",
+            }
+        )
+
+    blockers = sorted(
+        blockers,
+        key=lambda item: (
+            str(item.get("path") or ""),
+            str(item.get("reason") or ""),
+            str(item.get("blob_sha256") or ""),
+        ),
+    )
+    deletion_allowed = not blockers
+    candidates = candidate_rows if deletion_allowed else []
+    retention = {
+        "run_keep_days": SCAN_BLOB_RUN_KEEP_DAYS,
+        "run_keep_count": SCAN_BLOB_RUN_KEEP_COUNT,
+        "orphan_grace_hours": SCAN_BLOB_ORPHAN_GRACE_HOURS,
+    }
+    plan = {
+        "schema_version": SCAN_BLOB_GC_PREVIEW_SCHEMA,
+        "observed_at_utc": observed_at.isoformat(),
+        "retention": retention,
+        "retained_run_ids": sorted(retained_run_ids),
+        "protected_manifests": sorted(protected_manifests, key=lambda item: item["path"]),
+        "reachable_blob_sha256": sorted(reachable),
+        "candidates": candidates,
+        "blockers": [
+            {
+                key: item[key]
+                for key in ("reason", "path", "blob_sha256")
+                if key in item
+            }
+            for item in blockers
+        ],
+        "deletion_allowed": deletion_allowed,
+    }
+    hash_plan = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"observed_at_utc", "candidates"}
+    }
+    hash_plan["runtime_root"] = str(root)
+    hash_plan["candidates"] = [
+        {key: value for key, value in row.items() if key != "age_hours"}
+        for row in candidates
+    ]
+    canonical_plan = json.dumps(
+        hash_plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {
+        **plan,
+        "status": "complete" if deletion_allowed else "data_unavailable",
+        "runtime_root": str(root),
+        "plan_sha256": hashlib.sha256(canonical_plan).hexdigest(),
+        "summary": {
+            "run_count": run_count,
+            "retained_run_count": len(retained_run_ids),
+            "protected_manifest_count": len(protected_manifests),
+            "reachable_blob_count": len(reachable),
+            "stored_blob_count": len(blobs),
+            "candidate_blob_count": len(candidates),
+            "candidate_bytes": sum(int(item["compressed_size_bytes"]) for item in candidates),
+        },
+        "safety": {
+            "read_only": True,
+            "no_follow_traversal": True,
+            "mutation_operations": 0,
+            "automatic_actions": [],
+        },
+    }
+
+
+def _gc_run_inventory(
+    *,
+    root: Path,
+    observed_at: datetime,
+) -> tuple[int, set[str], list[dict[str, Any]]]:
+    runs_root = root / "output_runs"
+    if not runs_root.exists() and not runs_root.is_symlink():
+        return 0, set(), []
+    if runs_root.is_symlink() or not runs_root.is_dir():
+        return 0, set(), [_gc_blocker(reason="output_runs_root_unsafe", path="output_runs")]
+    rows: list[tuple[float, str]] = []
+    blockers: list[dict[str, Any]] = []
+    with os.scandir(runs_root) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                blockers.append(
+                    _gc_blocker(
+                        reason="output_run_symlink_not_followed",
+                        path=f"output_runs/{entry.name}",
+                    )
+                )
+            elif entry.is_dir(follow_symlinks=False):
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    blockers.append(
+                        _gc_blocker(
+                            reason="output_run_timestamp_unavailable",
+                            path=f"output_runs/{entry.name}",
+                        )
+                    )
+                    continue
+                rows.append((mtime, entry.name))
+    ordered = sorted(rows, key=lambda item: (item[0], item[1]), reverse=True)
+    latest = {name for _mtime, name in ordered[:SCAN_BLOB_RUN_KEEP_COUNT]}
+    cutoff = (observed_at - timedelta(days=SCAN_BLOB_RUN_KEEP_DAYS)).timestamp()
+    retained = {run_id for mtime, run_id in ordered if run_id in latest or mtime >= cutoff}
+    return len(ordered), retained, blockers
+
+
+def _gc_file_inventory(
+    *,
+    root: Path,
+    observed_at: datetime,
+    retained_run_ids: AbstractSet[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    for name in (*RUNTIME_SUBROOTS, "manifests"):
+        base = root / name
+        if not base.exists() and not base.is_symlink():
+            continue
+        if base.is_symlink() or not base.is_dir():
+            blockers.append(_gc_blocker(reason="runtime_subroot_unsafe", path=name))
+            continue
+        aggregates = _RuntimeAggregates()
+        symlinks: list[dict[str, Any]] = []
+        _scan_runtime_directory(
+            base,
+            root=root,
+            observed_at=observed_at,
+            aggregates=aggregates,
+            research_files=[],
+            symlinks=symlinks,
+            inventory_files=rows,
+        )
+        for item in symlinks:
+            relpath = str(item["path"])
+            protected_manifest = _is_manifest_relpath(relpath) and _gc_manifest_is_protected(
+                relpath,
+                retained_run_ids=retained_run_ids,
+            )
+            if protected_manifest or relpath.startswith("output_shared/blobs/sha256/"):
+                blockers.append(
+                    _gc_blocker(
+                        reason=(
+                            "protected_manifest_symlink_not_followed"
+                            if protected_manifest
+                            else "blob_store_symlink_not_followed"
+                        ),
+                        path=relpath,
+                    )
+                )
+    return sorted(rows, key=lambda item: str(item["path"])), blockers
+
+
+def _gc_manifest_is_protected(
+    relpath: str,
+    *,
+    retained_run_ids: AbstractSet[str],
+) -> bool:
+    parts = Path(relpath).parts
+    if parts and parts[0] == "output_runs":
+        return len(parts) > 1 and parts[1] in retained_run_ids
+    return True
+
+
+def _parse_utc_timestamp(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp lacks timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _gc_blocker(
+    *,
+    reason: str,
+    path: str,
+    digest: str | None = None,
+) -> dict[str, Any]:
+    result = {"reason": reason, "path": path}
+    if digest:
+        result["blob_sha256"] = digest
     return result
 
 
@@ -789,6 +1149,7 @@ def _scan_runtime_directory(
     aggregates: _RuntimeAggregates,
     research_files: list[dict[str, Any]],
     symlinks: list[dict[str, Any]],
+    inventory_files: list[dict[str, Any]] | None = None,
 ) -> None:
     stack = [directory]
     while stack:
@@ -813,6 +1174,7 @@ def _scan_runtime_directory(
                     "path": relpath,
                     "size_bytes": int(stat.st_size),
                     "mtime_ns": int(stat.st_mtime_ns),
+                    "ctime": float(stat.st_ctime),
                     "age_days": round(age_days, 3),
                     "suffix": path.suffix.lower() or "[none]",
                     "month": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m"),
@@ -820,6 +1182,8 @@ def _scan_runtime_directory(
                     "tier": tier,
                 }
                 aggregates.add(item)
+                if inventory_files is not None:
+                    inventory_files.append(item)
                 if storage_class in {"research_artifact", "immutable_shared_partition", "sealed_run_artifact"}:
                     research_files.append(item)
 
@@ -1058,14 +1422,18 @@ def _extract_manifest_references(
     manifest_path: Path,
     root: Path,
     known_files: AbstractSet[str],
+    scan_blob_refs: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    archive_references: list[dict[str, Any]] = []
     if payload.get("schema_version") == "research_archive.v2" and payload.get("action") == "verify":
-        return _extract_research_archive_references(
+        archive_references = _extract_research_archive_references(
             payload,
             manifest_path=manifest_path,
             root=root,
             known_files=known_files,
         )
+        if scan_blob_refs is None:
+            return archive_references
 
     out: list[dict[str, Any]] = []
 
@@ -1075,12 +1443,30 @@ def _extract_manifest_references(
         root=root,
     )
 
+    def record_scan_blob_ref(raw: Any) -> None:
+        if scan_blob_refs is None:
+            return
+        if not isinstance(raw, Mapping):
+            raise RequiredDataBlobError("required-data scan blob ref is invalid")
+        ref = validate_required_data_scan_blob_ref(raw)
+        digest = str(ref["blob_sha256"])
+        previous = scan_blob_refs.get(digest)
+        if previous is not None and (
+            required_data_scan_blob_ref_identity(previous)
+            != required_data_scan_blob_ref_identity(ref)
+        ):
+            raise RequiredDataBlobError("required-data scan blob references conflict")
+        if previous is None or ref["published_at_utc"] > previous["published_at_utc"]:
+            scan_blob_refs[digest] = ref
+
     def visit(
         value: Any,
         context: Mapping[str, Any] | None = None,
         path_hint: str | None = None,
     ) -> None:
         if isinstance(value, dict):
+            if value.get("schema_version") == REQUIRED_DATA_SCAN_BLOB_REF_SCHEMA:
+                record_scan_blob_ref(value)
             reference = _reference_from_mapping(
                 value,
                 manifest_path=manifest_path,
@@ -1093,6 +1479,13 @@ def _extract_manifest_references(
             if reference is not None:
                 out.append(reference)
             for child_key, child in value.items():
+                if child_key == "scan_blob_ref":
+                    record_scan_blob_ref(child)
+                elif child_key == "scan_blob_refs":
+                    if scan_blob_refs is not None and not isinstance(child, list):
+                        raise RequiredDataBlobError("required-data scan blob refs are invalid")
+                    for item in child if isinstance(child, list) else ():
+                        record_scan_blob_ref(item)
                 child_path_hint = str(child_key) if _mapping_looks_like_file_index(value) else None
                 visit(child, context=value, path_hint=child_path_hint)
         elif isinstance(value, list):
@@ -1100,6 +1493,7 @@ def _extract_manifest_references(
                 visit(child, context=context, path_hint=None)
 
     visit(dict(payload))
+    out.extend(archive_references)
     out.extend(
         _extract_parallel_file_map_references(
         payload,
@@ -1668,4 +2062,9 @@ def _path_or_parent_is_symlink(path: Path, *, stop: Path | None) -> bool:
         current = parent
 
 
-__all__ = ["SCHEMA_VERSION", "collect_storage_runtime_baseline"]
+__all__ = [
+    "SCAN_BLOB_GC_PREVIEW_SCHEMA",
+    "SCHEMA_VERSION",
+    "collect_storage_runtime_baseline",
+    "preview_scan_blob_gc",
+]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Mapping, cast
 
 import pandas as pd
 
@@ -49,6 +49,7 @@ class CandidateScanConfig:
     reject_stage: str = "candidate_calculation"
     strategy_family: str | None = None
     strategy_profile: str | None = None
+    required_data_frames: Mapping[str, pd.DataFrame] | None = None
 
 
 @dataclass(frozen=True)
@@ -61,12 +62,22 @@ class CandidateScanDependencies:
     metric_reject_reason_fn: Callable[[CandidateContractInput], dict[str, Any] | None] | None = None
 
 
-def _load_required_data_rows(*, input_root: Path, symbol: str, mode: str) -> pd.DataFrame:
-    path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
-    try:
-        df = pd.read_csv(path)
-    except (FileNotFoundError, pd.errors.EmptyDataError):
-        return pd.DataFrame()
+def _load_required_data_rows(
+    *,
+    input_root: Path,
+    symbol: str,
+    mode: str,
+    frames: Mapping[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    supplied = frames.get(symbol) if frames is not None else None
+    if supplied is not None:
+        df = supplied.copy()
+    else:
+        path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
+        try:
+            df = pd.read_csv(path)
+        except (FileNotFoundError, pd.errors.EmptyDataError):
+            return pd.DataFrame()
     if df.empty or "option_type" not in df.columns:
         return pd.DataFrame()
     return cast(pd.DataFrame, df.loc[df["option_type"] == mode].copy())
@@ -162,6 +173,7 @@ def run_candidate_scan(
             input_root=config.input_root,
             symbol=symbol,
             mode=config.mode,
+            frames=config.required_data_frames,
         )
         for raw_row in data.to_dict("records"):
             contract = CandidateContractInput.from_row(raw_row, mode=config.mode)

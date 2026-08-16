@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,6 +263,145 @@ def test_archive_pull_defaults_to_rsync_dry_run_and_filters_local_runs(tmp_path:
     assert not (tmp_path / "archive" / "manifests" / "inventory.latest.json").exists()
 
 
+def test_archive_pull_syncs_only_selected_run_blob_refs(tmp_path: Path) -> None:
+    from src.application.required_data_blobs import publish_required_data_scan_blob
+    from src.application.research.archive import archive_pull
+
+    source = tmp_path / "source"
+    run_dir = _write_run(source, "run-1")
+    provider = {
+        "symbol": "NVDA",
+        "rows": [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "contract_symbol": "NVDA260821P00100000",
+                "strike": 100,
+                "multiplier": 100,
+            }
+        ],
+    }
+    raw_bytes = (
+        json.dumps(provider, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    columns = [
+        "symbol",
+        "option_type",
+        "expiration",
+        "contract_symbol",
+        "strike",
+        "multiplier",
+    ]
+    csv_bytes = (
+        ",".join(columns)
+        + "\nNVDA,put,2026-08-21,NVDA260821P00100000,100,100\n"
+    ).encode("utf-8")
+    ref = publish_required_data_scan_blob(
+        runtime_root=source,
+        symbol="NVDA",
+        market="US",
+        raw_json_bytes=raw_bytes,
+        required_data_csv_bytes=csv_bytes,
+        columns=columns,
+    )
+    (run_dir / "state" / "required_data_snapshot_manifest.json").write_text(
+        json.dumps({"symbols": {"NVDA": {"scan_blob_ref": ref}}}),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+
+    data = archive_pull(
+        repo_root=tmp_path,
+        archive_root=tmp_path / "archive",
+        source_root=source,
+        run_ids=["run-1"],
+        write=False,
+        run_cmd=_run_cmd,
+    )
+
+    blob_calls = [
+        command for command in calls if ref["blob_relpath"] in command[-2]
+    ]
+    assert data["scan_blob_refs"] == [ref]
+    assert len(blob_calls) == 1
+    assert blob_calls[0][-2].endswith(ref["blob_relpath"])
+    assert not any(
+        command[-2].endswith("output_shared/blobs/") for command in calls
+    )
+
+
+def test_archive_rejects_symlinked_required_data_manifest(tmp_path: Path) -> None:
+    from src.application.research.archive import _run_scan_blob_refs
+
+    run_dir = _write_run(tmp_path, "run-1")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    manifest = run_dir / "state" / "required_data_snapshot_manifest.json"
+    manifest.symlink_to(outside)
+
+    refs, status, error = _run_scan_blob_refs(run_dir)
+
+    assert refs == []
+    assert status == "invalid"
+    assert error == "required-data snapshot manifest is unsafe"
+
+
+def test_archive_deduplicates_same_blob_with_runtime_local_publish_times(
+    tmp_path: Path,
+) -> None:
+    from src.application.required_data_blobs import publish_required_data_scan_blob
+    from src.application.research.archive import _selected_scan_blob_refs
+
+    provider = {
+        "symbol": "NVDA",
+        "rows": [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "contract_symbol": "NVDA260821P00100000",
+                "strike": 100,
+                "multiplier": 100,
+            }
+        ],
+    }
+    columns = [
+        "symbol",
+        "option_type",
+        "expiration",
+        "contract_symbol",
+        "strike",
+        "multiplier",
+    ]
+    ref = publish_required_data_scan_blob(
+        runtime_root=tmp_path,
+        symbol="NVDA",
+        market="US",
+        raw_json_bytes=(json.dumps(provider, indent=2) + "\n").encode(),
+        required_data_csv_bytes=(
+            ",".join(columns)
+            + "\nNVDA,put,2026-08-21,NVDA260821P00100000,100,100\n"
+        ).encode(),
+        columns=columns,
+    )
+    newer = {**ref, "published_at_utc": "2026-08-17T00:00:00Z"}
+
+    selected = _selected_scan_blob_refs(
+        source={"kind": "ssh"},
+        source_run_inventory=[
+            {"scan_blob_reference_status": "ready", "scan_blob_refs": [ref]},
+            {"scan_blob_reference_status": "ready", "scan_blob_refs": [newer]},
+        ],
+    )
+
+    assert selected == [newer]
+
+
 def test_archive_pull_can_auto_select_local_replay_evidence_runs(tmp_path: Path) -> None:
     from src.application.research.archive import archive_pull
 
@@ -388,6 +528,116 @@ def test_archive_build_datasets_uses_verified_archive_runs(tmp_path: Path) -> No
     manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["dataset_id"] == "prod-us-run-1"
     assert manifest["summary"]["candidate_snapshot_count"] == 2
+
+
+def test_archive_build_marks_from_canonical_only_run_root(tmp_path: Path) -> None:
+    from src.application.research.archive import archive_build_datasets
+    from src.application.required_data_snapshot import seal_required_data_snapshot
+    from src.application.shadow_replay import (
+        mark_shadow_replay_dataset,
+        settle_shadow_replay_dataset,
+    )
+    from src.application.strategy_lab import run_strategy_lab_experiment
+
+    archive_root = tmp_path / "archive"
+    run_dir = archive_root / "output_runs" / "run-1"
+    state_dir = run_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "last_run.json").write_text(
+        json.dumps({"run_id": "run-1", "status": "ok"}),
+        encoding="utf-8",
+    )
+    seal_opening_candidate_fixture(
+        archive_root,
+        run_id="run-1",
+        market="HK",
+        accepted_rows=[
+            {
+                "symbol": "3690.HK",
+                "account": "lx",
+                "option_type": "put",
+                "contract_symbol": "3690.HK-P",
+                "expiration": "2026-08-28",
+                "dte": 24,
+                "delta": -0.2,
+                "strike": 100,
+                "spot": 110,
+                "net_income": 120,
+                "multiplier": 100,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "spread_ratio": 0.10,
+                "open_interest": 500,
+                "volume": 20,
+            }
+        ],
+    )
+    required_root = run_dir / "required_data"
+    (required_root / "raw").mkdir(parents=True)
+    (required_root / "parsed").mkdir(parents=True)
+    helpers = runpy.run_path(
+        str(Path(__file__).with_name("test_required_data_snapshot.py"))
+    )
+    helpers["_publish_quote"](
+        required_root,
+        run_id="run-1",
+        symbol="3690.HK",
+        canonical_blob=True,
+    )
+    snapshot = seal_required_data_snapshot(
+        manifest_path=run_dir / "state" / "required_data_snapshot_manifest.json",
+        required_data_root=required_root,
+        run_id="run-1",
+        prefetch_summary=helpers["_summary"]("3690.HK"),
+    )
+    entry = snapshot["symbols"]["3690.HK"]
+    (required_root / entry["raw_json_relpath"]).unlink()
+    (required_root / entry["required_data_csv_relpath"]).unlink()
+    _verify_remote_archive(tmp_path, archive_root)
+
+    data = archive_build_datasets(
+        repo_root=tmp_path,
+        archive_root=archive_root,
+        remote="prod",
+        write=True,
+    )
+
+    marking = data["built"][0]["post_build_marking"]
+    dataset_dir = Path(data["built"][0]["dataset_dir"])
+    verified_marking = mark_shadow_replay_dataset(
+        dataset=dataset_dir,
+        required_data_root=required_root,
+        as_of=entry["source_observed_at"],
+        repo_root=tmp_path,
+        write=True,
+        replace=True,
+        mark_time_basis="collection_time",
+        quote_collection_source="opend",
+    )
+    settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True)
+    strategy_lab = run_strategy_lab_experiment(
+        repo_root=tmp_path,
+        dataset=dataset_dir,
+        min_sample=1,
+    )
+    assert data["ok"] is True
+    assert marking["status"] == "marked"
+    assert marking["scan_blob_refs"] == [entry["scan_blob_ref"]]
+    assert marking["summary"]["required_data_read_source_counts"] == {
+        "canonical_blob": 1,
+        "legacy_snapshot": 0,
+    }
+    assert verified_marking["summary"]["usable_mark_snapshot_count"] == 1
+    assert settlement["summary"]["generated_outcome_fact_count"] == 1
+    assert strategy_lab["schema_version"] == "strategy_lab_experiment.v1"
+    assert (
+        strategy_lab["readiness"]["shadow_replay"]["outcome_coverage"]
+        ["outcome_instrument_count"]
+        == 1
+    )
+    telemetry = json.dumps(marking["summary"], sort_keys=True)
+    assert "raw_json_base64" not in telemetry
+    assert "required_data_csv_base64" not in telemetry
+    assert "provider_payload" not in telemetry
 
 
 def test_archive_build_datasets_filters_verified_runs_by_market(tmp_path: Path) -> None:

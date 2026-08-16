@@ -22,6 +22,13 @@ from src.application.required_data_coverage import (
 from src.application.required_data_plan_identity import (
     validate_required_data_expected_fetch_contract,
 )
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    load_required_data_scan_blob,
+    publish_required_data_scan_blob,
+    required_data_shadow_base64_matches,
+    required_data_shadow_file_matches,
+)
 from src.application.source_receipts import (
     SourceReceiptError,
     SOURCE_MAX_AGE_SECONDS,
@@ -383,18 +390,55 @@ def _validate_required_data_quote_candidate(
         raw_payload = json.loads(raw.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceReceiptError("required-data JSON is unreadable") from exc
-    meta, rows, source_outcome, contract = (
-        _validate_required_data_payload_candidate(
-            raw_payload=raw_payload,
-            expected_fetch_contract=expected_fetch_contract,
-        )
-    )
     try:
         frame = pd.read_csv(csv)
     except Exception as exc:
         raise SourceReceiptError(
             "required-data CSV is unreadable"
         ) from exc
+    _validate_required_data_quote_content(
+        raw_payload=raw_payload,
+        frame=frame,
+        expected_fetch_contract=expected_fetch_contract,
+        csv_path=csv,
+    )
+
+
+def validate_required_data_quote_bytes(
+    *,
+    raw_json_bytes: bytes,
+    required_data_csv_bytes: bytes,
+    expected_fetch_contract: Mapping[str, Any],
+) -> None:
+    """Validate exact bytes after the canonical blob verified multiplier overrides."""
+
+    try:
+        raw_payload = json.loads(bytes(raw_json_bytes).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SourceReceiptError("required-data canonical JSON is unreadable") from exc
+    try:
+        frame = pd.read_csv(io.BytesIO(bytes(required_data_csv_bytes)))
+    except Exception as exc:
+        raise SourceReceiptError("required-data canonical CSV is unreadable") from exc
+    _validate_required_data_quote_content(
+        raw_payload=raw_payload,
+        frame=frame,
+        expected_fetch_contract=expected_fetch_contract,
+        csv_path=None,
+    )
+
+
+def _validate_required_data_quote_content(
+    *,
+    raw_payload: Mapping[str, Any],
+    frame: pd.DataFrame,
+    expected_fetch_contract: Mapping[str, Any],
+    csv_path: Path | None,
+) -> None:
+    meta, rows, source_outcome, contract = _validate_required_data_payload_candidate(
+        raw_payload=raw_payload,
+        expected_fetch_contract=expected_fetch_contract,
+    )
     if source_outcome == "success_empty":
         if not frame.empty or list(frame.columns) != REQUIRED_DATA_COLUMNS:
             raise SourceReceiptError(
@@ -404,7 +448,7 @@ def _validate_required_data_quote_candidate(
     _validate_consumer_csv_projection(
         rows=rows,
         frame=frame,
-        csv=csv,
+        csv=csv_path,
         symbol=str(contract["symbol"]),
         raw_meta=meta,
     )
@@ -1097,7 +1141,7 @@ def _validate_consumer_csv_projection(
     *,
     rows: list[Any],
     frame: pd.DataFrame,
-    csv: Path,
+    csv: Path | None,
     symbol: str,
     raw_meta: Mapping[str, Any],
 ) -> None:
@@ -1126,7 +1170,7 @@ def _validate_consumer_csv_projection(
             raise SourceReceiptError(
                 "required-data JSON and CSV canonical projections differ"
             )
-    if multiplier_enriched:
+    if multiplier_enriched and csv is not None:
         _validate_quote_cache_metadata_binding(
             csv=csv,
             symbol=symbol,
@@ -1850,6 +1894,7 @@ def finalize_required_data_quote_candidate(
     if not run_id:
         return result
     receipt_path, receipt = publish_required_data_quote_snapshot(
+        runtime_root=Path(base),
         producer_root=root,
         producer_run_id=run_id,
         symbol=symbol_norm,
@@ -1863,6 +1908,7 @@ def finalize_required_data_quote_candidate(
         now=now,
     )
     evidence = resolve_exact_fresh_required_data_quote_receipt(
+        runtime_root=Path(base),
         producer_root=root,
         symbol=symbol_norm,
         expected_producer_run_id=run_id,
@@ -1888,6 +1934,7 @@ def finalize_required_data_quote_candidate(
 
 def publish_required_data_quote_snapshot(
     *,
+    runtime_root: Path | None = None,
     producer_root: Path,
     producer_run_id: str,
     symbol: str,
@@ -1973,7 +2020,7 @@ def publish_required_data_quote_snapshot(
         "fetch_policy": policy_input,
     }
     policy_hash = canonical_sha256(policy_payload)
-    bundle = {
+    bundle: dict[str, Any] = {
         "schema_version": REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
         "symbol": symbol_norm,
         "market": market,
@@ -1989,6 +2036,20 @@ def publish_required_data_quote_snapshot(
             "ascii"
         ),
     }
+    if runtime_root is not None:
+        try:
+            bundle["scan_blob_ref"] = publish_required_data_scan_blob(
+                runtime_root=Path(runtime_root),
+                symbol=symbol_norm,
+                market=market,
+                raw_json_bytes=raw.read_bytes(),
+                required_data_csv_bytes=csv.read_bytes(),
+                columns=REQUIRED_DATA_COLUMNS,
+            )
+        except RequiredDataBlobError as exc:
+            raise SourceReceiptError(
+                "required-data canonical blob publication failed"
+            ) from exc
     bundle_bytes = (
         json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
@@ -2014,6 +2075,7 @@ def publish_required_data_quote_snapshot(
     )
     existing = (
         resolve_exact_fresh_required_data_quote_receipt(
+            runtime_root=runtime_root,
             producer_root=root,
             symbol=symbol_norm,
             expected_producer_run_id=run_id,
@@ -2160,6 +2222,7 @@ def find_fresh_required_data_quote_receipts(
 
 def resolve_exact_fresh_required_data_quote_receipt(
     *,
+    runtime_root: Path | None = None,
     producer_root: Path,
     symbol: str,
     now: datetime | str | None = None,
@@ -2184,18 +2247,7 @@ def resolve_exact_fresh_required_data_quote_receipt(
     receipt_root = root / "source_receipts" / "quotes"
     raw_path = root / "raw" / f"{symbol_norm}_required_data.json"
     csv_path = root / "parsed" / f"{symbol_norm}_required_data.csv"
-    if (
-        not receipt_root.exists()
-        or not raw_path.is_file()
-        or raw_path.is_symlink()
-        or not csv_path.is_file()
-        or csv_path.is_symlink()
-    ):
-        return None
-    try:
-        raw_bytes = raw_path.read_bytes()
-        csv_bytes = csv_path.read_bytes()
-    except OSError:
+    if not receipt_root.exists():
         return None
 
     now_value = now or datetime.now(timezone.utc)
@@ -2280,16 +2332,70 @@ def resolve_exact_fresh_required_data_quote_receipt(
                     != policy_hash
                 ):
                     continue
-            captured_raw = base64.b64decode(
-                str(payload.get("raw_json_base64") or ""),
-                validate=True,
-            )
-            captured_csv = base64.b64decode(
-                str(payload.get("required_data_csv_base64") or ""),
-                validate=True,
-            )
-            if captured_raw != raw_bytes or captured_csv != csv_bytes:
-                continue
+            scan_blob_ref = payload.get("scan_blob_ref")
+            read_source = "legacy_snapshot"
+            legacy_shadow_match: bool | None = None
+            if scan_blob_ref is not None:
+                if runtime_root is None or not isinstance(scan_blob_ref, Mapping):
+                    return None
+                try:
+                    loaded = load_required_data_scan_blob(
+                        runtime_root=Path(runtime_root),
+                        blob_ref=scan_blob_ref,
+                    )
+                except RequiredDataBlobError:
+                    return None
+                raw_bytes = loaded["raw_json_bytes"]
+                csv_bytes = loaded["required_data_csv_bytes"]
+                read_source = "canonical_blob"
+                legacy_shadow_match = None
+                inline_pairs = (
+                    ("raw_json_base64", raw_bytes),
+                    ("required_data_csv_base64", csv_bytes),
+                )
+                for field, expected_bytes in inline_pairs:
+                    if field not in payload:
+                        continue
+                    if not required_data_shadow_base64_matches(
+                        payload.get(field),
+                        expected_bytes,
+                    ):
+                        return None
+                    legacy_shadow_match = True
+                for legacy_path, expected_bytes in (
+                    (raw_path, raw_bytes),
+                    (csv_path, csv_bytes),
+                ):
+                    if legacy_path.exists() or legacy_path.is_symlink():
+                        if not required_data_shadow_file_matches(
+                            legacy_path,
+                            expected_bytes,
+                        ):
+                            return None
+                        legacy_shadow_match = True
+            else:
+                captured_raw = base64.b64decode(
+                    str(payload.get("raw_json_base64") or ""),
+                    validate=True,
+                )
+                captured_csv = base64.b64decode(
+                    str(payload.get("required_data_csv_base64") or ""),
+                    validate=True,
+                )
+                if (
+                    not raw_path.is_file()
+                    or raw_path.is_symlink()
+                    or not csv_path.is_file()
+                    or csv_path.is_symlink()
+                ):
+                    continue
+                try:
+                    raw_bytes = raw_path.read_bytes()
+                    csv_bytes = csv_path.read_bytes()
+                except OSError:
+                    continue
+                if captured_raw != raw_bytes or captured_csv != csv_bytes:
+                    continue
             observed = datetime.fromisoformat(
                 str(validated["source_observed_at"]).replace("Z", "+00:00")
             )
@@ -2309,6 +2415,13 @@ def resolve_exact_fresh_required_data_quote_receipt(
                             if contract is not None
                             else None
                         ),
+                        "scan_blob_ref": (
+                            dict(scan_blob_ref)
+                            if isinstance(scan_blob_ref, Mapping)
+                            else None
+                        ),
+                        "read_source": read_source,
+                        "legacy_shadow_match": legacy_shadow_match,
                     },
                 )
             )
@@ -2363,6 +2476,7 @@ __all__ = [
     "resolve_exact_fresh_required_data_quote_receipt",
     "save_outputs",
     "validate_required_data_payload_candidate",
+    "validate_required_data_quote_bytes",
     "validate_required_data_quote_candidate",
     "validate_required_data_source_outcome",
 ]

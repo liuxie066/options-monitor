@@ -28,6 +28,8 @@ from src.application.required_data_plan_identity import (
 )
 from src.application.source_receipts import (
     SourceReceiptError,
+    publish_source_receipt,
+    validate_source_receipt,
 )
 
 
@@ -179,7 +181,13 @@ def test_snapshot_physical_binding_rejects_non_integer_ports(
         )
 
 
-def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
+def _publish_quote(
+    root: Path,
+    *,
+    run_id: str,
+    symbol: str = "3690.HK",
+    canonical_blob: bool = False,
+) -> None:
     fetch_plan = _fetch_plan(symbol)
     contract = _expected_contract(symbol, fetch_plan=fetch_plan)
     observed_at = _OBSERVED_AT
@@ -293,6 +301,7 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
     }
     raw_path, csv_path = save_outputs(root.parent.parent.parent, symbol, payload, output_root=root)
     publish_required_data_quote_snapshot(
+        runtime_root=(root.parents[2] if canonical_blob else None),
         producer_root=root,
         producer_run_id=run_id,
         symbol=symbol,
@@ -465,6 +474,169 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
         path: (path.read_bytes(), path.stat().st_mtime_ns)
         for path in tracked_paths
     } == before
+
+
+def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    old_receipt_path = next(root.glob("source_receipts/quotes/*/*/*/receipt.json"))
+    old_receipt = json.loads(old_receipt_path.read_text(encoding="utf-8"))
+    validated = validate_source_receipt(
+        old_receipt,
+        producer_root=root,
+        now=datetime.now(timezone.utc),
+        expected_source_kind="quotes",
+    )
+    bundle = json.loads(validated["payload_bytes"])
+    bundle.pop("raw_json_base64")
+    bundle.pop("required_data_csv_base64")
+    old_receipt_path.unlink()
+    payload_bytes = (
+        json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    publish_source_receipt(
+        producer_root=root,
+        receipt_relpath="source_receipts/quotes/future/run/symbol/receipt.json",
+        payload_relpath="source_receipts/quotes/future/run/symbol/payload.json",
+        payload_bytes=payload_bytes,
+        source_kind="quotes",
+        producer_schema_version=str(old_receipt["producer_schema_version"]),
+        producer_run_id="run-1",
+        broker="futu",
+        included_markets=["HK"],
+        source_native_id=str(old_receipt["source_native_id"]),
+        source_observed_at=str(old_receipt["source_observed_at"]),
+        completed_at=str(old_receipt["completed_at"]),
+        producer_policy_hash=str(old_receipt["producer_policy_hash"]),
+    )
+    (root / bundle["raw_json_relpath"]).unlink()
+    (root / bundle["required_data_csv_relpath"]).unlink()
+
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+    entry = manifest["symbols"]["3690.HK"]
+    evidence = resolve_frozen_required_data(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        symbol="3690.HK",
+        required_data_root=root,
+    )
+
+    assert entry["scan_blob_ref"] == bundle["scan_blob_ref"]
+    assert evidence["scan_blob_ref"] == entry["scan_blob_ref"]
+    assert evidence["read_source"] == "canonical_blob"
+
+    dataset = tmp_path / "shadow-dataset"
+    dataset.mkdir()
+    (dataset / "candidate_snapshots.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "account": "lx",
+                "status": "accepted",
+                "symbol": "3690.HK",
+                "option_type": "put",
+                "contract_symbol": "3690.HK-P",
+                "expiration": "2026-08-28",
+                "strike": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    from src.application.shadow_replay import mark_shadow_replay_dataset
+
+    marking = mark_shadow_replay_dataset(
+        dataset=dataset,
+        required_data_root=root,
+        as_of=str(manifest["sealed_at_utc"]),
+        repo_root=tmp_path,
+        write=False,
+    )
+    assert marking["summary"]["matched_quote_count"] == 1
+    assert marking["summary"]["required_data_read_source_counts"] == {
+        "canonical_blob": 1,
+        "legacy_snapshot": 0,
+    }
+    assert marking["summary"]["required_data_legacy_read_count"] == 0
+
+    blob_path = tmp_path / entry["scan_blob_ref"]["blob_relpath"]
+    blob_path.write_bytes(b"corrupt")
+    with pytest.raises(
+        FrozenRequiredDataUnavailable,
+        match="receipt_or_payload_mismatch",
+    ):
+        resolve_frozen_required_data(
+            manifest_path=manifest_path,
+            expected_run_id="run-1",
+            symbol="3690.HK",
+            required_data_root=root,
+        )
+
+
+def test_shadow_mark_rows_are_identical_for_legacy_and_canonical_reads(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import mark_shadow_replay_dataset
+
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    dataset = tmp_path / "shadow-parity"
+    dataset.mkdir()
+    (dataset / "candidate_snapshots.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "account": "lx",
+                "status": "accepted",
+                "symbol": "3690.HK",
+                "option_type": "put",
+                "contract_symbol": "3690.HK-P",
+                "expiration": "2026-08-28",
+                "strike": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mark_at = datetime.fromisoformat(_OBSERVED_AT.replace("Z", "+00:00"))
+    legacy = mark_shadow_replay_dataset(
+        dataset=dataset,
+        required_data_root=root,
+        as_of=_OBSERVED_AT,
+        repo_root=tmp_path,
+        write=False,
+    )
+    seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+        sealed_at=mark_at,
+    )
+    canonical = mark_shadow_replay_dataset(
+        dataset=dataset,
+        required_data_root=root,
+        as_of=_OBSERVED_AT,
+        repo_root=tmp_path,
+        write=False,
+    )
+
+    assert canonical["generated_mark_snapshots"] == legacy[
+        "generated_mark_snapshots"
+    ]
+    assert legacy["summary"]["required_data_legacy_read_count"] == 1
+    assert canonical["summary"]["required_data_read_source_counts"] == {
+        "canonical_blob": 1,
+        "legacy_snapshot": 0,
+    }
 
 
 def test_manifest_snapshot_returns_the_exact_validated_generation(

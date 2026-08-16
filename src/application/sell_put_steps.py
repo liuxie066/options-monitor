@@ -71,6 +71,7 @@ def run_sell_put_scan_and_summarize(
     candidate_decisions_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
+    required_data_frame: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
 
@@ -94,6 +95,11 @@ def run_sell_put_scan_and_summarize(
         strategy_family=sell_put_semantics.strategy_family,
         strategy_profile=sell_put_semantics.scan_strategy_profile,
         calculation_decision_sink_fn=candidate_decisions.extend,
+        required_data_frames=(
+            {symbol: required_data_frame}
+            if required_data_frame is not None
+            else None
+        ),
     )
     df_sp_lab = label_sell_put_candidates(df_sp_lab)
     if not df_sp_lab.empty:

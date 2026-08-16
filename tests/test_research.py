@@ -192,6 +192,44 @@ def test_storage_baseline_cli_dispatches_read_only_options(monkeypatch, tmp_path
     ]
 
 
+def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    from src.application.research import storage_baseline
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        storage_baseline,
+        "preview_scan_blob_gc",
+        lambda **kwargs: calls.append(kwargs)
+        or {"schema_version": "scan_blob_gc_preview.v1", "deletion_allowed": True},
+    )
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    response = handle_research_command(
+        parse_args(
+            ["research", "storage-gc-preview", "--runtime-root", str(runtime)]
+        ),
+        repo_base_fn=lambda: tmp_path,
+    )
+
+    assert response["ok"] is True
+    assert response["tool_name"] == "research.storage-gc-preview"
+    assert calls == [{"runtime_root": str(runtime)}]
+    for forbidden in ("--confirm", "--delete"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    "research",
+                    "storage-gc-preview",
+                    "--runtime-root",
+                    str(runtime),
+                    forbidden,
+                ]
+            )
+
+
 class _ToolKwargs(TypedDict):
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
     repo_base: Callable[[], Path]

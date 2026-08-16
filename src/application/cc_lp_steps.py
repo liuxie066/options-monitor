@@ -44,12 +44,20 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _load_required_data_puts(*, input_root: Path, symbol: str) -> pd.DataFrame:
-    path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
-    try:
-        df = pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
+def _load_required_data_puts(
+    *,
+    input_root: Path,
+    symbol: str,
+    required_data_frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if required_data_frame is not None:
+        df = required_data_frame.copy()
+    else:
+        path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
     if df.empty or "option_type" not in df.columns:
         return pd.DataFrame()
     mask = df["option_type"].astype(str).str.strip().str.lower() == "put"
@@ -77,6 +85,7 @@ def run_cc_lp_scan(
     run_sell_call_scan_fn: Callable[..., pd.DataFrame] = run_sell_call_scan,
     now_utc_fn: Callable[[], datetime] = _utc_now,
     strategy_profile: str = "cc_lp_funding_call",
+    required_data_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Run the CC+LP opening scan: independent Sell Call scan + Long Put pairing."""
 
@@ -129,6 +138,11 @@ def run_cc_lp_scan(
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=SELL_CALL_FAMILY,
         strategy_profile="cc_lp_funding_call",
+        required_data_frames=(
+            {symbol: required_data_frame}
+            if required_data_frame is not None
+            else None
+        ),
     )
     if df_calls.empty:
         return pd.DataFrame()
@@ -144,7 +158,11 @@ def run_cc_lp_scan(
     )
     if df_calls.empty:
         return pd.DataFrame()
-    df_puts = _load_required_data_puts(input_root=required_data_dir, symbol=symbol)
+    df_puts = _load_required_data_puts(
+        input_root=required_data_dir,
+        symbol=symbol,
+        required_data_frame=required_data_frame,
+    )
     if df_puts.empty:
         return pd.DataFrame()
 

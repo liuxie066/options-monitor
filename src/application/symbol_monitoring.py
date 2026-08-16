@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import io
 import logging
 from pathlib import Path
 from typing import Any, Callable, Protocol
+
+import pandas as pd
 
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
@@ -222,6 +225,12 @@ def run_symbol_monitoring(
             )
 
     frozen_required_data = inputs.required_data_snapshot_manifest is not None
+    required_data_frame: pd.DataFrame | None = None
+
+    def _capture_required_data_csv_bytes(csv_bytes: bytes) -> None:
+        nonlocal required_data_frame
+        required_data_frame = pd.read_csv(io.BytesIO(csv_bytes))
+
     if not frozen_required_data:
         try:
             deps.apply_multiplier_cache_fn(
@@ -298,6 +307,9 @@ def run_symbol_monitoring(
                     ),
                     "required_data_snapshot_run_id": (
                         inputs.required_data_snapshot_run_id
+                    ),
+                    "required_data_csv_bytes_sink_fn": (
+                        _capture_required_data_csv_bytes
                     ),
                 }
             )
@@ -491,6 +503,11 @@ def run_symbol_monitoring(
         inputs.candidate_capture_status_sink_fn(payload)
 
     summary_rows: list[dict[str, Any]] = []
+    frozen_frame_kwargs = (
+        {"required_data_frame": required_data_frame}
+        if required_data_frame is not None
+        else {}
+    )
 
     if want_put:
         try:
@@ -504,6 +521,7 @@ def run_symbol_monitoring(
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
+                **frozen_frame_kwargs,
             )
             _append_summary_result(
                 summary_rows,
@@ -572,6 +590,7 @@ def run_symbol_monitoring(
                 portfolio_ctx=inputs.portfolio_ctx,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 combo_evidence_sink_fn=inputs.combo_evidence_sink_fn,
+                **frozen_frame_kwargs,
             )
             _append_summary_result(
                 summary_rows,
@@ -668,6 +687,7 @@ def run_symbol_monitoring(
                 global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
+                **frozen_frame_kwargs,
             )
             call_status = "completed"
             call_reason = None

@@ -16,6 +16,7 @@ from src.application.opend_symbol_outputs import (
     REQUIRED_DATA_COLUMNS,
     REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
     resolve_exact_fresh_required_data_quote_receipt,
+    validate_required_data_quote_bytes,
     validate_required_data_quote_candidate,
     validate_required_data_source_outcome,
 )
@@ -28,6 +29,13 @@ from src.application.source_receipts import (
 from src.application.required_data_plan_identity import (
     required_data_plan_id,
     validate_required_data_expected_fetch_contract,
+)
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    load_required_data_scan_blob,
+    required_data_shadow_base64_matches,
+    required_data_shadow_file_matches,
+    validate_required_data_scan_blob_ref,
 )
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.payload_helpers import required_text
@@ -133,6 +141,10 @@ def seal_required_data_snapshot(
         symbol = str(expected_contract["symbol"])
         try:
             evidence = resolve_exact_fresh_required_data_quote_receipt(
+                runtime_root=_runtime_root_from_required_data_root(
+                    root,
+                    run_id_norm,
+                ),
                 producer_root=root,
                 symbol=symbol,
                 now=seal_time,
@@ -470,9 +482,11 @@ def _validate_manifest_symbols(
         entry = dict(raw_entry)
         entry_status = str(entry.get("status") or "").strip().lower()
         if entry_status == "ready":
-            allowed_fields = ready_fields | (
-                {"reason_code"} if "reason_code" in entry else set()
-            )
+            allowed_fields = ready_fields
+            if "reason_code" in entry:
+                allowed_fields |= {"reason_code"}
+            if "scan_blob_ref" in entry:
+                allowed_fields |= {"scan_blob_ref"}
             if set(entry) != allowed_fields:
                 raise RequiredDataSnapshotError(
                     f"{symbol} ready manifest entry fields do not match schema"
@@ -743,11 +757,18 @@ def _ready_manifest_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise RequiredDataSnapshotError(f"{symbol} quote bundle is invalid")
+    raw_bytes, csv_bytes, read_source, scan_blob_ref = _bundle_scan_bytes(
+        root=root,
+        run_id=run_id,
+        bundle=bundle,
+        expected_scan_blob_ref=evidence.get("scan_blob_ref"),
+    )
     contract = _validate_bundle_authority(
         bundle=bundle,
         receipt=receipt,
         symbol=symbol,
         expected_fetch_contract=expected_fetch_contract,
+        raw_json_bytes=raw_bytes,
     )
     if str(evidence.get("expected_fetch_contract_sha256") or "") != str(
         contract["contract_sha256"]
@@ -755,12 +776,23 @@ def _ready_manifest_entry(
         raise RequiredDataSnapshotError(
             f"{symbol} resolver contract evidence mismatch"
         )
-    _validate_canonical_bundle_candidate(
-        root=root,
-        bundle=bundle,
-        expected_fetch_contract=contract,
+    if read_source == "canonical_blob":
+        validate_required_data_quote_bytes(
+            raw_json_bytes=raw_bytes,
+            required_data_csv_bytes=csv_bytes,
+            expected_fetch_contract=contract,
+        )
+    else:
+        _validate_canonical_bundle_candidate(
+            root=root,
+            bundle=bundle,
+            expected_fetch_contract=contract,
+        )
+    source_outcome, reason_code = _validate_complete_required_data_bundle(
+        bundle,
+        raw_json_bytes=raw_bytes,
+        required_data_csv_bytes=csv_bytes,
     )
-    source_outcome, reason_code = _validate_complete_required_data_bundle(bundle)
     if dict(plan_item.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
         raise RequiredDataSnapshotError(f"{symbol} plan fetch contract mismatch")
     fetch_policy_hash = str(bundle["fetch_policy_hash"])
@@ -783,6 +815,15 @@ def _ready_manifest_entry(
         ),
         "source_outcome": source_outcome,
     }
+    if scan_blob_ref is not None:
+        if (
+            evidence.get("read_source") != "canonical_blob"
+            or evidence.get("scan_blob_ref") != scan_blob_ref
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} canonical blob resolver evidence mismatch"
+            )
+        entry["scan_blob_ref"] = scan_blob_ref
     if reason_code:
         entry["reason_code"] = reason_code
     return entry
@@ -846,18 +887,36 @@ def _validate_ready_entry(
         raise SourceReceiptError(
             "manifest expected fetch contract hash mismatch"
         )
+    raw_bytes, csv_bytes, read_source, scan_blob_ref = _bundle_scan_bytes(
+        root=root,
+        run_id=run_id,
+        bundle=bundle,
+        expected_scan_blob_ref=entry.get("scan_blob_ref"),
+    )
     contract = _validate_bundle_authority(
         bundle=bundle,
         receipt=receipt,
         symbol=symbol,
         expected_fetch_contract=expected_contract,
+        raw_json_bytes=raw_bytes,
     )
-    _validate_canonical_bundle_candidate(
-        root=root,
-        bundle=bundle,
-        expected_fetch_contract=contract,
+    if read_source == "canonical_blob":
+        validate_required_data_quote_bytes(
+            raw_json_bytes=raw_bytes,
+            required_data_csv_bytes=csv_bytes,
+            expected_fetch_contract=contract,
+        )
+    else:
+        _validate_canonical_bundle_candidate(
+            root=root,
+            bundle=bundle,
+            expected_fetch_contract=contract,
+        )
+    source_outcome, reason_code = _validate_complete_required_data_bundle(
+        bundle,
+        raw_json_bytes=raw_bytes,
+        required_data_csv_bytes=csv_bytes,
     )
-    source_outcome, reason_code = _validate_complete_required_data_bundle(bundle)
     raw_relpath = _required_text(entry.get("raw_json_relpath"), "raw_json_relpath")
     csv_relpath = _required_text(
         entry.get("required_data_csv_relpath"),
@@ -881,18 +940,6 @@ def _validate_ready_entry(
         raise SourceReceiptError(
             "required-data reason code mismatch"
         )
-    raw_bytes = safe_existing_relative_path(root, raw_relpath).read_bytes()
-    csv_bytes = safe_existing_relative_path(root, csv_relpath).read_bytes()
-    captured_raw = base64.b64decode(
-        _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
-        validate=True,
-    )
-    captured_csv = base64.b64decode(
-        _required_text(bundle.get("required_data_csv_base64"), "required_data_csv_base64"),
-        validate=True,
-    )
-    if raw_bytes != captured_raw or csv_bytes != captured_csv:
-        raise SourceReceiptError("required-data bytes do not match the sealed receipt")
     return (
         {
             "receipt_relpath": receipt_relpath,
@@ -910,9 +957,88 @@ def _validate_ready_entry(
             "expected_fetch_contract_sha256": str(
                 contract["contract_sha256"]
             ),
+            "scan_blob_ref": scan_blob_ref,
+            "read_source": read_source,
         },
-        captured_csv,
+        csv_bytes,
     )
+
+
+def _bundle_scan_bytes(
+    *,
+    root: Path,
+    run_id: str,
+    bundle: Mapping[str, Any],
+    expected_scan_blob_ref: Any,
+) -> tuple[bytes, bytes, str, dict[str, Any] | None]:
+    bundle_ref = bundle.get("scan_blob_ref")
+    if bundle_ref is None:
+        if expected_scan_blob_ref is not None:
+            raise SourceReceiptError("manifest canonical blob ref is unbound")
+        raw_bytes = base64.b64decode(
+            _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
+            validate=True,
+        )
+        csv_bytes = base64.b64decode(
+            _required_text(
+                bundle.get("required_data_csv_base64"),
+                "required_data_csv_base64",
+            ),
+            validate=True,
+        )
+        raw_relpath = _required_text(bundle.get("raw_json_relpath"), "raw_json_relpath")
+        csv_relpath = _required_text(
+            bundle.get("required_data_csv_relpath"),
+            "required_data_csv_relpath",
+        )
+        if (
+            safe_existing_relative_path(root, raw_relpath).read_bytes() != raw_bytes
+            or safe_existing_relative_path(root, csv_relpath).read_bytes() != csv_bytes
+        ):
+            raise SourceReceiptError(
+                "required-data bytes do not match the sealed receipt"
+            )
+        return raw_bytes, csv_bytes, "legacy_snapshot", None
+    if not isinstance(bundle_ref, Mapping) or not isinstance(
+        expected_scan_blob_ref,
+        Mapping,
+    ):
+        raise SourceReceiptError("required-data canonical blob ref is invalid")
+    validated_ref = validate_required_data_scan_blob_ref(bundle_ref)
+    if validate_required_data_scan_blob_ref(expected_scan_blob_ref) != validated_ref:
+        raise SourceReceiptError("manifest canonical blob ref mismatch")
+    loaded = load_required_data_scan_blob(
+        runtime_root=_runtime_root_from_required_data_root(root, run_id),
+        blob_ref=validated_ref,
+    )
+    raw_bytes = loaded["raw_json_bytes"]
+    csv_bytes = loaded["required_data_csv_bytes"]
+    for field, expected_bytes in (
+        ("raw_json_base64", raw_bytes),
+        ("required_data_csv_base64", csv_bytes),
+    ):
+        if field in bundle and not required_data_shadow_base64_matches(
+            _required_text(bundle.get(field), field),
+            expected_bytes,
+        ):
+            raise SourceReceiptError("required-data inline shadow mismatch")
+    for field, expected_bytes in (
+        ("raw_json_relpath", raw_bytes),
+        ("required_data_csv_relpath", csv_bytes),
+    ):
+        relpath = _required_text(bundle.get(field), field)
+        relative = Path(relpath)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SourceReceiptError("required-data legacy shadow path is invalid")
+        candidate = root / relative
+        if (candidate.exists() or candidate.is_symlink()) and not (
+            required_data_shadow_file_matches(
+                safe_existing_relative_path(root, relpath),
+                expected_bytes,
+            )
+        ):
+            raise SourceReceiptError("required-data legacy shadow mismatch")
+    return raw_bytes, csv_bytes, "canonical_blob", validated_ref
 
 
 def _validate_bundle_authority(
@@ -921,6 +1047,7 @@ def _validate_bundle_authority(
     receipt: Mapping[str, Any],
     symbol: str,
     expected_fetch_contract: Mapping[str, Any],
+    raw_json_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     contract_payload = bundle.get("expected_fetch_contract")
     if not isinstance(contract_payload, Mapping):
@@ -973,9 +1100,13 @@ def _validate_bundle_authority(
         subject="operational fetch policy",
     )
     try:
-        raw_bytes = base64.b64decode(
-            _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
-            validate=True,
+        raw_bytes = (
+            bytes(raw_json_bytes)
+            if raw_json_bytes is not None
+            else base64.b64decode(
+                _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
+                validate=True,
+            )
         )
         raw_payload = json.loads(raw_bytes.decode("utf-8"))
     except (
@@ -1062,11 +1193,18 @@ def _validate_physical_binding(
 
 def _validate_complete_required_data_bundle(
     bundle: Mapping[str, Any],
+    *,
+    raw_json_bytes: bytes | None = None,
+    required_data_csv_bytes: bytes | None = None,
 ) -> tuple[str, str | None]:
     try:
-        raw_bytes = base64.b64decode(
-            _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
-            validate=True,
+        raw_bytes = (
+            bytes(raw_json_bytes)
+            if raw_json_bytes is not None
+            else base64.b64decode(
+                _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
+                validate=True,
+            )
         )
         raw_payload = json.loads(raw_bytes.decode("utf-8"))
     except (
@@ -1096,12 +1234,16 @@ def _validate_complete_required_data_bundle(
     )
     if not rows:
         try:
-            csv_bytes = base64.b64decode(
-                _required_text(
-                    bundle.get("required_data_csv_base64"),
-                    "required_data_csv_base64",
-                ),
-                validate=True,
+            csv_bytes = (
+                bytes(required_data_csv_bytes)
+                if required_data_csv_bytes is not None
+                else base64.b64decode(
+                    _required_text(
+                        bundle.get("required_data_csv_base64"),
+                        "required_data_csv_base64",
+                    ),
+                    validate=True,
+                )
             )
             csv_rows = list(
                 csv.reader(
@@ -1193,6 +1335,19 @@ def _existing_directory(path: Path, field: str) -> Path:
     if not candidate.exists() or not candidate.is_dir() or candidate.is_symlink():
         raise RequiredDataSnapshotError(f"{field} is invalid")
     return candidate.resolve()
+
+
+def _runtime_root_from_required_data_root(root: Path, run_id: str) -> Path:
+    candidate = Path(root).resolve()
+    if (
+        candidate.name != "required_data"
+        or candidate.parent.name != run_id
+        or candidate.parent.parent.name != "output_runs"
+    ):
+        raise RequiredDataSnapshotError(
+            "required-data root is outside the runtime run layout"
+        )
+    return candidate.parent.parent.parent
 
 
 def _is_sha256(value: Any) -> bool:

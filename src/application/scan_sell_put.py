@@ -5,7 +5,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import pandas as pd
 
@@ -112,6 +112,7 @@ def run_sell_put_scan(
     calculation_decision_sink_fn: (
         Callable[[list[dict[str, Any]]], None] | None
     ) = None,
+    required_data_frames: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """计算卖出看跌期权候选，并返回类型化内存结果。"""
     # Kept in the public Python/CLI surface for compatibility only. Sell Put
@@ -140,6 +141,7 @@ def run_sell_put_scan(
             min_net_income=float(min_net_income),
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
+            required_data_frames=required_data_frames,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=lambda contract: compute_metrics(
