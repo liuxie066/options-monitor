@@ -271,6 +271,152 @@ def test_calendar_refresh_cli_requires_write_and_closes_gateway(
     ).exists()
 
 
+def test_capability_refresh_cli_requires_write_and_readiness_only_reads_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.interfaces.cli.strategy_lab_top1 as cli
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.strategy_lab.top1.capability_receipts import (
+        ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
+    )
+    from src.interfaces.cli.main import parse_args
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+    fee_plan_path = tmp_path / "fee-plan.json"
+    fee_plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
+                "market": "HK",
+                "account": "lx",
+                "commission_free": True,
+                "platform_fee": 15.0,
+                "fee_plan_ref": "futu-hk-plan.v1",
+                "observed_at_utc": "2026-08-16T01:00:00Z",
+                "evidence_ref": "operator://futu/lx/fee-plan/2026-08-16",
+                "evidence_sha256": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = [
+        "research",
+        "strategy-lab",
+        "top1-loop",
+        "capabilities",
+        "refresh",
+        "--market",
+        "hk",
+        "--account",
+        "lx",
+        "--profile-path",
+        str(profile_path),
+        "--fee-plan-receipt-path",
+        str(fee_plan_path),
+        "--stock-owner",
+        "HK.00700",
+        "--contract-symbol",
+        "HK.00700260828P00400000",
+        "--terms-expiration",
+        "2026-08-28",
+        "--close-expiration",
+        "2026-08-14",
+    ]
+
+    def explode(**_kwargs: object) -> None:
+        raise AssertionError("missing --write or readiness must not build a gateway")
+
+    monkeypatch.setattr(cli, "build_ready_futu_quote_gateway", explode)
+    with pytest.raises(AgentToolError, match="requires --write"):
+        cli.handle_top1_command(parse_args(command))
+
+    fee_plan_link = tmp_path / "fee-plan-link.json"
+    fee_plan_link.symlink_to(fee_plan_path)
+    linked_command = list(command)
+    linked_command[linked_command.index("--fee-plan-receipt-path") + 1] = str(
+        fee_plan_link
+    )
+    with pytest.raises(AgentToolError, match="cannot be read"):
+        cli.handle_top1_command(parse_args([*linked_command, "--write"]))
+
+    class FakeGateway:
+        closed = False
+
+        def get_snapshot(self, codes: list[str]) -> list[dict[str, object]]:
+            return [{"code": codes[0], "bid_price": 1.2, "ask_price": 1.3}]
+
+        def get_exact_expiration_option_terms(
+            self, **_kwargs: object
+        ) -> dict[str, object]:
+            return {
+                "contract_symbol": "HK.00700260828P00400000",
+                "stock_owner": "HK.00700",
+                "expiration": "2026-08-28",
+                "option_type": "PUT",
+                "option_standard_type": "STANDARD",
+                "strike": 400.0,
+                "multiplier": 100,
+                "currency": "HKD",
+            }
+
+        def get_history_kl_quota(self) -> dict[str, object]:
+            return {"used_quota": 0, "remain_quota": 100, "detail_list": []}
+
+        def get_exact_expiration_close(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "code": "HK.00700",
+                "expiration": "2026-08-14",
+                "close": 600.0,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    gateway = FakeGateway()
+    monkeypatch.setattr(
+        cli, "build_ready_futu_quote_gateway", lambda **_kwargs: gateway
+    )
+    refreshed = cli.handle_top1_command(parse_args([*command, "--write"]))
+    assert refreshed["ok"] is True
+    assert refreshed["data"]["capabilities"] == {
+        name: True for name in CAPABILITY_FACTS
+    }
+    assert gateway.closed is True
+
+    drift, status = _source_facts()
+    monkeypatch.setattr(cli, "service_drift", lambda **_kwargs: drift)
+    monkeypatch.setattr(
+        cli, "service_status_from_profile", lambda *_args, **_kwargs: status
+    )
+    monkeypatch.setattr(
+        cli,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("missing")),
+    )
+    monkeypatch.setattr(cli, "build_ready_futu_quote_gateway", explode)
+    readiness = cli.handle_top1_command(
+        parse_args(
+            [
+                "research",
+                "strategy-lab",
+                "top1-loop",
+                "readiness",
+                "--market",
+                "hk",
+                "--account",
+                "lx",
+                "--profile-path",
+                str(profile_path),
+            ]
+        )
+    )
+    assert readiness["data"]["facts"]["capabilities"] == {
+        name: True for name in CAPABILITY_FACTS
+    }
+    assert readiness["data"]["facts"]["capability_receipt"] is not None
+
+
 def test_disabled_advance_migrates_store_but_loads_no_runtime_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
