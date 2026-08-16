@@ -88,8 +88,14 @@ FORBIDDEN_SQL_TABLES = (
 )
 FORBIDDEN_QUALITY_CALLS = {
     *FORBIDDEN_METHODS,
+    "_coherent_account_lifecycle_inputs",
+    "build_ledger_datasets",
+    "build_lifecycle_datasets",
+    "lifecycle_account_coherent_facts",
     "preview_current_decision_projection_oracle",
+    "project_trade_event_log",
     "resolve_lifecycle_account_rows",
+    "trade_event_log",
     "project_stored_trade_events_to_position_lots",
 }
 
@@ -328,8 +334,12 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
     now_ms = 1_900_000_000_000
     now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
     root = Path(repo.db_path).parent
-    config_path = root / "quality-benchmark.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
+    config_paths = {
+        market: root / f"quality-benchmark.{market}.json"
+        for market in ("us", "hk")
+    }
+    for config_path in config_paths.values():
+        config_path.write_text("{}\n", encoding="utf-8")
     config = {
         "accounts": [account],
         "account_settings": {
@@ -344,13 +354,20 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
             }
         },
     }
-    runtime = {
-        "config": {"config_key": "us"},
-        "summary": {"ok": True},
-        "ledger_store": {"sqlite_path": str(repo.db_path)},
-        "trade_intake": {"holdings_sync": {"enabled": False}, "sources": []},
-        "service_profile": {"loaded": True},
-    }
+    def runtime_status(_tool: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "data": {
+                "config": {"config_key": payload["config_key"]},
+                "summary": {"ok": True},
+                "ledger_store": {"sqlite_path": str(repo.db_path)},
+                "trade_intake": {
+                    "holdings_sync": {"enabled": False},
+                    "sources": [],
+                },
+                "service_profile": {"loaded": True},
+            },
+        }
 
     def service(label: str) -> OMQualityService:
         return OMQualityService(
@@ -361,7 +378,7 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
                 root / f"quality-{label}-control.json"
             ),
             opend_adapter=_StaticOpenD(),
-            runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
+            runtime_status_fn=runtime_status,
             now_fn=lambda: now,
             instance_id=f"benchmark-{label}",
             ledger_probe_path=repo.db_path,
@@ -369,6 +386,7 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
 
     baseline_service = service("legacy")
     aggregate_service = service("aggregate")
+    current_service = service("current")
     original_reader = quality_service_module.read_current_decision_projection
     original_summary = quality_service_module.build_lifecycle_quality_migration_summary
 
@@ -379,12 +397,12 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
         patch.object(
             quality_service_module,
             "load_runtime_config",
-            lambda **_kwargs: (config_path, config),
+            lambda *, config_key: (config_paths[config_key], config),
         ),
         patch.object(
             quality_service_module,
             "infer_runtime_config_market",
-            lambda **_kwargs: "US",
+            lambda *, config_path, **_kwargs: config_path.stem.split(".")[-1],
         ),
         patch.object(quality_service_module, "repo_base", lambda: root),
         patch.object(
@@ -429,6 +447,24 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
             aggregate_cpu = _measure(aggregate, time.process_time_ns)
             aggregate_allocation = _allocation(aggregate)
 
+        with patch.object(
+            quality_service_module,
+            "read_quality_hot_path_cutover_receipt",
+            return_value={"status": "active"},
+        ):
+            current_service.refresh(config_keys=["us", "hk"], deep=False)
+            current = lambda: refresh(current_service)  # noqa: E731
+            current_payload = current()
+            current_wall = _measure(current, time.perf_counter_ns)
+            current_cpu = _measure(current, time.process_time_ns)
+            current_allocation = _allocation(current)
+            current_forbidden_calls = _forbidden_call_count(current)
+            current_dataset_ids = [
+                str(item.get("dataset_id") or "")
+                for item in current_payload.get("datasets") or []
+                if isinstance(item, dict)
+            ]
+
         read_probes: list[dict[str, Any]] = []
         summary_forbidden_calls: list[int] = []
 
@@ -472,6 +508,17 @@ def _quality_measurement(repo: Any, account: str) -> dict[str, Any]:
         "aggregate_wall_time_ns": aggregate_wall,
         "aggregate_cpu_time_ns": aggregate_cpu,
         "aggregate_python_peak_bytes": aggregate_allocation,
+        "current_wall_time_ns": current_wall,
+        "current_cpu_time_ns": current_cpu,
+        "current_python_peak_bytes": current_allocation,
+        "current_forbidden_call_count": current_forbidden_calls,
+        "current_legacy_dataset_count": sum(
+            item in {"om.lifecycle_evidence", "om.lifecycle_history"}
+            for item in current_dataset_ids
+        ),
+        "current_lifecycle_summary_count": current_dataset_ids.count(
+            "om.lifecycle_evidence_summary"
+        ),
         "new_path_probe": read_probe,
         "new_path_forbidden_call_count": (
             int(read_probe["forbidden_method_count"])
@@ -911,11 +958,15 @@ def _source_sha256() -> str:
         "src/application/positions/workflows.py",
         "src/application/prepared_option_positions_context.py",
         "src/application/quality/gate.py",
+        "src/application/quality/cutover.py",
+        "src/application/quality/ledger_checks.py",
         "src/application/quality/lifecycle_checks.py",
+        "src/application/quality/paths.py",
         "src/application/quality/service.py",
         "src/application/trades/lifecycle.py",
         "src/application/trades/lifecycle_timing.py",
         "src/interfaces/cli/option_positions.py",
+        "src/interfaces/quality/cli.py",
         "scripts/benchmark_current_decision_projection_slice2.py",
     ):
         data = (REPO_ROOT / relative).read_bytes()
@@ -983,6 +1034,10 @@ def run() -> dict[str, Any]:
     quality_cpu_overhead = max(
         0,
         int(quality["aggregate_cpu_time_ns"]["p95"]) - quality_cpu_baseline,
+    )
+    current_quality_cpu_overhead = max(
+        0,
+        int(quality["current_cpu_time_ns"]["p95"]) - quality_cpu_baseline,
     )
 
     def zero_probe(
@@ -1109,6 +1164,23 @@ def run() -> dict[str, Any]:
         "ordinary_quality_forbidden_work_zero": (
             quality["new_path_forbidden_call_count"] == 0
         ),
+        "current_quality_wall": (
+            quality["current_wall_time_ns"]["p95"] < QUALITY_WALL_LIMIT_NS
+        ),
+        "current_quality_cpu_overhead": (
+            current_quality_cpu_overhead <= quality_cpu_budget
+        ),
+        "current_quality_allocation": (
+            quality["current_python_peak_bytes"]
+            <= CURRENT_STATE_ALLOCATION_LIMIT_BYTES
+        ),
+        "current_quality_forbidden_work_zero": (
+            quality["current_forbidden_call_count"] == 0
+        ),
+        "current_quality_retires_legacy_rows": (
+            quality["current_legacy_dataset_count"] == 0
+            and quality["current_lifecycle_summary_count"] == 2
+        ),
     }
     return {
         "schema_version": SCHEMA,
@@ -1141,6 +1213,9 @@ def run() -> dict[str, Any]:
             "ordinary_quality_wall_ns": QUALITY_WALL_LIMIT_NS,
             "ordinary_quality_cpu_overhead_ns": quality_cpu_budget,
             "ordinary_quality_cpu_overhead_ratio": QUALITY_CPU_OVERHEAD_RATIO,
+            "current_quality_allocation_bytes": (
+                CURRENT_STATE_ALLOCATION_LIMIT_BYTES
+            ),
         },
         "history_baseline": baseline_history,
         "history_10x": history_10x,
@@ -1154,6 +1229,7 @@ def run() -> dict[str, Any]:
         "ordinary_quality": {
             **quality,
             "cpu_overhead_ns": quality_cpu_overhead,
+            "current_cpu_overhead_ns": current_quality_cpu_overhead,
         },
         "checks": checks,
         "status": "pass" if all(checks.values()) else "fail",

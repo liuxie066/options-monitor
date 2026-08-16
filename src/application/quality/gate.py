@@ -19,7 +19,7 @@ class QualityStatusReader(Protocol):
         consumer: str | None = None,
         account: str | None = None,
         market: str | None = None,
-        lifecycle_rows_requested: bool = True,
+        lifecycle_rows_requested: bool = False,
     ) -> dict[str, Any] | None: ...
 
 
@@ -141,7 +141,7 @@ def assert_quality_allows(
             consumer=consumer,
             account=account,
             market=market,
-            lifecycle_rows_requested=True,
+            lifecycle_rows_requested=False,
         )
         if service is not None
         else QualityArtifactRepository(default_quality_artifact_path()).read()
@@ -151,7 +151,7 @@ def assert_quality_allows(
             consumer=consumer,
             account=account,
             market=market,
-            lifecycle_rows_requested=True,
+            lifecycle_rows_requested=False,
             lifecycle_rows_returned=quality_payload_has_lifecycle_rows(
                 payload,
                 account=account,
@@ -173,10 +173,17 @@ def assert_quality_allows(
     reasons: set[str] = set()
     account_key = str(account or "").strip().lower()
     market_key = str(market or "").strip().lower()
+    cutover_active = (
+        (((payload.get("extensions") or {}).get("quality_hot_path_cutover") or {}).get("status"))
+        == "active"
+    )
     for dataset in payload.get("datasets") or []:
         if not isinstance(dataset, dict):
             continue
-        if dataset.get("dataset_id") == "om.lifecycle_evidence_summary":
+        if (
+            dataset.get("dataset_id") == "om.lifecycle_evidence_summary"
+            and not cutover_active
+        ):
             continue
         scope = dataset.get("scope") if isinstance(dataset.get("scope"), dict) else {}
         if account_key and scope.get("account") and str(scope.get("account")).lower() != account_key:

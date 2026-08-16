@@ -111,6 +111,36 @@ def test_shadow_lifecycle_summary_never_changes_legacy_gate_authority(
     )
 
 
+def test_current_lifecycle_summary_becomes_gate_authority_after_cutover(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    payload = _payload()
+    payload["extensions"] = {
+        "quality_hot_path_cutover": {"status": "active"}
+    }
+    payload["datasets"].append(
+        {
+            **payload["datasets"][0],
+            "dataset_id": "om.lifecycle_evidence_summary",
+            "status": "unavailable",
+            "blocked_consumers": ["close_advice"],
+            "blocked_by": ["OM-LCY-CURRENT-001"],
+            "reason_codes": ["CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"],
+        }
+    )
+
+    with pytest.raises(QualityGateBlocked) as exc:
+        assert_quality_allows(
+            "close_advice",
+            account="lx",
+            market="us",
+            service=_service(tmp_path, payload),
+        )
+    assert exc.value.reason_code == "CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"
+
+
 def test_quality_reads_count_declared_and_unexplained_without_payloads(
     tmp_path: Path,
 ) -> None:
@@ -189,6 +219,10 @@ def test_quality_tool_declares_its_consumer_scope(monkeypatch) -> None:
             calls.append(kwargs)
             return _payload()
 
+        def read_integrity_published(self):
+            calls.append({"integrity": True})
+            return _payload()
+
     monkeypatch.setattr(
         quality_tool_module,
         "OMQualityService",
@@ -202,14 +236,7 @@ def test_quality_tool_declares_its_consumer_scope(monkeypatch) -> None:
         }
     )
 
-    assert calls == [
-        {
-            "consumer": "quality_status",
-            "account": "lx",
-            "market": "us",
-            "lifecycle_rows_requested": True,
-        }
-    ]
+    assert calls == [{"integrity": True}]
 
 
 def test_http_is_read_only_authenticated_and_etag_aware(monkeypatch, tmp_path: Path) -> None:

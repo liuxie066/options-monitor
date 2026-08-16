@@ -1,7 +1,7 @@
 flowchart LR
   src_application["src.application"] -->|214| domain_domain["domain.domain"]
-  src_interfaces["src.interfaces"] -->|122| src_application["src.application"]
-  src_application["src.application"] -->|108| src_infrastructure["src.infrastructure"]
+  src_interfaces["src.interfaces"] -->|124| src_application["src.application"]
+  src_application["src.application"] -->|109| src_infrastructure["src.infrastructure"]
   src_application_ledger["src.application.ledger"] -->|55| domain_domain["domain.domain"]
   src_application_ledger["src.application.ledger"] -->|39| domain_domain_ledger["domain.domain.ledger"]
   src_application["src.application"] -->|32| domain_storage["domain.storage"]
@@ -22,7 +22,7 @@ flowchart LR
   src_application_trades["src.application.trades"] -->|13| src_infrastructure["src.infrastructure"]
   src_infrastructure["src.infrastructure"] -->|13| src_application["src.application"]
   domain_domain["domain.domain"] -->|12| domain_domain_ledger["domain.domain.ledger"]
-  src_application["src.application"] -->|11| domain_domain_ledger["domain.domain.ledger"]
+  src_application["src.application"] -->|12| domain_domain_ledger["domain.domain.ledger"]
   src_interfaces["src.interfaces"] -->|10| src_application_trades["src.application.trades"]
   src_application_ledger["src.application.ledger"] -->|9| src_infrastructure["src.infrastructure"]
   src_application["src.application"] -->|8| src_application_trades["src.application.trades"]

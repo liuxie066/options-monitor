@@ -8,8 +8,12 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import derive_lifecycle_quality_view
 from src.application.quality.intake_checks import build_trade_intake_datasets
-from src.application.quality.ledger_checks import build_ledger_datasets
+from src.application.quality.ledger_checks import (
+    build_current_ledger_dataset,
+    build_ledger_datasets,
+)
 from src.application.quality.lifecycle_checks import (
+    build_current_lifecycle_quality_dataset,
     build_lifecycle_datasets,
     build_lifecycle_quality_migration_summary,
     lifecycle_deadline,
@@ -20,6 +24,41 @@ from src.application.quality.position_checks import (
 )
 from src.application.quality.runtime_checks import build_runtime_checks
 from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
+
+
+def test_current_quality_datasets_fail_closed_without_history() -> None:
+    ledger = build_current_ledger_dataset(
+        current_projection={"status": "absent", "reason": "missing"},
+        account="lx",
+        market="us",
+        observed_at_utc="2026-08-16T00:00:00Z",
+    )
+    lifecycle = build_current_lifecycle_quality_dataset(
+        current_quality={
+            "aggregate_by_market": [
+                {
+                    "market": "US",
+                    "total_case_count": 1,
+                    "status_counts": {"needs_review": 1},
+                    "trust_class_counts": {"trusted": 1},
+                    "dataset_status_counts": {"untrusted": 1},
+                    "blocked_consumer_counts": {"close_advice": 1},
+                }
+            ],
+            "operational_cases": [],
+        },
+        projection_status="trusted",
+        projection_reason=None,
+        account="lx",
+        market="us",
+        observed_at_utc="2026-08-16T00:00:00Z",
+    )
+
+    assert ledger["status"] == "unavailable"
+    assert ledger["blocked_by"] == ["OM-LED-001"]
+    assert lifecycle["status"] == "untrusted"
+    assert lifecycle["blocked_consumers"] == ["close_advice"]
+    assert lifecycle["blocked_by"] == ["OM-LCY-CURRENT-001"]
 
 
 class _LedgerRepo:
