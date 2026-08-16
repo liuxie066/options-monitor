@@ -136,13 +136,26 @@ def advance_scheduled(
             context_error_ids.add(experiment_id)
             had_failure = True
 
-    committed_by_date: dict[str, Mapping[str, Any]] = {}
+    committed_by_date: dict[str, dict[str, object]] = {}
     conflicted_dates: set[str] = set()
     for context in contexts.values():
+        commitment = context.get("commitment")
         for day in context.get("committed_days", []):
             assert isinstance(day, Mapping)
+            assert isinstance(commitment, Mapping)
             trading_date = str(day["trading_date"])
-            if trading_date in committed_by_date and committed_by_date[trading_date] != day:
+            denominator = {
+                "day": day,
+                "market_calendar_version": commitment["market_calendar_version"],
+                "market_calendar_sha256": commitment[
+                    "market_calendar_snapshot_content_sha256"
+                ],
+                "schedule_config_sha256": commitment["schedule_config_sha256"],
+            }
+            if (
+                trading_date in committed_by_date
+                and committed_by_date[trading_date] != denominator
+            ):
                 conflicted_dates.add(trading_date)
                 result["corpus"].append(
                     {
@@ -153,7 +166,7 @@ def advance_scheduled(
                 )
                 had_failure = True
             else:
-                committed_by_date[trading_date] = day
+                committed_by_date[trading_date] = denominator
     denominator_unknown = bool(context_error_ids) or any(
         context["phase"] == "validation" and context["behavior_binding_drift"]
         for context in contexts.values()
@@ -170,7 +183,7 @@ def advance_scheduled(
 
     try:
         today = _hk_date(occurred_at_utc)
-        committed_day = committed_by_date.get(today)
+        committed = committed_by_date.get(today)
         if today in conflicted_dates:
             result["corpus"].append(
                 {
@@ -180,29 +193,24 @@ def advance_scheduled(
                     "trading_date": today,
                 }
             )
-        elif committed_day is not None:
-            owner = next(
-                context
-                for context in contexts.values()
-                if committed_day in context.get("committed_days", [])
-            )
-            commitment = owner["commitment"]
-            assert isinstance(commitment, Mapping)
+        elif committed is not None:
+            committed_day = committed["day"]
+            assert isinstance(committed_day, Mapping)
             sealed = seal_committed_day_expectation(
                 store,
                 artifact_root,
                 market=market,
                 account=account,
                 committed_day=committed_day,
-                market_calendar_version=str(commitment["market_calendar_version"]),
-                market_calendar_sha256=str(
-                    commitment["market_calendar_snapshot_content_sha256"]
-                ),
-                schedule_config_sha256=str(commitment["schedule_config_sha256"]),
+                market_calendar_version=str(committed["market_calendar_version"]),
+                market_calendar_sha256=str(committed["market_calendar_sha256"]),
+                schedule_config_sha256=str(committed["schedule_config_sha256"]),
                 sealed_at_utc=occurred_at_utc,
                 environ=environ,
             )
             result["corpus"].append(sealed)
+            if sealed.get("status") == "conflict":
+                had_failure = True
         elif schedule is not None and not denominator_unknown:
             calendar = read_market_calendar_binding(artifact_root, market=market)
             if not calendar["coverage_start"] <= today <= calendar["coverage_end"]:
@@ -211,24 +219,25 @@ def advance_scheduled(
                     "current date is outside market calendar coverage",
                 )
             if today in calendar["trading_dates"]:
-                result["corpus"].append(
-                    seal_day_expectation(
-                        store,
-                        artifact_root,
-                        market=market,
-                        account=account,
-                        schedule=schedule,
-                        trading_date=today,
-                        market_calendar_version=str(
-                            calendar["market_calendar_version"]
-                        ),
-                        market_calendar_sha256=str(
-                            calendar["snapshot_content_sha256"]
-                        ),
-                        sealed_at_utc=occurred_at_utc,
-                        environ=environ,
-                    )
+                sealed = seal_day_expectation(
+                    store,
+                    artifact_root,
+                    market=market,
+                    account=account,
+                    schedule=schedule,
+                    trading_date=today,
+                    market_calendar_version=str(
+                        calendar["market_calendar_version"]
+                    ),
+                    market_calendar_sha256=str(
+                        calendar["snapshot_content_sha256"]
+                    ),
+                    sealed_at_utc=occurred_at_utc,
+                    environ=environ,
                 )
+                result["corpus"].append(sealed)
+                if sealed.get("status") == "conflict":
+                    had_failure = True
             else:
                 result["corpus"].append(
                     {
@@ -261,17 +270,18 @@ def advance_scheduled(
                 had_failure = True
                 continue
             try:
-                result["corpus"].append(
-                    capture_recommendation_point(
-                        store,
-                        source_root,
-                        artifact_root,
-                        point_ref=str(point["point_ref"]),
-                        trading_date=str(point["trading_date"]),
-                        captured_at_utc=occurred_at_utc,
-                        environ=environ,
-                    )
+                captured = capture_recommendation_point(
+                    store,
+                    source_root,
+                    artifact_root,
+                    point_ref=str(point["point_ref"]),
+                    trading_date=str(point["trading_date"]),
+                    captured_at_utc=occurred_at_utc,
+                    environ=environ,
                 )
+                result["corpus"].append(captured)
+                if captured.get("status") == "conflict":
+                    had_failure = True
             except Exception as exc:
                 result["corpus"].append(
                     {"operation": "capture_recommendation_point", **point, **_error(exc)}
@@ -292,6 +302,7 @@ def advance_scheduled(
         runtime_ready = readiness.get("validation_runtime_ready") is True
     except Exception as exc:
         result["readiness"] = {"validation_runtime_ready": False, **_error(exc)}
+        had_failure = True
 
     gateway_loaded = False
     gateway: Any = None
