@@ -29,6 +29,12 @@ from src.application.ledger.publisher import (
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
+from src.application.ledger.current_decision_projection import (
+    capture_trade_event_decision_projection_fence,
+)
+from src.application.ledger.writer import (
+    _finish_trade_event_decision_projection,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
     with_sqlite_repo_transaction,
@@ -208,7 +214,11 @@ def adopt_post_trade_combo_pair(
                 event_time_ms=decision_ms,
             ),
         ]
-        run_position_projection_in_transaction(
+        decision_fence = capture_trade_event_decision_projection_fence(
+            sqlite_repo,
+            conn=conn,
+        )
+        runtime = run_position_projection_in_transaction(
             sqlite_repo,
             adjustment_events,
             conn=conn,
@@ -264,12 +274,20 @@ def adopt_post_trade_combo_pair(
             },
             conn=conn,
         )
+        decision_projection = _finish_trade_event_decision_projection(
+            sqlite_repo,
+            conn=conn,
+            fence=decision_fence,
+            events=adjustment_events,
+            created_flags=runtime.created_flags,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             **preview,
             "identity": identity,
             "membership": membership.fact,
             "inference": updated,
+            "decision_projection": decision_projection,
         }
 
     return with_sqlite_repo_transaction(
@@ -417,7 +435,11 @@ def supersede_post_trade_combo_pair(
                 )
             for event_id, target_id in zip(void_ids, adoption_ids, strict=True)
         ]
-        run_position_projection_in_transaction(
+        decision_fence = capture_trade_event_decision_projection_fence(
+            sqlite_repo,
+            conn=conn,
+        )
+        runtime = run_position_projection_in_transaction(
             sqlite_repo,
             void_events,
             conn=conn,
@@ -448,8 +470,20 @@ def supersede_post_trade_combo_pair(
             },
             conn=conn,
         )
+        decision_projection = _finish_trade_event_decision_projection(
+            sqlite_repo,
+            conn=conn,
+            fence=decision_fence,
+            events=void_events,
+            created_flags=runtime.created_flags,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
-        return {**preview, "membership": membership_after.fact, "inference": updated}
+        return {
+            **preview,
+            "membership": membership_after.fact,
+            "inference": updated,
+            "decision_projection": decision_projection,
+        }
 
     return with_sqlite_repo_transaction(
         repo,

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.option_lifecycle import FINAL_STATUSES, PENDING_STATUSES
 from domain.domain.symbol_identity import symbol_market
 from src.application.quality.model import check_result, dataset_status, freshness, utc_iso
-from src.application.trades.lifecycle import FINAL_STATUSES, PENDING_STATUSES
 
 
 EXTERNAL_REVIEW_STATUSES = {"external_adjustment_pending_review", "external_adjustment", "manual_review"}
+LIFECYCLE_SUMMARY_DATASET_ID = "om.lifecycle_evidence_summary"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -263,4 +266,308 @@ def build_lifecycle_datasets(
     return out
 
 
-__all__ = ["build_lifecycle_datasets", "lifecycle_deadline", "next_trading_day"]
+def build_lifecycle_quality_migration_summary(
+    *,
+    legacy_datasets: list[dict[str, Any]],
+    current_quality: Mapping[str, Any],
+    account: str,
+    market: str,
+    observed_at_utc: str,
+    now_ms: int,
+    case_status_by_id: Mapping[str, str],
+    read_models_by_case: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    account_key = str(account or "").strip().lower()
+    market_key = str(market or "").strip().upper()
+    legacy = sorted(
+        (
+            dict(item)
+            for item in legacy_datasets
+            if str(item.get("dataset_id") or "")
+            in {"om.lifecycle_evidence", "om.lifecycle_history"}
+            and str((item.get("scope") or {}).get("account") or "")
+            .strip()
+            .lower()
+            == account_key
+            and str((item.get("scope") or {}).get("market") or "")
+            .strip()
+            .upper()
+            == market_key
+        ),
+        key=lambda item: str((item.get("scope") or {}).get("lifecycle_case_id") or ""),
+    )
+    legacy_by_case = {
+        str((item.get("scope") or {}).get("lifecycle_case_id") or "").strip(): item
+        for item in legacy
+    }
+    if len(legacy_by_case) != len(legacy) or "" in legacy_by_case:
+        raise ValueError("legacy lifecycle quality case identity is invalid")
+
+    current_aggregate = next(
+        (
+            dict(item)
+            for item in current_quality.get("aggregate_by_market") or []
+            if isinstance(item, Mapping)
+            and str(item.get("market") or "").strip().upper() == market_key
+        ),
+        None,
+    )
+    current_details = [
+        dict(item)
+        for item in current_quality.get("operational_cases") or []
+        if isinstance(item, Mapping)
+        and str(item.get("market") or "").strip().upper() == market_key
+    ]
+
+    legacy_summary = {
+        "total_case_count": len(legacy),
+        "case_status_counts": _counts(
+            case_status_by_id.get(case_id)
+            for case_id in legacy_by_case
+        ),
+        "trust_class_counts": _counts(
+            _legacy_trust_class(item) for item in legacy
+        ),
+        "dataset_status_counts": _counts(item.get("status") for item in legacy),
+        "blocked_consumer_counts": _counts(
+            consumer
+            for item in legacy
+            for consumer in item.get("blocked_consumers") or []
+        ),
+    }
+    current_summary = {
+        "total_case_count": int(
+            (current_aggregate or {}).get("total_case_count") or 0
+        ),
+        "case_status_counts": dict(
+            (current_aggregate or {}).get("status_counts") or {}
+        ),
+        "trust_class_counts": dict(
+            (current_aggregate or {}).get("trust_class_counts") or {}
+        ),
+        "dataset_status_counts": dict(
+            (current_aggregate or {}).get("dataset_status_counts") or {}
+        ),
+        "blocked_consumer_counts": dict(
+            (current_aggregate or {}).get("blocked_consumer_counts") or {}
+        ),
+    }
+    legacy_details = {
+        case_id: _legacy_operational_detail(
+            dataset,
+            case_status=case_status_by_id.get(case_id),
+            read_model=read_models_by_case.get(case_id),
+        )
+        for case_id, dataset in legacy_by_case.items()
+        if str(case_status_by_id.get(case_id) or "").strip().lower()
+        not in FINAL_STATUSES
+    }
+    current_detail_view = {
+        str(item.get("case_id") or "").strip(): {
+            "case_id": str(item.get("case_id") or "").strip(),
+            "case_status": item.get("status"),
+            "trust_class": item.get("trust_class"),
+            "evidence_count": item.get("evidence_count"),
+            "settlement_deadline_ms": item.get("settlement_deadline_ms"),
+            "reason_state": item.get("reason_state"),
+            "timing_policy_hash": item.get("timing_policy_hash"),
+            "dataset_status": item.get("dataset_status"),
+            "blocked_consumers": item.get("blocked_consumers"),
+            "reason_codes": _current_quality_reason_codes(
+                item,
+                now_ms=int(now_ms),
+            ),
+        }
+        for item in current_details
+    }
+    comparison = _quality_comparison(
+        legacy_summary=legacy_summary,
+        current_summary=current_summary,
+        legacy_details=legacy_details,
+        current_details=current_detail_view,
+    )
+    status_counts = current_summary["dataset_status_counts"]
+    current_verdict = (
+        "unavailable"
+        if status_counts.get("unavailable")
+        else "untrusted"
+        if status_counts.get("untrusted")
+        else "partial"
+        if status_counts.get("partial")
+        else "trusted"
+    )
+    verdict = (
+        current_verdict
+        if comparison["status"] == "matched"
+        else "unavailable"
+    )
+    blocked_consumers = sorted(
+        set(current_summary["blocked_consumer_counts"])
+        | set(legacy_summary["blocked_consumer_counts"])
+    )
+    check = check_result(
+        check_id="OM-LCY-SHADOW-001",
+        status="pass" if comparison["status"] == "matched" else "fail",
+        scope={"account": account_key, "market": market_key.lower()},
+        observed_at_utc=observed_at_utc,
+        reason_code=(
+            "CURRENT_DECISION_QUALITY_MATCHED"
+            if comparison["status"] == "matched"
+            else "CURRENT_DECISION_QUALITY_MISMATCH"
+        ),
+        message="Current lifecycle quality matches legacy authority."
+        if comparison["status"] == "matched"
+        else "Current lifecycle quality differs from legacy authority.",
+        observed={
+            "legacy_sha256": comparison["legacy_sha256"],
+            "current_sha256": comparison["current_sha256"],
+            "mismatch_count": comparison["mismatch_count"],
+        },
+        expected={"legacy_parity": True},
+        evidence_refs=[],
+    )
+    return (
+        dataset_status(
+            dataset_id=LIFECYCLE_SUMMARY_DATASET_ID,
+            scope={"account": account_key, "market": market_key.lower()},
+            status=verdict,
+            as_of_utc=observed_at_utc,
+            checks=[check],
+            usable_for=[],
+            blocked_consumers=blocked_consumers,
+            blocked_by=(
+                ["OM-LCY-SHADOW-001"]
+                if comparison["status"] != "matched"
+                else []
+            ),
+            reason_codes=(
+                ["CURRENT_DECISION_QUALITY_MISMATCH"]
+                if comparison["status"] != "matched"
+                else []
+            ),
+            extensions={
+                "schema_version": "current_lifecycle_quality_shadow.v1",
+                "aggregate": current_summary,
+                "operational_cases": [
+                    current_detail_view[key]
+                    for key in sorted(current_detail_view)
+                ],
+                "comparison": comparison,
+            },
+        ),
+        comparison,
+    )
+
+
+def _counts(values: Any) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                str(value).strip()
+                for value in values
+                if str(value or "").strip()
+            ).items()
+        )
+    )
+
+
+def _legacy_trust_class(dataset: Mapping[str, Any]) -> str:
+    reasons = {str(item) for item in dataset.get("reason_codes") or []}
+    if "EXTERNAL_ADJUSTMENT_PENDING_REVIEW" in reasons:
+        return "external_review"
+    if str(dataset.get("dataset_id") or "") == "om.lifecycle_history":
+        return "legacy_gap"
+    return "trusted"
+
+
+def _legacy_operational_detail(
+    dataset: Mapping[str, Any],
+    *,
+    case_status: Any,
+    read_model: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    scope = dataset.get("scope") if isinstance(dataset.get("scope"), Mapping) else {}
+    checks = [item for item in dataset.get("checks") or [] if isinstance(item, Mapping)]
+    check = checks[0] if checks else {}
+    observed = check.get("observed") if isinstance(check.get("observed"), Mapping) else {}
+    model = dict(read_model or {})
+    expected_by = str(
+        ((dataset.get("freshness") or {}).get("expected_by_utc") or "")
+    ).strip()
+    deadline_ms = model.get("pending_until_ms")
+    if deadline_ms is None and expected_by:
+        parsed = _parse_utc(expected_by)
+        deadline_ms = int(parsed.timestamp() * 1000) if parsed else None
+    return {
+        "case_id": str(scope.get("lifecycle_case_id") or "").strip(),
+        "case_status": case_status,
+        "trust_class": _legacy_trust_class(dataset),
+        "evidence_count": observed.get("evidence_count"),
+        "settlement_deadline_ms": deadline_ms,
+        "reason_state": model.get("reason_state"),
+        "timing_policy_hash": model.get("timing_policy_hash"),
+        "dataset_status": dataset.get("status"),
+        "blocked_consumers": list(dataset.get("blocked_consumers") or []),
+        "reason_codes": list(dataset.get("reason_codes") or []),
+    }
+
+
+def _current_quality_reason_codes(
+    detail: Mapping[str, Any],
+    *,
+    now_ms: int,
+) -> list[str]:
+    trust = detail.get("trust_class")
+    deadline = detail.get("settlement_deadline_ms")
+    if trust == "external_review":
+        return ["EXTERNAL_ADJUSTMENT_PENDING_REVIEW"]
+    if trust == "legacy_gap":
+        return ["LEGACY_EVIDENCE_GAP"]
+    if detail.get("status") == "ledger_written":
+        return []
+    if deadline is None:
+        return ["LIFECYCLE_DEADLINE_UNAVAILABLE"]
+    if detail.get("dataset_status") == "partial":
+        return ["LIFECYCLE_PENDING_WITHIN_DEADLINE"]
+    return ["LIFECYCLE_EVIDENCE_OVERDUE"]
+
+
+def _quality_comparison(
+    *,
+    legacy_summary: Mapping[str, Any],
+    current_summary: Mapping[str, Any],
+    legacy_details: Mapping[str, Any],
+    current_details: Mapping[str, Any],
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    if legacy_summary != current_summary:
+        mismatches.append({"key": "summary"})
+    for case_id in sorted(set(legacy_details) | set(current_details)):
+        if (
+            case_id not in legacy_details
+            or case_id not in current_details
+            or legacy_details[case_id] != current_details[case_id]
+        ):
+            mismatches.append({"key": case_id})
+    return {
+        "status": "matched" if not mismatches else "mismatch",
+        "legacy_sha256": canonical_sha256(
+            {"summary": legacy_summary, "operational_cases": legacy_details}
+        ),
+        "current_sha256": canonical_sha256(
+            {"summary": current_summary, "operational_cases": current_details}
+        ),
+        "legacy_case_count": len(legacy_details),
+        "current_case_count": len(current_details),
+        "mismatch_count": len(mismatches),
+        "mismatch_samples": mismatches[:10],
+    }
+
+
+__all__ = [
+    "LIFECYCLE_SUMMARY_DATASET_ID",
+    "build_lifecycle_datasets",
+    "build_lifecycle_quality_migration_summary",
+    "lifecycle_deadline",
+    "next_trading_day",
+]

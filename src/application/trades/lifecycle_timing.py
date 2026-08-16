@@ -5,6 +5,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from domain.domain.symbol_identity import symbol_market
+from src.application.ledger.api import record_lifecycle_timing_policy
 from src.application.trades.close_reason_evidence import (
     MARKET_TIMEZONES,
     build_lifecycle_timing_policy,
@@ -148,24 +149,12 @@ def bind_lifecycle_timing_policy(
         calendar_source=calendar_source,
         calendar_observed_at_ms=calendar_observed_at_ms,
     )
-    existing = repo.get_trade_lifecycle_timing_policy(case_id)
-    if existing is not None and dict(existing) != policy:
-        raise ValueError(
-            f"lifecycle timing policy immutable conflict for case_id={case_id}"
-        )
-    created = False
-    if apply_changes:
-        created = bool(
-            repo.insert_trade_lifecycle_timing_policy_once(policy)
-        )
-    return {
-        "schema_version": "lifecycle_timing_binding_result.v1",
-        "case_id": case_id,
-        "apply_changes": bool(apply_changes),
-        "created": created,
-        "existing": existing is not None,
-        "policy": policy,
-    }
+    return record_lifecycle_timing_policy(
+        repo,
+        case_id=case_id,
+        policy=policy,
+        apply_changes=apply_changes,
+    )
 
 
 def _positive_int(value: Any) -> int | None:

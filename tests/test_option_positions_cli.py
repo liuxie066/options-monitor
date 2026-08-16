@@ -110,6 +110,102 @@ def test_projection_migration_writes_require_apply_and_confirmation(
     }
 
 
+@pytest.mark.parametrize(
+    ("command", "function_name"),
+    (
+        ("inventory", "build_current_decision_projection_migration_inventory"),
+        ("verify", "verify_current_decision_projection_migration"),
+        ("status", "current_decision_projection_migration_status"),
+    ),
+)
+def test_decision_projection_reads_use_resolved_store_without_write_guard(
+    command: str,
+    function_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        function_name,
+        lambda path: captured.update(path=path) or {"path": str(path)},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_guard_write",
+        lambda **_kwargs: pytest.fail("read command invoked write guard"),
+    )
+
+    assert cli_mod.main(
+        ["--data-config", str(data_config), "decision-projection", command]
+    ) == 0
+    assert captured["path"] == sqlite_path
+    assert json.loads(capsys.readouterr().out) == {"path": str(sqlite_path)}
+
+
+def test_decision_projection_apply_requires_manifest_and_high_risk_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "inventory.json"
+    manifest.write_text('{"schema_version":"test"}\n', encoding="utf-8")
+    sqlite_path = tmp_path / "ledger.sqlite3"
+    sqlite_path.touch()
+    common = [
+        "--data-config",
+        str(data_config),
+        "decision-projection",
+        "apply",
+        "--manifest",
+        str(manifest),
+    ]
+
+    with pytest.raises(SystemExit, match="requires --apply"):
+        cli_mod.main(common)
+    with pytest.raises(SystemExit, match="use --confirm or --yes"):
+        cli_mod.main([*common, "--apply"])
+
+    monkeypatch.setattr(cli_mod, "_guard_write", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_ledger_store",
+        lambda *_args, **_kwargs: SimpleNamespace(sqlite_path=sqlite_path),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "apply_current_decision_projection_migration",
+        lambda path, payload: {
+            "operation": "apply",
+            "path": str(path),
+            "input_schema": payload["schema_version"],
+        },
+    )
+
+    assert cli_mod.main([*common, "--apply", "--yes"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "operation": "apply",
+        "path": str(sqlite_path),
+        "input_schema": "test",
+    }
+
+
 def test_projection_migration_activate_requires_both_evidence_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -273,6 +273,37 @@ audit JSONL，并在有实际 attempt 时追加 touched-head seal。任一 seal 
 `expiration_no_settlement`；该结论必须来自完整且冻结的 broker settlement
 observation。
 
+## 当前决策投影迁移（shadow-only）
+
+Phase 3B 只增加影子读面，legacy 决策仍是唯一业务权威。先在停止 trade-intake
+的离线副本上执行只读命令；本阶段没有自动 apply、服务切换或历史删除。
+
+```bash
+./om option-positions decision-projection inventory > current-decision-inventory.json
+./om option-positions decision-projection verify
+./om option-positions decision-projection status
+
+# 仅对同一个未漂移 ledger 使用刚冻结的 inventory；这是本地高风险写入
+./om option-positions decision-projection apply \
+  --manifest current-decision-inventory.json --apply --confirm
+```
+
+- `inventory`、`verify`、`status` 均为只读，并校验 SQLite 文件尺寸不变。
+  `status=absent` 表示尚未建立投影；`dirty` 表示源、schema 或 generation
+  不可信；`mismatch` 表示只有部分账户缺失或与 oracle 不一致；只有 `clean`
+  才允许 shadow readiness 继续评估。
+- `apply` 在 `BEGIN IMMEDIATE` 内重新核对 store identity、实现指纹和 authority
+  fingerprint。manifest 过期、目标 ledger 不同或任何校验失败都会整笔回滚；
+  相同 manifest 对 clean 状态重放返回 `write_applied=false`，不会产生 SQLite
+  DML 或 WAL/SHM 增长。
+- 修复流程不是手改 JSON 或单表补行：重新停止 writer、重新生成 inventory，
+  核对 readiness/reasons 后再执行一次 manifest-bound apply，最后重新运行
+  `verify` 和 `status`。
+- schema 启用后，旧版本 writer 的无账户 assigned-stock 写入会被 guard 拒绝，
+  其它未适配写入会使 generation 变脏并令新读面失败关闭。因此升级窗口内不得
+  混跑旧、新 writer；降级只恢复 legacy 读权威，不删除 additive 表，也不猜测
+  或回写旧状态。
+
 ## 历史切换安全顺序
 
 保持 trade-intake 停止，先做 WAL-safe ledger 快照，再生成 inventory。

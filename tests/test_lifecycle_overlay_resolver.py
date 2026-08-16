@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from src.application.ledger.lifecycle_overlay import (
+    advance_direct_lifecycle_anchor_resolution,
     lifecycle_case_generation_token,
     lifecycle_case_resolution,
     resolve_account_lifecycle_overlay,
@@ -202,6 +203,49 @@ def test_disjoint_direct_anchors_are_canonical_and_order_stable() -> None:
     assert min(
         item["received_at_ms"] for item in resolution["anchor_facts"]
     ) == 1_700_000_000_200
+
+
+def test_incremental_direct_anchor_matches_full_resolver() -> None:
+    lifecycle_case = _case("case-a", {"lot-1": 1, "lot-2": 1})
+    anchor_1, claim_1 = _direct_anchor(
+        case_id="case-a",
+        evidence_id="evidence-1",
+        source_suffix="deal-1",
+        manifest={"lot-1": 1},
+        received_at_ms=1_700_000_000_200,
+    )
+    anchor_2, claim_2 = _direct_anchor(
+        case_id="case-a",
+        evidence_id="evidence-2",
+        source_suffix="deal-2",
+        manifest={"lot-2": 1},
+        received_at_ms=1_700_000_000_300,
+    )
+    prior = lifecycle_case_resolution(
+        _resolve(
+            cases=[lifecycle_case],
+            evidence=[anchor_1],
+            claims=[claim_1],
+            lots=[_lot("lot-1"), _lot("lot-2")],
+        ),
+        case_id="case-a",
+    )
+    full = lifecycle_case_resolution(
+        _resolve(
+            cases=[lifecycle_case],
+            evidence=[anchor_1, anchor_2],
+            claims=[claim_1, claim_2],
+            lots=[_lot("lot-1"), _lot("lot-2")],
+        ),
+        case_id="case-a",
+    )
+    assert prior is not None and full is not None
+    assert advance_direct_lifecycle_anchor_resolution(
+        lifecycle_case=lifecycle_case,
+        prior_resolution=prior,
+        evidence=anchor_2,
+        source_claim=claim_2,
+    ) == full
 
 
 def test_direct_anchor_without_claim_is_conflict_and_zero_reservation() -> None:

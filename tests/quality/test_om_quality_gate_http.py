@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -9,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+import src.application.agent_tools.quality as quality_tool_module
+import src.application.quality.gate as quality_gate_module
+from src.application.quality.gate import (
+    QualityGateBlocked,
+    assert_quality_allows,
+    quality_consumer_telemetry_snapshot,
+)
 from src.application.quality.service import OMQualityService
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
@@ -77,6 +84,132 @@ def test_gate_fails_closed_on_stale_artifact(monkeypatch, tmp_path: Path) -> Non
     with pytest.raises(QualityGateBlocked) as exc:
         assert_quality_allows("close_advice", service=_service(tmp_path, _payload(observed_at=stale)))
     assert exc.value.reason_code == "QUALITY_STATUS_STALE"
+
+
+def test_shadow_lifecycle_summary_never_changes_legacy_gate_authority(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    payload = _payload()
+    payload["datasets"].append(
+        {
+            **payload["datasets"][0],
+            "dataset_id": "om.lifecycle_evidence_summary",
+            "status": "unavailable",
+            "blocked_consumers": ["close_advice"],
+            "blocked_by": ["OM-LCY-SHADOW-001"],
+            "reason_codes": ["CURRENT_DECISION_QUALITY_MISMATCH"],
+        }
+    )
+
+    assert_quality_allows(
+        "close_advice",
+        account="lx",
+        market="us",
+        service=_service(tmp_path, payload),
+    )
+
+
+def test_quality_reads_count_declared_and_unexplained_without_payloads(
+    tmp_path: Path,
+) -> None:
+    payload = _payload()
+    payload["extensions"] = {
+        "current_decision_migration": {
+            "quality_consumer_telemetry": {},
+        }
+    }
+    payload["datasets"].append(
+        {
+            **payload["datasets"][0],
+            "dataset_id": "om.lifecycle_evidence",
+            "scope": {
+                "account": "lx",
+                "market": "us",
+                "lifecycle_case_id": "case-1",
+            },
+        }
+    )
+    service = _service(tmp_path, payload)
+
+    before = quality_consumer_telemetry_snapshot()
+    assert service.read_published() == payload
+    declared = service.read_published(
+        consumer="close_advice",
+        account="lx",
+        market="us",
+        lifecycle_rows_requested=True,
+    )
+    after = quality_consumer_telemetry_snapshot()
+
+    assert after["total_count"] == before["total_count"] + 2
+    assert after["unexplained_count"] == before["unexplained_count"] + 1
+    assert declared["extensions"]["current_decision_migration"][
+        "quality_consumer_telemetry"
+    ] == after
+    assert service.artifact_repository.read() == payload
+    assert any(
+        item["consumer"] == "close_advice"
+        and item["account"] == "lx"
+        and item["market"] == "us"
+        and item["legacy_rows_requested"] is True
+        and item["legacy_rows_returned"] is True
+        for item in after["entries"]
+    )
+
+
+def test_quality_read_telemetry_is_bounded_and_overflow_is_unexplained(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(quality_gate_module, "_TELEMETRY_COUNTS", Counter())
+    monkeypatch.setattr(quality_gate_module, "_TELEMETRY_OVERFLOW_COUNT", 0)
+
+    for index in range(quality_gate_module._TELEMETRY_LIMIT + 3):
+        quality_gate_module.record_quality_consumer_read(
+            consumer=f"consumer-{index}",
+            account="lx",
+            market="us",
+            lifecycle_rows_requested=True,
+            lifecycle_rows_returned=True,
+        )
+
+    telemetry = quality_consumer_telemetry_snapshot()
+    assert len(telemetry["entries"]) == quality_gate_module._TELEMETRY_LIMIT
+    assert telemetry["overflow_count"] == 3
+    assert telemetry["unexplained_count"] == 3
+    assert telemetry["coverage_status"] == "unexplained"
+
+
+def test_quality_tool_declares_its_consumer_scope(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class _Reader:
+        def read_published(self, **kwargs):
+            calls.append(kwargs)
+            return _payload()
+
+    monkeypatch.setattr(
+        quality_tool_module,
+        "OMQualityService",
+        _Reader,
+    )
+    quality_tool_module._quality_status_tool(  # noqa: SLF001 - facade proof
+        {
+            "account": "lx",
+            "market": "us",
+            "dataset_id": "om.lifecycle_evidence",
+        }
+    )
+
+    assert calls == [
+        {
+            "consumer": "quality_status",
+            "account": "lx",
+            "market": "us",
+            "lifecycle_rows_requested": True,
+        }
+    ]
 
 
 def test_http_is_read_only_authenticated_and_etag_aware(monkeypatch, tmp_path: Path) -> None:

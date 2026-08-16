@@ -134,6 +134,14 @@
           "history_dimension": "lifecycle_history",
           "path_class": "operator_write_path",
           "later_phase": "phase_2"
+        },
+        {
+          "path_glob": "src/application/research/performance_baseline.py",
+          "owner": "storage_performance_benchmark",
+          "operation": "write",
+          "history_dimension": "lifecycle_history",
+          "path_class": "offline_benchmark",
+          "later_phase": "phase_2"
         }
       ]
     },

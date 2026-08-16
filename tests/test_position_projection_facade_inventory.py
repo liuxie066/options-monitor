@@ -204,8 +204,13 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "_validate_inference_against_current_ledger",
                 "project_stored_trade_events_to_position_lots",
             ): 1,
-            (
-                "src/application/ledger/decision_snapshot.py",
+                (
+                    "src/application/ledger/current_decision_projection.py",
+                    "_oracle_assigned_stock_report",
+                    "project_stored_trade_events_to_position_lots",
+                ): 1,
+                (
+                    "src/application/ledger/decision_snapshot.py",
                 "decision_state_snapshot_from_rows",
                 "project_stored_trade_events_to_position_lots",
             ): 1,

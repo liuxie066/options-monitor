@@ -13,10 +13,20 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.ledger.api import (
     lifecycle_account_coherent_facts,
     open_trade_reconciliation_evidence_repo,
+    read_current_decision_projection,
+)
+from src.application.quality.gate import (
+    quality_consumer_telemetry_snapshot,
+    quality_payload_has_lifecycle_rows,
+    record_quality_consumer_read,
 )
 from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
-from src.application.quality.lifecycle_checks import build_lifecycle_datasets
+from src.application.quality.lifecycle_checks import (
+    LIFECYCLE_SUMMARY_DATASET_ID,
+    build_lifecycle_datasets,
+    build_lifecycle_quality_migration_summary,
+)
 from src.application.trades.lifecycle_reconciliation import (
     build_lifecycle_read_models_from_resolved_account,
 )
@@ -160,8 +170,38 @@ class OMQualityService:
             or default_quality_artifact_path().parent.parent / "option_positions.sqlite3"
         ).expanduser().resolve()
 
-    def read_published(self) -> dict[str, Any] | None:
-        return self.artifact_repository.read()
+    def read_published(
+        self,
+        *,
+        consumer: str | None = None,
+        account: str | None = None,
+        market: str | None = None,
+        lifecycle_rows_requested: bool = True,
+    ) -> dict[str, Any] | None:
+        payload = self.artifact_repository.read()
+        record_quality_consumer_read(
+            consumer=consumer,
+            account=account,
+            market=market,
+            lifecycle_rows_requested=lifecycle_rows_requested,
+            lifecycle_rows_returned=quality_payload_has_lifecycle_rows(
+                payload,
+                account=account,
+                market=market,
+            ),
+        )
+        migration = (
+            ((payload or {}).get("extensions") or {}).get(
+                "current_decision_migration"
+            )
+            if str(consumer or "").strip()
+            else None
+        )
+        if isinstance(migration, dict):
+            migration["quality_consumer_telemetry"] = (
+                quality_consumer_telemetry_snapshot()
+            )
+        return payload
 
     def refresh(
         self,
@@ -171,6 +211,7 @@ class OMQualityService:
         day_end_strict: bool = False,
     ) -> dict[str, Any]:
         now = self.now_fn().astimezone(timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
         observed_at = utc_iso(now)
         previous_payload = self._previous_payload()
         configs = self._load_configs(config_keys or ["us", "hk"])
@@ -209,6 +250,7 @@ class OMQualityService:
             tuple[Path, str], tuple[dict[str, Any] | None, str | None]
         ] = {}
         authoritative_refresh_scopes: list[dict[str, str]] = []
+        migration_comparisons: list[dict[str, Any]] = []
 
         for key, _path, cfg, market in configs:
             accounts = accounts_from_config(cfg, fallback=())
@@ -301,7 +343,7 @@ class OMQualityService:
                                 _coherent_account_lifecycle_inputs(
                                     repo,
                                     account=account,
-                                    now_ms=int(now.timestamp() * 1000),
+                                    now_ms=now_ms,
                                 ),
                                 None,
                             )
@@ -430,24 +472,81 @@ class OMQualityService:
                         market=market,
                     )
                 datasets.append(position_dataset)
-                datasets.extend(
-                    build_lifecycle_datasets(
-                        cases=account_cases,
-                        evidence_rows=account_evidence_rows,
-                        account=account,
-                        market=market,
-                        observed_at_utc=observed_at,
-                        now=now,
-                        trading_days=trading_days,
-                        first_deep_by_case=dict(
-                            control_state.get("lifecycle_first_deep_reconcile") or {}
-                        ),
-                        timing_policies_by_case=(
-                            account_timing_policies_by_case
-                        ),
-                        read_models_by_case=account_read_models_by_case,
-                    )
+                legacy_lifecycle_datasets = build_lifecycle_datasets(
+                    cases=account_cases,
+                    evidence_rows=account_evidence_rows,
+                    account=account,
+                    market=market,
+                    observed_at_utc=observed_at,
+                    now=now,
+                    trading_days=trading_days,
+                    first_deep_by_case=dict(
+                        control_state.get("lifecycle_first_deep_reconcile")
+                        or {}
+                    ),
+                    timing_policies_by_case=(
+                        account_timing_policies_by_case
+                    ),
+                    read_models_by_case=account_read_models_by_case,
                 )
+                datasets.extend(legacy_lifecycle_datasets)
+                migration = {
+                    "account": account,
+                    "market": market,
+                    "status": "not_available",
+                    "current_projection_status": "absent",
+                }
+                if repo is not None:
+                    try:
+                        current_projection = read_current_decision_projection(
+                            repo,
+                            account=account,
+                            now_ms=now_ms,
+                        )
+                        migration["current_projection_status"] = str(
+                            current_projection.get("status")
+                            or "data_unavailable"
+                        )
+                        if current_projection.get("status") == "trusted":
+                            summary_dataset, comparison = (
+                                build_lifecycle_quality_migration_summary(
+                                    legacy_datasets=legacy_lifecycle_datasets,
+                                    current_quality=dict(
+                                        current_projection.get(
+                                            "lifecycle_quality"
+                                        )
+                                        or {}
+                                    ),
+                                    account=account,
+                                    market=market,
+                                    observed_at_utc=observed_at,
+                                    now_ms=now_ms,
+                                    case_status_by_id={
+                                        str(item.get("case_id") or "").strip(): str(
+                                            item.get("status") or ""
+                                        ).strip().lower()
+                                        for item in account_cases
+                                        if str(item.get("case_id") or "").strip()
+                                    },
+                                    read_models_by_case=(
+                                        account_read_models_by_case
+                                    ),
+                                )
+                            )
+                            datasets.append(summary_dataset)
+                            migration.update(
+                                status=comparison["status"],
+                                comparison=comparison,
+                            )
+                    except Exception as exc:
+                        migration.update(
+                            status="error",
+                            reason=(
+                                "quality_shadow_failed:"
+                                f"{type(exc).__name__}"
+                            ),
+                        )
+                migration_comparisons.append(migration)
                 datasets.append(
                     self._holdings_sync_dataset(
                         runtime_for_config=runtime_for_config,
@@ -469,6 +568,37 @@ class OMQualityService:
         runtime_status = runtime_verdict(runtime_checks)
         if runtime_errors and runtime_status == "healthy":
             runtime_status = "unknown"
+        published_datasets = self._deduplicate_datasets(datasets)
+        telemetry = quality_consumer_telemetry_snapshot()
+        declared_lifecycle_read = any(
+            item["legacy_rows_requested"]
+            and item["consumer"] != "unexplained"
+            for item in telemetry["entries"]
+        )
+        published_scopes = {
+            (
+                str((item.get("scope") or {}).get("account") or "").lower(),
+                str((item.get("scope") or {}).get("market") or "").lower(),
+            )
+            for item in published_datasets
+            if (item.get("scope") or {}).get("account")
+            and (item.get("scope") or {}).get("market")
+        }
+        matched_scopes = {
+            (str(item["account"]), str(item["market"]))
+            for item in migration_comparisons
+            if item["status"] == "matched"
+        }
+        migration_ready = (
+            bool(migration_comparisons)
+            and all(
+                item["status"] == "matched"
+                for item in migration_comparisons
+            )
+            and published_scopes <= matched_scopes
+            and telemetry["coverage_status"] == "observed"
+            and declared_lifecycle_read
+        )
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "producer": {
@@ -490,7 +620,7 @@ class OMQualityService:
                 "checks": runtime_checks,
                 "extensions": {"runtime_status_errors": runtime_errors},
             },
-            "datasets": self._deduplicate_datasets(datasets),
+            "datasets": published_datasets,
             "incidents": [],
             "extensions": {
                 "onboarded": self._onboarded(),
@@ -498,9 +628,27 @@ class OMQualityService:
                 "deep_refresh_requested": deep,
                 "day_end_strict": day_end_strict,
                 "authoritative_refresh_scopes": authoritative_refresh_scopes,
+                "current_decision_migration": {
+                    "schema_version": "current_decision_migration.v1",
+                    "status": (
+                        "shadow_ready" if migration_ready else "not_ready"
+                    ),
+                    "comparisons": migration_comparisons,
+                    "quality_consumer_telemetry": telemetry,
+                },
             },
         }
-        payload["summary"] = summarize(payload)
+        payload["summary"] = summarize(
+            {
+                **payload,
+                "datasets": [
+                    item
+                    for item in published_datasets
+                    if item.get("dataset_id")
+                    != LIFECYCLE_SUMMARY_DATASET_ID
+                ],
+            }
+        )
         validate_payload(payload, schema_path=_SCHEMA)
         self.artifact_repository.write_atomic(payload)
         return payload

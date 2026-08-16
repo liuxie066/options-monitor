@@ -17,6 +17,11 @@ from domain.domain.ledger.position_fields import (
     normalize_option_type,
     normalize_side,
 )
+from domain.domain.option_lifecycle import (
+    ASSIGNMENT_WAITING_STATUS,
+    FINAL_STATUSES,
+    PENDING_STATUSES,
+)
 from domain.domain.trade_contract_identity import canonical_contract_symbol, normalize_contract_expiration
 from src.application.ledger.api import (
     accept_option_close_evidence,
@@ -38,14 +43,6 @@ from src.application.trades.lifecycle_reconciliation import (
 from src.application.trades.normalizer import NormalizedTradeDeal
 
 
-ASSIGNMENT_WAITING_STATUS = "waiting_settlement_evidence"
-PENDING_STATUSES = {
-    "pending",
-    ASSIGNMENT_WAITING_STATUS,
-    "needs_review",
-    "partially_resolved",
-}
-FINAL_STATUSES = {"ledger_written"}
 EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
 
 

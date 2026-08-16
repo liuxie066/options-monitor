@@ -97,10 +97,12 @@ from src.application.ledger.writer import (
     adopt_existing_combo_identity_atomically,
     advance_lifecycle_case_state_atomically,
     apply_lifecycle_allocation_atomically,
+    bind_lifecycle_timing_policy_atomically,
     discover_expired_lifecycle_cases_atomically,
     persist_normalized_trade_events_atomically,
     persist_trade_event,
     persist_trade_event_with_combo_identity,
+    record_assigned_stock_event_atomically,
     record_lifecycle_evidence_issue_atomically,
     rebuild_position_lots_from_trade_events,
 )
@@ -2078,6 +2080,19 @@ def record_lifecycle_allocation(
     )
 
 
+def record_assigned_stock_event(
+    repo: Any,
+    *,
+    sale_event: dict[str, Any],
+    assigned_stock_after: dict[str, Any],
+) -> dict[str, Any]:
+    return record_assigned_stock_event_atomically(
+        repo,
+        sale_event=sale_event,
+        assigned_stock_after=assigned_stock_after,
+    )
+
+
 def accept_option_close_evidence(
     repo: Any,
     *,
@@ -2104,6 +2119,21 @@ def discover_expired_lifecycle_cases(
         repo,
         account=account,
         observed_at_ms=observed_at_ms,
+        apply_changes=apply_changes,
+    )
+
+
+def record_lifecycle_timing_policy(
+    repo: Any,
+    *,
+    case_id: str,
+    policy: dict[str, Any],
+    apply_changes: bool,
+) -> dict[str, Any]:
+    return bind_lifecycle_timing_policy_atomically(
+        repo,
+        case_id=case_id,
+        policy=policy,
         apply_changes=apply_changes,
     )
 
@@ -2276,6 +2306,7 @@ __all__ = [
     "preview_trade_event_void",
     "record_broker_trade_close",
     "record_broker_trade_open",
+    "record_assigned_stock_event",
     "record_combo_trade_open",
     "record_expired_position_closes",
     "record_lifecycle_assignment",
@@ -2285,6 +2316,7 @@ __all__ = [
     "accept_option_close_evidence",
     "discover_expired_lifecycle_cases",
     "record_lifecycle_evidence_issue",
+    "record_lifecycle_timing_policy",
     "record_manual_exercise",
     "record_manual_assignment",
     "record_manual_position_adjust",

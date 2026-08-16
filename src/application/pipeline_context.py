@@ -204,15 +204,24 @@ def load_option_positions_context(
                 state_dir=shared_root,
                 log=log,
             )
+            decision_snapshots = _decision_snapshots_for_records(
+                _repo,
+                records,
+            )
             shared_ctx = build_shared_option_positions_context(
                 records,
                 broker=str(market),
                 rates=rates,
-                decision_snapshots_by_account=_decision_snapshots_for_records(
-                    _repo,
-                    records,
-                ),
+                decision_snapshots_by_account=decision_snapshots,
             )
+            for snapshot_account, snapshot in decision_snapshots.items():
+                account_context = (shared_ctx.get("by_account") or {}).get(
+                    snapshot_account
+                )
+                if isinstance(account_context, dict):
+                    account_context["current_decision_shadow"] = dict(
+                        snapshot["current_decision_shadow"]
+                    )
             ctx = dict(slice_shared_option_context_for_account(shared_ctx, account) or {})
             if not _is_exact_account(ctx, source="shared_refresh"):
                 raise ValueError("shared option context account validation failed")
@@ -250,6 +259,10 @@ def load_option_positions_context(
             rates=rates,
             decision_snapshot=decision_snapshot,
         )
+        if decision_snapshot is not None:
+            ctx["current_decision_shadow"] = dict(
+                decision_snapshot["current_decision_shadow"]
+            )
         if not _is_exact_account(ctx, source="direct_fetch"):
             raise ValueError("direct option context account validation failed")
         ctx = with_context_source(ctx, 'direct_fetch')

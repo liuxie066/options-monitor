@@ -62,6 +62,10 @@ def _base_projection(
 ) -> dict[str, Any]:
     opened_at = _ms("2026-04-03T10:00:00")
     assigned_at = _ms("2026-05-01T10:00:00")
+    assignment_currency = str(
+        ((assignment_payload or {}).get("stock_settlement") or {}).get("currency")
+        or "USD"
+    ).upper()
     open_put = _event(
         "open-put",
         option_type="put",
@@ -91,6 +95,8 @@ def _base_projection(
             },
         },
     )
+    open_put["currency"] = assignment_currency
+    assignment["currency"] = assignment_currency
     trade_events = [open_put, assignment, *(extra_events or [])]
     option_lots = [
         {
@@ -102,7 +108,7 @@ def _base_projection(
             "symbol": "NVDA",
             "option_type": "put",
             "position_side": "short",
-            "currency": "USD",
+            "currency": assignment_currency,
             "contracts": 1,
             "remaining": 0,
             "price": 2.5,
@@ -172,7 +178,7 @@ def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> N
     assert missing["assigned_stock_review_rows"][0]["status"] == "missing_quote"
 
 
-def test_projection_marks_unsupported_assignment_or_exercise_inventory_basis() -> None:
+def test_projection_rejects_assignment_or_exercise_stock_side_mismatch() -> None:
     unsupported = _event(
         "exercise-call",
         option_type="call",
@@ -199,7 +205,7 @@ def test_projection_marks_unsupported_assignment_or_exercise_inventory_basis() -
     )
 
     assert report["assigned_stock_lots"] == []
-    assert report["unsupported_inventory_rows"][0]["status"] == "incomplete_inventory_basis"
+    assert report["assigned_stock_review_rows"][0]["status"] == "missing_stock_settlement"
 
 
 def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once() -> None:
@@ -262,11 +268,12 @@ def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once(
             "start_at_ms": opened_at,
             "end_at_ms": _ms("2026-06-30T16:00:00"),
             "allocation_status": "explicit",
+            "linkage_basis": "stock_lot_id",
         }
     ]
 
 
-def test_covered_call_fifo_downgrades_quality_and_mixed_inventory_fails_closed() -> None:
+def test_covered_call_without_linkage_identity_fails_closed() -> None:
     opened_at = _ms("2026-05-05T10:00:00")
     call_open = _event(
         "open-call",
@@ -296,21 +303,20 @@ def test_covered_call_fifo_downgrades_quality_and_mixed_inventory_fails_closed()
         "unrealized_pnl_gross": 50,
     }
 
-    fifo = _base_projection(extra_events=[call_open], extra_option_lots=[call_lot])
+    unbound = _base_projection(extra_events=[call_open], extra_option_lots=[call_lot])
     mixed = _base_projection(
         extra_events=[call_open],
         extra_option_lots=[call_lot],
         stock_holdings=[{"account": "lx", "broker": "富途", "symbol": "NVDA", "shares": 200}],
     )
 
-    fifo_row = fifo["assigned_stock_lots"][0]
-    assert fifo_row["covered_call_pnl"] == 50
-    assert fifo_row["covered_call_allocation_status"] == "derived_fifo"
-    assert fifo_row["covered_call_allocation_quality"] == "heuristic"
-    assert fifo_row["lifecycle_quality"] == "open_marked_heuristic"
-    assert mixed["assigned_stock_lots"][0]["covered_call_pnl"] == 0
-    assert mixed["covered_call_allocations"] == []
-    assert any(row["status"] == "covered_call_unallocated" for row in mixed["assigned_stock_review_rows"])
+    for report in (unbound, mixed):
+        assert report["assigned_stock_lots"][0]["covered_call_pnl"] == 0
+        assert report["covered_call_allocations"] == []
+        assert any(
+            row["status"] == "covered_call_unallocated"
+            for row in report["assigned_stock_review_rows"]
+        )
 
 
 def test_covered_call_fails_closed_when_assigned_shares_are_sold_before_call_end() -> None:

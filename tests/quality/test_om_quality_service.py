@@ -7,6 +7,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 
 import src.application.quality.service as service_module
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import build_lifecycle_case
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.position_records import PositionLotRecord
@@ -37,6 +38,19 @@ class _OpenD:
             rows=[],
             trading_days=[date(2026, 7, 13), date(2026, 7, 14)],
         )
+
+
+def _empty_current_quality() -> dict:
+    return {
+        "schema_version": "current_lifecycle_quality.v1",
+        "account": "lx",
+        "aggregate_by_market": [],
+        "operational_cases": [],
+        "aggregate_fingerprint": canonical_sha256([]),
+        "detail_fingerprint": canonical_sha256([]),
+        "operational_status_counts": {},
+        "blocked_consumer_counts": {},
+    }
 
 
 def test_holdings_sync_quality_treats_no_activity_as_not_triggered() -> None:
@@ -147,6 +161,34 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
     }
     monkeypatch.setattr(service_module, "load_runtime_config", lambda **_kwargs: (config_path, cfg))
     monkeypatch.setattr(service_module, "infer_runtime_config_market", lambda **_kwargs: "US")
+    current_reads: list[str] = []
+
+    def _current_projection(_repo, *, account: str, now_ms: int) -> dict:
+        assert now_ms > 0
+        current_reads.append(account)
+        return {
+            "status": "trusted",
+            "lifecycle_quality": _empty_current_quality(),
+        }
+
+    monkeypatch.setattr(
+        service_module,
+        "read_current_decision_projection",
+        _current_projection,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "quality_consumer_telemetry_snapshot",
+        lambda: {
+            "coverage_status": "unexplained",
+            "entries": [
+                {
+                    "consumer": "unexplained",
+                    "legacy_rows_requested": True,
+                }
+            ],
+        },
+    )
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     runtime = {
         "config": {"config_key": "us"},
@@ -202,6 +244,22 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
     } <= check_ids
     runtime_ids = {item["check_id"] for item in payload["runtime"]["checks"]}
     assert {"RT-OM-001", "RT-OM-002", "RT-OM-003", "RT-OM-004"} <= runtime_ids
+    lifecycle_summary = next(
+        item
+        for item in payload["datasets"]
+        if item["dataset_id"] == "om.lifecycle_evidence_summary"
+    )
+    assert current_reads == ["lx"]
+    assert lifecycle_summary["status"] == "trusted"
+    assert lifecycle_summary["extensions"]["comparison"]["status"] == "matched"
+    assert payload["extensions"]["current_decision_migration"]["status"] == "not_ready"
+    assert sum(payload["summary"]["dataset_counts"].values()) == len(
+        [
+            item
+            for item in payload["datasets"]
+            if item["dataset_id"] != "om.lifecycle_evidence_summary"
+        ]
+    )
 
     schema = json.loads(
         (Path(__file__).resolve().parents[2] / "contracts/quality-monitoring/quality_status.v1.schema.json").read_text(
@@ -512,6 +570,27 @@ def test_single_market_day_end_refresh_preserves_other_market(
         "infer_runtime_config_market",
         lambda *, config_path, **_kwargs: config_path.stem.split(".")[-1],
     )
+    monkeypatch.setattr(
+        service_module,
+        "read_current_decision_projection",
+        lambda *_args, **_kwargs: {
+            "status": "trusted",
+            "lifecycle_quality": _empty_current_quality(),
+        },
+    )
+    monkeypatch.setattr(
+        service_module,
+        "quality_consumer_telemetry_snapshot",
+        lambda: {
+            "coverage_status": "observed",
+            "entries": [
+                {
+                    "consumer": "close_advice",
+                    "legacy_rows_requested": True,
+                }
+            ],
+        },
+    )
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
 
     def runtime_status(_tool, payload):
@@ -539,7 +618,20 @@ def test_single_market_day_end_refresh_preserves_other_market(
         instance_id="test-instance",
         ledger_probe_path=ledger_path,
     )
-    service.refresh(config_keys=["us", "hk"])
+    baseline = service.refresh(config_keys=["us", "hk"])
+    assert baseline["extensions"]["current_decision_migration"]["status"] == (
+        "shadow_ready"
+    )
+    service.artifact_repository.write_atomic(
+        {
+            **baseline,
+            "datasets": [
+                item
+                for item in baseline["datasets"]
+                if item["dataset_id"] != "om.lifecycle_evidence_summary"
+            ],
+        }
+    )
     us_only = service.refresh(
         config_keys=["us"],
         deep=True,
@@ -558,3 +650,9 @@ def test_single_market_day_end_refresh_preserves_other_market(
     }
     assert position_markets == {"us", "hk"}
     assert runtime_markets == {"us", "hk"}
+    assert us_only["extensions"]["current_decision_migration"]["status"] == (
+        "not_ready"
+    )
+    assert service.refresh(config_keys=["us", "hk"])["extensions"][
+        "current_decision_migration"
+    ]["status"] == "shadow_ready"

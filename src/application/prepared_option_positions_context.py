@@ -17,6 +17,7 @@ from src.application.exchange_rate_loader import (
 from src.application.ledger.api import (
     decision_state_snapshot_from_rows,
     open_position_ledger_from_data_config,
+    read_current_decision_projection,
     read_decision_state_rows_many,
     resolve_position_data_config_path,
     resolve_position_ledger_sqlite_path,
@@ -130,6 +131,7 @@ def prepare_option_positions_contexts(
         data_config_by_ledger_path.setdefault(ledger_path, data_path)
 
     rows_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
+    repos_by_ledger_path: dict[Path, Any] = {}
     ledger_read_count = 0
     for ledger_path, accounts in sorted(
         accounts_by_ledger_path.items(),
@@ -144,6 +146,7 @@ def prepare_option_positions_contexts(
                 repo,
                 accounts=tuple(sorted(accounts)),
             )
+            repos_by_ledger_path[ledger_path] = repo
             ledger_read_count += 1
         except Exception as exc:
             reason = f"coherent_position_ledger_unavailable:{type(exc).__name__}"
@@ -214,15 +217,30 @@ def prepare_option_positions_contexts(
             records = list(
                 generation_payloads[accounts[0]]["stored_position_lots"]
             )
-            snapshots = {
-                account: decision_state_snapshot_from_rows(
+            snapshots = {}
+            for account in accounts:
+                try:
+                    current_projection = read_current_decision_projection(
+                        repos_by_ledger_path[ledger_path],
+                        account=account,
+                        now_ms=lifecycle_now_ms,
+                    )
+                except Exception as exc:
+                    current_projection = {
+                        "status": "data_unavailable",
+                        "reason": (
+                            "current_projection_read_failed:"
+                            f"{type(exc).__name__}"
+                        ),
+                    }
+                snapshots[account] = decision_state_snapshot_from_rows(
                     rows_by_account[account],
                     account=account,
                     portfolio_scope_id=portfolio_scope_id(account),
                     source_observed_at=observed_at_utc,
+                    current_projection=current_projection,
+                    current_decision_now_ms=lifecycle_now_ms,
                 )
-                for account in accounts
-            }
         except Exception as exc:
             reason = f"coherent_position_projection_unavailable:{type(exc).__name__}"
             for account in accounts:
@@ -281,6 +299,9 @@ def prepare_option_positions_contexts(
                 context = dict(context)
                 context["decision_state_snapshot"] = dict(
                     snapshots[account]
+                )
+                context["current_decision_shadow"] = dict(
+                    snapshots[account]["current_decision_shadow"]
                 )
                 context["context_source"] = "prepared"
                 context["prepared_authority"] = prepared_authority
