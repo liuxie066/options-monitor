@@ -264,12 +264,14 @@ def _recommendation_row(row: dict[str, Any]) -> str:
     vetoes = row.get("hard_vetoes") if isinstance(row.get("hard_vetoes"), list) else []
     warnings = row.get("warnings") if isinstance(row.get("warnings"), list) else []
     risk_note = ", ".join(str(item) for item in (vetoes or warnings)[:2])
+    stockvoice_note = _stockvoice_note(row.get("stockvoice_signal"))
+    source_note = f"{html.escape(stockvoice_note)}" if stockvoice_note else html.escape(str(row.get("name") or ""))
     return f"""
       <tr>
         <td class="decision-col"><strong>{html.escape(str(row.get("final_decision") or ""))}</strong><span>{html.escape(str(row.get("mature_band") or ""))}</span></td>
         <td>{html.escape(str(row.get("mature_score") or "-"))}<span>{html.escape(str(row.get("original_framework", {}).get("verdict") if isinstance(row.get("original_framework"), dict) else "-"))}</span></td>
         <td>{html.escape(strategy)}</td>
-        <td><strong>{html.escape(str(row.get("symbol") or ""))}</strong><span>{html.escape(str(row.get("name") or ""))}</span></td>
+        <td><strong>{html.escape(str(row.get("symbol") or ""))}</strong><span>{source_note}</span></td>
         <td>{html.escape(str(row.get("contract_symbol") or ""))}<span>{html.escape(str(row.get("expiration") or ""))}</span></td>
         <td>{_fmt_money(row.get("underlying_price"))}</td>
         <td>{_fmt_money(row.get("strike"))}</td>
@@ -281,6 +283,21 @@ def _recommendation_row(row: dict[str, Any]) -> str:
         <td>{html.escape(liquidity)}<span>{html.escape(risk_note)}</span></td>
       </tr>
     """
+
+
+def _stockvoice_note(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    bullish = value.get("bullish_count")
+    bearish = value.get("bearish_count")
+    neutral = value.get("neutral_count")
+    ratio = value.get("bull_bear_ratio")
+    ratio_text = ""
+    try:
+        ratio_text = f", {float(ratio):.1f}x bull/bear"
+    except (TypeError, ValueError):
+        pass
+    return f"StockVoice bull {bullish} / neutral {neutral} / bear {bearish}{ratio_text}"
 
 
 def _fmt_money(value: Any) -> str:
@@ -361,6 +378,8 @@ def _page(result: dict[str, Any] | None = None) -> bytes:
       border-radius: 6px;
       font-size: 14px;
     }}
+    input[type="checkbox"] {{ width: auto; margin: 0 8px 0 0; padding: 0; }}
+    .check-row {{ display: flex; align-items: center; gap: 0; color: var(--ink); }}
     button {{
       width: 100%;
       margin-top: 14px;
@@ -430,6 +449,7 @@ def _page(result: dict[str, Any] | None = None) -> bytes:
         <label>Xueqiu blogger holdings link</label>
         <input name="xueqiu_user_url" value="{DEFAULT_BLOGGER_URL}">
         <p class="note">Default guardrails: sell puts only, no in-the-money puts, Tier-A target basis required, 21-60 DTE, at least 15% out-of-the-money, IV at least 40%, delta at or below 0.30, and liquidity/spread checks. Cash is assumed unlimited; GO and NO-GO rows inside the strategy universe are ranked by annualized yield.</p>
+        <label class="check-row"><input type="checkbox" name="include_stockvoice" value="1" checked> Include StockVoice strong-bullish public KOL signals</label>
         <div class="row">
           <div>
             <label>Scan first N US holdings</label>
@@ -624,6 +644,7 @@ def _command_for_action(action: str, fields: dict[str, list[str]]) -> tuple[list
         user_url = (fields.get("xueqiu_user_url") or [""])[0].strip() or "https://xueqiu.com/u/1247347556#/stock"
         symbols_limit = (fields.get("symbols_limit") or ["5"])[0].strip() or "5"
         expiration = (fields.get("options_expiration") or [""])[0].strip()
+        include_stockvoice = bool(fields.get("include_stockvoice"))
         command = [
             "./om",
             "options-data",
@@ -637,6 +658,8 @@ def _command_for_action(action: str, fields: dict[str, list[str]]) -> tuple[list
             "--max-results",
             "250",
         ]
+        if include_stockvoice:
+            command.append("--include-stockvoice")
         if expiration:
             command.extend(["--expiration", expiration])
         return command, 900

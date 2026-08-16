@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.interfaces.cli.main import parse_args
 from src.interfaces.cli.options_data_ops import handle_options_data_command
 from src.infrastructure.robinhood_options import RobinhoodOptionsError
+from src.infrastructure.stockvoice_client import StockVoiceSignal
 from src.infrastructure.xueqiu_client import XueqiuUserStock
 
 
@@ -65,6 +66,47 @@ def test_options_data_chain_reports_provider_error_without_traceback(monkeypatch
         "token_configured": False,
         "error": "set ROBINHOOD_AUTH_TOKEN",
     }
+
+
+def test_options_data_stockvoice_signals_returns_public_consensus_rows() -> None:
+    args = parse_args(
+        [
+            "options-data",
+            "stockvoice-signals",
+            "--min-bullish-count",
+            "8",
+            "--min-bull-bear-ratio",
+            "2",
+            "--limit",
+            "1",
+        ]
+    )
+
+    def _fetch_stockvoice_signals(**kwargs):
+        assert kwargs["min_bullish_count"] == 8
+        assert kwargs["min_bull_bear_ratio"] == 2.0
+        assert kwargs["limit"] == 1
+        return [
+            StockVoiceSignal(
+                symbol="SPCX",
+                name=None,
+                bullish_count=13,
+                neutral_count=7,
+                bearish_count=5,
+                bullish_ratio=0.52,
+                bull_bear_ratio=2.6,
+                price=140.0,
+            )
+        ]
+
+    payload = handle_options_data_command(args, fetch_stockvoice_signals_fn=_fetch_stockvoice_signals)
+
+    assert payload["ok"] is True
+    assert payload["schema_version"] == "stockvoice_signals.v1"
+    assert payload["provider"] == "stockvoice"
+    assert payload["signal_count"] == 1
+    assert payload["signals"][0]["symbol"] == "SPCX"
+    assert payload["signals"][0]["bull_bear_ratio"] == 2.6
 
 
 def test_options_data_blogger_opportunities_scans_us_stocks_with_saved_tokens(tmp_path) -> None:
@@ -193,6 +235,108 @@ def test_options_data_blogger_opportunities_scans_us_stocks_with_saved_tokens(tm
     assert captured["requests"][0].expiration == "2026-09-18"
     assert "rh-token" not in str(payload)
     assert "xq-cookie" not in str(payload)
+
+
+def test_options_data_blogger_opportunities_can_merge_stockvoice_symbols(tmp_path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        'ROBINHOOD_AUTH_TOKEN="rh-token"\nXUEQIU_COOKIE="xq-cookie"\n',
+        encoding="utf-8",
+    )
+    args = parse_args(
+        [
+            "options-data",
+            "blogger-opportunities",
+            "--user-url",
+            "https://xueqiu.com/u/1247347556#/stock",
+            "--symbols-limit",
+            "3",
+            "--expiration",
+            "2026-09-18",
+            "--include-stockvoice",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+    captured = {"requests": []}
+
+    def _fetch_user_stocks(_target: str, **_kwargs):
+        return [
+            XueqiuUserStock(
+                source_user_id="1247347556",
+                raw_symbol="SPCX",
+                symbol="SPCX",
+                name="SpaceX",
+                exchange="NASDAQ",
+                marketplace="US",
+                current=100.0,
+            ),
+        ]
+
+    def _fetch_stockvoice_signals(**_kwargs):
+        return [
+            StockVoiceSignal(
+                symbol="SPCX",
+                name=None,
+                bullish_count=13,
+                neutral_count=7,
+                bearish_count=5,
+                bullish_ratio=0.52,
+                bull_bear_ratio=2.6,
+                price=100.0,
+            ),
+            StockVoiceSignal(
+                symbol="META",
+                name=None,
+                bullish_count=11,
+                neutral_count=4,
+                bearish_count=3,
+                bullish_ratio=0.611111,
+                bull_bear_ratio=3.666667,
+                price=600.0,
+            ),
+        ]
+
+    def _fetch_options(request):
+        captured["requests"].append(request)
+        current = 100.0 if request.symbol == "SPCX" else 600.0
+        strike = 80.0 if request.symbol == "SPCX" else 500.0
+        return [
+            {
+                "contract_symbol": f"{request.symbol}260918P",
+                "option_type": "put",
+                "expiration": "2026-09-18",
+                "strike": strike,
+                "bid": 2.0,
+                "ask": 2.2,
+                "mid": 2.1,
+                "volume": 100,
+                "open_interest": 1000,
+                "iv": 0.5,
+                "delta": -0.2,
+            }
+        ]
+
+    def _fetch_quotes(symbols, **_kwargs):
+        return {symbol: {"last_trade_price": 100.0 if symbol == "SPCX" else 600.0} for symbol in symbols}
+
+    payload = handle_options_data_command(
+        args,
+        fetch_robinhood_option_chain_fn=_fetch_options,
+        fetch_robinhood_stock_quotes_fn=_fetch_quotes,
+        fetch_user_stocks_fn=_fetch_user_stocks,
+        fetch_stockvoice_signals_fn=_fetch_stockvoice_signals,
+    )
+
+    assert payload["ok"] is True
+    assert payload["selected_symbols"] == ["SPCX", "META"]
+    assert payload["stockvoice_signal_count"] == 2
+    assert payload["stockvoice_symbols"] == ["SPCX", "META"]
+    assert payload["stock_source_count"] == 2
+    assert [request.symbol for request in captured["requests"]] == ["SPCX", "META"]
+    meta_rows = [item for item in payload["opportunities"] if item["symbol"] == "META"]
+    assert meta_rows
+    assert meta_rows[0]["stockvoice_signal"]["bullish_count"] == 11
 
 
 def test_options_data_blogger_opportunities_scopes_dte_when_expiration_is_blank(tmp_path) -> None:

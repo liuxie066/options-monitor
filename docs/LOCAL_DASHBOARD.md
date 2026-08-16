@@ -10,6 +10,7 @@ The dashboard:
 
 - loads a Xueqiu blogger stock-holdings page;
 - keeps only US-listed holdings;
+- optionally adds public StockVoice strong-bullish KOL consensus symbols;
 - fetches Robinhood stock and option quote data;
 - evaluates sell-put candidates through the personal underwriting guardrails;
 - shows both `GO` and `NO_GO` rows inside the eligible strategy universe;
@@ -86,6 +87,16 @@ before ranking.
 Xueqiu is used only to discover the blogger's visible holdings. Robinhood is used
 only for read-only stock and options market data. The dashboard does not need a
 brokerage account ID and does not send orders.
+
+StockVoice can be used as an additional public symbol-discovery source. By
+default, the local workflow treats a StockVoice stock as strong-bullish only when:
+
+- bullish KOL count is at least 8;
+- bullish count is at least 3 higher than bearish count;
+- bullish / bearish ratio is at least 2.0.
+
+StockVoice does not approve a trade by itself. It only allows the symbol to enter
+the same sell-put option guardrails used for Xueqiu-derived symbols.
 
 ## Safety Model
 

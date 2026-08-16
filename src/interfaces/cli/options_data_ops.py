@@ -18,6 +18,11 @@ from src.infrastructure.robinhood_options import (
     fetch_robinhood_option_chain,
     fetch_robinhood_stock_quotes,
 )
+from src.infrastructure.stockvoice_client import (
+    STOCKVOICE_URL,
+    StockVoiceSignal,
+    fetch_stockvoice_signals,
+)
 from src.infrastructure.xueqiu_client import (
     DEFAULT_COOKIE_ENV,
     XueqiuUserStock,
@@ -29,6 +34,7 @@ from src.infrastructure.xueqiu_client import (
 FetchOptionChain = Callable[[RobinhoodOptionChainRequest], list[dict[str, Any]]]
 FetchStockQuotes = Callable[..., dict[str, dict[str, Any]]]
 FetchUserStocks = Callable[..., list[XueqiuUserStock]]
+FetchStockVoiceSignals = Callable[..., list[StockVoiceSignal]]
 
 
 def add_options_data_commands(subparsers: argparse._SubParsersAction) -> None:
@@ -48,6 +54,17 @@ def add_options_data_commands(subparsers: argparse._SubParsersAction) -> None:
     chain.add_argument("--env-file", default=None)
     chain.add_argument("--no-local-env-file", action="store_true")
     chain.add_argument("--timeout", type=float, default=20.0)
+
+    stockvoice = commands.add_parser(
+        "stockvoice-signals",
+        help="fetch public StockVoice bullish consensus signals",
+    )
+    stockvoice.add_argument("--url", default=STOCKVOICE_URL)
+    stockvoice.add_argument("--min-bullish-count", type=int, default=8)
+    stockvoice.add_argument("--min-bull-bear-ratio", type=float, default=2.0)
+    stockvoice.add_argument("--min-net-bullish", type=int, default=3)
+    stockvoice.add_argument("--limit", type=int, default=20)
+    stockvoice.add_argument("--timeout", type=float, default=20.0)
 
     blogger = commands.add_parser(
         "blogger-opportunities",
@@ -74,6 +91,12 @@ def add_options_data_commands(subparsers: argparse._SubParsersAction) -> None:
     blogger.add_argument("--env-file", default=None)
     blogger.add_argument("--no-local-env-file", action="store_true")
     blogger.add_argument("--timeout", type=float, default=20.0)
+    blogger.add_argument("--include-stockvoice", action="store_true")
+    blogger.add_argument("--stockvoice-url", default=STOCKVOICE_URL)
+    blogger.add_argument("--stockvoice-limit", type=int, default=20)
+    blogger.add_argument("--stockvoice-min-bullish-count", type=int, default=8)
+    blogger.add_argument("--stockvoice-min-bull-bear-ratio", type=float, default=2.0)
+    blogger.add_argument("--stockvoice-min-net-bullish", type=int, default=3)
 
 
 def handle_options_data_command(
@@ -82,13 +105,17 @@ def handle_options_data_command(
     fetch_robinhood_option_chain_fn: FetchOptionChain = fetch_robinhood_option_chain,
     fetch_robinhood_stock_quotes_fn: FetchStockQuotes = fetch_robinhood_stock_quotes,
     fetch_user_stocks_fn: FetchUserStocks = fetch_user_stocks,
+    fetch_stockvoice_signals_fn: FetchStockVoiceSignals = fetch_stockvoice_signals,
 ) -> dict[str, Any]:
+    if args.options_data_command == "stockvoice-signals":
+        return _handle_stockvoice_signals(args, fetch_stockvoice_signals_fn=fetch_stockvoice_signals_fn)
     if args.options_data_command == "blogger-opportunities":
         return _handle_blogger_opportunities(
             args,
             fetch_robinhood_option_chain_fn=fetch_robinhood_option_chain_fn,
             fetch_robinhood_stock_quotes_fn=fetch_robinhood_stock_quotes_fn,
             fetch_user_stocks_fn=fetch_user_stocks_fn,
+            fetch_stockvoice_signals_fn=fetch_stockvoice_signals_fn,
         )
     if args.options_data_command != "chain":
         return {"ok": False, "error": f"unsupported options-data command: {args.options_data_command}"}
@@ -147,6 +174,7 @@ def _handle_blogger_opportunities(
     fetch_robinhood_option_chain_fn: FetchOptionChain,
     fetch_robinhood_stock_quotes_fn: FetchStockQuotes,
     fetch_user_stocks_fn: FetchUserStocks,
+    fetch_stockvoice_signals_fn: FetchStockVoiceSignals,
 ) -> dict[str, Any]:
     effective = build_effective_env(
         env_file=getattr(args, "env_file", None),
@@ -199,9 +227,27 @@ def _handle_blogger_opportunities(
             "error": str(exc),
         }
 
-    us_stocks = [stock for stock in stocks if _is_us_stock(stock)]
-    selected_stocks = us_stocks[:symbols_limit]
     errors: list[dict[str, str]] = []
+    stockvoice_signals: list[StockVoiceSignal] = []
+    if bool(getattr(args, "include_stockvoice", False)):
+        try:
+            stockvoice_signals = fetch_stockvoice_signals_fn(
+                url=str(getattr(args, "stockvoice_url", STOCKVOICE_URL) or STOCKVOICE_URL),
+                timeout=float(args.timeout or 20.0),
+                min_bullish_count=max(0, int(getattr(args, "stockvoice_min_bullish_count", 8) or 0)),
+                min_bull_bear_ratio=max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 2.0) or 0.0)),
+                min_net_bullish=max(0, int(getattr(args, "stockvoice_min_net_bullish", 3) or 0)),
+                limit=max(0, int(getattr(args, "stockvoice_limit", 20) or 0)),
+            )
+        except Exception as exc:
+            stockvoice_signals = []
+            errors.append({"stage": "stockvoice_signals", "error": str(exc)})
+
+    us_stocks = [stock for stock in stocks if _is_us_stock(stock)]
+    stockvoice_stocks = [_stock_from_stockvoice_signal(signal) for signal in stockvoice_signals]
+    source_stocks = _dedupe_stocks([*us_stocks, *stockvoice_stocks])
+    selected_stocks = source_stocks[:symbols_limit]
+    stockvoice_by_symbol = {signal.symbol: signal for signal in stockvoice_signals}
     quotes: dict[str, dict[str, Any]] = {}
     try:
         quotes = fetch_robinhood_stock_quotes_fn(
@@ -237,6 +283,7 @@ def _handle_blogger_opportunities(
             policy=policy,
             portfolio_nav=portfolio_nav,
             enforce_dte_scope=not bool(args.expiration),
+            stockvoice_signal=stockvoice_by_symbol.get(stock.symbol),
         )
         opportunities.extend(ranked[:per_symbol_limit] if per_symbol_limit else ranked)
     sorted_opportunities = sorted(opportunities, key=_yield_sort_key)
@@ -252,6 +299,9 @@ def _handle_blogger_opportunities(
         "xueqiu_cookie_configured": bool(xueqiu_cookie),
         "source_stock_count": len(stocks),
         "us_stock_count": len(us_stocks),
+        "stockvoice_signal_count": len(stockvoice_signals),
+        "stockvoice_symbols": [signal.symbol for signal in stockvoice_signals],
+        "stock_source_count": len(source_stocks),
         "selected_symbols": [stock.symbol for stock in selected_stocks],
         "quote_count": len(quotes),
         "cash_assumption": "unlimited_cash",
@@ -265,6 +315,9 @@ def _handle_blogger_opportunities(
             "max_abs_delta": policy.max_abs_delta,
             "min_iv": policy.min_iv,
             "max_bid_ask_spread_pct": policy.max_bid_ask_spread_pct,
+            "stockvoice_min_bullish_count": max(0, int(getattr(args, "stockvoice_min_bullish_count", 8) or 0)),
+            "stockvoice_min_bull_bear_ratio": max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 2.0) or 0.0)),
+            "stockvoice_min_net_bullish": max(0, int(getattr(args, "stockvoice_min_net_bullish", 3) or 0)),
         },
         "opportunity_count": len(returned_opportunities),
         "evaluated_count": len(opportunities),
@@ -283,6 +336,43 @@ def _handle_blogger_opportunities(
             "Cash is assumed unlimited for this local strategy; assignment cash required and stress losses are shown in dollars instead of NAV percentages.",
             "Macro, VIX, Fear & Greed, earnings, and analyst data are not yet wired into this local backend, so the original framework remains unresolved when only those gates are missing.",
             "Missing upstream values remain null so they are easy to spot.",
+            "When enabled, StockVoice is used only as a public bullish-consensus symbol source before option guardrails run.",
+        ],
+    }
+
+
+def _handle_stockvoice_signals(
+    args: argparse.Namespace,
+    *,
+    fetch_stockvoice_signals_fn: FetchStockVoiceSignals,
+) -> dict[str, Any]:
+    try:
+        signals = fetch_stockvoice_signals_fn(
+            url=str(args.url or STOCKVOICE_URL),
+            timeout=float(args.timeout or 20.0),
+            min_bullish_count=max(0, int(args.min_bullish_count or 0)),
+            min_bull_bear_ratio=max(0.0, float(args.min_bull_bear_ratio or 0.0)),
+            min_net_bullish=max(0, int(args.min_net_bullish or 0)),
+            limit=max(0, int(args.limit or 0)),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "schema_version": "stockvoice_signals.v1",
+            "provider": "stockvoice",
+            "source_url": str(args.url or STOCKVOICE_URL),
+            "error": str(exc),
+        }
+    return {
+        "ok": True,
+        "schema_version": "stockvoice_signals.v1",
+        "provider": "stockvoice",
+        "source_url": str(args.url or STOCKVOICE_URL),
+        "signal_count": len(signals),
+        "signals": [signal.to_dict() for signal in signals],
+        "notes": [
+            "StockVoice signals are parsed from the public website and used as advisory symbol-discovery input only.",
+            "A bullish consensus signal does not bypass sell-put option guardrails.",
         ],
     }
 
@@ -296,6 +386,30 @@ def _is_us_stock(stock: XueqiuUserStock) -> bool:
     if marketplace == "US":
         return True
     return bool(symbol and "." not in symbol and symbol.isascii())
+
+
+def _stock_from_stockvoice_signal(signal: StockVoiceSignal) -> XueqiuUserStock:
+    return XueqiuUserStock(
+        source_user_id="stockvoice",
+        raw_symbol=signal.symbol,
+        symbol=signal.symbol,
+        name=signal.name,
+        exchange="US",
+        marketplace="US",
+        current=signal.price,
+    )
+
+
+def _dedupe_stocks(stocks: list[XueqiuUserStock]) -> list[XueqiuUserStock]:
+    out: list[XueqiuUserStock] = []
+    seen: set[str] = set()
+    for stock in stocks:
+        symbol = str(stock.symbol or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(stock)
+    return out
 
 
 def _rank_strategy_rows(
@@ -367,6 +481,7 @@ def _rank_sell_put_rows(
     policy: SellPutPolicy,
     portfolio_nav: float | None,
     enforce_dte_scope: bool = False,
+    stockvoice_signal: StockVoiceSignal | None = None,
 ) -> list[dict[str, Any]]:
     quote_midpoint = _midpoint(_float_or_none(quote.get("bid_price")), _float_or_none(quote.get("ask_price")))
     current = _first_float(stock.current, quote.get("last_trade_price"), quote_midpoint)
@@ -410,6 +525,8 @@ def _rank_sell_put_rows(
             policy=policy,
             portfolio_nav=portfolio_nav,
         )
+        if stockvoice_signal is not None:
+            evaluated["stockvoice_signal"] = stockvoice_signal.to_dict()
         out.append(evaluated)
     out = sorted(out, key=_yield_sort_key)
     for item in out:
