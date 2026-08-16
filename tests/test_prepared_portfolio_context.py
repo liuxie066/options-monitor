@@ -13,6 +13,7 @@ import pytest
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
+    load_prepared_portfolio_context_receipt,
     prepare_portfolio_contexts,
 )
 from src.application.tick_run_workspace import publish_account_run_config
@@ -26,6 +27,7 @@ class _CompletedWorker:
         request = json.loads(request_path.read_text(encoding="utf-8"))
         context = {
             "filters": {"account": request["account"]},
+            "source_observed_at": "2026-08-16T00:00:00+00:00",
             "stocks_by_symbol": {
                 "NVDA": {
                     "account": request["account"],
@@ -125,6 +127,57 @@ def test_prepare_promotes_only_valid_worker_payloads(tmp_path: Path) -> None:
         ),
     )
     assert loaded["stocks_by_symbol"]["NVDA"]["avg_cost"] == 100
+    receipt = load_prepared_portfolio_context_receipt(
+        manifest_path=Path(manifests["lx"]["manifest_path"]),
+        expected_base=tmp_path,
+        expected_run_id="run-1",
+        expected_account="lx",
+        expected_account_config_sha256=authorities["lx"].account_config_sha256,
+        expected_manifest_sha256=manifests["lx"]["manifest_sha256"],
+        expected_runtime_config=json.loads(
+            authorities["lx"].canonical_bytes.decode("utf-8")
+        ),
+    )
+    assert receipt["payload"] == loaded
+    assert receipt["manifest"]["source_as_of_utc"] == loaded["source_observed_at"]
+    assert (
+        receipt["manifest"]["promoted_at_utc"] == receipt["manifest"]["prepared_at_utc"]
+    )
+
+    manifest_path = Path(manifests["lx"]["manifest_path"])
+    malformed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    malformed_manifest["promoted_at_utc"] = "2026-08-16T00:00:09+00:00"
+    malformed_bytes = _artifact_bytes(malformed_manifest)
+    manifest_path.write_bytes(malformed_bytes)
+    malformed_sha256 = hashlib.sha256(malformed_bytes).hexdigest()
+    assert (
+        load_prepared_portfolio_context(
+            manifest_path=manifest_path,
+            expected_base=tmp_path,
+            expected_run_id="run-1",
+            expected_account="lx",
+            expected_account_config_sha256=authorities["lx"].account_config_sha256,
+            expected_manifest_sha256=malformed_sha256,
+            expected_runtime_config=json.loads(
+                authorities["lx"].canonical_bytes.decode("utf-8")
+            ),
+        )
+        == loaded
+    )
+    with pytest.raises(PreparedPortfolioContextError, match="alias mismatch"):
+        load_prepared_portfolio_context_receipt(
+            manifest_path=manifest_path,
+            expected_base=tmp_path,
+            expected_run_id="run-1",
+            expected_account="lx",
+            expected_account_config_sha256=authorities["lx"].account_config_sha256,
+            expected_manifest_sha256=malformed_sha256,
+            expected_runtime_config=json.loads(
+                authorities["lx"].canonical_bytes.decode("utf-8")
+            ),
+        )
+
+    manifest_path.write_bytes(_artifact_bytes(receipt["manifest"]))
 
     context_path = states["lx"] / manifests["lx"]["portfolio_context_relpath"]
     context_path.write_text("{}", encoding="utf-8")

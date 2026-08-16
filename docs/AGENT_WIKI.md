@@ -292,6 +292,7 @@ Important runtime paths:
 | Current pointers | `output_shared/state/current/` |
 | Per-account output | `output_accounts/<account>/` |
 | Run snapshots | `output_runs/<run_id>/` |
+| Compact runtime shadow | `output_runs/<run_id>/accounts/<account>/state/runtime_portfolio_snapshot.v1.json` |
 | Default reports | `output_shared/reports/` |
 | OpenD cache | `cache/opend_option_chain/`, `cache/opend_option_expirations/` |
 | Audit logs | `audit/run_logs/` |
@@ -370,6 +371,7 @@ Tick flow:
       -> required_data prefetch
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
       -> optional close advice
+      -> immutable compact runtime shadow after terminal candidate commit
       -> per-account metrics and notification text
    -> tick_notification_flow  # scheduled only: Daily Decision Brief ordinary delivery
    -> run state and audit writes
@@ -384,6 +386,12 @@ parent and scan-child consumers use the retained generation instead of reopening
 replacement cannot split one run across two configs. Account labels are canonical lowercase path components
 (`[a-z0-9][a-z0-9_-]{0,63}`); an explicit empty scope, unsafe label, or symlinked artifact ancestor fails closed before
 run artifacts or config publication.
+
+After a scanned account commits its terminal candidate manifest, Tick publishes the account-scoped compact runtime
+snapshot above with write-once/adopt semantics. It is replay evidence and a shadow comparison surface only: legacy
+files, `AccountResult`, ranking, notification, and delivery remain authoritative. Missing, malformed, or conflicting
+compact data is reported as account-scoped `data_unavailable` and never repaired or substituted into the legacy path;
+rollback is removal of the compact consumer/call, not a history rewrite or runtime-data deletion.
 
 Prepared portfolio payloads use content-addressed names and a write-once/adopt manifest. The parent retains the manifest
 SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader

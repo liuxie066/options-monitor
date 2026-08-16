@@ -459,7 +459,7 @@ def prepare_portfolio_contexts(
         return promoted
 
 
-def load_prepared_portfolio_context(
+def _load_prepared_portfolio_context_artifacts(
     *,
     manifest_path: Path,
     expected_base: Path,
@@ -540,7 +540,12 @@ def load_prepared_portfolio_context(
         )
     status = str(manifest.get("status") or "").strip().lower()
     if status == "unavailable":
-        return None
+        return {
+            "manifest": manifest,
+            "payload": None,
+            "manifest_bytes": manifest_bytes,
+            "payload_bytes": None,
+        }
     if status != "ready":
         raise PreparedPortfolioContextError("prepared portfolio manifest status is invalid")
     relpath = _required_text(
@@ -579,7 +584,82 @@ def load_prepared_portfolio_context(
         expected_account=account,
         expected_runtime_config=expected_runtime_config,
     )
-    return payload
+    return {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": manifest_bytes,
+        "payload_bytes": payload_bytes,
+    }
+
+
+def load_prepared_portfolio_context_receipt(
+    *,
+    manifest_path: Path,
+    expected_base: Path,
+    expected_run_id: str,
+    expected_account: str,
+    expected_account_config_sha256: str,
+    expected_manifest_sha256: str | None = None,
+    expected_runtime_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load bytes and expose only owner-validated timing receipts."""
+
+    receipt = _load_prepared_portfolio_context_artifacts(
+        manifest_path=manifest_path,
+        expected_base=expected_base,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_runtime_config=expected_runtime_config,
+    )
+    payload = receipt["payload"]
+    if payload is None:
+        return receipt
+    manifest = receipt["manifest"]
+    source_as_of_utc = _utc_receipt(
+        manifest.get("source_as_of_utc"),
+        "source_as_of_utc",
+    )
+    promoted_at_utc = _utc_receipt(
+        manifest.get("promoted_at_utc"),
+        "promoted_at_utc",
+    )
+    if _utc_receipt(manifest.get("prepared_at_utc"), "prepared_at_utc") != (
+        promoted_at_utc
+    ):
+        raise PreparedPortfolioContextError("prepared portfolio receipt alias mismatch")
+    payload_source_as_of = str(
+        payload.get("source_observed_at") or payload.get("as_of_utc") or ""
+    )
+    if payload_source_as_of != source_as_of_utc:
+        raise PreparedPortfolioContextError(
+            "prepared portfolio source observation mismatch"
+        )
+    return receipt
+
+
+def load_prepared_portfolio_context(
+    *,
+    manifest_path: Path,
+    expected_base: Path,
+    expected_run_id: str,
+    expected_account: str,
+    expected_account_config_sha256: str,
+    expected_manifest_sha256: str | None = None,
+    expected_runtime_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Load the existing payload-only facade from a validated receipt."""
+
+    return _load_prepared_portfolio_context_artifacts(
+        manifest_path=manifest_path,
+        expected_base=expected_base,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_runtime_config=expected_runtime_config,
+    )["payload"]
 
 
 def run_worker(request_path: Path) -> int:
@@ -841,6 +921,17 @@ def _required_sha256(value: Any, field: str) -> str:
     return digest
 
 
+def _utc_receipt(value: Any, field: str) -> str:
+    text = _required_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PreparedPortfolioContextError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise PreparedPortfolioContextError(f"{field} must be UTC")
+    return text
+
+
 def _resolve_context_source_binding(
     *,
     config: Mapping[str, Any],
@@ -994,6 +1085,7 @@ __all__ = [
     "PREPARED_PORTFOLIO_CONTEXT_SCHEMA",
     "PreparedPortfolioContextError",
     "load_prepared_portfolio_context",
+    "load_prepared_portfolio_context_receipt",
     "prepare_portfolio_contexts",
     "run_worker",
 ]

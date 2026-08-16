@@ -132,11 +132,18 @@ from src.application.ledger.position_projection_publication import (
     read_current_position_projection,
 )
 from src.application.ledger.current_decision_projection import (
+    CURRENT_ASSIGNED_STOCK_SCHEMA,
+    CURRENT_COMBO_GROUP_FACT_SCHEMA,
+    CURRENT_COMBO_SCHEMA,
+    CURRENT_DECISION_READ_SCHEMA,
     apply_current_decision_projection_migration,
+    build_current_decision_projection_payload,
     build_current_decision_projection_migration_inventory,
     CurrentDecisionProjectionError,
     build_current_decision_projection,
+    build_initial_lifecycle_case_decision_fact,
     build_lifecycle_case_decision_fact,
+    build_lifecycle_quality_fact,
     capture_current_decision_projection_fence,
     compact_assigned_stock_view,
     current_decision_projection_row,
@@ -145,9 +152,11 @@ from src.application.ledger.current_decision_projection import (
     empty_assigned_stock_fact,
     encode_current_decision_projection,
     finalize_current_decision_projection,
+    lifecycle_views_by_lot,
     preview_current_decision_projection_oracle,
     read_current_decision_projection,
     update_assigned_stock_fact,
+    validate_current_decision_projection_payload,
     verify_current_decision_projection,
     verify_current_decision_projection_migration,
 )
@@ -160,6 +169,7 @@ from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
 from src.application.ledger.decision_snapshot import (
+    CURRENT_DECISION_POSITION_FIELDS,
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
     decision_state_snapshot_from_rows,
@@ -203,6 +213,7 @@ from src.application.ledger.notification_outbox import (
     canonical_payload_hash,
 )
 from src.application.ledger.repository import (
+    POSITION_PROJECTION_SCHEMA,
     with_sqlite_repo_transaction,
 )
 from src.application.ledger.writer import (
@@ -225,6 +236,11 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 __all__ = [
+    "CURRENT_ASSIGNED_STOCK_SCHEMA",
+    "CURRENT_COMBO_GROUP_FACT_SCHEMA",
+    "CURRENT_COMBO_SCHEMA",
+    "CURRENT_DECISION_POSITION_FIELDS",
+    "CURRENT_DECISION_READ_SCHEMA",
     "AssignedStockEventLog",
     "assigned_stock_event_log",
     "accept_option_close_evidence",
@@ -294,7 +310,10 @@ __all__ = [
     "build_lifecycle_attempt_run_seal",
     "build_current_decision_projection_migration_inventory",
     "build_current_decision_projection",
+    "build_current_decision_projection_payload",
+    "build_initial_lifecycle_case_decision_fact",
     "build_lifecycle_case_decision_fact",
+    "build_lifecycle_quality_fact",
     "capture_current_decision_projection_fence",
     "compact_assigned_stock_view",
     "current_decision_projection_row",
@@ -305,6 +324,7 @@ __all__ = [
     "empty_assigned_stock_fact",
     "encode_current_decision_projection",
     "lifecycle_attempt_diagnostic_sha256",
+    "lifecycle_views_by_lot",
     "compute_lifecycle_attempt_chain_sha256",
     "list_combo_pair_inferences",
     "ledger_store_payload",
@@ -324,6 +344,7 @@ __all__ = [
     "position_projection_migration_status",
     "position_projection_runtime_telemetry",
     "POSITION_PROJECTION_ACCEPTANCE_SCHEMA",
+    "POSITION_PROJECTION_SCHEMA",
     "loaded_projector_implementation_fingerprint",
     "read_current_position_projection",
     "read_current_decision_projection",
@@ -386,6 +407,7 @@ __all__ = [
     "valid_void_target_event_id",
     "validate_account_lifecycle_resolution",
     "validate_combo_group_membership",
+    "validate_current_decision_projection_payload",
     "update_assigned_stock_fact",
     "validate_lifecycle_attempt_run_seal",
     "validate_position_fact_snapshot_contract",
