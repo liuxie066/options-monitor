@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 import src.application.ledger.lifecycle_attempt_audit as audit_codec
+import src.application.ledger.lifecycle_settlement_semantics as settlement_semantics
+import src.application.ledger.repository as repository_module
 from src.application.ledger.api import (
     record_lifecycle_attempt_audit_atomically,
 )
@@ -1718,6 +1720,86 @@ def test_atomic_sidecar_writer_creates_three_spans_for_a_b_a(
     assert repo.verify_trade_lifecycle_attempt_audit_case(
         case_id="case-a"
     )["status"] == "valid"
+
+
+def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    current = _observation()
+    _append_attempt(
+        repo,
+        build_lifecycle_attempt_audit_envelope(
+            case_id="case-a",
+            invocation_id=_invocation(30),
+            attempted_at_ms=2_000,
+            outcome_kind="observed_complete",
+            observation=current,
+        ),
+        evidence_id="evidence-v1",
+        evidence_observation=current,
+    )
+
+    upgraded_projection = {
+        **current["semantic_projection"],
+        "schema_version": "settlement_observation_semantic.v2",
+    }
+    upgraded = {
+        **current,
+        "semantic_schema": upgraded_projection["schema_version"],
+        "semantic_projection": upgraded_projection,
+        "semantic_fingerprint": settlement_semantics.canonical_hash(
+            upgraded_projection
+        ),
+    }
+
+    def versioned_semantic(evidence: dict[str, object]):
+        observation = evidence["observation"]
+        assert isinstance(observation, dict)
+        return observation["semantic_projection"], observation["semantic_fingerprint"]
+
+    monkeypatch.setattr(
+        audit_codec,
+        "settlement_semantic_from_evidence",
+        versioned_semantic,
+    )
+    monkeypatch.setattr(
+        repository_module,
+        "settlement_semantic_from_evidence",
+        versioned_semantic,
+    )
+    _append_attempt(
+        repo,
+        build_lifecycle_attempt_audit_envelope(
+            case_id="case-a",
+            invocation_id=_invocation(31),
+            attempted_at_ms=3_000,
+            outcome_kind="observed_complete",
+            observation=upgraded,
+        ),
+        evidence_id="evidence-v2",
+        evidence_observation=upgraded,
+    )
+
+    with repo._connect() as conn:  # noqa: SLF001 - focused span contract
+        spans = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM trade_lifecycle_observation_spans "
+                "ORDER BY span_ordinal"
+            )
+        ]
+    assert [row["semantic_schema"] for row in spans] == [
+        "settlement_observation_semantic.v1",
+        "settlement_observation_semantic.v2",
+    ]
+    assert spans[0]["closed_chain_sha256"] is not None
+    assert spans[1]["closed_chain_sha256"] is None
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")[
+        "status"
+    ] == "valid"
 
 
 def test_audit_only_writer_persists_failure_without_business_or_evidence(
