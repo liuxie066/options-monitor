@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import os
@@ -1059,6 +1060,29 @@ def test_scan_blob_gc_preview_marks_retained_and_research_roots_and_old_orphans(
     )
     assert first_empty["summary"] == second_empty["summary"]
     assert first_empty["plan_sha256"] != second_empty["plan_sha256"]
+
+
+def test_scan_blob_gc_preview_deduplicates_concurrent_same_hash_publish(
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        refs = list(pool.map(lambda _index: _publish_scan_blob(root, "AAA"), range(8)))
+
+    digest = refs[0]["blob_sha256"]
+    assert {ref["blob_sha256"] for ref in refs} == {digest}
+    assert len(list((root / "output_shared/blobs/sha256").glob("*/*.json.gz"))) == 1
+    assert list((root / "output_shared/blobs/sha256").glob("**/*.tmp")) == []
+
+    before = _tree_identity(root)
+    result = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert _tree_identity(root) == before
+    assert [item["blob_sha256"] for item in result["candidates"]] == [digest]
+    assert result["deletion_allowed"] is True
 
 
 def test_scan_blob_gc_preview_keeps_recent_run_outside_latest_200(tmp_path: Path) -> None:
