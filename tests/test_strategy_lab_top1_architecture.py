@@ -31,6 +31,7 @@ FILL_OBSERVATION_MODULE = (
     ROOT / "src/application/strategy_lab/top1/fill_observation.py"
 )
 OUTCOME_MODULE = ROOT / "src/application/strategy_lab/top1/outcome.py"
+ADVANCE_MODULE = ROOT / "src/application/strategy_lab/top1/advance.py"
 PRODUCTION_TICK_MODULES = (
     ROOT / "src/application/multi_account_tick.py",
     ROOT / "src/application/tick_account_execution.py",
@@ -165,10 +166,13 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "pathlib",
         "re",
         "typing",
+        "zoneinfo",
         "domain.domain.decision_state_fingerprint",
         "src.application.recommendation_point",
+        "src.application.scan_scheduler",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
+        "src.application.strategy_lab.top1.corpus",
         "src.application.strategy_lab.top1.research",
         "src.application.strategy_lab.top1.research_artifacts",
         "src.application.strategy_lab.top1.terminal_projection",
@@ -197,6 +201,7 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "pathlib",
         "re",
         "typing",
+        "zoneinfo",
         "domain.domain.decision_state_fingerprint",
         "src.application.candidate_snapshot_contract",
         "src.application.opening_candidate_snapshot",
@@ -208,6 +213,22 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.strategy_lab.top1.ranking",
         "src.application.strategy_lab.top1.terminal_projection",
         "src.infrastructure.private_storage",
+        "src.infrastructure.strategy_lab.experiment_store",
+    }
+
+    assert _imports(ADVANCE_MODULE) <= {
+        "__future__",
+        "collections.abc",
+        "datetime",
+        "hashlib",
+        "pathlib",
+        "typing",
+        "zoneinfo",
+        "src.application.strategy_lab.top1.corpus",
+        "src.application.strategy_lab.top1.fill_observation",
+        "src.application.strategy_lab.top1.lifecycle",
+        "src.application.strategy_lab.top1.outcome",
+        "src.application.strategy_lab.top1.validation",
         "src.infrastructure.strategy_lab.experiment_store",
     }
 

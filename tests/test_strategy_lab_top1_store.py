@@ -55,6 +55,10 @@ from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStoreError,
     compact_json,
 )
+from tests.candidate_evidence_helpers import (
+    seal_market_calendar_fixture,
+    top1_hk_schedule_fixture,
+)
 
 
 AVAILABLE = {"OM_STRATEGY_LAB_TOP1_AVAILABLE": "1"}
@@ -179,7 +183,19 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
 
 
 def _dates(start: date, *, step: int = 1) -> list[str]:
-    return [(start + timedelta(days=index * step)).isoformat() for index in range(20)]
+    current = start
+    values: list[str] = []
+    while len(values) < 20:
+        if current.weekday() < 5:
+            values.append(current.isoformat())
+            remaining = step
+            while remaining:
+                current += timedelta(days=1)
+                if current.weekday() < 5:
+                    remaining -= 1
+        else:
+            current += timedelta(days=1)
+    return values
 
 
 def _store(tmp_path: Path) -> ExperimentStore:
@@ -252,6 +268,7 @@ def _ready_research(store: ExperimentStore, root: Path, experiment_id: str) -> N
 def _lock_store_challenger(
     store: ExperimentStore,
     *,
+    root: Path,
     experiment_id: str,
     trading_dates: list[str],
     idempotency_key: str,
@@ -264,13 +281,15 @@ def _lock_store_challenger(
     )
     research_hash = build_research_spec_sha256(spec)
     terminal_hash = str(research["terminal_file_sha256"])
+    calendar_binding = seal_market_calendar_fixture(
+        root, trading_dates, version="hk-calendar.v1"
+    )
     commitment = build_hidden_window_commitment(
         experiment_id=experiment_id,
         account="lx",
-        trading_dates=trading_dates,
-        market_calendar_version=str(
-            spec["economics_contracts"]["market_calendar_version"]
-        ),
+        validation_start_trading_date=trading_dates[0],
+        market_calendar_binding=calendar_binding,
+        schedule=top1_hk_schedule_fixture(),
         challenger_variant_id="level-1",
         research_spec_sha256=research_hash,
         research_terminal_file_sha256=terminal_hash,
@@ -318,6 +337,7 @@ def _ready_validation(
     _ready_research(store, root, experiment_id)
     locked = _lock_store_challenger(
         store,
+        root=root,
         experiment_id=experiment_id,
         trading_dates=trading_dates,
         idempotency_key=f"lock-{experiment_id}",
@@ -617,6 +637,7 @@ def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None
     replacement_dates = _dates(date(2027, 3, 1))
     relocked = _lock_store_challenger(
         store,
+        root=root,
         experiment_id="experiment-overlap",
         trading_dates=replacement_dates,
         idempotency_key="relock-overlap",

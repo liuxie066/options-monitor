@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,11 @@ from src.application.strategy_lab.top1.validation import (
     record_validation_day_gap,
 )
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
-from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+from tests.candidate_evidence_helpers import (
+    seal_market_calendar_fixture,
+    seal_opening_candidate_fixture,
+    top1_hk_schedule_fixture,
+)
 from tests.test_strategy_lab_top1_corpus import (
     _publish_source_point,
     _seal,
@@ -125,16 +130,34 @@ def _start_validation(
         ),
         validation=True,
     )
+    seal_market_calendar_fixture(
+        artifact_root,
+        dates,
+        version=str(validation_spec["economics_contracts"]["market_calendar_version"]),
+    )
     locked = lock_challenger(
         store,
         validation_spec,
         challenger_variant_id="concentration",
-        trading_dates=dates,
+        validation_start_trading_date=dates[0],
+        schedule=top1_hk_schedule_fixture(),
         actor="human",
         occurred_at_utc="2026-10-02T01:00:00Z",
         idempotency_key="lock-validation",
         artifact_root=artifact_root,
         environ=AVAILABLE,
+    )
+    commitment = json.loads(
+        str(store.experiment(EXPERIMENT_ID)["proposed_commitment_json"])
+    )
+    assert commitment["schema_version"] == "sell_put_top1_hidden_window_commitment.v2"
+    assert commitment["trading_dates"] == dates
+    assert len(commitment["days"]) == 20
+    assert all(day["expected_recommendation_point_ids"] for day in commitment["days"])
+    seal_market_calendar_fixture(
+        artifact_root,
+        _trading_days("2026-11-02", 20),
+        version=str(validation_spec["economics_contracts"]["market_calendar_version"]),
     )
     validation_hash = str(locked["validation_spec_sha256"])
     authorize_validation(

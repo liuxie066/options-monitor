@@ -30,6 +30,7 @@ from src.application.strategy_lab.top1.research_runner import (
 )
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
+from tests.candidate_evidence_helpers import top1_hk_schedule_fixture
 from tests.test_strategy_lab_top1_research import (
     AVAILABLE,
     SOURCE_SHA,
@@ -38,7 +39,6 @@ from tests.test_strategy_lab_top1_research import (
     _receipts,
     _set_variants,
     _spec,
-    _trading_days,
 )
 
 
@@ -289,7 +289,8 @@ def test_m3_rejects_research_without_a_winner(
             store,
             _spec(case["sealed_dataset"], variants=variants, validation=True),
             challenger_variant_id="same" if same_top1 else "concentration",
-            trading_dates=_trading_days("2026-10-02", 20),
+            validation_start_trading_date="2026-10-02",
+            schedule=top1_hk_schedule_fixture(),
             actor="human",
             occurred_at_utc=NOW,
             idempotency_key=f"lock-{mode}",
