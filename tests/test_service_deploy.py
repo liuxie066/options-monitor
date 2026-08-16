@@ -2515,6 +2515,229 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     }
 
 
+def test_render_systemd_bundle_can_include_strategy_lab_top1_timer(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    env_file = runtime / "options-monitor.env"
+    repo.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.hk.json",
+        {"lx": _futu_service_account(opend_root=tmp_path / "opend-lx")},
+    )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+        config_paths={"hk": config_path},
+        env_file=env_file,
+        include_opend=True,
+        include_strategy_lab_top1=True,
+        strategy_lab_top1_advance_interval_seconds=300,
+        strategy_lab_top1_timeout_start_sec=120,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files[
+        "systemd/options-monitor-strategy-lab-top1-advance.service"
+    ]["content"]
+    timer = files["systemd/options-monitor-strategy-lab-top1-advance.timer"][
+        "content"
+    ]
+    profile = json.loads(files["service.profile.json"]["content"])
+    assert (
+        str(repo / "om")
+        + " research strategy-lab top1-loop advance --scheduled --market hk "
+        "--account lx --profile-path "
+        + str(runtime / "service.profile.json")
+        + " --write"
+    ) in service
+    assert f"EnvironmentFile={env_file}" in service
+    assert "After=network-online.target options-monitor-opend.service" in service
+    assert "Wants=network-online.target options-monitor-opend.service" in service
+    assert "TimeoutStartSec=120" in service
+    assert "OnUnitActiveSec=300s" in timer
+    assert profile["strategy_lab_top1"] == {
+        "enabled": True,
+        "market": "hk",
+        "account": "lx",
+        "opend_binding": {"host": "127.0.0.1", "port": 11111},
+        "advance_interval": 300,
+        "timeout_start_sec": 120,
+    }
+
+
+def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(ValueError, match="supported only for systemd"):
+        render_service_bundle(
+            target="launchd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["hk"],
+            include_strategy_lab_top1=True,
+            strategy_lab_top1_advance_interval_seconds=300,
+            strategy_lab_top1_timeout_start_sec=120,
+        )
+    with pytest.raises(ValueError, match="non-empty service env file"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["hk"],
+            include_strategy_lab_top1=True,
+            strategy_lab_top1_advance_interval_seconds=300,
+            strategy_lab_top1_timeout_start_sec=120,
+        )
+    with pytest.raises(ValueError, match="explicit positive integers"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["hk"],
+            env_file=tmp_path / "env",
+            include_strategy_lab_top1=True,
+            strategy_lab_top1_advance_interval_seconds=0,
+            strategy_lab_top1_timeout_start_sec=120,
+        )
+    with pytest.raises(ValueError, match="requires selected market hk and account lx"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["sy"],
+            markets=["hk"],
+            env_file=tmp_path / "env",
+            include_strategy_lab_top1=True,
+            strategy_lab_top1_advance_interval_seconds=300,
+            strategy_lab_top1_timeout_start_sec=120,
+        )
+    invalid_config = _write_service_account_config(
+        tmp_path / "invalid-config.hk.json",
+        {"lx": _futu_service_account(port=0)},
+    )
+    with pytest.raises(ValueError, match="Strategy Lab Top1 OpenD port is invalid"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["hk"],
+            config_paths={"hk": invalid_config},
+            env_file=tmp_path / "env",
+            include_strategy_lab_top1=True,
+            strategy_lab_top1_advance_interval_seconds=300,
+            strategy_lab_top1_timeout_start_sec=120,
+        )
+
+
+def test_service_drift_round_trips_tampers_and_retires_strategy_lab_top1(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.hk.json", {"lx": _futu_service_account()}
+    )
+    render_args = {
+        "target": "systemd",
+        "repo_root": repo,
+        "runtime_root": runtime,
+        "accounts": ["lx"],
+        "markets": ["hk"],
+        "config_paths": {"hk": config_path},
+        "env_file": tmp_path / "env",
+    }
+    bundle = render_service_bundle(
+        **render_args,
+        include_strategy_lab_top1=True,
+        strategy_lab_top1_advance_interval_seconds=300,
+        strategy_lab_top1_timeout_start_sec=120,
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False), encoding="utf-8"
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    clean = service_drift(
+        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
+    )
+    assert clean["summary"]["status"] == "ok"
+    assert clean["profile_content_changed"] is False
+
+    for invalid_timing in (None, True, "abc"):
+        invalid_profile = json.loads(json.dumps(profile))
+        if invalid_timing is None:
+            invalid_profile["strategy_lab_top1"].pop("advance_interval")
+        else:
+            invalid_profile["strategy_lab_top1"]["advance_interval"] = invalid_timing
+        (runtime / "service.profile.json").write_text(
+            json.dumps(invalid_profile, ensure_ascii=False), encoding="utf-8"
+        )
+        invalid = service_drift(
+            repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
+        )
+        assert invalid["summary"]["status"] == "error"
+        assert invalid["reason"] == "strategy_lab_top1_profile_invalid"
+
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False), encoding="utf-8"
+    )
+
+    service_path = systemd_root / "options-monitor-strategy-lab-top1-advance.service"
+    service_path.write_text(service_path.read_text(encoding="utf-8") + "# tampered\n")
+    tampered = service_drift(
+        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
+    )
+    assert "options-monitor-strategy-lab-top1-advance.service" in tampered[
+        "mismatched_units"
+    ]
+
+    default_bundle = render_service_bundle(**render_args)
+    default_profile = json.loads(
+        {item["relative_path"]: item for item in default_bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    assert "strategy_lab_top1" not in default_profile
+    assert not any(
+        "strategy-lab-top1" in item["relative_path"]
+        for item in default_bundle["files"]
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(default_profile, ensure_ascii=False), encoding="utf-8"
+    )
+    retired = service_drift(
+        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
+    )
+    assert "options-monitor-strategy-lab-top1-advance.service" in retired[
+        "extra_installed_units"
+    ]
+    assert "options-monitor-strategy-lab-top1-advance.timer" in retired[
+        "extra_installed_units"
+    ]
+
+
 def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -3244,6 +3467,25 @@ def test_service_render_cli_exposes_strategy_lab_recorder_account(capsys: pytest
         parse_args(["service", "render", "--help"])
     assert exc_info.value.code == 0
     assert "--strategy-lab-recorder-account" in capsys.readouterr().out
+
+    top1 = parse_args(
+        [
+            "service",
+            "render",
+            "--target",
+            "systemd",
+            "--config-yaml",
+            "/tmp/config.yaml",
+            "--include-strategy-lab-top1",
+            "--strategy-lab-top1-advance-interval-seconds",
+            "300",
+            "--strategy-lab-top1-timeout-start-sec",
+            "120",
+        ]
+    )
+    assert top1.include_strategy_lab_top1 is True
+    assert top1.strategy_lab_top1_advance_interval_seconds == 300
+    assert top1.strategy_lab_top1_timeout_start_sec == 120
 
 
 def test_service_drift_preserves_strategy_lab_recorder_opt_in(tmp_path: Path) -> None:

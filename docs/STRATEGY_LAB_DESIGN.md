@@ -695,6 +695,44 @@ recorder 只是 evidence lifecycle 的服务化入口，不是 experiment runner
 proposal。OpenD recorder 以所选 Futu 账户为绑定身份，host/port 每次从 canonical
 config 解析；多 Futu 账户不允许依赖列表顺序或默认端口推断。
 
+### 实验功能：Sell Put Top1 loop
+
+Top1 loop 是独立的实验功能，固定绑定 `HK/lx`，默认不渲染、不运行；维护方可随时
+移除 service render opt-in 或关闭 maintainer availability。它只组合已经存在的
+语料、研究、20 个交易日隐藏验证和终态回执命令，不改交易策略配置，也不自动采用
+胜者。
+
+只读入口：
+
+```bash
+./om research strategy-lab top1-loop feature status --market hk --account lx --profile-path <runtime>/service.profile.json
+./om research strategy-lab top1-loop status --market hk --account lx --profile-path <runtime>/service.profile.json --experiment-id <id>
+./om research strategy-lab top1-loop readiness --market hk --account lx --profile-path <runtime>/service.profile.json
+```
+
+定时 source delivery 必须显式提供 cadence、timeout 和 env file：
+
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --markets hk \
+  --accounts lx \
+  --env-file /var/lib/options-monitor/options-monitor.env \
+  --include-strategy-lab-top1 \
+  --strategy-lab-top1-advance-interval-seconds <measured-seconds> \
+  --strategy-lab-top1-timeout-start-sec <measured-seconds> \
+  --output-dir /tmp/options-monitor-service
+```
+
+renderer 只生成 unit/profile，不安装或启动服务。scheduled unit 固定调用
+`top1-loop advance --scheduled --market hk --account lx --write`。readiness 分开报告
+`source_delivery_ready` 和 `validation_runtime_ready`；缺 calendar、账户 fee-plan、
+quote、exact-expiration terms、history quota 或 exact-expiration close 的 live receipt
+时，后者保持 false，且不会构造 OpenD gateway。当前 W0R 结论仍是
+`runtime_no_go`。
+
 ### `readiness`
 
 目标：

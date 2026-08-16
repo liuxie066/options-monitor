@@ -1029,6 +1029,7 @@ def build_service_profile(
     feishu_ws: dict[str, Any] | None = None,
     wechat_clawbot: dict[str, Any] | None = None,
     strategy_lab_recorder: dict[str, Any] | None = None,
+    strategy_lab_top1: dict[str, Any] | None = None,
     quality_monitoring: dict[str, Any] | None = None,
     feishu_agent_credential: dict[str, Any] | None = None,
     secret_credentials: dict[str, Any] | None = None,
@@ -1107,6 +1108,8 @@ def build_service_profile(
         profile["wechat_clawbot"] = dict(wechat_clawbot)
     if strategy_lab_recorder is not None:
         profile["strategy_lab_recorder"] = dict(strategy_lab_recorder)
+    if strategy_lab_top1 is not None:
+        profile["strategy_lab_top1"] = dict(strategy_lab_top1)
     if quality_monitoring is not None:
         profile["quality_monitoring"] = dict(quality_monitoring)
     if feishu_agent_credential is not None:
@@ -1145,6 +1148,9 @@ def render_service_bundle(
     strategy_lab_recorder_account: str | None = None,
     strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
+    include_strategy_lab_top1: bool = False,
+    strategy_lab_top1_advance_interval_seconds: int | None = None,
+    strategy_lab_top1_timeout_start_sec: int | None = None,
     include_quality_monitoring: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
@@ -1158,6 +1164,20 @@ def render_service_bundle(
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
+    if include_strategy_lab_top1 and target_key != "systemd":
+        raise ValueError("Strategy Lab Top1 service rendering is supported only for systemd")
+    if not include_strategy_lab_top1 and (
+        strategy_lab_top1_advance_interval_seconds is not None
+        or strategy_lab_top1_timeout_start_sec is not None
+    ):
+        raise ValueError("Strategy Lab Top1 timing requires include_strategy_lab_top1")
+    if include_strategy_lab_top1 and (
+        type(strategy_lab_top1_advance_interval_seconds) is not int
+        or strategy_lab_top1_advance_interval_seconds <= 0
+        or type(strategy_lab_top1_timeout_start_sec) is not int
+        or strategy_lab_top1_timeout_start_sec <= 0
+    ):
+        raise ValueError("Strategy Lab Top1 interval and timeout must be explicit positive integers")
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
@@ -1205,6 +1225,12 @@ def render_service_bundle(
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
+    if include_strategy_lab_top1 and (
+        "hk" not in market_values or "lx" not in account_values
+    ):
+        raise ValueError("Strategy Lab Top1 requires selected market hk and account lx")
+    if include_strategy_lab_top1 and env_file_path is None:
+        raise ValueError("Strategy Lab Top1 requires a non-empty service env file")
     recorder_source = normalize_strategy_lab_recorder_source(strategy_lab_recorder_source)
     recorder_max_datasets = max(1, int(strategy_lab_recorder_max_datasets))
     recorder_mark_stale_hours = max(1, int(strategy_lab_recorder_mark_stale_hours))
@@ -1269,6 +1295,27 @@ def render_service_bundle(
         explicit_opend_root=explicit_opend_root,
         opend_service_plans=opend_service_plans,
     )
+    top1_binding = None
+    if include_strategy_lab_top1:
+        try:
+            top1_binding = _resolve_strategy_lab_recorder_binding(
+                target=target_key,
+                include_strategy_lab_recorder=True,
+                recorder_source="opend",
+                recorder_account="lx",
+                repo_root=repo,
+                config_yaml_path=config_yaml_path,
+                config_by_market=config_by_market,
+                market_values=["hk"],
+                account_values=["lx"],
+                include_opend=include_opend,
+                explicit_opend_root=explicit_opend_root,
+                opend_service_plans=opend_service_plans,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                str(exc).replace("strategy_lab_recorder", "Strategy Lab Top1")
+            ) from exc
 
     om = str(repo / "om")
     lock_root = runtime / "locks"
@@ -1500,6 +1547,59 @@ def render_service_bundle(
                 install_path=f"/etc/systemd/system/{opend_plan.systemd_service_name}",
                 kind="systemd_service",
                 service_name=opend_plan.systemd_service_name,
+            )
+
+        if include_strategy_lab_top1:
+            assert top1_binding is not None
+            top1_service = "options-monitor-strategy-lab-top1-advance.service"
+            top1_timer = "options-monitor-strategy-lab-top1-advance.timer"
+            top1_dependency = (
+                [str(top1_binding["service_name"])]
+                if top1_binding.get("service_name")
+                else []
+            )
+            add(
+                f"systemd/{top1_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab Top1 scheduled advance",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "research",
+                        "strategy-lab",
+                        "top1-loop",
+                        "advance",
+                        "--scheduled",
+                        "--market",
+                        "hk",
+                        "--account",
+                        "lx",
+                        "--profile-path",
+                        str(runtime / "service.profile.json"),
+                        "--write",
+                    ],
+                    after=top1_dependency or None,
+                    wants=top1_dependency or None,
+                    timeout_start_sec=strategy_lab_top1_timeout_start_sec,
+                ),
+                install_path=f"/etc/systemd/system/{top1_service}",
+                kind="systemd_service",
+                service_name=top1_service,
+            )
+            add(
+                f"systemd/{top1_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab Top1 scheduled advance timer",
+                    unit_name=top1_service,
+                    interval=f"{strategy_lab_top1_advance_interval_seconds}s",
+                ),
+                install_path=f"/etc/systemd/system/{top1_timer}",
+                kind="systemd_timer",
+                service_name=top1_timer,
             )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
@@ -2516,6 +2616,17 @@ def render_service_bundle(
             "settle_schedule_beijing": "07:20",
             **({"binding": dict(recorder_binding)} if recorder_binding is not None else {}),
         } if include_strategy_lab_recorder else None,
+        strategy_lab_top1={
+            "enabled": True,
+            "market": "hk",
+            "account": "lx",
+            "opend_binding": {
+                "host": str(top1_binding["host"]),
+                "port": int(top1_binding["port"]),
+            },
+            "advance_interval": int(strategy_lab_top1_advance_interval_seconds),
+            "timeout_start_sec": int(strategy_lab_top1_timeout_start_sec),
+        } if top1_binding is not None else None,
         quality_monitoring={
             "enabled": True,
             "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),

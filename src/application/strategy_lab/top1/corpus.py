@@ -24,16 +24,13 @@ from src.application.recommendation_point import (
     build_recommendation_point_id,
     load_recommendation_point,
     point_binding_from_recommendation_point,
+    strategy_lab_top1_available,
 )
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     RECOMMENDATION_POINT_SELECTOR,
     SEALED_HISTORICAL_DATASET_SCHEMA,
-)
-from src.application.strategy_lab.top1.lifecycle import (
-    Top1LifecycleError,
-    effective_feature_status,
 )
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_SCHEMA_VERSION,
@@ -428,21 +425,17 @@ def _feature_enabled(
     environ: Mapping[str, str] | None,
 ) -> bool:
     try:
-        return bool(
-            effective_feature_status(
-                store,
-                market=market,
-                account=account,
-                environ=environ,
-            )["effective"]
-        )
-    except Top1LifecycleError as exc:
+        feature = store.feature(market, account)
+    except ExperimentStoreError as exc:
         reason = (
             "schema_unsupported"
             if exc.reason_code == "schema_unsupported"
             else "corpus_input_invalid"
         )
         raise CorpusError(reason, str(exc)) from exc
+    return strategy_lab_top1_available(environ) and bool(
+        feature and feature["user_opt_in"]
+    )
 
 
 def _store_call(function: Any, /, *args: Any, **kwargs: Any) -> Any:
