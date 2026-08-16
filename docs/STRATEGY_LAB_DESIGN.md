@@ -721,6 +721,28 @@ HK 交易日历证据由操作员显式刷新，不随 loop 自动运行：
 只保留规范化来源回执哈希。相同证据重复刷新不会新增文件。
 它只关闭 calendar blocker，不代表其余 W0R capability 已就绪。
 
+其余 W0R 回执由操作员显式刷新，不由 readiness 或 timer 自动探测：
+
+```bash
+./om research strategy-lab top1-loop capabilities refresh \
+  --market hk --account lx --profile-path <runtime>/service.profile.json \
+  --fee-plan-receipt-path <account-fee-plan-receipt.json> \
+  --stock-owner HK.00700 --contract-symbol <HK-put-contract> \
+  --terms-expiration <YYYY-MM-DD> --close-expiration <YYYY-MM-DD> --write
+```
+
+费用套餐输入固定为 `sell_put_top1_account_fee_plan_receipt.v1`，必须包含
+`HK/lx`、`commission_free`、`platform_fee`、`fee_plan_ref`、观察时间，以及原始人工
+证据的 ref/SHA-256；普通 event、position 或 CLI 标量不能代替这份回执。命令复用
+现有 gateway，依次验证 quote、exact-expiration terms、history K-Line quota 和
+exact-expiration close，只把规范化标量与来源 hash 写入
+`strategy_lab/top1/capabilities/w0r/hk/lx/current.json`。该文件最多 8 KiB，每次成功
+刷新原子替换，不保存 raw snapshot、option chain、quota detail 或历史回执序列。
+
+readiness 只读并严格校验该文件；文件缺失、篡改、OpenD host/port 漂移或任一子回执
+无效时，五项 capability fact 全部保持 false。真实预检调用与刷新写入仍需要单独的
+操作授权。该回执只证明最近一次显式预检通过，不替代实验执行时的 gateway 与配额检查。
+
 定时 source delivery 必须显式提供 cadence、timeout 和 env file：
 
 ```bash
