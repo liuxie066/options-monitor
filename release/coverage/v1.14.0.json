@@ -1,0 +1,750 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.0",
+  "base": {
+    "tag": "v1.13.23",
+    "commit": "69ba7a396fa1b913bec840cc80dee64ff9ddd699"
+  },
+  "reviewed_head": "90ee4c21b3e160043f9740164ea9fd2cf6179961",
+  "commits": [
+    {
+      "sha": "68ddab18321c39f32b8ff0ea434f843a0033eeff",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w1a"
+    },
+    {
+      "sha": "071de742500120d07d001fe3c5b20bf665402723",
+      "subject": "feat(strategy-lab): add Sell Put Top1 ranking core"
+    },
+    {
+      "sha": "b10e3aaa9ad657d7f7db9f1f4487306a6b7beba0",
+      "subject": "chore(gateflow): accept W1A aggregate review"
+    },
+    {
+      "sha": "02d0fb112329348a81e58f867a2eef1d82ad8095",
+      "subject": "chore(gateflow): accept W1A main integration"
+    },
+    {
+      "sha": "ffc9fed1381b024c586d8fe97598bae2a4112af1",
+      "subject": "chore(gateflow): mark W1A ready for draft PR"
+    },
+    {
+      "sha": "7019a46d57b8c8fa377313fb49955e89541b6120",
+      "subject": "chore(gateflow): record W1A draft PR pass"
+    },
+    {
+      "sha": "a45999f71bdf316bfce1199078fa17c7bb2b37e0",
+      "subject": "chore(gateflow): close Sell Put Top1 W1A"
+    },
+    {
+      "sha": "c1d98a6880f6cce238698c30ee732f0a5cc73474",
+      "subject": "docs(gateflow): accept HK terminal fee contract plan"
+    },
+    {
+      "sha": "8787a6880453cf0abd65e2dc8830c7d91d08af83",
+      "subject": "feat(fees): accept HK terminal fee contract"
+    },
+    {
+      "sha": "c66bc210f248ba0703310f7c959afde51d2ab027",
+      "subject": "chore(gateflow): accept HK fee aggregate review"
+    },
+    {
+      "sha": "abc3c0e36b04ca9c45e64c0e40171df7db0bff6a",
+      "subject": "chore(gateflow): accept HK fee PR review"
+    },
+    {
+      "sha": "807a656de6667ed5e60266a45f53d74371fd3e50",
+      "subject": "chore(gateflow): record HK fee draft PR pass"
+    },
+    {
+      "sha": "21e7ff42c807a1961857cf033a1180df5ded37e7",
+      "subject": "chore(gateflow): close HK terminal fee contract"
+    },
+    {
+      "sha": "ef25415f8975d617d074bd67324e6fc922cbc6ab",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w1b"
+    },
+    {
+      "sha": "7de82758e59db9d7a31be2283144f7f114ef0579",
+      "subject": "Merge pull request #156 from liuxie066/feat/sell-put-top1-w1a"
+    },
+    {
+      "sha": "c6e1c929189e296ffcb7b07b5548b7ee001733b4",
+      "subject": "chore(strategy-lab): merge main into hk fee contract"
+    },
+    {
+      "sha": "9d9c4122807c0b77f1a675ac92f81f8dae287561",
+      "subject": "Merge pull request #157 from liuxie066/feat/sell-put-top1-hk-terminal-fee-contract"
+    },
+    {
+      "sha": "871eddc42e5c22ff56f473c603d0eeb2ffa7c6d2",
+      "subject": "chore(strategy-lab): update w1b baseline from main"
+    },
+    {
+      "sha": "ca9bfd9312397aadd351d78ed1ec5d794e5837d0",
+      "subject": "feat(strategy-lab): add top1 experiment core"
+    },
+    {
+      "sha": "99136bae1a467828c8c771e7383a0b826eba77cc",
+      "subject": "docs(strategy-lab): record w1b aggregate review"
+    },
+    {
+      "sha": "078791d841fa1b18baa860fc882a37e755c62f49",
+      "subject": "docs(strategy-lab): record w1b draft pr readiness"
+    },
+    {
+      "sha": "1c69b1f71ada4f2cfb890ef337f1f893f1d018a3",
+      "subject": "docs(strategy-lab): record w1b draft pr pass"
+    },
+    {
+      "sha": "38c9595296765d1ccaf8c651cb75de2c174abc56",
+      "subject": "docs(strategy-lab): close sell put top1 w1b"
+    },
+    {
+      "sha": "283835933a93fca2e3d576ac766cde55f793fa68",
+      "subject": "Merge pull request #158 from liuxie066/feat/sell-put-top1-w1b"
+    },
+    {
+      "sha": "e73e0c1cd199f400e11b0c78ab1bca657fdeddf1",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w2"
+    },
+    {
+      "sha": "4523f87a8322a06d091ef401fbf45ad627322804",
+      "subject": "feat(strategy-lab): capture sell put recommendation points"
+    },
+    {
+      "sha": "8a857ccaa5f4825e0812f864379c332325491762",
+      "subject": "docs(gateflow): accept sell put top1 w2 review"
+    },
+    {
+      "sha": "7392f668f742a44540ad7c34c079be205b279efd",
+      "subject": "docs(gateflow): ready sell put top1 w2 draft pr"
+    },
+    {
+      "sha": "0d5ab3abbace9d0fb608476eedc487b8791e1218",
+      "subject": "docs(strategy-lab): record w2 draft pr pass"
+    },
+    {
+      "sha": "78f8cd23b2749f0cc91494b3beb6121b6abecd78",
+      "subject": "docs(strategy-lab): close sell put top1 w2"
+    },
+    {
+      "sha": "d905fb9b16c4b1fe6f1dc8a2311d8fe8fcaab385",
+      "subject": "Merge pull request #159 from liuxie066/feat/sell-put-top1-w2"
+    },
+    {
+      "sha": "d684be70bdac1784268ff8405730fc540578afa1",
+      "subject": "docs(strategy-lab): accept Sell Put Top1 W3 plan"
+    },
+    {
+      "sha": "907ef1cae714666fbe4c69ee8848a0fe77db6d94",
+      "subject": "feat(strategy-lab): add Top1 experiment lifecycle store"
+    },
+    {
+      "sha": "648dabf200a16d42a709d4026140f52b7458dce7",
+      "subject": "docs(strategy-lab): record W3 aggregate review"
+    },
+    {
+      "sha": "10474af1ec9e6126bb5f62487b6c652d254fb354",
+      "subject": "docs(strategy-lab): mark W3 ready for draft PR"
+    },
+    {
+      "sha": "b36233d6db16c10a7775b7aafabced2996c00bc9",
+      "subject": "docs(strategy-lab): record W3 draft PR pass"
+    },
+    {
+      "sha": "4d664475abc7961023532c5efe023fdbdefbcbc6",
+      "subject": "docs(strategy-lab): close Sell Put Top1 W3"
+    },
+    {
+      "sha": "baa681628f0b62a43f48edd51e2e5fb4f4fafa8e",
+      "subject": "Merge pull request #161 from liuxie066/feat/sell-put-top1-w3"
+    },
+    {
+      "sha": "de7932bc70fc8ff5c32924fb180889a34a050639",
+      "subject": "docs(gateflow): accept plan for sell-put-top1-w4"
+    },
+    {
+      "sha": "ce5f0759f1f7913d3d71b9ef5f9fd1495095f787",
+      "subject": "feat(strategy-lab): capture top1 corpus evidence"
+    },
+    {
+      "sha": "e41fe4771c9a334996045fe71441e3cb766e9112",
+      "subject": "feat(strategy-lab): freeze top1 research corpus"
+    },
+    {
+      "sha": "c12625d5111a8f2f7c502772388558f6c34095b9",
+      "subject": "docs(strategy-lab): record W4 aggregate review"
+    },
+    {
+      "sha": "fdcda279bce42509f2c7ee30546da56e1f6812da",
+      "subject": "docs(strategy-lab): mark W4 ready for draft PR"
+    },
+    {
+      "sha": "aa6b04a77f530aac13f62a3d4b98a50776441b6e",
+      "subject": "docs(strategy-lab): pass W4 draft PR review"
+    },
+    {
+      "sha": "b8e84cf9f50bf2caec2961cd6639db2185074fcc",
+      "subject": "docs(strategy-lab): close W4 gateflow"
+    },
+    {
+      "sha": "5a89eb76421007bf42d08c5dc15e01262e86ebcd",
+      "subject": "chore(docs): remove process artifacts from main repo"
+    },
+    {
+      "sha": "6b16fb3d189e68ba9957de3a60cfa59cc89a0294",
+      "subject": "Merge pull request #162 from liuxie066/feat/sell-put-top1-w4"
+    },
+    {
+      "sha": "82e29ac6292f030d6465724e180bece795ee5087",
+      "subject": "chore(gateflow): accept sell-put-top1-w5-evaluator plan"
+    },
+    {
+      "sha": "68c7031834092032167cce5fde19dbf129efc430",
+      "subject": "refactor(application): consolidate per-module payload helper copies"
+    },
+    {
+      "sha": "cf54f9791c50d85faaa15cbe98dfd99d33e85afd",
+      "subject": "feat(strategy-lab): accept sell-put-top1-w5 evaluator slice"
+    },
+    {
+      "sha": "97baafcb28da9e62aac9acc41b20a1476f9e51ab",
+      "subject": "docs(gateflow): accept sell-put-top1-w5 evaluator deepreview"
+    },
+    {
+      "sha": "2a5b10f258b675126fdd147f9f0d3d8605e0b367",
+      "subject": "docs(gateflow): mark sell-put-top1-w5 evaluator ready for draft pr"
+    },
+    {
+      "sha": "be776632cd8a8de8f8c721adf7d093dcc2345b40",
+      "subject": "docs(gateflow): pass sell-put-top1-w5 evaluator draft pr review"
+    },
+    {
+      "sha": "dbac3b25b6b645519ecc8ab836946cabc32b788d",
+      "subject": "docs(gateflow): close sell-put-top1-w5 evaluator slice"
+    },
+    {
+      "sha": "8bf9cfeb88c3aeb16b24aba9062d2b40702f6478",
+      "subject": "refactor(multi_tick): retire dead notify_format compatibility module"
+    },
+    {
+      "sha": "d1e8d5c17bcb0a16de85b3a3e99e8306c08fbf51",
+      "subject": "Merge pull request #163 from liuxie066/feat/sell-put-top1-w5"
+    },
+    {
+      "sha": "1ce93b5d1a125abeffcb25f6ed406e72ce3c7f40",
+      "subject": "chore(merge): integrate origin/main W3-W5 slices with docs artifact removal"
+    },
+    {
+      "sha": "0da901b30cd26242636b9ec967b8aa281f61937c",
+      "subject": "chore(docs): re-remove W3-W5 gateflow artifacts merged from origin/main"
+    },
+    {
+      "sha": "0fc8bd6d16782ff7d350eb42e48dcb8a99c12ed7",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w0r-history-quota"
+    },
+    {
+      "sha": "e107db50e6411327d507cd02867132d075e8dc47",
+      "subject": "feat(strategy-lab): add W0R history quota boundary"
+    },
+    {
+      "sha": "16a4f0b1b15fec6b4a5a5e8db0debbe2c6ac4c4d",
+      "subject": "chore(gateflow): accept deepreview for W0R quota"
+    },
+    {
+      "sha": "7c0ff70bd83ef04a23734d28ff8fc957c0f4cb2d",
+      "subject": "chore(gateflow): record W0R quota PR readiness"
+    },
+    {
+      "sha": "66c019f5730e6db7c0df5d96b746623c9df96ccf",
+      "subject": "chore(gateflow): accept PR review for W0R quota"
+    },
+    {
+      "sha": "813ec6f8021148ff6d152ff4ee4f5c39e36897fc",
+      "subject": "Merge pull request #164 from liuxie066/feat/sell-put-top1-w0r-history-quota"
+    },
+    {
+      "sha": "8d3522223d5ffd9f720dfc002114b3bc4be37e2a",
+      "subject": "chore(gateflow): accept W0R exact close plan"
+    },
+    {
+      "sha": "5528d70047a7fc00a3e424ad2810f6900a64ba88",
+      "subject": "feat(strategy-lab): add exact expiration close boundary"
+    },
+    {
+      "sha": "9a0c7050641925c1bc5cc6d17fd16e719b624ef0",
+      "subject": "chore(gateflow): accept W0R exact close review"
+    },
+    {
+      "sha": "2ddc111d93a58e4eee4dbd8112bd032f79e849f5",
+      "subject": "chore(gateflow): record W0R exact close PR readiness"
+    },
+    {
+      "sha": "dd75aec89c77373d059286b81b82d9a1aa9508a1",
+      "subject": "chore(docs): declare process artifact dirs as never-commit in AGENTS.md"
+    },
+    {
+      "sha": "a303625e4e83f18c52d30a366c526c3fd122f01f",
+      "subject": "chore(merge): integrate origin/main W0R slice"
+    },
+    {
+      "sha": "c0863e33c2ed821875d9e1c9d9be87a2b3bad2dd",
+      "subject": "chore(docs): re-remove W0R gateflow artifacts merged from origin/main"
+    },
+    {
+      "sha": "af81f532373024ded8d06d1dac7c0634a73b0526",
+      "subject": "chore(docs): remove leftover PR review artifact from origin/main merge"
+    },
+    {
+      "sha": "82f9a4378ad7b3f833afd3728ee5e9fba909651a",
+      "subject": "chore(gateflow): accept PR review for W0R exact close"
+    },
+    {
+      "sha": "122e470667c0394b3a927d96a6e535b3f76c8620",
+      "subject": "chore(docs): exclude exact-close process artifacts"
+    },
+    {
+      "sha": "ff67c3d117bd1a2a9896d7a5f2ab2baed53d663c",
+      "subject": "Merge pull request #165 from liuxie066/feat/sell-put-top1-w0r-exact-expiry-close"
+    },
+    {
+      "sha": "58f604dc88ab185f3fb4bca3d4097c5bddb48a25",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w5-runner"
+    },
+    {
+      "sha": "2e05360e068669350bf22cc8a8e51c4b20f8b595",
+      "subject": "feat(strategy-lab): accept sell-put top1 w5 runner"
+    },
+    {
+      "sha": "e01c7db3f67775085e04554cd10ce13223fe2452",
+      "subject": "fix(strategy-lab): bind w5 research evidence"
+    },
+    {
+      "sha": "c329d725bb19af2d0dee2c5a2a785c87a5891fd0",
+      "subject": "Merge pull request #166 from liuxie066/codex/sell-put-top1-w5-runner"
+    },
+    {
+      "sha": "cdc9bc0036754216f02d8830c2475fbd1099fc41",
+      "subject": "perf(application): replace pandas iterrows with to_dict records in hot loops"
+    },
+    {
+      "sha": "4a66ac24d256b0388edd23dd67f071ae841c6915",
+      "subject": "fix(tests): mock fetch-plan so combo capture tests never build a real futu gateway"
+    },
+    {
+      "sha": "84d0b59effd54d9f5e77f8bee5d833765f5a0328",
+      "subject": "perf(cc_lp_steps): hoist put-row materialization out of call loop"
+    },
+    {
+      "sha": "e8ae8b2e6fba9931ccf8107508871b2b8d072f16",
+      "subject": "chore(merge): integrate iterrows perf win and futu test-mock fix"
+    },
+    {
+      "sha": "06c064faf955abefab9f07f455c07787a94d79e2",
+      "subject": "fix(strategy_lab): break top1 corpus/lifecycle/research import cycle"
+    },
+    {
+      "sha": "2abae36734ed849aca634903bdedfa705fcbfef9",
+      "subject": "fix(application): import Any for alert sort key"
+    },
+    {
+      "sha": "4991d07ee7e7c18a3dc66963f106e0a933ef2b09",
+      "subject": "Merge pull request #168 from liuxie066/codex/fix-alert-engine-any-import"
+    },
+    {
+      "sha": "b6c8c31810cbd7a700da7988c053e01b77c7a75d",
+      "subject": "feat(strategy-lab): add top1 hidden validation core"
+    },
+    {
+      "sha": "cff3fc09b97d4c68133b63002c4d00fd426b9034",
+      "subject": "Merge pull request #167 from liuxie066/codex/sell-put-top1-w6"
+    },
+    {
+      "sha": "f94e84b53de2faa0de6073b30f2ea767d6bc8d55",
+      "subject": "chore(gateflow): accept plan for sell-put-top1-w7"
+    },
+    {
+      "sha": "dacb74f5249e07e3b0da860bc8ff8688896bfcff",
+      "subject": "feat(strategy-lab): add W7 S1 scheduled advance core"
+    },
+    {
+      "sha": "63f48d3f1bc330c61f430164a86fdbcbeb9d3abe",
+      "subject": "feat(strategy-lab): add W7 S2 scheduled delivery"
+    },
+    {
+      "sha": "4901a26a7e830d9d552c6514364672419e55b2e6",
+      "subject": "fix(strategy-lab): close W7 aggregate review findings"
+    },
+    {
+      "sha": "11907b08f31855b24816c6b1cb1a7042208b4f93",
+      "subject": "fix(strategy-lab): accept W7 PR review"
+    },
+    {
+      "sha": "ec7b4ea5c643865f6103686b3853e05d67463594",
+      "subject": "Merge pull request #169 from liuxie066/codex/sell-put-top1-w7"
+    },
+    {
+      "sha": "0557e9f7d4ee56702567055b46b2548f5ebaf6c1",
+      "subject": "feat(strategy-lab): add HK calendar evidence producer"
+    },
+    {
+      "sha": "15dd7f84858db602b2567050c97d6e29d8286a81",
+      "subject": "fix(strategy-lab): honor HK partial trading days"
+    },
+    {
+      "sha": "904917c3ebab15eacd9609aae871cd4ac885feb3",
+      "subject": "Merge pull request #170 from liuxie066/codex/sell-put-top1-w0r-hk-calendar"
+    },
+    {
+      "sha": "ec5b785011ad7c119f325078353d109fd7099743",
+      "subject": "feat(strategy-lab): add W0R capability receipts"
+    },
+    {
+      "sha": "90ee4c21b3e160043f9740164ea9fd2cf6179961",
+      "subject": "Merge pull request #171 from liuxie066/codex/sell-put-top1-w0r-capability-receipts"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added an opt-in experimental HK/lx Sell Put Top1 optimization loop that captures official recommendation points, compares baseline and challenger ranking profiles on a frozen 40-trading-day research corpus, validates the locked challenger over a separate 20-trading-day hidden window, and advances through an auditable scheduled runner without changing production strategy configuration or automatically adopting a winner. Its explicit W0R preflight records compact HK calendar, account fee-plan, quote, exact-expiration terms, history-quota, and exact-expiration close receipts while keeping raw provider responses out of storage.",
+      "commits": [
+        "071de742500120d07d001fe3c5b20bf665402723",
+        "8787a6880453cf0abd65e2dc8830c7d91d08af83",
+        "ca9bfd9312397aadd351d78ed1ec5d794e5837d0",
+        "4523f87a8322a06d091ef401fbf45ad627322804",
+        "907ef1cae714666fbe4c69ee8848a0fe77db6d94",
+        "ce5f0759f1f7913d3d71b9ef5f9fd1495095f787",
+        "e41fe4771c9a334996045fe71441e3cb766e9112",
+        "cf54f9791c50d85faaa15cbe98dfd99d33e85afd",
+        "e107db50e6411327d507cd02867132d075e8dc47",
+        "5528d70047a7fc00a3e424ad2810f6900a64ba88",
+        "2e05360e068669350bf22cc8a8e51c4b20f8b595",
+        "e01c7db3f67775085e04554cd10ce13223fe2452",
+        "b6c8c31810cbd7a700da7988c053e01b77c7a75d",
+        "dacb74f5249e07e3b0da860bc8ff8688896bfcff",
+        "63f48d3f1bc330c61f430164a86fdbcbeb9d3abe",
+        "4901a26a7e830d9d552c6514364672419e55b2e6",
+        "11907b08f31855b24816c6b1cb1a7042208b4f93",
+        "0557e9f7d4ee56702567055b46b2548f5ebaf6c1",
+        "15dd7f84858db602b2567050c97d6e29d8286a81",
+        "ec5b785011ad7c119f325078353d109fd7099743"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced candidate scanning, Close Advice loading, alert rendering, and combo construction overhead by replacing pandas row iteration in hot paths with record materialization and by reusing the materialized put-leg set across call combinations.",
+      "commits": [
+        "cdc9bc0036754216f02d8830c2475fbd1099fc41",
+        "84d0b59effd54d9f5e77f8bee5d833765f5a0328",
+        "2abae36734ed849aca634903bdedfa705fcbfef9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "68ddab18321c39f32b8ff0ea434f843a0033eeff",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "b10e3aaa9ad657d7f7db9f1f4487306a6b7beba0",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "02d0fb112329348a81e58f867a2eef1d82ad8095",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "ffc9fed1381b024c586d8fe97598bae2a4112af1",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "7019a46d57b8c8fa377313fb49955e89541b6120",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "a45999f71bdf316bfce1199078fa17c7bb2b37e0",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "c1d98a6880f6cce238698c30ee732f0a5cc73474",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "c66bc210f248ba0703310f7c959afde51d2ab027",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "abc3c0e36b04ca9c45e64c0e40171df7db0bff6a",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "807a656de6667ed5e60266a45f53d74371fd3e50",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "21e7ff42c807a1961857cf033a1180df5ded37e7",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "ef25415f8975d617d074bd67324e6fc922cbc6ab",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "7de82758e59db9d7a31be2283144f7f114ef0579",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "c6e1c929189e296ffcb7b07b5548b7ee001733b4",
+      "reason": "Branch synchronization only; release semantics are covered by mapped source commits."
+    },
+    {
+      "commit": "9d9c4122807c0b77f1a675ac92f81f8dae287561",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "871eddc42e5c22ff56f473c603d0eeb2ffa7c6d2",
+      "reason": "Branch synchronization only; release semantics are covered by mapped source commits."
+    },
+    {
+      "commit": "99136bae1a467828c8c771e7383a0b826eba77cc",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "078791d841fa1b18baa860fc882a37e755c62f49",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "1c69b1f71ada4f2cfb890ef337f1f893f1d018a3",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "38c9595296765d1ccaf8c651cb75de2c174abc56",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "283835933a93fca2e3d576ac766cde55f793fa68",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "e73e0c1cd199f400e11b0c78ab1bca657fdeddf1",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "8a857ccaa5f4825e0812f864379c332325491762",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "7392f668f742a44540ad7c34c079be205b279efd",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "0d5ab3abbace9d0fb608476eedc487b8791e1218",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "78f8cd23b2749f0cc91494b3beb6121b6abecd78",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "d905fb9b16c4b1fe6f1dc8a2311d8fe8fcaab385",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "d684be70bdac1784268ff8405730fc540578afa1",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "648dabf200a16d42a709d4026140f52b7458dce7",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "10474af1ec9e6126bb5f62487b6c652d254fb354",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "b36233d6db16c10a7775b7aafabced2996c00bc9",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "4d664475abc7961023532c5efe023fdbdefbcbc6",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "baa681628f0b62a43f48edd51e2e5fb4f4fafa8e",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "de7932bc70fc8ff5c32924fb180889a34a050639",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "c12625d5111a8f2f7c502772388558f6c34095b9",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "fdcda279bce42509f2c7ee30546da56e1f6812da",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "aa6b04a77f530aac13f62a3d4b98a50776441b6e",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "b8e84cf9f50bf2caec2961cd6639db2185074fcc",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "5a89eb76421007bf42d08c5dc15e01262e86ebcd",
+      "reason": "Repository process-artifact cleanup only; no runtime or user-visible change."
+    },
+    {
+      "commit": "6b16fb3d189e68ba9957de3a60cfa59cc89a0294",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "82e29ac6292f030d6465724e180bece795ee5087",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "68c7031834092032167cce5fde19dbf129efc430",
+      "reason": "Internal payload-helper consolidation with behavior preserved."
+    },
+    {
+      "commit": "97baafcb28da9e62aac9acc41b20a1476f9e51ab",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "2a5b10f258b675126fdd147f9f0d3d8605e0b367",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "be776632cd8a8de8f8c721adf7d093dcc2345b40",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "dbac3b25b6b645519ecc8ab836946cabc32b788d",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "8bf9cfeb88c3aeb16b24aba9062d2b40702f6478",
+      "reason": "Removed a dead compatibility module with no remaining runtime callers."
+    },
+    {
+      "commit": "d1e8d5c17bcb0a16de85b3a3e99e8306c08fbf51",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "1ce93b5d1a125abeffcb25f6ed406e72ce3c7f40",
+      "reason": "Integration commit; release semantics are covered by mapped source commits."
+    },
+    {
+      "commit": "0da901b30cd26242636b9ec967b8aa281f61937c",
+      "reason": "Repository process-artifact cleanup only; no runtime or user-visible change."
+    },
+    {
+      "commit": "0fc8bd6d16782ff7d350eb42e48dcb8a99c12ed7",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "16a4f0b1b15fec6b4a5a5e8db0debbe2c6ac4c4d",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "7c0ff70bd83ef04a23734d28ff8fc957c0f4cb2d",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "66c019f5730e6db7c0df5d96b746623c9df96ccf",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "813ec6f8021148ff6d152ff4ee4f5c39e36897fc",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "8d3522223d5ffd9f720dfc002114b3bc4be37e2a",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "9a0c7050641925c1bc5cc6d17fd16e719b624ef0",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "2ddc111d93a58e4eee4dbd8112bd032f79e849f5",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "dd75aec89c77373d059286b81b82d9a1aa9508a1",
+      "reason": "Repository process-artifact policy documentation only."
+    },
+    {
+      "commit": "a303625e4e83f18c52d30a366c526c3fd122f01f",
+      "reason": "Integration commit; release semantics are covered by mapped source commits."
+    },
+    {
+      "commit": "c0863e33c2ed821875d9e1c9d9be87a2b3bad2dd",
+      "reason": "Repository process-artifact cleanup only; no runtime or user-visible change."
+    },
+    {
+      "commit": "af81f532373024ded8d06d1dac7c0634a73b0526",
+      "reason": "Repository process-artifact cleanup only; no runtime or user-visible change."
+    },
+    {
+      "commit": "82f9a4378ad7b3f833afd3728ee5e9fba909651a",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "122e470667c0394b3a927d96a6e535b3f76c8620",
+      "reason": "Repository process-artifact policy documentation only."
+    },
+    {
+      "commit": "ff67c3d117bd1a2a9896d7a5f2ab2baed53d663c",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "58f604dc88ab185f3fb4bca3d4097c5bddb48a25",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "c329d725bb19af2d0dee2c5a2a785c87a5891fd0",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "4a66ac24d256b0388edd23dd67f071ae841c6915",
+      "reason": "Test-only provider isolation; no production behavior change."
+    },
+    {
+      "commit": "e8ae8b2e6fba9931ccf8107508871b2b8d072f16",
+      "reason": "Integration commit; release semantics are covered by mapped source commits."
+    },
+    {
+      "commit": "06c064faf955abefab9f07f455c07787a94d79e2",
+      "reason": "Internal dependency-direction correction for the new feature; no separate user-visible change."
+    },
+    {
+      "commit": "4991d07ee7e7c18a3dc66963f106e0a933ef2b09",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "cff3fc09b97d4c68133b63002c4d00fd426b9034",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "f94e84b53de2faa0de6073b30f2ea767d6bc8d55",
+      "reason": "Process-only plan or review record; no runtime or user-visible change."
+    },
+    {
+      "commit": "ec7b4ea5c643865f6103686b3853e05d67463594",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "904917c3ebab15eacd9609aae871cd4ac885feb3",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    },
+    {
+      "commit": "90ee4c21b3e160043f9740164ea9fd2cf6179961",
+      "reason": "Merge commit; release semantics are covered by its mapped source commits."
+    }
+  ]
+}
