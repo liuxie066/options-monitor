@@ -22,15 +22,20 @@ import tempfile
 import time
 import tracemalloc
 from typing import Any, Callable, Iterator, Mapping, Sequence
+import uuid
 import zlib
 
 from domain.domain.combo_identity import build_combo_identity_intent
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import (
+    attach_settlement_semantics,
     apply_position_projection_migration,
     build_position_projection_migration_inventory,
+    build_lifecycle_attempt_audit_envelope,
     compute_projector_implementation_fingerprint,
+    compute_lifecycle_attempt_chain_sha256,
     LEDGER_DB_RELATIVE_PATH,
+    LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
     loaded_projector_implementation_fingerprint,
     open_position_ledger,
     project_trade_event_log as project_stored_trade_events_to_position_lots,
@@ -91,6 +96,17 @@ PHASE_3A_FINGERPRINT_STARTUP_LIMIT_NS = 50_000_000
 PHASE_3A_ALLOCATION_FLOOR_BYTES = 64 * 1024 * 1024
 PHASE_3A_READ_ALLOCATION_LIMIT_BYTES = 16 * 1024 * 1024
 PHASE_3A_FINGERPRINT_ALLOCATION_LIMIT_BYTES = 8 * 1024 * 1024
+LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA = "data_storage_lifecycle_attempt_benchmark.v1"
+LIFECYCLE_ATTEMPT_ARTIFACT_FILENAME = "lifecycle-attempt-audit.json"
+LIFECYCLE_ATTEMPT_COUNT = 100_000
+LIFECYCLE_RECEIPT_BYTES = 64 * 1024
+LIFECYCLE_P99_RECEIPT_BYTES = 55_759
+LIFECYCLE_MOVE_COUNT = 1_000
+LIFECYCLE_WALL_LIMIT_NS = 25_000_000
+LIFECYCLE_BYTES_PER_ATTEMPT_LIMIT = 224
+LIFECYCLE_ALLOCATION_FLOOR_BYTES = 8 * 1024 * 1024
+LIFECYCLE_MOVE_WAL_FLOOR_BYTES = 1 * 1024 * 1024
+LIFECYCLE_MOVE_PEAK_FLOOR_BYTES = 64 * 1024 * 1024
 ARTIFACT_FILENAMES = (
     "fixture-manifest.json",
     "timing.json",
@@ -2605,6 +2621,1236 @@ def _max_sqlite_sizes(left: Mapping[str, int], right: Mapping[str, int]) -> dict
     return {key: max(int(left.get(key, 0)), int(right.get(key, 0))) for key in set(left) | set(right)}
 
 
+def _lifecycle_benchmark_invocation(index: int) -> bytes:
+    return uuid.UUID(int=int(index), version=4).bytes
+
+
+def _lifecycle_benchmark_observation(
+    *,
+    target_bytes: int,
+    nonce: int,
+    seed: int,
+) -> dict[str, Any]:
+    target = _bounded_positive_int(
+        target_bytes,
+        name="lifecycle receipt bytes",
+        maximum=4 * 1024 * 1024,
+    )
+
+    def materialize(padding: str) -> dict[str, Any]:
+        return attach_settlement_semantics(
+            {
+                "schema_version": "broker_settlement_observation.v2",
+                "case_id": "benchmark-case",
+                "account": "lx",
+                "futu_account_id": "1001",
+                "market": "US",
+                "contract_identity": {
+                    "symbol": "NVDA",
+                    "option_contract_code": "US.NVDA280121P100000",
+                    "option_type": "put",
+                    "position_side": "short",
+                    "strike": "100.00",
+                    "expiration_ymd": "2028-01-21",
+                    "multiplier": 100,
+                },
+                "target_contracts_by_lot": {"benchmark-lot": 1},
+                "frozen_preterminal_remaining_by_lot": {"benchmark-lot": 0},
+                "anchor_option_deal_key": "futu:lx:1001:benchmark-deal",
+                "anchor_execution_time_ms": 1_900_000_000_000,
+                "observed_at_ms": 1_900_000_001_000,
+                "settlement_deadline_ms": 1_900_000_000_500,
+                "required_sources": ["anchor_option_close"],
+                "source_receipts": {
+                    "anchor_option_close": {
+                        "status": "complete",
+                        "coverage_complete": True,
+                        "pagination_complete": True,
+                        "rows": [],
+                    }
+                },
+                "stock_settlement_candidates": [],
+                "broker_option_position_absent": True,
+                "projection_matches_frozen_remaining": True,
+                "reservation_exclusive": True,
+                "competing_effective_consumption": False,
+                "stock_settlement_present": False,
+                "normal_order_present": False,
+                "complete": True,
+                "incomplete_reason_codes": [],
+                "benchmark_receipt_nonce": f"{int(nonce):08d}",
+                "benchmark_receipt_padding": padding,
+            },
+            evidence_kind="expire_close",
+        )
+
+    observation = materialize("")
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id="benchmark-case",
+        invocation_id=_lifecycle_benchmark_invocation(1),
+        attempted_at_ms=1_900_000_001_000,
+        outcome_kind="observed_complete",
+        observation=observation,
+    )
+    padding_bytes = target - int(envelope.receipt_uncompressed_bytes or 0)
+    if padding_bytes < 0:
+        raise ValueError("lifecycle receipt target is smaller than the canonical fixture")
+    padding = _deterministic_filler(
+        seed=seed,
+        scenario_key="lifecycle-attempt-receipt",
+        sequence=0,
+        entropy_class="high",
+        size=max(1, padding_bytes),
+    )[:padding_bytes]
+    for _attempt in range(4):
+        observation = materialize(padding)
+        envelope = build_lifecycle_attempt_audit_envelope(
+            case_id="benchmark-case",
+            invocation_id=_lifecycle_benchmark_invocation(1),
+            attempted_at_ms=1_900_000_001_000,
+            outcome_kind="observed_complete",
+            observation=observation,
+        )
+        delta = target - int(envelope.receipt_uncompressed_bytes or 0)
+        if delta == 0:
+            return observation
+        if len(padding) + delta < 0:
+            break
+        if delta > 0:
+            padding += _deterministic_filler(
+                seed=seed + len(padding),
+                scenario_key="lifecycle-attempt-receipt-tail",
+                sequence=0,
+                entropy_class="high",
+                size=delta,
+            )[:delta]
+        else:
+            padding = padding[:delta]
+    raise RuntimeError("failed to build exact-size lifecycle receipt fixture")
+
+
+def _checkpoint_lifecycle_repo(repo: Any) -> dict[str, int]:
+    conn = repo._connect()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    return _sqlite_sizes(Path(repo.db_path))
+
+
+def _lifecycle_sidecar_counts(repo: Any) -> dict[str, int]:
+    conn = repo._connect()
+    try:
+        return {
+            table: int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            for table in (
+                "trade_lifecycle_attempt_audit_heads",
+                "trade_lifecycle_attempt_audits",
+                "trade_lifecycle_observation_spans",
+                "trade_lifecycle_receipt_blobs",
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _append_lifecycle_benchmark_envelope(
+    repo: Any,
+    *,
+    envelope: Any,
+    first_evidence_id: str | None = "benchmark-evidence",
+    trace: list[str] | None = None,
+) -> dict[str, Any]:
+    conn = repo._connect()
+    try:
+        if trace is not None:
+            conn.set_trace_callback(trace.append)
+        conn.execute("BEGIN IMMEDIATE")
+        result = repo.append_trade_lifecycle_attempt_audit_in_transaction(
+            attempt_audit=envelope,
+            first_evidence_id=first_evidence_id,
+            conn=conn,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    cleanup_hash = result.pop("_cleanup_receipt_sha256", None)
+    if cleanup_hash is not None:
+        cleanup = repo._connect()
+        try:
+            if trace is not None:
+                cleanup.set_trace_callback(trace.append)
+            cleanup.execute("BEGIN IMMEDIATE")
+            repo.delete_unreferenced_trade_lifecycle_receipt_blob(
+                cleanup_hash,
+                conn=cleanup,
+            )
+            cleanup.commit()
+        except Exception:
+            cleanup.rollback()
+            raise
+        finally:
+            cleanup.close()
+    return result
+
+
+def _persist_lifecycle_benchmark_observation(
+    repo: Any,
+    *,
+    observation: Mapping[str, Any],
+    invocation_index: int,
+    attempted_at_ms: int,
+    trace: list[str] | None = None,
+) -> dict[str, Any]:
+    envelope = build_lifecycle_attempt_audit_envelope(
+        case_id="benchmark-case",
+        invocation_id=_lifecycle_benchmark_invocation(invocation_index),
+        attempted_at_ms=attempted_at_ms,
+        outcome_kind="observed_complete",
+        observation=observation,
+    )
+    result = _append_lifecycle_benchmark_envelope(
+        repo,
+        envelope=envelope,
+        trace=trace,
+    )
+    return {
+        **result,
+        "invocation_id": envelope.invocation_id.hex(),
+        "attempted_at_ms": envelope.attempted_at_ms,
+        "receipt_sha256": envelope.receipt_sha256.hex(),
+        "receipt_uncompressed_bytes": int(envelope.receipt_uncompressed_bytes or 0),
+        "receipt_compressed_bytes": int(envelope.receipt_compressed_bytes or 0),
+    }
+
+
+@contextmanager
+def _temporary_lifecycle_attempt_fixture(
+    *,
+    prior_attempts: int,
+    receipt_bytes: int,
+    seed: int,
+) -> Iterator[dict[str, Any]]:
+    attempt_count = _bounded_positive_int(
+        prior_attempts,
+        name="lifecycle prior attempts",
+        maximum=1_000_000,
+    )
+    observation = _lifecycle_benchmark_observation(
+        target_bytes=receipt_bytes,
+        nonce=0,
+        seed=seed,
+    )
+    with tempfile.TemporaryDirectory(prefix="om-lifecycle-attempt-") as temp_name:
+        root = Path(temp_name)
+        data_config = root / "data.json"
+        data_config.write_text("{}\n", encoding="utf-8")
+        repo = open_position_ledger(data_config)
+        repo.upsert_trade_lifecycle_case(
+            {
+                "case_id": "benchmark-case",
+                "case_key": "benchmark-case",
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "waiting_settlement_evidence",
+            }
+        )
+        repo.insert_trade_lifecycle_evidence_once(
+            {
+                "evidence_id": "benchmark-evidence",
+                "case_id": "benchmark-case",
+                "source_type": "broker_settlement_observation",
+                "evidence_type": "expire_close",
+                "account": "lx",
+                "symbol": "NVDA",
+                "semantic_schema": observation["semantic_schema"],
+                "semantic_fingerprint": observation["semantic_fingerprint"],
+                "semantic_projection": observation["semantic_projection"],
+                "observation": observation,
+            }
+        )
+        conn = repo._connect()
+        try:
+            evidence_created_at_ms = int(
+                conn.execute(
+                    "SELECT created_at_ms FROM trade_lifecycle_evidence "
+                    "WHERE evidence_id = 'benchmark-evidence'"
+                ).fetchone()[0]
+            )
+        finally:
+            conn.close()
+        repo.upsert_trade_lifecycle_settlement_admission_head(
+            case_id="benchmark-case",
+            semantic_schema=str(observation["semantic_schema"]),
+            semantic_fingerprint=str(observation["semantic_fingerprint"]),
+            evidence_id="benchmark-evidence",
+            evidence_created_at_ms=evidence_created_at_ms,
+            updated_at_ms=1_900_000_001_000,
+        )
+        baseline_sqlite = _checkpoint_lifecycle_repo(repo)
+        first = build_lifecycle_attempt_audit_envelope(
+            case_id="benchmark-case",
+            invocation_id=_lifecycle_benchmark_invocation(1),
+            attempted_at_ms=1_900_000_001_000,
+            outcome_kind="observed_complete",
+            observation=observation,
+        )
+        first_result = _append_lifecycle_benchmark_envelope(
+            repo,
+            envelope=first,
+        )
+        chain = bytes.fromhex(str(first_result["audit_chain_sha256"]))
+        if attempt_count > 1:
+            head = repo.get_trade_lifecycle_attempt_audit_head(
+                case_id="benchmark-case"
+            )
+            if head is None:
+                raise RuntimeError("lifecycle benchmark head was not created")
+            audit_case_key = int(head["audit_case_key"])
+            conn = repo._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rows: list[tuple[Any, ...]] = []
+                for ordinal in range(2, attempt_count + 1):
+                    invocation = _lifecycle_benchmark_invocation(ordinal)
+                    attempted_at_ms = 1_900_000_001_000 + ordinal - 1
+                    chain = compute_lifecycle_attempt_chain_sha256(
+                        previous_chain_sha256=chain,
+                        case_id="benchmark-case",
+                        ordinal=ordinal,
+                        invocation_id=invocation,
+                        attempted_at_ms=attempted_at_ms,
+                        outcome_code=first.outcome_code,
+                        semantic_fingerprint=first.semantic_fingerprint,
+                        receipt_sha256=first.receipt_sha256,
+                        diagnostic_sha256=None,
+                    )
+                    rows.append(
+                        (
+                            audit_case_key,
+                            ordinal,
+                            invocation,
+                            attempted_at_ms,
+                            first.outcome_code,
+                            first.semantic_fingerprint,
+                            first.receipt_sha256,
+                            1,
+                        )
+                    )
+                    if len(rows) == 5_000:
+                        conn.executemany(
+                            "INSERT INTO trade_lifecycle_attempt_audits "
+                            "(audit_case_key,ordinal,invocation_id,attempted_at_ms,"
+                            "outcome_code,semantic_fingerprint,receipt_sha256,span_ordinal) "
+                            "VALUES (?,?,?,?,?,?,?,?)",
+                            rows,
+                        )
+                        rows.clear()
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO trade_lifecycle_attempt_audits "
+                        "(audit_case_key,ordinal,invocation_id,attempted_at_ms,"
+                        "outcome_code,semantic_fingerprint,receipt_sha256,span_ordinal) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        rows,
+                    )
+                conn.execute(
+                    "UPDATE trade_lifecycle_observation_spans "
+                    "SET last_success_ordinal=?,last_success_at_ms=?,"
+                    "successful_observation_count=? "
+                    "WHERE audit_case_key=? AND span_ordinal=1",
+                    (
+                        attempt_count,
+                        1_900_000_001_000 + attempt_count - 1,
+                        attempt_count,
+                        audit_case_key,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE trade_lifecycle_attempt_audit_heads "
+                    "SET last_ordinal=?,chain_sha256=?,last_invocation_id=?,updated_at_ms=? "
+                    "WHERE audit_case_key=?",
+                    (
+                        attempt_count,
+                        chain,
+                        _lifecycle_benchmark_invocation(attempt_count),
+                        1_900_000_001_000 + attempt_count - 1,
+                        audit_case_key,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        fixture_sqlite = _checkpoint_lifecycle_repo(repo)
+        keeper = repo._connect()
+        try:
+            yield {
+                "root": root,
+                "repo": repo,
+                "db_path": Path(repo.db_path),
+                "observation": observation,
+                "baseline_sqlite": baseline_sqlite,
+                "fixture_sqlite": fixture_sqlite,
+                "fixture_sha256": _sha256_json(
+                    {
+                        "schema_version": LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA,
+                        "seed": seed,
+                        "prior_attempts": attempt_count,
+                        "receipt_bytes": receipt_bytes,
+                        "chain_sha256": chain.hex(),
+                    }
+                ),
+            }
+        finally:
+            keeper.close()
+
+
+def _explain_lifecycle_hot_lookups(repo: Any) -> dict[str, list[str]]:
+    conn = repo._connect()
+    try:
+        head = repo.get_trade_lifecycle_attempt_audit_head(
+            case_id="benchmark-case",
+            conn=conn,
+        )
+        if head is None:
+            raise RuntimeError("lifecycle benchmark head is missing")
+        audit_case_key = int(head["audit_case_key"])
+        invocation = head["last_invocation_id"]
+
+        def explain(sql: str, params: Sequence[Any]) -> list[str]:
+            return [
+                str(row["detail"])
+                for row in conn.execute("EXPLAIN QUERY PLAN " + sql, tuple(params))
+            ]
+
+        return {
+            "head": explain(
+                "SELECT audit_case_key,last_ordinal,chain_sha256,current_span_ordinal,"
+                "last_invocation_id FROM trade_lifecycle_attempt_audit_heads WHERE case_id=?",
+                ("benchmark-case",),
+            ),
+            "invocation": explain(
+                "SELECT ordinal FROM trade_lifecycle_attempt_audits "
+                "WHERE audit_case_key=? AND invocation_id=?",
+                (audit_case_key, invocation),
+            ),
+            "span": explain(
+                "SELECT last_receipt_sha256 FROM trade_lifecycle_observation_spans "
+                "WHERE audit_case_key=? AND span_ordinal=?",
+                (audit_case_key, 1),
+            ),
+            "orphan_reference": explain(
+                "SELECT 1 FROM trade_lifecycle_observation_spans "
+                "WHERE last_receipt_sha256=? LIMIT 1",
+                (bytes(32),),
+            ),
+            "account_heads": explain(
+                "SELECT audit_head.audit_case_key,audit_head.case_id "
+                "FROM trade_lifecycle_cases AS lifecycle_case "
+                "JOIN trade_lifecycle_attempt_audit_heads AS audit_head "
+                "ON audit_head.case_id=lifecycle_case.case_id "
+                "WHERE lifecycle_case.account=? ORDER BY lifecycle_case.case_id ASC",
+                ("lx",),
+            ),
+        }
+    finally:
+        conn.close()
+
+
+def _measure_lifecycle_sealing(repo: Any, *, root: Path) -> dict[str, Any]:
+    from src.application.ledger.api import build_lifecycle_attempt_run_seal
+    import src.application.trades.state as trade_state
+
+    account_heads = repo.list_trade_lifecycle_attempt_audit_heads_for_account(
+        account="lx"
+    )
+    if len(account_heads) != 1:
+        raise RuntimeError("lifecycle benchmark seal head is missing")
+    head = account_heads[0]
+    audit_path = root / "benchmark-audit.jsonl"
+    original_flock = trade_state.fcntl.flock
+    original_fsync = trade_state.os.fsync
+    lock_wait_samples: list[int] = []
+    fsync_calls = 0
+
+    def measured_flock(fd: int, operation: int) -> Any:
+        started = time.perf_counter_ns()
+        result = original_flock(fd, operation)
+        if operation & trade_state.fcntl.LOCK_EX:
+            lock_wait_samples.append(time.perf_counter_ns() - started)
+        return result
+
+    def counted_fsync(fd: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        original_fsync(fd)
+
+    trade_state.fcntl.flock = measured_flock
+    trade_state.os.fsync = counted_fsync
+    try:
+        touched = build_lifecycle_attempt_run_seal(
+            account="lx",
+            source_id="benchmark-source",
+            completed_at_ms=1_900_000_200_000,
+            seal_scope="touched_heads",
+            reason="ordinary_due",
+            heads=[head],
+        )
+        started = time.perf_counter_ns()
+        trade_state.append_trade_intake_audit(
+            audit_path,
+            touched,
+            durable=True,
+        )
+        touched_wall = time.perf_counter_ns() - started
+        touched_fsync = fsync_calls
+        started = time.perf_counter_ns()
+        checkpoint = trade_state.append_lifecycle_attempt_checkpoint_seal(
+            audit_path,
+            repo=repo,
+            account="lx",
+            source_id="benchmark-source",
+            completed_at_ms=1_900_000_201_000,
+            reason="process_startup",
+        )
+        checkpoint_wall = time.perf_counter_ns() - started
+        checkpoint_fsync = fsync_calls - touched_fsync
+        before_non_durable_fsync = fsync_calls
+        trade_state.append_trade_intake_audit(
+            audit_path,
+            {"schema_version": "benchmark_non_durable.v1"},
+            durable=False,
+        )
+        non_durable_fsync = fsync_calls - before_non_durable_fsync
+    finally:
+        trade_state.fcntl.flock = original_flock
+        trade_state.os.fsync = original_fsync
+    stress_path = root / "benchmark-concurrent-audit.jsonl"
+    worker = (
+        "import sys;"
+        "from src.application.trades.state import append_trade_intake_audit as append;"
+        "[append(sys.argv[1],{'writer':sys.argv[2],'index':i},durable=sys.argv[3]=='1') "
+        "for i in range(int(sys.argv[4]))]"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker, str(stress_path), name, durable, count],
+            cwd=Path(__file__).resolve().parents[3],
+        )
+        for name, durable, count in (("ordinary", "0", "50"), ("durable", "1", "10"))
+    ]
+    try:
+        for process in processes:
+            process.wait(timeout=30)
+            if process.returncode != 0:
+                raise RuntimeError("lifecycle concurrent append worker failed")
+    except Exception:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        raise
+    raw_lines = stress_path.read_bytes().splitlines()
+    stress_rows = [json.loads(line) for line in raw_lines]
+    writer_counts = {
+        name: sum(row.get("writer") == name for row in stress_rows)
+        for name in ("ordinary", "durable")
+    }
+    return {
+        "touched_heads": {
+            "head_count": int(touched["head_count"]),
+            "wall_time_ns": touched_wall,
+            "flush_fsync_count": touched_fsync,
+            "sqlite_attempt_rows_read": 0,
+        },
+        "account_checkpoint": {
+            "head_count": int(checkpoint["head_count"]),
+            "wall_time_ns": checkpoint_wall,
+            "flush_fsync_count": checkpoint_fsync,
+            "sqlite_attempt_rows_read": 0,
+        },
+        "non_durable_append": {"fsync_count": non_durable_fsync},
+        "concurrent_append_stress": {
+            "process_count": len(processes),
+            "line_count": len(stress_rows),
+            "writer_counts": writer_counts,
+            "all_lines_complete_json": stress_path.read_bytes().endswith(b"\n")
+            and len(stress_rows) == 60
+            and writer_counts == {"ordinary": 50, "durable": 10},
+        },
+        "exclusive_flock_wait_ns": _timing_distribution(lock_wait_samples),
+    }
+
+
+def _lifecycle_forbidden_work(trace: Sequence[str]) -> dict[str, int]:
+    statements = [" ".join(statement.upper().split()) for statement in trace]
+    mutations = tuple(
+        statement
+        for statement in statements
+        if statement.startswith(("INSERT", "UPDATE", "DELETE"))
+    )
+    return {
+        "attempt_history_scan": sum(
+            "FROM TRADE_LIFECYCLE_ATTEMPT_AUDITS" in statement
+            and "INVOCATION_ID" not in statement.partition(" WHERE ")[2]
+            for statement in statements
+        ),
+        "evidence_history_scan": sum(
+            "FROM TRADE_LIFECYCLE_EVIDENCE" in statement
+            for statement in statements
+        ),
+        "full_replay": sum(
+            "FROM TRADE_EVENTS" in statement for statement in statements
+        ),
+        "global_blob_sweep": sum(
+            "DELETE FROM TRADE_LIFECYCLE_RECEIPT_BLOBS" in statement
+            and "WHERE RECEIPT_SHA256" not in statement
+            for statement in statements
+        ),
+        "decision_projection_write": sum(
+            "POSITION_PROJECTION_" in statement for statement in mutations
+        ),
+        "per_attempt_checkpoint": sum(
+            "WAL_CHECKPOINT" in statement for statement in statements
+        ),
+    }
+
+
+def _measure_lifecycle_runtime_sealing() -> dict[str, Any]:
+    from src.application.trades.inbox import (
+        finish_settlement_attempt_provider_invocation,
+        mark_settlement_attempt_provider_started,
+        reserve_settlement_attempt_invocation,
+        upsert_settlement_attempt_state,
+    )
+    from src.application.trades.lifecycle_runtime import (
+        reconcile_due_lifecycle_cases_for_source,
+    )
+    from src.application.trades.settlement_attempts import (
+        SettlementAttemptOutcome,
+        SettlementCapabilitySnapshot,
+        SettlementCollectorContract,
+        case_scope_fingerprint,
+        prepare_provider_required_state,
+    )
+
+    class NoCallCollector:
+        contract = SettlementCollectorContract(required_capability_keys=())
+        capability = SettlementCapabilitySnapshot(
+            contract_version=contract.contract_version,
+            gateway_adapter_version="benchmark",
+            provider_sdk_version="benchmark",
+            capability_fingerprint="benchmark-capability",
+            capabilities={},
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def collect_outcome(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.calls += 1
+            raise AssertionError("lifecycle seal benchmark called provider")
+
+    with tempfile.TemporaryDirectory(prefix="om-lifecycle-runtime-seal-") as temp_name:
+        root = Path(temp_name)
+        config_path = root / "data.json"
+        config_path.write_text("{}\n", encoding="utf-8")
+        repo = open_position_ledger(config_path)
+        case_id = "benchmark-runtime-case"
+        repo.upsert_trade_lifecycle_case(
+            {
+                "schema_version": "lifecycle_case.v2",
+                "case_id": case_id,
+                "case_key": case_id,
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "status": "waiting_settlement_evidence",
+                "futu_account_id": "1001",
+                "contract_key": "benchmark-contract",
+                "target_contracts_by_lot": {"benchmark-lot": 1},
+                "observation_start_ms": 1,
+                "pending_until_ms": 2,
+                "derived_summary": {"reason_state": "cause_pending"},
+            }
+        )
+        candidate = repo.list_trade_lifecycle_due_candidates(account="lx")[0]
+        collector = NoCallCollector()
+        source_id = "benchmark-source"
+        inbox_path = root / "inbox.sqlite3"
+        control_now_ms = 200_000
+        state = prepare_provider_required_state(
+            None,
+            source_id=source_id,
+            account="lx",
+            case_id=case_id,
+            case_scope_fingerprint_value=case_scope_fingerprint(candidate),
+            provider_input_scope_fingerprint_value="benchmark-provider-scope",
+            contract_version=collector.contract.contract_version,
+            capability_fingerprint=collector.capability.capability_fingerprint,
+            now_ms=1,
+        )
+        upsert_settlement_attempt_state(inbox_path, state=state)
+        reserved = reserve_settlement_attempt_invocation(
+            inbox_path,
+            source_id=source_id,
+            account="lx",
+            case_id=case_id,
+            case_scope_fingerprint=str(state["case_scope_fingerprint"]),
+            claim_id="benchmark-claim",
+            now_ms=1,
+            lease_ms=1,
+        )
+        if reserved is None:
+            raise RuntimeError("lifecycle runtime seal benchmark reservation failed")
+        started = mark_settlement_attempt_provider_started(
+            inbox_path,
+            source_id=source_id,
+            account="lx",
+            case_id=case_id,
+            claim_id="benchmark-claim",
+            invocation_id=str(reserved["invocation_id"]),
+            attempted_at_ms=2,
+        )
+        outcome = SettlementAttemptOutcome(
+            kind="unknown_error",
+            source_id=source_id,
+            account="lx",
+            case_id=case_id,
+            contract_version=collector.contract.contract_version,
+            capability_fingerprint=collector.capability.capability_fingerprint,
+            reason_code="benchmark_provider_failed",
+            error_class="BenchmarkProviderError",
+        )
+        envelope = build_lifecycle_attempt_audit_envelope(
+            case_id=case_id,
+            invocation_id=str(started["invocation_id"]),
+            attempted_at_ms=2,
+            outcome_kind="unknown_error",
+            reason_code=outcome.reason_code,
+            error_class=outcome.error_class,
+        )
+        finish_settlement_attempt_provider_invocation(
+            inbox_path,
+            source_id=source_id,
+            account="lx",
+            case_id=case_id,
+            claim_id="benchmark-claim",
+            invocation_id=str(started["invocation_id"]),
+            outcome=outcome,
+            outcome_code=envelope.outcome_code,
+            semantic_fingerprint=envelope.semantic_fingerprint,
+            receipt_sha256=envelope.receipt_sha256,
+            diagnostic_sha256=envelope.diagnostic_sha256,
+            control_now_ms=3,
+        )
+        _append_lifecycle_benchmark_envelope(
+            repo,
+            envelope=envelope,
+            first_evidence_id=None,
+        )
+
+        forbidden_work = {
+            "attempt_history_scan": 0,
+            "evidence_history_scan": 0,
+            "full_replay": 0,
+            "global_blob_sweep": 0,
+            "decision_projection_write": 0,
+            "per_attempt_checkpoint": 0,
+        }
+
+        def forbid(key: str) -> Callable[..., Any]:
+            def blocked(*_args: Any, **_kwargs: Any) -> Any:
+                forbidden_work[key] += 1
+                raise AssertionError(f"lifecycle runtime seal benchmark called {key}")
+
+            return blocked
+
+        repo.list_trade_events = forbid("full_replay")
+        repo.list_trade_lifecycle_evidence = forbid("evidence_history_scan")
+        repo.list_trade_lifecycle_attempt_audits = forbid("attempt_history_scan")
+        repo.publish_full_position_projection_heads = forbid(
+            "decision_projection_write"
+        )
+        source = {
+            "id": source_id,
+            "account": "lx",
+            "futu_account_ids": ["1001"],
+            "inbox_path": inbox_path,
+            "settlement_observation": {"enabled": True},
+        }
+        first_seals: list[dict[str, Any]] = []
+        first = reconcile_due_lifecycle_cases_for_source(
+            repo,
+            source=source,
+            now_ms=control_now_ms,
+            apply_changes=True,
+            settlement_collector=collector,
+            settlement_control_now_ms_fn=lambda: control_now_ms,
+            seal_sink=first_seals.append,
+        )
+        second_seals: list[dict[str, Any]] = []
+        second = reconcile_due_lifecycle_cases_for_source(
+            repo,
+            source=source,
+            now_ms=control_now_ms,
+            apply_changes=True,
+            settlement_collector=collector,
+            settlement_control_now_ms_fn=lambda: control_now_ms,
+            seal_sink=second_seals.append,
+        )
+        checks = {
+            "one_touched_one_seal": first.get("seal_status") == "sealed"
+            and len(first_seals) == 1
+            and first_seals[0].get("head_count") == 1,
+            "zero_touched_no_seal": second.get("seal_status") == "not_required"
+            and not second_seals,
+            "provider_not_called": collector.calls == 0
+            and int(first.get("provider_attempt_count") or 0) == 0
+            and int(second.get("provider_attempt_count") or 0) == 0,
+            "forbidden_work_zero": not any(forbidden_work.values()),
+        }
+        return {
+            "checks": checks,
+            "forbidden_work": forbidden_work,
+            "one_touched": {
+                "seal_status": first.get("seal_status"),
+                "seal_count": len(first_seals),
+            },
+            "zero_touched": {
+                "seal_status": second.get("seal_status"),
+                "seal_count": len(second_seals),
+            },
+            "provider_call_count": collector.calls,
+            "status": "pass" if all(checks.values()) else "fail",
+        }
+
+
+def _measure_lifecycle_receipt_class(
+    *,
+    prior_attempts: int,
+    receipt_bytes: int,
+    warmups: int,
+    repetitions: int,
+    moves: int,
+    seed: int,
+) -> dict[str, Any]:
+    with _temporary_lifecycle_attempt_fixture(
+        prior_attempts=prior_attempts,
+        receipt_bytes=receipt_bytes,
+        seed=seed,
+    ) as fixture:
+        repo = fixture["repo"]
+        observation = fixture["observation"]
+        compact_delta = (
+            int(fixture["fixture_sqlite"]["total_bytes"])
+            - int(fixture["baseline_sqlite"]["total_bytes"])
+        )
+        wall_samples: list[int] = []
+        cpu_samples: list[int] = []
+        next_invocation = int(prior_attempts) + 1
+        for index in range(warmups + repetitions):
+            invocation_index = next_invocation
+            next_invocation += 1
+            started_wall = time.perf_counter_ns()
+            started_cpu = time.process_time_ns()
+            _persist_lifecycle_benchmark_observation(
+                repo,
+                observation=observation,
+                invocation_index=invocation_index,
+                attempted_at_ms=1_900_100_000_000 + invocation_index,
+            )
+            cpu_elapsed = time.process_time_ns() - started_cpu
+            wall_elapsed = time.perf_counter_ns() - started_wall
+            if index >= warmups:
+                wall_samples.append(wall_elapsed)
+                cpu_samples.append(cpu_elapsed)
+
+        allocation_invocation = next_invocation
+        next_invocation += 1
+        allocation, allocation_output = _allocation_call(
+            lambda: _persist_lifecycle_benchmark_observation(
+                repo,
+                observation=observation,
+                invocation_index=allocation_invocation,
+                attempted_at_ms=1_900_100_000_000 + allocation_invocation,
+            ),
+            output_fn=lambda result: dict(result),
+        )
+        before_replay_counts = _lifecycle_sidecar_counts(repo)
+        before_replay_bytes = _checkpoint_lifecycle_repo(repo)
+        replay = _persist_lifecycle_benchmark_observation(
+            repo,
+            observation=observation,
+            invocation_index=allocation_invocation,
+            attempted_at_ms=1_900_100_000_000 + allocation_invocation,
+        )
+        after_replay_counts = _lifecycle_sidecar_counts(repo)
+        after_replay_bytes = _checkpoint_lifecycle_repo(repo)
+
+        trace: list[str] = []
+        probe_invocation = next_invocation
+        next_invocation += 1
+        probe = _persist_lifecycle_benchmark_observation(
+            repo,
+            observation=observation,
+            invocation_index=probe_invocation,
+            attempted_at_ms=1_900_100_000_000 + probe_invocation,
+            trace=trace,
+        )
+        move_start = _checkpoint_lifecycle_repo(repo)
+        peak = dict(move_start)
+        maximum_wal_growth = 0
+        move_wall_samples: list[int] = []
+        for move_index in range(1, moves + 1):
+            moving_observation = _lifecycle_benchmark_observation(
+                target_bytes=receipt_bytes,
+                nonce=move_index,
+                seed=seed,
+            )
+            before = _sqlite_sizes(Path(repo.db_path))
+            invocation_index = next_invocation
+            next_invocation += 1
+            started = time.perf_counter_ns()
+            _persist_lifecycle_benchmark_observation(
+                repo,
+                observation=moving_observation,
+                invocation_index=invocation_index,
+                attempted_at_ms=1_900_200_000_000 + invocation_index,
+            )
+            move_wall_samples.append(time.perf_counter_ns() - started)
+            after = _sqlite_sizes(Path(repo.db_path))
+            maximum_wal_growth = max(
+                maximum_wal_growth,
+                max(0, int(after["wal_bytes"]) - int(before["wal_bytes"])),
+            )
+            peak = _max_sqlite_sizes(peak, after)
+        before_move_checkpoint = _sqlite_sizes(Path(repo.db_path))
+        after_move_checkpoint = _checkpoint_lifecycle_repo(repo)
+        conn = repo._connect()
+        try:
+            span = conn.execute(
+                "SELECT COUNT(*) AS span_count,"
+                "SUM(last_receipt_sha256 IS NOT NULL) AS last_reference_count,"
+                "MIN(length(first_evidence_receipt_sha256)) AS commitment_min,"
+                "MAX(length(first_evidence_receipt_sha256)) AS commitment_max "
+                "FROM trade_lifecycle_observation_spans"
+            ).fetchone()
+            blob_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM trade_lifecycle_receipt_blobs"
+                ).fetchone()[0]
+            )
+        finally:
+            conn.close()
+        verified = repo.verify_trade_lifecycle_attempt_audit_case(
+            case_id="benchmark-case"
+        )
+        query_plans = _explain_lifecycle_hot_lookups(repo)
+        sealing = _measure_lifecycle_sealing(repo, root=fixture["root"])
+        receipt_uncompressed = int(allocation_output["receipt_uncompressed_bytes"])
+        allocation_limit = max(
+            LIFECYCLE_ALLOCATION_FLOOR_BYTES,
+            3 * receipt_uncompressed,
+        )
+        wal_limit = max(
+            LIFECYCLE_MOVE_WAL_FLOOR_BYTES,
+            4 * receipt_uncompressed,
+        )
+        peak_limit = max(
+            LIFECYCLE_MOVE_PEAK_FLOOR_BYTES,
+            8 * receipt_uncompressed,
+        )
+        peak_growth = max(
+            0,
+            int(peak["total_bytes"]) - int(move_start["total_bytes"]),
+        )
+        indexed = all(
+            any("SEARCH" in detail.upper() for detail in details)
+            and not any("SCAN TRADE_LIFECYCLE_ATTEMPT_AUDITS" in detail.upper() for detail in details)
+            for details in query_plans.values()
+        )
+        forbidden_work = _lifecycle_forbidden_work(trace)
+        checks = {
+            "duplicate_wall_p95": _timing_distribution(wall_samples)["p95"]
+            <= LIFECYCLE_WALL_LIMIT_NS,
+            "compact_bytes_per_attempt": compact_delta / prior_attempts
+            <= LIFECYCLE_BYTES_PER_ATTEMPT_LIMIT,
+            "python_peak_allocation": int(allocation["python_peak_bytes"])
+            <= allocation_limit,
+            "exact_replay_zero_rows": before_replay_counts == after_replay_counts,
+            "exact_replay_zero_physical_bytes": before_replay_bytes == after_replay_bytes,
+            "one_optional_last_receipt": int(span["span_count"] or 0) == 1
+            and blob_count <= 1
+            and int(span["last_reference_count"] or 0) <= 1,
+            "fixed_first_receipt_commitment": int(span["commitment_min"] or 0) == 32
+            and int(span["commitment_max"] or 0) == 32,
+            "moving_receipt_wal": maximum_wal_growth <= wal_limit,
+            "moving_receipt_peak": peak_growth <= peak_limit,
+            "checkpoint_returns_to_steady_wal": int(after_move_checkpoint["wal_bytes"]) == 0,
+            "indexed_hot_lookups": indexed,
+            "shadow_verifier": verified["status"] == "valid",
+            "one_fsync_per_seal": sealing["touched_heads"]["flush_fsync_count"] == 1
+            and sealing["account_checkpoint"]["flush_fsync_count"] == 1,
+            "non_durable_no_fsync": sealing["non_durable_append"]["fsync_count"] == 0,
+            "concurrent_append_integrity": sealing["concurrent_append_stress"][
+                "all_lines_complete_json"
+            ],
+            "forbidden_work_zero": not any(forbidden_work.values()),
+        }
+        return {
+            "fixture_sha256": fixture["fixture_sha256"],
+            "receipt": {
+                "uncompressed_bytes": receipt_uncompressed,
+                "compressed_bytes": int(allocation_output["receipt_compressed_bytes"]),
+                "compression_ratio": round(
+                    int(allocation_output["receipt_compressed_bytes"])
+                    / receipt_uncompressed,
+                    6,
+                ),
+                "compression_class": "deterministic_high_entropy_urlsafe_base85",
+            },
+            "timing": {
+                "cold_state": "fresh_temporary_db_fixture_setup_excluded",
+                "warm_state": "warm_os_page_cache_not_flushed",
+                "duplicate_observation_wall_time_ns": _timing_distribution(wall_samples),
+                "duplicate_observation_cpu_time_ns": _timing_distribution(cpu_samples),
+                "moving_receipt_wall_time_ns": _timing_distribution(move_wall_samples),
+            },
+            "allocation": allocation,
+            "space": {
+                "baseline_before_sidecar": fixture["baseline_sqlite"],
+                "fixture_after_prior_attempts": fixture["fixture_sqlite"],
+                "incremental_compact_bytes": compact_delta,
+                "incremental_compact_bytes_per_attempt": round(
+                    compact_delta / prior_attempts,
+                    6,
+                ),
+                "before_exact_replay": before_replay_bytes,
+                "after_exact_replay": after_replay_bytes,
+                "move_start_checkpoint": move_start,
+                "move_peak_observed": peak,
+                "move_before_final_checkpoint": before_move_checkpoint,
+                "move_after_final_checkpoint": after_move_checkpoint,
+                "maximum_single_move_wal_growth_bytes": maximum_wal_growth,
+                "peak_growth_bytes_including_compact_rows": peak_growth,
+            },
+            "rows": {
+                "before_exact_replay": before_replay_counts,
+                "after_exact_replay": after_replay_counts,
+                "span_count": int(span["span_count"] or 0),
+                "last_receipt_reference_count": int(span["last_reference_count"] or 0),
+                "receipt_blob_count": blob_count,
+                "first_receipt_commitment_min_bytes": int(span["commitment_min"] or 0),
+                "first_receipt_commitment_max_bytes": int(span["commitment_max"] or 0),
+            },
+            "exact_replay": replay,
+            "hot_write_probe": {
+                "result": probe,
+                "sql_statement_count": len(trace),
+                "select_statement_count": sum(
+                    statement.lstrip().upper().startswith("SELECT")
+                    for statement in trace
+                ),
+                "mutation_statement_count": sum(
+                    statement.lstrip().upper().startswith(
+                        ("INSERT", "UPDATE", "DELETE")
+                    )
+                    for statement in trace
+                ),
+                "attempt_history_scan_count": forbidden_work[
+                    "attempt_history_scan"
+                ],
+                "evidence_history_scan_count": forbidden_work[
+                    "evidence_history_scan"
+                ],
+                "checkpoint_statement_count": forbidden_work[
+                    "per_attempt_checkpoint"
+                ],
+                "envelope_build_count": 1,
+                "compression_count": 1,
+            },
+            "forbidden_work": forbidden_work,
+            "query_plans": query_plans,
+            "sealing": sealing,
+            "shadow_verifier": verified,
+            "limits": {
+                "wall_p95_ns": LIFECYCLE_WALL_LIMIT_NS,
+                "compact_bytes_per_attempt": LIFECYCLE_BYTES_PER_ATTEMPT_LIMIT,
+                "python_peak_allocation_bytes": allocation_limit,
+                "single_move_wal_growth_bytes": wal_limit,
+                "moving_peak_growth_bytes": peak_limit,
+            },
+            "checks": checks,
+            "status": "pass" if all(checks.values()) else "fail",
+        }
+
+
+def run_lifecycle_attempt_audit_benchmark(
+    *,
+    repo_root: str | Path,
+    output_dir: str | Path,
+    warmups: int = DEFAULT_WARMUPS,
+    repetitions: int = DEFAULT_REPETITIONS,
+    seed: int = SEED,
+    prior_attempts: int = LIFECYCLE_ATTEMPT_COUNT,
+    receipt_bytes: int = LIFECYCLE_RECEIPT_BYTES,
+    p99_receipt_bytes: int = LIFECYCLE_P99_RECEIPT_BYTES,
+    moves: int = LIFECYCLE_MOVE_COUNT,
+    reference_host_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    base = Path(repo_root).expanduser().resolve(strict=True)
+    warmup_count = _bounded_nonnegative_int(warmups, name="warmups", maximum=100)
+    repetition_count = _bounded_positive_int(
+        repetitions,
+        name="repetitions",
+        maximum=1_000,
+    )
+    fixture_seed = _bounded_nonnegative_int(seed, name="seed", maximum=2**31 - 1)
+    attempt_count = _bounded_positive_int(
+        prior_attempts,
+        name="lifecycle prior attempts",
+        maximum=1_000_000,
+    )
+    move_count = _bounded_positive_int(moves, name="lifecycle moves", maximum=10_000)
+    host = _host_profile()
+    reference = _validated_reference_fingerprint(reference_host_fingerprint)
+    comparable = reference is not None and reference == host["fingerprint"]
+    classes = []
+    seen_sizes: set[int] = set()
+    for label, size in (
+        ("fixed_64_kib", receipt_bytes),
+        ("p99_receipt_class", p99_receipt_bytes),
+    ):
+        size_value = _bounded_positive_int(
+            size,
+            name=f"{label} receipt bytes",
+            maximum=4 * 1024 * 1024,
+        )
+        if size_value in seen_sizes:
+            continue
+        seen_sizes.add(size_value)
+        classes.append(
+            {
+                "key": label,
+                **_measure_lifecycle_receipt_class(
+                    prior_attempts=attempt_count,
+                    receipt_bytes=size_value,
+                    warmups=warmup_count,
+                    repetitions=repetition_count,
+                    moves=move_count,
+                    seed=fixture_seed,
+                ),
+            }
+        )
+    runtime_sealing = _measure_lifecycle_runtime_sealing()
+    forbidden_keys = tuple(runtime_sealing["forbidden_work"])
+    forbidden_work = {
+        key: int(runtime_sealing["forbidden_work"].get(key) or 0)
+        + sum(
+            int(item.get("forbidden_work", {}).get(key) or 0)
+            for item in classes
+        )
+        for key in forbidden_keys
+    }
+    acceptance_dimensions = (
+        attempt_count == LIFECYCLE_ATTEMPT_COUNT
+        and int(receipt_bytes) == LIFECYCLE_RECEIPT_BYTES
+        and int(p99_receipt_bytes) == LIFECYCLE_P99_RECEIPT_BYTES
+        and move_count == LIFECYCLE_MOVE_COUNT
+        and warmup_count == DEFAULT_WARMUPS
+        and repetition_count == DEFAULT_REPETITIONS
+    )
+    resource_pass = (
+        all(item["status"] == "pass" for item in classes)
+        and runtime_sealing["status"] == "pass"
+        and not any(forbidden_work.values())
+    )
+    status = (
+        "pass"
+        if acceptance_dimensions and comparable and resource_pass
+        else "fail"
+        if acceptance_dimensions and comparable
+        else "not_evaluable"
+    )
+    artifact = {
+        "schema_version": LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _git_sha(base),
+        "fixture_seed": fixture_seed,
+        "run_label": (
+            "acceptance_5_warmups_30_repetitions"
+            if acceptance_dimensions
+            else "non_acceptance_smoke"
+        ),
+        "host": host,
+        "reference_host": {
+            "fingerprint": reference,
+            "comparable": comparable,
+        },
+        "dimensions": {
+            "prior_attempts": attempt_count,
+            "warmups": warmup_count,
+            "repetitions": repetition_count,
+            "moving_receipt_observations": move_count,
+            "receipt_classes_bytes": sorted(seen_sizes),
+        },
+        "baseline_p99_receipt_class": {
+            "bytes": int(p99_receipt_bytes),
+            "status": (
+                "measured_read_only"
+                if int(p99_receipt_bytes) == LIFECYCLE_P99_RECEIPT_BYTES
+                else "non_acceptance_override"
+            ),
+            "source": (
+                "liuxie-incus production ledger 2026-08-15"
+                if int(p99_receipt_bytes) == LIFECYCLE_P99_RECEIPT_BYTES
+                else "caller_override"
+            ),
+            "method": "nearest_rank_p99_canonical_observation_json_bytes",
+            "eligible_row_count": (
+                2_250
+                if int(p99_receipt_bytes) == LIFECYCLE_P99_RECEIPT_BYTES
+                else None
+            ),
+            "invalid_row_count": (
+                0
+                if int(p99_receipt_bytes) == LIFECYCLE_P99_RECEIPT_BYTES
+                else None
+            ),
+        },
+        "classes": classes,
+        "runtime_sealing": runtime_sealing,
+        "forbidden_work": forbidden_work,
+        "status": status,
+        "status_reason": (
+            "all_lifecycle_attempt_gates_pass"
+            if status == "pass"
+            else "lifecycle_attempt_gate_failed"
+            if status == "fail"
+            else "smoke_or_reference_host_not_comparable"
+        ),
+        "automatic_actions": [],
+    }
+    target = _publish_lifecycle_attempt_artifact(
+        output_dir=output_dir,
+        repo_root=base,
+        artifact=artifact,
+    )
+    return {
+        "status": status,
+        "output_dir": str(target),
+        "artifact": str(target / LIFECYCLE_ATTEMPT_ARTIFACT_FILENAME),
+        "class_count": len(classes),
+    }
+
+
 def _projection_output(projection: Any, *, event_count: int) -> dict[str, Any]:
     lots = [lot.to_dict() for lot in projection.lots]
     diagnostics = [item.to_dict() for item in projection.diagnostics]
@@ -3644,6 +4890,44 @@ def _publish_artifact_set(
             shutil.rmtree(stage)
 
 
+def _publish_lifecycle_attempt_artifact(
+    *,
+    output_dir: str | Path,
+    repo_root: Path,
+    artifact: Mapping[str, Any],
+) -> Path:
+    target, existed = _resolve_output_dir(output_dir, repo_root=repo_root)
+    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent))
+    published = False
+    try:
+        path = stage / LIFECYCLE_ATTEMPT_ARTIFACT_FILENAME
+        with path.open("wb") as handle:
+            handle.write(_canonical_json_bytes(artifact) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA
+        ):
+            raise RuntimeError("lifecycle attempt benchmark artifact is invalid")
+        directory_fd = os.open(stage, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if existed:
+            if any(target.iterdir()):
+                raise ValueError("output directory became non-empty before publish")
+            target.rmdir()
+        os.replace(stage, target)
+        published = True
+        return target
+    finally:
+        if not published and stage.exists():
+            shutil.rmtree(stage)
+
+
 def _validate_published_files(directory: Path) -> None:
     actual = {path.name for path in directory.iterdir() if path.is_file()}
     if actual != set(ARTIFACT_FILENAMES):
@@ -3679,11 +4963,35 @@ def build_parser() -> argparse.ArgumentParser:
         description="Benchmark canonical option-position projection on deterministic synthetic data.",
     )
     parser.add_argument("--baseline", help="Optional storage_runtime_baseline.v1 metadata report")
-    parser.add_argument("--scenario", choices=PUBLIC_SCENARIOS, default="all")
+    parser.add_argument(
+        "--scenario",
+        choices=(*PUBLIC_SCENARIOS, "lifecycle_attempt_audit"),
+        default="all",
+    )
     parser.add_argument("--output-dir", help="Required absent or empty local output directory")
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS)
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument(
+        "--lifecycle-prior-attempts",
+        type=int,
+        default=LIFECYCLE_ATTEMPT_COUNT,
+    )
+    parser.add_argument(
+        "--lifecycle-receipt-bytes",
+        type=int,
+        default=LIFECYCLE_RECEIPT_BYTES,
+    )
+    parser.add_argument(
+        "--lifecycle-p99-receipt-bytes",
+        type=int,
+        default=LIFECYCLE_P99_RECEIPT_BYTES,
+    )
+    parser.add_argument(
+        "--lifecycle-moves",
+        type=int,
+        default=LIFECYCLE_MOVE_COUNT,
+    )
     parser.add_argument(
         "--reference-host-fingerprint",
         help="Exact host-profile SHA-256 required before absolute timing decisions are allowed",
@@ -3708,17 +5016,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.output_dir:
             parser.error("--output-dir is required")
         repo_root = Path(__file__).resolve().parents[3]
-        result = run_data_storage_projection_benchmark(
-            repo_root=repo_root,
-            output_dir=args.output_dir,
-            baseline=args.baseline,
-            scenario=args.scenario,
-            warmups=args.warmups,
-            repetitions=args.repetitions,
-            seed=args.seed,
-            reference_host_fingerprint=args.reference_host_fingerprint,
-            shadow_manifest=args.shadow_manifest,
-        )
+        if args.scenario == "lifecycle_attempt_audit":
+            result = run_lifecycle_attempt_audit_benchmark(
+                repo_root=repo_root,
+                output_dir=args.output_dir,
+                warmups=args.warmups,
+                repetitions=args.repetitions,
+                seed=args.seed,
+                prior_attempts=args.lifecycle_prior_attempts,
+                receipt_bytes=args.lifecycle_receipt_bytes,
+                p99_receipt_bytes=args.lifecycle_p99_receipt_bytes,
+                moves=args.lifecycle_moves,
+                reference_host_fingerprint=args.reference_host_fingerprint,
+            )
+        else:
+            result = run_data_storage_projection_benchmark(
+                repo_root=repo_root,
+                output_dir=args.output_dir,
+                baseline=args.baseline,
+                scenario=args.scenario,
+                warmups=args.warmups,
+                repetitions=args.repetitions,
+                seed=args.seed,
+                reference_host_fingerprint=args.reference_host_fingerprint,
+                shadow_manifest=args.shadow_manifest,
+            )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True) + "\n")
@@ -3730,9 +5052,11 @@ __all__ = [
     "CPU_PROFILE_SCHEMA",
     "DECISION_SCHEMA",
     "FIXTURE_SCHEMA",
+    "LIFECYCLE_ATTEMPT_BENCHMARK_SCHEMA",
     "PHASE_3A_ACCEPTANCE_SCHEMA",
     "TIMING_SCHEMA",
     "build_parser",
     "main",
     "run_data_storage_projection_benchmark",
+    "run_lifecycle_attempt_audit_benchmark",
 ]

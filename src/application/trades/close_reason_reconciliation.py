@@ -12,8 +12,10 @@ from domain.domain.option_close_reason import (
 from domain.domain.option_lifecycle import LIFECYCLE_CASE_SCHEMA
 from src.application.ledger.api import (
     advance_lifecycle_case_state,
+    LifecycleAttemptAuditEnvelope,
     lifecycle_case_coherent_facts,
     record_lifecycle_evidence_issue,
+    record_lifecycle_observation_attempt_atomically,
 )
 from src.application.trades.close_reason_evidence import (
     canonical_hash,
@@ -33,6 +35,70 @@ from src.application.trades.settlement_observation import (
 )
 
 
+def _settlement_observation_evidence(
+    lifecycle_case: Mapping[str, Any],
+    observation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    observation_id = str(
+        observation.get("observation_id") or ""
+    ).strip()
+    if not observation_id:
+        return None
+    contract = (
+        dict(observation.get("contract_identity") or {})
+        if isinstance(observation.get("contract_identity"), Mapping)
+        else {}
+    )
+    frozen_remaining = (
+        dict(
+            observation.get(
+                "frozen_preterminal_remaining_by_lot"
+            )
+            or {}
+        )
+        if isinstance(
+            observation.get(
+                "frozen_preterminal_remaining_by_lot"
+            ),
+            Mapping,
+        )
+        else {}
+    )
+    return {
+        "evidence_id": observation_id,
+        "case_id": str(lifecycle_case.get("case_id") or "").strip(),
+        "source_type": "broker_settlement_observation",
+        "source_event_id": observation_id,
+        "evidence_type": "settlement_observation",
+        "account": (
+            observation.get("account")
+            or lifecycle_case.get("account")
+        ),
+        "symbol": (
+            contract.get("symbol")
+            or lifecycle_case.get("symbol")
+        ),
+        "contracts": sum(
+            int(value) for value in frozen_remaining.values()
+        ),
+        "observation_hash": str(
+            observation.get("semantic_fingerprint")
+            or canonical_hash(dict(observation))
+        ),
+        "semantic_schema": observation.get("semantic_schema"),
+        "semantic_fingerprint": observation.get(
+            "semantic_fingerprint"
+        ),
+        "semantic_projection": observation.get(
+            "semantic_projection"
+        ),
+        "previous_settlement_evidence_id": observation.get(
+            "previous_settlement_evidence_id"
+        ),
+        "observation": dict(observation),
+    }
+
+
 def reconcile_lifecycle_close_reason(
     repo: Any,
     *,
@@ -42,7 +108,12 @@ def reconcile_lifecycle_close_reason(
     apply_changes: bool = False,
     coherent_facts: Mapping[str, Any] | None = None,
     refresh_read_model: bool = True,
+    attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
 ) -> dict[str, Any]:
+    if not apply_changes and attempt_audit is not None:
+        raise ValueError(
+            "close-reason preview cannot consume an attempt audit"
+        )
     observation_payload = dict(observation or {})
     facts = (
         dict(coherent_facts)
@@ -75,6 +146,37 @@ def reconcile_lifecycle_close_reason(
     expected_generation_token = (
         prepared_generation_token or current_generation_token
     )
+    observation_evidence = _settlement_observation_evidence(
+        lifecycle_case,
+        observation_payload,
+    )
+    if attempt_audit is not None and observation_evidence is None:
+        raise ValueError(
+            "provider settlement attempt requires observation identity"
+        )
+    remaining_attempt_audit = attempt_audit
+
+    def _record_observation_only(
+        *,
+        direct_evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        nonlocal remaining_attempt_audit
+        if remaining_attempt_audit is None:
+            return None
+        assert observation_evidence is not None
+        result = record_lifecycle_observation_attempt_atomically(
+            repo,
+            case_id=case_id,
+            evidence=observation_evidence,
+            expected_lifecycle_generation_token=(
+                expected_generation_token
+            ),
+            attempt_audit=remaining_attempt_audit,
+            direct_evidence=direct_evidence,
+        )
+        remaining_attempt_audit = None
+        return result
+
     stock_candidates, stock_candidate_reasons = (
         _canonical_stock_settlement_candidates(
             observation_payload.get("stock_settlement_candidates")
@@ -82,6 +184,7 @@ def reconcile_lifecycle_close_reason(
         )
     )
     if stock_candidate_reasons:
+        write_result = _record_observation_only()
         return {
             "schema_version": (
                 "close_reason_reconciliation_result.v1"
@@ -111,6 +214,7 @@ def reconcile_lifecycle_close_reason(
             "lifecycle_generation_token": current_generation_token,
             "poll_settlement_results": [],
             "write_status": "not_attempted",
+            "write_result": write_result,
             "lifecycle_read_model": _refreshed_lifecycle_read_model(
                 repo,
                 case_id=case_id,
@@ -128,20 +232,40 @@ def reconcile_lifecycle_close_reason(
                 expected_lifecycle_generation_token=(
                     expected_generation_token
                 ),
+                attempt_evidence=(
+                    observation_evidence
+                    if remaining_attempt_audit is not None
+                    else None
+                ),
+                attempt_audit=remaining_attempt_audit,
+                consume_unresolved_attempt=False,
             )
         )
+        resolution_diagnostics = dict(resolution.diagnostics)
+        attempt_result = resolution_diagnostics.get(
+            "attempt_result"
+        )
+        if isinstance(attempt_result, dict):
+            remaining_attempt_audit = None
         poll_results.append(
             {
                 "status": resolution.status,
                 "action": resolution.action,
                 "reason": resolution.reason,
-                "diagnostics": dict(resolution.diagnostics),
+                "diagnostics": resolution_diagnostics,
             }
         )
-    if poll_results and any(
-        item["status"] in {"applied", "skipped", "dry_run"}
-        for item in poll_results
+    if poll_results and (
+        any(
+            item["status"] in {"applied", "skipped", "dry_run"}
+            for item in poll_results
+        )
+        or (
+            attempt_audit is not None
+            and remaining_attempt_audit is None
+        )
     ):
+        write_result = _record_observation_only()
         return {
             "schema_version": (
                 "close_reason_reconciliation_result.v1"
@@ -149,6 +273,7 @@ def reconcile_lifecycle_close_reason(
             "case_id": case_id,
             "apply_changes": bool(apply_changes),
             "poll_settlement_results": poll_results,
+            "write_result": write_result,
             "lifecycle_read_model": _refreshed_lifecycle_read_model(
                 repo,
                 case_id=case_id,
@@ -158,6 +283,7 @@ def reconcile_lifecycle_close_reason(
         }
     case_resolution = dict(facts["case_resolution"])
     if case_resolution.get("status") == "conflict":
+        write_result = _record_observation_only()
         return {
             "schema_version": ("close_reason_reconciliation_result.v1"),
             "case_id": case_id,
@@ -176,6 +302,7 @@ def reconcile_lifecycle_close_reason(
             "timing_error": None,
             "observation_id": None,
             "poll_settlement_results": poll_results,
+            "write_result": write_result,
         }
     evidence_rows = [
         dict(item) for item in facts["validated_anchors"]
@@ -393,8 +520,13 @@ def reconcile_lifecycle_close_reason(
         "lifecycle_generation_token": current_generation_token,
         "poll_settlement_results": poll_results,
     }
-    if not apply_changes or decision.status == "not_started":
+    if not apply_changes:
         return preview
+    if decision.status == "not_started":
+        return {
+            **preview,
+            "write_result": _record_observation_only(),
+        }
     if (
         decision.status == "resolved"
         and decision.close_reason == "expiration_no_settlement"
@@ -403,15 +535,11 @@ def reconcile_lifecycle_close_reason(
             raise ValueError(
                 "complete settlement observation identity is required"
             )
+        assert observation_evidence is not None
         terminal_evidence = {
-            "evidence_id": observation_id,
-            "case_id": case_id,
-            "source_type": "broker_settlement_observation",
-            "source_event_id": observation_id,
+            **observation_evidence,
             "evidence_type": "expire_close",
             "terminal_type": "expire_close",
-            "account": lifecycle_case.get("account"),
-            "symbol": lifecycle_case.get("symbol"),
             "option_type": lifecycle_case.get("option_type"),
             "position_side": lifecycle_case.get("position_side"),
             "strike": lifecycle_case.get("strike"),
@@ -423,25 +551,6 @@ def reconcile_lifecycle_close_reason(
                 observation_payload.get("observed_at_ms") or now_ms
             ),
             "currency": lifecycle_case.get("currency"),
-            "observation_hash": str(
-                observation_payload.get("semantic_fingerprint")
-                or canonical_hash(observation_payload)
-            ),
-            "semantic_schema": observation_payload.get(
-                "semantic_schema"
-            ),
-            "semantic_fingerprint": observation_payload.get(
-                "semantic_fingerprint"
-            ),
-            "semantic_projection": observation_payload.get(
-                "semantic_projection"
-            ),
-            "previous_settlement_evidence_id": (
-                observation_payload.get(
-                    "previous_settlement_evidence_id"
-                )
-            ),
-            "observation": observation_payload,
         }
         result = reconcile_lifecycle_evidence(
             repo,
@@ -453,6 +562,7 @@ def reconcile_lifecycle_close_reason(
                 expected_generation_token
             ),
             refresh_read_model=refresh_read_model,
+            attempt_audit=remaining_attempt_audit,
         )
         return {**preview, "write_result": result.to_dict()}
     summary = {
@@ -487,48 +597,18 @@ def reconcile_lifecycle_close_reason(
     }
     if (
         decision.status in {"needs_review", "conflict"}
-        and observation_id
+        and observation_evidence is not None
     ):
-        issue_evidence = {
-            "evidence_id": observation_id,
-            "case_id": case_id,
-            "source_type": "broker_settlement_observation",
-            "source_event_id": observation_id,
-            "evidence_type": "settlement_observation",
-            "account": lifecycle_case.get("account"),
-            "symbol": lifecycle_case.get("symbol"),
-            "contracts": sum(
-                resolution.remaining_contracts_by_lot.values()
-            ),
-            "observation_hash": str(
-                observation_payload.get("semantic_fingerprint")
-                or canonical_hash(observation_payload)
-            ),
-            "semantic_schema": observation_payload.get(
-                "semantic_schema"
-            ),
-            "semantic_fingerprint": observation_payload.get(
-                "semantic_fingerprint"
-            ),
-            "semantic_projection": observation_payload.get(
-                "semantic_projection"
-            ),
-            "previous_settlement_evidence_id": (
-                observation_payload.get(
-                    "previous_settlement_evidence_id"
-                )
-            ),
-            "observation": observation_payload,
-        }
         write_result = record_lifecycle_evidence_issue(
             repo,
             case_id=case_id,
-            evidence=issue_evidence,
+            evidence=observation_evidence,
             status=decision.status,
             reason_codes=list(decision.reason_codes),
             expected_lifecycle_generation_token=(
                 expected_generation_token
             ),
+            attempt_audit=remaining_attempt_audit,
         )
     else:
         if (
@@ -556,6 +636,12 @@ def reconcile_lifecycle_close_reason(
             expected_lifecycle_generation_token=(
                 expected_generation_token
             ),
+            evidence=(
+                observation_evidence
+                if remaining_attempt_audit is not None
+                else None
+            ),
+            attempt_audit=remaining_attempt_audit,
         )
     return {
         **preview,

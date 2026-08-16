@@ -14,7 +14,10 @@ from src.application.ledger.api import (
     SettlementAdmissionStateIncoherent,
     SettlementSemanticUnavailable,
     advance_lifecycle_case_state,
+    build_lifecycle_attempt_audit_envelope,
+    build_lifecycle_attempt_run_seal,
     list_trade_lifecycle_due_candidates,
+    record_lifecycle_attempt_audit_atomically,
 )
 from src.application.trades.close_reason_reconciliation import (
     reconcile_due_lifecycle_cases,
@@ -23,13 +26,17 @@ from src.application.trades.close_reason_reconciliation import (
 from src.application.trades.inbox import (
     SETTLEMENT_ATTEMPT_MIN_LEASE_MS,
     SettlementAttemptClaimOwnershipLost,
-    claim_settlement_attempt,
     claim_settlement_provider_batch,
     complete_settlement_attempt,
+    finish_settlement_attempt_provider_invocation,
     list_settlement_attempt_states,
+    mark_settlement_attempt_provider_started,
+    reconcile_settlement_attempt_invocation,
+    replace_finished_settlement_attempt_provider_invocation,
     renew_settlement_attempt_claim,
     renew_settlement_provider_batch_claim,
     release_settlement_provider_batch_claim,
+    reserve_settlement_attempt_invocation,
     require_trade_inbox_store_readable,
     settlement_attempt_summary,
     upsert_settlement_attempt_state,
@@ -87,6 +94,96 @@ def _settlement_processing_failure_outcome(
         reason_code=reason_code,
         error_class=type(error).__name__,
     )
+
+
+def _settlement_provider_audit_kind(kind: str) -> str:
+    return {
+        "stale_generation": "stale_generation_after_call",
+        "legacy_semantic_unavailable": (
+            "legacy_semantic_unavailable_after_call"
+        ),
+    }.get(str(kind or "").strip(), str(kind or "").strip())
+
+
+def _settlement_terminal_failure(
+    *,
+    collector: SettlementObservationCollector,
+    source_id: str,
+    account: str,
+    case_id: str,
+    error: Exception,
+) -> tuple[SettlementAttemptOutcome, str]:
+    if isinstance(error, LifecycleObservationGenerationChanged) or (
+        isinstance(error, ValueError)
+        and str(error) == "lifecycle generation compare-and-set failed"
+    ):
+        return (
+            SettlementAttemptOutcome(
+                kind="stale_generation",
+                source_id=source_id,
+                account=account,
+                case_id=case_id,
+                contract_version=collector.contract.contract_version,
+                capability_fingerprint=(
+                    collector.capability.capability_fingerprint
+                ),
+                reason_code="lifecycle_generation_changed",
+                error_class="stale_generation",
+            ),
+            "stale_generation_after_call",
+        )
+    if isinstance(error, LegacySettlementSemanticUnavailable):
+        return (
+            SettlementAttemptOutcome(
+                kind="legacy_semantic_unavailable",
+                source_id=source_id,
+                account=account,
+                case_id=case_id,
+                contract_version=collector.contract.contract_version,
+                capability_fingerprint=(
+                    collector.capability.capability_fingerprint
+                ),
+                reason_code="legacy_semantic_unavailable",
+                error_class="canonical_evidence_unavailable",
+            ),
+            "legacy_semantic_unavailable_after_call",
+        )
+    if isinstance(error, SettlementAdmissionStateIncoherent):
+        outcome = SettlementAttemptOutcome(
+            kind="unknown_error",
+            source_id=source_id,
+            account=account,
+            case_id=case_id,
+            contract_version=collector.contract.contract_version,
+            capability_fingerprint=(
+                collector.capability.capability_fingerprint
+            ),
+            reason_code="settlement_admission_state_incoherent",
+            error_class="canonical_state",
+        )
+    elif isinstance(error, SettlementSemanticUnavailable):
+        outcome = SettlementAttemptOutcome(
+            kind="unknown_error",
+            source_id=source_id,
+            account=account,
+            case_id=case_id,
+            contract_version=collector.contract.contract_version,
+            capability_fingerprint=(
+                collector.capability.capability_fingerprint
+            ),
+            reason_code="current_semantic_unavailable",
+            error_class="semantic_contract",
+        )
+    else:
+        outcome = _settlement_processing_failure_outcome(
+            collector=collector,
+            source_id=source_id,
+            account=account,
+            case_id=case_id,
+            reason_code="settlement_attempt_processing_failed",
+            error=error,
+        )
+    return outcome, "processing_failure_after_call"
 
 
 def _optional_nonnegative_control_int(value: Any) -> int | None:
@@ -568,10 +665,14 @@ def reconcile_due_lifecycle_cases_for_source(
     ) = None,
     settlement_control_now_ms_fn: Callable[[], int] | None = None,
     process_metrics: dict[str, int] | None = None,
+    seal_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    if apply_changes and seal_sink is None:
+        raise ValueError("applied lifecycle reconciliation requires a seal sink")
     provider_batch_lease = _SettlementProviderBatchLease()
+    touched_heads: list[dict[str, Any]] = []
     try:
-        return _reconcile_due_lifecycle_cases_for_source(
+        result = _reconcile_due_lifecycle_cases_for_source(
             repo,
             source=source,
             gateway=gateway,
@@ -588,9 +689,17 @@ def reconcile_due_lifecycle_cases_for_source(
             ),
             process_metrics=process_metrics,
             provider_batch_lease=provider_batch_lease,
+            touched_heads=touched_heads,
         )
     finally:
         provider_batch_lease.close()
+    if not apply_changes:
+        return result
+    return _runtime_result_with_seal(
+        result,
+        touched_heads=touched_heads,
+        seal_sink=seal_sink,
+    )
 
 
 def _reconcile_due_lifecycle_cases_for_source(
@@ -611,6 +720,7 @@ def _reconcile_due_lifecycle_cases_for_source(
     settlement_control_now_ms_fn: Callable[[], int] | None = None,
     process_metrics: dict[str, int] | None = None,
     provider_batch_lease: _SettlementProviderBatchLease,
+    touched_heads: list[dict[str, Any]],
 ) -> dict[str, Any]:
     account = str(source.get("account") or "").strip().lower()
     account_ids = [
@@ -658,7 +768,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             account=account,
             now_ms=int(now_ms),
             apply_changes=False,
-            observation_collector=require_collector(),
+            observation_collector=None,
         )
 
     control_now_ms_fn = (
@@ -724,6 +834,40 @@ def _reconcile_due_lifecycle_cases_for_source(
         )
     if not isinstance(states, dict):
         raise TypeError("settlement attempt state listing is invalid")
+    for case_id, state in tuple(states.items()):
+        invocation_id = str(state.get("invocation_id") or "").strip()
+        invocation_state = str(
+            state.get("invocation_state") or ""
+        ).strip()
+        if (
+            not invocation_id
+            or not invocation_state
+            or invocation_state in {
+                "ledger_committed",
+                "ambiguous_provider_result",
+            }
+            or _active_claim(state, now_ms=control_now_ms())
+        ):
+            continue
+        audit = repo.get_trade_lifecycle_attempt_audit_by_invocation(
+            case_id=case_id,
+            invocation_id=invocation_id,
+        )
+        reconciled = reconcile_settlement_attempt_invocation(
+            inbox_path,
+            source_id=source_id,
+            account=account,
+            case_id=case_id,
+            invocation_id=invocation_id,
+            audit=audit,
+        )
+        states[case_id] = reconciled
+        if (
+            invocation_state == "provider_finished"
+            and audit is not None
+            and reconciled.get("invocation_state") == "ledger_committed"
+        ):
+            touched_heads.append(audit)
 
     needs_plan: list[str] = []
     provider_case_ids: list[str] = []
@@ -740,6 +884,10 @@ def _reconcile_due_lifecycle_cases_for_source(
         if _active_claim(state, now_ms=control_now_ms()):
             provider_batch_claim_active = True
             skipped_counts["claimed"] += 1
+            continue
+        if str((state or {}).get("invocation_state") or "") == (
+            "ambiguous_provider_result"
+        ):
             continue
         fingerprint = fingerprints[case_id]
         if (
@@ -1280,10 +1428,10 @@ def _reconcile_due_lifecycle_cases_for_source(
         first_state = states[first_case_id]
         first_claim_id = uuid.uuid4().hex
         first_claim_now_ms = control_now_ms()
-        claim_acquired, control_error = (
+        reserved, control_error = (
             _run_settlement_control_operation(
                 inbox_path,
-                claim_settlement_attempt,
+                reserve_settlement_attempt_invocation,
                 inbox_path,
                 source_id=source_id,
                 account=account,
@@ -1301,7 +1449,8 @@ def _reconcile_due_lifecycle_cases_for_source(
                 control_error,
                 provider_claim_count=provider_claim_count,
             )
-        if bool(claim_acquired):
+        if isinstance(reserved, dict):
+            states[first_case_id] = reserved
             preclaimed[first_case_id] = first_claim_id
             provider_claim_count += 1
         else:
@@ -1585,22 +1734,26 @@ def _reconcile_due_lifecycle_cases_for_source(
                 control_now_ms(),
                 int(preclaim_handoff_now_ms.get(case_id) or 0),
             )
-            claim_acquired, control_error = (
-                _run_settlement_control_operation(
-                    inbox_path,
-                    claim_settlement_attempt,
-                    inbox_path,
-                    source_id=source_id,
-                    account=account,
-                    case_id=case_id,
-                    case_scope_fingerprint=str(
-                        state.get("case_scope_fingerprint") or ""
-                    ),
-                    claim_id=claim_id,
-                    now_ms=claim_now_ms,
-                    lease_ms=_SETTLEMENT_CLAIM_LEASE_MS,
+            if already_claimed:
+                reserved = state
+                control_error = None
+            else:
+                reserved, control_error = (
+                    _run_settlement_control_operation(
+                        inbox_path,
+                        reserve_settlement_attempt_invocation,
+                        inbox_path,
+                        source_id=source_id,
+                        account=account,
+                        case_id=case_id,
+                        case_scope_fingerprint=str(
+                            state.get("case_scope_fingerprint") or ""
+                        ),
+                        claim_id=claim_id,
+                        now_ms=claim_now_ms,
+                        lease_ms=_SETTLEMENT_CLAIM_LEASE_MS,
+                    )
                 )
-            )
             if control_error is not None:
                 return control_unavailable(
                     control_error,
@@ -1608,14 +1761,20 @@ def _reconcile_due_lifecycle_cases_for_source(
                     provider_attempt_count=provider_call_count,
                     provider_results=provider_results,
                 )
-            if not bool(claim_acquired):
+            if not isinstance(reserved, dict):
                 skipped_counts["claimed"] += 1
                 continue
+            state = reserved
+            states[case_id] = state
             if not already_claimed:
                 provider_claim_count += 1
 
             lease_error: Exception | None = None
             skip_post_refresh = False
+            provider_started_state: dict[str, Any] | None = None
+            provider_start_error: Exception | None = None
+            audit_outcome_kind: str | None = None
+            committed_audit: dict[str, Any] | None = None
             if lifecycle_case is not None:
                 lease_guard = _SettlementClaimLeaseGuard(
                     inbox_path=inbox_path,
@@ -1635,172 +1794,90 @@ def _reconcile_due_lifecycle_cases_for_source(
                     ),
                 ).start()
                 lease_guard_start_error = lease_guard.error
+
+                def before_first_provider_io() -> None:
+                    nonlocal provider_attempted
+                    nonlocal provider_call_count
+                    nonlocal provider_started_state
+                    nonlocal provider_start_error
+                    if provider_started_state is not None:
+                        return
+                    attempted_at_ms = control_now_ms()
+                    started, start_error = (
+                        _run_settlement_control_operation(
+                            inbox_path,
+                            mark_settlement_attempt_provider_started,
+                            inbox_path,
+                            source_id=source_id,
+                            account=account,
+                            case_id=case_id,
+                            claim_id=claim_id,
+                            invocation_id=str(state["invocation_id"]),
+                            attempted_at_ms=attempted_at_ms,
+                        )
+                    )
+                    if start_error is not None:
+                        provider_start_error = start_error
+                        raise start_error
+                    if not isinstance(started, dict):
+                        provider_start_error = TypeError(
+                            "settlement provider-start state is invalid"
+                        )
+                        raise provider_start_error
+                    provider_started_state = started
+                    provider_attempted = True
+                    provider_call_count += 1
+                    metrics["collector_attempt_count"] += 1
+
                 try:
                     if lease_guard_start_error is not None:
                         skip_post_refresh = True
                         raise lease_guard_start_error
-                    provider_attempted = True
-                    provider_call_count += 1
-                    metrics["collector_attempt_count"] += 1
                     outcome = collector.collect_outcome(
                         lifecycle_case,
                         read_model,
+                        before_first_provider_io=(
+                            before_first_provider_io
+                        ),
                     )
                     reconciliation = None
                     semantic_fingerprint = None
-                    lease_error = lease_guard.renew_now()
-                    if (
-                        lease_error is None
-                        and isinstance(outcome.observation, dict)
-                    ):
-                        semantic_fingerprint = str(
-                            outcome.observation.get(
-                                "semantic_fingerprint"
+                    if provider_started_state is None:
+                        skip_post_refresh = True
+                    else:
+                        audit_outcome_kind = (
+                            _settlement_provider_audit_kind(
+                                outcome.kind
                             )
-                            or ""
-                        ).strip() or None
-                        try:
-                            reconciliation = (
-                                reconcile_lifecycle_close_reason(
-                                    repo,
-                                    case_id=case_id,
-                                    now_ms=int(now_ms),
-                                    observation=dict(
-                                        outcome.observation
-                                    ),
-                                    apply_changes=True,
-                                    coherent_facts=(
-                                        read_model.get(
-                                            SETTLEMENT_OBSERVATION_CONTEXT_KEY
-                                        )
-                                        if isinstance(read_model, dict)
-                                        else None
-                                    ),
-                                    refresh_read_model=False,
-                                )
-                            )
-                        except LifecycleObservationGenerationChanged:
-                            outcome = SettlementAttemptOutcome(
-                                kind="stale_generation",
-                                source_id=source_id,
-                                account=account,
-                                case_id=case_id,
-                                contract_version=(
-                                    collector.contract.contract_version
-                                ),
-                                capability_fingerprint=(
-                                    collector.capability.capability_fingerprint
-                                ),
-                                reason_code=(
-                                    "lifecycle_generation_changed"
-                                ),
-                                error_class="stale_generation",
-                            )
-                            reconciliation = None
-                            semantic_fingerprint = None
-                        except LegacySettlementSemanticUnavailable:
-                            outcome = SettlementAttemptOutcome(
-                                kind="legacy_semantic_unavailable",
-                                source_id=source_id,
-                                account=account,
-                                case_id=case_id,
-                                contract_version=(
-                                    collector.contract.contract_version
-                                ),
-                                capability_fingerprint=(
-                                    collector.capability.capability_fingerprint
-                                ),
-                                reason_code=(
-                                    "legacy_semantic_unavailable"
-                                ),
-                                error_class=(
-                                    "canonical_evidence_unavailable"
-                                ),
-                            )
-                            reconciliation = None
-                            semantic_fingerprint = None
-                        except SettlementAdmissionStateIncoherent:
-                            outcome = SettlementAttemptOutcome(
-                                kind="unknown_error",
-                                source_id=source_id,
-                                account=account,
-                                case_id=case_id,
-                                contract_version=(
-                                    collector.contract.contract_version
-                                ),
-                                capability_fingerprint=(
-                                    collector.capability.capability_fingerprint
-                                ),
-                                reason_code=(
-                                    "settlement_admission_state_incoherent"
-                                ),
-                                error_class="canonical_state",
-                            )
-                            reconciliation = None
-                            semantic_fingerprint = None
-                        except SettlementSemanticUnavailable:
-                            outcome = SettlementAttemptOutcome(
-                                kind="unknown_error",
-                                source_id=source_id,
-                                account=account,
-                                case_id=case_id,
-                                contract_version=(
-                                    collector.contract.contract_version
-                                ),
-                                capability_fingerprint=(
-                                    collector.capability.capability_fingerprint
-                                ),
-                                reason_code=(
-                                    "current_semantic_unavailable"
-                                ),
-                                error_class="semantic_contract",
-                            )
-                            reconciliation = None
-                            semantic_fingerprint = None
-                        except ValueError as exc:
-                            if str(exc) != (
-                                "lifecycle generation compare-and-set failed"
-                            ):
-                                raise
-                            outcome = SettlementAttemptOutcome(
-                                kind="stale_generation",
-                                source_id=source_id,
-                                account=account,
-                                case_id=case_id,
-                                contract_version=(
-                                    collector.contract.contract_version
-                                ),
-                                capability_fingerprint=(
-                                    collector.capability.capability_fingerprint
-                                ),
-                                reason_code=(
-                                    "lifecycle_generation_changed"
-                                ),
-                                error_class="stale_generation",
-                            )
-                            reconciliation = None
-                            semantic_fingerprint = None
-                        admission = _find_admission_status(
-                            reconciliation
                         )
-                        if admission == "admitted_semantic":
-                            metrics["semantic_admission_count"] += 1
-                        elif admission == "duplicate_semantic":
-                            metrics["semantic_duplicate_count"] += 1
-                        lease_error = lease_guard.renew_now()
+                        if isinstance(outcome.observation, dict):
+                            semantic_fingerprint = str(
+                                outcome.observation.get(
+                                    "semantic_fingerprint"
+                                )
+                                or ""
+                            ).strip() or None
+                    lease_error = lease_guard.renew_now()
                 except Exception as exc:
-                    outcome = _settlement_processing_failure_outcome(
-                        collector=collector,
-                        source_id=source_id,
-                        account=account,
-                        case_id=case_id,
-                        reason_code=(
-                            "settlement_attempt_lease_guard_failed"
-                            if exc is lease_guard_start_error
-                            else "settlement_attempt_processing_failed"
-                        ),
-                        error=exc,
-                    )
+                    if provider_start_error is not None:
+                        lease_error = provider_start_error
+                    else:
+                        outcome = _settlement_processing_failure_outcome(
+                            collector=collector,
+                            source_id=source_id,
+                            account=account,
+                            case_id=case_id,
+                            reason_code=(
+                                "settlement_attempt_lease_guard_failed"
+                                if exc is lease_guard_start_error
+                                else "settlement_attempt_processing_failed"
+                            ),
+                            error=exc,
+                        )
+                        if provider_started_state is not None:
+                            audit_outcome_kind = (
+                                "processing_failure_after_call"
+                            )
                     reconciliation = None
                     semantic_fingerprint = None
                     if (
@@ -1921,16 +1998,12 @@ def _reconcile_due_lifecycle_cases_for_source(
                     reason_code="settlement_attempt_refresh_failed",
                     error=post_refresh_error,
                 )
-                provider_result = {
-                    "case_id": case_id,
-                    "outcome": outcome.to_dict(
-                        include_observation=False
-                    ),
-                    "semantic_fingerprint": semantic_fingerprint,
-                    "admission_status": _find_admission_status(
-                        reconciliation
-                    ),
-                }
+                reconciliation = None
+                semantic_fingerprint = None
+                if provider_started_state is not None:
+                    audit_outcome_kind = (
+                        "processing_failure_after_call"
+                    )
 
             prior_state = dict(state)
             post_candidate = post_candidates.get(case_id)
@@ -1954,45 +2027,341 @@ def _reconcile_due_lifecycle_cases_for_source(
                 post_scope = str(
                     prior_state.get("case_scope_fingerprint") or ""
                 )
-                provider_result = {
-                    "case_id": case_id,
-                    "outcome": outcome.to_dict(
-                        include_observation=False
+                reconciliation = None
+                semantic_fingerprint = None
+                if provider_started_state is not None:
+                    audit_outcome_kind = (
+                        "processing_failure_after_call"
+                    )
+            if (
+                provider_started_state is not None
+                and post_refresh_error is None
+                and (
+                    post_candidate is None
+                    or post_scope
+                    != str(
+                        prior_state.get("case_scope_fingerprint")
+                        or ""
+                    )
+                )
+            ):
+                outcome = SettlementAttemptOutcome(
+                    kind="stale_generation",
+                    source_id=source_id,
+                    account=account,
+                    case_id=case_id,
+                    contract_version=(
+                        collector.contract.contract_version
                     ),
-                    "semantic_fingerprint": semantic_fingerprint,
-                    "admission_status": _find_admission_status(
-                        reconciliation
+                    capability_fingerprint=(
+                        collector.capability.capability_fingerprint
                     ),
-                }
-            _completed, control_error, completed_outcome = complete_claim(
-                case_id=case_id,
-                claim_id=claim_id,
-                state=prior_state,
-                outcome=outcome,
-                case_scope=post_scope,
-                provider_scope=provider_scope,
-                semantic_fingerprint=semantic_fingerprint,
-                provider_attempted=provider_attempted,
-            )
-            if completed_outcome is not outcome:
-                outcome = completed_outcome
-                provider_result = {
-                    "case_id": case_id,
-                    "outcome": outcome.to_dict(
-                        include_observation=False
-                    ),
-                    "semantic_fingerprint": semantic_fingerprint,
-                    "admission_status": _find_admission_status(
-                        reconciliation
-                    ),
-                }
-            if control_error is not None:
-                provider_results.append(provider_result)
-                return control_unavailable(
-                    control_error,
-                    provider_claim_count=provider_claim_count,
-                    provider_attempt_count=provider_call_count,
-                    provider_results=provider_results,
+                    reason_code="lifecycle_generation_changed",
+                    error_class="stale_generation",
+                )
+                audit_outcome_kind = "stale_generation_after_call"
+                reconciliation = None
+                semantic_fingerprint = None
+
+            if provider_started_state is None:
+                _completed, control_error, completed_outcome = (
+                    complete_claim(
+                        case_id=case_id,
+                        claim_id=claim_id,
+                        state=prior_state,
+                        outcome=outcome,
+                        case_scope=post_scope,
+                        provider_scope=provider_scope,
+                        semantic_fingerprint=semantic_fingerprint,
+                        provider_attempted=False,
+                    )
+                )
+                if completed_outcome is not outcome:
+                    outcome = completed_outcome
+                if control_error is not None:
+                    provider_result = {
+                        "case_id": case_id,
+                        "outcome": outcome.to_dict(
+                            include_observation=False
+                        ),
+                        "semantic_fingerprint": None,
+                        "admission_status": None,
+                    }
+                    provider_results.append(provider_result)
+                    return control_unavailable(
+                        control_error,
+                        provider_claim_count=provider_claim_count,
+                        provider_attempt_count=provider_call_count,
+                        provider_results=provider_results,
+                    )
+            else:
+                attempted_at_ms = int(
+                    provider_started_state[
+                        "invocation_attempted_at_ms"
+                    ]
+                )
+                invocation_id = str(state["invocation_id"])
+                try:
+                    observed_attempt = audit_outcome_kind in {
+                        "observed_complete",
+                        "observed_incomplete",
+                    }
+                    envelope = build_lifecycle_attempt_audit_envelope(
+                        case_id=case_id,
+                        invocation_id=invocation_id,
+                        attempted_at_ms=attempted_at_ms,
+                        outcome_kind=str(audit_outcome_kind or ""),
+                        observation=(
+                            dict(outcome.observation)
+                            if observed_attempt
+                            and isinstance(outcome.observation, dict)
+                            else None
+                        ),
+                        reason_code=(
+                            None if observed_attempt else outcome.reason_code
+                        ),
+                        provider_code=(
+                            None if observed_attempt else outcome.provider_code
+                        ),
+                        error_class=(
+                            None if observed_attempt else outcome.error_class
+                        ),
+                    )
+                except Exception as exc:
+                    outcome, audit_outcome_kind = (
+                        _settlement_terminal_failure(
+                            collector=collector,
+                            source_id=source_id,
+                            account=account,
+                            case_id=case_id,
+                            error=exc,
+                        )
+                    )
+                    reconciliation = None
+                    semantic_fingerprint = None
+                    envelope = build_lifecycle_attempt_audit_envelope(
+                        case_id=case_id,
+                        invocation_id=invocation_id,
+                        attempted_at_ms=attempted_at_ms,
+                        outcome_kind=audit_outcome_kind,
+                        reason_code=outcome.reason_code,
+                        provider_code=outcome.provider_code,
+                        error_class=outcome.error_class,
+                    )
+
+                finished, control_error = (
+                    _run_settlement_control_operation(
+                        inbox_path,
+                        finish_settlement_attempt_provider_invocation,
+                        inbox_path,
+                        source_id=source_id,
+                        account=account,
+                        case_id=case_id,
+                        claim_id=claim_id,
+                        invocation_id=invocation_id,
+                        outcome=outcome,
+                        outcome_code=envelope.outcome_code,
+                        semantic_fingerprint=(
+                            envelope.semantic_fingerprint
+                        ),
+                        receipt_sha256=envelope.receipt_sha256,
+                        diagnostic_sha256=envelope.diagnostic_sha256,
+                        control_now_ms=control_now_ms(),
+                    )
+                )
+                if control_error is not None:
+                    provider_result = {
+                        "case_id": case_id,
+                        "outcome": outcome.to_dict(
+                            include_observation=False
+                        ),
+                        "semantic_fingerprint": semantic_fingerprint,
+                        "admission_status": None,
+                    }
+                    provider_results.append(provider_result)
+                    return control_unavailable(
+                        control_error,
+                        provider_claim_count=provider_claim_count,
+                        provider_attempt_count=provider_call_count,
+                        provider_results=provider_results,
+                    )
+                if not isinstance(finished, dict):
+                    raise TypeError(
+                        "settlement provider-finished state is invalid"
+                    )
+
+                if envelope.outcome_code in (1, 2):
+                    try:
+                        reconciliation = reconcile_lifecycle_close_reason(
+                            repo,
+                            case_id=case_id,
+                            now_ms=int(now_ms),
+                            observation=dict(outcome.observation or {}),
+                            apply_changes=True,
+                            coherent_facts=(
+                                read_model.get(
+                                    SETTLEMENT_OBSERVATION_CONTEXT_KEY
+                                )
+                                if isinstance(read_model, dict)
+                                else None
+                            ),
+                            refresh_read_model=False,
+                            attempt_audit=envelope,
+                        )
+                    except Exception as exc:
+                        outcome, audit_outcome_kind = (
+                            _settlement_terminal_failure(
+                                collector=collector,
+                                source_id=source_id,
+                                account=account,
+                                case_id=case_id,
+                                error=exc,
+                            )
+                        )
+                        reconciliation = None
+                        semantic_fingerprint = None
+                        envelope = build_lifecycle_attempt_audit_envelope(
+                            case_id=case_id,
+                            invocation_id=invocation_id,
+                            attempted_at_ms=attempted_at_ms,
+                            outcome_kind=audit_outcome_kind,
+                            reason_code=outcome.reason_code,
+                            provider_code=outcome.provider_code,
+                            error_class=outcome.error_class,
+                        )
+                        replaced, control_error = (
+                            _run_settlement_control_operation(
+                                inbox_path,
+                                replace_finished_settlement_attempt_provider_invocation,
+                                inbox_path,
+                                source_id=source_id,
+                                account=account,
+                                case_id=case_id,
+                                claim_id=claim_id,
+                                invocation_id=invocation_id,
+                                outcome=outcome,
+                                outcome_code=envelope.outcome_code,
+                                semantic_fingerprint=None,
+                                receipt_sha256=None,
+                                diagnostic_sha256=(
+                                    envelope.diagnostic_sha256
+                                ),
+                                control_now_ms=control_now_ms(),
+                            )
+                        )
+                        if control_error is not None:
+                            provider_result = {
+                                "case_id": case_id,
+                                "outcome": outcome.to_dict(
+                                    include_observation=False
+                                ),
+                                "semantic_fingerprint": None,
+                                "admission_status": None,
+                            }
+                            provider_results.append(provider_result)
+                            return control_unavailable(
+                                control_error,
+                                provider_claim_count=(
+                                    provider_claim_count
+                                ),
+                                provider_attempt_count=(
+                                    provider_call_count
+                                ),
+                                provider_results=provider_results,
+                            )
+                        if not isinstance(replaced, dict):
+                            raise TypeError(
+                                "settlement provider-result replacement is invalid"
+                            )
+                        record_lifecycle_attempt_audit_atomically(
+                            repo,
+                            attempt_audit=envelope,
+                        )
+                else:
+                    record_lifecycle_attempt_audit_atomically(
+                        repo,
+                        attempt_audit=envelope,
+                    )
+
+                audit = (
+                    repo.get_trade_lifecycle_attempt_audit_by_invocation(
+                        case_id=case_id,
+                        invocation_id=invocation_id,
+                    )
+                )
+                if audit is None:
+                    raise RuntimeError(
+                        "settlement provider attempt has no ledger audit"
+                    )
+                committed, control_error = (
+                    _run_settlement_control_operation(
+                        inbox_path,
+                        reconcile_settlement_attempt_invocation,
+                        inbox_path,
+                        source_id=source_id,
+                        account=account,
+                        case_id=case_id,
+                        invocation_id=invocation_id,
+                        audit=audit,
+                    )
+                )
+                if control_error is not None:
+                    provider_result = {
+                        "case_id": case_id,
+                        "outcome": outcome.to_dict(
+                            include_observation=False
+                        ),
+                        "semantic_fingerprint": semantic_fingerprint,
+                        "admission_status": _find_admission_status(
+                            reconciliation
+                        ),
+                    }
+                    provider_results.append(provider_result)
+                    return control_unavailable(
+                        control_error,
+                        provider_claim_count=provider_claim_count,
+                        provider_attempt_count=provider_call_count,
+                        provider_results=provider_results,
+                    )
+                if (
+                    not isinstance(committed, dict)
+                    or committed.get("invocation_state")
+                    != "ledger_committed"
+                    or committed.get("committed_audit_ordinal")
+                    != audit.get("ordinal")
+                    or committed.get("committed_chain_sha256")
+                    != audit.get("chain_sha256")
+                ):
+                    raise RuntimeError(
+                        "settlement provider attempt audit did not commit exactly"
+                    )
+                states[case_id] = committed
+                committed_audit = audit
+                touched_heads.append(audit)
+
+            admission_status = _find_admission_status(reconciliation)
+            if admission_status == "admitted_semantic":
+                metrics["semantic_admission_count"] += 1
+            elif admission_status == "duplicate_semantic":
+                metrics["semantic_duplicate_count"] += 1
+            provider_result = {
+                "case_id": case_id,
+                "outcome": outcome.to_dict(
+                    include_observation=False
+                ),
+                "semantic_fingerprint": semantic_fingerprint,
+                "admission_status": admission_status,
+            }
+            if committed_audit is not None:
+                provider_result.update(
+                    {
+                        "invocation_id": str(state["invocation_id"]),
+                        "invocation_state": "ledger_committed",
+                        "audit_ordinal": committed_audit["ordinal"],
+                        "audit_chain_sha256": bytes(
+                            committed_audit["chain_sha256"]
+                        ).hex(),
+                    }
                 )
             provider_results.append(provider_result)
             batch_lease_error = provider_batch_lease.renew_now()
@@ -2057,6 +2426,36 @@ def _reconcile_due_lifecycle_cases_for_source(
         "provider_results": provider_results,
         "process_counters": dict(metrics),
     }
+
+
+def _runtime_result_with_seal(
+    result: dict[str, Any],
+    *,
+    touched_heads: list[dict[str, Any]],
+    seal_sink: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
+    if not touched_heads:
+        return {**result, "seal_status": "not_required", "run_seal": None}
+    if seal_sink is None:
+        raise ValueError("applied lifecycle reconciliation requires a seal sink")
+    seal = build_lifecycle_attempt_run_seal(
+        account=str(result.get("account") or ""),
+        source_id=str(result.get("source_id") or ""),
+        completed_at_ms=max(1, _settlement_control_wall_clock_ms()),
+        heads=touched_heads,
+        seal_scope="touched_heads",
+        reason="ordinary_due",
+    )
+    try:
+        seal_sink(seal)
+    except Exception as exc:
+        return {
+            **result,
+            "seal_status": "seal_persist_failed",
+            "seal_error_class": type(exc).__name__,
+            "run_seal": seal,
+        }
+    return {**result, "seal_status": "sealed", "run_seal": seal}
 
 
 def _run_settlement_control_operation(

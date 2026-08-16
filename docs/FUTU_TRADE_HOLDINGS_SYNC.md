@@ -204,6 +204,14 @@ Inbox、生命周期原因、逐意图 Outbox 与 delivery batch 分开显示，
 实际写入必须同时给出 `--apply` 和 `--confirm`（或 `--yes`），发送通知还需要
 明确授权真实发送。
 
+`lifecycle reconcile-due` 的默认模式和显式 `--dry-run` 都只计算本地计划：
+不要求 broker/quote 路由 ready，也不会构造或查询 provider gateway。只有显式
+`--apply --confirm`（或 `--apply --yes`）才会访问 provider 并写入结算结果。
+apply 会在创建 gateway 前把当前账户的 lifecycle audit heads 持久化到 intake
+audit JSONL，并在有实际 attempt 时追加 touched-head seal。任一 seal 写入失败都
+返回非零；已提交的 attempt 不会因此重调 provider，下一次 apply 会先补写当前
+账户 checkpoint。
+
 ```bash
 # 查看 case、证据和当前 revision
 ./om option-positions lifecycle list --account lx --include-evidence
