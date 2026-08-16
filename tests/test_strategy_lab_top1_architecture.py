@@ -32,6 +32,7 @@ FILL_OBSERVATION_MODULE = (
 )
 OUTCOME_MODULE = ROOT / "src/application/strategy_lab/top1/outcome.py"
 ADVANCE_MODULE = ROOT / "src/application/strategy_lab/top1/advance.py"
+READINESS_MODULE = ROOT / "src/application/strategy_lab/top1/readiness.py"
 PRODUCTION_TICK_MODULES = (
     ROOT / "src/application/multi_account_tick.py",
     ROOT / "src/application/tick_account_execution.py",
@@ -230,6 +231,13 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.strategy_lab.top1.outcome",
         "src.application.strategy_lab.top1.validation",
         "src.infrastructure.strategy_lab.experiment_store",
+    }
+    assert _imports(READINESS_MODULE) <= {
+        "__future__",
+        "collections.abc",
+        "datetime",
+        "pathlib",
+        "typing",
     }
 
     assert _imports(RESEARCH_RUNNER_MODULE) <= {
