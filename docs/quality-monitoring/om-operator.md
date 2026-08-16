@@ -12,6 +12,10 @@ position lots、生命周期 case 或 OpenD 数据。
 ./om quality recheck-due --config-key us --config-key hk
 ./om quality refresh --config-key us --day-end-strict
 ./om quality status --json
+./om quality integrity --config-key us --config-key hk
+./om quality integrity-status --json
+./om quality cutover --evidence <cutover-evidence.json>
+./om quality cutover --evidence <cutover-evidence.json> --apply
 ./om-agent run --tool quality_status --input-json '{}'
 ```
 
@@ -19,6 +23,13 @@ position lots、生命周期 case 或 OpenD 数据。
 `--no-deep`。后者会继续发布 runtime、ledger、intake、lifecycle 等当前检查，
 但只在本地持仓 revision 改变、差异复查到期、日终 deadline 到期或缺少有效
 baseline 时访问 OpenD；否则沿用仍在有效期内的最近一次权威 OpenD 证据。
+
+普通 `refresh` 在 cutover 前继续兼容旧的详细生命周期数据。`integrity` 是显式的
+全历史 replay，并单独发布 `integrity_status.v1.json`；普通 status 和 gate 不会隐式
+触发它。`cutover` 默认只校验证据，只有 `--apply` 才写入不可变激活回执。激活后
+第一次普通 refresh 必须同时包含 `us` 和 `hk`，之后单市场日终刷新才可保留另一
+市场最近一次 current-only 汇总。激活仍要求两个市场各 14 个合格交易日、零
+unexplained/legacy read、静态 consumer inventory 与 deployment-access 证据。
 
 `refresh` 会原子发布：
 

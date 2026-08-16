@@ -12,6 +12,7 @@ from src.application.quality.model import check_result, dataset_status, freshnes
 
 EXTERNAL_REVIEW_STATUSES = {"external_adjustment_pending_review", "external_adjustment", "manual_review"}
 LIFECYCLE_SUMMARY_DATASET_ID = "om.lifecycle_evidence_summary"
+_LIFECYCLE_CONSUMERS = {"lifecycle_report", "close_advice", "option_performance"}
 
 
 def _parse_date(value: Any) -> date | None:
@@ -296,6 +297,8 @@ def build_lifecycle_quality_migration_summary(
         ),
         key=lambda item: str((item.get("scope") or {}).get("lifecycle_case_id") or ""),
     )
+
+
     legacy_by_case = {
         str((item.get("scope") or {}).get("lifecycle_case_id") or "").strip(): item
         for item in legacy
@@ -459,6 +462,102 @@ def build_lifecycle_quality_migration_summary(
     )
 
 
+def build_current_lifecycle_quality_dataset(
+    *,
+    current_quality: Mapping[str, Any],
+    projection_status: str,
+    projection_reason: str | None,
+    account: str,
+    market: str,
+    observed_at_utc: str,
+) -> dict[str, Any]:
+    account_key = str(account or "").strip().lower()
+    market_key = str(market or "").strip().upper()
+    trusted = projection_status == "trusted"
+    aggregate = next(
+        (
+            dict(item)
+            for item in current_quality.get("aggregate_by_market") or []
+            if isinstance(item, Mapping)
+            and str(item.get("market") or "").strip().upper() == market_key
+        ),
+        {
+            "market": market_key,
+            "total_case_count": 0,
+            "status_counts": {},
+            "trust_class_counts": {},
+            "dataset_status_counts": {},
+            "blocked_consumer_counts": {},
+        },
+    )
+    details = [
+        dict(item)
+        for item in current_quality.get("operational_cases") or []
+        if isinstance(item, Mapping)
+        and str(item.get("market") or "").strip().upper() == market_key
+    ]
+    status_counts = dict(aggregate.get("dataset_status_counts") or {})
+    verdict = (
+        "unavailable"
+        if not trusted or status_counts.get("unavailable")
+        else "untrusted"
+        if status_counts.get("untrusted")
+        else "partial"
+        if status_counts.get("partial")
+        else "trusted"
+    )
+    blocked = (
+        set(_LIFECYCLE_CONSUMERS)
+        if not trusted
+        else set(dict(aggregate.get("blocked_consumer_counts") or {}))
+    )
+    reason_code = (
+        "CURRENT_LIFECYCLE_QUALITY_UNAVAILABLE"
+        if not trusted
+        else "CURRENT_LIFECYCLE_QUALITY_BLOCKED"
+        if blocked
+        else "CURRENT_LIFECYCLE_QUALITY_TRUSTED"
+    )
+    check = check_result(
+        check_id="OM-LCY-CURRENT-001",
+        status="unknown" if not trusted else "fail" if blocked else "pass",
+        scope={"account": account_key, "market": market_key.lower()},
+        observed_at_utc=observed_at_utc,
+        reason_code=reason_code,
+        message=(
+            "Current lifecycle quality is unavailable; use the explicit integrity workflow."
+            if not trusted
+            else "Current lifecycle facts block one or more consumers."
+            if blocked
+            else "Current lifecycle quality generations and compact facts are trusted."
+        ),
+        observed={
+            "projection_status": projection_status,
+            "reason": None if trusted else projection_reason,
+            "total_case_count": aggregate.get("total_case_count", 0),
+            "operational_case_count": len(details),
+        },
+        expected={"projection_status": "trusted"},
+        evidence_refs=[],
+    )
+    return dataset_status(
+        dataset_id=LIFECYCLE_SUMMARY_DATASET_ID,
+        scope={"account": account_key, "market": market_key.lower()},
+        status=verdict,
+        as_of_utc=observed_at_utc,
+        checks=[check],
+        usable_for=sorted(_LIFECYCLE_CONSUMERS - blocked),
+        blocked_consumers=sorted(blocked),
+        blocked_by=["OM-LCY-CURRENT-001"] if blocked else [],
+        reason_codes=[reason_code] if blocked else [],
+        extensions={
+            "schema_version": "current_lifecycle_quality_hot_path.v1",
+            "aggregate": aggregate,
+            "operational_cases": details,
+        },
+    )
+
+
 def _counts(values: Any) -> dict[str, int]:
     return dict(
         sorted(
@@ -566,6 +665,7 @@ def _quality_comparison(
 
 __all__ = [
     "LIFECYCLE_SUMMARY_DATASET_ID",
+    "build_current_lifecycle_quality_dataset",
     "build_lifecycle_datasets",
     "build_lifecycle_quality_migration_summary",
     "lifecycle_deadline",

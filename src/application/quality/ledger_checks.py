@@ -168,4 +168,80 @@ def build_ledger_datasets(
     return out
 
 
-__all__ = ["build_ledger_datasets"]
+def build_current_ledger_dataset(
+    *,
+    current_projection: dict[str, Any],
+    account: str,
+    market: str,
+    observed_at_utc: str,
+) -> dict[str, Any]:
+    trusted = current_projection.get("status") == "trusted"
+    reason = str(current_projection.get("reason") or "current_projection_unavailable")
+    payload = (
+        current_projection.get("payload")
+        if isinstance(current_projection.get("payload"), dict)
+        else {}
+    )
+    binding = (
+        payload.get("position_binding")
+        if isinstance(payload.get("position_binding"), dict)
+        else {}
+    )
+    check = check_result(
+        check_id="OM-LED-001",
+        status="pass" if trusted else "unknown",
+        scope={"account": account, "market": market},
+        observed_at_utc=observed_at_utc,
+        reason_code=(
+            "LEDGER_CURRENT_PROJECTION_TRUSTED"
+            if trusted
+            else "LEDGER_CURRENT_PROJECTION_UNAVAILABLE"
+        ),
+        message=(
+            "Current ledger projection head, generations, rows, and fingerprint are trusted."
+            if trusted
+            else "Current ledger projection is unavailable; run the explicit integrity or repair workflow."
+        ),
+        observed={
+            "projection_status": current_projection.get("status"),
+            "reason": None if trusted else reason,
+            "lot_count": current_projection.get("lot_count", 0),
+            "position_source_generation": binding.get(
+                "position_source_generation"
+            ),
+            "position_lots_generation": binding.get(
+                "position_lots_generation"
+            ),
+            "position_lots_fingerprint": binding.get(
+                "position_lots_fingerprint"
+            ),
+        },
+        expected={"projection_status": "trusted"},
+        evidence_refs=[],
+    )
+    return dataset_status(
+        dataset_id="om.ledger_projection",
+        scope={"account": account, "market": market},
+        status="trusted" if trusted else "unavailable",
+        as_of_utc=observed_at_utc,
+        checks=[check],
+        usable_for=(
+            ["option_position_report", "lifecycle", "close_advice"]
+            if trusted
+            else []
+        ),
+        blocked_consumers=(
+            []
+            if trusted
+            else ["option_position_report", "lifecycle", "close_advice"]
+        ),
+        blocked_by=[] if trusted else ["OM-LED-001"],
+        reason_codes=[] if trusted else ["LEDGER_CURRENT_PROJECTION_UNAVAILABLE"],
+        extensions={
+            "validation_mode": "current_heads_and_rows",
+            "full_replay_status_artifact": "quality/integrity_status.v1.json",
+        },
+    )
+
+
+__all__ = ["build_current_ledger_dataset", "build_ledger_datasets"]
