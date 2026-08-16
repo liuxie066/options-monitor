@@ -94,6 +94,15 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
     assert ready["validation_runtime_ready"] is True
     assert ready["validation_runtime_blockers"] == []
 
+    missing_corpus = build_top1_readiness(
+        **{**common, "corpus_status": None},
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+    )
+    assert missing_corpus["validation_runtime_ready"] is False
+    assert "strategy_lab_top1_corpus_unavailable" in missing_corpus[
+        "validation_runtime_blockers"
+    ]
+
     malformed_status = build_top1_readiness(
         **{**common, "service_status": {"services": None}},
         capability_facts={name: True for name in CAPABILITY_FACTS},

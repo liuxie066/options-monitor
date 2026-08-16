@@ -553,6 +553,43 @@ def test_separate_authorization_starts_evidence_bound_validation(tmp_path: Path)
     assert read_public_receipt(store, experiment_id="experiment-a") is None
 
 
+def test_public_status_rejects_cross_account_identity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    root = tmp_path / "artifacts"
+    set_account_opt_in(
+        store,
+        market="HK",
+        account="sy",
+        enabled=True,
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="enable-sy",
+        artifact_root=root,
+        environ=AVAILABLE,
+    )
+    spec = _spec("experiment-sy")
+    spec["account"] = "sy"
+    prepare_experiment(
+        store,
+        spec,
+        provenance={"source_commit_sha": "commit-1", "config_sha256": SHA_B},
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="prepare-sy",
+        artifact_root=root,
+        environ=AVAILABLE,
+    )
+
+    with pytest.raises(Top1LifecycleError) as exc_info:
+        read_public_status(
+            store,
+            experiment_id="experiment-sy",
+            expected_market="HK",
+            expected_account="lx",
+        )
+    assert exc_info.value.reason_code == "experiment_conflict"
+
+
 def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"

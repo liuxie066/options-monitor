@@ -2590,16 +2590,18 @@ def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
             strategy_lab_top1_advance_interval_seconds=300,
             strategy_lab_top1_timeout_start_sec=120,
         )
-    with pytest.raises(ValueError, match="non-empty service env file"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["hk"],
-            include_strategy_lab_top1=True,
-            strategy_lab_top1_advance_interval_seconds=300,
-            strategy_lab_top1_timeout_start_sec=120,
-        )
+    for env_file in (None, "", " \t "):
+        with pytest.raises(ValueError, match="non-empty service env file"):
+            render_service_bundle(
+                target="systemd",
+                repo_root=repo,
+                accounts=["lx"],
+                markets=["hk"],
+                env_file=env_file,
+                include_strategy_lab_top1=True,
+                strategy_lab_top1_advance_interval_seconds=300,
+                strategy_lab_top1_timeout_start_sec=120,
+            )
     with pytest.raises(ValueError, match="explicit positive integers"):
         render_service_bundle(
             target="systemd",
