@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from copy import deepcopy
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
+from src.application.ledger.api import derive_lifecycle_quality_view
 from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
-from src.application.quality.lifecycle_checks import build_lifecycle_datasets, lifecycle_deadline
+from src.application.quality.lifecycle_checks import (
+    build_lifecycle_datasets,
+    build_lifecycle_quality_migration_summary,
+    lifecycle_deadline,
+)
 from src.application.quality.position_checks import (
     build_position_dataset,
     normalize_opend_positions,
@@ -535,6 +542,290 @@ def test_lifecycle_excludes_superseded_and_other_market_cases() -> None:
     )
 
     assert [item["scope"]["lifecycle_case_id"] for item in datasets] == ["pending-us"]
+
+
+def test_lifecycle_quality_shadow_matches_both_sides_of_deadline() -> None:
+    deadline_ms = 1_800_000
+    case = {
+        "case_id": "pending-us",
+        "account": "lx",
+        "market": "US",
+        "symbol": "NVDA",
+        "status": "waiting_settlement_evidence",
+    }
+    read_model = {
+        "pending_until_ms": deadline_ms,
+        "reason_state": "cause_pending",
+        "timing_policy_hash": "a" * 64,
+    }
+    detail = {
+        "case_id": "pending-us",
+        "market": "US",
+        "status": "waiting_settlement_evidence",
+        "trust_class": "trusted",
+        "evidence_count": 0,
+        "settlement_deadline_ms": deadline_ms,
+        "reason_state": "cause_pending",
+        "timing_policy_hash": "a" * 64,
+    }
+    current_quality = {
+        "schema_version": "current_lifecycle_quality.v1",
+        "account": "lx",
+        "aggregate_by_market": [
+            {
+                "market": "US",
+                "total_case_count": 1,
+                "status_counts": {"waiting_settlement_evidence": 1},
+                "trust_class_counts": {"trusted": 1},
+            }
+        ],
+        "operational_cases": [detail],
+    }
+    current_quality["aggregate_fingerprint"] = canonical_sha256(
+        current_quality["aggregate_by_market"]
+    )
+    current_quality["detail_fingerprint"] = canonical_sha256([detail])
+
+    for now_ms, expected_status in (
+        (deadline_ms, "partial"),
+        (deadline_ms + 1, "untrusted"),
+    ):
+        now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        legacy = build_lifecycle_datasets(
+            cases=[case],
+            evidence_rows=[],
+            account="lx",
+            market="us",
+            observed_at_utc=now.isoformat(),
+            now=now,
+            trading_days=[],
+            first_deep_by_case={},
+            read_models_by_case={"pending-us": read_model},
+        )
+        frozen_legacy = deepcopy(legacy)
+        summary, comparison = build_lifecycle_quality_migration_summary(
+            legacy_datasets=legacy,
+            current_quality=derive_lifecycle_quality_view(
+                current_quality,
+                now_ms=now_ms,
+            ),
+            account="lx",
+            market="us",
+            observed_at_utc=now.isoformat(),
+            now_ms=now_ms,
+            case_status_by_id={
+                "pending-us": "waiting_settlement_evidence"
+            },
+            read_models_by_case={"pending-us": read_model},
+        )
+
+        assert legacy == frozen_legacy
+        assert comparison["status"] == "matched"
+        assert comparison["mismatch_samples"] == []
+        assert summary["status"] == expected_status
+        assert len(summary["extensions"]["operational_cases"]) == 1
+
+    mismatched = deepcopy(current_quality)
+    mismatched["operational_cases"][0]["evidence_count"] = 1
+    mismatched["detail_fingerprint"] = canonical_sha256(
+        mismatched["operational_cases"]
+    )
+    summary, comparison = build_lifecycle_quality_migration_summary(
+        legacy_datasets=legacy,
+        current_quality=derive_lifecycle_quality_view(
+            mismatched,
+            now_ms=now_ms,
+        ),
+        account="lx",
+        market="us",
+        observed_at_utc=now.isoformat(),
+        now_ms=now_ms,
+        case_status_by_id={"pending-us": "waiting_settlement_evidence"},
+        read_models_by_case={"pending-us": read_model},
+    )
+    assert comparison["status"] == "mismatch"
+    assert len(comparison["mismatch_samples"]) <= 10
+    assert summary["status"] == "unavailable"
+
+
+def test_lifecycle_quality_shadow_keeps_terminal_aggregate_counts() -> None:
+    now_ms = 1_800_000
+    now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    cases = [
+        {
+            "case_id": "terminal-trusted",
+            "account": "lx",
+            "market": "US",
+            "symbol": "NVDA",
+            "status": "ledger_written",
+        },
+        {
+            "case_id": "terminal-legacy",
+            "account": "lx",
+            "market": "HK",
+            "symbol": "0700.HK",
+            "status": "ledger_written",
+            "legacy_evidence_gap": True,
+        },
+        {
+            "case_id": "terminal-external",
+            "account": "lx",
+            "market": "US",
+            "symbol": "NVDA",
+            "status": "ledger_written",
+            "decision_type": "external_adjustment",
+        },
+    ]
+    aggregates = [
+        {
+            "market": "HK",
+            "total_case_count": 1,
+            "status_counts": {"ledger_written": 1},
+            "trust_class_counts": {"legacy_gap": 1},
+        },
+        {
+            "market": "US",
+            "total_case_count": 2,
+            "status_counts": {"ledger_written": 2},
+            "trust_class_counts": {
+                "external_review": 1,
+                "trusted": 1,
+            },
+        }
+    ]
+    current_quality = {
+        "schema_version": "current_lifecycle_quality.v1",
+        "account": "lx",
+        "aggregate_by_market": aggregates,
+        "operational_cases": [],
+        "aggregate_fingerprint": canonical_sha256(aggregates),
+        "detail_fingerprint": canonical_sha256([]),
+    }
+    current_view = derive_lifecycle_quality_view(
+        current_quality,
+        now_ms=now_ms,
+    )
+    expected = {
+        "hk": (
+            {"untrusted": 1},
+            {"option_performance": 1},
+        ),
+        "us": (
+            {"trusted": 1, "unavailable": 1},
+            {
+                "close_advice": 1,
+                "lifecycle_report": 1,
+                "option_performance": 1,
+            },
+        ),
+    }
+    for market, (status_counts, blocked_counts) in expected.items():
+        legacy = build_lifecycle_datasets(
+            cases=cases,
+            evidence_rows=[],
+            account="lx",
+            market=market,
+            observed_at_utc=now.isoformat(),
+            now=now,
+            trading_days=[],
+            first_deep_by_case={},
+        )
+        summary, comparison = build_lifecycle_quality_migration_summary(
+            legacy_datasets=legacy,
+            current_quality=current_view,
+            account="lx",
+            market=market,
+            observed_at_utc=now.isoformat(),
+            now_ms=now_ms,
+            case_status_by_id={
+                item["case_id"]: "ledger_written" for item in cases
+            },
+            read_models_by_case={},
+        )
+
+        aggregate = summary["extensions"]["aggregate"]
+        assert comparison["status"] == "matched"
+        assert aggregate["dataset_status_counts"] == status_counts
+        assert aggregate["blocked_consumer_counts"] == blocked_counts
+        assert summary["extensions"]["operational_cases"] == []
+
+
+def test_lifecycle_quality_conflict_never_gets_deadline_grace() -> None:
+    deadline_ms = 1_800_000
+    case = {
+        "case_id": "conflict-us",
+        "account": "lx",
+        "market": "US",
+        "symbol": "NVDA",
+        "status": "conflict",
+    }
+    read_model = {
+        "pending_until_ms": deadline_ms,
+        "reason_state": "conflict",
+        "timing_policy_hash": "a" * 64,
+    }
+    detail = {
+        "case_id": "conflict-us",
+        "market": "US",
+        "status": "conflict",
+        "trust_class": "trusted",
+        "evidence_count": 0,
+        "settlement_deadline_ms": deadline_ms,
+        "reason_state": "conflict",
+        "timing_policy_hash": "a" * 64,
+    }
+    current_quality = {
+        "schema_version": "current_lifecycle_quality.v1",
+        "account": "lx",
+        "aggregate_by_market": [
+            {
+                "market": "US",
+                "total_case_count": 1,
+                "status_counts": {"conflict": 1},
+                "trust_class_counts": {"trusted": 1},
+            }
+        ],
+        "operational_cases": [detail],
+    }
+    current_quality["aggregate_fingerprint"] = canonical_sha256(
+        current_quality["aggregate_by_market"]
+    )
+    current_quality["detail_fingerprint"] = canonical_sha256([detail])
+
+    for now_ms in (deadline_ms - 1, deadline_ms, deadline_ms + 1):
+        now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        legacy = build_lifecycle_datasets(
+            cases=[case],
+            evidence_rows=[],
+            account="lx",
+            market="us",
+            observed_at_utc=now.isoformat(),
+            now=now,
+            trading_days=[],
+            first_deep_by_case={},
+            read_models_by_case={"conflict-us": read_model},
+        )
+        summary, comparison = build_lifecycle_quality_migration_summary(
+            legacy_datasets=legacy,
+            current_quality=derive_lifecycle_quality_view(
+                current_quality,
+                now_ms=now_ms,
+            ),
+            account="lx",
+            market="us",
+            observed_at_utc=now.isoformat(),
+            now_ms=now_ms,
+            case_status_by_id={"conflict-us": "conflict"},
+            read_models_by_case={"conflict-us": read_model},
+        )
+
+        assert comparison["status"] == "matched"
+        assert summary["status"] == "untrusted"
+        assert summary["blocked_consumers"] == [
+            "close_advice",
+            "lifecycle_report",
+            "option_performance",
+        ]
 
 
 def test_runtime_service_and_timer_checks_require_checked_active_units() -> None:

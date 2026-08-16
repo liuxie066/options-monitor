@@ -231,6 +231,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     old_build_option_positions_context = pc.build_option_positions_context
     old_build_shared_option_positions_context = pc.build_shared_option_positions_context
     old_load_option_position_exchange_rates = pc._load_option_position_exchange_rates
+    old_decision_snapshots = pc._decision_snapshots_for_records
 
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).exists()  # type: ignore[assignment]
@@ -247,6 +248,18 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         pc.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
         pc._load_option_position_records = lambda *_a, **_k: (object(), [])  # type: ignore[assignment]
         pc._load_option_position_exchange_rates = lambda **_kwargs: {"rates": {"USDCNY": 7.2}}  # type: ignore[assignment]
+        pc._decision_snapshots_for_records = lambda *_a, **_k: {  # type: ignore[assignment]
+            account: {
+                "current_decision_shadow": {
+                    "schema_version": "current_decision_shadow.v1",
+                    "status": "matched",
+                    "mismatch_count": 0,
+                    "mismatch_samples": [],
+                    "sections": [],
+                }
+            }
+            for account in ("lx", "sy")
+        }
         pc.build_shared_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option)  # type: ignore[assignment]
         pc.build_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option["all_accounts"])  # type: ignore[assignment]
         logs: list[str] = []
@@ -307,6 +320,8 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         assert p2["cash_by_currency"]["USD"] == 1500.0
         assert o1["locked_shares_by_symbol"]["NVDA"] == 100
         assert o2["locked_shares_by_symbol"]["NVDA"] == 200
+        assert o1["current_decision_shadow"]["status"] == "matched"
+        assert o2["current_decision_shadow"]["status"] == "matched"
         assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
         assert any("option_positions_context source=shared_slice account=sy" in x for x in logs)
     finally:
@@ -318,6 +333,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         pc.build_option_positions_context = old_build_option_positions_context  # type: ignore[assignment]
         pc.build_shared_option_positions_context = old_build_shared_option_positions_context  # type: ignore[assignment]
         pc._load_option_position_exchange_rates = old_load_option_position_exchange_rates  # type: ignore[assignment]
+        pc._decision_snapshots_for_records = old_decision_snapshots  # type: ignore[assignment]
 
 
 def test_shared_slice_matches_legacy_key_fields() -> None:

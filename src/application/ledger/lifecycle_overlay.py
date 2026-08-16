@@ -266,42 +266,22 @@ def resolve_account_lifecycle_overlay(
             effective_void_event_ids=set(voided),
         )
 
-    contested_components = _reservation_conflict_components(local_resolutions)
-    conflict_case_ids = {
-        case_id
-        for component in contested_components
-        for case_id in component["case_ids"]
+    arbitration = arbitrate_lifecycle_case_resolutions(
+        account=account_value,
+        case_resolutions=local_resolutions,
+    )
+    local_resolutions = {
+        str(item["case_id"]): item
+        for item in arbitration["case_resolutions"]
     }
-    for case_id, resolution in local_resolutions.items():
-        if case_id in conflict_case_ids:
-            resolution["status"] = "conflict"
-            resolution["reason_codes"] = sorted(
-                {
-                    *resolution.get("reason_codes", ()),
-                    "reservation_target_overlap",
-                }
-            )
-            resolution["effective_reservations_by_lot"] = {}
-        elif resolution.get("status") != "conflict":
-            resolution["effective_reservations_by_lot"] = dict(
-                resolution.get("requested_reservations_by_lot") or {}
-            )
-        resolution["resolution_hash"] = _hash_without(
-            resolution,
-            "resolution_hash",
-        )
-
-    case_resolutions = [
-        local_resolutions[case_id]
-        for case_id in sorted(local_resolutions)
-    ]
+    case_resolutions = arbitration["case_resolutions"]
     arbitration_payload = {
-        "schema_version": ACCOUNT_LIFECYCLE_RESOLUTION_SCHEMA,
-        "account": account_value,
+        "schema_version": arbitration["schema_version"],
+        "account": arbitration["account"],
         "case_resolutions": case_resolutions,
-        "contested_components": contested_components,
+        "contested_components": arbitration["contested_components"],
     }
-    arbitration_hash = canonical_sha256(arbitration_payload)
+    arbitration_hash = str(arbitration["arbitration_hash"])
     generation_tokens = _case_generation_tokens(
         account=account_value,
         case_rows=case_rows,
@@ -320,6 +300,63 @@ def resolve_account_lifecycle_overlay(
         **arbitration_payload,
         "arbitration_hash": arbitration_hash,
         "generation_tokens": generation_tokens,
+    }
+
+
+def arbitrate_lifecycle_case_resolutions(
+    *,
+    account: str,
+    case_resolutions: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Apply the canonical cross-case reservation rule to compact facts."""
+
+    account_value = str(account or "").strip().lower()
+    if not account_value:
+        raise LifecycleOverlayContractError("lifecycle arbitration account is required")
+    resolutions: dict[str, dict[str, Any]] = {}
+    for raw_case_id, raw_resolution in case_resolutions.items():
+        case_id = str(raw_case_id or "").strip()
+        item = dict(raw_resolution)
+        if not case_id or str(item.get("case_id") or "").strip() != case_id:
+            raise LifecycleOverlayContractError("lifecycle arbitration case id mismatch")
+        resolutions[case_id] = item
+
+    contested_components = _reservation_conflict_components(resolutions)
+    conflict_case_ids = {
+        case_id
+        for component in contested_components
+        for case_id in component["case_ids"]
+    }
+    for case_id, resolution in resolutions.items():
+        if case_id in conflict_case_ids:
+            resolution["status"] = "conflict"
+            resolution["reason_codes"] = sorted(
+                {
+                    *resolution.get("reason_codes", ()),
+                    "reservation_target_overlap",
+                }
+            )
+            resolution["effective_reservations_by_lot"] = {}
+        elif resolution.get("status") != "conflict":
+            resolution["effective_reservations_by_lot"] = dict(
+                resolution.get("requested_reservations_by_lot") or {}
+            )
+        resolution["resolution_hash"] = _hash_without(
+            resolution,
+            "resolution_hash",
+        )
+
+    ordered = [resolutions[case_id] for case_id in sorted(resolutions)]
+    arbitration_payload = {
+        "schema_version": ACCOUNT_LIFECYCLE_RESOLUTION_SCHEMA,
+        "account": account_value,
+        "case_resolutions": ordered,
+        "contested_components": contested_components,
+    }
+    arbitration_hash = canonical_sha256(arbitration_payload)
+    return {
+        **arbitration_payload,
+        "arbitration_hash": arbitration_hash,
     }
 
 
@@ -691,6 +728,113 @@ def _resolve_case_anchor(
                 key=lambda item: str(item.get("anchor_fact_id") or ""),
             ),
             "requested_reservations_by_lot": dict(sorted(reservations.items())),
+        }
+    )
+    base["resolution_hash"] = _hash_without(base, "resolution_hash")
+    return base
+
+
+def advance_direct_lifecycle_anchor_resolution(
+    *,
+    lifecycle_case: Mapping[str, Any],
+    prior_resolution: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    source_claim: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and add one direct anchor using only compact prior facts."""
+
+    case = dict(lifecycle_case)
+    case_id = str(case.get("case_id") or "").strip()
+    prior = dict(prior_resolution)
+    prior_status = str(prior.get("status") or "missing").strip().lower()
+    if prior_status not in {"missing", "direct"}:
+        raise LifecycleOverlayContractError(
+            "incremental direct anchor requires missing or direct prior state"
+        )
+    manifest = _evidence_manifest(evidence)
+    target = _case_target_manifest(case)
+    fact, reasons = _validated_anchor_fact(
+        lifecycle_case=case,
+        evidence=evidence,
+        owner_claims=(source_claim,),
+        manifest=manifest,
+        anchor_kind="direct",
+        bridge_evidence_id=None,
+    )
+    if fact is None or reasons:
+        raise LifecycleOverlayContractError(
+            ",".join(sorted(reasons)) or "direct anchor is invalid"
+        )
+    if target is None:
+        raise LifecycleOverlayContractError(
+            "lifecycle target manifest is invalid"
+        )
+    anchors = [
+        dict(item)
+        for item in prior.get("anchor_facts") or []
+        if isinstance(item, Mapping)
+    ]
+    if any(item.get("anchor_fact_id") == fact["anchor_fact_id"] for item in anchors):
+        result = {
+            "resolver_schema_version": LIFECYCLE_ANCHOR_RESOLUTION_SCHEMA,
+            "case_id": case_id,
+            "status": prior_status,
+            "anchor_facts": anchors,
+            "requested_reservations_by_lot": dict(
+                prior.get("requested_reservations_by_lot") or {}
+            ),
+            "effective_reservations_by_lot": dict(
+                prior.get("effective_reservations_by_lot") or {}
+            ),
+            "reason_codes": list(
+                prior.get("reason_codes")
+                or prior.get("contested_reason_codes")
+                or []
+            ),
+            "timing_policy_hash": None,
+        }
+        result["resolution_hash"] = _hash_without(result, "resolution_hash")
+        return result
+    base = {
+        "resolver_schema_version": LIFECYCLE_ANCHOR_RESOLUTION_SCHEMA,
+        "case_id": case_id,
+        "status": "direct",
+        "anchor_facts": [],
+        "requested_reservations_by_lot": {},
+        "effective_reservations_by_lot": {},
+        "reason_codes": [],
+        "timing_policy_hash": None,
+    }
+    if any(
+        str(item.get("source_key") or "") == str(fact["source_key"])
+        for item in anchors
+    ):
+        return _conflicted_resolution(base, "direct_anchor_source_collision")
+    if any(
+        set(item.get("target_contracts_by_lot") or {})
+        & set(fact["target_contracts_by_lot"])
+        for item in anchors
+    ):
+        return _conflicted_resolution(
+            base,
+            "direct_anchor_manifest_overlap",
+        )
+    requested = dict(prior.get("requested_reservations_by_lot") or {})
+    for lot_id, contracts in fact["target_contracts_by_lot"].items():
+        requested[lot_id] = int(requested.get(lot_id, 0)) + int(contracts)
+        if lot_id not in target or requested[lot_id] > int(target[lot_id]):
+            return _conflicted_resolution(
+                base,
+                "lifecycle_anchor_target_quantity_invalid",
+            )
+    base.update(
+        {
+            "anchor_facts": sorted(
+                [*anchors, fact],
+                key=lambda item: str(item.get("anchor_fact_id") or ""),
+            ),
+            "requested_reservations_by_lot": dict(sorted(requested.items())),
+            "effective_reservations_by_lot": dict(sorted(requested.items())),
         }
     )
     base["resolution_hash"] = _hash_without(base, "resolution_hash")
@@ -1246,9 +1390,11 @@ __all__ = [
     "LIFECYCLE_GENERATION_TOKEN_SCHEMA",
     "NON_ALLOCATING_EVIDENCE_TYPES",
     "ZERO_PRICE_OPTION_CLOSE_EVIDENCE",
+    "advance_direct_lifecycle_anchor_resolution",
     "lifecycle_case_generation_token",
     "lifecycle_case_resolution",
     "lifecycle_evidence_facts",
+    "arbitrate_lifecycle_case_resolutions",
     "resolve_account_lifecycle_overlay",
     "resolve_lifecycle_account_rows",
 ]

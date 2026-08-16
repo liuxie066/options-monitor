@@ -27,9 +27,13 @@ from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
+from src.application.ledger.current_decision_projection import (
+    capture_trade_event_decision_projection_fence,
+)
 from src.application.ledger.results import LedgerWriteResult
 from src.application.ledger.targets import assert_position_lot_target_matches_current_state
 from src.application.ledger.writer import (
+    _finish_trade_event_decision_projection,
     persist_trade_event_object,
     projection_diagnostics_summary,
 )
@@ -671,11 +675,22 @@ def persist_manual_adjust_events(
             )
             prepared.append((record_id, event, patch_contract))
 
+        decision_fence = capture_trade_event_decision_projection_fence(
+            sqlite_repo,
+            conn=conn,
+        )
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
             [event for _record_id, event, _patch_contract in prepared],
             conn=conn,
             mode="fast_if_safe",
+        )
+        decision_projection = _finish_trade_event_decision_projection(
+            sqlite_repo,
+            conn=conn,
+            fence=decision_fence,
+            events=[event for _record_id, event, _patch_contract in prepared],
+            created_flags=runtime.created_flags,
         )
         diagnostics = projection_diagnostics_summary(runtime.diagnostics)
         out: list[LedgerWriteResult] = []
@@ -691,6 +706,7 @@ def persist_manual_adjust_events(
                 "position_lot_count": int(runtime.position_lot_count),
                 **diagnostics,
                 "patch": patch_contract.to_dict(),
+                "decision_projection": decision_projection,
             }
             out.append(LedgerWriteResult.from_payload(payload))
         return out

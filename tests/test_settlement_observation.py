@@ -17,6 +17,12 @@ from domain.domain.option_lifecycle import (
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
 )
+from src.application.ledger.current_decision_projection import (
+    current_decision_projection_row,
+    preview_current_decision_projection_oracle,
+    read_current_decision_projection,
+    write_lifecycle_case_decision_fact,
+)
 from src.application.ledger.api import (
     advance_lifecycle_case_state,
     LegacySettlementSemanticUnavailable,
@@ -213,6 +219,60 @@ def _repo_with_pending_case(
     )
     assert repo.insert_trade_lifecycle_timing_policy_once(policy)
     return repo, lifecycle_case, policy, anchor_time_ms
+
+
+def _bootstrap_current_decision_shadow(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    now_ms: int,
+) -> None:
+    assigned_stock_report = {
+        "_all_assigned_stock_lots": [],
+        "covered_call_allocations": [],
+        "assigned_stock_review_rows": [],
+    }
+    projection = preview_current_decision_projection_oracle(
+        repo,
+        account="lx",
+        now_ms=now_ms,
+        assigned_stock_report=assigned_stock_report,
+    )
+    with repo._connect() as conn:  # noqa: SLF001 - explicit shadow bootstrap
+        for fact in projection["lifecycle"]["operational_cases"]:
+            write_lifecycle_case_decision_fact(repo, fact=fact, conn=conn)
+    projection = preview_current_decision_projection_oracle(
+        repo,
+        account="lx",
+        now_ms=now_ms,
+        assigned_stock_report=assigned_stock_report,
+    )
+    repo.upsert_current_decision_projection(
+        current_decision_projection_row(projection)
+    )
+
+
+def _assert_current_lifecycle_matches_oracle(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    now_ms: int,
+) -> None:
+    trusted = read_current_decision_projection(
+        repo,
+        account="lx",
+        now_ms=now_ms,
+    )
+    oracle = preview_current_decision_projection_oracle(
+        repo,
+        account="lx",
+        now_ms=now_ms,
+        assigned_stock_report={
+            "_all_assigned_stock_lots": [],
+            "covered_call_allocations": [],
+            "assigned_stock_review_rows": [],
+        },
+    )
+    assert trusted["status"] == "trusted"
+    assert trusted["payload"]["lifecycle"] == oracle["lifecycle"]
 
 
 def _add_pending_case(
@@ -1406,13 +1466,14 @@ def test_polled_preview_rejects_attempt_and_writes_nothing(
 def test_unresolved_polled_attempt_writes_direct_and_observation_atomically(
     tmp_path: Path,
 ) -> None:
-    repo, case_id, _now_ms, observation, candidate, envelope = (
+    repo, case_id, now_ms, observation, candidate, envelope = (
         _polled_attempt_fixture(
             tmp_path,
             invocation_id="123e4567-e89b-42d3-a456-426614174403",
             mismatched=True,
         )
     )
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
 
     resolution = reconcile_polled_stock_settlement_evidence(
         repo,
@@ -1428,6 +1489,9 @@ def test_unresolved_polled_attempt_writes_direct_and_observation_atomically(
     assert resolution.status == "unresolved"
     assert resolution.reason == "polled_settlement_case_mismatch"
     assert resolution.diagnostics["attempt_result"]["audit_ordinal"] == 1
+    assert resolution.diagnostics["attempt_result"]["decision_projection"][
+        "statuses"
+    ] == {"lx": "published"}
     assert (
         resolution.diagnostics["attempt_result"]["admission_status"]
         == "admitted_semantic"
@@ -1449,6 +1513,7 @@ def test_unresolved_polled_attempt_writes_direct_and_observation_atomically(
     assert repo.verify_trade_lifecycle_attempt_audit_case(
         case_id=case_id
     )["status"] == "valid"
+    _assert_current_lifecycle_matches_oracle(repo, now_ms=now_ms)
 
 
 def test_unresolved_polled_close_reason_falls_back_to_one_attempt_owner(
@@ -2275,6 +2340,7 @@ def test_close_reason_threads_one_attempt_to_terminal_owner(
     )
     case_id = str(lifecycle_case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
     observation = collect_broker_settlement_observation(
         repo,
         lifecycle_case=lifecycle_case,
@@ -2313,6 +2379,8 @@ def test_close_reason_threads_one_attempt_to_terminal_owner(
 
     assert owner_result["audit_ordinal"] == 1
     assert owner_result["admission_status"] == "admitted_semantic"
+    assert owner_result["decision_projection"]["statuses"] == {"lx": "published"}
+    _assert_current_lifecycle_matches_oracle(repo, now_ms=now_ms)
     assert len(
         repo.list_trade_lifecycle_attempt_audits(case_id=case_id)
     ) == 1
@@ -2336,6 +2404,7 @@ def test_state_only_owner_appends_once_and_exact_replay_reads_no_business(
     )
     now_ms = int(timing["pairing_until_ms"]) + 1
     assert now_ms < int(policy["settlement_deadline_ms"])
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
     observation = collect_broker_settlement_observation(
         repo,
         lifecycle_case=lifecycle_case,
@@ -2366,6 +2435,10 @@ def test_state_only_owner_appends_once_and_exact_replay_reads_no_business(
     )
     assert first["decision"]["status"] == "cause_pending"
     assert first["write_result"]["audit_ordinal"] == 1
+    assert first["write_result"]["decision_projection"]["statuses"] == {
+        "lx": "published"
+    }
+    _assert_current_lifecycle_matches_oracle(repo, now_ms=now_ms)
     before = {
         "case": repo.get_trade_lifecycle_case(case_id),
         "evidence": repo.list_trade_lifecycle_evidence(case_id=case_id),
@@ -2396,6 +2469,7 @@ def test_state_only_owner_appends_once_and_exact_replay_reads_no_business(
 
     assert replay["audit_idempotent"] is True
     assert replay["audit_ordinal"] == 1
+    assert "decision_projection" not in replay
     assert repo.get_trade_lifecycle_case(case_id) == before["case"]
     assert repo.list_trade_lifecycle_evidence(
         case_id=case_id
@@ -2519,6 +2593,7 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
     )
     case_id = str(lifecycle_case["case_id"])
     observed_at_ms = int(policy["settlement_deadline_ms"]) + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=observed_at_ms)
     observation = collect_broker_settlement_observation(
         repo,
         lifecycle_case=lifecycle_case,
@@ -2561,6 +2636,9 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
     outbox_after_first = repo.list_trade_lifecycle_notifications(
         case_id=case_id
     )
+    decision_storage_after_first = repo.read_current_decision_storage_state(
+        "lx"
+    )
     second_observation = _rebase_observation(
         repo,
         case_id=case_id,
@@ -2573,8 +2651,16 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
     )
 
     assert first["audit_ordinal"] == 1
+    assert first["decision_projection"]["statuses"] == {"lx": "published"}
+    assert read_current_decision_projection(
+        repo,
+        account="lx",
+        now_ms=observed_at_ms,
+    )["status"] == "trusted"
     assert second["audit_ordinal"] == 2
     assert second["admission_status"] == "duplicate_semantic"
+    assert second["decision_projection"]["projection_dml_count"] == 0
+    assert second["decision_projection"]["statuses"] == {"lx": "not_required"}
     assert second["resolution_revision"] == first["resolution_revision"]
     assert repo.list_trade_lifecycle_evidence(
         case_id=case_id
@@ -2583,6 +2669,13 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
     assert repo.list_trade_lifecycle_notifications(
         case_id=case_id
     ) == outbox_after_first
+    assert repo.read_current_decision_storage_state(
+        "lx"
+    ) == decision_storage_after_first
+    _assert_current_lifecycle_matches_oracle(
+        repo,
+        now_ms=observed_at_ms,
+    )
     assert repo.verify_trade_lifecycle_attempt_audit_case(
         case_id=case_id
     )["status"] == "valid"
@@ -2611,6 +2704,10 @@ def test_issue_writer_appends_same_semantic_attempts_before_business_dedupe(
 
     assert replay["audit_idempotent"] is True
     assert replay["audit_ordinal"] == 2
+    assert "decision_projection" not in replay
+    assert repo.read_current_decision_storage_state(
+        "lx"
+    ) == decision_storage_after_first
     assert len(repo.list_trade_lifecycle_attempt_audits(case_id=case_id)) == counts_before[
         "audit"
     ]

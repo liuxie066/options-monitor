@@ -20,8 +20,11 @@ from src.application.ledger.api import (
     activate_position_projection_checkpoints,
     adopt_post_trade_combo_pair,
     adopt_existing_combo_identity,
+    apply_current_decision_projection_migration,
     apply_position_projection_migration,
+    build_current_decision_projection_migration_inventory,
     build_position_projection_migration_inventory,
+    current_decision_projection_migration_status,
     deactivate_position_projection_checkpoints,
     format_position_cash_secured,
     format_position_money,
@@ -41,6 +44,7 @@ from src.application.ledger.api import (
     resolve_position_data_config_path,
     preview_trade_event_void,
     verify_position_lot_projection,
+    verify_current_decision_projection_migration,
     verify_position_projection_migration,
     supersede_post_trade_combo_pair,
 )
@@ -524,6 +528,31 @@ def main(argv: list[str] | None = None) -> int:
     p_projection_deactivate.add_argument('--format', default='json', choices=['json'])
     _add_local_write_flags(p_projection_deactivate, high_risk=True)
 
+    p_decision_projection = sub.add_parser(
+        'decision-projection',
+        help='inventory, verify, apply, or inspect the current decision projection',
+    )
+    decision_projection_sub = p_decision_projection.add_subparsers(
+        dest='decision_projection_cmd',
+        required=True,
+    )
+    for command_name, help_text in (
+        ('inventory', 'emit an exact read-only migration inventory'),
+        ('verify', 'compare the legacy oracle with proposed compact facts'),
+        ('status', 'read migration readiness without changing SQLite'),
+    ):
+        command = decision_projection_sub.add_parser(command_name, help=help_text)
+        _add_runtime_root_arg(command)
+        command.add_argument('--format', default='json', choices=['json'])
+    p_decision_apply = decision_projection_sub.add_parser(
+        'apply',
+        help='apply one exact frozen inventory and publish initial current facts',
+    )
+    _add_runtime_root_arg(p_decision_apply)
+    p_decision_apply.add_argument('--manifest', required=True)
+    p_decision_apply.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_decision_apply, high_risk=True)
+
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
     _add_runtime_root_arg(p_inspect)
     p_inspect.add_argument('--record-id', default=None)
@@ -956,7 +985,29 @@ def main(argv: list[str] | None = None) -> int:
 
     write_controls: dict[str, dict[str, bool]] = {}
     write_control_key = str(args.cmd)
-    if args.cmd == "projection-migration" and getattr(
+    if args.cmd == "decision-projection" and getattr(
+        args, "decision_projection_cmd", None
+    ) == "apply":
+        write_control_key = "decision-projection:apply"
+        if (
+            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
+            and not bool(getattr(args, "apply", False))
+        ):
+            raise SystemExit(
+                "option-positions decision-projection apply requires --apply "
+                "together with --confirm or --yes"
+            )
+        write_controls[write_control_key] = _resolve_write_control(
+            args,
+            command_name="option-positions decision-projection apply",
+            high_risk=True,
+        )
+        if not write_controls[write_control_key]["write_requested"]:
+            raise SystemExit(
+                "option-positions decision-projection apply requires --apply "
+                "and --confirm or --yes"
+            )
+    elif args.cmd == "projection-migration" and getattr(
         args, "projection_migration_cmd", None
     ) in {"apply", "activate", "deactivate"}:
         migration_command = str(args.projection_migration_cmd)
@@ -1055,6 +1106,31 @@ def main(argv: list[str] | None = None) -> int:
         )
         if guard is None:
             return 2
+
+    if args.cmd == "decision-projection":
+        store = resolve_ledger_store(
+            data_config_path,
+            runtime_root=_runtime_root_arg(args),
+        )
+        sqlite_path = store.sqlite_path
+        command = str(args.decision_projection_cmd)
+        if command == "inventory":
+            payload = build_current_decision_projection_migration_inventory(
+                sqlite_path
+            )
+        elif command == "verify":
+            payload = verify_current_decision_projection_migration(sqlite_path)
+        elif command == "status":
+            payload = current_decision_projection_migration_status(sqlite_path)
+        elif command == "apply":
+            payload = apply_current_decision_projection_migration(
+                sqlite_path,
+                _load_json_object(_resolve_path_under(args.manifest, base=base)),
+            )
+        else:  # pragma: no cover - argparse owns the command set
+            raise SystemExit(f"unsupported decision projection command: {command}")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     if args.cmd == "projection-migration":
         store = resolve_ledger_store(

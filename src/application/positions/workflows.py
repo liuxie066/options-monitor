@@ -22,6 +22,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.api import (
     assigned_stock_event_log,
+    compact_assigned_stock_view,
     LotCloseResolutionError,
     preview_manual_assignment,
     preview_manual_exercise,
@@ -33,6 +34,8 @@ from src.application.ledger.api import (
     record_manual_position_adjust,
     record_manual_position_close,
     record_manual_position_open,
+    read_current_position_projection,
+    record_assigned_stock_event,
     resolve_manual_position_close_target,
 )
 from src.application.cash_conversion import (
@@ -996,11 +999,25 @@ def _execute_assigned_stock_sale(
     }
     if dry_run:
         return payload
-    upsert = getattr(repo, "upsert_assigned_stock_event", None)
-    if not callable(upsert):
-        raise ValueError("repo does not support assigned stock event writes")
-    created = bool(upsert(sale_event))
-    result = {"stock_event_id": stock_event_id, "created": created}
+    current_position = read_current_position_projection(
+        repo,
+        account=str(sale_event.get("account") or ""),
+    )
+    assigned_stock_after = compact_assigned_stock_view(
+        after_report,
+        account=str(sale_event.get("account") or ""),
+        current_position_lots=(
+            current_position["position_lots"]
+            if current_position["status"] == "trusted"
+            else []
+        ),
+    )
+    result = record_assigned_stock_event(
+        repo,
+        sale_event=sale_event,
+        assigned_stock_after=assigned_stock_after,
+    )
+    created = bool(result["created"])
     return _apply_result_payload(
         repo,
         record_id=stock_lot_id,

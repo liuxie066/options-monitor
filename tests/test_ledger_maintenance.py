@@ -947,7 +947,7 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
     repo.upsert_trade_lifecycle_evidence(
         {
             "evidence_id": "ev_0700_old_450_put_assignment",
-            "case_id": "lc_0700_old_450_put_assignment",
+            "case_id": None,
             "source_type": "futu_trade_push",
             "source_event_id": "deal-0700-old-450-put-stock",
             "evidence_type": "stock_settlement_leg",

@@ -7,7 +7,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence, cast
+from typing import Any, Mapping, Protocol, Sequence, cast
 
 from domain.domain.ledger.position_fields import effective_expiration, now_ms
 from domain.domain.ledger.position_fingerprint import (
@@ -31,7 +31,10 @@ from src.application.ledger.lifecycle_settlement_semantics import (
     settlement_semantic_from_evidence,
 )
 from src.application.ledger.position_records import PositionLotRecord
-from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
+from src.application.ledger.sqlite_row_codec import (
+    position_lot_row_to_record,
+    read_current_decision_projection_inputs_from_conn,
+)
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 from src.infrastructure.private_storage import (
@@ -42,6 +45,16 @@ from src.infrastructure.private_storage import (
 
 
 POSITION_PROJECTION_SCHEMA = "position_projection.v1"
+
+_CURRENT_DECISION_GENERATION_COUNTERS = (
+    "case_generation",
+    "evidence_generation",
+    "allocation_generation",
+    "source_consumption_generation",
+    "timing_generation",
+    "combo_identity_generation",
+    "assigned_stock_generation",
+)
 
 TRADE_EVENTS_COLUMN_CLASSIFICATION = {
     "event_id": "integrity/identity",
@@ -241,6 +254,35 @@ def _same_lifecycle_evidence_source(existing_raw_json: Any, payload: dict[str, A
     return True
 
 
+def _normalized_lifecycle_case_targets(
+    payload: dict[str, Any],
+    *,
+    case_id: str,
+    account: str,
+) -> tuple[tuple[str, ...], dict[str, int], tuple[tuple[str, str, str, int | None], ...]]:
+    target_lot_ids_raw = payload.get("target_lot_ids") or []
+    if not isinstance(target_lot_ids_raw, (list, tuple)):
+        raise ValueError("trade lifecycle case target_lot_ids must be a list")
+    target_lot_ids = tuple(str(value or "").strip() for value in target_lot_ids_raw)
+    if any(not value for value in target_lot_ids) or len(set(target_lot_ids)) != len(target_lot_ids):
+        raise ValueError("trade lifecycle case target_lot_ids are invalid")
+    target_contracts_raw = payload.get("target_contracts_by_lot") or {}
+    if not isinstance(target_contracts_raw, dict):
+        raise ValueError("trade lifecycle case target_contracts_by_lot must be an object")
+    target_contracts: dict[str, int] = {}
+    for key, value in target_contracts_raw.items():
+        lot_id = str(key or "").strip()
+        if not lot_id or type(value) is not int or value <= 0:
+            raise ValueError("trade lifecycle case target contract count is invalid")
+        target_contracts[lot_id] = value
+    all_lot_ids = tuple(sorted(set(target_lot_ids) | set(target_contracts)))
+    return (
+        target_lot_ids,
+        target_contracts,
+        tuple((case_id, account, lot_id, target_contracts.get(lot_id)) for lot_id in all_lot_ids),
+    )
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
@@ -294,6 +336,267 @@ def _position_projection_column_contract_is_closed(
     return all(
         not details["missing"] and not details["unclassified"]
         for details in _position_projection_column_contract(conn).values()
+    )
+
+
+def _ensure_lifecycle_evidence_count_triggers(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        conn,
+        "trade_lifecycle_evidence_revisions",
+        "evidence_count",
+        ("INTEGER CHECK(evidence_count IS NULL OR (typeof(evidence_count) = 'integer' AND evidence_count >= 0))"),
+    )
+    trigger_names = (
+        "trg_trade_lifecycle_evidence_revision_insert",
+        "trg_trade_lifecycle_evidence_revision_update_old",
+        "trg_trade_lifecycle_evidence_revision_update_new",
+        "trg_trade_lifecycle_evidence_revision_delete",
+    )
+    for trigger_name in trigger_names:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if row is not None and "evidence_count" not in str(row["sql"] or ""):
+            conn.execute(f"DROP TRIGGER {trigger_name}")
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_trade_lifecycle_evidence_revision_insert
+        AFTER INSERT ON trade_lifecycle_evidence
+        WHEN NEW.case_id IS NOT NULL AND NEW.case_id != ''
+        BEGIN
+          INSERT INTO trade_lifecycle_evidence_revisions (
+            case_id, revision, evidence_count
+          ) VALUES (NEW.case_id, 1, 1)
+          ON CONFLICT(case_id) DO UPDATE SET
+            revision = revision + 1,
+            evidence_count = CASE
+              WHEN evidence_count IS NULL THEN NULL
+              ELSE evidence_count + 1
+            END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_trade_lifecycle_evidence_revision_update_old
+        AFTER UPDATE OF case_id ON trade_lifecycle_evidence
+        WHEN OLD.case_id IS NOT NEW.case_id
+          AND OLD.case_id IS NOT NULL
+          AND OLD.case_id != ''
+        BEGIN
+          INSERT INTO trade_lifecycle_evidence_revisions (
+            case_id, revision, evidence_count
+          ) VALUES (OLD.case_id, 1, NULL)
+          ON CONFLICT(case_id) DO UPDATE SET
+            revision = revision + 1,
+            evidence_count = CASE
+              WHEN evidence_count IS NULL THEN NULL
+              WHEN evidence_count > 0 THEN evidence_count - 1
+              ELSE RAISE(ABORT, 'lifecycle evidence count underflow')
+            END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_trade_lifecycle_evidence_revision_update_new
+        AFTER UPDATE OF case_id ON trade_lifecycle_evidence
+        WHEN OLD.case_id IS NOT NEW.case_id
+          AND NEW.case_id IS NOT NULL
+          AND NEW.case_id != ''
+        BEGIN
+          INSERT INTO trade_lifecycle_evidence_revisions (
+            case_id, revision, evidence_count
+          ) VALUES (NEW.case_id, 1, 1)
+          ON CONFLICT(case_id) DO UPDATE SET
+            revision = revision + 1,
+            evidence_count = CASE
+              WHEN evidence_count IS NULL THEN NULL
+              ELSE evidence_count + 1
+            END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_trade_lifecycle_evidence_revision_delete
+        AFTER DELETE ON trade_lifecycle_evidence
+        WHEN OLD.case_id IS NOT NULL AND OLD.case_id != ''
+        BEGIN
+          INSERT INTO trade_lifecycle_evidence_revisions (
+            case_id, revision, evidence_count
+          ) VALUES (OLD.case_id, 1, NULL)
+          ON CONFLICT(case_id) DO UPDATE SET
+            revision = revision + 1,
+            evidence_count = CASE
+              WHEN evidence_count IS NULL THEN NULL
+              WHEN evidence_count > 0 THEN evidence_count - 1
+              ELSE RAISE(ABORT, 'lifecycle evidence count underflow')
+            END;
+        END
+        """
+    )
+
+
+def _current_decision_generation_statement(
+    *,
+    account_sql: str,
+    counter: str,
+    updated_at_sql: str,
+    where_sql: str = "1",
+) -> str:
+    if counter not in _CURRENT_DECISION_GENERATION_COUNTERS:
+        raise ValueError(f"unsupported current-decision counter: {counter}")
+    account = f"trim(CAST(({account_sql}) AS TEXT))"
+    counter_values = ", ".join("1" if name == counter else "0" for name in _CURRENT_DECISION_GENERATION_COUNTERS)
+    counter_columns = ", ".join(_CURRENT_DECISION_GENERATION_COUNTERS)
+    return f"""
+      INSERT INTO current_decision_input_generations (
+        account, generation, {counter_columns}, updated_at_ms
+      )
+      SELECT {account}, 1, {counter_values}, CAST({updated_at_sql} AS INTEGER)
+      WHERE ({where_sql})
+        AND {account} != ''
+        AND {account} = lower({account})
+      ON CONFLICT(account) DO UPDATE SET
+        generation = generation + 1,
+        {counter} = {counter} + 1,
+        updated_at_ms = excluded.updated_at_ms;
+    """
+
+
+def _create_current_decision_generation_triggers(
+    conn: sqlite3.Connection,
+    *,
+    label: str,
+    table: str,
+    counter: str,
+    new_account_sql: str,
+    old_account_sql: str,
+    insert_time_sql: str,
+    update_time_sql: str,
+    delete_time_sql: str,
+    insert_when: str = "1",
+    update_when: str = "1",
+    delete_when: str = "1",
+) -> None:
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_current_decision_{label}_insert
+        AFTER INSERT ON {table}
+        WHEN {insert_when}
+        BEGIN
+          {
+            _current_decision_generation_statement(
+                account_sql=new_account_sql,
+                counter=counter,
+                updated_at_sql=insert_time_sql,
+            )
+        }
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_current_decision_{label}_update
+        AFTER UPDATE ON {table}
+        WHEN {update_when}
+        BEGIN
+          {
+            _current_decision_generation_statement(
+                account_sql=old_account_sql,
+                counter=counter,
+                updated_at_sql=update_time_sql,
+            )
+        }
+          {
+            _current_decision_generation_statement(
+                account_sql=new_account_sql,
+                counter=counter,
+                updated_at_sql=update_time_sql,
+                where_sql=f"({new_account_sql}) IS NOT ({old_account_sql})",
+            )
+        }
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_current_decision_{label}_delete
+        AFTER DELETE ON {table}
+        WHEN {delete_when}
+        BEGIN
+          {
+            _current_decision_generation_statement(
+                account_sql=old_account_sql,
+                counter=counter,
+                updated_at_sql=delete_time_sql,
+            )
+        }
+        END
+        """
+    )
+
+
+def _create_current_decision_case_scope_guards(
+    conn: sqlite3.Connection,
+    *,
+    label: str,
+    table: str,
+    nullable: bool = False,
+) -> None:
+    def invalid_case(row: str) -> str:
+        case_id = f"trim(CAST({row}.case_id AS TEXT))"
+        missing = (
+            f"NOT EXISTS (SELECT 1 FROM trade_lifecycle_cases "
+            f"WHERE case_id = {row}.case_id AND account != '' "
+            f"AND account = lower(account))"
+        )
+        if nullable:
+            return f"({case_id} != '' AND {missing})"
+        return f"({case_id} = '' OR {missing})"
+
+    message = "current decision case account is missing"
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_{label}_account_insert_guard
+        BEFORE INSERT ON {table}
+        BEGIN
+          SELECT CASE WHEN {invalid_case("NEW")}
+            THEN RAISE(ABORT, '{message}') END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_{label}_account_update_guard
+        BEFORE UPDATE ON {table}
+        BEGIN
+          SELECT CASE WHEN {invalid_case("OLD")}
+            THEN RAISE(ABORT, '{message}') END;
+          SELECT CASE WHEN {invalid_case("NEW")}
+            THEN RAISE(ABORT, '{message}') END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_{label}_account_delete_guard
+        BEFORE DELETE ON {table}
+        BEGIN
+          SELECT CASE WHEN {invalid_case("OLD")}
+            THEN RAISE(ABORT, '{message}') END;
+        END
+        """
     )
 
 
@@ -731,6 +1034,539 @@ def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
           AND projector_implementation_fingerprint IS NULL
         """,
         (_projection_schema_cookie(conn), int(now_ms())),
+    )
+
+
+def _ensure_current_decision_projection_schema(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        conn,
+        "assigned_stock_events",
+        "account",
+        ("TEXT CHECK(account IS NULL OR (typeof(account) = 'text' AND account != '' AND account = lower(account)))"),
+    )
+    _add_column_if_missing(
+        conn,
+        "trade_lifecycle_cases",
+        "decision_fact_json",
+        (
+            "TEXT CHECK(decision_fact_json IS NULL OR "
+            "(typeof(decision_fact_json) = 'text' AND json_valid(decision_fact_json)))"
+        ),
+    )
+    _add_column_if_missing(
+        conn,
+        "trade_lifecycle_cases",
+        "decision_fact_sha256",
+        (
+            "TEXT CHECK(decision_fact_sha256 IS NULL OR "
+            "(typeof(decision_fact_sha256) = 'text' "
+            "AND length(decision_fact_sha256) = 64 "
+            "AND decision_fact_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    )
+    _create_index_if_table_empty(
+        conn,
+        index_name="idx_assigned_stock_events_account_time",
+        table="assigned_stock_events",
+        create_sql=(
+            "CREATE INDEX idx_assigned_stock_events_account_time "
+            "ON assigned_stock_events(account, trade_time_ms, stock_event_id)"
+        ),
+    )
+    _create_index_if_table_empty(
+        conn,
+        index_name="idx_trade_lifecycle_cases_account_status",
+        table="trade_lifecycle_cases",
+        create_sql=(
+            "CREATE INDEX idx_trade_lifecycle_cases_account_status "
+            "ON trade_lifecycle_cases(account, status, updated_at_ms DESC, case_id DESC) "
+            "WHERE status IN ("
+            "'pending', 'waiting_settlement_evidence', 'needs_review', "
+            "'partially_resolved', 'conflict'"
+            ")"
+        ),
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS current_decision_input_generations (
+          account TEXT PRIMARY KEY,
+          generation INTEGER NOT NULL
+            CHECK(typeof(generation) = 'integer' AND generation >= 0),
+          case_generation INTEGER NOT NULL
+            CHECK(typeof(case_generation) = 'integer' AND case_generation >= 0),
+          evidence_generation INTEGER NOT NULL
+            CHECK(typeof(evidence_generation) = 'integer' AND evidence_generation >= 0),
+          allocation_generation INTEGER NOT NULL
+            CHECK(typeof(allocation_generation) = 'integer' AND allocation_generation >= 0),
+          source_consumption_generation INTEGER NOT NULL
+            CHECK(
+              typeof(source_consumption_generation) = 'integer'
+              AND source_consumption_generation >= 0
+            ),
+          timing_generation INTEGER NOT NULL
+            CHECK(typeof(timing_generation) = 'integer' AND timing_generation >= 0),
+          combo_identity_generation INTEGER NOT NULL
+            CHECK(
+              typeof(combo_identity_generation) = 'integer'
+              AND combo_identity_generation >= 0
+            ),
+          assigned_stock_generation INTEGER NOT NULL
+            CHECK(
+              typeof(assigned_stock_generation) = 'integer'
+              AND assigned_stock_generation >= 0
+            ),
+          updated_at_ms INTEGER NOT NULL
+            CHECK(typeof(updated_at_ms) = 'integer' AND updated_at_ms > 0),
+          CHECK(typeof(account) = 'text' AND account != '' AND account = lower(account))
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS current_decision_projections (
+          account TEXT PRIMARY KEY,
+          projection_schema TEXT NOT NULL,
+          projector_implementation_fingerprint TEXT NOT NULL,
+          built_position_source_generation INTEGER NOT NULL,
+          built_position_lots_generation INTEGER NOT NULL,
+          position_lots_fingerprint TEXT NOT NULL,
+          built_decision_input_generation INTEGER NOT NULL,
+          built_case_generation INTEGER NOT NULL,
+          built_evidence_generation INTEGER NOT NULL,
+          built_allocation_generation INTEGER NOT NULL,
+          built_source_consumption_generation INTEGER NOT NULL,
+          built_timing_generation INTEGER NOT NULL,
+          built_combo_identity_generation INTEGER NOT NULL,
+          built_assigned_stock_generation INTEGER NOT NULL,
+          decision_state_fingerprint TEXT NOT NULL,
+          payload_sha256 TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          CHECK(typeof(account) = 'text' AND account != '' AND account = lower(account)),
+          CHECK(typeof(projection_schema) = 'text' AND projection_schema != ''),
+          CHECK(
+            typeof(projector_implementation_fingerprint) = 'text'
+            AND length(projector_implementation_fingerprint) = 64
+            AND projector_implementation_fingerprint NOT GLOB '*[^0-9a-f]*'
+          ),
+          CHECK(
+            typeof(built_position_source_generation) = 'integer'
+            AND built_position_source_generation >= 0
+          ),
+          CHECK(
+            typeof(built_position_lots_generation) = 'integer'
+            AND built_position_lots_generation >= 0
+          ),
+          CHECK(
+            typeof(position_lots_fingerprint) = 'text'
+            AND length(position_lots_fingerprint) = 64
+            AND position_lots_fingerprint NOT GLOB '*[^0-9a-f]*'
+          ),
+          CHECK(
+            typeof(built_decision_input_generation) = 'integer'
+            AND built_decision_input_generation >= 0
+          ),
+          CHECK(
+            typeof(built_case_generation) = 'integer'
+            AND built_case_generation >= 0
+          ),
+          CHECK(
+            typeof(built_evidence_generation) = 'integer'
+            AND built_evidence_generation >= 0
+          ),
+          CHECK(
+            typeof(built_allocation_generation) = 'integer'
+            AND built_allocation_generation >= 0
+          ),
+          CHECK(
+            typeof(built_source_consumption_generation) = 'integer'
+            AND built_source_consumption_generation >= 0
+          ),
+          CHECK(
+            typeof(built_timing_generation) = 'integer'
+            AND built_timing_generation >= 0
+          ),
+          CHECK(
+            typeof(built_combo_identity_generation) = 'integer'
+            AND built_combo_identity_generation >= 0
+          ),
+          CHECK(
+            typeof(built_assigned_stock_generation) = 'integer'
+            AND built_assigned_stock_generation >= 0
+          ),
+          CHECK(
+            typeof(decision_state_fingerprint) = 'text'
+            AND length(decision_state_fingerprint) = 64
+            AND decision_state_fingerprint NOT GLOB '*[^0-9a-f]*'
+          ),
+          CHECK(
+            typeof(payload_sha256) = 'text'
+            AND length(payload_sha256) = 64
+            AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          CHECK(typeof(payload_json) = 'text' AND json_valid(payload_json)),
+          CHECK(typeof(updated_at_ms) = 'integer' AND updated_at_ms > 0)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_lifecycle_case_targets (
+          case_id TEXT NOT NULL,
+          account TEXT NOT NULL,
+          target_lot_id TEXT NOT NULL,
+          target_contracts INTEGER,
+          PRIMARY KEY(case_id, target_lot_id),
+          CHECK(typeof(case_id) = 'text' AND case_id != ''),
+          CHECK(typeof(account) = 'text' AND account != '' AND account = lower(account)),
+          CHECK(typeof(target_lot_id) = 'text' AND target_lot_id != ''),
+          CHECK(
+            target_contracts IS NULL OR (
+              typeof(target_contracts) = 'integer' AND target_contracts > 0
+            )
+          ),
+          FOREIGN KEY(case_id) REFERENCES trade_lifecycle_cases(case_id)
+            ON DELETE CASCADE
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_case_targets_account_lot
+        ON trade_lifecycle_case_targets(account, target_lot_id, case_id)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_lifecycle_case_account_insert_guard
+        BEFORE INSERT ON trade_lifecycle_cases
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.raw_json) = 0
+              THEN RAISE(ABORT, 'lifecycle case JSON is invalid')
+            WHEN NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'lifecycle case account must be lowercase')
+            WHEN trim(CAST(json_extract(NEW.raw_json, '$.account') AS TEXT)) IS NOT NEW.account
+              THEN RAISE(ABORT, 'lifecycle case account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_lifecycle_case_account_update_guard
+        BEFORE UPDATE OF account, raw_json ON trade_lifecycle_cases
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'lifecycle case account must be lowercase')
+            WHEN json_valid(NEW.raw_json) = 0
+              THEN RAISE(ABORT, 'lifecycle case JSON is invalid')
+            WHEN NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'lifecycle case account must be lowercase')
+            WHEN trim(CAST(json_extract(NEW.raw_json, '$.account') AS TEXT)) IS NOT NEW.account
+              THEN RAISE(ABORT, 'lifecycle case account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_lifecycle_case_account_delete_guard
+        BEFORE DELETE ON trade_lifecycle_cases
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'lifecycle case account must be lowercase')
+          END;
+        END
+        """
+    )
+    for operation in ("INSERT", "UPDATE OF decision_fact_json, decision_fact_sha256"):
+        suffix = "insert" if operation == "INSERT" else "update"
+        conn.execute(
+            f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_lifecycle_case_fact_{suffix}_guard
+        BEFORE {operation} ON trade_lifecycle_cases
+        BEGIN
+          SELECT CASE
+            WHEN (NEW.decision_fact_json IS NULL) !=
+                 (NEW.decision_fact_sha256 IS NULL)
+              THEN RAISE(ABORT, 'lifecycle case decision fact is incomplete')
+            WHEN NEW.decision_fact_json IS NOT NULL
+              AND (
+                json_valid(NEW.decision_fact_json) = 0
+                OR json_extract(NEW.decision_fact_json, '$.schema_version')
+                   != 'lifecycle_case_decision_fact.v1'
+              )
+              THEN RAISE(ABORT, 'lifecycle case decision fact is invalid')
+          END;
+        END
+        """
+        )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_case_target_guard
+        BEFORE INSERT ON trade_lifecycle_case_targets
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1
+            FROM trade_lifecycle_cases
+            WHERE case_id = NEW.case_id AND account = NEW.account
+          ) THEN RAISE(ABORT, 'lifecycle case target account mismatch') END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_case_target_update_guard
+        BEFORE UPDATE ON trade_lifecycle_case_targets
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1
+            FROM trade_lifecycle_cases
+            WHERE case_id = OLD.case_id AND account = OLD.account
+          ) OR NOT EXISTS (
+            SELECT 1
+            FROM trade_lifecycle_cases
+            WHERE case_id = NEW.case_id AND account = NEW.account
+          ) THEN RAISE(ABORT, 'lifecycle case target account mismatch') END;
+        END
+        """
+    )
+    assigned_account = "trim(CAST(json_extract(NEW.event_json, '$.account') AS TEXT))"
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_assigned_stock_account_insert_guard
+        BEFORE INSERT ON assigned_stock_events
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.event_json) = 0
+              THEN RAISE(ABORT, 'assigned stock event JSON is invalid')
+            WHEN NEW.account IS NULL OR NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'assigned stock account is required')
+            WHEN NEW.account IS NOT {assigned_account}
+              THEN RAISE(ABORT, 'assigned stock account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_assigned_stock_account_update_guard
+        BEFORE UPDATE OF account, event_json ON assigned_stock_events
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account IS NULL OR OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'assigned stock account is required')
+            WHEN json_valid(NEW.event_json) = 0
+              THEN RAISE(ABORT, 'assigned stock event JSON is invalid')
+            WHEN NEW.account IS NULL OR NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'assigned stock account is required')
+            WHEN NEW.account IS NOT {assigned_account}
+              THEN RAISE(ABORT, 'assigned stock account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_assigned_stock_account_delete_guard
+        BEFORE DELETE ON assigned_stock_events
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account IS NULL OR OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'assigned stock account is required')
+          END;
+        END
+        """
+    )
+
+    identity_account = "trim(CAST(json_extract(NEW.raw_json, '$.account') AS TEXT))"
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_combo_identity_account_insert_guard
+        BEFORE INSERT ON strategy_group_identities
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.raw_json) = 0
+              THEN RAISE(ABORT, 'strategy identity JSON is invalid')
+            WHEN NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'strategy identity account must be lowercase')
+            WHEN NEW.account IS NOT {identity_account}
+              THEN RAISE(ABORT, 'strategy identity account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_combo_identity_account_update_guard
+        BEFORE UPDATE OF account, raw_json ON strategy_group_identities
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'strategy identity account must be lowercase')
+            WHEN json_valid(NEW.raw_json) = 0
+              THEN RAISE(ABORT, 'strategy identity JSON is invalid')
+            WHEN NEW.account = '' OR NEW.account != lower(NEW.account)
+              THEN RAISE(ABORT, 'strategy identity account must be lowercase')
+            WHEN NEW.account IS NOT {identity_account}
+              THEN RAISE(ABORT, 'strategy identity account conflicts with JSON')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        trg_current_decision_combo_identity_account_delete_guard
+        BEFORE DELETE ON strategy_group_identities
+        BEGIN
+          SELECT CASE
+            WHEN OLD.account = '' OR OLD.account != lower(OLD.account)
+              THEN RAISE(ABORT, 'strategy identity account must be lowercase')
+          END;
+        END
+        """
+    )
+
+    for label, table, nullable in (
+        ("lifecycle_evidence", "trade_lifecycle_evidence", True),
+        ("lifecycle_allocation", "trade_lifecycle_allocations", False),
+        ("lifecycle_source_consumption", "trade_lifecycle_source_consumptions", False),
+        ("lifecycle_timing", "trade_lifecycle_timing_policies", False),
+    ):
+        _create_current_decision_case_scope_guards(
+            conn,
+            label=label,
+            table=table,
+            nullable=nullable,
+        )
+
+    case_update_when = " OR ".join(
+        f"OLD.{column} IS NOT NEW.{column}"
+        for column in (
+            "case_id",
+            "case_key",
+            "account",
+            "broker",
+            "symbol",
+            "option_type",
+            "position_side",
+            "strike",
+            "expiration_ymd",
+            "contract_key",
+            "status",
+            "decision_type",
+            "target_lot_ids_json",
+            "target_contracts_by_lot_json",
+            "observation_start_ms",
+            "pending_until_ms",
+            "decision_fact_json",
+            "decision_fact_sha256",
+            "raw_json",
+        )
+    )
+    _create_current_decision_generation_triggers(
+        conn,
+        label="lifecycle_case",
+        table="trade_lifecycle_cases",
+        counter="case_generation",
+        new_account_sql="NEW.account",
+        old_account_sql="OLD.account",
+        insert_time_sql="NEW.updated_at_ms",
+        update_time_sql="NEW.updated_at_ms",
+        delete_time_sql="OLD.updated_at_ms",
+        update_when=case_update_when,
+    )
+    evidence_account_new = "(SELECT account FROM trade_lifecycle_cases WHERE case_id = NEW.case_id)"
+    evidence_account_old = "(SELECT account FROM trade_lifecycle_cases WHERE case_id = OLD.case_id)"
+    _create_current_decision_generation_triggers(
+        conn,
+        label="lifecycle_evidence",
+        table="trade_lifecycle_evidence",
+        counter="evidence_generation",
+        new_account_sql=evidence_account_new,
+        old_account_sql=evidence_account_old,
+        insert_time_sql="NEW.created_at_ms",
+        update_time_sql="NEW.created_at_ms",
+        delete_time_sql="OLD.created_at_ms",
+        insert_when="NEW.case_id IS NOT NULL AND NEW.case_id != ''",
+        update_when="OLD.case_id IS NOT NEW.case_id",
+        delete_when="OLD.case_id IS NOT NULL AND OLD.case_id != ''",
+    )
+    for label, table, counter, timestamp_column in (
+        (
+            "lifecycle_allocation",
+            "trade_lifecycle_allocations",
+            "allocation_generation",
+            "created_at_ms",
+        ),
+        (
+            "lifecycle_source_consumption",
+            "trade_lifecycle_source_consumptions",
+            "source_consumption_generation",
+            "created_at_ms",
+        ),
+        (
+            "lifecycle_timing",
+            "trade_lifecycle_timing_policies",
+            "timing_generation",
+            "created_at_ms",
+        ),
+    ):
+        _create_current_decision_generation_triggers(
+            conn,
+            label=label,
+            table=table,
+            counter=counter,
+            new_account_sql=("(SELECT account FROM trade_lifecycle_cases WHERE case_id = NEW.case_id)"),
+            old_account_sql=("(SELECT account FROM trade_lifecycle_cases WHERE case_id = OLD.case_id)"),
+            insert_time_sql=f"NEW.{timestamp_column}",
+            update_time_sql=f"NEW.{timestamp_column}",
+            delete_time_sql=f"OLD.{timestamp_column}",
+        )
+    _create_current_decision_generation_triggers(
+        conn,
+        label="combo_identity",
+        table="strategy_group_identities",
+        counter="combo_identity_generation",
+        new_account_sql="NEW.account",
+        old_account_sql="OLD.account",
+        insert_time_sql="NEW.created_at_ms",
+        update_time_sql="NEW.created_at_ms",
+        delete_time_sql="OLD.created_at_ms",
+    )
+    _create_current_decision_generation_triggers(
+        conn,
+        label="assigned_stock",
+        table="assigned_stock_events",
+        counter="assigned_stock_generation",
+        new_account_sql="NEW.account",
+        old_account_sql="OLD.account",
+        insert_time_sql="NEW.updated_at_ms",
+        update_time_sql="NEW.updated_at_ms",
+        delete_time_sql="OLD.updated_at_ms",
+        update_when=(
+            "OLD.stock_event_id IS NOT NEW.stock_event_id "
+            "OR OLD.account IS NOT NEW.account "
+            "OR OLD.event_json IS NOT NEW.event_json "
+            "OR OLD.trade_time_ms IS NOT NEW.trade_time_ms"
+        ),
     )
 
 
@@ -1263,6 +2099,13 @@ class SQLiteOptionPositionsRepository:
                 """
                 CREATE TABLE IF NOT EXISTS assigned_stock_events (
                   stock_event_id TEXT PRIMARY KEY,
+                  account TEXT CHECK(
+                    account IS NULL OR (
+                      typeof(account) = 'text'
+                      AND account != ''
+                      AND account = lower(account)
+                    )
+                  ),
                   event_json TEXT NOT NULL,
                   trade_time_ms INTEGER NOT NULL,
                   created_at_ms INTEGER NOT NULL,
@@ -1293,6 +2136,19 @@ class SQLiteOptionPositionsRepository:
                   pending_until_ms INTEGER,
                   created_at_ms INTEGER NOT NULL,
                   updated_at_ms INTEGER NOT NULL,
+                  decision_fact_json TEXT CHECK(
+                    decision_fact_json IS NULL OR (
+                      typeof(decision_fact_json) = 'text'
+                      AND json_valid(decision_fact_json)
+                    )
+                  ),
+                  decision_fact_sha256 TEXT CHECK(
+                    decision_fact_sha256 IS NULL OR (
+                      typeof(decision_fact_sha256) = 'text'
+                      AND length(decision_fact_sha256) = 64
+                      AND decision_fact_sha256 NOT GLOB '*[^0-9a-f]*'
+                    )
+                  ),
                   raw_json TEXT NOT NULL
                 )
                 """
@@ -1369,74 +2225,19 @@ class SQLiteOptionPositionsRepository:
                 """
                 CREATE TABLE IF NOT EXISTS trade_lifecycle_evidence_revisions (
                   case_id TEXT PRIMARY KEY,
-                  revision INTEGER NOT NULL CHECK(revision >= 0)
+                  revision INTEGER NOT NULL
+                    CHECK(typeof(revision) = 'integer' AND revision >= 0),
+                  evidence_count INTEGER
+                    CHECK(
+                      evidence_count IS NULL OR (
+                        typeof(evidence_count) = 'integer'
+                        AND evidence_count >= 0
+                      )
+                    )
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS
-                trg_trade_lifecycle_evidence_revision_insert
-                AFTER INSERT ON trade_lifecycle_evidence
-                WHEN NEW.case_id IS NOT NULL AND NEW.case_id != ''
-                BEGIN
-                  INSERT INTO trade_lifecycle_evidence_revisions (
-                    case_id, revision
-                  ) VALUES (NEW.case_id, 1)
-                  ON CONFLICT(case_id) DO UPDATE SET
-                    revision = revision + 1;
-                END
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS
-                trg_trade_lifecycle_evidence_revision_update_old
-                AFTER UPDATE OF case_id ON trade_lifecycle_evidence
-                WHEN OLD.case_id IS NOT NEW.case_id
-                  AND OLD.case_id IS NOT NULL
-                  AND OLD.case_id != ''
-                BEGIN
-                  INSERT INTO trade_lifecycle_evidence_revisions (
-                    case_id, revision
-                  ) VALUES (OLD.case_id, 1)
-                  ON CONFLICT(case_id) DO UPDATE SET
-                    revision = revision + 1;
-                END
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS
-                trg_trade_lifecycle_evidence_revision_update_new
-                AFTER UPDATE OF case_id ON trade_lifecycle_evidence
-                WHEN OLD.case_id IS NOT NEW.case_id
-                  AND NEW.case_id IS NOT NULL
-                  AND NEW.case_id != ''
-                BEGIN
-                  INSERT INTO trade_lifecycle_evidence_revisions (
-                    case_id, revision
-                  ) VALUES (NEW.case_id, 1)
-                  ON CONFLICT(case_id) DO UPDATE SET
-                    revision = revision + 1;
-                END
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS
-                trg_trade_lifecycle_evidence_revision_delete
-                AFTER DELETE ON trade_lifecycle_evidence
-                WHEN OLD.case_id IS NOT NULL AND OLD.case_id != ''
-                BEGIN
-                  INSERT INTO trade_lifecycle_evidence_revisions (
-                    case_id, revision
-                  ) VALUES (OLD.case_id, 1)
-                  ON CONFLICT(case_id) DO UPDATE SET
-                    revision = revision + 1;
-                END
-                """
-            )
+            _ensure_lifecycle_evidence_count_triggers(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_lifecycle_settlement_admission_heads (
@@ -1646,6 +2447,7 @@ class SQLiteOptionPositionsRepository:
                 """
             )
             _ensure_position_projection_schema(conn)
+            _ensure_current_decision_projection_schema(conn)
             conn.commit()
 
     def backfill_position_lot_contract_columns(
@@ -1929,6 +2731,9 @@ class SQLiteOptionPositionsRepository:
         stock_event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
         if not stock_event_id:
             raise ValueError("assigned stock event requires stock_event_id")
+        account = str(event.get("account") or "").strip()
+        if not account or account != account.lower():
+            raise ValueError("assigned stock event requires lowercase account")
         try:
             trade_time_ms = int(event.get("trade_time_ms") or event.get("event_time_ms") or 0)
         except (TypeError, ValueError) as exc:
@@ -1937,6 +2742,7 @@ class SQLiteOptionPositionsRepository:
             raise ValueError("assigned stock event requires trade_time_ms > 0")
         payload = dict(event)
         payload["stock_event_id"] = stock_event_id
+        payload["account"] = account
         payload["trade_time_ms"] = trade_time_ms
         event_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         ts = int(now_ms())
@@ -1953,10 +2759,11 @@ class SQLiteOptionPositionsRepository:
             active_conn.execute(
                 """
                 INSERT INTO assigned_stock_events (
-                  stock_event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?)
+                  stock_event_id, account, event_json, trade_time_ms,
+                  created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (stock_event_id, event_json, trade_time_ms, ts, ts),
+                (stock_event_id, account, event_json, trade_time_ms, ts, ts),
             )
         return True
 
@@ -1977,6 +2784,27 @@ class SQLiteOptionPositionsRepository:
             if isinstance(item, dict):
                 out.append(item)
         return out
+
+    def list_assigned_stock_events_for_account(
+        self,
+        account: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("assigned stock account must be lowercase")
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT event_json
+                FROM assigned_stock_events
+                WHERE account = ?
+                ORDER BY trade_time_ms ASC, stock_event_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        return [_json_object(row["event_json"]) for row in rows]
 
     def replace_position_lots(
         self,
@@ -2778,6 +3606,15 @@ class SQLiteOptionPositionsRepository:
         case_key = str(payload.get("case_key") or "").strip()
         if not case_id or not case_key:
             raise ValueError("trade lifecycle case requires case_id and case_key")
+        account = str(payload.get("account") or "").strip()
+        if not account or account != account.lower():
+            raise ValueError("trade lifecycle case requires lowercase account")
+        payload["account"] = account
+        target_lot_ids, target_contracts, target_rows = _normalized_lifecycle_case_targets(
+            payload,
+            case_id=case_id,
+            account=account,
+        )
         ts = int(now_ms())
         raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self._optional_conn(conn, commit=True) as active_conn:
@@ -2820,7 +3657,7 @@ class SQLiteOptionPositionsRepository:
                 (
                     case_id,
                     case_key,
-                    str(payload.get("account") or "").strip().lower(),
+                    account,
                     str(payload.get("broker") or "").strip().lower() or None,
                     str(payload.get("symbol") or "").strip().upper(),
                     (str(payload.get("option_type") or "").strip().lower() or None),
@@ -2830,26 +3667,37 @@ class SQLiteOptionPositionsRepository:
                     (str(payload.get("contract_key") or "").strip() or None),
                     str(payload.get("status") or "pending").strip().lower(),
                     (str(payload.get("decision_type") or "").strip().lower() or None),
-                    json.dumps(list(payload.get("target_lot_ids") or []), ensure_ascii=False, sort_keys=True),
+                    json.dumps(list(target_lot_ids), ensure_ascii=False, sort_keys=True),
                     json.dumps(
-                        dict(payload.get("target_contracts_by_lot") or {}),
+                        target_contracts,
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
-                    (
-                        int(payload["observation_start_ms"])
-                        if payload.get("observation_start_ms") is not None
-                        else None
-                    ),
+                    (int(payload["observation_start_ms"]) if payload.get("observation_start_ms") is not None else None),
                     int(payload["pending_until_ms"]) if payload.get("pending_until_ms") is not None else None,
                     created_at_ms,
                     ts,
                     raw_json,
                 ),
             )
+            if changed:
+                active_conn.execute(
+                    "DELETE FROM trade_lifecycle_case_targets WHERE case_id = ?",
+                    (case_id,),
+                )
+                active_conn.executemany(
+                    """
+                    INSERT INTO trade_lifecycle_case_targets (
+                      case_id, account, target_lot_id, target_contracts
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    target_rows,
+                )
         return changed
 
-    def get_trade_lifecycle_case(self, case_id: str, *, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+    def get_trade_lifecycle_case(
+        self, case_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
         with self._optional_conn(conn) as active_conn:
             row = active_conn.execute(
                 "SELECT raw_json FROM trade_lifecycle_cases WHERE case_id = ?",
@@ -2908,6 +3756,382 @@ class SQLiteOptionPositionsRepository:
             if isinstance(payload, dict):
                 out.append(dict(payload))
         return out
+
+    def list_trade_lifecycle_case_targets_for_lots(
+        self,
+        *,
+        account: str,
+        target_lot_ids: Sequence[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("lifecycle case target account must be lowercase")
+        lot_ids = tuple(dict.fromkeys(str(value or "").strip() for value in target_lot_ids))
+        if any(not value for value in lot_ids):
+            raise ValueError("lifecycle case target lot id is required")
+        if not lot_ids:
+            return []
+        placeholders = ",".join("?" for _value in lot_ids)
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT case_id, account, target_lot_id, target_contracts
+                FROM trade_lifecycle_case_targets
+                WHERE account = ? AND target_lot_id IN ({placeholders})
+                ORDER BY target_lot_id ASC, case_id ASC
+                """,
+                (account_value, *lot_ids),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_current_decision_storage_state(
+        self,
+        account: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, Any] | None]:
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("current decision account must be lowercase")
+        with self._optional_conn(conn) as active_conn:
+            generation = active_conn.execute(
+                """
+                SELECT *
+                FROM current_decision_input_generations
+                WHERE account = ?
+                """,
+                (account_value,),
+            ).fetchone()
+            projection = active_conn.execute(
+                """
+                SELECT *
+                FROM current_decision_projections
+                WHERE account = ?
+                """,
+                (account_value,),
+            ).fetchone()
+        return {
+            "generation": dict(generation) if generation is not None else None,
+            "projection": dict(projection) if projection is not None else None,
+        }
+
+    def read_current_decision_projection_inputs(
+        self,
+        account: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+        include_identities: bool = True,
+    ) -> dict[str, Any]:
+        """Read one account's bounded current-state inputs from one snapshot."""
+        with self._optional_conn(conn) as active_conn:
+            return read_current_decision_projection_inputs_from_conn(
+                active_conn,
+                account,
+                include_identities=include_identities,
+            )
+
+    def read_current_decision_projection_fence_inputs(
+        self,
+        accounts: Sequence[str],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Read only the bounded metadata needed by the publication fence."""
+
+        account_values = tuple(
+            sorted({str(value or "").strip() for value in accounts})
+        )
+        if not account_values or any(
+            not value or value != value.lower() for value in account_values
+        ):
+            raise ValueError("current decision fence accounts must be lowercase")
+        placeholders = ",".join("?" for _value in account_values)
+        with self._optional_conn(conn) as active_conn:
+            source = active_conn.execute(
+                "SELECT * FROM position_projection_source_state WHERE singleton_id = 1"
+            ).fetchone()
+            heads = active_conn.execute(
+                f"SELECT * FROM position_projection_heads WHERE account IN ({placeholders})",
+                account_values,
+            ).fetchall()
+            generations = active_conn.execute(
+                f"""
+                SELECT * FROM current_decision_input_generations
+                WHERE account IN ({placeholders})
+                """,
+                account_values,
+            ).fetchall()
+            projections = active_conn.execute(
+                f"""
+                SELECT account, projection_schema,
+                  projector_implementation_fingerprint,
+                  built_position_source_generation,
+                  built_position_lots_generation, position_lots_fingerprint,
+                  built_decision_input_generation, built_case_generation,
+                  built_evidence_generation, built_allocation_generation,
+                  built_source_consumption_generation, built_timing_generation,
+                  built_combo_identity_generation, built_assigned_stock_generation
+                FROM current_decision_projections
+                WHERE account IN ({placeholders})
+                """,
+                account_values,
+            ).fetchall()
+        heads_by_account = {str(row["account"]): dict(row) for row in heads}
+        generations_by_account = {
+            str(row["account"]): dict(row) for row in generations
+        }
+        projections_by_account = {
+            str(row["account"]): dict(row) for row in projections
+        }
+        return {
+            "source": dict(source) if source is not None else None,
+            "accounts": {
+                account: {
+                    "head": heads_by_account.get(account),
+                    "generation": generations_by_account.get(account),
+                    "projection": projections_by_account.get(account),
+                }
+                for account in account_values
+            },
+        }
+
+    def list_current_decision_lifecycle_fact_rows(
+        self,
+        *,
+        account: str,
+        target_lot_ids: Sequence[str] = (),
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read operational or currently referenced compact lifecycle facts."""
+
+        account_value = str(account or "").strip()
+        if not account_value or account_value != account_value.lower():
+            raise ValueError("current decision account must be lowercase")
+        lot_ids = tuple(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in target_lot_ids
+                if str(value or "").strip()
+            )
+        )
+        select_sql = """
+            SELECT lifecycle_case.case_id, lifecycle_case.account,
+                   lifecycle_case.status, lifecycle_case.decision_fact_json,
+                   lifecycle_case.decision_fact_sha256,
+                   evidence_revision.revision AS evidence_revision,
+                   evidence_revision.evidence_count AS evidence_count,
+                   admission.semantic_schema AS admitted_semantic_schema,
+                   admission.semantic_fingerprint AS admitted_semantic_fingerprint,
+                   admission.evidence_id AS admitted_evidence_id
+            FROM trade_lifecycle_cases AS lifecycle_case
+            LEFT JOIN trade_lifecycle_evidence_revisions AS evidence_revision
+              ON evidence_revision.case_id = lifecycle_case.case_id
+            LEFT JOIN trade_lifecycle_settlement_admission_heads AS admission
+              ON admission.case_id = lifecycle_case.case_id
+        """
+        rows_by_case: dict[str, sqlite3.Row] = {}
+        with self._optional_conn(conn) as active_conn:
+            for row in active_conn.execute(
+                select_sql
+                + """
+                WHERE lifecycle_case.account = ?
+                  AND lifecycle_case.status IN (
+                    'pending', 'waiting_settlement_evidence', 'needs_review',
+                    'partially_resolved', 'conflict'
+                  )
+                ORDER BY lifecycle_case.case_id ASC
+                """,
+                (account_value,),
+            ).fetchall():
+                rows_by_case[str(row["case_id"])] = row
+            if lot_ids:
+                placeholders = ",".join("?" for _value in lot_ids)
+                for row in active_conn.execute(
+                    select_sql
+                    + f"""
+                    JOIN trade_lifecycle_case_targets AS target
+                      ON target.case_id = lifecycle_case.case_id
+                    WHERE target.account = ?
+                      AND target.target_lot_id IN ({placeholders})
+                    ORDER BY lifecycle_case.case_id ASC
+                    """,
+                    (account_value, *lot_ids),
+                ).fetchall():
+                    rows_by_case[str(row["case_id"])] = row
+        return [dict(rows_by_case[key]) for key in sorted(rows_by_case)]
+
+    def get_current_decision_lifecycle_fact_state(
+        self,
+        case_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        case_id_value = str(case_id or "").strip()
+        if not case_id_value:
+            raise ValueError("current decision lifecycle case id is required")
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT lifecycle_case.case_id, lifecycle_case.account,
+                       lifecycle_case.status,
+                       lifecycle_case.decision_fact_json,
+                       lifecycle_case.decision_fact_sha256,
+                       COALESCE(evidence_revision.revision, 0)
+                         AS evidence_revision,
+                       COALESCE(evidence_revision.evidence_count, 0)
+                         AS evidence_count,
+                       admission.semantic_schema AS admitted_semantic_schema,
+                       admission.semantic_fingerprint
+                         AS admitted_semantic_fingerprint,
+                       admission.evidence_id AS admitted_evidence_id
+                FROM trade_lifecycle_cases AS lifecycle_case
+                LEFT JOIN trade_lifecycle_evidence_revisions
+                  AS evidence_revision
+                  ON evidence_revision.case_id = lifecycle_case.case_id
+                LEFT JOIN trade_lifecycle_settlement_admission_heads
+                  AS admission
+                  ON admission.case_id = lifecycle_case.case_id
+                WHERE lifecycle_case.case_id = ?
+                """,
+                (case_id_value,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def update_trade_lifecycle_case_decision_fact(
+        self,
+        *,
+        case_id: str,
+        account: str,
+        status: str,
+        decision_fact_json: str,
+        decision_fact_sha256: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        case_id_value = str(case_id or "").strip()
+        account_value = str(account or "").strip()
+        status_value = str(status or "").strip().lower()
+        if (
+            not case_id_value
+            or not account_value
+            or account_value != account_value.lower()
+            or not status_value
+        ):
+            raise ValueError("current decision lifecycle fact binding is invalid")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT account, status, decision_fact_json,
+                       decision_fact_sha256
+                FROM trade_lifecycle_cases
+                WHERE case_id = ?
+                """,
+                (case_id_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"lifecycle case not found: {case_id_value}")
+            if row["account"] != account_value or row["status"] != status_value:
+                raise ValueError("current decision lifecycle fact binding changed")
+            if (
+                row["decision_fact_json"] == decision_fact_json
+                and row["decision_fact_sha256"] == decision_fact_sha256
+            ):
+                return False
+            cursor = active_conn.execute(
+                """
+                UPDATE trade_lifecycle_cases
+                SET decision_fact_json = ?, decision_fact_sha256 = ?
+                WHERE case_id = ? AND account = ? AND status = ?
+                """,
+                (
+                    decision_fact_json,
+                    decision_fact_sha256,
+                    case_id_value,
+                    account_value,
+                    status_value,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise ValueError("current decision lifecycle fact write lost ownership")
+        return True
+
+    def upsert_current_decision_projection(
+        self,
+        row: Mapping[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        values = dict(row or {})
+        columns = (
+            "account",
+            "projection_schema",
+            "projector_implementation_fingerprint",
+            "built_position_source_generation",
+            "built_position_lots_generation",
+            "position_lots_fingerprint",
+            "built_decision_input_generation",
+            "built_case_generation",
+            "built_evidence_generation",
+            "built_allocation_generation",
+            "built_source_consumption_generation",
+            "built_timing_generation",
+            "built_combo_identity_generation",
+            "built_assigned_stock_generation",
+            "decision_state_fingerprint",
+            "payload_sha256",
+            "payload_json",
+            "updated_at_ms",
+        )
+        if set(values) != set(columns):
+            raise ValueError("current decision projection row shape is invalid")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            cursor = active_conn.execute(
+                """
+                INSERT INTO current_decision_projections (
+                  account, projection_schema,
+                  projector_implementation_fingerprint,
+                  built_position_source_generation,
+                  built_position_lots_generation, position_lots_fingerprint,
+                  built_decision_input_generation, built_case_generation,
+                  built_evidence_generation, built_allocation_generation,
+                  built_source_consumption_generation, built_timing_generation,
+                  built_combo_identity_generation,
+                  built_assigned_stock_generation, decision_state_fingerprint,
+                  payload_sha256, payload_json, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                  projection_schema = excluded.projection_schema,
+                  projector_implementation_fingerprint =
+                    excluded.projector_implementation_fingerprint,
+                  built_position_source_generation =
+                    excluded.built_position_source_generation,
+                  built_position_lots_generation =
+                    excluded.built_position_lots_generation,
+                  position_lots_fingerprint = excluded.position_lots_fingerprint,
+                  built_decision_input_generation =
+                    excluded.built_decision_input_generation,
+                  built_case_generation = excluded.built_case_generation,
+                  built_evidence_generation = excluded.built_evidence_generation,
+                  built_allocation_generation = excluded.built_allocation_generation,
+                  built_source_consumption_generation =
+                    excluded.built_source_consumption_generation,
+                  built_timing_generation = excluded.built_timing_generation,
+                  built_combo_identity_generation =
+                    excluded.built_combo_identity_generation,
+                  built_assigned_stock_generation =
+                    excluded.built_assigned_stock_generation,
+                  decision_state_fingerprint = excluded.decision_state_fingerprint,
+                  payload_sha256 = excluded.payload_sha256,
+                  payload_json = excluded.payload_json,
+                  updated_at_ms = excluded.updated_at_ms
+                WHERE current_decision_projections.payload_sha256
+                      IS NOT excluded.payload_sha256
+                   OR current_decision_projections.payload_json
+                      IS NOT excluded.payload_json
+                """,
+                tuple(values[column] for column in columns),
+            )
+        return int(cursor.rowcount or 0) == 1
 
     def list_trade_lifecycle_due_candidates(
         self,
@@ -3076,9 +4300,16 @@ class SQLiteOptionPositionsRepository:
         payload = dict(case or {})
         case_id = str(payload.get("case_id") or "").strip()
         case_key = str(payload.get("case_key") or "").strip()
-        account = str(payload.get("account") or "").strip().lower()
-        target_contracts = payload.get("target_contracts_by_lot")
-        if not case_id or not case_key or not account or not isinstance(target_contracts, dict) or not target_contracts:
+        account = str(payload.get("account") or "").strip()
+        if not account or account != account.lower():
+            raise ValueError("lifecycle_case.v2 requires lowercase account")
+        payload["account"] = account
+        _target_lot_ids, target_contracts, target_rows = _normalized_lifecycle_case_targets(
+            payload,
+            case_id=case_id,
+            account=account,
+        )
+        if not case_id or not case_key or not target_contracts or len(target_rows) != len(target_contracts):
             raise ValueError("lifecycle_case.v2 requires case id, key, account and target manifest")
         immutable = _lifecycle_case_immutable_payload(payload)
         ts = int(now_ms())
@@ -3090,7 +4321,10 @@ class SQLiteOptionPositionsRepository:
             ).fetchone()
             if existing is not None:
                 existing_payload = json.loads(str(existing["raw_json"]) or "{}")
-                if not isinstance(existing_payload, dict) or _lifecycle_case_immutable_payload(existing_payload) != immutable:
+                if (
+                    not isinstance(existing_payload, dict)
+                    or _lifecycle_case_immutable_payload(existing_payload) != immutable
+                ):
                     raise ValueError(f"lifecycle case immutable conflict for case_id={case_id}")
                 return False
             active_conn.execute(
@@ -3115,7 +4349,7 @@ class SQLiteOptionPositionsRepository:
                     _json_text(payload.get("contract_key")),
                     str(payload.get("status") or "waiting_settlement_evidence").strip().lower(),
                     str(payload.get("decision_type") or "").strip().lower() or None,
-                    json.dumps(sorted(str(item) for item in target_contracts), ensure_ascii=False),
+                    json.dumps(sorted(target_contracts), ensure_ascii=False),
                     json.dumps(target_contracts, ensure_ascii=False, sort_keys=True),
                     int(payload["observation_start_ms"]) if payload.get("observation_start_ms") is not None else None,
                     int(payload["pending_until_ms"]) if payload.get("pending_until_ms") is not None else None,
@@ -3123,6 +4357,14 @@ class SQLiteOptionPositionsRepository:
                     ts,
                     raw_json,
                 ),
+            )
+            active_conn.executemany(
+                """
+                INSERT INTO trade_lifecycle_case_targets (
+                  case_id, account, target_lot_id, target_contracts
+                ) VALUES (?, ?, ?, ?)
+                """,
+                target_rows,
             )
         return True
 
@@ -3155,12 +4397,11 @@ class SQLiteOptionPositionsRepository:
                     if isinstance(payload.get("derived_summary"), dict)
                     else {}
                 )
-                if str(
-                    current_summary.get("state_fingerprint") or ""
-                ).strip() != str(expected_state_fingerprint or "").strip():
-                    raise ValueError(
-                        "lifecycle case state fingerprint compare-and-set failed"
-                    )
+                if (
+                    str(current_summary.get("state_fingerprint") or "").strip()
+                    != str(expected_state_fingerprint or "").strip()
+                ):
+                    raise ValueError("lifecycle case state fingerprint compare-and-set failed")
             updated = {
                 **payload,
                 "status": status_value,
@@ -5883,6 +7124,45 @@ class SQLiteOptionPositionsRepository:
                 (account_value,),
             ).fetchall()
         ]
+        evidence_revisions = {
+            str(row["case_id"]): {
+                "revision": int(row["revision"]),
+                "evidence_count": (
+                    int(row["evidence_count"])
+                    if row["evidence_count"] is not None
+                    else None
+                ),
+            }
+            for row in conn.execute(
+                """
+                SELECT revision.case_id, revision.revision,
+                       revision.evidence_count
+                FROM trade_lifecycle_evidence_revisions AS revision
+                JOIN trade_lifecycle_cases AS lifecycle_case
+                  ON lifecycle_case.case_id = revision.case_id
+                WHERE lifecycle_case.account = ?
+                ORDER BY revision.case_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        }
+        admission_heads = {
+            str(row["case_id"]): dict(row)
+            for row in conn.execute(
+                """
+                SELECT admission.case_id, admission.semantic_schema,
+                       admission.semantic_fingerprint, admission.evidence_id,
+                       admission.evidence_created_at_ms,
+                       admission.updated_at_ms
+                FROM trade_lifecycle_settlement_admission_heads AS admission
+                JOIN trade_lifecycle_cases AS lifecycle_case
+                  ON lifecycle_case.case_id = admission.case_id
+                WHERE lifecycle_case.account = ?
+                ORDER BY admission.case_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        }
         assigned_stock_events = (
             list(shared_assigned_stock_events)
             if shared_assigned_stock_events is not None
@@ -5921,6 +7201,8 @@ class SQLiteOptionPositionsRepository:
             "account_lifecycle_allocations": allocations,
             "account_lifecycle_source_consumptions": source_claims,
             "account_lifecycle_timing_policies": timing_policies,
+            "account_lifecycle_evidence_revisions": evidence_revisions,
+            "account_lifecycle_settlement_admission_heads": admission_heads,
             "account_assigned_stock_events": [
                 row
                 for row in assigned_stock_events

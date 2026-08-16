@@ -16,6 +16,14 @@ from domain.domain.lifecycle_allocation import (
 
 LIFECYCLE_CASE_SCHEMA = "lifecycle_case.v2"
 PENDING_ELAPSED_HOURS = 72
+ASSIGNMENT_WAITING_STATUS = "waiting_settlement_evidence"
+PENDING_STATUSES = {
+    "pending",
+    ASSIGNMENT_WAITING_STATUS,
+    "needs_review",
+    "partially_resolved",
+}
+FINAL_STATUSES = {"ledger_written"}
 
 MARKET_TIMEZONES = {
     "US": "America/New_York",
@@ -417,10 +425,13 @@ def _read_model(
 
 
 __all__ = [
+    "ASSIGNMENT_WAITING_STATUS",
+    "FINAL_STATUSES",
     "LIFECYCLE_CASE_SCHEMA",
     "LifecycleReadModel",
     "MARKET_TIMEZONES",
     "PENDING_ELAPSED_HOURS",
+    "PENDING_STATUSES",
     "build_lifecycle_case",
     "derive_lifecycle_read_model",
     "expiration_observation_start_ms",

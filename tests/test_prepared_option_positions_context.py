@@ -174,6 +174,15 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         _rates,
     )
 
+    def _current_read_fails(*_args, **_kwargs):
+        raise RuntimeError("shadow unavailable")
+
+    monkeypatch.setattr(
+        mod,
+        "read_current_decision_projection",
+        _current_read_fails,
+    )
+
     batch = prepare_option_positions_contexts(
         base=tmp_path,
         run_id=run_id,
@@ -212,6 +221,15 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         assert loaded[account]["raw_selected_count"] == 0
         assert loaded[account]["open_positions_min"] == []
         assert loaded[account]["decision_snapshot_status"] == "trusted"
+        assert loaded[account]["current_decision_shadow"] == loaded[account][
+            "decision_state_snapshot"
+        ]["current_decision_shadow"]
+        assert loaded[account]["current_decision_shadow"]["status"] == (
+            "not_available"
+        )
+        assert loaded[account]["current_decision_shadow"]["reason"] == (
+            "current_projection_read_failed:RuntimeError"
+        )
 
     assert loaded["lx"]["as_of_utc"] == loaded["sy"]["as_of_utc"]
     assert (

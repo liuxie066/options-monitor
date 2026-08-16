@@ -384,7 +384,10 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
     assert state_path.read_bytes() == original_state
 
     with closing(sqlite3.connect(ledger_path)) as conn:
-        with conn:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="lifecycle case JSON is invalid",
+        ), conn:
             conn.execute(
                 """
                 INSERT INTO trade_lifecycle_cases (
@@ -412,11 +415,12 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
                 ),
             )
 
-    with pytest.raises(json.JSONDecodeError):
-        preview_trade_intake_reconciliation_from_sqlite(
-            state_path=state_path,
-            sqlite_path=ledger_path,
-        )
+    out = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path,
+        sqlite_path=ledger_path,
+    )
+    assert out["available"] is True
+    assert out["delegated_lifecycle_pending_count"] == 1
     assert state_path.read_bytes() == original_state
 
 

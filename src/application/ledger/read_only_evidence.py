@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from src.application.ledger.event_codec import trade_event_application_payload
+from src.application.ledger.sqlite_row_codec import (
+    read_current_decision_projection_inputs_from_conn,
+)
 
 
 def open_trade_reconciliation_evidence_repo(
@@ -40,6 +43,27 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         with closing(self._connect()) as conn:
             rows = self._read_position_lots(conn)
         return rows
+
+    def read_current_decision_projection_inputs(
+        self,
+        account: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+        include_identities: bool = True,
+    ) -> dict[str, Any]:
+        if conn is not None:
+            return read_current_decision_projection_inputs_from_conn(
+                conn,
+                account,
+                include_identities=include_identities,
+            )
+        with closing(self._connect()) as active_conn:
+            active_conn.execute("BEGIN")
+            return read_current_decision_projection_inputs_from_conn(
+                active_conn,
+                account,
+                include_identities=include_identities,
+            )
 
     def _read_position_lots(
         self,

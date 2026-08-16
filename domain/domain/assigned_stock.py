@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from domain.domain.fee_calc import (
@@ -12,9 +13,17 @@ from domain.domain.fee_calc import (
     calc_futu_stock_fee,
     extract_actual_fees,
 )
-from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger import (
+    ContractKey,
+    OptionEconomicAllocation,
+    PositionLot,
+    TradeEvent,
+)
 from domain.domain.ledger.events import validate_trade_event
-from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
+from domain.domain.ledger.position_fields import (
+    POSITION_LOT_STRATEGY_PATCH_FIELDS,
+    strategy_metadata_fields_from_payload,
+)
 from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -25,6 +34,12 @@ from domain.domain.option_position_identity import (
     normalize_option_type,
 )
 from domain.domain.trade_contract_identity import normalize_trade_side
+from domain.domain.performance.models import (
+    OptionInstrumentKey,
+    ValuationMarkFact,
+    quantize_money,
+    select_valuation_mark,
+)
 
 
 def safe_float(value: Any) -> float | None:
@@ -34,6 +49,36 @@ def safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _positive_integral(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not number.is_finite() or number <= 0 or number != number.to_integral_value():
+        return None
+    return int(number)
+
+
+def _positive_integer(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _nonnegative_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() and number >= 0 else None
 
 
 _DAY_MS = 86_400_000
@@ -128,6 +173,19 @@ def _event_stock_settlement(event: dict[str, Any]) -> dict[str, Any]:
     payload = _event_payload(event)
     raw = payload.get("stock_settlement")
     return raw if isinstance(raw, dict) else {}
+
+
+def _settlement_stock_side(
+    close_type: str,
+    option_type: str,
+    position_side: str,
+) -> str | None:
+    return {
+        ("assignment", "put", "short"): "buy",
+        ("assignment", "call", "short"): "sell",
+        ("exercise", "call", "long"): "buy",
+        ("exercise", "put", "long"): "sell",
+    }.get((close_type, option_type, position_side))
 
 def _voided_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
@@ -229,21 +287,6 @@ def _stock_event_shares(event: dict[str, Any]) -> int:
 
 def _stock_event_price(event: dict[str, Any]) -> float | None:
     return safe_float(event.get("price") if event.get("price") not in (None, "") else event.get("avg_price"))
-
-
-def _source_option_lot_id(event: dict[str, Any], option_rows: list[dict[str, Any]]) -> str | None:
-    explicit = str(event.get("target_lot_id") or "").strip()
-    if explicit:
-        return explicit
-    payload = _event_payload(event)
-    for key in ("target_lot_id", "record_id", "close_target_source_event_id"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    open_ids = sorted({str(row.get("open_event_id") or "").strip() for row in option_rows if row.get("open_event_id")})
-    if len(open_ids) == 1:
-        return open_ids[0]
-    return None
 
 def _source_option_open_event_id(event: dict[str, Any], option_rows: list[dict[str, Any]]) -> str | None:
     open_ids = sorted({str(row.get("open_event_id") or "").strip() for row in option_rows if row.get("open_event_id")})
@@ -427,7 +470,7 @@ def _option_fee_fact(event: dict[str, Any], *, component: str) -> dict[str, Any]
         "reason": "standard_option_fee_schedule_estimate",
     }
 
-def _stock_fee_fact(
+def assigned_stock_fee_fact(
     value: dict[str, Any],
     *,
     component: str,
@@ -533,6 +576,10 @@ def _stock_fee_fact(
         "reason": "standard_fixed_stock_fee_schedule_estimate",
     }
 
+
+_stock_fee_fact = assigned_stock_fee_fact
+
+
 def _scale_fee_fact(fact: dict[str, Any], ratio: float) -> dict[str, Any]:
     return {**fact, "amount": _round_money(float(fact.get("amount") or 0.0) * max(0.0, ratio))}
 
@@ -611,33 +658,12 @@ def _minimum_available_shares(
         for checkpoint in checkpoints
     )
 
-def _mixed_assigned_stock_keys(
-    lots_by_id: dict[str, dict[str, Any]],
-    stock_holdings: list[dict[str, Any]] | None,
-) -> set[tuple[str, str, str]]:
-    assigned: dict[tuple[str, str, str], int] = {}
-    for lot in lots_by_id.values():
-        key = (str(lot.get("account") or ""), str(lot.get("broker") or ""), str(lot.get("symbol") or ""))
-        assigned[key] = assigned.get(key, 0) + int(lot.get("shares_remaining") or 0)
-    mixed: set[tuple[str, str, str]] = set()
-    for holding in stock_holdings or []:
-        key = (
-            normalize_account(holding.get("account")) or "",
-            normalize_broker(holding.get("broker")) or "",
-            norm_symbol(holding.get("symbol") or ""),
-        )
-        shares = int(abs(float(holding.get("shares") or holding.get("quantity") or 0)))
-        if shares > assigned.get(key, 0):
-            mixed.add(key)
-    return mixed
-
 def _attribute_covered_calls(
     lots_by_id: dict[str, dict[str, Any]],
     *,
     trade_events: list[dict[str, Any]],
     option_open_lots: list[dict[str, Any]],
     assignment_option_rows: list[dict[str, Any]],
-    stock_holdings: list[dict[str, Any]] | None,
     as_of_ms: int,
     review_rows: list[dict[str, Any]],
     allocation_rows: list[dict[str, Any]],
@@ -652,7 +678,6 @@ def _attribute_covered_calls(
         open_id = str(row.get("open_event_id") or "").strip()
         if open_id:
             realized_by_open.setdefault(open_id, []).append(row)
-    mixed_keys = _mixed_assigned_stock_keys(lots_by_id, stock_holdings)
     reservations: dict[str, list[tuple[int, int, int]]] = {}
 
     calls = sorted(
@@ -709,13 +734,47 @@ def _attribute_covered_calls(
         ]
         if not candidates and not explicit_id:
             continue
-        allocation_status = "explicit" if explicit_id else "derived_fifo"
+        group_id = str(
+            call.get("strategy_group_id")
+            or _event_strategy_metadata(open_event).get("strategy_group_id")
+            or ""
+        ).strip()
+        linkage_basis = "stock_lot_id" if explicit_id else "strategy_group"
         if explicit_id:
             candidates = [lot for lot in candidates if str(lot.get("stock_lot_id") or "") == explicit_id]
-        elif key in mixed_keys:
-            candidates = []
-            allocation_status = "unallocated"
+        elif group_id:
+            candidates = [
+                lot
+                for lot in candidates
+                if str(lot.get("strategy_group_id") or "") == group_id
+            ]
+        else:
+            review_rows.append(
+                _assigned_stock_review_row(
+                    status="covered_call_unallocated",
+                    event_id=open_id,
+                    account=key[0],
+                    broker=key[1],
+                    symbol=key[2],
+                    message="covered call is missing assigned-stock linkage identity",
+                    details={"required_shares": required_shares},
+                )
+            )
+            continue
         candidates.sort(key=lambda lot: (int(lot.get("assigned_at_ms") or 0), str(lot.get("stock_lot_id") or "")))
+        if len(candidates) != 1:
+            review_rows.append(
+                _assigned_stock_review_row(
+                    status="covered_call_unallocated",
+                    event_id=open_id,
+                    account=key[0],
+                    broker=key[1],
+                    symbol=key[2],
+                    message="covered call assigned-stock linkage is not unique",
+                    details={"candidate_count": len(candidates)},
+                )
+            )
+            continue
 
         available: list[tuple[dict[str, Any], int]] = []
         for lot in candidates:
@@ -757,7 +816,7 @@ def _attribute_covered_calls(
                 float(lot.get("_covered_call_unrealized_pnl") or 0.0) + float(open_unrealized or 0.0) * ratio
             )
             lot["_covered_call_fee_facts"].extend(_scale_fee_fact(fact, ratio) for fact in fee_facts)
-            lot["_covered_call_statuses"].add(allocation_status)
+            lot["_covered_call_statuses"].add("explicit")
             lot["_covered_call_complete"] = bool(lot.get("_covered_call_complete")) and economics_complete
             evidence_fact_id = str(call.get("valuation_evidence_fact_id") or "").strip()
             if evidence_fact_id:
@@ -775,7 +834,8 @@ def _attribute_covered_calls(
                     "shares": allocated,
                     "start_at_ms": opened_at,
                     "end_at_ms": reservation_end,
-                    "allocation_status": allocation_status,
+                    "allocation_status": "explicit",
+                    "linkage_basis": linkage_basis,
                 }
             )
             remaining_shares -= allocated
@@ -880,6 +940,148 @@ def _sale_row_in_month(row: dict[str, Any], month: str | None) -> bool:
 def _review_row_in_month(row: dict[str, Any], month: str | None) -> bool:
     return not month or row.get("month") in (None, month)
 
+
+def assigned_stock_trade_event_row(event: TradeEvent) -> dict[str, Any]:
+    is_open = event.event_type == "open"
+    is_close = event.event_type in {"close", "expire_close", "assignment", "exercise"}
+    side = (
+        "sell"
+        if (is_open and event.contract_key.position_side == "short")
+        or (is_close and event.contract_key.position_side == "long")
+        else "buy"
+    )
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "event_time_ms": event.event_time_ms,
+        "trade_time_ms": event.event_time_ms,
+        "target_event_id": event.target_event_id,
+        "contract_key": event.contract_key.to_dict(),
+        "broker": event.contract_key.broker,
+        "account": event.contract_key.account,
+        "symbol": event.contract_key.underlying_symbol,
+        "option_type": event.contract_key.option_type,
+        "side": side,
+        "position_effect": (
+            "open" if is_open else "close" if is_close else event.event_type
+        ),
+        "contracts": event.contracts,
+        "price": event.price,
+        "strike": event.contract_key.strike,
+        "expiration_ymd": event.contract_key.expiration_ymd,
+        "currency": event.currency,
+        "source": event.source,
+        "multiplier": event.multiplier,
+        "fees": event.fees,
+        "target_lot_id": event.target_lot_id,
+        "raw_payload": dict(event.raw_payload or {}),
+    }
+
+
+def assigned_stock_allocation_row(
+    allocation: OptionEconomicAllocation,
+) -> dict[str, Any]:
+    return {
+        "event_id": allocation.close_event_id,
+        "open_event_id": allocation.open_event_id,
+        "source_record_id": allocation.target_lot_id,
+        "close_type": allocation.close_type,
+        "contracts_closed": allocation.contracts,
+        "realized_pnl_gross": float(allocation.realized_pnl_gross),
+        "realized_pnl_net": (
+            None
+            if allocation.realized_pnl_net is None
+            else float(allocation.realized_pnl_net)
+        ),
+        "closed_at": allocation.closed_at_ms,
+    }
+
+
+def assigned_stock_position_lot_row(
+    lot: PositionLot,
+    *,
+    current_fields: Mapping[str, Any] | None = None,
+    valuation_marks: Sequence[ValuationMarkFact] = (),
+    at_ms: int,
+) -> dict[str, Any]:
+    row = {
+        "record_id": lot.lot_id,
+        "open_event_id": lot.open_event_id,
+        "opened_at": lot.opened_at_ms,
+        "account": lot.contract_key.account,
+        "broker": lot.contract_key.broker,
+        "symbol": lot.contract_key.underlying_symbol,
+        "option_type": lot.contract_key.option_type,
+        "position_side": lot.contract_key.position_side,
+        "currency": lot.currency,
+        "contracts": lot.contracts_opened,
+        "remaining": lot.contracts_open,
+        "price": lot.premium_open,
+        "multiplier": lot.multiplier,
+        "strike": lot.contract_key.strike,
+        "expiration_ymd": lot.contract_key.expiration_ymd,
+    }
+    for field in POSITION_LOT_STRATEGY_PATCH_FIELDS:
+        if current_fields is not None and field in current_fields:
+            value = current_fields[field]
+            row[field] = dict(value) if isinstance(value, dict) else value
+    if int(lot.contracts_open) <= 0:
+        row.update(
+            unrealized_pnl_gross=0.0,
+            valuation_status="not_required",
+            valuation_evidence_fact_id=None,
+        )
+        return row
+    try:
+        instrument = OptionInstrumentKey.from_contract_key(
+            lot.contract_key,
+            currency=lot.currency,
+            multiplier=lot.multiplier,
+        )
+        selection = select_valuation_mark(
+            list(valuation_marks),
+            instrument_key=instrument.instrument_key,
+            at_ms=at_ms,
+        )
+    except (TypeError, ValueError):
+        selection = None
+    fact = selection.fact if selection is not None else None
+    if fact is None:
+        row.update(
+            unrealized_pnl_gross=None,
+            valuation_status=(
+                "missing_mark" if selection is None else selection.status
+            ),
+            valuation_evidence_fact_id=None,
+        )
+        return row
+    open_value = (
+        float(lot.premium_open) * float(lot.multiplier) * int(lot.contracts_open)
+    )
+    mark_value = float(fact.price) * float(lot.multiplier) * int(lot.contracts_open)
+    gross = (
+        open_value - mark_value
+        if lot.contract_key.position_side == "short"
+        else mark_value - open_value
+    )
+    row.update(
+        unrealized_pnl_gross=float(quantize_money(gross)),
+        valuation_status=selection.status,
+        valuation_evidence_fact_id=fact.fact_id,
+    )
+    return row
+
+
+def assigned_stock_event_time_ms(item: Mapping[str, Any]) -> int:
+    for key in ("trade_time_ms", "event_time_ms", "sold_at_ms", "closed_at_ms"):
+        try:
+            value = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
 def project_assigned_stock_lifecycle(
     trade_events: list[dict[str, Any]],
     *,
@@ -900,15 +1102,24 @@ def project_assigned_stock_lifecycle(
     }
     option_rows_by_event: dict[str, list[dict[str, Any]]] = {}
     for row in assignment_option_rows:
-        if str(row.get("close_type") or "").strip().lower() != "assignment":
+        if str(row.get("close_type") or "").strip().lower() not in {
+            "assignment",
+            "exercise",
+        }:
             continue
         event_id = str(row.get("event_id") or row.get("record_id") or "").strip()
         if event_id:
             option_rows_by_event.setdefault(event_id, []).append(row)
+    option_lots_by_id: dict[str, list[dict[str, Any]]] = {}
+    for lot in option_open_lots:
+        record_id = str(lot.get("record_id") or "").strip()
+        if record_id:
+            option_lots_by_id.setdefault(record_id, []).append(lot)
 
     lots_by_id: dict[str, dict[str, Any]] = {}
     review_rows: list[dict[str, Any]] = []
     warnings: list[str] = []
+    settlement_sales: list[dict[str, Any]] = []
     for event in _active_trade_events(trade_events):
         if not _passes_report_filter(event, account_norm, broker_norm):
             continue
@@ -924,7 +1135,12 @@ def project_assigned_stock_lifecycle(
         option_type = normalize_option_type(event.get("option_type")) or "-"
         position_side = _event_position_side(event) or str(event.get("position_side") or "").strip().lower()
         currency = normalize_currency(event.get("currency")) or "USD"
-        if lifecycle_close_type != "assignment" or option_type != "put" or position_side != "short":
+        expected_stock_side = _settlement_stock_side(
+            lifecycle_close_type,
+            option_type,
+            position_side,
+        )
+        if expected_stock_side is None:
             review_rows.append(
                 _assigned_stock_review_row(
                     status="incomplete_inventory_basis",
@@ -947,12 +1163,37 @@ def project_assigned_stock_lifecycle(
         stock_side = normalize_trade_side(stock.get("side") or stock.get("stock_side")) if stock else ""
         raw_shares = stock.get("shares") if stock.get("shares") not in (None, "") else stock.get("stock_qty")
         raw_price = stock.get("price") if stock.get("price") not in (None, "") else stock.get("stock_price")
-        try:
-            shares_opened = int(abs(float(raw_shares or 0)))
-        except Exception:
-            shares_opened = 0
-        assignment_price = safe_float(raw_price)
-        if not stock or stock_side != "buy" or shares_opened <= 0 or assignment_price is None:
+        shares_opened = _positive_integer(raw_shares)
+        assignment_price_number = _nonnegative_decimal(raw_price)
+        assignment_price = (
+            float(assignment_price_number)
+            if assignment_price_number is not None
+            else None
+        )
+        raw_stock_fee = (
+            stock.get("fees")
+            if stock.get("fees") is not None
+            else stock.get("fee")
+        )
+        raw_settlement_at = (
+            stock.get("event_time_ms")
+            if stock.get("event_time_ms") is not None
+            else stock.get("trade_time_ms")
+            if stock.get("trade_time_ms") is not None
+            else event_at
+        )
+        settlement_at = _positive_integer(raw_settlement_at)
+        if (
+            not stock
+            or stock_side != expected_stock_side
+            or shares_opened is None
+            or assignment_price is None
+            or (
+                raw_stock_fee is not None
+                and _nonnegative_decimal(raw_stock_fee) is None
+            )
+            or settlement_at is None
+        ):
             review_rows.append(
                 _assigned_stock_review_row(
                     status="missing_stock_settlement",
@@ -961,17 +1202,148 @@ def project_assigned_stock_lifecycle(
                     account=account,
                     broker=broker,
                     symbol=symbol,
-                    message="assignment event is missing confirmed buy-side stock settlement facts",
+                    message=(
+                        "assignment/exercise event is missing confirmed "
+                        f"{expected_stock_side}-side stock settlement facts"
+                    ),
                     details={"stock_settlement": dict(stock or {})},
                 )
             )
             continue
+        event_at = settlement_at
+        event_month = month_from_ms(settlement_at)
         option_rows = option_rows_by_event.get(event_id, [])
+        contracts = _positive_integer(event.get("contracts"))
+        multiplier = _positive_integral(event.get("multiplier"))
+        allocation = option_rows[0] if len(option_rows) == 1 else None
+        allocation_contracts = (
+            _positive_integer(allocation.get("contracts_closed"))
+            if allocation is not None
+            else None
+        )
+        source_option_lot_id = (
+            str(allocation.get("source_record_id") or "").strip()
+            if allocation is not None
+            else None
+        ) or None
+        explicit_option_lot_id = str(
+            event.get("target_lot_id")
+            or _event_payload(event).get("target_lot_id")
+            or _event_payload(event).get("record_id")
+            or ""
+        ).strip()
+        source_option_lots = option_lots_by_id.get(source_option_lot_id or "", [])
+        source_option_lot = source_option_lots[0] if len(source_option_lots) == 1 else None
+        source_option_opened_at = (
+            _positive_integer(source_option_lot.get("opened_at"))
+            if source_option_lot is not None
+            else None
+        )
+        allocation_open_event_id = (
+            str(allocation.get("open_event_id") or "").strip()
+            if allocation is not None
+            else ""
+        )
+        source_option_open_event_id = (
+            str(source_option_lot.get("open_event_id") or "").strip()
+            if source_option_lot is not None
+            else ""
+        )
+        binding_error = None
+        if contracts is None or multiplier is None:
+            binding_error = "assignment/exercise contracts or multiplier is invalid"
+        elif shares_opened != contracts * multiplier:
+            binding_error = "assignment/exercise stock settlement quantity mismatch"
+        elif allocation is None or allocation_contracts != contracts:
+            binding_error = "assignment/exercise option allocation is incomplete"
+        elif str(allocation.get("close_type") or "").strip().lower() != lifecycle_close_type:
+            binding_error = "assignment/exercise option allocation type conflicts with terminal event"
+        elif source_option_lot_id is None or source_option_lot is None:
+            binding_error = "assignment/exercise option-lot binding is not unique"
+        elif (
+            not allocation_open_event_id
+            or allocation_open_event_id != source_option_open_event_id
+        ):
+            binding_error = "assignment/exercise option allocation open-event binding conflicts with final lot"
+        elif explicit_option_lot_id and explicit_option_lot_id != source_option_lot_id:
+            binding_error = "assignment/exercise option-lot binding conflicts with allocation"
+        elif (
+            normalize_account(source_option_lot.get("account")) != account
+            or normalize_broker(source_option_lot.get("broker")) != broker
+            or norm_symbol(source_option_lot.get("symbol") or "") != symbol
+            or normalize_currency(source_option_lot.get("currency")) != (
+                normalize_currency(stock.get("currency")) or currency
+            )
+            or normalize_option_type(source_option_lot.get("option_type")) != option_type
+            or str(source_option_lot.get("position_side") or "").strip().lower()
+            != position_side
+            or source_option_opened_at is None
+            or source_option_opened_at <= 0
+            or source_option_opened_at > settlement_at
+        ):
+            binding_error = "assignment/exercise final option lot is inconsistent"
+        if binding_error:
+            review_rows.append(
+                _assigned_stock_review_row(
+                    status="incomplete_inventory_basis",
+                    event_id=event_id,
+                    month=event_month,
+                    account=account,
+                    broker=broker,
+                    symbol=symbol,
+                    message=binding_error,
+                    details={
+                        "contracts": contracts,
+                        "multiplier": multiplier,
+                        "shares": shares_opened,
+                        "source_option_lot_id": source_option_lot_id,
+                    },
+                )
+            )
+            continue
+        if expected_stock_side == "sell":
+            payload = _event_payload(event)
+            target_stock_lot_id = next(
+                (
+                    str(source.get(key) or "").strip()
+                    for source in (stock, payload, event)
+                    for key in (
+                        "stock_lot_id",
+                        "target_stock_lot_id",
+                        "source_stock_lot_id",
+                    )
+                    if str(source.get(key) or "").strip()
+                ),
+                "",
+            )
+            strategy = _event_strategy_metadata(event)
+            strategy_group_id = (
+                strategy.get("strategy_group_id")
+                or source_option_lot.get("strategy_group_id")
+            )
+            settlement_sales.append(
+                {
+                    "event_type": "sale",
+                    "stock_event_id": event_id,
+                    "target_stock_lot_id": target_stock_lot_id,
+                    "strategy_group_id": strategy_group_id,
+                    "account": account,
+                    "broker": broker,
+                    "symbol": symbol,
+                    "side": "sell",
+                    "shares": shares_opened,
+                    "price": assignment_price,
+                    "currency": normalize_currency(stock.get("currency")) or currency,
+                    "fees": stock.get("fees") if stock.get("fees") is not None else stock.get("fee", 0),
+                    "fee_provenance": stock.get("fee_provenance"),
+                    "trade_time_ms": event_at,
+                    "source": f"option_{lifecycle_close_type}_stock_settlement",
+                    "_settlement_transition": True,
+                }
+            )
+            continue
         option_premium_attribution = _option_premium_attribution(option_rows)
-        if not option_rows:
-            warnings.append(f"{event_id or '(no event_id)'}: assignment has no option premium attribution row")
         stock_lot_id = _assigned_stock_lot_id(event_id)
-        source_option_lot_id = _source_option_lot_id(event, option_rows)
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))
@@ -1001,24 +1373,29 @@ def project_assigned_stock_lifecycle(
             }.items()
             if value not in (None, "", {})
         }
+        open_fee_component = f"{option_type}_open_option_fee"
+        close_fee_component = (
+            f"{option_type}_{lifecycle_close_type}_option_fee"
+        )
+        stock_fee_component = f"{lifecycle_close_type}_stock_fee"
         if source_open_event is not None:
             open_contracts = max(1, int(abs(float(source_open_event.get("contracts") or 0))))
             fee_facts.append(
                 _scale_fee_fact(
-                    _option_fee_fact(source_open_event, component="put_open_option_fee"),
+                    _option_fee_fact(source_open_event, component=open_fee_component),
                     assigned_contracts / open_contracts,
                 )
             )
         else:
-            fee_facts.append({"component": "put_open_option_fee", "basis": "missing", "amount": 0.0})
+            fee_facts.append({"component": open_fee_component, "basis": "missing", "amount": 0.0})
         close_contracts = max(1, int(abs(float(event.get("contracts") or 0))))
         fee_facts.append(
             _scale_fee_fact(
-                _option_fee_fact(event, component="put_assignment_option_fee"),
+                _option_fee_fact(event, component=close_fee_component),
                 assigned_contracts / close_contracts,
             )
         )
-        assignment_stock_fee = _stock_fee_fact(
+        assignment_stock_fee = assigned_stock_fee_fact(
             {
                 **stock,
                 "account": account,
@@ -1027,7 +1404,7 @@ def project_assigned_stock_lifecycle(
                 "currency": normalize_currency(stock.get("currency")) or currency,
                 "contracts": assigned_contracts,
             },
-            component="assignment_stock_fee",
+            component=stock_fee_component,
             transaction_kind="assignment",
         )
         fee_facts.append(assignment_stock_fee)
@@ -1078,10 +1455,21 @@ def project_assigned_stock_lifecycle(
             "_covered_call_evidence_fact_ids": set(),
         }
 
+    stock_events = sorted(
+        [
+            *settlement_sales,
+            *_normalize_assigned_stock_events(assigned_stock_events),
+        ],
+        key=lambda row: (
+            int(_stock_event_time_ms(row) or 0),
+            str(row.get("stock_event_id") or row.get("event_id") or ""),
+        ),
+    )
     seen_stock_events: set[str] = set()
-    for idx, sale in enumerate(_normalize_assigned_stock_events(assigned_stock_events), start=1):
+    for idx, sale in enumerate(stock_events, start=1):
         if _stock_event_type(sale) != "sale":
             continue
+        settlement_transition = bool(sale.get("_settlement_transition"))
         stock_event_id = _stock_event_id(sale, fallback_index=idx)
         if stock_event_id in seen_stock_events:
             review_rows.append(
@@ -1104,20 +1492,58 @@ def project_assigned_stock_lifecycle(
             continue
         if broker_norm and sale_broker_filter != broker_norm:
             continue
-        lot = lots_by_id.get(target_stock_lot_id)
         sale_month = _stock_event_month(sale)
         sale_at = _stock_event_time_ms(sale)
+        shares = _stock_event_shares(sale)
+        if settlement_transition and not target_stock_lot_id:
+            group_id = str(sale.get("strategy_group_id") or "").strip()
+            candidates = [
+                lot
+                for lot in lots_by_id.values()
+                if lot.get("account") == sale_account_filter
+                and lot.get("broker") == sale_broker_filter
+                and lot.get("symbol") == norm_symbol(sale.get("symbol") or "")
+                and lot.get("currency") == normalize_currency(sale.get("currency"))
+                and int(lot.get("shares_remaining") or 0) >= shares
+                and int(lot.get("assigned_at_ms") or 0) <= int(sale_at or 0)
+                and (not group_id or lot.get("strategy_group_id") == group_id)
+            ]
+            if len(candidates) == 1:
+                target_stock_lot_id = str(candidates[0]["stock_lot_id"])
+            else:
+                review_rows.append(
+                    _assigned_stock_review_row(
+                        status="incomplete_inventory_basis",
+                        event_id=stock_event_id,
+                        month=sale_month,
+                        account=sale_account_filter,
+                        broker=sale_broker_filter,
+                        symbol=norm_symbol(sale.get("symbol") or ""),
+                        message="assignment/exercise stock-lot binding is not unique",
+                        details={"candidate_count": len(candidates)},
+                    )
+                )
+                continue
+        lot = lots_by_id.get(target_stock_lot_id)
         if lot is None:
             review_rows.append(
                 _assigned_stock_review_row(
-                    status="manual_review_required",
+                    status=(
+                        "incomplete_inventory_basis"
+                        if settlement_transition
+                        else "manual_review_required"
+                    ),
                     stock_event_id=stock_event_id,
                     stock_lot_id=target_stock_lot_id or None,
                     month=sale_month,
                     account=normalize_account(sale.get("account")),
                     broker=normalize_broker(sale.get("broker")),
                     symbol=norm_symbol(sale.get("symbol") or ""),
-                    message="assigned stock sale must target an existing assigned stock lot",
+                    message=(
+                        "assignment/exercise stock settlement must target an existing assigned stock lot"
+                        if settlement_transition
+                        else "assigned stock sale must target an existing assigned stock lot"
+                    ),
                 )
             )
             continue
@@ -1126,9 +1552,12 @@ def project_assigned_stock_lifecycle(
         sale_broker = normalize_broker(sale.get("broker")) or lot.get("broker")
         sale_symbol = norm_symbol(sale.get("symbol") or lot.get("symbol") or "")
         sale_currency = normalize_currency(sale.get("currency")) or lot.get("currency")
-        shares = _stock_event_shares(sale)
         price = _stock_event_price(sale)
-        sale_fee_fact = _stock_fee_fact(sale, component="stock_sale_fee", transaction_kind="sale")
+        sale_fee_fact = assigned_stock_fee_fact(
+            sale,
+            component="stock_sale_fee",
+            transaction_kind="sale",
+        )
         fees = _round_money(sale_fee_fact.get("amount"))
         mismatch_fields = []
         if sale_side != "sell":
@@ -1182,7 +1611,8 @@ def project_assigned_stock_lifecycle(
         lot["assigned_stock_realized_pnl"] = _round_money(
             float(lot.get("assigned_stock_realized_pnl") or 0.0) + realized_pnl
         )
-        lot["sale_event_ids"].append(stock_event_id)
+        if not settlement_transition:
+            lot["sale_event_ids"].append(stock_event_id)
         if sale_month and sale_month not in lot["sale_months"]:
             lot["sale_months"].append(sale_month)
         lot["_fee_facts"].append(sale_fee_fact)
@@ -1233,7 +1663,6 @@ def project_assigned_stock_lifecycle(
         trade_events=_active_trade_events(trade_events),
         option_open_lots=option_open_lots,
         assignment_option_rows=assignment_option_rows,
-        stock_holdings=stock_holdings,
         as_of_ms=effective_as_of_ms,
         review_rows=review_rows,
         allocation_rows=covered_call_allocation_rows,
@@ -1556,4 +1985,11 @@ def _assigned_stock_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-__all__ = ["project_assigned_stock_lifecycle"]
+__all__ = [
+    "assigned_stock_allocation_row",
+    "assigned_stock_event_time_ms",
+    "assigned_stock_fee_fact",
+    "assigned_stock_position_lot_row",
+    "assigned_stock_trade_event_row",
+    "project_assigned_stock_lifecycle",
+]

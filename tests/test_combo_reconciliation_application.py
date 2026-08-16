@@ -11,6 +11,12 @@ from src.application.ledger.combo_reconciliation import (
     reject_post_trade_combo_pair,
     supersede_post_trade_combo_pair,
 )
+from src.application.ledger.current_decision_projection import (
+    build_current_decision_projection,
+    current_decision_projection_row,
+    empty_assigned_stock_fact,
+    read_current_decision_projection,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 
@@ -151,6 +157,27 @@ def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> No
         effective_now_ms=BASE_TIME_MS + 3_000,
     )
     proposal = reconciled["inferences"][0]
+    with repo._connect() as conn:  # noqa: SLF001 - migrated generation seed
+        conn.execute(
+            """
+            INSERT INTO current_decision_input_generations (
+              account, generation, case_generation, evidence_generation,
+              allocation_generation, source_consumption_generation,
+              timing_generation, combo_identity_generation,
+              assigned_stock_generation, updated_at_ms
+            ) VALUES ('lx', 0, 0, 0, 0, 0, 0, 0, 0, 1)
+            """
+        )
+    projection = build_current_decision_projection(
+        repo,
+        account="lx",
+        updated_at_ms=BASE_TIME_MS + 3_500,
+        assigned_stock_after=empty_assigned_stock_fact("lx"),
+        all_quality_case_facts=[],
+    )
+    repo.upsert_current_decision_projection(
+        current_decision_projection_row(projection)
+    )
     preview = adopt_post_trade_combo_pair(
         repo=repo,
         inference_id=proposal["inference_id"],
@@ -171,6 +198,12 @@ def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> No
         effective_now_ms=BASE_TIME_MS + 4_000,
     )
     assert adopted["membership"]["status"] == "exact"
+    assert adopted["decision_projection"]["statuses"] == {"lx": "published"}
+    assert read_current_decision_projection(
+        repo,
+        account="lx",
+        now_ms=BASE_TIME_MS + 4_000,
+    )["payload"]["combo"]["current_groups"][0]["status"] == "active_combo"
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "user_confirmed"
     assert len(repo.list_trade_events()) == 4
 
@@ -195,6 +228,14 @@ def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> No
         effective_now_ms=BASE_TIME_MS + 6_000,
     )
     assert superseded["membership"]["status"] != "exact"
+    assert superseded["decision_projection"]["statuses"] == {
+        "lx": "explicit_rebuild_required"
+    }
+    assert read_current_decision_projection(
+        repo,
+        account="lx",
+        now_ms=BASE_TIME_MS + 6_000,
+    )["status"] == "data_unavailable"
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "superseded"
     assert len(repo.list_trade_events()) == 6
 

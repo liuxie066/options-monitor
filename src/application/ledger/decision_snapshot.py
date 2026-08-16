@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import (
     DECISION_STATE_FINGERPRINT_SCHEMA,
@@ -23,6 +23,79 @@ from src.application.ledger.lifecycle_overlay import (
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 
 
+CURRENT_DECISION_SHADOW_SCHEMA = "current_decision_shadow.v1"
+CURRENT_DECISION_POSITION_FIELDS = frozenset(
+    {
+        "account",
+        "broker",
+        "cash_secured_amount",
+        "close_reason",
+        "close_type",
+        "contracts",
+        "contracts_closed",
+        "contracts_open",
+        "currency",
+        "expiration",
+        "expiration_ymd",
+        "last_action_at",
+        "leg_role",
+        "multiplier",
+        "opened_at",
+        "option_type",
+        "position_id",
+        "premium",
+        "side",
+        "source_event_id",
+        "status",
+        "strategy",
+        "strategy_group_id",
+        "strategy_snapshot",
+        "strike",
+        "symbol",
+        "underlying_share_locked",
+        "yield_enhancement_mode",
+    }
+)
+CURRENT_DECISION_LIFECYCLE_FIELDS = frozenset(
+    {
+        "actionable",
+        "close_reason",
+        "closure_fact",
+        "lifecycle_case_id",
+        "lifecycle_case_ids",
+        "lifecycle_evidence_status",
+        "lifecycle_generation_token",
+        "lifecycle_reason_codes",
+        "lifecycle_state",
+        "observation_start_ms",
+        "pending_until_ms",
+        "reason_state",
+        "remaining_contracts_by_lot",
+        "reserved_contracts_by_lot",
+        "resolved_contracts_by_lot",
+        "resolved_contracts_by_terminal_type",
+        "schema_version",
+        "target_contracts_by_lot",
+        "timing_policy_hash",
+    }
+)
+CURRENT_DECISION_COMBO_FIELDS = frozenset(
+    {
+        "account",
+        "active_member_bindings",
+        "assigned_stock_lot_ids",
+        "expected_roles",
+        "group_id",
+        "identity_hash",
+        "original_contracts",
+        "reason_codes",
+        "status",
+        "strategy",
+        "symbol",
+    }
+)
+
+
 POSITION_FACT_SNAPSHOT_CONTRACT = "position_fact_snapshot.v1"
 _SNAPSHOT_FINGERPRINT_METADATA_FIELDS = frozenset(
     {
@@ -35,6 +108,7 @@ _SNAPSHOT_FINGERPRINT_METADATA_FIELDS = frozenset(
         "reason_codes",
         "snapshot_status",
         "source_observed_at",
+        "current_decision_shadow",
     }
 )
 
@@ -45,6 +119,7 @@ def decision_state_snapshot(
     account: str,
     portfolio_scope_id: str,
     source_observed_at: str | None = None,
+    current_decision_now_ms: int | None = None,
 ) -> dict[str, Any]:
     observed_at_override = (
         str(source_observed_at) if source_observed_at is not None else None
@@ -65,11 +140,33 @@ def decision_state_snapshot(
         observed_at = (
             observed_at_override or datetime.now(timezone.utc).isoformat()
         )
+        now_ms = (
+            int(current_decision_now_ms)
+            if current_decision_now_ms is not None
+            else int(datetime.now(timezone.utc).timestamp() * 1000)
+        )
+        from src.application.ledger.current_decision_projection import (
+            read_current_decision_projection,
+        )
+
+        try:
+            current_projection = read_current_decision_projection(
+                candidate,
+                account=account,
+                now_ms=now_ms,
+            )
+        except Exception as exc:
+            current_projection = {
+                "status": "data_unavailable",
+                "reason": f"current_projection_read_failed:{type(exc).__name__}",
+            }
         return decision_state_snapshot_from_rows(
             rows,
             account=account,
             portfolio_scope_id=portfolio_scope_id,
             source_observed_at=observed_at,
+            current_projection=current_projection,
+            current_decision_now_ms=now_ms,
         )
     except Exception as exc:
         return _unavailable_snapshot(
@@ -85,6 +182,8 @@ def decision_state_snapshot_from_rows(
     account: str,
     portfolio_scope_id: str,
     source_observed_at: str,
+    current_projection: Mapping[str, Any] | None = None,
+    current_decision_now_ms: int | None = None,
 ) -> dict[str, Any]:
     """Build one account snapshot from an already-frozen ledger read."""
 
@@ -166,7 +265,7 @@ def decision_state_snapshot_from_rows(
             fingerprint_payload
         )
         trusted = error_count == 0
-        return {
+        snapshot = {
             **fingerprint_payload,
             "fingerprint_schema_version": DECISION_STATE_FINGERPRINT_SCHEMA,
             "snapshot_status": "trusted" if trusted else "projection_untrusted",
@@ -177,6 +276,13 @@ def decision_state_snapshot_from_rows(
             "projection_comparison": comparison,
             "projection_diagnostics": [item.to_dict() for item in projection.diagnostics],
         }
+        snapshot["current_decision_shadow"] = _build_current_decision_shadow(
+            snapshot,
+            source_rows=rows,
+            current_projection=current_projection,
+            current_decision_now_ms=current_decision_now_ms,
+        )
+        return snapshot
     except Exception as exc:
         return _unavailable_snapshot(
             observed_at=observed_at,
@@ -428,7 +534,284 @@ def _lifecycle_resolution_fact_view(
     }
 
 
+def _build_current_decision_shadow(
+    snapshot: Mapping[str, Any],
+    *,
+    source_rows: Mapping[str, Any],
+    current_projection: Mapping[str, Any] | None,
+    current_decision_now_ms: int | None,
+) -> dict[str, Any]:
+    current = dict(current_projection or {})
+    if current.get("status") != "trusted":
+        return {
+            "schema_version": CURRENT_DECISION_SHADOW_SCHEMA,
+            "status": "not_available",
+            "reason": str(current.get("reason") or "current_projection_not_supplied"),
+            "mismatch_count": 0,
+            "mismatch_samples": [],
+            "sections": [],
+        }
+    try:
+        now_ms = int(current_decision_now_ms or 0)
+        if now_ms < 1:
+            raise ValueError("current_decision_now_ms is required")
+        account = str(snapshot.get("normalized_account") or "").strip().lower()
+        payload = current.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("trusted current projection payload is missing")
+        current_quality = dict(current.get("lifecycle_quality") or {})
+
+        from src.application.ledger.current_decision_projection import (
+            _oracle_lifecycle_case_facts,
+            _oracle_assigned_stock_report,
+            arbitrate_lifecycle_case_facts,
+            build_current_combo_facts,
+            compact_assigned_stock_view,
+            lifecycle_views_by_lot,
+        )
+        from src.application.quality.lifecycle_checks import (
+            build_lifecycle_datasets,
+            build_lifecycle_quality_migration_summary,
+        )
+
+        legacy_assigned = compact_assigned_stock_view(
+            _oracle_assigned_stock_report(
+                snapshot,
+                account=account,
+                now_ms=now_ms,
+            ),
+            account=account,
+            current_position_lots=list(snapshot.get("account_position_lots") or []),
+        )
+        legacy_lifecycle, models_by_case = lifecycle_views_by_lot(
+            arbitrate_lifecycle_case_facts(
+                account=account,
+                case_facts=_oracle_lifecycle_case_facts(
+                    source_rows,
+                    now_ms=now_ms,
+                ),
+            ),
+            current_position_lots=list(snapshot.get("account_position_lots") or []),
+            now_ms=now_ms,
+        )
+        legacy_combo = build_current_combo_facts(
+            account=account,
+            current_position_lots=list(snapshot.get("account_position_lots") or []),
+            identities=list(snapshot.get("account_combo_identities") or []),
+            assigned_stock=legacy_assigned,
+        )
+        sections = [
+            _compare_fact_maps(
+                "position_lots",
+                _position_consumer_view(snapshot.get("account_position_lots") or []),
+                _position_consumer_view(current.get("position_lots") or []),
+            ),
+            _compare_fact_maps(
+                "lifecycle",
+                _field_map(legacy_lifecycle, CURRENT_DECISION_LIFECYCLE_FIELDS),
+                _field_map(
+                    current.get("lifecycle_by_lot") or {},
+                    CURRENT_DECISION_LIFECYCLE_FIELDS,
+                ),
+            ),
+            _compare_fact_maps(
+                "combo",
+                _combo_consumer_view(legacy_combo),
+                _combo_consumer_view(payload.get("combo") or {}),
+            ),
+            _compare_fact_maps(
+                "assigned_stock",
+                _assigned_consumer_view(legacy_assigned),
+                _assigned_consumer_view(payload.get("assigned_stock") or {}),
+            ),
+        ]
+        cases = [
+            dict(item)
+            for item in snapshot.get("account_lifecycle_cases") or []
+            if isinstance(item, Mapping)
+        ]
+        markets = {
+            str(item.get("market") or "").strip().upper()
+            for item in cases
+            if str(item.get("market") or "").strip()
+        } | {
+            str(item.get("market") or "").strip().upper()
+            for item in current_quality.get("aggregate_by_market") or []
+            if isinstance(item, Mapping)
+            and str(item.get("market") or "").strip()
+        }
+        instant = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        observed_at = instant.isoformat()
+        for market in sorted(markets):
+            legacy_quality = build_lifecycle_datasets(
+                cases=cases,
+                evidence_rows=[
+                    dict(item)
+                    for item in snapshot.get("account_lifecycle_evidence") or []
+                    if isinstance(item, Mapping)
+                ],
+                account=account,
+                market=market,
+                observed_at_utc=observed_at,
+                now=instant,
+                trading_days=[],
+                first_deep_by_case={},
+                timing_policies_by_case={
+                    str(item.get("case_id") or "").strip(): dict(item)
+                    for item in snapshot.get(
+                        "account_lifecycle_timing_policies"
+                    )
+                    or []
+                    if isinstance(item, Mapping)
+                    and str(item.get("case_id") or "").strip()
+                },
+                read_models_by_case=models_by_case,
+            )
+            _summary, quality_comparison = (
+                build_lifecycle_quality_migration_summary(
+                    legacy_datasets=legacy_quality,
+                    current_quality=current_quality,
+                    account=account,
+                    market=market,
+                    observed_at_utc=observed_at,
+                    now_ms=now_ms,
+                    case_status_by_id={
+                        str(item.get("case_id") or "").strip(): str(
+                            item.get("status") or ""
+                        ).strip().lower()
+                        for item in cases
+                    },
+                    read_models_by_case=models_by_case,
+                )
+            )
+            quality_comparison["section"] = f"quality:{market.lower()}"
+            quality_comparison["legacy_count"] = quality_comparison.pop(
+                "legacy_case_count"
+            )
+            quality_comparison["current_count"] = quality_comparison.pop(
+                "current_case_count"
+            )
+            sections.append(quality_comparison)
+        samples = [
+            {"section": section["section"], **sample}
+            for section in sections
+            for sample in section["mismatch_samples"]
+        ][:10]
+        mismatch_count = sum(int(item["mismatch_count"]) for item in sections)
+        return {
+            "schema_version": CURRENT_DECISION_SHADOW_SCHEMA,
+            "status": "matched" if mismatch_count == 0 else "mismatch",
+            "reason": None if mismatch_count == 0 else "consumer_fact_mismatch",
+            "mismatch_count": mismatch_count,
+            "mismatch_samples": samples,
+            "sections": sections,
+        }
+    except Exception as exc:
+        return {
+            "schema_version": CURRENT_DECISION_SHADOW_SCHEMA,
+            "status": "error",
+            "reason": f"shadow_comparison_failed:{type(exc).__name__}",
+            "mismatch_count": 1,
+            "mismatch_samples": [],
+            "sections": [],
+        }
+
+
+def _position_consumer_view(rows: Sequence[Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("position lot must be an object")
+        record_id = str(raw.get("record_id") or "").strip()
+        fields = raw.get("fields")
+        if not record_id or not isinstance(fields, Mapping) or record_id in out:
+            raise ValueError("position lot identity is invalid")
+        out[record_id] = {
+            field: fields.get(field)
+            for field in sorted(CURRENT_DECISION_POSITION_FIELDS)
+        }
+    return dict(sorted(out.items()))
+
+
+def _field_map(
+    rows: Mapping[str, Any],
+    fields: frozenset[str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(key): {
+            field: value.get(field)
+            for field in sorted(fields)
+        }
+        for key, value in sorted(rows.items())
+        if isinstance(value, Mapping)
+    }
+
+
+def _combo_consumer_view(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("group_id")): {
+            field: item.get(field)
+            for field in sorted(CURRENT_DECISION_COMBO_FIELDS)
+        }
+        for item in payload.get("current_groups") or []
+        if isinstance(item, Mapping) and str(item.get("group_id") or "").strip()
+    }
+
+
+def _assigned_consumer_view(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "lots": list(payload.get("lots") or []),
+        "covered_call_allocations": list(
+            payload.get("covered_call_allocations") or []
+        ),
+        "review_facts": list(payload.get("review_facts") or []),
+        "sale_facts": {
+            "count": payload.get("applied_sale_fact_count"),
+            "chain_sha256": payload.get("applied_sale_fact_chain_sha256"),
+        },
+    }
+
+
+def _compare_fact_maps(
+    section: str,
+    legacy: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    keys = sorted(set(legacy) | set(current))
+    mismatches = [
+        key
+        for key in keys
+        if key not in legacy
+        or key not in current
+        or canonical_sha256(legacy[key]) != canonical_sha256(current[key])
+    ]
+    return {
+        "section": section,
+        "legacy_count": len(legacy),
+        "current_count": len(current),
+        "legacy_sha256": canonical_sha256(dict(legacy)),
+        "current_sha256": canonical_sha256(dict(current)),
+        "mismatch_count": len(mismatches),
+        "mismatch_samples": [
+            {
+                "key": key,
+                "legacy_sha256": (
+                    canonical_sha256(legacy[key]) if key in legacy else None
+                ),
+                "current_sha256": (
+                    canonical_sha256(current[key]) if key in current else None
+                ),
+            }
+            for key in mismatches[:10]
+        ],
+    }
+
+
 __all__ = [
+    "CURRENT_DECISION_COMBO_FIELDS",
+    "CURRENT_DECISION_LIFECYCLE_FIELDS",
+    "CURRENT_DECISION_POSITION_FIELDS",
+    "CURRENT_DECISION_SHADOW_SCHEMA",
     "POSITION_FACT_SNAPSHOT_CONTRACT",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
