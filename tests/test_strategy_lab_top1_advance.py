@@ -233,15 +233,20 @@ def test_behavior_drift_terminates_without_loading_gateway(
     assert terminated == ["drift"]
 
 
+@pytest.mark.parametrize("conflict_kind", ["day", "schedule"])
 def test_hidden_window_overlap_blocks_sealing_and_collection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict_kind: str
 ) -> None:
     day_a = {
         "trading_date": "2026-08-17",
         "scheduled_scan_targets_market": ["2026-08-17T01:00:00Z"],
         "expected_recommendation_point_ids": ["a"],
     }
-    day_b = {**day_a, "expected_recommendation_point_ids": ["b"]}
+    day_b = (
+        {**day_a, "expected_recommendation_point_ids": ["b"]}
+        if conflict_kind == "day"
+        else dict(day_a)
+    )
 
     def context(
         *_args: object, experiment_id: str, **_kwargs: object
@@ -255,7 +260,11 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
             "commitment": {
                 "market_calendar_version": "hk-calendar.v1",
                 "market_calendar_snapshot_content_sha256": "a" * 64,
-                "schedule_config_sha256": "b" * 64,
+                "schedule_config_sha256": (
+                    "c" * 64
+                    if conflict_kind == "schedule" and experiment_id == "b"
+                    else "b" * 64
+                ),
             },
             "committed_days": [day_a if experiment_id == "a" else day_b],
             "open_trading_date": "2026-08-17",
@@ -374,3 +383,118 @@ def test_out_of_coverage_calendar_blocks_sealing_without_fallback(
     assert result["corpus"][0]["reason_code"] == (
         "market_calendar_binding_unavailable"
     )
+
+
+def test_readiness_failure_makes_advance_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
+    monkeypatch.setattr(
+        advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: _calendar(),
+    )
+    monkeypatch.setattr(
+        advance_module, "discover_recommendation_points", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=_explode,
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=60,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:00:00Z",
+        idempotency_key="readiness-error",
+        environ=AVAILABLE,
+    )
+
+    assert result["status"] == "partial"
+    assert result["readiness"]["reason_code"] == "advance_failed"
+
+
+@pytest.mark.parametrize(
+    ("seal_status", "capture_status"),
+    [("conflict", "published"), ("published", "conflict")],
+)
+def test_corpus_conflicts_make_advance_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seal_status: str,
+    capture_status: str,
+) -> None:
+    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
+    monkeypatch.setattr(
+        advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: _calendar(),
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "seal_day_expectation",
+        lambda *_args, **_kwargs: {
+            "operation": "seal_day_expectation",
+            "status": seal_status,
+        },
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "discover_recommendation_points",
+        lambda *_args, **_kwargs: [
+            {
+                "status": "available",
+                "point_ref": "output_runs/run/accounts/lx/state/recommendation_point.v1.json",
+                "trading_date": "2026-08-17",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "capture_recommendation_point",
+        lambda *_args, **_kwargs: {
+            "operation": "capture_recommendation_point",
+            "status": capture_status,
+        },
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=60,
+        actor="timer",
+        occurred_at_utc="2026-08-17T00:30:00Z",
+        idempotency_key="corpus-conflict",
+        environ=AVAILABLE,
+    )
+
+    assert result["status"] == "partial"
+    assert any(item.get("status") == "conflict" for item in result["corpus"])
