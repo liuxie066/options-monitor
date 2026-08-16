@@ -13,15 +13,20 @@ from src.application.service_deploy import load_service_profile, service_status_
 from src.application.service_drift import service_drift
 from src.application.strategy_lab.top1.advance import ADVANCE_REVISION, advance_scheduled
 from src.application.strategy_lab.top1.corpus import (
+    CorpusError,
     read_corpus_status,
     read_market_calendar_binding,
+    refresh_market_calendar_binding,
 )
 from src.application.strategy_lab.top1.lifecycle import (
     effective_feature_status,
     read_public_status,
 )
 from src.application.strategy_lab.top1.readiness import build_top1_readiness
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+from src.infrastructure.futu_gateway import (
+    FutuGatewayError,
+    build_ready_futu_quote_gateway,
+)
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 
 
@@ -52,6 +57,17 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
     _add_identity(advance)
     advance.add_argument("--scheduled", action="store_true")
     advance.add_argument("--write", action="store_true")
+
+    calendar = commands.add_parser("calendar", help="manage HK calendar evidence")
+    calendar_commands = calendar.add_subparsers(required=True)
+    calendar_refresh = calendar_commands.add_parser(
+        "refresh", help="collect and publish HK calendar evidence"
+    )
+    _add_identity(calendar_refresh)
+    calendar_refresh.add_argument("--coverage-start", required=True)
+    calendar_refresh.add_argument("--coverage-end", required=True)
+    calendar_refresh.add_argument("--calendar-version", required=True)
+    calendar_refresh.add_argument("--write", action="store_true")
 
     feature = commands.add_parser("feature", help="inspect the experimental feature gate")
     feature_commands = feature.add_subparsers(
@@ -229,7 +245,68 @@ def _store_not_ready(tool_name: str, store: ExperimentStore) -> dict[str, Any]:
 
 def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     command = args.top1_loop_command
-    context = _profile_context(args, require_top1=command == "advance")
+    context = _profile_context(args, require_top1=command in {"advance", "calendar"})
+
+    if command == "calendar":
+        if not args.write:
+            raise AgentToolError(
+                code="INPUT_ERROR", message="Top1 calendar refresh requires --write"
+            )
+        top1 = context["top1"]
+        binding = top1["opend_binding"]
+        gateway = None
+        try:
+            gateway = build_ready_futu_quote_gateway(
+                host=str(binding["host"]),
+                port=int(binding["port"]),
+                is_option_chain_cache_enabled=False,
+            )
+            result = refresh_market_calendar_binding(
+                context["artifact_root"],
+                gateway=gateway,
+                market=args.market.upper(),
+                market_calendar_version=args.calendar_version,
+                coverage_start=args.coverage_start,
+                coverage_end=args.coverage_end,
+                observed_at_utc=datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        except (CorpusError, FutuGatewayError) as exc:
+            raise AgentToolError(
+                code=str(getattr(exc, "reason_code", getattr(exc, "code", "ERROR"))),
+                message=str(exc),
+            ) from exc
+        finally:
+            if gateway is not None:
+                gateway.close()
+        calendar_binding = result["binding"]
+        return build_response(
+            tool_name="research.strategy-lab.top1-loop.calendar.refresh",
+            ok=True,
+            data={
+                "status": result["status"],
+                "market": calendar_binding["market"],
+                "market_calendar_version": calendar_binding[
+                    "market_calendar_version"
+                ],
+                "coverage_start": calendar_binding["coverage_start"],
+                "coverage_end": calendar_binding["coverage_end"],
+                "trading_date_count": len(calendar_binding["trading_dates"]),
+                "source_receipt_sha256": calendar_binding[
+                    "source_receipt_sha256"
+                ],
+                "observed_at_utc": calendar_binding["observed_at_utc"],
+                "snapshot_ref": calendar_binding["snapshot_ref"],
+                "snapshot_content_sha256": calendar_binding[
+                    "snapshot_content_sha256"
+                ],
+                "snapshot_file_sha256": calendar_binding[
+                    "snapshot_file_sha256"
+                ],
+            },
+        )
+
     store = ExperimentStore(context["store_path"])
 
     if command == "readiness":

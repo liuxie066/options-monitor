@@ -710,6 +710,16 @@ Top1 loop 是独立的实验功能，固定绑定 `HK/lx`，默认不渲染、�
 ./om research strategy-lab top1-loop readiness --market hk --account lx --profile-path <runtime>/service.profile.json
 ```
 
+HK 交易日历证据由操作员显式刷新，不随 loop 自动运行：
+
+```bash
+./om research strategy-lab top1-loop calendar refresh --market hk --account lx --profile-path <runtime>/service.profile.json --coverage-start <YYYY-MM-DD> --coverage-end <YYYY-MM-DD> --calendar-version <version> --write
+```
+
+该命令使用 profile 已绑定的 OpenD，只落内容寻址的紧凑日历快照和 `current`
+指针；原始响应不落盘，只保留规范化来源回执哈希。相同证据重复刷新不会新增文件。
+它只关闭 calendar blocker，不代表其余 W0R capability 已就绪。
+
 定时 source delivery 必须显式提供 cadence、timeout 和 env file：
 
 ```bash
