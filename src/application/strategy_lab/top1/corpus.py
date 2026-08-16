@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, NoReturn
+from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
@@ -54,6 +55,32 @@ CORPUS_COMMAND_RESULT_SCHEMA = "sell_put_top1_corpus_command_result.v1"
 CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
 RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
+MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
+MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v1"
+
+_CALENDAR_POINTER_FIELDS = frozenset(
+    {
+        "schema_version",
+        "market",
+        "snapshot_ref",
+        "snapshot_content_sha256",
+        "snapshot_file_sha256",
+        "content_sha256",
+    }
+)
+_CALENDAR_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "market",
+        "market_calendar_version",
+        "coverage_start",
+        "coverage_end",
+        "trading_dates",
+        "source_receipt_sha256",
+        "observed_at_utc",
+        "content_sha256",
+    }
+)
 
 _EXPECTATION_FIELDS = frozenset(
     {
@@ -194,12 +221,173 @@ def _dataset_ref(market: str, account: str, content_sha256: str) -> str:
     )
 
 
+def _calendar_pointer_ref(market: str) -> str:
+    return (
+        "strategy_lab/top1/capabilities/market-calendar/"
+        f"{market.lower()}/current.json"
+    )
+
+
+def _calendar_snapshot_ref(market: str, content_sha256: str) -> str:
+    return (
+        "strategy_lab/top1/capabilities/market-calendar/"
+        f"{market.lower()}/snapshots/{content_sha256}.json"
+    )
+
+
 def _render(payload: dict[str, Any]) -> bytes:
     return render_json_text(payload).encode("utf-8")
 
 
 def _file_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _read_canonical_artifact(
+    artifact_root: str | Path,
+    ref: str,
+) -> tuple[dict[str, Any], bytes]:
+    path = private_path(artifact_root).joinpath(*ref.split("/"))
+    try:
+        with open_private_text(path) as handle:
+            content = handle.read().encode("utf-8")
+        payload = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CorpusError(
+            "market_calendar_binding_unavailable",
+            "market calendar artifact is unavailable",
+        ) from exc
+    if not isinstance(payload, dict) or content != _render(payload):
+        _fail(
+            "market_calendar_binding_unavailable",
+            "market calendar artifact bytes are not canonical",
+        )
+    return payload, content
+
+
+def _validate_calendar_snapshot(
+    payload: Mapping[str, Any],
+    *,
+    expected_market: str,
+) -> dict[str, Any]:
+    item = dict(payload)
+    try:
+        if set(item) != _CALENDAR_SNAPSHOT_FIELDS:
+            raise ValueError("snapshot keys are invalid")
+        if item["schema_version"] != MARKET_CALENDAR_SNAPSHOT_SCHEMA:
+            raise ValueError("snapshot schema is invalid")
+        if item["market"] != expected_market:
+            raise ValueError("snapshot market does not match")
+        _text(item["market_calendar_version"], "market_calendar_version")
+        coverage_start = _trading_date(item["coverage_start"])
+        coverage_end = _trading_date(item["coverage_end"])
+        if coverage_start > coverage_end:
+            raise ValueError("snapshot coverage is reversed")
+        values = item["trading_dates"]
+        if not isinstance(values, list) or not values:
+            raise ValueError("snapshot trading dates are missing")
+        trading_dates = [_trading_date(value) for value in values]
+        if trading_dates != sorted(set(trading_dates)):
+            raise ValueError("snapshot trading dates are not ordered and unique")
+        if trading_dates[0] < coverage_start or trading_dates[-1] > coverage_end:
+            raise ValueError("snapshot trading dates exceed coverage")
+        _hash(item["source_receipt_sha256"], "source_receipt_sha256")
+        _timestamp(item["observed_at_utc"], "observed_at_utc")
+        _hash(item["content_sha256"], "content_sha256")
+        content = {key: value for key, value in item.items() if key != "content_sha256"}
+        if canonical_sha256(content) != item["content_sha256"]:
+            raise ValueError("snapshot content hash does not match")
+    except (CorpusError, KeyError, TypeError, ValueError) as exc:
+        raise CorpusError(
+            "market_calendar_binding_unavailable",
+            f"market calendar snapshot is invalid: {exc}",
+        ) from exc
+    return item
+
+
+def read_bound_market_calendar_snapshot(
+    artifact_root: str | Path,
+    *,
+    market: str,
+    snapshot_ref: str,
+    snapshot_content_sha256: str,
+    snapshot_file_sha256: str,
+) -> dict[str, Any]:
+    """Read one exact content-addressed calendar snapshot without using current."""
+
+    market, _ = _identity(market, "calendar")
+    try:
+        ref = _relative_ref(snapshot_ref, "snapshot_ref")
+        content_hash = _hash(
+            snapshot_content_sha256, "snapshot_content_sha256"
+        )
+        file_hash = _hash(snapshot_file_sha256, "snapshot_file_sha256")
+    except CorpusError as exc:
+        raise CorpusError("market_calendar_binding_unavailable", str(exc)) from exc
+    if ref != _calendar_snapshot_ref(market, content_hash):
+        _fail(
+            "market_calendar_binding_unavailable",
+            "market calendar snapshot ref is not content-addressed",
+        )
+    payload, content = _read_canonical_artifact(artifact_root, ref)
+    item = _validate_calendar_snapshot(payload, expected_market=market)
+    if item["content_sha256"] != content_hash or _file_sha256(content) != file_hash:
+        _fail(
+            "market_calendar_binding_unavailable",
+            "market calendar snapshot hashes do not match",
+        )
+    return {
+        **item,
+        "snapshot_ref": ref,
+        "snapshot_content_sha256": content_hash,
+        "snapshot_file_sha256": file_hash,
+    }
+
+
+def read_market_calendar_binding(
+    artifact_root: str | Path,
+    *,
+    market: str,
+) -> dict[str, Any]:
+    """Read and verify the current compact market-calendar capability."""
+
+    market, _ = _identity(market, "calendar")
+    ref = _calendar_pointer_ref(market)
+    payload, content = _read_canonical_artifact(artifact_root, ref)
+    try:
+        if set(payload) != _CALENDAR_POINTER_FIELDS:
+            raise ValueError("pointer keys are invalid")
+        if payload["schema_version"] != MARKET_CALENDAR_POINTER_SCHEMA:
+            raise ValueError("pointer schema is invalid")
+        if payload["market"] != market:
+            raise ValueError("pointer market does not match")
+        snapshot_ref = _relative_ref(payload["snapshot_ref"], "snapshot_ref")
+        snapshot_content_hash = _hash(
+            payload["snapshot_content_sha256"], "snapshot_content_sha256"
+        )
+        snapshot_file_hash = _hash(
+            payload["snapshot_file_sha256"], "snapshot_file_sha256"
+        )
+        _hash(payload["content_sha256"], "content_sha256")
+        pointer_body = {
+            key: value for key, value in payload.items() if key != "content_sha256"
+        }
+        if canonical_sha256(pointer_body) != payload["content_sha256"]:
+            raise ValueError("pointer content hash does not match")
+        if content != _render(payload):
+            raise ValueError("pointer bytes are not canonical")
+    except (CorpusError, KeyError, TypeError, ValueError) as exc:
+        raise CorpusError(
+            "market_calendar_binding_unavailable",
+            f"market calendar pointer is invalid: {exc}",
+        ) from exc
+    return read_bound_market_calendar_snapshot(
+        artifact_root,
+        market=market,
+        snapshot_ref=snapshot_ref,
+        snapshot_content_sha256=snapshot_content_hash,
+        snapshot_file_sha256=snapshot_file_hash,
+    )
 
 
 def _command_result(
@@ -496,68 +684,57 @@ def _seal_result(
     )
 
 
-def seal_day_expectation(
-    store: ExperimentStore,
-    artifact_root: str | Path,
+def _build_expectation(
     *,
     market: str,
     account: str,
-    schedule: Mapping[str, Any],
     trading_date: str,
     market_calendar_version: str,
     market_calendar_sha256: str,
+    schedule_config_sha256: str,
+    targets: list[str],
     sealed_at_utc: str,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    market, account = _identity(market, account)
-    day = _trading_date(trading_date)
-    calendar_version = _text(market_calendar_version, "market_calendar_version")
-    calendar_hash = _hash(market_calendar_sha256, "market_calendar_sha256")
-    sealed_at = _timestamp(sealed_at_utc, "sealed_at_utc")
-    if not isinstance(schedule, Mapping):
-        _fail("corpus_input_invalid", "schedule must be an object")
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
-        return _command_result(
-            operation="seal_day_expectation",
-            status="not_evaluable",
-            reason_code="feature_disabled",
-            market=market,
-            account=account,
-            trading_date=day,
-        )
-
-    try:
-        targets = scheduled_scan_targets_for_date(dict(schedule), day)
-        schedule_hash = canonical_sha256(dict(schedule))
-    except (TypeError, ValueError) as exc:
-        raise CorpusError("corpus_input_invalid", "schedule is invalid") from exc
-    target_texts = [
-        utc_timestamp(target, "scheduled_scan_target_market") for target in targets
+) -> tuple[dict[str, Any], bytes]:
+    canonical_targets = [
+        _timestamp(target, f"scheduled_scan_targets_market[{index}]")
+        for index, target in enumerate(targets)
     ]
-    first_target = target_texts[0] if target_texts else None
+    if canonical_targets != sorted(set(canonical_targets)):
+        _fail("corpus_input_invalid", "scheduled targets must be ordered and unique")
+    point_ids = [
+        build_recommendation_point_id(market, account, target)
+        for target in canonical_targets
+    ]
+    first_target = canonical_targets[0] if canonical_targets else None
     payload: dict[str, Any] = {
         "schema_version": CORPUS_DAY_EXPECTATION_SCHEMA,
         "market": market,
         "account": account,
-        "trading_date": day,
-        "market_calendar_version": calendar_version,
-        "market_calendar_sha256": calendar_hash,
-        "schedule_config_sha256": schedule_hash,
-        "sealed_at_utc": sealed_at,
+        "trading_date": trading_date,
+        "market_calendar_version": market_calendar_version,
+        "market_calendar_sha256": market_calendar_sha256,
+        "schedule_config_sha256": schedule_config_sha256,
+        "sealed_at_utc": sealed_at_utc,
         "first_target_at_utc": first_target,
         "sealed_before_first_target": bool(
-            first_target and _before(sealed_at, first_target)
+            first_target and _before(sealed_at_utc, first_target)
         ),
-        "scheduled_scan_targets_market": target_texts,
-        "expected_recommendation_point_ids": [
-            build_recommendation_point_id(market, account, target)
-            for target in target_texts
-        ],
+        "scheduled_scan_targets_market": canonical_targets,
+        "expected_recommendation_point_ids": point_ids,
     }
     payload["content_sha256"] = canonical_sha256(payload)
-    content = _render(payload)
+    return payload, _render(payload)
+
+
+def _persist_expectation(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    payload: Mapping[str, Any],
+    content: bytes,
+) -> dict[str, Any]:
+    market = str(payload["market"])
+    account = str(payload["account"])
+    day = str(payload["trading_date"])
     ref = _expectation_ref(market, account, day)
 
     existing = _store_call(store.corpus_day, market, account, day)
@@ -606,6 +783,114 @@ def seal_day_expectation(
         "conflict": "conflict",
     }[recorded["status"]]
     return _seal_result(payload, content, status=status)
+
+
+def seal_day_expectation(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    schedule: Mapping[str, Any],
+    trading_date: str,
+    market_calendar_version: str,
+    market_calendar_sha256: str,
+    sealed_at_utc: str,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    market, account = _identity(market, account)
+    day = _trading_date(trading_date)
+    calendar_version = _text(market_calendar_version, "market_calendar_version")
+    calendar_hash = _hash(market_calendar_sha256, "market_calendar_sha256")
+    sealed_at = _timestamp(sealed_at_utc, "sealed_at_utc")
+    if not isinstance(schedule, Mapping):
+        _fail("corpus_input_invalid", "schedule must be an object")
+    if not _feature_enabled(
+        store, market=market, account=account, environ=environ
+    ):
+        return _command_result(
+            operation="seal_day_expectation",
+            status="not_evaluable",
+            reason_code="feature_disabled",
+            market=market,
+            account=account,
+            trading_date=day,
+        )
+
+    try:
+        targets = scheduled_scan_targets_for_date(dict(schedule), day)
+        schedule_hash = canonical_sha256(dict(schedule))
+    except (TypeError, ValueError) as exc:
+        raise CorpusError("corpus_input_invalid", "schedule is invalid") from exc
+    target_texts = [
+        utc_timestamp(target, "scheduled_scan_target_market") for target in targets
+    ]
+    payload, content = _build_expectation(
+        market=market,
+        account=account,
+        trading_date=day,
+        market_calendar_version=calendar_version,
+        market_calendar_sha256=calendar_hash,
+        schedule_config_sha256=schedule_hash,
+        targets=target_texts,
+        sealed_at_utc=sealed_at,
+    )
+    return _persist_expectation(store, artifact_root, payload, content)
+
+
+def seal_committed_day_expectation(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    committed_day: Mapping[str, Any],
+    market_calendar_version: str,
+    market_calendar_sha256: str,
+    schedule_config_sha256: str,
+    sealed_at_utc: str,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Seal the shared M4 expectation from an exact M3 commitment denominator."""
+
+    market, account = _identity(market, account)
+    if not isinstance(committed_day, Mapping) or set(committed_day) != {
+        "trading_date",
+        "scheduled_scan_targets_market",
+        "expected_recommendation_point_ids",
+    }:
+        _fail("corpus_input_invalid", "committed day is invalid")
+    day = _trading_date(committed_day["trading_date"])
+    calendar_version = _text(market_calendar_version, "market_calendar_version")
+    calendar_hash = _hash(market_calendar_sha256, "market_calendar_sha256")
+    schedule_hash = _hash(schedule_config_sha256, "schedule_config_sha256")
+    sealed_at = _timestamp(sealed_at_utc, "sealed_at_utc")
+    targets = committed_day["scheduled_scan_targets_market"]
+    point_ids = committed_day["expected_recommendation_point_ids"]
+    if not isinstance(targets, list) or not isinstance(point_ids, list):
+        _fail("corpus_input_invalid", "committed targets and point IDs must be lists")
+    if not _feature_enabled(store, market=market, account=account, environ=environ):
+        return _command_result(
+            operation="seal_day_expectation",
+            status="not_evaluable",
+            reason_code="feature_disabled",
+            market=market,
+            account=account,
+            trading_date=day,
+        )
+    payload, content = _build_expectation(
+        market=market,
+        account=account,
+        trading_date=day,
+        market_calendar_version=calendar_version,
+        market_calendar_sha256=calendar_hash,
+        schedule_config_sha256=schedule_hash,
+        targets=list(targets),
+        sealed_at_utc=sealed_at,
+    )
+    if payload["expected_recommendation_point_ids"] != point_ids:
+        _fail("corpus_input_invalid", "committed point IDs do not match targets")
+    return _persist_expectation(store, artifact_root, payload, content)
 
 
 def _record_point(
@@ -939,6 +1224,64 @@ def capture_recommendation_point(
         artifact_sha256=_file_sha256(projection_content),
         artifact_content_sha256=projection["artifact_provenance"]["content_sha256"],
         expected_point_count=expected_count,
+    )
+
+
+def discover_recommendation_points(
+    source_root: str | Path,
+    *,
+    market: str,
+    account: str,
+) -> list[dict[str, Any]]:
+    """Validate retained canonical M2 points and project only routing facts."""
+
+    market, account = _identity(market, account)
+    root = Path(source_root)
+    pattern = f"output_runs/*/accounts/{account}/state/{RECOMMENDATION_POINT_FILE}"
+    results: list[dict[str, Any]] = []
+    for path in sorted(root.glob(pattern)):
+        ref = path.relative_to(root).as_posix()
+        matched = _POINT_REF.fullmatch(ref)
+        if matched is None:
+            continue
+        run_id = matched.group(1)
+        try:
+            point = load_recommendation_point(root, run_id, account)
+            if point["market"] != market or point["account"] != account:
+                raise RecommendationPointError(
+                    "official_point_invalid", "point identity does not match scope"
+                )
+            target = str(point["scheduled_scan_target_market"])
+            trading_date = (
+                datetime.fromisoformat(target.replace("Z", "+00:00"))
+                .astimezone(ZoneInfo("Asia/Hong_Kong"))
+                .date()
+                .isoformat()
+            )
+        except (RecommendationPointError, ValueError) as exc:
+            results.append(
+                {
+                    "status": "invalid",
+                    "point_ref": ref,
+                    "reason_code": getattr(exc, "reason_code", "official_point_invalid"),
+                }
+            )
+            continue
+        results.append(
+            {
+                "status": "available",
+                "point_ref": ref,
+                "recommendation_point_id": point["recommendation_point_id"],
+                "scheduled_scan_target_market": target,
+                "trading_date": trading_date,
+            }
+        )
+    return sorted(
+        results,
+        key=lambda item: (
+            str(item.get("scheduled_scan_target_market") or ""),
+            str(item["point_ref"]),
+        ),
     )
 
 
@@ -1472,13 +1815,19 @@ __all__ = [
     "CORPUS_DAY_EXPECTATION_SCHEMA",
     "CORPUS_STATUS_SCHEMA",
     "DATASET_FREEZE_RESULT_SCHEMA",
+    "MARKET_CALENDAR_POINTER_SCHEMA",
+    "MARKET_CALENDAR_SNAPSHOT_SCHEMA",
     "RESEARCH_WINDOW_FACTS_SCHEMA",
     "SEALED_HISTORICAL_DATASET_SCHEMA",
     "CorpusError",
     "capture_recommendation_point",
+    "discover_recommendation_points",
     "freeze_research_dataset",
+    "read_bound_market_calendar_snapshot",
     "read_corpus_status",
+    "read_market_calendar_binding",
     "read_validation_day_source",
     "read_validation_point_source",
+    "seal_committed_day_expectation",
     "seal_day_expectation",
 ]

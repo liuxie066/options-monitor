@@ -6,12 +6,18 @@ import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence, cast
+from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from src.application.recommendation_point import strategy_lab_top1_available
+from src.application.recommendation_point import (
+    build_recommendation_point_id,
+    strategy_lab_top1_available,
+)
+from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.shadow_replay.common import artifact_content_sha256, render_json_text
 from src.application.strategy_lab.top1.contracts import (
     Top1CoreContractError,
+    build_current_behavior_binding,
     build_research_spec_sha256,
     build_validation_spec_sha256,
     validate_experiment_spec,
@@ -30,8 +36,42 @@ from src.infrastructure.strategy_lab.experiment_store import (
 )
 
 
-HIDDEN_WINDOW_COMMITMENT_SCHEMA = "sell_put_top1_hidden_window_commitment.v1"
+HIDDEN_WINDOW_COMMITMENT_SCHEMA = "sell_put_top1_hidden_window_commitment.v2"
 PUBLIC_STATUS_SCHEMA = "sell_put_top1_experiment_status.v1"
+
+_HIDDEN_DAY_FIELDS = frozenset(
+    {
+        "trading_date",
+        "scheduled_scan_targets_market",
+        "expected_recommendation_point_ids",
+    }
+)
+_HIDDEN_COMMITMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "experiment_id",
+        "market",
+        "account",
+        "strategy_family",
+        "trading_dates",
+        "start_trading_date",
+        "end_trading_date",
+        "market_calendar_version",
+        "market_calendar_snapshot_ref",
+        "market_calendar_snapshot_content_sha256",
+        "market_calendar_snapshot_file_sha256",
+        "market_calendar_coverage_start",
+        "market_calendar_coverage_end",
+        "schedule_config_sha256",
+        "days",
+        "point_selector",
+        "capture_schema",
+        "challenger_variant_id",
+        "research_spec_sha256",
+        "research_terminal_file_sha256",
+        "behavior_binding_sha256",
+    }
+)
 
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _PATH_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -109,6 +149,22 @@ def _trading_dates(values: Sequence[object]) -> list[str]:
     if any(left >= right for left, right in zip(parsed, parsed[1:])):
         _fail("experiment_invalid", "trading dates must be strictly increasing")
     return texts
+
+
+def _iso_date(value: object, label: str) -> str:
+    text = _text(value, label)
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        _fail("experiment_invalid", f"{label} must be a canonical ISO date")
+    if parsed.isoformat() != text:
+        _fail("experiment_invalid", f"{label} must be a canonical ISO date")
+    return text
+
+
+def _utc_datetime(value: object, label: str) -> datetime:
+    text = _timestamp(value, label)
+    return datetime.fromisoformat(f"{text[:-1]}+00:00")
 
 
 def _identity(market: object, account: object) -> tuple[str, str]:
@@ -576,8 +632,9 @@ def build_hidden_window_commitment(
     *,
     experiment_id: str,
     account: str,
-    trading_dates: Sequence[object],
-    market_calendar_version: str,
+    validation_start_trading_date: str,
+    market_calendar_binding: Mapping[str, object],
+    schedule: Mapping[str, Any],
     challenger_variant_id: str,
     research_spec_sha256: str,
     research_terminal_file_sha256: str,
@@ -585,7 +642,58 @@ def build_hidden_window_commitment(
 ) -> dict[str, object]:
     experiment_id = _segment(experiment_id, "experiment_id")
     _, account = _identity("HK", account)
-    dates = _trading_dates(trading_dates)
+    start = _iso_date(
+        validation_start_trading_date, "validation_start_trading_date"
+    )
+    if not isinstance(market_calendar_binding, Mapping):
+        _fail("experiment_invalid", "market calendar binding must be an object")
+    if market_calendar_binding.get("market") != "HK":
+        _fail("experiment_invalid", "market calendar binding must be for HK")
+    raw_dates = market_calendar_binding.get("trading_dates")
+    if not isinstance(raw_dates, list):
+        _fail("experiment_invalid", "market calendar trading dates are missing")
+    calendar_dates = [
+        _iso_date(value, f"market_calendar_binding.trading_dates[{index}]")
+        for index, value in enumerate(raw_dates)
+    ]
+    if calendar_dates != sorted(set(calendar_dates)):
+        _fail("experiment_invalid", "market calendar trading dates are invalid")
+    try:
+        start_index = calendar_dates.index(start)
+    except ValueError:
+        _fail("experiment_invalid", "validation start is not a trading date")
+    dates = calendar_dates[start_index : start_index + 20]
+    if len(dates) != 20:
+        _fail("experiment_invalid", "market calendar does not cover 20 trading days")
+    if not isinstance(schedule, Mapping) or schedule.get("timezone") != (
+        "Asia/Hong_Kong"
+    ):
+        _fail("experiment_invalid", "schedule must use Asia/Hong_Kong")
+    schedule_payload = dict(schedule)
+    schedule_hash = canonical_sha256(schedule_payload)
+    days: list[dict[str, object]] = []
+    for day in dates:
+        try:
+            targets = [
+                target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                for target in scheduled_scan_targets_for_date(schedule_payload, day)
+            ]
+        except (TypeError, ValueError) as exc:
+            raise Top1LifecycleError(
+                "experiment_invalid", "schedule is invalid"
+            ) from exc
+        if not targets:
+            _fail("experiment_invalid", "committed trading day has no scan target")
+        days.append(
+            {
+                "trading_date": day,
+                "scheduled_scan_targets_market": targets,
+                "expected_recommendation_point_ids": [
+                    build_recommendation_point_id("HK", account, target)
+                    for target in targets
+                ],
+            }
+        )
     payload: dict[str, object] = {
         "schema_version": HIDDEN_WINDOW_COMMITMENT_SCHEMA,
         "experiment_id": experiment_id,
@@ -596,8 +704,31 @@ def build_hidden_window_commitment(
         "start_trading_date": dates[0],
         "end_trading_date": dates[-1],
         "market_calendar_version": _text(
-            market_calendar_version, "market_calendar_version"
+            market_calendar_binding.get("market_calendar_version"),
+            "market_calendar_version",
         ),
+        "market_calendar_snapshot_ref": _ref(
+            market_calendar_binding.get("snapshot_ref"),
+            "market_calendar_snapshot_ref",
+        ),
+        "market_calendar_snapshot_content_sha256": _hash(
+            market_calendar_binding.get("snapshot_content_sha256"),
+            "market_calendar_snapshot_content_sha256",
+        ),
+        "market_calendar_snapshot_file_sha256": _hash(
+            market_calendar_binding.get("snapshot_file_sha256"),
+            "market_calendar_snapshot_file_sha256",
+        ),
+        "market_calendar_coverage_start": _iso_date(
+            market_calendar_binding.get("coverage_start"),
+            "market_calendar_coverage_start",
+        ),
+        "market_calendar_coverage_end": _iso_date(
+            market_calendar_binding.get("coverage_end"),
+            "market_calendar_coverage_end",
+        ),
+        "schedule_config_sha256": schedule_hash,
+        "days": days,
         "point_selector": "official_scheduled_sell_put.v1",
         "capture_schema": "recommendation_point.v1",
         "challenger_variant_id": _text(
@@ -616,12 +747,116 @@ def build_hidden_window_commitment(
     return payload
 
 
+def validate_hidden_window_commitment(
+    payload: object,
+    *,
+    expected_experiment_id: str | None = None,
+    expected_account: str | None = None,
+) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        _fail("experiment_conflict", "hidden commitment must be an object")
+    item = dict(payload)
+    if set(item) != _HIDDEN_COMMITMENT_FIELDS:
+        _fail("experiment_conflict", "hidden commitment keys are invalid")
+    if item["schema_version"] != HIDDEN_WINDOW_COMMITMENT_SCHEMA:
+        _fail("experiment_conflict", "hidden commitment schema is invalid")
+    experiment_id = _segment(item["experiment_id"], "experiment_id")
+    market, account = _identity(item["market"], item["account"])
+    if expected_experiment_id is not None and experiment_id != expected_experiment_id:
+        _fail("experiment_conflict", "hidden commitment experiment changed")
+    if expected_account is not None and account != expected_account:
+        _fail("experiment_conflict", "hidden commitment account changed")
+    if item["strategy_family"] != "sell_put":
+        _fail("experiment_conflict", "hidden commitment strategy changed")
+    dates = _trading_dates(cast(Sequence[object], item["trading_dates"]))
+    if item["start_trading_date"] != dates[0] or item["end_trading_date"] != dates[-1]:
+        _fail("experiment_conflict", "hidden commitment date bounds changed")
+    coverage_start = _iso_date(
+        item["market_calendar_coverage_start"], "market_calendar_coverage_start"
+    )
+    coverage_end = _iso_date(
+        item["market_calendar_coverage_end"], "market_calendar_coverage_end"
+    )
+    if coverage_start > dates[0] or coverage_end < dates[-1]:
+        _fail("experiment_conflict", "hidden commitment exceeds calendar coverage")
+    _text(item["market_calendar_version"], "market_calendar_version")
+    snapshot_content_hash = _hash(
+        item["market_calendar_snapshot_content_sha256"],
+        "market_calendar_snapshot_content_sha256",
+    )
+    if item["market_calendar_snapshot_ref"] != (
+        "strategy_lab/top1/capabilities/market-calendar/"
+        f"{market.lower()}/snapshots/{snapshot_content_hash}.json"
+    ):
+        _fail("experiment_conflict", "calendar snapshot ref is not content-addressed")
+    _hash(
+        item["market_calendar_snapshot_file_sha256"],
+        "market_calendar_snapshot_file_sha256",
+    )
+    _hash(item["schedule_config_sha256"], "schedule_config_sha256")
+    raw_days = item["days"]
+    if not isinstance(raw_days, list) or len(raw_days) != 20:
+        _fail("experiment_conflict", "hidden commitment must contain 20 day entries")
+    days: list[dict[str, object]] = []
+    for index, raw_day in enumerate(raw_days):
+        if not isinstance(raw_day, Mapping) or set(raw_day) != _HIDDEN_DAY_FIELDS:
+            _fail("experiment_conflict", "hidden commitment day is invalid")
+        day = dict(raw_day)
+        if day["trading_date"] != dates[index]:
+            _fail("experiment_conflict", "hidden commitment day order changed")
+        targets = day["scheduled_scan_targets_market"]
+        point_ids = day["expected_recommendation_point_ids"]
+        if not isinstance(targets, list) or not targets or not isinstance(point_ids, list):
+            _fail("experiment_conflict", "hidden commitment denominator is invalid")
+        canonical_targets = [
+            _timestamp(target, f"days[{index}].targets[{target_index}]")
+            for target_index, target in enumerate(targets)
+        ]
+        if canonical_targets != sorted(set(canonical_targets)):
+            _fail("experiment_conflict", "hidden commitment targets changed")
+        if any(
+            _utc_datetime(target, "scheduled_scan_target_market")
+            .astimezone(ZoneInfo("Asia/Hong_Kong"))
+            .date()
+            .isoformat()
+            != dates[index]
+            for target in canonical_targets
+        ):
+            _fail("experiment_conflict", "hidden commitment target date changed")
+        expected_ids = [
+            build_recommendation_point_id(market, account, target)
+            for target in canonical_targets
+        ]
+        if point_ids != expected_ids:
+            _fail("experiment_conflict", "hidden commitment point IDs changed")
+        days.append(
+            {
+                "trading_date": dates[index],
+                "scheduled_scan_targets_market": canonical_targets,
+                "expected_recommendation_point_ids": expected_ids,
+            }
+        )
+    if item["point_selector"] != "official_scheduled_sell_put.v1" or item[
+        "capture_schema"
+    ] != "recommendation_point.v1":
+        _fail("experiment_conflict", "hidden commitment point contract changed")
+    _text(item["challenger_variant_id"], "challenger_variant_id")
+    _hash(item["research_spec_sha256"], "research_spec_sha256")
+    _hash(
+        item["research_terminal_file_sha256"],
+        "research_terminal_file_sha256",
+    )
+    _hash(item["behavior_binding_sha256"], "behavior_binding_sha256")
+    return {**item, "trading_dates": dates, "days": days}
+
+
 def lock_challenger(
     store: ExperimentStore,
     validation_spec: object,
     *,
     challenger_variant_id: str,
-    trading_dates: Sequence[object],
+    validation_start_trading_date: str,
+    schedule: Mapping[str, Any],
     actor: str,
     occurred_at_utc: str,
     idempotency_key: str,
@@ -637,6 +872,10 @@ def lock_challenger(
         ResearchArtifactError,
         load_materialized_research_input,
         load_recorded_research_revision,
+    )
+    from src.application.strategy_lab.top1.corpus import (
+        CorpusError,
+        read_market_calendar_binding,
     )
 
     actor, occurred_at_utc, idempotency_key = _command_fields(
@@ -717,11 +956,22 @@ def lock_challenger(
     )
     economics = cast(Mapping[str, object], spec["economics_contracts"])
     baseline = cast(Mapping[str, object], spec["baseline"])
+    try:
+        calendar_binding = read_market_calendar_binding(
+            artifact_root, market=market
+        )
+    except CorpusError as exc:
+        raise Top1LifecycleError(exc.reason_code, str(exc)) from exc
+    if calendar_binding["market_calendar_version"] != economics[
+        "market_calendar_version"
+    ]:
+        _fail("experiment_invalid", "calendar version does not match ExperimentSpec")
     commitment = build_hidden_window_commitment(
         experiment_id=experiment_id,
         account=account,
-        trading_dates=trading_dates,
-        market_calendar_version=str(economics["market_calendar_version"]),
+        validation_start_trading_date=validation_start_trading_date,
+        market_calendar_binding=calendar_binding,
+        schedule=schedule,
         challenger_variant_id=challenger_variant_id,
         research_spec_sha256=research_hash,
         research_terminal_file_sha256=str(
@@ -729,6 +979,14 @@ def lock_challenger(
         ),
         behavior_binding_sha256=str(baseline["behavior_binding_sha256"]),
     )
+    first_target = cast(list[dict[str, object]], commitment["days"])[0][
+        "scheduled_scan_targets_market"
+    ]
+    assert isinstance(first_target, list)
+    if _utc_datetime(first_target[0], "first_target_at_utc") <= _utc_datetime(
+        occurred_at_utc, "occurred_at_utc"
+    ):
+        _fail("experiment_invalid", "validation first target must be future")
     commitment_sha256 = canonical_sha256(commitment)
     commitment_text = render_json_text(commitment)
     commitment_file_sha256 = hashlib.sha256(
@@ -768,6 +1026,47 @@ def lock_challenger(
         occurred_at_utc=occurred_at_utc,
         idempotency_key=idempotency_key,
     )
+
+
+def _validate_commitment_calendar(
+    artifact_root: str | Path,
+    commitment: Mapping[str, object],
+) -> dict[str, Any]:
+    from src.application.strategy_lab.top1.corpus import (
+        CorpusError,
+        read_bound_market_calendar_snapshot,
+    )
+
+    try:
+        binding = read_bound_market_calendar_snapshot(
+            artifact_root,
+            market=str(commitment["market"]),
+            snapshot_ref=str(commitment["market_calendar_snapshot_ref"]),
+            snapshot_content_sha256=str(
+                commitment["market_calendar_snapshot_content_sha256"]
+            ),
+            snapshot_file_sha256=str(
+                commitment["market_calendar_snapshot_file_sha256"]
+            ),
+        )
+    except CorpusError as exc:
+        raise Top1LifecycleError(exc.reason_code, str(exc)) from exc
+    expected = {
+        "market_calendar_version": commitment["market_calendar_version"],
+        "coverage_start": commitment["market_calendar_coverage_start"],
+        "coverage_end": commitment["market_calendar_coverage_end"],
+    }
+    if any(binding[key] != value for key, value in expected.items()):
+        _fail("experiment_conflict", "committed calendar binding changed")
+    calendar_dates = cast(list[str], binding["trading_dates"])
+    start = str(commitment["start_trading_date"])
+    try:
+        start_index = calendar_dates.index(start)
+    except ValueError:
+        _fail("experiment_conflict", "committed start is absent from calendar")
+    if calendar_dates[start_index : start_index + 20] != commitment["trading_dates"]:
+        _fail("experiment_conflict", "committed dates are not consecutive")
+    return binding
 
 
 def start_validation(
@@ -813,7 +1112,16 @@ def start_validation(
             "authorization_required",
             "current validation hash is not confirmed",
         )
-    commitment = json.loads(str(experiment["proposed_commitment_json"]))
+    try:
+        commitment = validate_hidden_window_commitment(
+            json.loads(str(experiment["proposed_commitment_json"])),
+            expected_experiment_id=experiment_id,
+            expected_account=str(experiment["account"]),
+        )
+    except json.JSONDecodeError as exc:
+        raise Top1LifecycleError(
+            "experiment_conflict", "commitment JSON is invalid"
+        ) from exc
     text = render_json_text(commitment)
     if canonical_sha256(commitment) != experiment["proposed_commitment_sha256"]:
         _fail("experiment_conflict", "commitment semantic hash changed")
@@ -831,6 +1139,15 @@ def start_validation(
         "proposed_commitment_file_sha256"
     ]:
         _fail("experiment_conflict", "commitment file hash changed")
+    _validate_commitment_calendar(artifact_root, commitment)
+    first_target = cast(list[dict[str, object]], commitment["days"])[0][
+        "scheduled_scan_targets_market"
+    ]
+    assert isinstance(first_target, list)
+    if _utc_datetime(first_target[0], "first_target_at_utc") <= _utc_datetime(
+        occurred_at_utc, "occurred_at_utc"
+    ):
+        _fail("invalid_transition", "validation first target is no longer future")
     try:
         publish_exact_text(
             artifact_root,
@@ -844,7 +1161,7 @@ def start_validation(
         experiment_id=experiment_id,
         authorized_hash=validation_spec_sha256,
         commitment_sha256=str(experiment["proposed_commitment_sha256"]),
-        commitment_dates=_trading_dates(commitment["trading_dates"]),
+        commitment_dates=cast(list[str], commitment["trading_dates"]),
         actor=actor,
         occurred_at_utc=occurred_at_utc,
         idempotency_key=idempotency_key,
@@ -967,15 +1284,12 @@ def reconcile_disabled_experiments(
     )
     if disabled_scope not in {"user", "maintainer"}:
         _fail("experiment_invalid", "disabled_scope is unsupported")
-    pending_ids = {
-        str(event["experiment_id"])
-        for event in _call(store.pending_projections)
-        if event["experiment_id"] is not None
-    }
-    for experiment_id in sorted(pending_ids):
-        experiment = _call(store.experiment, experiment_id)
-        if experiment["market"] == market and experiment["account"] == account:
-            _recover_projection(store, artifact_root, experiment_id=experiment_id)
+    recover_account_terminal_projections(
+        store,
+        artifact_root,
+        market=market,
+        account=account,
+    )
     experiment_ids: list[str] = []
     for experiment in _call(store.active_experiments, market, account):
         experiment_id = str(experiment["experiment_id"])
@@ -993,6 +1307,163 @@ def reconcile_disabled_experiments(
         )
         experiment_ids.append(experiment_id)
     return experiment_ids
+
+
+def recover_account_terminal_projections(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    publisher: Publisher | None = None,
+) -> list[str]:
+    market, account = _identity(market, account)
+    pending_ids = {
+        str(event["experiment_id"])
+        for event in _call(store.pending_projections)
+        if event["experiment_id"] is not None
+    }
+    recovered: list[str] = []
+    for experiment_id in sorted(pending_ids):
+        experiment = _call(store.experiment, experiment_id)
+        if experiment["market"] != market or experiment["account"] != account:
+            continue
+        _recover_projection(
+            store,
+            artifact_root,
+            experiment_id=experiment_id,
+            publisher=publisher,
+        )
+        recovered.append(experiment_id)
+    return recovered
+
+
+def read_active_experiment_ids(
+    store: ExperimentStore,
+    *,
+    market: str,
+    account: str,
+) -> list[str]:
+    market, account = _identity(market, account)
+    return sorted(
+        str(item["experiment_id"])
+        for item in _call(store.active_experiments, market, account)
+    )
+
+
+def read_advance_context(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    experiment_id: str,
+) -> dict[str, object]:
+    """Return only the validated routing facts needed by the scheduled composer."""
+
+    experiment_id = _segment(experiment_id, "experiment_id")
+    experiment = _call(store.experiment, experiment_id)
+    base: dict[str, object] = {
+        "experiment_id": experiment_id,
+        "market": experiment["market"],
+        "account": experiment["account"],
+        "phase": experiment["phase"],
+        "validation_progress": experiment["validation_progress"],
+        "terminal_mode": experiment["terminal_mode"],
+        "behavior_binding_drift": False,
+    }
+    if experiment["terminal_mode"] is not None:
+        return base
+    try:
+        raw_spec = json.loads(str(experiment["spec_json"]))
+        if not isinstance(raw_spec, Mapping):
+            raise ValueError("spec is not an object")
+        baseline = raw_spec.get("baseline")
+        if not isinstance(baseline, Mapping):
+            raise ValueError("baseline is missing")
+        stored_behavior = _hash(
+            baseline.get("behavior_binding_sha256"), "behavior_binding_sha256"
+        )
+        current_behavior = build_current_behavior_binding(raw_spec)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, Top1CoreContractError) as exc:
+        raise Top1LifecycleError(
+            "experiment_conflict", "experiment behavior binding is invalid"
+        ) from exc
+    if stored_behavior != current_behavior:
+        return {**base, "behavior_binding_drift": True}
+    try:
+        spec = validate_experiment_spec(raw_spec)
+    except Top1CoreContractError as exc:
+        raise Top1LifecycleError("experiment_conflict", str(exc)) from exc
+    if experiment["phase"] != "validation":
+        return base
+    try:
+        commitment = validate_hidden_window_commitment(
+            json.loads(str(experiment["proposed_commitment_json"])),
+            expected_experiment_id=experiment_id,
+            expected_account=str(experiment["account"]),
+        )
+    except json.JSONDecodeError as exc:
+        raise Top1LifecycleError(
+            "experiment_conflict", "commitment JSON is invalid"
+        ) from exc
+    commitment_text = render_json_text(commitment)
+    expected_ref = (
+        f"strategy_lab/top1/experiments/{experiment_id}/hidden_window_commitments/"
+        f"{experiment['proposed_commitment_sha256']}.json"
+    )
+    bindings_match = (
+        canonical_sha256(commitment) == experiment["proposed_commitment_sha256"]
+        and artifact_content_sha256(commitment)
+        == experiment["proposed_commitment_content_sha256"]
+        and hashlib.sha256(commitment_text.encode("utf-8")).hexdigest()
+        == experiment["proposed_commitment_file_sha256"]
+        and experiment["proposed_commitment_ref"] == expected_ref
+        and commitment["challenger_variant_id"] == experiment["research_leader"]
+        and commitment["research_spec_sha256"] == experiment["research_spec_sha256"]
+        and commitment["behavior_binding_sha256"] == stored_behavior
+    )
+    if not bindings_match:
+        _fail("experiment_conflict", "hidden commitment binding changed")
+    research = next(
+        (
+            item
+            for item in _call(store.generations, experiment_id)
+            if item["generation_kind"] == "research"
+        ),
+        None,
+    )
+    if research is None or commitment["research_terminal_file_sha256"] != research[
+        "terminal_file_sha256"
+    ]:
+        _fail("experiment_conflict", "research terminal binding changed")
+    _validate_commitment_calendar(artifact_root, commitment)
+    dates = cast(list[str], commitment["trading_dates"])
+    if _call(store.commitment_dates, experiment_id) != dates:
+        _fail("experiment_conflict", "stored commitment dates changed")
+    completed = int(experiment["completed_validation_partitions"])
+    open_date = dates[completed] if completed < len(dates) else None
+    decisions = _call(store.validation_decisions, experiment_id)
+    open_decisions = (
+        [item for item in decisions if item["trading_date"] == open_date]
+        if open_date is not None
+        else []
+    )
+    return {
+        **base,
+        "spec": spec,
+        "timer_binding": spec["timer_binding"],
+        "commitment": commitment,
+        "committed_days": commitment["days"],
+        "open_trading_date": open_date,
+        "consumed_point_ids": [
+            item["recommendation_point_id"] for item in open_decisions
+        ],
+        "last_consumed_available_point_id": (
+            open_decisions[-1]["recommendation_point_id"]
+            if open_decisions and open_decisions[-1]["source_status"] == "available"
+            else None
+        ),
+        "has_outcome_jobs": bool(_call(store.outcome_jobs, experiment_id)),
+    }
 
 
 def read_public_status(
@@ -1112,8 +1583,11 @@ __all__ = [
     "effective_feature_status",
     "lock_challenger",
     "prepare_experiment",
+    "read_active_experiment_ids",
+    "read_advance_context",
     "read_public_receipt",
     "read_public_status",
+    "recover_account_terminal_projections",
     "reconcile_disabled_experiments",
     "record_generation_revision",
     "seal_generation",
@@ -1121,4 +1595,5 @@ __all__ = [
     "start_research",
     "start_validation",
     "terminate_experiment",
+    "validate_hidden_window_commitment",
 ]
