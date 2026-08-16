@@ -83,6 +83,21 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="render opt-in Strategy Lab dataset build, mark sampling, and settlement timers",
     )
     service_render.add_argument(
+        "--include-strategy-lab-top1",
+        action="store_true",
+        help="render the experimental HK/lx Strategy Lab Top1 advance timer",
+    )
+    service_render.add_argument(
+        "--strategy-lab-top1-advance-interval-seconds",
+        type=int,
+        default=None,
+    )
+    service_render.add_argument(
+        "--strategy-lab-top1-timeout-start-sec",
+        type=int,
+        default=None,
+    )
+    service_render.add_argument(
         "--include-quality-monitoring",
         action="store_true",
         help="render opt-in systemd quality API, refresh, recheck, and day-end reconciliation units",
@@ -343,6 +358,13 @@ def handle_service_update_command(
             strategy_lab_recorder_account=args.strategy_lab_recorder_account,
             strategy_lab_recorder_max_datasets=args.strategy_lab_recorder_max_datasets,
             strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
+            include_strategy_lab_top1=bool(args.include_strategy_lab_top1),
+            strategy_lab_top1_advance_interval_seconds=(
+                args.strategy_lab_top1_advance_interval_seconds
+            ),
+            strategy_lab_top1_timeout_start_sec=(
+                args.strategy_lab_top1_timeout_start_sec
+            ),
             include_quality_monitoring=bool(args.include_quality_monitoring),
             include_feishu_agent_credential=bool(args.include_feishu_agent_credential),
             include_secret_credentials=bool(args.include_secret_credentials),

@@ -9,6 +9,7 @@ from typing import Any, Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.research.facade import run_research_collect
+from src.interfaces.cli.strategy_lab_top1 import add_top1_commands, handle_top1_command
 
 
 def _add_candidate_impact_args(parser: Any) -> None:
@@ -174,6 +175,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="run offline Strategy Lab readiness and experiment workflows",
     )
     research_strategy_lab_sub = research_strategy_lab.add_subparsers(dest="strategy_lab_command", required=True)
+    add_top1_commands(research_strategy_lab_sub)
     strategy_lab_update = research_strategy_lab_sub.add_parser(
         "update",
         help="dry-run or execute Strategy Lab evidence lifecycle maintenance",
@@ -950,6 +952,9 @@ def handle_research_command(
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research archive command: {args.archive_command}")
 
     if args.research_command == "strategy-lab":
+        if args.strategy_lab_command == "top1-loop":
+            return handle_top1_command(args)
+
         from src.application.strategy_lab import (
             analyze_strategy_lab_readiness,
             build_strategy_lab_llm_context,

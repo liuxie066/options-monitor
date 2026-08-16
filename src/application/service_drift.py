@@ -1279,12 +1279,16 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         )
     except ValueError as exc:
         error = str(exc)
-        if not error.startswith("strategy_lab_recorder_binding_"):
+        if error.startswith("strategy_lab_recorder_binding_"):
+            reason = "strategy_lab_recorder_binding_invalid"
+        elif error.startswith("Strategy Lab Top1"):
+            reason = "strategy_lab_top1_profile_invalid"
+        else:
             raise
         return {
             "checked": True,
             "supported": False,
-            "reason": "strategy_lab_recorder_binding_invalid",
+            "reason": reason,
             "error": error,
             "provider": provider,
             "profile_path": str(ctx["profile_path"]),
@@ -1484,6 +1488,8 @@ def _expected_bundle_from_profile(
     wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
     strategy_lab_recorder_raw = profile.get("strategy_lab_recorder")
     strategy_lab_recorder = strategy_lab_recorder_raw if isinstance(strategy_lab_recorder_raw, dict) else {}
+    strategy_lab_top1_raw = profile.get("strategy_lab_top1")
+    strategy_lab_top1 = strategy_lab_top1_raw if isinstance(strategy_lab_top1_raw, dict) else {}
     quality_monitoring_raw = profile.get("quality_monitoring")
     quality_monitoring = quality_monitoring_raw if isinstance(quality_monitoring_raw, dict) else {}
     feishu_agent_credential_raw = profile.get("feishu_agent_credential")
@@ -1524,6 +1530,11 @@ def _expected_bundle_from_profile(
         or "com.options-monitor.strategy-lab-build" in services
         or "com.options-monitor.strategy-lab-sample" in services
         or "com.options-monitor.strategy-lab-settle" in services
+    )
+    include_strategy_lab_top1 = bool(
+        strategy_lab_top1.get("enabled")
+        or "options-monitor-strategy-lab-top1-advance.service" in services
+        or "options-monitor-strategy-lab-top1-advance.timer" in services
     )
     include_quality_monitoring = bool(
         quality_monitoring.get("enabled")
@@ -1581,6 +1592,17 @@ def _expected_bundle_from_profile(
         "strategy_lab_recorder_source": recorder_source,
         "strategy_lab_recorder_max_datasets": int(strategy_lab_recorder.get("max_datasets") or 5),
         "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
+        "include_strategy_lab_top1": include_strategy_lab_top1,
+        "strategy_lab_top1_advance_interval_seconds": (
+            strategy_lab_top1.get("advance_interval")
+            if include_strategy_lab_top1
+            else None
+        ),
+        "strategy_lab_top1_timeout_start_sec": (
+            strategy_lab_top1.get("timeout_start_sec")
+            if include_strategy_lab_top1
+            else None
+        ),
         "include_quality_monitoring": include_quality_monitoring,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
@@ -2039,6 +2061,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "feishu_ws",
         "wechat_clawbot",
         "strategy_lab_recorder",
+        "strategy_lab_top1",
         "quality_monitoring",
         "feishu_agent_credential",
         "secret_credentials",

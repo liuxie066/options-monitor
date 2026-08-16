@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -22,16 +23,75 @@ from src.application.opening_candidate_snapshot import (
 )
 from src.application.shadow_replay.common import (
     DATASET_FILES,
+    render_json_text,
     refresh_dataset_manifest,
 )
+from src.application.strategy_lab.top1.corpus import (
+    MARKET_CALENDAR_POINTER_SCHEMA,
+    MARKET_CALENDAR_SNAPSHOT_SCHEMA,
+    read_market_calendar_binding,
+)
+from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
 )
+from src.infrastructure.private_storage import atomic_write_private_text
+from domain.domain.decision_state_fingerprint import canonical_sha256
 
 
 CONFIG_HASH = "a" * 64
 POLICY_HASH = "b" * 64
+
+
+def top1_hk_schedule_fixture() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "run_window": {"start": "09:50", "end": "10:10"},
+        "run_points": {"start_plus_min": 10},
+    }
+
+
+def seal_market_calendar_fixture(
+    artifact_root: Path,
+    trading_dates: list[str],
+    *,
+    version: str = "hk-calendar.v1",
+    coverage_start: str | None = None,
+    coverage_end: str | None = None,
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "schema_version": MARKET_CALENDAR_SNAPSHOT_SCHEMA,
+        "market": "HK",
+        "market_calendar_version": version,
+        "coverage_start": coverage_start or trading_dates[0],
+        "coverage_end": coverage_end or trading_dates[-1],
+        "trading_dates": trading_dates,
+        "source_receipt_sha256": "d" * 64,
+        "observed_at_utc": "2026-08-15T00:00:00Z",
+    }
+    snapshot["content_sha256"] = canonical_sha256(snapshot)
+    snapshot_content = render_json_text(snapshot).encode("utf-8")
+    snapshot_ref = (
+        "strategy_lab/top1/capabilities/market-calendar/hk/snapshots/"
+        f"{snapshot['content_sha256']}.json"
+    )
+    publish_exact_text(artifact_root, snapshot_ref, snapshot_content)
+    pointer: dict[str, Any] = {
+        "schema_version": MARKET_CALENDAR_POINTER_SCHEMA,
+        "market": "HK",
+        "snapshot_ref": snapshot_ref,
+        "snapshot_content_sha256": snapshot["content_sha256"],
+        "snapshot_file_sha256": hashlib.sha256(snapshot_content).hexdigest(),
+    }
+    pointer["content_sha256"] = canonical_sha256(pointer)
+    pointer_path = (
+        artifact_root
+        / "strategy_lab/top1/capabilities/market-calendar/hk/current.json"
+    )
+    atomic_write_private_text(pointer_path, render_json_text(pointer))
+    return read_market_calendar_binding(artifact_root, market="HK")
 
 
 def seal_opening_candidate_fixture(

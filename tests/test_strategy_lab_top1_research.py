@@ -73,7 +73,11 @@ from src.application.strategy_lab.top1.terminal_projection import (
     recover_terminal_projection,
 )
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
-from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+from tests.candidate_evidence_helpers import (
+    seal_market_calendar_fixture,
+    seal_opening_candidate_fixture,
+    top1_hk_schedule_fixture,
+)
 
 
 AVAILABLE = {"OM_STRATEGY_LAB_TOP1_AVAILABLE": "1"}
@@ -938,13 +942,14 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         ),
         validation=True,
     )
-    hidden_days = _trading_days("2026-08-04", 20)
+    hidden_days = _trading_days("2026-09-01", 20)
     with pytest.raises(Top1LifecycleError) as wrong_leader:
         lock_challenger(
             store,
             validation_spec,
             challenger_variant_id="without",
-            trading_dates=hidden_days,
+            validation_start_trading_date=hidden_days[0],
+            schedule=top1_hk_schedule_fixture(),
             actor="human",
             occurred_at_utc="2026-08-15T03:05:00Z",
             idempotency_key="wrong-leader-m3-seam",
@@ -961,7 +966,8 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
             store,
             validation_spec,
             challenger_variant_id=str(leader),
-            trading_dates=hidden_days,
+            validation_start_trading_date=hidden_days[0],
+            schedule=top1_hk_schedule_fixture(),
             actor="human",
             occurred_at_utc="2026-08-15T03:05:30Z",
             idempotency_key="tampered-revision-m3-seam",
@@ -970,11 +976,28 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         )
     assert tampered_revision.value.reason_code == "experiment_conflict"
     revision_path.write_bytes(revision_content)
+    calendar_days = _trading_days("2026-09-01", 60)
+    seal_market_calendar_fixture(tmp_path, calendar_days, version=CALENDAR)
+    with pytest.raises(Top1LifecycleError) as missed_start:
+        lock_challenger(
+            store,
+            validation_spec,
+            challenger_variant_id=str(leader),
+            validation_start_trading_date=hidden_days[0],
+            schedule=top1_hk_schedule_fixture(),
+            actor="human",
+            occurred_at_utc="2026-09-01T03:00:00Z",
+            idempotency_key="missed-start-m3-seam",
+            artifact_root=tmp_path,
+            environ=AVAILABLE,
+        )
+    assert missed_start.value.reason_code == "experiment_invalid"
     locked = lock_challenger(
         store,
         validation_spec,
         challenger_variant_id=str(leader),
-        trading_dates=hidden_days,
+        validation_start_trading_date=hidden_days[0],
+        schedule=top1_hk_schedule_fixture(),
         actor="human",
         occurred_at_utc="2026-08-15T03:06:00Z",
         idempotency_key="lock-leader-m3-seam",
@@ -990,7 +1013,8 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         store,
         validation_spec,
         challenger_variant_id=str(leader),
-        trading_dates=_trading_days("2026-09-01", 20),
+        validation_start_trading_date=_trading_days("2026-10-01", 1)[0],
+        schedule=top1_hk_schedule_fixture(),
         actor="human",
         occurred_at_utc="2026-08-15T03:06:30Z",
         idempotency_key="relock-leader-m3-seam",
