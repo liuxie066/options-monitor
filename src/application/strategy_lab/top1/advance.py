@@ -232,6 +232,11 @@ def advance_scheduled(
                     "current date is outside market calendar coverage",
                 )
             if today in calendar["trading_dates"]:
+                session_type = next(
+                    item["trade_date_type"]
+                    for item in calendar["trading_sessions"]
+                    if item["trading_date"] == today
+                )
                 sealed = seal_day_expectation(
                     store,
                     artifact_root,
@@ -246,6 +251,7 @@ def advance_scheduled(
                         calendar["snapshot_content_sha256"]
                     ),
                     sealed_at_utc=occurred_at_utc,
+                    trade_date_type=str(session_type),
                     environ=environ,
                 )
                 result["corpus"].append(sealed)

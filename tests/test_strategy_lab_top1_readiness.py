@@ -73,6 +73,10 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
             "coverage_start": "2026-08-01",
             "coverage_end": "2026-12-31",
             "trading_dates": ["2026-08-01", "2026-12-31"],
+            "trading_sessions": [
+                {"trading_date": "2026-08-01", "trade_date_type": "WHOLE"},
+                {"trading_date": "2026-12-31", "trade_date_type": "WHOLE"},
+            ],
             "snapshot_ref": "calendar.json",
             "snapshot_content_sha256": "a" * 64,
             "snapshot_file_sha256": "c" * 64,
@@ -121,7 +125,18 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
         "source_delivery_blockers"
     ]
 
-    for invalid_calendar in ({}, {"market": "HK"}, {**common["calendar_binding"], "trading_dates": []}):
+    for invalid_calendar in (
+        {},
+        {"market": "HK"},
+        {**common["calendar_binding"], "trading_dates": []},
+        {
+            **common["calendar_binding"],
+            "trading_sessions": [
+                {"trading_date": "2026-08-01", "trade_date_type": "UNKNOWN"},
+                {"trading_date": "2026-12-31", "trade_date_type": "WHOLE"},
+            ],
+        },
+    ):
         blocked_calendar = build_top1_readiness(
             **{**common, "calendar_binding": invalid_calendar},
             capability_facts={name: True for name in CAPABILITY_FACTS},
@@ -180,6 +195,80 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     assert response["data"]["validation_runtime_ready"] is False
     assert response["data"]["facts"]["store_schema"]["status"] == "not_initialized"
     assert not store_path.exists()
+
+
+def test_calendar_refresh_cli_requires_write_and_closes_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.interfaces.cli.strategy_lab_top1 as cli
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.main import parse_args
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+    command = [
+        "research",
+        "strategy-lab",
+        "top1-loop",
+        "calendar",
+        "refresh",
+        "--market",
+        "hk",
+        "--account",
+        "lx",
+        "--profile-path",
+        str(profile_path),
+        "--coverage-start",
+        "2026-08-03",
+        "--coverage-end",
+        "2026-08-31",
+        "--calendar-version",
+        "hk-calendar.opend.v1",
+    ]
+
+    def explode(**_kwargs: object) -> None:
+        raise AssertionError("missing --write must not build an OpenD gateway")
+
+    monkeypatch.setattr(cli, "build_ready_futu_quote_gateway", explode)
+    with pytest.raises(AgentToolError, match="requires --write"):
+        cli.handle_top1_command(parse_args(command))
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def get_trading_days_with_receipt(
+            self, **_kwargs: object
+        ) -> dict[str, object]:
+            return {
+                "retcode": 0,
+                "rows": [
+                    {"time": "2026-08-03", "trade_date_type": "WHOLE"},
+                    {"time": "2026-08-04", "trade_date_type": "WHOLE"},
+                ],
+                "coverage_complete": True,
+                "pagination_complete": True,
+                "page_count": 1,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    gateway = FakeGateway()
+    monkeypatch.setattr(
+        cli, "build_ready_futu_quote_gateway", lambda **_kwargs: gateway
+    )
+    response = cli.handle_top1_command(parse_args([*command, "--write"]))
+
+    assert response["ok"] is True
+    assert response["data"]["status"] == "published"
+    assert response["data"]["trading_date_count"] == 2
+    assert "trading_dates" not in response["data"]
+    assert gateway.closed is True
+    assert not (
+        tmp_path
+        / "runtime/output_shared/research/strategy_lab/experiments.sqlite3"
+    ).exists()
 
 
 def test_disabled_advance_migrates_store_but_loads_no_runtime_dependencies(

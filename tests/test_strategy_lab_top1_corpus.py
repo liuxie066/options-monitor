@@ -6,6 +6,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -28,6 +29,7 @@ from src.application.strategy_lab.top1.corpus import (
     freeze_research_dataset,
     read_market_calendar_binding,
     read_corpus_status,
+    refresh_market_calendar_binding,
     seal_committed_day_expectation,
     seal_day_expectation,
 )
@@ -48,6 +50,16 @@ CALENDAR_HASH = "a" * 64
 SOURCE_SHA = "c" * 40
 
 
+class _CalendarGateway:
+    def __init__(self, receipt: dict[str, Any]) -> None:
+        self.receipt = receipt
+        self.calls: list[dict[str, Any]] = []
+
+    def get_trading_days_with_receipt(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return self.receipt
+
+
 def _schedule(*, start_plus_min: int = 10, enabled: bool = True) -> dict[str, Any]:
     return {
         "enabled": enabled,
@@ -62,6 +74,23 @@ def _multi_point_schedule() -> dict[str, Any]:
         "enabled": True,
         "timezone": "Asia/Hong_Kong",
         "run_window": {"start": "09:30", "end": "10:20"},
+        "run_points": {
+            "start_plus_min": 10,
+            "hourly_minute": 0,
+            "end_minus_min": 10,
+        },
+    }
+
+
+def _hk_full_day_schedule() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "run_window": {
+            "start": "09:30",
+            "end": "16:00",
+            "breaks": [{"start": "12:00", "end": "13:00"}],
+        },
         "run_points": {
             "start_plus_min": 10,
             "hourly_minute": 0,
@@ -255,6 +284,10 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
             },
             "2026-07-21",
         )
+    with pytest.raises(ValueError, match="session break"):
+        scheduled_scan_targets_for_date(
+            _schedule(), "2026-07-21", trade_date_type="MORNING"
+        )
 
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
@@ -329,27 +362,192 @@ def test_calendar_binding_is_content_addressed_and_fails_closed(
     with pytest.raises(CorpusError) as tampered:
         read_market_calendar_binding(tmp_path, market="HK")
     assert tampered.value.reason_code == "market_calendar_binding_unavailable"
+    recovered = seal_market_calendar_fixture(
+        tmp_path, days, version="hk-calendar.fixture.v2"
+    )
+    assert recovered["market_calendar_version"] == "hk-calendar.fixture.v2"
+    assert recovered["snapshot_ref"] != binding["snapshot_ref"]
 
 
-def test_committed_denominator_rejects_later_schedule_drift(tmp_path: Path) -> None:
+def test_calendar_refresh_publishes_compact_evidence_without_duplicate_growth(
+    tmp_path: Path,
+) -> None:
+    gateway = _CalendarGateway(
+        {
+            "retcode": 0,
+            "rows": [
+                {"time": "2026-08-04", "trade_date_type": "MORNING"},
+                {"time": "2026-08-03", "trade_date_type": "WHOLE"},
+            ],
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": 1,
+        }
+    )
+    kwargs = {
+        "gateway": gateway,
+        "market": "HK",
+        "market_calendar_version": "hk-calendar.opend.v1",
+        "coverage_start": "2026-08-03",
+        "coverage_end": "2026-08-31",
+    }
+
+    first = refresh_market_calendar_binding(
+        tmp_path,
+        **kwargs,
+        observed_at_utc="2026-08-16T01:00:00Z",
+    )
+    assert first["status"] == "published"
+    assert first["binding"]["trading_dates"] == ["2026-08-03", "2026-08-04"]
+    assert first["binding"]["trading_sessions"] == [
+        {"trading_date": "2026-08-03", "trade_date_type": "WHOLE"},
+        {"trading_date": "2026-08-04", "trade_date_type": "MORNING"},
+    ]
+    assert gateway.calls == [
+        {"market": "HK", "start": "2026-08-03", "end": "2026-08-31"}
+    ]
+    capability_root = (
+        tmp_path / "strategy_lab/top1/capabilities/market-calendar/hk"
+    )
+    files_before = sorted(
+        path.relative_to(tmp_path) for path in capability_root.rglob("*.json")
+    )
+    assert len(files_before) == 2
+    assert all("receipt" not in path.name for path in files_before)
+    snapshot = json.loads(
+        tmp_path.joinpath(*str(first["binding"]["snapshot_ref"]).split("/")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert snapshot["trading_sessions"] == first["binding"]["trading_sessions"]
+    assert "trading_dates" not in snapshot
+
+    second = refresh_market_calendar_binding(
+        tmp_path,
+        **kwargs,
+        observed_at_utc="2026-08-16T02:00:00Z",
+    )
+    assert second["status"] == "unchanged"
+    assert second["binding"] == first["binding"]
+    assert sorted(
+        path.relative_to(tmp_path) for path in capability_root.rglob("*.json")
+    ) == files_before
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {
+            "retcode": 0,
+            "rows": [{"time": "2026-08-03", "trade_date_type": "WHOLE"}],
+            "coverage_complete": False,
+            "pagination_complete": True,
+            "page_count": 1,
+        },
+        {
+            "retcode": 0,
+            "rows": [
+                {"time": "2026-08-03", "trade_date_type": "WHOLE"},
+                {"time": "2026-08-03", "trade_date_type": "MORNING"},
+            ],
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": 1,
+        },
+        {
+            "retcode": 0,
+            "rows": [{"time": "2026-09-01", "trade_date_type": "WHOLE"}],
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": 1,
+        },
+        {
+            "retcode": 0,
+            "rows": [{"time": "2026-08-03", "trade_date_type": "UNKNOWN"}],
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": 1,
+        },
+    ],
+)
+def test_calendar_refresh_rejects_untrustworthy_source_without_writing(
+    tmp_path: Path,
+    receipt: dict[str, Any],
+) -> None:
+    with pytest.raises(CorpusError) as raised:
+        refresh_market_calendar_binding(
+            tmp_path,
+            gateway=_CalendarGateway(receipt),
+            market="HK",
+            market_calendar_version="hk-calendar.opend.v1",
+            coverage_start="2026-08-03",
+            coverage_end="2026-08-31",
+            observed_at_utc="2026-08-16T01:00:00Z",
+        )
+    assert raised.value.reason_code == "market_calendar_source_invalid"
+    assert not (tmp_path / "strategy_lab").exists()
+
+
+def test_committed_denominator_honors_sessions_and_rejects_schedule_drift(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
     _enable(store, artifact_root)
     days = _trading_days("2026-07-21", 20)
     binding = seal_market_calendar_fixture(
-        artifact_root, days, version="hk-calendar.fixture.v1"
+        artifact_root,
+        days,
+        version="hk-calendar.fixture.v1",
+        trade_date_types={days[0]: "MORNING", days[1]: "AFTERNOON"},
     )
     commitment = build_hidden_window_commitment(
         experiment_id="experiment-denominator",
         account="lx",
         validation_start_trading_date=days[0],
         market_calendar_binding=binding,
-        schedule=_multi_point_schedule(),
+        schedule=_hk_full_day_schedule(),
         challenger_variant_id="challenger",
         research_spec_sha256="a" * 64,
         research_terminal_file_sha256="b" * 64,
         behavior_binding_sha256="c" * 64,
     )
+    hk_tz = ZoneInfo("Asia/Hong_Kong")
+
+    def local_times(index: int) -> list[str]:
+        return [
+            datetime.fromisoformat(str(target).replace("Z", "+00:00"))
+            .astimezone(hk_tz)
+            .strftime("%H:%M")
+            for target in commitment["days"][index][
+                "scheduled_scan_targets_market"
+            ]
+        ]
+
+    assert local_times(0) == ["09:40", "10:00", "10:30", "11:00", "11:30"]
+    assert local_times(1) == [
+        "13:00",
+        "13:30",
+        "14:00",
+        "14:30",
+        "15:00",
+        "15:30",
+        "15:50",
+    ]
+    assert local_times(2) == [
+        "09:40",
+        "10:00",
+        "10:30",
+        "11:00",
+        "11:30",
+        "13:00",
+        "13:30",
+        "14:00",
+        "14:30",
+        "15:00",
+        "15:30",
+        "15:50",
+    ]
     committed_day = commitment["days"][0]
     sealed = seal_committed_day_expectation(
         store,

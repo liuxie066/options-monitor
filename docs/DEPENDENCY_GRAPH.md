@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|1| infrastructure
   storage -->|1| domain
   tests -->|2648| application
-  tests -->|437| domain
+  tests -->|436| domain
   tests -->|2| domain_services
-  tests -->|179| infrastructure
-  tests -->|227| interfaces
+  tests -->|178| infrastructure
+  tests -->|229| interfaces
   tests -->|15| scripts
   tests -->|18| storage
 ```
@@ -78,9 +78,9 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | tests | application | 2648 |
-| tests | domain | 437 |
-| tests | interfaces | 227 |
-| tests | infrastructure | 179 |
+| tests | domain | 436 |
+| tests | interfaces | 229 |
+| tests | infrastructure | 178 |
 | tests | storage | 18 |
 | tests | scripts | 15 |
 | tests | domain_services | 2 |

@@ -658,6 +658,34 @@ def build_hidden_window_commitment(
     ]
     if calendar_dates != sorted(set(calendar_dates)):
         _fail("experiment_invalid", "market calendar trading dates are invalid")
+    raw_sessions = market_calendar_binding.get("trading_sessions")
+    if not isinstance(raw_sessions, list):
+        _fail("experiment_invalid", "market calendar trading sessions are missing")
+    session_dates: list[str] = []
+    session_types: list[str] = []
+    for index, raw_session in enumerate(raw_sessions):
+        if not isinstance(raw_session, Mapping) or set(raw_session) != {
+            "trading_date",
+            "trade_date_type",
+        }:
+            _fail("experiment_invalid", "market calendar trading sessions are invalid")
+        session_dates.append(
+            _iso_date(
+                raw_session["trading_date"],
+                f"market_calendar_binding.trading_sessions[{index}].trading_date",
+            )
+        )
+        session_types.append(
+            _text(
+                raw_session["trade_date_type"],
+                f"market_calendar_binding.trading_sessions[{index}].trade_date_type",
+            )
+        )
+    if session_dates != calendar_dates or any(
+        value not in {"WHOLE", "MORNING", "AFTERNOON"} for value in session_types
+    ):
+        _fail("experiment_invalid", "market calendar trading sessions are invalid")
+    session_by_date = dict(zip(session_dates, session_types, strict=True))
     try:
         start_index = calendar_dates.index(start)
     except ValueError:
@@ -676,7 +704,11 @@ def build_hidden_window_commitment(
         try:
             targets = [
                 target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                for target in scheduled_scan_targets_for_date(schedule_payload, day)
+                for target in scheduled_scan_targets_for_date(
+                    schedule_payload,
+                    day,
+                    trade_date_type=session_by_date[day],
+                )
             ]
         except (TypeError, ValueError) as exc:
             raise Top1LifecycleError(

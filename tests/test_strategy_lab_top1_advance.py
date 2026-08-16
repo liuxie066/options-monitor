@@ -25,6 +25,9 @@ def _calendar() -> dict[str, object]:
         "coverage_start": "2026-08-16",
         "coverage_end": "2026-08-18",
         "trading_dates": ["2026-08-17"],
+        "trading_sessions": [
+            {"trading_date": "2026-08-17", "trade_date_type": "MORNING"}
+        ],
         "market_calendar_version": "hk-calendar.v1",
         "snapshot_content_sha256": "a" * 64,
     }
@@ -574,6 +577,7 @@ def test_corpus_conflicts_make_advance_partial(
     seal_status: str,
     capture_status: str,
 ) -> None:
+    seal_calls: list[dict[str, object]] = []
     monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
@@ -586,10 +590,8 @@ def test_corpus_conflicts_make_advance_partial(
     monkeypatch.setattr(
         advance_module,
         "seal_day_expectation",
-        lambda *_args, **_kwargs: {
-            "operation": "seal_day_expectation",
-            "status": seal_status,
-        },
+        lambda *_args, **kwargs: seal_calls.append(kwargs)
+        or {"operation": "seal_day_expectation", "status": seal_status},
     )
     monkeypatch.setattr(
         advance_module,
@@ -634,4 +636,5 @@ def test_corpus_conflicts_make_advance_partial(
     )
 
     assert result["status"] == "partial"
+    assert seal_calls[0]["trade_date_type"] == "MORNING"
     assert any(item.get("status") == "conflict" for item in result["corpus"])
