@@ -50,6 +50,7 @@ trade_events -> projection -> position_lots
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 全部 Sell Put / Sell Call 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
+| 本地 Xueqiu / Robinhood dashboard | `scripts/local_dashboard.py` | [Local Dashboard](docs/LOCAL_DASHBOARD.md) |
 | 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Shadow Replay / Strategy Lab | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
