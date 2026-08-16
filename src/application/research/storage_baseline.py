@@ -1203,6 +1203,8 @@ def _storage_class(relpath: str) -> str:
     if parts[:2] == ("output_shared", "required_data"):
         return "immutable_shared_partition"
     if parts[:2] == ("output_shared", "research"):
+        if "partitions" in parts and "sha256" in parts:
+            return "immutable_shared_partition"
         return "research_artifact"
     return "shared_runtime_artifact" if parts[0] == "output_shared" else "other"
 

@@ -209,6 +209,7 @@ def run_strategy_lab_experiment(
         source_generation={
             "generation_id": integrity.get("generation_id"),
             "revision": integrity.get("revision"),
+            "generation_ref": integrity.get("generation_ref"),
             "dataset_dir": readiness.get("dataset_dir"),
             "repo_root": str(Path(repo_root).expanduser().resolve()),
         },
