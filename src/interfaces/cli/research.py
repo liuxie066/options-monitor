@@ -115,6 +115,22 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="preview reachable and orphaned canonical scan blobs without deleting",
     )
     storage_gc.add_argument("--runtime-root", required=True)
+    historical_cleanup = research_sub.add_parser(
+        "storage-cleanup-preview",
+        help="preview gated historical cleanup without moving or deleting data",
+    )
+    historical_cleanup.add_argument("--runtime-root", required=True)
+    historical_cleanup.add_argument("--ledger-sqlite", default=None)
+    historical_cleanup.add_argument("--lifecycle-inventory", required=True)
+    historical_cleanup.add_argument("--quality-cutover-evidence", default=None)
+    historical_cleanup.add_argument("--backup-proof", default=None)
+    historical_cleanup.add_argument(
+        "--history-report",
+        dest="history_reports",
+        action="append",
+        default=None,
+    )
+    historical_cleanup.add_argument("--allow-external-ledger", action="store_true")
     research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
     research_handoff.add_argument("--bundle", required=True)
     research_archive = research_sub.add_parser("archive", help="mirror remote Research evidence for local replay")
@@ -863,6 +879,27 @@ def handle_research_command(
     research_collect_fn: ResearchCollectFn | None = None,
     repo_base_fn: Callable[[], Path] = repo_base,
 ) -> dict[str, Any]:
+    if args.research_command == "storage-cleanup-preview":
+        from src.application.research.historical_cleanup import (
+            build_historical_cleanup_preview,
+        )
+
+        data = build_historical_cleanup_preview(
+            repo_root=repo_base_fn(),
+            runtime_root=args.runtime_root,
+            ledger_sqlite=args.ledger_sqlite,
+            lifecycle_inventory=args.lifecycle_inventory,
+            quality_cutover_evidence=args.quality_cutover_evidence,
+            backup_proof=args.backup_proof,
+            history_reports=args.history_reports,
+            allow_external_ledger=bool(args.allow_external_ledger),
+        )
+        return build_response(
+            tool_name="research.storage-cleanup-preview",
+            ok=True,
+            data=data,
+        )
+
     if args.research_command == "storage-gc-preview":
         from src.application.research.storage_baseline import preview_scan_blob_gc
 

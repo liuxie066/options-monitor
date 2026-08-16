@@ -192,6 +192,27 @@ than the 24-hour orphan grace period. Any invalid protected manifest or
 missing/corrupt referenced blob suppresses all candidates. There is no confirm
 or delete mode.
 
+Historical cleanup has a separate gated preview:
+
+```bash
+./om research storage-cleanup-preview \
+  --runtime-root /var/lib/options-monitor \
+  --lifecycle-inventory ./lifecycle-migration-inventory.json \
+  --quality-cutover-evidence ./quality-cutover-evidence.json \
+  --backup-proof ./historical-cleanup-backup-proof.json \
+  --history-report ./baseline-previous.json
+```
+
+The first run can omit `--backup-proof` to obtain
+`expected_backup_bindings`; it remains `not_ready` and emits no candidates.
+The proof must describe a standalone, integrity-checked SQLite backup whose
+logical contents and projection/lifecycle bindings match the live ledger.
+This command is preview-only: it never moves, deletes, vacuums, or rewrites
+data, and it has no `--confirm` or `--delete` mode. Even a ready result only
+authorizes a later operator decision. Legacy required-data CSV/base64 files,
+ledger history rows, and research generation roots are explicitly excluded.
+Actual cleanup requires separate authorization and an implemented write path.
+
 Sealed required-data snapshots also publish one deterministic gzip payload per
 symbol at
 `output_shared/blobs/sha256/<first-two-hex>/<sha256>.json.gz`; the run's
