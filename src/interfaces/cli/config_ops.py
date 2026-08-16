@@ -27,11 +27,33 @@ def add_config_commands(subparsers: Any) -> None:
     init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
     init_config.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     init_config.add_argument("--futu-acc-id", default=None, help="Futu account id; omitted keeps a placeholder in config.yaml")
-    init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
-    init_config.add_argument("--external-holdings-account", default="sy")
-    init_config.add_argument("--no-external-holdings", action="store_true")
-    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None)
-    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None)
+    init_config.add_argument(
+        "--account-label",
+        "--account",
+        dest="account_label",
+        default="lx",
+        help="local account label for the primary Futu account",
+    )
+    init_config.add_argument(
+        "--external-holdings-account",
+        default="sy",
+        help="optional external holdings account label; defaults to sy",
+    )
+    init_config.add_argument("--no-external-holdings", action="store_true", help="generate a Futu-only starter config")
+    init_config.add_argument(
+        "--us-symbol",
+        action="append",
+        dest="us_symbols",
+        default=None,
+        help="US symbol to monitor; repeat for a personalized watchlist",
+    )
+    init_config.add_argument(
+        "--hk-symbol",
+        action="append",
+        dest="hk_symbols",
+        default=None,
+        help="HK symbol to monitor; repeat for a personalized watchlist",
+    )
     init_config.add_argument("--no-build", action="store_true", help="only write config.yaml; do not build runtime JSON")
     init_config.add_argument("--dry-run", action="store_true", help="preview starter YAML without writing files")
     init_config.add_argument("--force", action="store_true")

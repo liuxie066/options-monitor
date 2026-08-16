@@ -1119,8 +1119,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
     assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-chat"
-    assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert payload["assistant"]["models"]["openai-default"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert "api_key_env" not in payload["assistant"]["models"]["deepseek-default"]
+    assert "api_key_env" not in payload["assistant"]["models"]["openai-default"]
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
@@ -1142,6 +1142,39 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 90
     assert assistant_cfg["assistant"]["llm"]["max_output_tokens"] == 2048
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+
+
+def test_config_init_supports_personalized_futu_only_watchlist(tmp_path: Path) -> None:
+    output_path = tmp_path / "personal.yaml"
+    runtime_dir = tmp_path / "runtime"
+
+    out = init_yaml_config(
+        repo_root=REPO_ROOT,
+        output_config_yaml_path=output_path,
+        runtime_output_dir=runtime_dir,
+        futu_acc_id="87654321",
+        account_label="christina",
+        external_holdings_account=None,
+        us_symbols=["NVDA", "aapl", "NVDA"],
+        hk_symbols=["0700.hk"],
+        dry_run=True,
+    )
+
+    assert out["ok"] is True
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert not output_path.exists()
+    payload = yaml.safe_load(out["yaml"])
+    assert payload["accounts"] == {
+        "christina": {
+            "type": "futu",
+            "futu_account_id": "87654321",
+        }
+    }
+    assert payload["markets"]["us"]["accounts"] == ["christina"]
+    assert payload["markets"]["us"]["symbols"] == ["NVDA", "AAPL"]
+    assert payload["markets"]["hk"]["accounts"] == ["christina"]
+    assert payload["markets"]["hk"]["symbols"] == ["0700.HK"]
 
 
 @pytest.mark.parametrize(

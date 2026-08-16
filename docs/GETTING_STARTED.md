@@ -81,6 +81,19 @@ om config build --source yaml --market hk --config-yaml config.yaml --output run
 om support bundle --config-path runtime-config/config.us.json --output-dir support --no-local-env-file
 ```
 
+如果只使用一个 Futu 账户，或账户标签和示例里的 `lx` / `sy` 不一致，初始化时直接定制 starter：
+
+```bash
+om config init \
+  --output config.yaml \
+  --runtime-output-dir runtime-config \
+  --account-label christina \
+  --futu-acc-id <futu-account-id> \
+  --no-external-holdings \
+  --us-symbol NVDA \
+  --us-symbol AAPL
+```
+
 ---
 
 ## 3. 配置普通 env 与秘密存储

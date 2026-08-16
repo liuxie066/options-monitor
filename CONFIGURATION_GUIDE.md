@@ -31,6 +31,22 @@
   --runtime-output-dir .
 ```
 
+按自己的券商账户和观察名单初始化时，直接在 starter 阶段传入本地账户形态，避免先生成 `lx` / `sy` 再手工大改：
+
+```bash
+./om config init \
+  --output config.yaml \
+  --runtime-output-dir . \
+  --account-label christina \
+  --futu-acc-id <futu-account-id> \
+  --no-external-holdings \
+  --us-symbol NVDA \
+  --us-symbol AAPL \
+  --hk-symbol 0700.HK
+```
+
+如果还有一套外部持仓来源，去掉 `--no-external-holdings`，或用 `--external-holdings-account <label>` 指定标签。
+
 安装后的全局命令可去掉 `./`。
 
 `config init` 默认生成：
