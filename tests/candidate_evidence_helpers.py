@@ -51,6 +51,7 @@ def seal_market_calendar_fixture(
     version: str = "hk-calendar.v1",
     coverage_start: str | None = None,
     coverage_end: str | None = None,
+    trade_date_types: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     start = coverage_start or trading_dates[0]
     end = coverage_end or trading_dates[-1]
@@ -61,7 +62,12 @@ def seal_market_calendar_fixture(
             return {
                 "retcode": 0,
                 "rows": [
-                    {"time": trading_date, "trade_date_type": "WHOLE"}
+                    {
+                        "time": trading_date,
+                        "trade_date_type": (trade_date_types or {}).get(
+                            trading_date, "WHOLE"
+                        ),
+                    }
                     for trading_date in trading_dates
                 ],
                 "coverage_complete": True,
