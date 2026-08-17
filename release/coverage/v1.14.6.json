@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.6",
+  "base": {
+    "tag": "v1.14.5",
+    "commit": "3059b16c35f6ed2a124e432fd25bde61e31f88f2"
+  },
+  "reviewed_head": "ace46c6f1d85aff9418ea8287fe8a3f6f7d8a687",
+  "commits": [
+    {
+      "sha": "ace46c6f1d85aff9418ea8287fe8a3f6f7d8a687",
+      "subject": "fix(decision-state): report field path on non-finite normalization error"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Report the offending field name when decision-state normalization rejects a non-finite numeric value, making candidate-seal NaN failures diagnosable.",
+      "commits": [
+        "ace46c6f1d85aff9418ea8287fe8a3f6f7d8a687"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
