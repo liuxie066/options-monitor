@@ -518,7 +518,12 @@ def _projection_overrides(
         provider_identity = _row_identity(provider)
         if _row_identity(final) != provider_identity:
             raise RequiredDataBlobError("required-data CSV row order or identity mismatch")
-        changed = [column for column in columns if provider[column] != final[column]]
+        changed = [
+            column
+            for column in columns
+            if provider[column] != final[column]
+            and not _equivalent_csv_number(provider[column], final[column])
+        ]
         if not changed:
             continue
         if changed != ["multiplier"]:
@@ -546,6 +551,20 @@ def _projection_overrides(
             }
         )
     return overrides
+
+
+def _equivalent_csv_number(left: str, right: str) -> bool:
+    try:
+        left_number = float(left)
+        right_number = float(right)
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(left_number)
+        and math.isfinite(right_number)
+        and abs(left_number - right_number)
+        <= max(math.ulp(left_number), math.ulp(right_number))
+    )
 
 
 def _csv_rows(payload: bytes, *, columns: list[str]) -> list[dict[str, str]]:

@@ -11,6 +11,7 @@ import pytest
 
 from conftest import phase2_opening_row
 from domain.domain.engine import calculate_opening_candidate_metrics
+from src.application import multiplier_cache
 from src.application.candidate_models import CandidateContractInput
 from src.application.close_advice_quote_cache import quote_cache_metadata_path
 from src.application.opend_symbol_outputs import (
@@ -1145,14 +1146,13 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from src.application import multiplier_cache
-
     monkeypatch.setattr(
         multiplier_cache,
         "resolve_multiplier",
         lambda **_kwargs: 100.0,
     )
     payload = _payload(multiplier=None)
+    payload["rows"][0]["implied_volatility"] = 0.13436424411240122
     result = finalize_required_data_quote_candidate(
         base=tmp_path,
         producer_root=tmp_path,
@@ -1177,6 +1177,33 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     assert datetime.fromisoformat(
         metadata["source_observed_at"].replace("Z", "+00:00")
     ) == NOW
+    assert result["quote_receipt_path"].is_file()
+
+
+def test_finalizer_keeps_valid_multiplier_csv_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        multiplier_cache,
+        "resolve_multiplier",
+        lambda **_kwargs: 100.0,
+    )
+    payload = _payload(multiplier=100.0)
+    payload["rows"][0]["implied_volatility"] = 0.13436424411240122
+
+    result = finalize_required_data_quote_candidate(
+        base=tmp_path,
+        producer_root=tmp_path,
+        producer_run_id="run-valid-multiplier",
+        symbol="NVDA",
+        expected_fetch_contract=_contract(),
+        fetch_policy=_policy(),
+        mode="fresh",
+        payload=payload,
+        now=COMPLETED_AT,
+    )
+
     assert result["quote_receipt_path"].is_file()
 
 

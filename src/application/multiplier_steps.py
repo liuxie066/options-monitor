@@ -43,6 +43,8 @@ def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir
                 bad = mm.isna() | (mm <= 0)
                 if bad.any():
                     df.loc[bad, 'multiplier'] = float(m)
+                else:
+                    return
             except Exception:
                 df['multiplier'] = float(m)
 

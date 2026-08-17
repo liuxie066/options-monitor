@@ -1413,6 +1413,37 @@ def test_stale_no_evidence_answer_rechecks_with_current_tool(
     assert event.payload["reason"] == expected_reason
 
 
+def test_stale_no_evidence_answer_fails_closed_when_model_skips_recheck() -> None:
+    stale_answer = (
+        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
+        "因此无法确认 0700.HK 被哪些条件过滤。"
+    )
+    model_calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal model_calls
+        model_calls += 1
+        return ModelTurn(text=stale_answer)
+
+    prepared = prepare_contract(
+        _request(
+            "0700.HK 在 lx 账户为什么被过滤？",
+            context=(
+                {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
+                {"role": "assistant", "content": stale_answer},
+            ),
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(prepared, model_runner=model)
+
+    assert result.status == "insufficient_evidence"
+    assert result.user_response == "本轮未取得可验证的当前证据，无法给出事实结论。"
+    assert model_calls == 2
+    assert any(event.type == "fresh_evidence_recheck_failed" for event in result.events)
+
+
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
     calls: list[dict] = []
 

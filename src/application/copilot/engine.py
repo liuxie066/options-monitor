@@ -111,6 +111,8 @@ def run_engine(
                 error={"code": "MODEL_ERROR", "message": "model response was blocked by content filtering"},
             )
         if turn.text and not turn.tool_calls:
+            if fresh_evidence_recheck_used and not state.observations:
+                break
             if turn.finish_reason == "length" and state.iterations < max_iterations:
                 state.accumulated_text_parts.append(turn.text)
                 state.continuation_count += 1
@@ -250,6 +252,16 @@ def run_engine(
 
     if is_cancelled and is_cancelled():
         return AgentRunResult(status="cancelled", error={"code": "CANCELLED", "message": "run cancelled"})
+    if fresh_evidence_recheck_used and not state.observations:
+        record_event(
+            "fresh_evidence_recheck_failed",
+            {"reason": "no_current_observation", "iteration": state.iterations},
+            None,
+        )
+        return AgentRunResult(
+            status="insufficient_evidence",
+            text="本轮未取得可验证的当前证据，无法给出事实结论。",
+        )
     final_turn = _call_model(
         state,
         model_runner,
