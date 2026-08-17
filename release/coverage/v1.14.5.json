@@ -1,0 +1,71 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.5",
+  "base": {
+    "tag": "v1.14.4",
+    "commit": "d959d4cc5063f75d61ee6fb9c12b6d249ffed6e8"
+  },
+  "reviewed_head": "305c8f94030a5148589101fc0e281d862a1c35e7",
+  "commits": [
+    {
+      "sha": "2bedb1add7ff16e7588afc54acff75a7228d4def",
+      "subject": "feat(pi-agent): S1 real Pi agent process boundary"
+    },
+    {
+      "sha": "b38727fcf1e229600a7ff9593e228c08106e0d96",
+      "subject": "fix(pi-agent): S1 cancel race, clean child exit, stderr diagnostics"
+    },
+    {
+      "sha": "1875c798a0d5b7dbf4e7140aaf6b390ddbc0fefb",
+      "subject": "fix(pi-agent): classify accepted non-zero exit and empty fixture"
+    },
+    {
+      "sha": "0f5c64e39efccb21a4ddfd7bdd557af00b14d061",
+      "subject": "feat(pi-agent): add S2 read-only tool bridge"
+    },
+    {
+      "sha": "fd119dcbc62eb0cea4a34e4c82c1f5df41a8a035",
+      "subject": "Merge pull request #175 from liuxie066/feat/pi-agent-core-integration-impl"
+    },
+    {
+      "sha": "2da2895ddfc3e1cc283ea369fcd699a2659fc87c",
+      "subject": "fix(strategy-lab): use 20-day research and 10-day validation"
+    },
+    {
+      "sha": "305c8f94030a5148589101fc0e281d862a1c35e7",
+      "subject": "fix(required-data): tolerate expiration ordering between projection and side plans"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Integrated the Pi Agent Core process boundary (S1): a real child-process agent runtime with cancel/exit classification, stderr diagnostics, and a read-only tool bridge (S2).",
+      "commits": [
+        "2bedb1add7ff16e7588afc54acff75a7228d4def",
+        "b38727fcf1e229600a7ff9593e228c08106e0d96",
+        "1875c798a0d5b7dbf4e7140aaf6b390ddbc0fefb",
+        "0f5c64e39efccb21a4ddfd7bdd557af00b14d061"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Tolerated expiration-date ordering differences between the prefetch projection and side plans, fixing the US market-open first batch failing with \"required-data projected expirations contradict side plans\" when OpenD returned expirations out of chronological order.",
+      "commits": [
+        "305c8f94030a5148589101fc0e281d862a1c35e7"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Aligned the Top1 research window to 20 days and the validation window to 10 days.",
+      "commits": [
+        "2da2895ddfc3e1cc283ea369fcd699a2659fc87c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fd119dcbc62eb0cea4a34e4c82c1f5df41a8a035",
+      "reason": "merge-only commit; both parent changes are covered by release notes"
+    }
+  ]
+}

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.14.5 - 2026-08-17
+
+### New Features
+- Integrated the Pi Agent Core process boundary (S1): a real child-process agent runtime with cancel/exit classification, stderr diagnostics, and a read-only tool bridge (S2).
+
+### Bug Fixes
+- Tolerated expiration-date ordering differences between the prefetch projection and side plans, fixing the US market-open first batch failing with "required-data projected expirations contradict side plans" when OpenD returned expirations out of chronological order.
+- Aligned the Top1 research window to 20 days and the validation window to 10 days.
+
 ## 1.14.4 - 2026-08-17
 
 ### Bug Fixes
