@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
+
+from src.infrastructure.net_port import port_open
 
 
 @dataclass
@@ -35,9 +36,6 @@ class Health:
                 payload.get("error"),
             )
         return payload
-
-
-from src.infrastructure.net_port import port_open
 
 
 def _looks_like_rate_limit(msg: str) -> bool:

@@ -216,3 +216,14 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
     assert second["account_results"][0]["ret"] == 0
     assert len([item for item in calls if "init" in item]) == 2
     assert len([item for item in calls if "closed" in item]) == 2
+
+
+def test_backfill_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
+    from src.application.trades import history_backfill as mod
+    from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: False)
+
+    client = OpenDHistoryDealClient(host="127.0.0.9", port=11119)
+    with pytest.raises(FutuGatewayUnreachableError):
+        client._context()
