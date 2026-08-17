@@ -553,6 +553,11 @@ async function run(): Promise<void> {
   const text = extractText(finalMessage);
 
   if (stopReason === "stop" || stopReason === "length") {
+    if (text === "") {
+      emitRun("run.error", safeError("MODEL_ERROR", "model", "empty answer", false));
+      process.exitCode = 1;
+      return;
+    }
     emitRun("run.proposed", {
       status: "answered",
       text,

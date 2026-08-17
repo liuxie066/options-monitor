@@ -828,8 +828,8 @@ Required behavior:
 - send one `run.start` envelope;
 - validate every child envelope and monotonic sequence;
 - forward normalized `agent.event` payloads to `on_event`;
-- in S1, reject any `tool.call` as a local `TOOL_BRIDGE_ERROR` unless a
-  callback was explicitly supplied by a test;
+- in S1, reject any `tool.call` as a local `TOOL_BRIDGE_ERROR` (no tools in
+  S1; `on_tool_call` is wired in S2);
 - forward `run.proposed` to `on_proposed` and send exactly the returned closed
   decision; the production Host callback performs the durable compare-and-set
   and never exposes an unclaimed Boolean decision;

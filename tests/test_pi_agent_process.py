@@ -206,6 +206,26 @@ def test_pre_identity_nonzero_exit(tmp_path):
     assert "boom" in result["error"]["message"]
 
 
+def test_accepted_then_nonzero_exit(tmp_path):
+    child = (
+        'process.stdout.write(JSON.stringify({protocol:"om-pi-ipc.v1",type:"run.accepted",'
+        'request_id:"req_1",run_id:"run_1",seq:1,payload:{runtime:"pi-agent-core",'
+        'runtime_version:"0.84.2",session_id:null}})+"\\n", () => process.exit(2));\n'
+    )
+    entry = _write_fake(tmp_path, child)
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        runtime_entry=entry,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PI_PROCESS_EXITED"
+    assert result["error"]["stage"] == "process"
+    assert result["error"]["retryable"] is True
+
+
 def test_timeout(tmp_path):
     entry = _write_fake(tmp_path, "setInterval(() => {}, 1000);\n")
     payload = _start_payload(
@@ -441,3 +461,16 @@ def test_real_runtime_exits_promptly_on_commit():
     # Before the stdin-destroy fix the child hung for the fixed 1s grace +
     # SIGTERM. After the fix it exits cleanly well under that window.
     assert elapsed < 0.8
+
+
+def test_empty_fixture_returns_model_error():
+    result = run_pi_agent(
+        _start_payload(debug={"fixture_response": "", "delay_ms": 0}),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MODEL_ERROR"
+    assert result["error"]["stage"] == "model"
+    assert result["error"]["retryable"] is False
