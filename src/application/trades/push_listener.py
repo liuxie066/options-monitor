@@ -7,7 +7,7 @@ import sys
 import threading
 from typing import Any, Callable
 
-from src.infrastructure.opend_watchdog import classify_watchdog_result
+from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
 
 
 class TradeIntakeStartCancelled(RuntimeError):
@@ -69,6 +69,10 @@ class OpenDTradePushListener:
 
         ctx = None
         last_error: Exception | None = None
+        if not port_open(self.host, self.port):
+            raise RuntimeError(
+                f"OpenD unreachable: {self.host}:{self.port}; start FutuOpenD before enabling the trade push listener"
+            )
         for kwargs in (
             {"host": self.host, "port": self.port},
             {"host": self.host, "port": self.port, "is_encrypt": False},

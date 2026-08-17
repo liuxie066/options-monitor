@@ -1225,7 +1225,10 @@ def test_default_backend_quote_readiness_does_not_construct_trade_context(monkey
     import sys
     from types import SimpleNamespace
 
+    from src.infrastructure import futu_gateway
     from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+
+    monkeypatch.setattr(futu_gateway, "port_open", lambda host, port: True)
 
     calls = {"quote": 0, "trade": 0}
 
@@ -1257,3 +1260,92 @@ def test_default_backend_quote_readiness_does_not_construct_trade_context(monkey
     gateway.close()
 
     assert calls == {"quote": 1, "trade": 0}
+
+
+def test_unreachable_backend_fails_fast_without_sdk_context(monkeypatch) -> None:
+    """Port-closed OpenD must raise UNREACHABLE quickly, never enter SDK reconnect loop."""
+
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    from src.infrastructure import futu_gateway as mod
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: False)
+    constructed: list[tuple[str, int]] = []
+
+    class FakeQuote:
+        def __init__(self, host, port, **kwargs):
+            constructed.append((host, port))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(RET_OK=0, OpenQuoteContext=FakeQuote, OpenSecTradeContext=FakeQuote),
+    )
+
+    t0 = time.monotonic()
+    with pytest.raises(mod.FutuGatewayUnreachableError) as exc_info:
+        mod.build_ready_futu_quote_gateway(host="127.0.0.9", port=11119)
+    elapsed = time.monotonic() - t0
+    assert exc_info.value.code == "UNREACHABLE"
+    assert elapsed < 1.0
+    assert constructed == []
+
+
+def test_unreachable_trade_client_fails_fast(monkeypatch) -> None:
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    from src.infrastructure import futu_gateway as mod
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: False)
+    constructed: list[tuple[str, int]] = []
+
+    class FakeTrade:
+        def __init__(self, host, port, **kwargs):
+            constructed.append((host, port))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(RET_OK=0, OpenQuoteContext=FakeTrade, OpenSecTradeContext=FakeTrade),
+    )
+
+    t0 = time.monotonic()
+    with pytest.raises(mod.FutuGatewayUnreachableError):
+        mod.build_ready_futu_broker_gateway(
+            host="127.0.0.9",
+            port=11119,
+            expected_account_ids=[],
+            trd_env="REAL",
+        )
+    assert time.monotonic() - t0 < 1.0
+    assert constructed == []
+
+
+def test_port_open_preserves_original_sdk_path(monkeypatch) -> None:
+    """port_open=True must keep constructing the SDK context (original semantics)."""
+
+    import sys
+    from types import SimpleNamespace
+
+    from src.infrastructure import futu_gateway as mod
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    constructed: list[tuple[str, int]] = []
+
+    class FakeQuote:
+        def __init__(self, host, port, **kwargs):
+            constructed.append((host, port))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(RET_OK=0, OpenQuoteContext=FakeQuote, OpenSecTradeContext=FakeQuote),
+    )
+
+    with pytest.raises(mod.FutuGatewayError):
+        mod.build_ready_futu_quote_gateway(host="127.0.0.9", port=11119)
+    assert constructed == [("127.0.0.9", 11119)]

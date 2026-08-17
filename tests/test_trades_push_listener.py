@@ -5,7 +5,19 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from src.application.trades.push_listener import OpenDTradePushListener
+
+
+@pytest.fixture(autouse=True)
+def _open_port(monkeypatch):
+    """Tests mock the futu SDK; keep the port pre-check passing."""
+
+    from src.application.trades import push_listener as mod
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    yield
 
 
 def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:

@@ -37,15 +37,7 @@ class Health:
         return payload
 
 
-def port_open(host: str, port: int, timeout: float = 0.8) -> bool:
-    try:
-        s = socket.socket()
-        s.settimeout(timeout)
-        s.connect((host, int(port)))
-        s.close()
-        return True
-    except Exception:
-        return False
+from src.infrastructure.net_port import port_open
 
 
 def _looks_like_rate_limit(msg: str) -> bool:
