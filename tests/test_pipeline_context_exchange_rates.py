@@ -63,10 +63,12 @@ def test_load_exchange_rates_uses_shared_run_cache_when_supplied(
     assert observed == [(shared_state / "rate_cache.json").resolve()]
 
 
-def test_load_exchange_rates_rejects_stale_cache_without_fallback(
+def test_load_exchange_rates_falls_back_to_stale_cache(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from src.application import pipeline_context as ctx
+    from src.infrastructure import exchange_rates
 
     cache_path = tmp_path / "rate_cache.json"
     cache_path.write_text(
@@ -76,63 +78,45 @@ def test_load_exchange_rates_rejects_stale_cache_without_fallback(
                 "timestamp": (
                     datetime.now(timezone.utc) - timedelta(hours=25)
                 ).isoformat(),
-                "source": "opend_account_funds_conversion",
+                "source": "tencent_quote",
             }
         ),
         encoding="utf-8",
     )
-    messages: list[str] = []
-    status: dict[str, str] = {}
+    # 网络不可用时回退到过期缓存，不再返回 None
+    monkeypatch.setattr(exchange_rates, "fetch_market_exchange_rates", lambda: None)
 
-    assert ctx.load_exchange_rates(
+    usd, hkd = ctx.load_exchange_rates(
         base=tmp_path,
         state_dir=tmp_path,
-        log=messages.append,
-        status_out=status,
-    ) == (None, None)
-    assert status == {"status": "unavailable"}
-    assert any("OpenD exchange_rate observation missing/stale" in message for message in messages)
+        log=lambda _msg: None,
+    )
+
+    assert round(usd or 0.0, 8) == round(1.0 / 7.25, 8)
+    assert round(hkd or 0.0, 4) == 0.93
 
 
-def test_fetch_opend_exchange_rate_observation_uses_canonical_opend_route(
+def test_fetch_opend_exchange_rate_observation_uses_market_fetch(
     monkeypatch,
 ) -> None:
     from src.application import exchange_rate_loader as loader
+    from src.infrastructure import exchange_rates
     from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
-    observed_accounts: list[str] = []
-
     monkeypatch.setattr(
-        loader,
-        "resolve_shared_futu_quote_route",
-        lambda _configs: SimpleNamespace(
-            ok=True,
-            host="127.0.0.1",
-            port=11111,
-        ),
-    )
-    from src.application import futu_portfolio_context
-
-    def _fetch(*, cfg, account):
-        del cfg
-        observed_accounts.append(account)
-        return {
+        exchange_rates,
+        "fetch_market_exchange_rates",
+        lambda: {
             "rates": {"USDCNY": 7.21, "HKDCNY": 0.92},
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "opend_account_funds_conversion",
-        }
-
-    monkeypatch.setattr(
-        futu_portfolio_context,
-        "fetch_futu_exchange_rate_observation",
-        _fetch,
+            "source": "tencent_quote",
+        },
     )
 
     observation = loader.fetch_opend_exchange_rate_observation(
         (("lx", {"symbols": []}),)
     )
 
-    assert observed_accounts == ["lx"]
     assert exchange_rate_observation_status(observation, max_age_hours=24) == "ready"
 
 

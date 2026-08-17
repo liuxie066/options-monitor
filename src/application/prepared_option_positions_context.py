@@ -11,8 +11,9 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.services import adapt_option_positions_context
-from src.application.exchange_rate_loader import (
-    fetch_opend_exchange_rate_observation,
+from src.infrastructure.exchange_rates import (
+    exchange_rate_observation_status,
+    get_exchange_rates_or_fetch_latest,
 )
 from src.application.ledger.api import (
     decision_state_snapshot_from_rows,
@@ -161,8 +162,13 @@ def prepare_option_positions_contexts(
     fx_status = "unavailable"
     fx_error_type: str | None = None
     try:
-        candidate = fetch_opend_exchange_rate_observation(
-            (account, configs[account]) for account in sorted(configs)
+        rate_cache_path = (
+            base_path / "output_shared" / "state" / "rate_cache.json"
+        ).resolve()
+        candidate = get_exchange_rates_or_fetch_latest(
+            cache_path=rate_cache_path,
+            max_age_hours=24,
+            log=log,
         )
         fx_observation = (
             dict(candidate) if isinstance(candidate, Mapping) else None

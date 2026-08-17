@@ -162,17 +162,17 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     )
     fx_calls: list[list[str]] = []
 
-    def _rates(configs):
-        fx_calls.append([account for account, _config in configs])
+    def _rates(cache_path=None, **_kwargs):
+        fx_calls.append(str(cache_path))
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "opend_account_funds_conversion",
+            "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         }
 
     monkeypatch.setattr(
         mod,
-        "fetch_opend_exchange_rate_observation",
+        "get_exchange_rates_or_fetch_latest",
         _rates,
     )
 
@@ -197,7 +197,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     assert batch.ledger_read_count == 1
     assert batch.fx_observation_count == 1
     assert len(fx_calls) == 1
-    assert fx_calls == [["lx", "sy"]]
+    assert fx_calls[0].endswith("rate_cache.json")
     assert batch.unavailable_by_account == {}
     assert set(batch.manifests) == {"lx", "sy"}
 
@@ -373,10 +373,10 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
 
     monkeypatch.setattr(
         mod,
-        "fetch_opend_exchange_rate_observation",
-        lambda _configs: {
+        "get_exchange_rates_or_fetch_latest",
+        lambda cache_path=None, **_kwargs: {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "opend_account_funds_conversion",
+            "source": "tencent_quote",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         },
     )
