@@ -63,6 +63,7 @@ logs/
 
 # webui build
 scripts/webui/frontend/node_modules/
+agent-runtime/node_modules/
 
 # local config backups
 config.*.bak.*

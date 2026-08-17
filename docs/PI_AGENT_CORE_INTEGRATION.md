@@ -828,8 +828,8 @@ Required behavior:
 - send one `run.start` envelope;
 - validate every child envelope and monotonic sequence;
 - forward normalized `agent.event` payloads to `on_event`;
-- in S1, reject any `tool.call` as a local `TOOL_BRIDGE_ERROR` unless a
-  callback was explicitly supplied by a test;
+- in S1, reject any `tool.call` as a local `TOOL_BRIDGE_ERROR` (no tools in
+  S1; `on_tool_call` is wired in S2);
 - forward `run.proposed` to `on_proposed` and send exactly the returned closed
   decision; the production Host callback performs the durable compare-and-set
   and never exposes an unclaimed Boolean decision;
@@ -1349,10 +1349,15 @@ details = {observation: compact observation}
 terminate = false
 ```
 
-`observation.ok == false` is a normal error tool result (`isError: true`) so the
-model may repair invalid arguments. Raw executor output never enters content,
-details, Session, or IPC. Cancellation rejects the pending promise, removes its
-listener, and prevents a later result from being accepted.
+`observation.ok == false` is promoted to `isError: true` by a global
+`afterToolCall` hook that returns `{ isError: true }` when
+`details.observation.ok === false`; this preserves the compact content and
+details while letting the model repair invalid arguments. `execute()` returns
+the same normal result for `ok: true` and `ok: false` and never throws for a
+valid observation: throwing would make Pi replace `content` with the thrown
+message, breaking the compact-observation guarantee. Raw executor output never
+enters content, details, Session, or IPC. Cancellation rejects the pending
+promise, removes its listener, and prevents a later result from being accepted.
 
 Python changes `run_pi_agent(..., on_tool_call=...)` from a synchronous callback
 inside the selector loop to one daemon worker for the single outstanding read.
@@ -1379,10 +1384,11 @@ verify manifest allowlist and pure_read capability
 -> tools.compact_observation(tool_name, result)
 ```
 
-An `AgentToolError` becomes a bounded compact observation with its safe code,
-message, status, and reference. An unknown/non-read tool, callback exception,
-protocol mismatch, or invalid callback return is terminal
-`TOOL_BRIDGE_ERROR`; callback exception text is discarded.
+`execute()` throws only for bridge failures: an unknown/non-read tool, callback
+exception, protocol mismatch, or invalid callback return. These are terminal
+`TOOL_BRIDGE_ERROR`; the run fails closed without committing a successful turn,
+and callback exception text is discarded rather than becoming a model-visible
+compact observation.
 
 ### 12.4 Budget behavior
 
