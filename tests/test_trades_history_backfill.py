@@ -4,11 +4,23 @@ import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from src.application.trades.history_backfill import (
     OpenDHistoryDealClient,
     fetch_opend_history_deals,
     history_deal_query_dates,
 )
+
+
+@pytest.fixture(autouse=True)
+def _open_port(monkeypatch):
+    """Tests mock the futu SDK; keep the port pre-check passing."""
+
+    from src.application.trades import history_backfill as mod
+
+    monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    yield
 
 
 def test_history_deal_query_dates_uses_hong_kong_trade_date_window() -> None:

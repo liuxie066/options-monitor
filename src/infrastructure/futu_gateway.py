@@ -25,6 +25,7 @@ from typing import Any, Iterable
 
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
+from src.infrastructure.net_port import port_open
 
 
 LOG = logging.getLogger(__name__)
@@ -271,6 +272,13 @@ class _FutuAPIBackend:
             _ensure_futu_api_importable()
             import futu
 
+            # ponytail: port pre-check leaves a <1s race window before connect;
+            # if OpenD dies inside it we still enter the SDK reconnect loop.
+            # Revisit with is_async_connect only if that window is ever hit.
+            if not port_open(self.host, self.port):
+                raise FutuGatewayUnreachableError(
+                    f"OpenD unreachable: {self.host}:{self.port}"
+                )
             self._quote_client = futu.OpenQuoteContext(host=self.host, port=self.port)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=quote host=%s port=%s",
@@ -284,6 +292,10 @@ class _FutuAPIBackend:
             _ensure_futu_api_importable()
             import futu
 
+            if not port_open(self.host, self.port):
+                raise FutuGatewayUnreachableError(
+                    f"OpenD unreachable: {self.host}:{self.port}"
+                )
             self._trade_client = futu.OpenSecTradeContext(host=self.host, port=self.port)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=broker host=%s port=%s",
@@ -570,6 +582,10 @@ class FutuGatewayDataContractError(FutuGatewayError):
     code = "DATA_CONTRACT"
 
 
+class FutuGatewayUnreachableError(FutuGatewayError):
+    code = "UNREACHABLE"
+
+
 class FutuGatewayCapabilityUnavailableError(FutuGatewayError):
     code = "CAPABILITY_UNAVAILABLE"
 
@@ -587,6 +603,8 @@ class FutuGatewayCapabilityUnavailableError(FutuGatewayError):
 
 
 def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
+    if isinstance(exc, FutuGatewayError):
+        return exc
     msg = str(exc or "")
     code = classify_opend_error(exc)
 

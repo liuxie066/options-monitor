@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.infrastructure.opend_watchdog import port_open
+
 
 def history_deal_query_dates(*, lookback_hours: float, now: datetime | None = None) -> tuple[str, str, str, str]:
     end_utc = now.astimezone(timezone.utc) if now is not None else datetime.now(timezone.utc)
@@ -89,6 +91,11 @@ class OpenDHistoryDealClient:
 
     def _context(self) -> Any:
         if self._ctx is None:
+            if not port_open(self.host, self.port):
+                raise RuntimeError(
+                    f"OpenD unreachable: {self.host}:{self.port}; "
+                    "start FutuOpenD before history backfill"
+                )
             self._ctx = self._futu().OpenSecTradeContext(
                 host=self.host,
                 port=self.port,

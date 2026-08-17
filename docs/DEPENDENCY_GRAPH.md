@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 974 (`src`: 522, `domain`: 75, `scripts`: 13, `tests`: 364)
-- Internal import edges: 6457 total, 2776 production/script edges excluding tests
+- Python files scanned: 975 (`src`: 523, `domain`: 75, `scripts`: 13, `tests`: 364)
+- Internal import edges: 6472 total, 2779 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|410| domain
   application -->|4| domain_services
-  application -->|148| infrastructure
+  application -->|149| infrastructure
   application -->|41| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|2| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|2726| application
+  tests -->|2730| application
   tests -->|442| domain
   tests -->|2| domain_services
-  tests -->|180| infrastructure
+  tests -->|188| infrastructure
   tests -->|242| interfaces
   tests -->|23| scripts
   tests -->|18| storage
@@ -61,7 +61,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 410 |
 | interfaces | application | 154 |
-| application | infrastructure | 148 |
+| application | infrastructure | 149 |
 | application | storage | 41 |
 | scripts | application | 38 |
 | infrastructure | application | 13 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2726 |
+| tests | application | 2730 |
 | tests | domain | 442 |
 | tests | interfaces | 242 |
-| tests | infrastructure | 180 |
+| tests | infrastructure | 188 |
 | tests | scripts | 23 |
 | tests | storage | 18 |
 | tests | domain_services | 2 |
@@ -112,8 +112,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.multi_tick | 15 |
 | src.application | src.application.settings | 15 |
 | src.application | src.application.positions | 14 |
+| src.application.trades | src.infrastructure | 14 |
 | src.application.positions | domain.domain | 13 |
-| src.application.trades | src.infrastructure | 13 |
 | src.infrastructure | src.application | 13 |
 | src.application | domain.domain.ledger | 12 |
 | domain.domain | domain.domain.ledger | 12 |
