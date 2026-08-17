@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.14.3 - 2026-08-17
+
+### Bug Fixes
+- Fixed HK decision-brief batches failing with "required-data CSV differs outside multiplier enrichment" when provider-projection and pipeline-CSV floats landed a few ULP apart (observed up to 3 ULP on otm_pct during lunch-reopen batches); blob validation now uses a 1e-12 relative tolerance, far tighter than any financial meaning.
+- Made fresh-evidence recheck fail closed when no current observation was obtained, and preserved quote snapshots when the multiplier cache skips enrichment.
+
 ## 1.14.2 - 2026-08-17
 
 ### Bug Fixes
