@@ -1,0 +1,45 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.3",
+  "base": {
+    "tag": "v1.14.2",
+    "commit": "7140e7452844ead440ec61e0b411fd8dbd95cbcd"
+  },
+  "reviewed_head": "f2b055b002e2f70323989e238c9465ac2a7bfc66",
+  "commits": [
+    {
+      "sha": "1a7bb237af2771407d41691a3a7700a7ce9a0603",
+      "subject": "fix(evidence): fail closed and preserve quote snapshots"
+    },
+    {
+      "sha": "70bfe87d2771258d360ff1bce5951cc6f6667aa8",
+      "subject": "Merge pull request #174 from liuxie066/fix/copilot-evidence-and-blob-float"
+    },
+    {
+      "sha": "f2b055b002e2f70323989e238c9465ac2a7bfc66",
+      "subject": "fix(blobs): widen CSV numeric equivalence to relative tolerance"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed HK decision-brief batches failing with \"required-data CSV differs outside multiplier enrichment\" when provider-projection and pipeline-CSV floats landed a few ULP apart (observed up to 3 ULP on otm_pct during lunch-reopen batches); blob validation now uses a 1e-12 relative tolerance, far tighter than any financial meaning.",
+      "commits": [
+        "f2b055b002e2f70323989e238c9465ac2a7bfc66"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made fresh-evidence recheck fail closed when no current observation was obtained, and preserved quote snapshots when the multiplier cache skips enrichment.",
+      "commits": [
+        "1a7bb237af2771407d41691a3a7700a7ce9a0603"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "70bfe87d2771258d360ff1bce5951cc6f6667aa8",
+      "reason": "merge commit only; both parent changes are covered by release notes"
+    }
+  ]
+}
