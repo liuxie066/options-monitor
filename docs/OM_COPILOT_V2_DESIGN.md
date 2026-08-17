@@ -1,7 +1,13 @@
-# OM Copilot v2 Architecture / Scene v3 Contract
+# OM Copilot v2 Architecture / Scene v4 Contract
 
 The product architecture remains v2. The general `om_chat` runtime Scene and
-prompt contract are versioned independently and are currently `v3`.
+prompt contract are versioned independently and are currently `v4`.
+
+The planned replacement of the generic Agent runtime with Pi Agent Core is
+specified separately in
+[PI_AGENT_CORE_INTEGRATION.md](PI_AGENT_CORE_INTEGRATION.md). Until that atomic
+cutover completes, this document remains the authority for current production
+behavior.
 
 ## Purpose
 
@@ -44,7 +50,7 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 ## Invariants
 
 - There is one general Scene: `om_chat`.
-- The `om_chat` Scene is `v3` and compiles one ordered five-fragment prompt
+- The `om_chat` Scene is `v4` and compiles one ordered five-fragment prompt
   pack. Repository operator instructions are not runtime prompt input.
 - Service does not classify free text into OM business tasks.
 - Service does not parse month, symbol, account, or intent from free text.
@@ -127,7 +133,7 @@ It declares:
 - model/tool/context/time budgets;
 - conversation limits.
 
-The ordered v3 prompt pack is:
+The ordered v4 prompt pack is:
 
 ```text
 base_behavior.md
@@ -493,7 +499,7 @@ configured at runtime and must not assume a provider.
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | P0 | Stable rebuild baseline | Focused tests, guards, dependency graph, and diff checks pass. |
-| P1 | Production answer-quality baseline | The configured production model produces sanitized v3 traces and human scores. |
+| P1 | Production answer-quality baseline | The configured production model produces sanitized v4 traces and human scores. |
 | P2 | Structured memory | Existing pinned state and episodes remain injectable without request-path model calls or memory writes. |
 | P3 | Durable run control | Interrupted reads resume safely and cancellation stops further work. |
 | P4 | Trace/model protocol | Iteration identity, usage, termination, and failure categories are persisted. |
@@ -521,7 +527,7 @@ The rebuild is complete only when:
 - explicit operations use one deterministic audited Control contract;
 - deterministic Copilot, Control, channel, config, and architecture tests pass;
 - production real-model questions produce useful, factual conclusions;
-- three independent real-model acceptance runs use the expected stable v3
+- three independent real-model acceptance runs use the expected stable v4
   prompt/tool fingerprints and pass every format and safety hard gate;
 - quantitative persona cases use relevant supported evidence, avoid false
   precision and emotional language, and permit wait/no-trade conclusions;
