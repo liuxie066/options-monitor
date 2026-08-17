@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.14.6 - 2026-08-17
+
+### Improvements
+- Report the offending field name when decision-state normalization rejects a non-finite numeric value, making candidate-seal NaN failures diagnosable.
+
 ## 1.14.5 - 2026-08-17
 
 ### New Features
