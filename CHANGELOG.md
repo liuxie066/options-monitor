@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.14.4 - 2026-08-17
+
+### Bug Fixes
+- Replaced the unreliable OpenD total-assets ratio exchange-rate derivation with a single market source (Tencent primary, Sina fallback), fixing decision-brief "折CNY" amounts that used a false USDCNY≈4.72 instead of ≈6.74.
+- Forced `refresh_cache=True` on the OpenD account-balance query so stale fund snapshots no longer understate money-fund balances and produce a bogus negative "available to open options".
+
 ## 1.14.3 - 2026-08-17
 
 ### Bug Fixes

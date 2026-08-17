@@ -1,0 +1,41 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.4",
+  "base": {
+    "tag": "v1.14.3",
+    "commit": "53a30b15497efe598f60651ab4dab9cf1a50ccc3"
+  },
+  "reviewed_head": "104e5f98e6606a942dc29a4b992328c9e332f5e3",
+  "commits": [
+    {
+      "sha": "d71d62f39cd3873c946ec51ab07eb31bc4887e64",
+      "subject": "feat(fx): market exchange-rate single source (Tencent primary, Sina fallback)"
+    },
+    {
+      "sha": "07ad92a6744edea5a8f7a0c6b78a40c341547c29",
+      "subject": "fix(fx): add default User-Agent and remove duplicate cache write"
+    },
+    {
+      "sha": "104e5f98e6606a942dc29a4b992328c9e332f5e3",
+      "subject": "fix(portfolio): force refresh_cache on account balance query"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Replaced the unreliable OpenD total-assets ratio exchange-rate derivation with a single market source (Tencent primary, Sina fallback), fixing decision-brief \"折CNY\" amounts that used a false USDCNY≈4.72 instead of ≈6.74.",
+      "commits": [
+        "d71d62f39cd3873c946ec51ab07eb31bc4887e64",
+        "07ad92a6744edea5a8f7a0c6b78a40c341547c29"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Forced `refresh_cache=True` on the OpenD account-balance query so stale fund snapshots no longer understate money-fund balances and produce a bogus negative \"available to open options\".",
+      "commits": [
+        "104e5f98e6606a942dc29a4b992328c9e332f5e3"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
