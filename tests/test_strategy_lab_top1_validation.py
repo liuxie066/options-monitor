@@ -13,6 +13,7 @@ from src.application.recommendation_point import (
     RECOMMENDATION_POINT_FILE,
     capture_scheduled_recommendation_point,
 )
+from src.application.strategy_lab.top1.contracts import VALIDATION_REQUIRED_DAYS
 from src.application.strategy_lab.top1.corpus import capture_recommendation_point
 from src.application.strategy_lab.top1.fill_observation import observe_active_contracts
 from src.application.strategy_lab.top1.lifecycle import (
@@ -121,7 +122,7 @@ def _start_validation(
     result = _run(store, artifact_root, case, research_hash, FakeGateway())
     assert result["selection"] == "research_leader"
 
-    dates = _trading_days("2026-10-05", 20)
+    dates = _trading_days("2026-10-05", VALIDATION_REQUIRED_DAYS)
     validation_spec = research_fixture._spec(
         case["sealed_dataset"],
         variants=(
@@ -152,11 +153,11 @@ def _start_validation(
     )
     assert commitment["schema_version"] == "sell_put_top1_hidden_window_commitment.v2"
     assert commitment["trading_dates"] == dates
-    assert len(commitment["days"]) == 20
+    assert len(commitment["days"]) == VALIDATION_REQUIRED_DAYS
     assert all(day["expected_recommendation_point_ids"] for day in commitment["days"])
     seal_market_calendar_fixture(
         artifact_root,
-        _trading_days("2026-11-02", 20),
+        _trading_days("2026-11-02", VALIDATION_REQUIRED_DAYS),
         version=str(validation_spec["economics_contracts"]["market_calendar_version"]),
     )
     validation_hash = str(locked["validation_spec_sha256"])
@@ -210,7 +211,7 @@ def _publish_candidate_point(
     )
 
 
-def test_twenty_day_empty_candidate_run_concludes_without_provider_access(
+def test_ten_day_empty_candidate_run_concludes_without_provider_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, artifact_root, source_root, dates = _start_validation(
@@ -260,14 +261,14 @@ def test_twenty_day_empty_candidate_run_concludes_without_provider_access(
         )
 
     experiment = store.experiment(EXPERIMENT_ID)
-    assert experiment["completed_validation_partitions"] == 20
+    assert experiment["completed_validation_partitions"] == VALIDATION_REQUIRED_DAYS
     assert experiment["validation_progress"] == "ready_to_conclude"
     before = read_public_status(
         store, experiment_id=EXPERIMENT_ID, environ=AVAILABLE
     )
     assert before["experiment"]["final_outcome_status"] is None
     assert before["validation"] == {
-        "consumed_point_count": 20,
+        "consumed_point_count": VALIDATION_REQUIRED_DAYS,
         "outcome_job_count": 0,
         "pending_outcome_count": 0,
     }

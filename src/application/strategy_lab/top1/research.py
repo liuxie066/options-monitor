@@ -12,6 +12,7 @@ from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     RECOMMENDATION_POINT_SELECTOR,
+    RESEARCH_REQUIRED_DAYS,
     SEALED_HISTORICAL_DATASET_SCHEMA,
     Top1CoreContractError,
     build_research_spec_sha256,
@@ -240,8 +241,11 @@ def _validate_dataset(
         _fail("research_corpus_conflict", "sealed dataset schema is unsupported")
     if item["market"] != spec["market"] or item["account"] != spec["account"]:
         _fail("research_corpus_conflict", "sealed dataset identity does not match spec")
-    if item["required_days"] != 40:
-        _fail("research_corpus_conflict", "sealed dataset must contain 40 days")
+    if item["required_days"] != RESEARCH_REQUIRED_DAYS:
+        _fail(
+            "research_corpus_conflict",
+            f"sealed dataset must contain {RESEARCH_REQUIRED_DAYS} days",
+        )
     if item["recommendation_point_selector"] != RECOMMENDATION_POINT_SELECTOR:
         _fail("research_corpus_conflict", "sealed dataset selector is unsupported")
     if item["ranking_projection_schema_version"] != RANKING_PROJECTION_SCHEMA_VERSION:
@@ -280,8 +284,8 @@ def _validate_dataset(
         for index, raw in enumerate(cast(list[object], raw_dates))
     ]
     if (
-        len(selected_dates) != 40
-        or len(set(selected_dates)) != 40
+        len(selected_dates) != RESEARCH_REQUIRED_DAYS
+        or len(set(selected_dates)) != RESEARCH_REQUIRED_DAYS
         or selected_dates != sorted(selected_dates)
     ):
         _fail("research_corpus_conflict", "sealed dataset dates are not exact and ordered")
@@ -291,7 +295,7 @@ def _validate_dataset(
         or item["latest_mature_trading_date"] != selected_dates[-1]
     ):
         _fail("research_corpus_conflict", "sealed dataset window does not match spec")
-    if len(raw_days) != 40:
+    if len(raw_days) != RESEARCH_REQUIRED_DAYS:
         _fail("research_corpus_conflict", "sealed dataset day count is incomplete")
 
     point_rows: list[dict[str, str]] = []
@@ -498,7 +502,7 @@ def _base_result(
         "dataset_ref": dataset_ref,
         "dataset_sha256": source["dataset_sha256"],
         "dataset_content_sha256": sealed_dataset["content_sha256"],
-        "required_days": 40,
+        "required_days": RESEARCH_REQUIRED_DAYS,
         "effective_days": effective_days,
         "research_fill_assumption": "t0_sell_limit",
         "research_is_counterfactual": True,
@@ -816,7 +820,7 @@ def evaluate_research(
         summary = summarize_paired_daily_deltas(
             point_rows_by_variant[variant_id],
             {
-                "required_days": 40,
+                "required_days": RESEARCH_REQUIRED_DAYS,
                 "confidence_level": 0.95,
                 "worst_fraction": 0.20,
                 "require_concentration_non_increase": True,

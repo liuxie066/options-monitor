@@ -30,6 +30,7 @@ from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     RECOMMENDATION_POINT_SELECTOR,
+    RESEARCH_REQUIRED_DAYS,
     SEALED_HISTORICAL_DATASET_SCHEMA,
 )
 from src.application.strategy_lab.top1.ranking import (
@@ -1762,15 +1763,18 @@ def freeze_research_dataset(
     artifact_root: str | Path,
     *,
     window_facts: Mapping[str, Any],
-    required_days: int = 40,
+    required_days: int = RESEARCH_REQUIRED_DAYS,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if (
         isinstance(required_days, bool)
         or not isinstance(required_days, int)
-        or required_days != 40
+        or required_days != RESEARCH_REQUIRED_DAYS
     ):
-        _fail("corpus_input_invalid", "required_days must equal 40")
+        _fail(
+            "corpus_input_invalid",
+            f"required_days must equal {RESEARCH_REQUIRED_DAYS}",
+        )
     facts = _validate_window_facts(window_facts)
     market = str(facts["market"])
     account = str(facts["account"])

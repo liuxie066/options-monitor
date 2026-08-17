@@ -698,8 +698,8 @@ config 解析；多 Futu 账户不允许依赖列表顺序或默认端口推断�
 ### 实验功能：Sell Put Top1 loop
 
 Top1 loop 是独立的实验功能，固定绑定 `HK/lx`，默认不渲染、不运行；维护方可随时
-移除 service render opt-in 或关闭 maintainer availability。它只组合已经存在的
-语料、40 个交易日研究回跑、20 个交易日隐藏验证和终态回执命令，不改交易策略配置，也不自动采用
+移除 service render opt-in 或关闭 maintainer availability。它只组合已经存在的正式语料、
+20 个交易日研究回跑、10 个交易日隐藏验证和终态回执命令，不改交易策略配置，也不自动采用
 胜者。
 
 正式样本点与生产扫描调度使用同一个 `scheduled_scan_target_market`。`HK/lx`
@@ -717,9 +717,11 @@ recommendation point、opening snapshot 和 ranking projection。任一预期点
 评价先计算同点 baseline/challenger 的 paired delta，再对同一账户、同一交易日的
 有效点取日均。统计样本量按交易日计，不把一天 12 个点当成 12 个独立日。
 
-已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据，但只有在能证明
-精确调度点、事前封存分母及完整排名和结果证据时，才能进入正式 40 日语料；
-不为了补数量把旧快照默认迁移成正式样本。
+已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据。W0 只把正式研究语料窗口
+从 40 日调整为 20 日，不新增历史归档转换或 OpenD 补数能力；只有能证明精确调度点、事前封存
+分母及完整排名和结果证据的数据，才能进入当前正式研究语料。旧归档桥接属于后续独立模块，
+不得为了补数量把旧快照默认迁移成正式样本。未来 10 日隐藏验证继续要求事前封存调度点和完整
+分母。
 
 只读入口：
 

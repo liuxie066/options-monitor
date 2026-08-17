@@ -14,6 +14,7 @@ from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     Top1CoreContractError,
+    VALIDATION_REQUIRED_DAYS,
     build_validation_spec_sha256,
     validate_experiment_spec,
 )
@@ -277,7 +278,9 @@ def _terminal_if_final(
     day_will_seal: bool,
     occurred_at_utc: str,
 ) -> Mapping[str, object] | None:
-    if not day_will_seal or int(experiment["completed_validation_partitions"]) != 19:
+    if not day_will_seal or int(experiment["completed_validation_partitions"]) != (
+        VALIDATION_REQUIRED_DAYS - 1
+    ):
         return None
     return build_generation_terminal_request(
         post_generation,

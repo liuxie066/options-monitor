@@ -17,6 +17,10 @@ from src.application.recommendation_point import (
     capture_scheduled_recommendation_point,
 )
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
+from src.application.strategy_lab.top1.contracts import (
+    RESEARCH_REQUIRED_DAYS,
+    VALIDATION_REQUIRED_DAYS,
+)
 from src.application.strategy_lab.top1.corpus import (
     CORPUS_COMMAND_RESULT_SCHEMA,
     CORPUS_STATUS_SCHEMA,
@@ -352,7 +356,7 @@ def test_calendar_binding_is_content_addressed_and_fails_closed(
         read_market_calendar_binding(tmp_path / "missing", market="HK")
     assert missing.value.reason_code == "market_calendar_binding_unavailable"
 
-    days = _trading_days("2026-07-21", 20)
+    days = _trading_days("2026-07-21", VALIDATION_REQUIRED_DAYS)
     binding = seal_market_calendar_fixture(
         tmp_path, days, version="hk-calendar.fixture.v1"
     )
@@ -494,7 +498,7 @@ def test_committed_denominator_honors_sessions_and_rejects_schedule_drift(
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
     _enable(store, artifact_root)
-    days = _trading_days("2026-07-21", 20)
+    days = _trading_days("2026-07-21", VALIDATION_REQUIRED_DAYS)
     binding = seal_market_calendar_fixture(
         artifact_root,
         days,
@@ -1073,7 +1077,7 @@ def test_status_counts_clean_not_evaluable_conflicting_and_missing(
     }
 
 
-def test_freeze_exact_40_days_survives_source_deletion_and_never_falls_back(
+def test_freeze_exact_research_window_survives_source_deletion_and_never_falls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1081,8 +1085,8 @@ def test_freeze_exact_40_days_survives_source_deletion_and_never_falls_back(
     artifact_root = tmp_path / "artifacts"
     source_root = tmp_path / "source"
     _enable(store, artifact_root)
-    all_days = _trading_days("2026-01-05", 41)
-    first_window = all_days[:40]
+    all_days = _trading_days("2026-01-05", RESEARCH_REQUIRED_DAYS + 1)
+    first_window = all_days[:RESEARCH_REQUIRED_DAYS]
     for index, trading_date in enumerate(first_window):
         targets = [(9, 40), (10, 0), (10, 10)] if index == 0 else [(10, 0)]
         assert _seal(
@@ -1120,12 +1124,12 @@ def test_freeze_exact_40_days_survives_source_deletion_and_never_falls_back(
         "schema_version": CORPUS_STATUS_SCHEMA,
         "market": "HK",
         "account": "lx",
-        "days_total": 40,
-        "days_on_time": 40,
+        "days_total": RESEARCH_REQUIRED_DAYS,
+        "days_on_time": RESEARCH_REQUIRED_DAYS,
         "days_not_evaluable": 0,
         "days_conflicting": 0,
-        "expected_points_total": 42,
-        "points_captured": 42,
+        "expected_points_total": RESEARCH_REQUIRED_DAYS + 2,
+        "points_captured": RESEARCH_REQUIRED_DAYS + 2,
         "points_not_evaluable": 0,
         "points_conflicting": 0,
         "points_missing": 0,
@@ -1161,7 +1165,7 @@ def test_freeze_exact_40_days_survives_source_deletion_and_never_falls_back(
     assert dataset["schema_version"] == SEALED_HISTORICAL_DATASET_SCHEMA
     assert dataset["selected_trading_dates"] == first_window
     assert [item["trading_date"] for item in dataset["days"]] == first_window
-    assert [len(item["points"]) for item in dataset["days"]] == [3] + [1] * 39
+    assert [len(item["points"]) for item in dataset["days"]] == [3] + [1] * (RESEARCH_REQUIRED_DAYS - 1)
     assert "candidates" not in json.dumps(dataset)
     assert dataset["content_sha256"] == canonical_sha256(
         {key: value for key, value in dataset.items() if key != "content_sha256"}
@@ -1291,10 +1295,17 @@ def test_freeze_validates_window_facts_feature_gate_and_warming(
 ) -> None:
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
-    days = _trading_days("2026-01-05", 39)
+    days = _trading_days("2026-01-05", RESEARCH_REQUIRED_DAYS - 1)
     facts = _window_facts(days)
 
-    invalid_required_days_values: list[Any] = [True, 1, 39, 40.0, 41, "40"]
+    invalid_required_days_values: list[Any] = [
+        True,
+        1,
+        RESEARCH_REQUIRED_DAYS - 1,
+        float(RESEARCH_REQUIRED_DAYS),
+        RESEARCH_REQUIRED_DAYS + 1,
+        str(RESEARCH_REQUIRED_DAYS),
+    ]
     for invalid_required_days in invalid_required_days_values:
         with pytest.raises(CorpusError) as raised:
             freeze_research_dataset(
@@ -1371,7 +1382,11 @@ def test_freeze_validates_window_facts_feature_gate_and_warming(
             )
         assert raised.value.reason_code == "corpus_input_invalid"
 
-    no_mature = json.loads(json.dumps(_window_facts(_trading_days("2026-01-05", 40))))
+    no_mature = json.loads(
+        json.dumps(
+            _window_facts(_trading_days("2026-01-05", RESEARCH_REQUIRED_DAYS))
+        )
+    )
     no_mature["latest_mature_trading_date"] = None
     _rehash(no_mature)
     assert freeze_research_dataset(
