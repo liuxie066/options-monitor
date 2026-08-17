@@ -593,8 +593,11 @@ def run_pi_agent(
                         # child closed stdout: EOF
                         if not saw_terminal:
                             # Capture the exit code before reaping so a hard
-                            # startup failure (non-zero, zero envelopes) is not
-                            # mistaken for an in-run process death.
+                            # startup failure (non-zero, before acceptance) is
+                            # not mistaken for an in-run process death. Once
+                            # `run.accepted` was seen the protocol is
+                            # established, so a non-zero exit is a process
+                            # death, not a runtime availability failure.
                             exit_code = process.poll()
                             try:
                                 while True:
@@ -605,7 +608,7 @@ def run_pi_agent(
                             except (BlockingIOError, OSError):
                                 pass
                             _stop_child(process)
-                            if exit_code not in (None, 0):
+                            if exit_code not in (None, 0) and not accepted:
                                 detail = _stderr_summary(stderr_buffer)
                                 message = "child failed before protocol established"
                                 if detail:
