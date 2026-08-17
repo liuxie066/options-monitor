@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.14.1 - 2026-08-17
+
+### New Features
+- Added a durable lifecycle-attempt audit pipeline that atomically binds broker observations, evidence, audit chains, restart reconciliation, and run seals to the existing SQLite ledger and controlled runtime flow.
+- Added current-decision projections with atomic writer fences, indexed current-state reads, migration and shadow verification, and query-only quality and performance consumers.
+- Added immutable per-account runtime portfolio snapshots that bind prepared portfolio inputs, current decision facts, source receipts, and replay references without rereading historical state.
+- Added content-addressed required-data scan blobs with canonical-first consumers, exact reachable-blob archive sync, and read-only retention and garbage-collection previews while retaining legacy compatibility during the migration window.
+- Added immutable Shadow Replay generations and a gated read-only historical-cleanup preview that verifies downstream cutover evidence before identifying removable legacy artifacts.
+
 ## 1.14.0 - 2026-08-16
 
 ### New Features

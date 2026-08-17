@@ -1,0 +1,112 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.1",
+  "base": {
+    "tag": "v1.14.0",
+    "commit": "d570097b9ca51e5ee0ee48021f74ed5019f6e4fb"
+  },
+  "reviewed_head": "951c671c7c74dec0d19176e88d1dc99a693e2d73",
+  "commits": [
+    {
+      "sha": "46e360312f27eae66238e1606f7f45c78bca1f56",
+      "subject": "feat(storage): port lifecycle audit pipeline to mainline"
+    },
+    {
+      "sha": "4d4cbdccdc68184aacd4f4ba1012976e5944902e",
+      "subject": "feat(storage): port current decision projection to mainline"
+    },
+    {
+      "sha": "0a623f0773a4825749d71ac6e2314b3af86a94b1",
+      "subject": "feat(storage): add compact runtime portfolio snapshot"
+    },
+    {
+      "sha": "028a8875e06f742b886d3184d17db7b860c8d801",
+      "subject": "feat(storage): cut over quality current-state reads"
+    },
+    {
+      "sha": "fc050d1d3056fee75ff2000c55637d491011dc0e",
+      "subject": "feat(storage): add required-data blob storage"
+    },
+    {
+      "sha": "438b25da89df3d96c6f40bf702284b46ec56ae1a",
+      "subject": "feat(research): add immutable replay generations"
+    },
+    {
+      "sha": "a775b764644eeaa173a413fed29a90f97a028c22",
+      "subject": "feat(storage): add historical cleanup preview"
+    },
+    {
+      "sha": "66a26b6d8b77435ef75dd6360d604d6bb7bcf545",
+      "subject": "test(storage): cover concurrent blob adoption"
+    },
+    {
+      "sha": "315a31ecfc040ad070c4badfd306f0bda6f178e4",
+      "subject": "test(storage): cover semantic schema rollover"
+    },
+    {
+      "sha": "cf1d5d641a32eafc27b09df89bc1340ce5fbdc19",
+      "subject": "chore(storage): refresh dependency graph"
+    },
+    {
+      "sha": "951c671c7c74dec0d19176e88d1dc99a693e2d73",
+      "subject": "test(research): derive newer blob timestamp"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a durable lifecycle-attempt audit pipeline that atomically binds broker observations, evidence, audit chains, restart reconciliation, and run seals to the existing SQLite ledger and controlled runtime flow.",
+      "commits": [
+        "46e360312f27eae66238e1606f7f45c78bca1f56"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added current-decision projections with atomic writer fences, indexed current-state reads, migration and shadow verification, and query-only quality and performance consumers.",
+      "commits": [
+        "4d4cbdccdc68184aacd4f4ba1012976e5944902e",
+        "028a8875e06f742b886d3184d17db7b860c8d801"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added immutable per-account runtime portfolio snapshots that bind prepared portfolio inputs, current decision facts, source receipts, and replay references without rereading historical state.",
+      "commits": [
+        "0a623f0773a4825749d71ac6e2314b3af86a94b1"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added content-addressed required-data scan blobs with canonical-first consumers, exact reachable-blob archive sync, and read-only retention and garbage-collection previews while retaining legacy compatibility during the migration window.",
+      "commits": [
+        "fc050d1d3056fee75ff2000c55637d491011dc0e"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added immutable Shadow Replay generations and a gated read-only historical-cleanup preview that verifies downstream cutover evidence before identifying removable legacy artifacts.",
+      "commits": [
+        "438b25da89df3d96c6f40bf702284b46ec56ae1a",
+        "a775b764644eeaa173a413fed29a90f97a028c22"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "66a26b6d8b77435ef75dd6360d604d6bb7bcf545",
+      "reason": "Test-only regression coverage for concurrent content-addressed blob adoption; no user-visible runtime change."
+    },
+    {
+      "commit": "315a31ecfc040ad070c4badfd306f0bda6f178e4",
+      "reason": "Test-only regression coverage for lifecycle semantic schema rollover; no user-visible runtime change."
+    },
+    {
+      "commit": "cf1d5d641a32eafc27b09df89bc1340ce5fbdc19",
+      "reason": "Regenerated dependency documentation after the reviewed source changes; no additional runtime behavior."
+    },
+    {
+      "commit": "951c671c7c74dec0d19176e88d1dc99a693e2d73",
+      "reason": "Test-only correction that derives the newer receipt timestamp instead of depending on a calendar date; no runtime change."
+    }
+  ]
+}
