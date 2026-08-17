@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import selectors
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
@@ -59,10 +61,19 @@ _EVENT_TYPES = frozenset(
         "model_turn_completed",
         "turn_end",
         "agent_end",
+        "tool_execution_start",
+        "tool_execution_end",
     }
 )
 
-_STOP_REASONS = frozenset({"stop", "length", "aborted", "error"})
+_STOP_REASONS = frozenset({"stop", "length", "toolUse", "aborted", "error"})
+
+# Process-wide single active tool worker slot. A live worker owns the slot until
+# its callback actually returns; a second run's tool call fails retryably while
+# the slot is held (acceptance #10). Only the selector thread writes JSONL; the
+# worker reports through a stdlib queue.
+_TOOL_SLOT_LOCK = threading.Lock()
+_TOOL_SLOT_BUSY = False
 
 _StartPayload = dict[str, Any]
 _Envelope = dict[str, Any]
@@ -106,6 +117,91 @@ def _stderr_summary(stderr_bytes: bytes) -> str:
     return text if text else ""
 
 
+def _validate_tools(tools: Any) -> None:
+    # Empty is the S1 no-tools eval path; non-empty is the S2 tool bridge.
+    if not isinstance(tools, list):
+        raise ValueError("tools must be an array")
+    names: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict) or set(tool) != {"name", "description", "input_schema"}:
+            raise ValueError("tool must hold only name, description, input_schema")
+        if not _is_nonempty_str(tool["name"]):
+            raise ValueError("tool.name must be a non-empty string")
+        if not _is_nonempty_str(tool["description"]):
+            raise ValueError("tool.description must be a non-empty string")
+        if not isinstance(tool["input_schema"], dict):
+            raise ValueError("tool.input_schema must be an object")
+        if tool["name"] in names:
+            raise ValueError("tool names must be unique")
+        names.add(tool["name"])
+
+
+def _validate_fixture_turns(turns: Any) -> None:
+    if not isinstance(turns, list):
+        raise ValueError("debug.fixture_turns must be an array")
+    for turn in turns:
+        if not isinstance(turn, dict) or len(turn) != 1:
+            raise ValueError("fixture turn must hold exactly one field")
+        if "text" in turn:
+            if not isinstance(turn["text"], str):
+                raise ValueError("fixture turn text must be a string")
+            continue
+        if "tool_calls" not in turn:
+            raise ValueError("fixture turn must hold text or tool_calls")
+        calls = turn["tool_calls"]
+        if not isinstance(calls, list) or not calls:
+            raise ValueError("fixture turn tool_calls must be a non-empty array")
+        for call in calls:
+            if not isinstance(call, dict) or set(call) != {"call_id", "tool_name", "arguments"}:
+                raise ValueError("fixture tool call must hold call_id, tool_name, arguments")
+            if not _is_nonempty_str(call["call_id"]):
+                raise ValueError("fixture tool call_id must be a non-empty string")
+            if not _is_nonempty_str(call["tool_name"]):
+                raise ValueError("fixture tool_name must be a non-empty string")
+            if not isinstance(call["arguments"], dict):
+                raise ValueError("fixture tool arguments must be an object")
+
+
+def _validate_tool_call_payload(payload: Any) -> None:
+    if not isinstance(payload, dict) or set(payload) != {"call_id", "tool_name", "arguments"}:
+        raise ValueError("tool.call payload must hold call_id, tool_name, arguments")
+    if not _is_nonempty_str(payload["call_id"]):
+        raise ValueError("tool.call call_id must be a non-empty string")
+    if not _is_nonempty_str(payload["tool_name"]):
+        raise ValueError("tool.call tool_name must be a non-empty string")
+    if not isinstance(payload["arguments"], dict):
+        raise ValueError("tool.call arguments must be an object")
+
+
+def _run_tool_worker(
+    call_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    callback: Callable[[dict[str, Any]], dict[str, Any]],
+    result_queue: "queue.Queue[tuple[str, dict[str, Any] | None, dict[str, Any] | None]]",
+) -> None:
+    global _TOOL_SLOT_BUSY
+    observation: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    try:
+        try:
+            observation = callback(
+                {"call_id": call_id, "tool_name": tool_name, "arguments": arguments}
+            )
+        except BaseException:
+            error = _safe_failure("TOOL_BRIDGE_ERROR", "tool", "tool callback failed", False)
+        else:
+            if not isinstance(observation, dict):
+                error = _safe_failure("TOOL_BRIDGE_ERROR", "tool", "invalid callback return", False)
+                observation = None
+    finally:
+        # Deliver before releasing the slot so a second run can never claim the
+        # sole worker while this worker still owes a result.
+        result_queue.put((call_id, observation, error))
+        with _TOOL_SLOT_LOCK:
+            _TOOL_SLOT_BUSY = False
+
+
 def _validate_start_payload(payload: Any) -> None:
     if not isinstance(payload, dict):
         raise ValueError("start payload must be an object")
@@ -126,9 +222,9 @@ def _validate_start_payload(payload: Any) -> None:
         raise ValueError("start payload has unknown or missing top-level fields")
 
     if payload["execution_environment"] != "eval":
-        raise ValueError("S1 only accepts execution_environment 'eval'")
+        raise ValueError("S1/S2 only accept execution_environment 'eval'")
     if payload["session_id"] is not None:
-        raise ValueError("S1 requires session_id null")
+        raise ValueError("S1/S2 require session_id null")
     if not _is_nonempty_str(payload["system_prompt"]):
         raise ValueError("system_prompt must be a non-empty string")
     if not _is_nonempty_str(payload["user_message"]):
@@ -146,10 +242,9 @@ def _validate_start_payload(payload: Any) -> None:
         ):
             raise ValueError("runtime_context must hold closed system messages")
 
-    if payload["tools"] != []:
-        raise ValueError("S1 requires an empty tools array")
+    _validate_tools(payload["tools"])
     if payload["recovered_observations"] != []:
-        raise ValueError("S1 requires an empty recovered_observations array")
+        raise ValueError("S1/S2 require an empty recovered_observations array")
 
     model = payload["model"]
     if not isinstance(model, dict):
@@ -198,10 +293,21 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError(f"limits.{key} must be a positive integer")
 
     debug = payload["debug"]
-    if not isinstance(debug, dict) or set(debug) != {"fixture_response", "delay_ms"}:
-        raise ValueError("debug must hold only fixture_response and delay_ms")
-    if not isinstance(debug["fixture_response"], str):
-        raise ValueError("debug.fixture_response must be a string")
+    if not isinstance(debug, dict):
+        raise ValueError("debug must be an object")
+    # S1 accepted a single string fixture; S2 adds a turn array. Keep both so
+    # the no-tools eval path stays backward compatible.
+    if "fixture_response" in debug:
+        if set(debug) != {"fixture_response", "delay_ms"}:
+            raise ValueError("debug must hold only fixture_response and delay_ms")
+        if not isinstance(debug["fixture_response"], str):
+            raise ValueError("debug.fixture_response must be a string")
+    elif "fixture_turns" in debug:
+        if set(debug) != {"fixture_turns", "delay_ms"}:
+            raise ValueError("debug must hold only fixture_turns and delay_ms")
+        _validate_fixture_turns(debug["fixture_turns"])
+    else:
+        raise ValueError("debug must hold fixture_response or fixture_turns")
     delay = debug["delay_ms"]
     if (
         not isinstance(delay, int)
@@ -269,7 +375,10 @@ def _encode_envelope(
         "seq": seq,
         "payload": payload,
     }
-    line = json.dumps(record, ensure_ascii=False) + "\n"
+    try:
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise ValueError("outbound envelope is not JSON serializable") from exc
     data = line.encode("utf-8")
     if len(data) > MAX_LINE_BYTES:
         raise ValueError("outbound envelope exceeds line ceiling")
@@ -370,6 +479,18 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
         if data["stop_reason"] not in _STOP_REASONS:
             raise ValueError("turn event stop_reason is not allowed")
         _validate_usage(data["usage"])
+    elif event_type == "tool_execution_start":
+        if set(data) != {"call_id", "tool_name"}:
+            raise ValueError("tool_execution_start data shape is invalid")
+        if not _is_nonempty_str(data["call_id"]) or not _is_nonempty_str(data["tool_name"]):
+            raise ValueError("tool event ids must be non-empty strings")
+    elif event_type == "tool_execution_end":
+        if set(data) != {"call_id", "tool_name", "ok"}:
+            raise ValueError("tool_execution_end data shape is invalid")
+        if not _is_nonempty_str(data["call_id"]) or not _is_nonempty_str(data["tool_name"]):
+            raise ValueError("tool event ids must be non-empty strings")
+        if not isinstance(data["ok"], bool):
+            raise ValueError("tool_execution_end ok must be a boolean")
 
 
 def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
@@ -394,11 +515,11 @@ def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
     if set(payload) != required:
         raise ValueError("terminal payload has unknown or missing fields")
     if status not in {"answered", "cancelled"}:
-        raise ValueError("S1 terminal status is not allowed")
+        raise ValueError("S1/S2 terminal status is not allowed")
     if not isinstance(payload["text"], str):
         raise ValueError("terminal text must be a string")
     if payload["control_request"] is not None:
-        raise ValueError("S1 terminal control_request must be null")
+        raise ValueError("S1/S2 terminal control_request must be null")
     reason = payload["termination_reason"]
     _validate_usage(payload["usage"])
     if status == "answered":
@@ -410,7 +531,7 @@ def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
         if payload["text"] != "":
             raise ValueError("cancelled terminal text must be empty")
     if not final and status != "answered":
-        raise ValueError("S1 proposal permits only an answered candidate")
+        raise ValueError("S1/S2 proposal permits only an answered candidate")
     if final:
         if not isinstance(payload["committed"], bool):
             raise ValueError("run.final committed must be a boolean")
@@ -445,6 +566,8 @@ def run_pi_agent(
     runtime_entry: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    global _TOOL_SLOT_BUSY
+
     if not _is_nonempty_str(request_id) or not _is_nonempty_str(run_id):
         return _safe_failure("CONFIG_ERROR", "config", "invalid identity", False)
     if not _is_pos_int(timeout_seconds):
@@ -454,6 +577,8 @@ def run_pi_agent(
         _validate_start_payload(start_payload)
     except ValueError as exc:
         return _safe_failure("CONFIG_ERROR", "config", str(exc), False)
+
+    allowed_tool_names = frozenset(tool["name"] for tool in start_payload["tools"])
 
     if start_payload["limits"]["timeout_seconds"] != timeout_seconds:
         return _safe_failure(
@@ -522,6 +647,8 @@ def run_pi_agent(
     final_result: dict[str, Any] | None = None
     final_error: dict[str, Any] | None = None
     final_ok: bool | None = None
+    result_queue: "queue.Queue[tuple[str, dict[str, Any] | None, dict[str, Any] | None]]" = queue.Queue()
+    pending_tool: dict[str, str] | None = None
 
     try:
         process.stdin.write(start_line)
@@ -663,8 +790,46 @@ def run_pi_agent(
                                         _stop_child(process)
                                         return _safe_failure("INTERNAL_ERROR", "runtime", "event callback failed", False)
                             elif type_ == "tool.call":
-                                _stop_child(process)
-                                return _safe_failure("TOOL_BRIDGE_ERROR", "tool", "unexpected tool call", False)
+                                if not accepted:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "tool call before accepted", False)
+                                _validate_tool_call_payload(payload)
+                                if payload["tool_name"] not in allowed_tool_names:
+                                    _stop_child(process)
+                                    return _safe_failure("TOOL_BRIDGE_ERROR", "tool", "tool outside Host allowlist", False)
+                                if on_tool_call is None:
+                                    _stop_child(process)
+                                    return _safe_failure("INTERNAL_ERROR", "runtime", "missing tool callback", False)
+                                if pending_tool is not None:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "second outstanding tool call", False)
+                                with _TOOL_SLOT_LOCK:
+                                    if _TOOL_SLOT_BUSY:
+                                        _stop_child(process)
+                                        return _safe_failure("TOOL_BRIDGE_ERROR", "tool", "another tool call is outstanding", True)
+                                    _TOOL_SLOT_BUSY = True
+                                pending_tool = {
+                                    "call_id": payload["call_id"],
+                                    "tool_name": payload["tool_name"],
+                                }
+                                try:
+                                    worker = threading.Thread(
+                                        target=_run_tool_worker,
+                                        args=(
+                                            payload["call_id"],
+                                            payload["tool_name"],
+                                            payload["arguments"],
+                                            on_tool_call,
+                                            result_queue,
+                                        ),
+                                        daemon=True,
+                                    )
+                                    worker.start()
+                                except Exception:
+                                    with _TOOL_SLOT_LOCK:
+                                        _TOOL_SLOT_BUSY = False
+                                    _stop_child(process)
+                                    return _safe_failure("INTERNAL_ERROR", "runtime", "tool worker spawn failed", False)
                             elif type_ == "run.proposed":
                                 if saw_terminal:
                                     _stop_child(process)
@@ -720,6 +885,46 @@ def run_pi_agent(
                         except ValueError:
                             _stop_child(process)
                             return _safe_failure("PROTOCOL_ERROR", "protocol", "invalid child record", False)
+
+            while True:
+                try:
+                    call_id, observation, error = result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if pending_tool is None or pending_tool["call_id"] != call_id:
+                    _stop_child(process)
+                    return _safe_failure("PROTOCOL_ERROR", "protocol", "tool result mismatch", False)
+                if error is not None:
+                    _stop_child(process)
+                    return error
+                if cancel_sent or saw_terminal:
+                    pending_tool = None
+                    continue
+                tool_name = pending_tool["tool_name"]
+                try:
+                    line_out = _encode_envelope(
+                        "tool.result",
+                        {"call_id": call_id, "tool_name": tool_name, "observation": observation},
+                        identity,
+                        py_seq,
+                    )
+                    py_seq += 1
+                    process.stdin.write(line_out)
+                    process.stdin.flush()
+                except ValueError:
+                    _stop_child(process)
+                    return _safe_failure(
+                        "TOOL_BRIDGE_ERROR",
+                        "tool",
+                        "observation is invalid or exceeds line ceiling",
+                        False,
+                    )
+                except OSError:
+                    _stop_child(process)
+                    return _safe_failure(
+                        "PI_PROCESS_EXITED", "process", "child closed stdin before tool result", True
+                    )
+                pending_tool = None
 
             if saw_terminal and process.poll() is not None:
                 break
