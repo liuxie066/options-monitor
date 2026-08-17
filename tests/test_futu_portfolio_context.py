@@ -508,6 +508,7 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
             "currency": currency,
             "acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY),
             "trd_env": "REAL",
+            "refresh_cache": True,
         }
         for currency in ("CNH", "USD", "HKD")
     ]

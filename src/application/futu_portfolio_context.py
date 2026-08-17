@@ -419,6 +419,7 @@ def _query_opend_exchange_rate_observation(
                 account_ids,
                 trd_env=trd_env,
                 currency=currency,
+                refresh_cache=True,
             ),
             account_ids,
             trd_env=trd_env,
