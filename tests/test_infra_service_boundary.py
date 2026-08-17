@@ -84,3 +84,26 @@ def test_trading_calendar_endpoint_fails_closed_on_route_conflict(monkeypatch) -
         ),
     )
     assert tick._is_trading_day_guard_for_market(cfg, "US") == (None, "US")
+
+
+def test_trading_day_via_futu_port_closed_returns_unavailable_without_sdk_context(monkeypatch) -> None:
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    from src.infrastructure import external_services as svc
+
+    constructed: list[tuple[str, int]] = []
+
+    class _FakeQuote:
+        def __init__(self, host: str, port: int):
+            constructed.append((host, port))
+
+    monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(OpenQuoteContext=_FakeQuote))
+    monkeypatch.setattr(svc, "port_open", lambda host, port: False)
+
+    t0 = time.monotonic()
+    result = svc.trading_day_via_futu(host="127.0.0.9", port=11119, market="HK")
+    assert result == (None, "HK")
+    assert time.monotonic() - t0 < 1.0
+    assert constructed == []

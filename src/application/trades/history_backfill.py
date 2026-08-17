@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 from src.infrastructure.opend_watchdog import port_open
 
 
@@ -92,7 +93,7 @@ class OpenDHistoryDealClient:
     def _context(self) -> Any:
         if self._ctx is None:
             if not port_open(self.host, self.port):
-                raise RuntimeError(
+                raise FutuGatewayUnreachableError(
                     f"OpenD unreachable: {self.host}:{self.port}; "
                     "start FutuOpenD before history backfill"
                 )

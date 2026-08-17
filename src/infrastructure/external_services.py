@@ -290,6 +290,8 @@ def trading_day_via_futu(
     except Exception:
         return (None, market_used)
 
+    # 等价于 FutuGatewayUnreachableError: 调用方按既有契约以 (None, market)
+    # 表示外部依赖不可用，不阻断主流程。
     if not port_open(str(host), int(port)):
         return (None, market_used)
 

@@ -7,6 +7,7 @@ import sys
 import threading
 from typing import Any, Callable
 
+from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
 
 
@@ -70,7 +71,7 @@ class OpenDTradePushListener:
         ctx = None
         last_error: Exception | None = None
         if not port_open(self.host, self.port):
-            raise RuntimeError(
+            raise FutuGatewayUnreachableError(
                 f"OpenD unreachable: {self.host}:{self.port}; start FutuOpenD before enabling the trade push listener"
             )
         for kwargs in (
