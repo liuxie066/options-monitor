@@ -15,8 +15,8 @@ from domain.domain.symbol_identity import (
 )
 from src.application.account_config import resolve_futu_account_ids
 from src.infrastructure.exchange_rates import (
-    OPEND_EXCHANGE_RATE_SOURCE,
     exchange_rate_observation_status,
+    fetch_market_exchange_rates,
 )
 
 
@@ -188,53 +188,8 @@ def _to_futu_acc_id(value: Any) -> int:
     return int(raw)
 
 
-def build_opend_exchange_rate_observation(
-    balance_rows_by_currency: Mapping[str, list[dict[str, Any]]],
-    *,
-    observed_at_utc: str | None = None,
-) -> dict[str, Any] | None:
-    """Derive OpenD's account conversion rates from one funds generation.
-
-    ``accinfo_query(currency=...)`` converts aggregate fund fields into the
-    requested display currency while leaving explicitly denominated cash
-    fields untouched.  Ratios of the same non-zero ``total_assets`` fact
-    therefore expose the conversion rates OpenD applied without introducing
-    a second market-data provider.
-    """
-
-    totals: dict[str, float] = {}
-    for currency in _OPEND_FX_DISPLAY_CURRENCIES:
-        rows = balance_rows_by_currency.get(currency)
-        if not isinstance(rows, list) or len(rows) != 1:
-            return None
-        row = rows[0]
-        if _normalize_currency(row.get("currency"), fallback="") != _normalize_currency(
-            currency,
-            fallback="",
-        ):
-            return None
-        total_assets = _to_float(row.get("total_assets"))
-        if total_assets is None or total_assets == 0:
-            return None
-        totals[currency] = total_assets
-    usdcny = totals["CNH"] / totals["USD"]
-    hkdcny = totals["CNH"] / totals["HKD"]
-    if usdcny <= 0 or hkdcny <= 0:
-        return None
-    return {
-        "rates": {
-            "USDCNY": usdcny,
-            "HKDCNY": hkdcny,
-        },
-        "source": OPEND_EXCHANGE_RATE_SOURCE,
-        "timestamp": str(
-            observed_at_utc or datetime.now(timezone.utc).isoformat()
-        ),
-        "provider_method": "accinfo_query",
-        "provider_display_currencies": list(_OPEND_FX_DISPLAY_CURRENCIES),
-        "value_basis": "total_assets",
-        "timestamp_basis": "client_receive_time",
-    }
+def _fetch_market_exchange_rate_observation() -> dict[str, Any] | None:
+    return fetch_market_exchange_rates()
 
 
 def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:
@@ -470,13 +425,9 @@ def _query_opend_exchange_rate_observation(
         )
         for currency in _OPEND_FX_DISPLAY_CURRENCIES
     }
-    observed_at_utc = datetime.now(timezone.utc).isoformat()
     return (
         rows_by_currency["CNH"],
-        build_opend_exchange_rate_observation(
-            rows_by_currency,
-            observed_at_utc=observed_at_utc,
-        ),
+        _fetch_market_exchange_rate_observation(),
     )
 
 

@@ -17,11 +17,22 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
+from urllib import request as urllib_request
 
 from src.infrastructure.io_utils import atomic_write_json
 
 
 OPEND_EXCHANGE_RATE_SOURCE = "opend_account_funds_conversion"
+TENCENT_EXCHANGE_RATE_SOURCE = "tencent_quote"
+SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
+
+_REQUIRED_RATES = ("USDCNY", "HKDCNY")
+
+# 腾讯主源：单次请求取 USDCNY + HKDCNY，`~` 分隔，字段 [3] 为现价。
+_TENCENT_URL = "https://qt.gtimg.cn/q=whUSDCNY,whHKDCNY"
+# 新浪兑底：需 Referer，返回行 `..."价格,..."`，取第一个字段。
+_SINA_URL = "https://hq.sinajs.cn/list=fx_susdcny,fx_shkdcny"
+_SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 
 
 @dataclass(frozen=True)
@@ -142,7 +153,11 @@ def exchange_rate_observation_status(
     if not isinstance(payload, Mapping):
         return "unavailable"
     value = dict(payload)
-    if str(value.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
+    if str(value.get("source") or "").strip() not in {
+        OPEND_EXCHANGE_RATE_SOURCE,
+        TENCENT_EXCHANGE_RATE_SOURCE,
+        SINA_EXCHANGE_RATE_SOURCE,
+    }:
         return "unavailable"
     rates = value.get("rates")
     if not isinstance(rates, Mapping) or not rates:
@@ -176,7 +191,11 @@ def get_cached_exchange_rates(
     obj = _read_cache(cache_path)
     if obj is None:
         return None
-    if str(obj.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
+    if str(obj.get("source") or "").strip() not in {
+        OPEND_EXCHANGE_RATE_SOURCE,
+        TENCENT_EXCHANGE_RATE_SOURCE,
+        SINA_EXCHANGE_RATE_SOURCE,
+    }:
         return None
     if _payload_timestamp(obj) is None:
         return None
@@ -195,6 +214,110 @@ def _warn(log: Callable[[str], None] | None, message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def _http_get(url: str, *, headers: dict[str, str] | None = None, timeout_sec: float = 8.0) -> str:
+    req = urllib_request.Request(url, headers=headers or {})
+    with urllib_request.urlopen(req, timeout=timeout_sec) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _validated_rates(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    out: dict[str, float] = {}
+    for key in _REQUIRED_RATES:
+        raw = value.get(key)
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not (0 < number < 1000):
+            return None
+        out[key] = round(number, 4)
+    return out
+
+
+def _parse_tencent(text: str) -> dict[str, float] | None:
+    """Parse `v_whUSDCNY="~名称~代码~价~..."` lines into USDCNY/HKDCNY."""
+
+    rates: dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if "whUSDCNY" in line:
+            bits = line.split("~")
+            if len(bits) >= 4:
+                rates["USDCNY"] = float(bits[3])
+        elif "whHKDCNY" in line:
+            bits = line.split("~")
+            if len(bits) >= 4:
+                rates["HKDCNY"] = float(bits[3])
+    return _validated_rates(rates)
+
+
+def _parse_sina(text: str) -> dict[str, float] | None:
+    """Parse `var hq_str_...="价,昨收,..."` lines into USDCNY/HKDCNY.
+
+    Sina fx_susdcny / fx_shkdcny return `现价,昨收,今开,...`; take the first.
+    """
+
+    rates: dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        code: str | None = None
+        if "fx_susdcny" in line or ("USDCNY" in line and "hq_str_" in line):
+            code = "USDCNY"
+        elif "fx_shkdcny" in line or ("HKDCNY" in line and "hq_str_" in line):
+            code = "HKDCNY"
+        if code is None:
+            continue
+        try:
+            parts = line.split('"')[1].split(",")
+            if len(parts) >= 1:
+                rates[code] = float(parts[0])
+        except (IndexError, ValueError):
+            continue
+    return _validated_rates(rates)
+
+
+def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | None:
+    """Fetch USDCNY/HKDCNY from Tencent first, falling back to Sina.
+
+    Returns a canonical observation dict ``{source, rates, timestamp}``, or
+    ``None`` when both providers fail (fail-closed; never fabricate a rate).
+    """
+
+    errors: list[str] = []
+    try:
+        rates = _parse_tencent(_http_get(_TENCENT_URL, timeout_sec=timeout_sec))
+        if rates is not None:
+            return {
+                "source": TENCENT_EXCHANGE_RATE_SOURCE,
+                "rates": rates,
+                "timestamp": _utc_now().isoformat(),
+            }
+        errors.append("tencent:invalid")
+    except Exception as exc:
+        errors.append(f"tencent:{type(exc).__name__}")
+
+    try:
+        rates = _parse_sina(_http_get(_SINA_URL, headers=_SINA_HEADERS, timeout_sec=timeout_sec))
+        if rates is not None:
+            return {
+                "source": SINA_EXCHANGE_RATE_SOURCE,
+                "rates": rates,
+                "timestamp": _utc_now().isoformat(),
+            }
+        errors.append("sina:invalid")
+    except Exception as exc:
+        errors.append(f"sina:{type(exc).__name__}")
+
+    _warn(None, f"[WARN] market FX fetch failed: {'; '.join(errors)}")
+    return None
+
+
+def _cache_from_observation(observation: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(observation)
+
+
 def save_exchange_rate_observation(
     path: Path,
     payload: Mapping[str, Any],
@@ -211,8 +334,12 @@ def save_exchange_rate_observation(
             raise ValueError("exchange-rate payload rates are required")
         if _payload_timestamp(value) is None:
             raise ValueError("exchange-rate payload timestamp is required")
-        if str(value.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
-            raise ValueError("exchange-rate payload source must be OpenD")
+        if str(value.get("source") or "").strip() not in {
+            OPEND_EXCHANGE_RATE_SOURCE,
+            TENCENT_EXCHANGE_RATE_SOURCE,
+            SINA_EXCHANGE_RATE_SOURCE,
+        }:
+            raise ValueError("exchange-rate payload source is unknown")
         atomic_write_json(path, value, sort_keys=True)
     except Exception as exc:
         _warn(log, f"[WARN] exchange_rate cache write failed: path={path} error={exc}")
@@ -226,23 +353,39 @@ def get_exchange_rates_or_fetch_latest(
     log: Callable[[str], None] | None = None,
     write_cache: bool = True,
 ) -> dict | None:
-    """Compatibility reader for a fresh OpenD observation cache.
+    """Return a fresh market FX observation, fetching Tencent/Sina on miss.
 
-    The function name is retained for existing callers, but it no longer
-    performs an external fetch and never returns a stale fallback. OpenD is the
-    sole formal provider; its original observation is written by the owning
-    portfolio/snapshot path via :func:`save_exchange_rate_observation`.
+    Reads the cache first; when missing or stale, fetches from the market
+    providers (Tencent primary, Sina fallback) and writes the fresh
+    observation back to ``cache_path``. Returns ``None`` only when no source
+    yields a valid rate (fail-closed).
     """
 
-    del write_through_path, write_cache
     cached = get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
     if cached is not None:
         return cached
-    _warn(
-        log,
-        f"[WARN] OpenD exchange_rate observation missing/stale: {Path(cache_path).resolve()}",
-    )
-    return None
+
+    observation = fetch_market_exchange_rates()
+    if observation is None:
+        # Fall back to a stale cache rather than fabricating a number.
+        stale = _read_cache(cache_path)
+        if stale is not None and isinstance(stale.get("rates"), Mapping) and stale.get("rates"):
+            _warn(log, f"[WARN] market FX unavailable; using stale cache {Path(cache_path).resolve()}")
+            return stale
+        _warn(log, f"[WARN] market FX unavailable and no cache: {Path(cache_path).resolve()}")
+        return None
+
+    if write_cache:
+        try:
+            save_exchange_rate_observation(cache_path, observation, log=log)
+        except Exception as exc:
+            _warn(log, f"[WARN] failed to persist FX observation: {exc}")
+    if write_through_path is not None:
+        try:
+            save_exchange_rate_observation(write_through_path, observation, log=log)
+        except Exception as exc:
+            _warn(log, f"[WARN] failed to persist FX write-through: {exc}")
+    return observation
 
 
 def load_exchange_rate_info(
