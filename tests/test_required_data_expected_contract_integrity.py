@@ -607,3 +607,23 @@ def test_expected_contract_rejects_invalid_iso_dates(
 def test_plan_identity_canonical_json_rejects_non_finite_numbers() -> None:
     with pytest.raises(ValueError):
         required_data_plan_id([{"symbol": "NVDA", "spot": math.nan}])
+
+
+def test_expected_contract_tolerates_expiration_order_between_projection_and_side_plans(
+    monkeypatch,
+) -> None:
+    """projected_expirations may be sorted while side_plans keep OpenD order.
+
+    required_data_prefetch rebuilds projected_expirations with sorted({...})
+    while side_plans use order-preserving de-duplication. The same set of
+    expirations must not fail the fail-closed validation merely on order.
+    """
+
+    plan = _success_rows_plan()
+    # put=08-21, call=09-18 -> natural side-plan order is ascending; make the
+    # projected list descending to reproduce the production mismatch.
+    plan["projected_expirations"] = ["2026-09-18", "2026-08-21"]
+
+    contract = _build(plan)
+
+    assert contract["fetch_plan"] == plan

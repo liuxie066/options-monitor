@@ -288,9 +288,11 @@ def validate_required_data_expected_fetch_contract(
         raise ValueError(
             "success-empty required-data plan contains fetch demand"
         )
-    if plan_expirations != projected_expirations:
+    if set(plan_expirations) != set(projected_expirations):
         raise ValueError(
-            "required-data projected expirations contradict side plans"
+            "required-data projected expirations contradict side plans: "
+            f"symbol={symbol} side_plan_expirations={plan_expirations} "
+            f"projected_expirations={projected_expirations}"
         )
     if not set(projected_expirations).issubset(discovery_expirations):
         raise ValueError(
