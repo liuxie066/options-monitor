@@ -243,7 +243,7 @@ def build_completed_receipt_request(
             "reason": None,
             "disabled_scope": None,
             "occurred_at_utc": occurred_at_utc,
-            "terminated_at_partition": 20,
+            "terminated_at_partition": experiment["completed_validation_partitions"],
         },
         "bindings": {
             "research_spec_sha256": experiment["research_spec_sha256"],

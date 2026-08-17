@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
@@ -32,9 +33,11 @@ from src.application.strategy_lab.top1.contracts import (
     EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     RESEARCH_METRIC_CONTRACT_VERSION,
+    RESEARCH_REQUIRED_DAYS,
     RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
+    VALIDATION_REQUIRED_DAYS,
     build_behavior_binding,
 )
 from src.application.strategy_lab.top1.corpus import (
@@ -314,7 +317,7 @@ def _spec(
             "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
             "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
             "fill_assumption": "t0_sell_limit",
-            "required_days": 40,
+            "required_days": RESEARCH_REQUIRED_DAYS,
             "window_mode": "fixed_consecutive_trading_days",
             "visibility": "visible_after_research_seal",
         },
@@ -347,7 +350,7 @@ def _spec(
         spec.update(
             {
                 "validation_evaluation": {
-                    "required_days": 20,
+                    "required_days": VALIDATION_REQUIRED_DAYS,
                     "window_mode": "fixed_future_consecutive_trading_days",
                     "visibility": "hidden_until_final_seal",
                 },
@@ -374,7 +377,7 @@ def _spec(
 
 
 def _build_case(root: Path) -> dict[str, Any]:
-    days = _trading_days("2026-06-08", 40)
+    days = _trading_days("2026-06-08", RESEARCH_REQUIRED_DAYS)
     standard = _base_projection(root, run_id="run-standard", candidates=_candidates())
     boosted = _base_projection(
         root,
@@ -423,7 +426,7 @@ def _build_case(root: Path) -> dict[str, Any]:
         "account": "lx",
         "cutoff_at_utc": "2026-10-01T08:00:00Z",
         "cutoff_trading_date": "2026-10-01",
-        "required_days": 40,
+        "required_days": RESEARCH_REQUIRED_DAYS,
         "window_facts_content_sha256": canonical_sha256({"window": days}),
         "market_calendar_version": CALENDAR,
         "market_calendar_ref": "evidence/hk-calendar.fixture.json",
@@ -558,7 +561,7 @@ def test_selects_unique_leader_and_aggregates_two_points_by_day(
     assert result["schema_version"] == RESEARCH_EVALUATION_SCHEMA
     assert result["selection"] == "research_leader"
     assert result["leader_variant_id"] == "concentration"
-    assert result["effective_days"] == 40
+    assert result["effective_days"] == RESEARCH_REQUIRED_DAYS
     assert result["research_fill_assumption"] == "t0_sell_limit"
     assert result["research_is_counterfactual"] is True
     assert result["contract_terms_revalidated"] is False
@@ -569,7 +572,7 @@ def test_selects_unique_leader_and_aggregates_two_points_by_day(
         "concentration_non_increase_failed"
     ]
     assert variants["concentration"]["decision"] == "pass"
-    assert variants["concentration"]["top1_change_count"] == 41
+    assert variants["concentration"]["top1_change_count"] == (RESEARCH_REQUIRED_DAYS + 1)
 
     first_day = variants["concentration"]["daily_deltas"][0]
     holding_days = (date.fromisoformat(EXPIRATION) - date(2026, 6, 8)).days
@@ -602,7 +605,7 @@ def test_same_or_empty_top1_needs_no_close_or_fee_plan(
 
     assert result["selection"] == "no_research_winner"
     assert result["leader_variant_id"] is None
-    assert result["effective_days"] == 40
+    assert result["effective_days"] == RESEARCH_REQUIRED_DAYS
     assert result["reason_codes"] == ["no_research_winner"]
     assert result["variant_results"][0]["mean_daily_delta"] == 0.0
 
@@ -690,7 +693,7 @@ def test_incomplete_assignment_fee_and_short_window_fail_closed(
     )
     short_result = evaluate_research(short, [], _fee_contract(complete=False))
     assert short_result["selection"] == "insufficient_evidence"
-    assert short_result["effective_days"] == 39
+    assert short_result["effective_days"] == RESEARCH_REQUIRED_DAYS - 1
     assert short_result["reason_codes"] == ["effective_days_below_required"]
 
 
@@ -798,8 +801,8 @@ def test_passing_leader_uses_every_deterministic_tie_break(
                 "non_negative_worst_tail",
                 "hard_risk_passed",
             ],
-            "required_days": 40,
-            "effective_days": 40,
+            "required_days": RESEARCH_REQUIRED_DAYS,
+            "effective_days": RESEARCH_REQUIRED_DAYS,
             "point_results": [],
             "daily_deltas": [],
             "mean_daily_delta": mean,
@@ -807,7 +810,7 @@ def test_passing_leader_uses_every_deterministic_tie_break(
             "standard_error": 0.0,
             "t_critical": 1.0,
             "one_sided_lower_bound": lower,
-            "worst_k": 8,
+            "worst_k": math.ceil(RESEARCH_REQUIRED_DAYS * 0.20),
             "worst_tail_mean": tail,
             "serial_correlation_unadjusted": True,
         }
@@ -942,7 +945,7 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         ),
         validation=True,
     )
-    hidden_days = _trading_days("2026-09-01", 20)
+    hidden_days = _trading_days("2026-09-01", VALIDATION_REQUIRED_DAYS)
     with pytest.raises(Top1LifecycleError) as wrong_leader:
         lock_challenger(
             store,
@@ -1061,7 +1064,7 @@ def test_accepts_real_w4_manifest_after_source_run_deletion(tmp_path: Path) -> N
     artifact_root = tmp_path / "artifacts"
     store = _store(tmp_path / "w4.sqlite3")
     _enable(store, artifact_root, key="enable-w4-seam")
-    days = _trading_days("2026-06-08", 40)
+    days = _trading_days("2026-06-08", RESEARCH_REQUIRED_DAYS)
     for index, trading_date in enumerate(days):
         seal_day_expectation(
             store,

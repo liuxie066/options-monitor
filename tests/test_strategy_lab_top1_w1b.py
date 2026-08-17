@@ -23,9 +23,11 @@ from src.application.strategy_lab.top1.contracts import (
     EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     RESEARCH_METRIC_CONTRACT_VERSION,
+    RESEARCH_REQUIRED_DAYS,
     RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
+    VALIDATION_REQUIRED_DAYS,
     Top1CoreContractError,
     build_behavior_binding,
     build_research_spec_sha256,
@@ -105,7 +107,7 @@ def _research_spec(
             "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
             "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
             "fill_assumption": "t0_sell_limit",
-            "required_days": 40,
+            "required_days": RESEARCH_REQUIRED_DAYS,
             "window_mode": "fixed_consecutive_trading_days",
             "visibility": "visible_after_research_seal",
         },
@@ -146,7 +148,7 @@ def _validation_spec(
     spec.update(
         {
             "validation_evaluation": {
-                "required_days": 20,
+                "required_days": VALIDATION_REQUIRED_DAYS,
                 "window_mode": "fixed_future_consecutive_trading_days",
                 "visibility": "hidden_until_final_seal",
             },
@@ -232,10 +234,10 @@ def test_experiment_spec_rejects_bad_shapes_constants_and_values() -> None:
     forged_behavior["baseline"]["behavior_binding_sha256"] = SHA_B
     bad_specs.append(forged_behavior)
     wrong_constant = _research_spec()
-    wrong_constant["research_evaluation"]["required_days"] = 20
+    wrong_constant["research_evaluation"]["required_days"] = RESEARCH_REQUIRED_DAYS + 1
     bad_specs.append(wrong_constant)
     wrong_numeric_type = _research_spec()
-    wrong_numeric_type["research_evaluation"]["required_days"] = 40.0
+    wrong_numeric_type["research_evaluation"]["required_days"] = float(RESEARCH_REQUIRED_DAYS)
     bad_specs.append(wrong_numeric_type)
     non_finite = _validation_spec()
     non_finite["validation_metrics"]["confidence_level"] = math.nan

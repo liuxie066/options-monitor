@@ -1413,9 +1413,9 @@ class ExperimentStore:
                     occurred_at_utc=occurred_at_utc,
                     idempotency_key=f"{idempotency_key}:hidden-terminal",
                 )
-            if (completed == 20) != (terminal_request is not None):
+            if (progress != "collecting_decisions") != (terminal_request is not None):
                 raise ExperimentStoreError(
-                    "experiment_conflict", "day-20 terminal binding is invalid"
+                    "experiment_conflict", "hidden terminal binding is invalid"
                 )
             connection.execute(
                 """
@@ -1533,9 +1533,9 @@ class ExperimentStore:
                     occurred_at_utc=occurred_at_utc,
                     idempotency_key=f"{idempotency_key}:hidden-terminal",
                 )
-            if (completed == 20) != (terminal_request is not None):
+            if (progress != "collecting_decisions") != (terminal_request is not None):
                 raise ExperimentStoreError(
-                    "experiment_conflict", "day-20 terminal binding is invalid"
+                    "experiment_conflict", "hidden terminal binding is invalid"
                 )
             connection.execute(
                 """
@@ -1634,9 +1634,9 @@ class ExperimentStore:
                     occurred_at_utc=occurred_at_utc,
                     idempotency_key=f"{idempotency_key}:hidden-terminal",
                 )
-            if (completed == 20) != (terminal_request is not None):
+            if (progress != "collecting_decisions") != (terminal_request is not None):
                 raise ExperimentStoreError(
-                    "experiment_conflict", "day-20 terminal binding is invalid"
+                    "experiment_conflict", "hidden terminal binding is invalid"
                 )
             connection.execute(
                 """
@@ -1766,8 +1766,7 @@ class ExperimentStore:
                     ),
                 )
                 evidence_failed = evidence_failed or target == "outcome_unavailable"
-            completed = int(experiment["completed_validation_partitions"])
-            if completed == 20 and evidence_failed:
+            if experiment["validation_progress"] != "collecting_decisions" and evidence_failed:
                 connection.execute(
                     """
                     UPDATE strategy_lab_outcome_jobs SET
@@ -1788,7 +1787,7 @@ class ExperimentStore:
             ).fetchone()
             progress = (
                 "collecting_decisions"
-                if completed < 20
+                if experiment["validation_progress"] == "collecting_decisions"
                 else "awaiting_outcomes"
                 if pending is not None
                 else "ready_to_conclude"
@@ -1874,7 +1873,6 @@ class ExperimentStore:
             if experiment["terminal_mode"] is not None or not (
                 experiment["phase"] == "validation"
                 and experiment["validation_progress"] == "ready_to_conclude"
-                and int(experiment["completed_validation_partitions"]) == 20
                 and hidden["terminal_request_event_id"] is not None
                 and generation["terminal_request_event_id"] is None
                 and pending is None
@@ -2955,7 +2953,7 @@ class ExperimentStore:
             ),
         )
         completed += 1
-        if completed < 20:
+        if completed < len(dates):
             return completed, "collecting_decisions"
         missing = connection.execute(
             """

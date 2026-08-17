@@ -23,9 +23,11 @@ from src.application.strategy_lab.top1.contracts import (
     EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     RESEARCH_METRIC_CONTRACT_VERSION,
+    RESEARCH_REQUIRED_DAYS,
     RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
+    VALIDATION_REQUIRED_DAYS,
     build_behavior_binding,
     build_research_spec_sha256,
     build_validation_spec_sha256,
@@ -120,7 +122,7 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
             "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
             "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
             "fill_assumption": "t0_sell_limit",
-            "required_days": 40,
+            "required_days": RESEARCH_REQUIRED_DAYS,
             "window_mode": "fixed_consecutive_trading_days",
             "visibility": "visible_after_research_seal",
         },
@@ -156,7 +158,7 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
         spec.update(
             {
                 "validation_evaluation": {
-                    "required_days": 20,
+                    "required_days": VALIDATION_REQUIRED_DAYS,
                     "window_mode": "fixed_future_consecutive_trading_days",
                     "visibility": "hidden_until_final_seal",
                 },
@@ -185,7 +187,7 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
 def _dates(start: date, *, step: int = 1) -> list[str]:
     current = start
     values: list[str] = []
-    while len(values) < 20:
+    while len(values) < VALIDATION_REQUIRED_DAYS:
         if current.weekday() < 5:
             values.append(current.isoformat())
             remaining = step

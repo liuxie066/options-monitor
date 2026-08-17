@@ -11,6 +11,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.strategy_lab.top1.contracts import (
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     Top1CoreContractError,
+    VALIDATION_REQUIRED_DAYS,
     validate_experiment_spec,
 )
 from src.application.strategy_lab.top1.corpus import (
@@ -643,7 +644,8 @@ def conclude_validation(
         experiment = _call(store.experiment, experiment_id)
         if not (
             experiment["validation_progress"] == "ready_to_conclude"
-            and int(experiment["completed_validation_partitions"]) == 20
+            and int(experiment["completed_validation_partitions"])
+            == VALIDATION_REQUIRED_DAYS
         ):
             return {
                 "status": "blocked",
@@ -672,7 +674,7 @@ def conclude_validation(
         result = summarize_paired_daily_deltas(
             rows,
             {
-                "required_days": 20,
+                "required_days": VALIDATION_REQUIRED_DAYS,
                 "confidence_level": metrics_policy["confidence_level"],
                 "worst_fraction": metrics_policy["worst_fraction"],
                 "require_concentration_non_increase": True,
