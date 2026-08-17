@@ -19,7 +19,6 @@ from src.application.config_loader import normalize_portfolio_broker_config, res
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
     get_exchange_rates_or_fetch_latest,
-    save_exchange_rate_observation,
 )
 from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
@@ -151,15 +150,10 @@ def query_sell_put_cash(
         candidate = get_exchange_rates_or_fetch_latest(
             cache_path=cache_file,
             max_age_hours=24,
-            write_cache=False,
+            write_cache=write_cache,
         )
         if exchange_rate_observation_status(candidate, max_age_hours=24) == "ready":
             exchange_rate_payload = dict(candidate or {})
-        if exchange_rate_payload and write_cache:
-            save_exchange_rate_observation(
-                cache_file,
-                exchange_rate_payload,
-            )
     opt = build_option_positions_context(
         option_records,
         broker=market,

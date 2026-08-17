@@ -215,7 +215,11 @@ def _warn(log: Callable[[str], None] | None, message: str) -> None:
 
 
 def _http_get(url: str, *, headers: dict[str, str] | None = None, timeout_sec: float = 8.0) -> str:
-    req = urllib_request.Request(url, headers=headers or {})
+    merged = {
+        "User-Agent": "Mozilla/5.0 (compatible; options-monitor/1.0)",
+        **(headers or {}),
+    }
+    req = urllib_request.Request(url, headers=merged)
     with urllib_request.urlopen(req, timeout=timeout_sec) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
