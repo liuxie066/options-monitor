@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.14.2 - 2026-08-17
+
+### Bug Fixes
+- Fixed OpenD probe paths (healthcheck, trading-day guard, trade push/backfill services) hanging indefinitely in the futu SDK reconnect loop when the gateway is offline; they now fail fast with a typed UNREACHABLE error.
+
 ## 1.14.1 - 2026-08-17
 
 ### New Features

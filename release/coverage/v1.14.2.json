@@ -1,0 +1,39 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.2",
+  "base": {
+    "tag": "v1.14.1",
+    "commit": "7467589204a7a3b1cd4aea0f87b2b493c4466951"
+  },
+  "reviewed_head": "476f310a7b3ca21c774a2ea1434dba4d90d5d297",
+  "commits": [
+    {
+      "sha": "ea2269ece4b0ea1ea1cff70919fd7dd34243da4d",
+      "subject": "fix(futu): fail fast on unreachable OpenD instead of hanging in SDK reconnect loop"
+    },
+    {
+      "sha": "3432b97afe81fcb8cce6b940a1846f849b8c9479",
+      "subject": "fix(futu): unify OpenD-unreachable error type and close test gaps"
+    },
+    {
+      "sha": "476f310a7b3ca21c774a2ea1434dba4d90d5d297",
+      "subject": "docs(design): Scene v4 contract, Top1 12-point sampling spec, Pi Agent Core PRD"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed OpenD probe paths (healthcheck, trading-day guard, trade push/backfill services) hanging indefinitely in the futu SDK reconnect loop when the gateway is offline; they now fail fast with a typed UNREACHABLE error.",
+      "commits": [
+        "ea2269ece4b0ea1ea1cff70919fd7dd34243da4d",
+        "3432b97afe81fcb8cce6b940a1846f849b8c9479"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "476f310a7b3ca21c774a2ea1434dba4d90d5d297",
+      "reason": "documentation-only design updates (Scene v4 contract, Top1 sampling spec, Pi Agent Core PRD) with no runtime or user-facing behavior change"
+    }
+  ]
+}
