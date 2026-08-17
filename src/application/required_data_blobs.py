@@ -559,12 +559,15 @@ def _equivalent_csv_number(left: str, right: str) -> bool:
         right_number = float(right)
     except (TypeError, ValueError):
         return False
-    return (
-        math.isfinite(left_number)
-        and math.isfinite(right_number)
-        and abs(left_number - right_number)
-        <= max(math.ulp(left_number), math.ulp(right_number))
-    )
+    if not math.isfinite(left_number) or not math.isfinite(right_number):
+        return False
+    if left_number == right_number:
+        return True
+    # ponytail: two derivation paths (provider projection vs pipeline CSV) can
+    # reorder float ops and land a few ULP apart (production case: 3 ULP on
+    # otm_pct). Relative tolerance is far tighter than any financial meaning.
+    scale = max(abs(left_number), abs(right_number), 1.0)
+    return abs(left_number - right_number) <= 1e-12 * scale
 
 
 def _csv_rows(payload: bytes, *, columns: list[str]) -> list[dict[str, str]]:

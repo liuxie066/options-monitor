@@ -1689,3 +1689,30 @@ def test_direct_publisher_rejects_child_rv_drift_without_receipt(
         )
 
     assert _receipt_paths(tmp_path) == []
+
+
+def test_blob_projection_accepts_float_last_bit_and_ulp_drift() -> None:
+    """Production 2026-08-17 lunch-reopen data differed by up to 3 ULP on otm_pct.
+
+    The strict CSV comparison must treat those as equivalent; only multiplier
+    may differ.
+    """
+
+    from src.application.required_data_blobs import _equivalent_csv_number
+
+    # 1-ULP drift (0.48621000000000003 vs 0.48621)
+    assert _equivalent_csv_number("0.48621000000000003", "0.48621")
+    # 3-ULP drift (production 0700.HK row0 otm_pct)
+    assert _equivalent_csv_number("0.19463087248322147", "0.1946308724832214")
+    # 1-ULP drift on a small-magnitude value
+    assert _equivalent_csv_number("0.26662320730117345", "0.2666232073011734")
+    # exact values stay equivalent
+    assert _equivalent_csv_number("0.42", "0.42")
+    assert _equivalent_csv_number("5", "5")
+    # material differences must still be rejected
+    assert not _equivalent_csv_number("0.42", "0.43")
+    assert not _equivalent_csv_number("1e3", "1e3.5")
+    # non-numeric strings are not numbers
+    assert not _equivalent_csv_number("N/A", "N/A")
+    assert not _equivalent_csv_number("", "0")
+
