@@ -57,15 +57,24 @@ class DecisionStateNormalizationError(ValueError):
     pass
 
 
-def _decimal_string(value: Any) -> str:
+def _decimal_string(value: Any, *, field_path: str = "") -> str:
     if isinstance(value, float) and not math.isfinite(value):
-        raise DecisionStateNormalizationError("non-finite numeric value in decision state")
+        raise DecisionStateNormalizationError(
+            "non-finite numeric value in decision state"
+            + (f" at {field_path}" if field_path else "")
+        )
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise DecisionStateNormalizationError("invalid numeric value in decision state") from exc
+        raise DecisionStateNormalizationError(
+            "invalid numeric value in decision state"
+            + (f" at {field_path}" if field_path else "")
+        ) from exc
     if not number.is_finite():
-        raise DecisionStateNormalizationError("non-finite numeric value in decision state")
+        raise DecisionStateNormalizationError(
+            "non-finite numeric value in decision state"
+            + (f" at {field_path}" if field_path else "")
+        )
     if number == 0:
         return "0"
     normalized = number.normalize()
@@ -102,12 +111,12 @@ def canonicalize_decision_value(
     if isinstance(value, str):
         if _is_decimal_field(_field_name, _parent_field):
             try:
-                return _decimal_string(value)
+                return _decimal_string(value, field_path=str(_field_name or ""))
             except DecisionStateNormalizationError:
                 pass
         return value
     if isinstance(value, (int, float, Decimal)):
-        return _decimal_string(value)
+        return _decimal_string(value, field_path=str(_field_name or ""))
     if isinstance(value, dict):
         return {
             str(key): canonicalize_decision_value(
