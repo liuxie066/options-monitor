@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import runpy
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -389,7 +389,8 @@ def test_archive_deduplicates_same_blob_with_runtime_local_publish_times(
         ).encode(),
         columns=columns,
     )
-    newer = {**ref, "published_at_utc": "2026-08-17T00:00:00Z"}
+    newer_at = datetime.fromisoformat(ref["published_at_utc"].replace("Z", "+00:00")) + timedelta(seconds=1)
+    newer = {**ref, "published_at_utc": newer_at.isoformat().replace("+00:00", "Z")}
 
     selected = _selected_scan_blob_refs(
         source={"kind": "ssh"},
