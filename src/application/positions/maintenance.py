@@ -566,7 +566,11 @@ def run_expired_position_maintenance_for_account(
             }
         return result
 
-    repo = open_position_ledger(data_config)
+    config_source_path = cfg.get("config_source_path") if isinstance(cfg, dict) else None
+    repo = open_position_ledger(
+        data_config,
+        config_path=config_source_path,
+    )
     ledger_store = ledger_store_payload(data_config, repo)
     projection_refresh = (
         None

@@ -50,7 +50,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     ]
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(mod, "_load_expiry_close_position_lots", lambda _repo: records)
 
     def _build_decisions(positions, **kwargs):
@@ -143,7 +143,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     ]
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(mod, "_load_expiry_close_position_lots", lambda _repo: records)
 
     def _build_decisions(positions, **kwargs):
@@ -208,7 +208,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
         code = "HK.00700"
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",
@@ -280,7 +280,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
     assert exp_ms is not None
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",
@@ -344,7 +344,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
     fake_repo = object()
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",
@@ -410,7 +410,7 @@ def test_position_maintenance_external_account_requires_manual_expiry_review(mon
     assert expiration is not None
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",
@@ -466,7 +466,7 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
     order: list[str] = []
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
 
     def _refresh(repo):
         assert repo is fake_repo
@@ -512,7 +512,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
     receipt_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",
@@ -584,7 +584,7 @@ def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_pat
     fake_repo = object()
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
-    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
     monkeypatch.setattr(
         mod,
         "_load_expiry_close_position_lots",

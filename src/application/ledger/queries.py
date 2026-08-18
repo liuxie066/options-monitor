@@ -30,8 +30,17 @@ class AssignedStockEventLog:
         }
 
 
-def open_position_ledger(data_config: Any) -> Any:
-    return load_option_positions_repo(data_config)
+def open_position_ledger(
+    data_config: Any,
+    *,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> Any:
+    return load_option_positions_repo(
+        data_config,
+        config_path=config_path,
+        runtime_root=runtime_root,
+    )
 
 
 def open_position_ledger_from_data_config(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
