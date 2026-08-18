@@ -245,8 +245,9 @@ def _handle_blogger_opportunities(
 
     us_stocks = [stock for stock in stocks if _is_us_stock(stock)]
     stockvoice_stocks = [_stock_from_stockvoice_signal(signal) for signal in stockvoice_signals]
-    source_stocks = _dedupe_stocks([*us_stocks, *stockvoice_stocks])
-    selected_stocks = source_stocks[:symbols_limit]
+    selected_xueqiu_stocks = us_stocks[:symbols_limit]
+    source_stocks = _dedupe_stocks([*selected_xueqiu_stocks, *stockvoice_stocks])
+    selected_stocks = source_stocks
     stockvoice_by_symbol = {signal.symbol: signal for signal in stockvoice_signals}
     quotes: dict[str, dict[str, Any]] = {}
     try:
@@ -290,7 +291,8 @@ def _handle_blogger_opportunities(
     returned_opportunities = sorted_opportunities[:max_results] if max_results else sorted_opportunities
 
     return {
-        "ok": not errors,
+        "ok": not errors or bool(returned_opportunities),
+        "partial_success": bool(errors and returned_opportunities),
         "schema_version": "options_data_blogger_opportunities.v1",
         "provider": "robinhood",
         "user_id": user_id,

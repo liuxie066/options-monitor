@@ -250,7 +250,7 @@ def test_options_data_blogger_opportunities_can_merge_stockvoice_symbols(tmp_pat
             "--user-url",
             "https://xueqiu.com/u/1247347556#/stock",
             "--symbols-limit",
-            "3",
+            "1",
             "--expiration",
             "2026-09-18",
             "--include-stockvoice",
@@ -337,6 +337,90 @@ def test_options_data_blogger_opportunities_can_merge_stockvoice_symbols(tmp_pat
     meta_rows = [item for item in payload["opportunities"] if item["symbol"] == "META"]
     assert meta_rows
     assert meta_rows[0]["stockvoice_signal"]["bullish_count"] == 11
+
+
+def test_options_data_blogger_opportunities_allows_partial_symbol_errors(tmp_path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        'ROBINHOOD_AUTH_TOKEN="rh-token"\nXUEQIU_COOKIE="xq-cookie"\n',
+        encoding="utf-8",
+    )
+    args = parse_args(
+        [
+            "options-data",
+            "blogger-opportunities",
+            "--user-url",
+            "https://xueqiu.com/u/1247347556#/stock",
+            "--symbols-limit",
+            "2",
+            "--expiration",
+            "2026-09-18",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    def _fetch_user_stocks(_target: str, **_kwargs):
+        return [
+            XueqiuUserStock(
+                source_user_id="1247347556",
+                raw_symbol="SPCX",
+                symbol="SPCX",
+                name="SpaceX",
+                exchange="NASDAQ",
+                marketplace="US",
+                current=100.0,
+            ),
+            XueqiuUserStock(
+                source_user_id="1247347556",
+                raw_symbol="BAD",
+                symbol="BAD",
+                name="Missing",
+                exchange="NASDAQ",
+                marketplace="US",
+                current=50.0,
+            ),
+        ]
+
+    def _fetch_options(request):
+        if request.symbol == "BAD":
+            raise RobinhoodOptionsError("robinhood could not find an equity instrument for BAD")
+        return [
+            {
+                "contract_symbol": "SPCX260918P00080000",
+                "option_type": "put",
+                "expiration": "2026-09-18",
+                "strike": 80.0,
+                "bid": 2.0,
+                "ask": 2.2,
+                "mid": 2.1,
+                "volume": 100,
+                "open_interest": 1000,
+                "iv": 0.5,
+                "delta": -0.2,
+            }
+        ]
+
+    def _fetch_quotes(symbols, **_kwargs):
+        return {symbol: {"last_trade_price": 100.0 if symbol == "SPCX" else 50.0} for symbol in symbols}
+
+    payload = handle_options_data_command(
+        args,
+        fetch_robinhood_option_chain_fn=_fetch_options,
+        fetch_robinhood_stock_quotes_fn=_fetch_quotes,
+        fetch_user_stocks_fn=_fetch_user_stocks,
+    )
+
+    assert payload["ok"] is True
+    assert payload["partial_success"] is True
+    assert payload["opportunity_count"] == 1
+    assert payload["errors"] == [
+        {
+            "symbol": "BAD",
+            "strategy": "sell_put",
+            "error": "robinhood could not find an equity instrument for BAD",
+        }
+    ]
 
 
 def test_options_data_blogger_opportunities_scopes_dte_when_expiration_is_blank(tmp_path) -> None:
