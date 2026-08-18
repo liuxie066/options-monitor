@@ -354,9 +354,19 @@ def test_tick_account_execution_isolates_one_account_exception(
 def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     from src.application import multi_account_tick as mod
 
-    assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 1
+    # 缺省：全并行（=账户数），加账户零配置
+    assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 3
+    assert mod._resolve_account_run_max_workers({}, 4) == 4
+    # 显式压低并行度（合法的运营选择）：尊重设置值
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 2}}, 5) == 2
+    # 显式值被账户数封顶
+    assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 9}}, 2) == 2
+    # 显式 0/负数被 to_positive_int 收敛为 1（显式串行）
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
+    # 兼容旧键 account_max_workers
+    assert mod._resolve_account_run_max_workers({"runtime": {"account_max_workers": 2}}, 5) == 2
+    # 单账户不并行
+    assert mod._resolve_account_run_max_workers({"runtime": {}}, 1) == 1
 
 
 def test_default_account_must_be_active_account() -> None:
