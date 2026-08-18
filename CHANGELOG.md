@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.14.9 - 2026-08-18
+
+### New Features
+- Added a strategy-lab historical research window bridge.
+
+### Bug Fixes
+- Defaulted multi-account scan parallelism to the full account count when `runtime.multi_account_max_workers` is unset, so every account's opening-candidate decision stays within the option-snapshot freshness window (fixes sy's shared snapshot going stale and all its US sell-put candidates being rejected). Explicitly setting the value still caps parallelism.
+
+### Improvements
+- Made circuit-breaker `probe_max_accounts` an internal constant (1) instead of a user-facing config key — a half-open probe only needs one representative account, and exposing it added a config surface that could drift.
+- `pipeline_watchlist` now raises on an unknown `use` template reference instead of silently dropping the symbol's merged config (defense in depth; validate/build already rejects it).
+
 ## 1.14.8 - 2026-08-18
 
 ### Bug Fixes
