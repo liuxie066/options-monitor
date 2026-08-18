@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.14.8 - 2026-08-18
+
+### Bug Fixes
+- Marked conversation-memory tool findings as historical snapshots so Copilot re-queries live read-only tools for candidate/run/position/notification questions instead of repeating stale conclusions (e.g. "0700 腾讯为什么被过滤" 复读旧结果而报「本轮未取得可验证的当前证据」).
+
 ## 1.14.7 - 2026-08-18
 
 ### Bug Fixes
