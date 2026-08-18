@@ -8,7 +8,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+import src.application.earnings_calendar as earnings_calendar
 from src.application.earnings_calendar import (
+    annotate_candidates_with_earnings_evidence,
     earnings_calendar_intervals,
     earnings_calendar_scan_date,
     fetch_market_earnings_calendar,
@@ -48,6 +51,39 @@ class _Gateway:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+def test_candidate_annotation_preserves_optional_earnings_none(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _evidence(*, expiration: str, **_kwargs: object) -> dict[str, object]:
+        soft_end = None if expiration == "2026-08-21" else "2026-09-11"
+        return {
+            "earnings_evidence_status": "ready",
+            "earnings_soft_window_end": soft_end,
+        }
+
+    monkeypatch.setattr(
+        earnings_calendar,
+        "load_earnings_evidence_for_candidate",
+        _evidence,
+    )
+    candidates = pd.DataFrame(
+        [
+            {"market": "US", "symbol": "NVDA", "expiration": "2026-08-21"},
+            {"market": "US", "symbol": "NVDA", "expiration": "2026-09-18"},
+        ]
+    )
+
+    rows = annotate_candidates_with_earnings_evidence(
+        candidates,
+        input_root=tmp_path,
+    ).to_dict("records")
+
+    assert rows[0]["earnings_soft_window_end"] is None
+    assert rows[1]["earnings_soft_window_end"] == "2026-09-11"
+    assert canonical_sha256(rows[0])
 
 
 def _fetch(gateway: _Gateway, *, expiry: str = "2026-08-21"):

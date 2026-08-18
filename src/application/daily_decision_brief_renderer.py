@@ -80,7 +80,11 @@ def build_daily_brief_user_view(
         diff=normalized_diff,
         context=ctx,
     )
-    scheduled_batch = _scheduled_batch_label(ctx, market=market)
+    scheduled_batch = _scheduled_batch_label(
+        ctx,
+        market=market,
+        display_in_user_timezone=delivery_kind == "fixed_report",
+    )
     if delivery_kind == "fixed_report" and scheduled_batch:
         phase_line = f"{scheduled_batch} 批次"
     else:
@@ -295,7 +299,11 @@ def render_fixed_failure(
 ) -> str:
     market = _upper(failure.get("market"))
     account = _lower(failure.get("account")) or "-"
-    batch = _scheduled_batch_label(dict(context or {}), market=market)
+    batch = _scheduled_batch_label(
+        dict(context or {}),
+        market=market,
+        display_in_user_timezone=True,
+    )
     phase = f"数据异常 · {batch} 批次失败" if batch else "数据异常 · 本轮批次失败"
     return _bounded_markdown(
         [
@@ -1955,7 +1963,12 @@ def _query_status_lines(brief: Mapping[str, Any], *, context: Mapping[str, Any])
     return lines
 
 
-def _scheduled_batch_label(context: Mapping[str, Any], *, market: str) -> str:
+def _scheduled_batch_label(
+    context: Mapping[str, Any],
+    *,
+    market: str,
+    display_in_user_timezone: bool = False,
+) -> str:
     if _lower(context.get("trigger_kind")) in {"manual", "force"}:
         return ""
     value = context.get("scheduled_target_market")
@@ -1970,8 +1983,15 @@ def _scheduled_batch_label(context: Mapping[str, Any], *, market: str) -> str:
     parsed = _parse_datetime(text)
     if parsed is None:
         return ""
-    market_tz = _safe_zoneinfo(str(context.get("market_timezone") or _MARKET_TIMEZONES.get(market) or "UTC"))
-    return parsed.astimezone(market_tz).strftime("%H:%M")
+    timezone_name = (
+        context.get("user_timezone")
+        if display_in_user_timezone
+        else context.get("market_timezone")
+    )
+    target_tz = _safe_zoneinfo(
+        str(timezone_name or _MARKET_TIMEZONES.get(market) or "UTC")
+    )
+    return parsed.astimezone(target_tz).strftime("%H:%M")
 
 
 def _data_as_of_label(brief: Mapping[str, Any], *, context: Mapping[str, Any]) -> str:
