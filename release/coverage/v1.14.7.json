@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.7",
+  "base": {
+    "tag": "v1.14.6",
+    "commit": "260b378290490224c1123483da45f744d1f5b4d7"
+  },
+  "reviewed_head": "511c8e50744270aa29e3bb1c6c6b3a8841435669",
+  "commits": [
+    {
+      "sha": "7491964554701f815a23ea89d4615ba51ff81dc2",
+      "subject": "fix(daily-brief): correct batch time and evidence nulls"
+    },
+    {
+      "sha": "511c8e50744270aa29e3bb1c6c6b3a8841435669",
+      "subject": "fix(ledger): resolve auto-close ledger store from config path, not release dir"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed auto-close-expired opening an empty SQLite ledger in the release directory instead of the real runtime store, which caused a concurrent \"locking protocol\" failure when both accounts ran against the same wrong file.",
+      "commits": [
+        "511c8e50744270aa29e3bb1c6c6b3a8841435669"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Corrected decision-brief batch time and null evidence rendering.",
+      "commits": [
+        "7491964554701f815a23ea89d4615ba51ff81dc2"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

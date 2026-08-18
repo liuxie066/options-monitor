@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.14.7 - 2026-08-18
+
+### Bug Fixes
+- Fixed auto-close-expired opening an empty SQLite ledger in the release directory instead of the real runtime store, which caused a concurrent "locking protocol" failure when both accounts ran against the same wrong file.
+- Corrected decision-brief batch time and null evidence rendering.
+
 ## 1.14.6 - 2026-08-17
 
 ### Improvements
