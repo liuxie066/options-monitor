@@ -61,7 +61,7 @@ def add_options_data_commands(subparsers: argparse._SubParsersAction) -> None:
     )
     stockvoice.add_argument("--url", default=STOCKVOICE_URL)
     stockvoice.add_argument("--min-bullish-count", type=int, default=8)
-    stockvoice.add_argument("--min-bull-bear-ratio", type=float, default=2.0)
+    stockvoice.add_argument("--min-bull-bear-ratio", type=float, default=1.5)
     stockvoice.add_argument("--min-net-bullish", type=int, default=3)
     stockvoice.add_argument("--limit", type=int, default=20)
     stockvoice.add_argument("--timeout", type=float, default=20.0)
@@ -95,7 +95,7 @@ def add_options_data_commands(subparsers: argparse._SubParsersAction) -> None:
     blogger.add_argument("--stockvoice-url", default=STOCKVOICE_URL)
     blogger.add_argument("--stockvoice-limit", type=int, default=20)
     blogger.add_argument("--stockvoice-min-bullish-count", type=int, default=8)
-    blogger.add_argument("--stockvoice-min-bull-bear-ratio", type=float, default=2.0)
+    blogger.add_argument("--stockvoice-min-bull-bear-ratio", type=float, default=1.5)
     blogger.add_argument("--stockvoice-min-net-bullish", type=int, default=3)
 
 
@@ -235,7 +235,7 @@ def _handle_blogger_opportunities(
                 url=str(getattr(args, "stockvoice_url", STOCKVOICE_URL) or STOCKVOICE_URL),
                 timeout=float(args.timeout or 20.0),
                 min_bullish_count=max(0, int(getattr(args, "stockvoice_min_bullish_count", 8) or 0)),
-                min_bull_bear_ratio=max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 2.0) or 0.0)),
+                min_bull_bear_ratio=max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 1.5) or 0.0)),
                 min_net_bullish=max(0, int(getattr(args, "stockvoice_min_net_bullish", 3) or 0)),
                 limit=max(0, int(getattr(args, "stockvoice_limit", 20) or 0)),
             )
@@ -318,7 +318,7 @@ def _handle_blogger_opportunities(
             "min_iv": policy.min_iv,
             "max_bid_ask_spread_pct": policy.max_bid_ask_spread_pct,
             "stockvoice_min_bullish_count": max(0, int(getattr(args, "stockvoice_min_bullish_count", 8) or 0)),
-            "stockvoice_min_bull_bear_ratio": max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 2.0) or 0.0)),
+            "stockvoice_min_bull_bear_ratio": max(0.0, float(getattr(args, "stockvoice_min_bull_bear_ratio", 1.5) or 0.0)),
             "stockvoice_min_net_bullish": max(0, int(getattr(args, "stockvoice_min_net_bullish", 3) or 0)),
         },
         "opportunity_count": len(returned_opportunities),

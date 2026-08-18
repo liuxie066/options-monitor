@@ -38,6 +38,23 @@ def test_extract_stockvoice_signals_keeps_strong_bullish_us_symbols() -> None:
     assert signals[1].price == 140.0
 
 
+def test_extract_stockvoice_signals_reads_next_heat_board_payload() -> None:
+    html = r"""
+    <script>
+    self.__next_f.push([1,"{\"ticker\":\"TSLA\",\"price\":339.3,\"pct\":-0.86,\"root_post_count\":349,\"bullish_count\":15,\"bearish_count\":8,\"neutral_count\":16},
+    {\"ticker\":\"SPCX\",\"price\":146.23,\"pct\":4.45,\"root_post_count\":185,\"bullish_count\":18,\"bearish_count\":10,\"neutral_count\":11},
+    {\"ticker\":\"META\",\"price\":568.97,\"pct\":-3.54,\"root_post_count\":125,\"bullish_count\":11,\"bearish_count\":12,\"neutral_count\":6}"])
+    </script>
+    """
+
+    signals = extract_stockvoice_signals(html, min_bullish_count=8, min_bull_bear_ratio=1.5, min_net_bullish=3)
+
+    assert [signal.symbol for signal in signals] == ["TSLA", "SPCX"]
+    assert signals[0].root_post_count == 349
+    assert signals[0].bull_bear_ratio == 1.875
+    assert signals[1].price == 146.23
+
+
 def test_normalize_stockvoice_symbol_removes_non_symbol_text() -> None:
     assert normalize_stockvoice_symbol(" spcx ") == "SPCX"
     assert normalize_stockvoice_symbol("BRK.B") == "BRK.B"

@@ -22,6 +22,7 @@ class StockVoiceSignal:
     bullish_count: int
     bearish_count: int
     neutral_count: int
+    root_post_count: int | None = None
     bullish_ratio: float | None = None
     bull_bear_ratio: float | None = None
     price: float | None = None
@@ -34,6 +35,7 @@ class StockVoiceSignal:
             "bullish_count": self.bullish_count,
             "bearish_count": self.bearish_count,
             "neutral_count": self.neutral_count,
+            "root_post_count": self.root_post_count,
             "bullish_ratio": self.bullish_ratio,
             "bull_bear_ratio": self.bull_bear_ratio,
             "price": self.price,
@@ -46,7 +48,7 @@ def fetch_stockvoice_signals(
     url: str = STOCKVOICE_URL,
     timeout: float = 10.0,
     min_bullish_count: int = 8,
-    min_bull_bear_ratio: float = 2.0,
+    min_bull_bear_ratio: float = 1.5,
     min_net_bullish: int = 3,
     limit: int = 20,
 ) -> list[StockVoiceSignal]:
@@ -66,12 +68,20 @@ def extract_stockvoice_signals(
     *,
     source_url: str = STOCKVOICE_URL,
     min_bullish_count: int = 8,
-    min_bull_bear_ratio: float = 2.0,
+    min_bull_bear_ratio: float = 1.5,
     min_net_bullish: int = 3,
     limit: int = 20,
 ) -> list[StockVoiceSignal]:
     text = _normalize_text(html)
     signals_by_symbol: dict[str, StockVoiceSignal] = {}
+    _extract_structured_heat_signals(
+        html,
+        signals_by_symbol=signals_by_symbol,
+        source_url=source_url,
+        min_bullish_count=min_bullish_count,
+        min_bull_bear_ratio=min_bull_bear_ratio,
+        min_net_bullish=min_net_bullish,
+    )
     count_pattern = (
         r"看多\s*(?P<bullish>\d+)\s*(?:位)?\s*"
         r"(?:"
@@ -152,6 +162,60 @@ def _add_signal_match(
             signals_by_symbol[symbol] = candidate
 
 
+def _extract_structured_heat_signals(
+    html: str,
+    *,
+    signals_by_symbol: dict[str, StockVoiceSignal],
+    source_url: str,
+    min_bullish_count: int,
+    min_bull_bear_ratio: float,
+    min_net_bullish: int,
+) -> None:
+    quote = r'\\?"'
+    number = r"-?\d+(?:\.\d+)?"
+    null_or_number = rf"(?:null|{number})"
+    pattern = re.compile(
+        rf"{quote}ticker{quote}\s*:\s*{quote}(?P<symbol>[A-Z][A-Z0-9.]{{0,8}}){quote}"
+        rf"\s*,\s*{quote}price{quote}\s*:\s*(?P<price>{null_or_number})"
+        rf"\s*,\s*{quote}pct{quote}\s*:\s*{null_or_number}"
+        rf"\s*,\s*{quote}root_post_count{quote}\s*:\s*(?P<root_post_count>\d+)"
+        rf"\s*,\s*{quote}bullish_count{quote}\s*:\s*(?P<bullish>\d+)"
+        rf"\s*,\s*{quote}bearish_count{quote}\s*:\s*(?P<bearish>\d+)"
+        rf"\s*,\s*{quote}neutral_count{quote}\s*:\s*(?P<neutral>\d+)"
+    )
+    for match in pattern.finditer(html):
+        symbol = normalize_stockvoice_symbol(match.group("symbol"))
+        if not symbol or not _looks_like_us_symbol(symbol):
+            continue
+        bullish = _int_or_zero(match.group("bullish"))
+        bearish = _int_or_zero(match.group("bearish"))
+        neutral = _int_or_zero(match.group("neutral"))
+        if bullish < int(min_bullish_count):
+            continue
+        if bullish - bearish < int(min_net_bullish):
+            continue
+        if bearish > 0 and bullish / bearish < float(min_bull_bear_ratio):
+            continue
+        total = bullish + bearish + neutral
+        bullish_ratio = round(bullish / total, 6) if total > 0 else None
+        bull_bear_ratio = round(bullish / bearish, 6) if bearish > 0 else float("inf") if bullish > 0 else None
+        candidate = StockVoiceSignal(
+            symbol=symbol,
+            name=None,
+            bullish_count=bullish,
+            bearish_count=bearish,
+            neutral_count=neutral,
+            root_post_count=_int_or_zero(match.group("root_post_count")),
+            bullish_ratio=bullish_ratio,
+            bull_bear_ratio=bull_bear_ratio,
+            price=_float_or_none(match.group("price")),
+            source_url=source_url,
+        )
+        existing = signals_by_symbol.get(symbol)
+        if existing is None or _signal_sort_key(candidate) < _signal_sort_key(existing):
+            signals_by_symbol[symbol] = candidate
+
+
 def normalize_stockvoice_symbol(value: str) -> str:
     symbol = str(value or "").strip().upper()
     symbol = symbol.replace("／", "/").split("/", 1)[0].strip()
@@ -220,10 +284,22 @@ def _int_or_zero(value: str | None) -> int:
         return 0
 
 
-def _signal_sort_key(signal: StockVoiceSignal) -> tuple[float, int, int, str]:
+def _float_or_none(value: str | None) -> float | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        return float(str(value))
+    except ValueError:
+        return None
+
+
+def _signal_sort_key(signal: StockVoiceSignal) -> tuple[int, float, int, float, int, str]:
+    root_post_count = signal.root_post_count or 0
     ratio = signal.bull_bear_ratio
     ratio_for_sort = ratio if ratio is not None and ratio != float("inf") else 999.0
-    return (-ratio_for_sort, -signal.bullish_count, signal.bearish_count, signal.symbol)
+    if root_post_count > 0:
+        return (0, -float(root_post_count), -signal.bullish_count, -ratio_for_sort, signal.bearish_count, signal.symbol)
+    return (1, -ratio_for_sort, -signal.bullish_count, 0.0, signal.bearish_count, signal.symbol)
 
 
 __all__ = [

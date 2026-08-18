@@ -454,7 +454,7 @@ def _page(result: dict[str, Any] | None = None) -> bytes:
         <label>Xueqiu blogger holdings link</label>
         <input name="xueqiu_user_url" value="{DEFAULT_BLOGGER_URL}">
         <p class="note">Default guardrails: sell puts only, no in-the-money puts, Tier-A target basis required, 21-60 DTE, at least 15% out-of-the-money, IV at least 40%, delta at or below 0.30, and liquidity/spread checks. Cash is assumed unlimited; GO and NO-GO rows inside the strategy universe are ranked by annualized yield.</p>
-        <label class="check-row"><input type="checkbox" name="include_stockvoice" value="1" checked> Include StockVoice strong-bullish public KOL signals</label>
+        <label class="check-row"><input type="checkbox" name="include_stockvoice" value="1" checked> Include StockVoice bullish public KOL heat signals</label>
         <div class="row">
           <div>
             <label>Scan first N US holdings</label>
