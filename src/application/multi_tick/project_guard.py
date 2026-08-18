@@ -11,6 +11,13 @@ def project_guard_state_path(base: Path) -> Path:
     return (base / 'output_shared' / 'state' / 'project_guard_state.json').resolve()
 
 
+# Half-open circuit probe sheds load to a single representative account. This
+# is an internal degradation detail, not a user-facing knob: a probe only ever
+# needs one account to test recovery, so it is fixed rather than configurable
+# (keeps it from drifting out of sync with the account list).
+_PROBE_MAX_ACCOUNTS = 1
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -35,7 +42,7 @@ def _load_policy(cfg: dict | None) -> dict[str, Any]:
         'circuit_failure_threshold': max(1, int(raw.get('circuit_failure_threshold', 3))),
         'circuit_window_sec': max(60, int(raw.get('circuit_window_sec', 300))),
         'circuit_open_sec': max(30, int(raw.get('circuit_open_sec', 300))),
-        'probe_max_accounts': max(1, int(raw.get('probe_max_accounts', 1))),
+        'probe_max_accounts': _PROBE_MAX_ACCOUNTS,
     }
 
 
