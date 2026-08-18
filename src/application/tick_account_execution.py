@@ -102,7 +102,14 @@ def resolve_account_run_max_workers(cfg: Mapping[str, object], account_count: in
     raw_workers = runtime.get("multi_account_max_workers")
     if raw_workers is None:
         raw_workers = runtime.get("account_max_workers")
-    workers = to_positive_int(raw_workers, 1)
+    if raw_workers is None:
+        # Default to full parallelism: account scans are pure local filtering over a
+        # shared prefetched snapshot (no extra OpenD calls), so running all accounts
+        # concurrently keeps every account's decision moment close to the snapshot
+        # receipt and avoids the trailing account's shared snapshot going stale.
+        # Operators may still set an explicit value to cap parallelism deliberately.
+        return account_count
+    workers = to_positive_int(raw_workers, account_count)
     return min(account_count, workers)
 
 
