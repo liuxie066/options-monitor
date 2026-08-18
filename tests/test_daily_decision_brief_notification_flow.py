@@ -487,7 +487,7 @@ def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current
     prep = mod._prepare_daily_brief_notification(bundle.request)
     envelope = prep.lifecycles_by_account["lx"]["envelope"]
     assert envelope["delivery_kind"] == "fixed_failure"
-    assert "数据异常" in envelope["rendered_message"]
+    assert "数据异常 · 22:00 批次失败" in envelope["rendered_message"]
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is False
 
 
@@ -1218,14 +1218,14 @@ def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_pa
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="HK")["available"] is False
 
 
-def test_scheduled_renderer_uses_batch_time_without_leaking_revision(monkeypatch, tmp_path: Path) -> None:
+def test_scheduled_renderer_uses_beijing_batch_time_without_leaking_revision(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
 
     _patch_assembler(monkeypatch)
     prep = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="render").request)
     message = prep.prepared_messages.messages_by_account["lx"]
-    assert "10:00 批次" in message
-    assert "状态｜10:00 批次" in message
+    assert "22:00 批次" in message
+    assert "状态｜22:00 批次" in message
     assert "数据｜美东 09:59 / 北京 21:59" in message
     assert "revision" not in message.lower()
 

@@ -947,6 +947,16 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert_mobile_flat_markdown(alert)
     assert_mobile_flat_markdown(failure)
 
+    beijing_failure = render_fixed_failure(
+        brief,
+        context={
+            **_scheduled_context(),
+            "scheduled_target_market": "2026-08-17T13:00:00-04:00",
+        },
+    )
+    assert "数据异常 · 01:00 批次失败" in beijing_failure
+    assert "13:00 批次失败" not in beijing_failure
+
     current_query = render_query_brief(
         brief,
         context={"query_time_utc": "2026-07-20T15:00:00+00:00"},

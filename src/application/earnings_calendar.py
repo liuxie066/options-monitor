@@ -783,7 +783,12 @@ def annotate_candidates_with_earnings_evidence(
             )
         )
         rows.append(payload)
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    for field in (name for name in out.columns if name.startswith("earnings_")):
+        values = [row.get(field) for row in rows]
+        if any(value is None for value in values):
+            out[field] = pd.Series(values, dtype=object)
+    return out
 
 
 def _candidate_earnings_unavailable(
