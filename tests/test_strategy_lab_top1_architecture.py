@@ -115,6 +115,7 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "datetime",
         "typing",
         "domain.domain.decision_state_fingerprint",
+        "domain.domain.engine",
         "domain.domain.fee_calc",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
@@ -270,7 +271,9 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "pathlib",
         "typing",
         "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.contracts",
         "src.application.strategy_lab.top1.research",
+        "src.application.strategy_lab.top1.research_window",
         "src.infrastructure.private_storage",
     }
 
