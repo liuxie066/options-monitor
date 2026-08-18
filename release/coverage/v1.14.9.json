@@ -1,0 +1,75 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.9",
+  "base": {
+    "tag": "v1.14.8",
+    "commit": "e0474734b3e8825311196ea1fb8a070ef4e2a079"
+  },
+  "reviewed_head": "71c687daee534558f2eb61577b471b9de362f3ea",
+  "commits": [
+    {
+      "sha": "206802c933d8af0c1b9f2d6fb668352c5c4d82ee",
+      "subject": "feat(strategy-lab): add historical research window bridge"
+    },
+    {
+      "sha": "6d2463d7a7e221a08b8f30e07d5f7447c2a28bab",
+      "subject": "Merge pull request #176 from liuxie066/codex/strategy-lab-w2-historical-window"
+    },
+    {
+      "sha": "ca43e1ec5dd7e157b0d810690d79a5034c196fdf",
+      "subject": "refactor(guard): make probe_max_accounts an internal constant, not a config knob"
+    },
+    {
+      "sha": "a9ac54873212869df479e682676a5228a7b9d2e2",
+      "subject": "fix(tick): default multi-account scan parallelism to full account count"
+    },
+    {
+      "sha": "5caee21add492d0418f6b3024a17b19302f03b80",
+      "subject": "fix(watchlist): fail loudly on unknown template reference at runtime"
+    },
+    {
+      "sha": "71c687daee534558f2eb61577b471b9de362f3ea",
+      "subject": "chore(config): regenerate dependency graph after watchlist/guard/tick changes"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a strategy-lab historical research window bridge.",
+      "commits": [
+        "206802c933d8af0c1b9f2d6fb668352c5c4d82ee"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Made circuit-breaker `probe_max_accounts` an internal constant (1) instead of a user-facing config key — a half-open probe only needs one representative account, and exposing it added a config surface that could drift.",
+      "commits": [
+        "ca43e1ec5dd7e157b0d810690d79a5034c196fdf"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "`pipeline_watchlist` now raises on an unknown `use` template reference instead of silently dropping the symbol's merged config (defense in depth; validate/build already rejects it).",
+      "commits": [
+        "5caee21add492d0418f6b3024a17b19302f03b80"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Defaulted multi-account scan parallelism to the full account count when `runtime.multi_account_max_workers` is unset, so every account's opening-candidate decision stays within the option-snapshot freshness window (fixes sy's shared snapshot going stale and all its US sell-put candidates being rejected). Explicitly setting the value still caps parallelism.",
+      "commits": [
+        "a9ac54873212869df479e682676a5228a7b9d2e2"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "6d2463d7a7e221a08b8f30e07d5f7447c2a28bab",
+      "reason": "merge_commit"
+    },
+    {
+      "commit": "71c687daee534558f2eb61577b471b9de362f3ea",
+      "reason": "generated_docs_chore"
+    }
+  ]
+}
