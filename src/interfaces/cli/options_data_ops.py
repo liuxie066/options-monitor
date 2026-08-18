@@ -425,8 +425,11 @@ def _rank_strategy_rows(
     max_abs_delta: float | None,
 ) -> list[dict[str, Any]]:
     quote_midpoint = _midpoint(_float_or_none(quote.get("bid_price")), _float_or_none(quote.get("ask_price")))
-    current = _first_float(stock.current, quote.get("last_trade_price"), quote_midpoint)
-    price_source = "xueqiu" if _float_or_none(stock.current) is not None else "robinhood_quote" if current is not None else None
+    current, price_source = _current_price_with_source(
+        robinhood_last=quote.get("last_trade_price"),
+        robinhood_midpoint=quote_midpoint,
+        source_current=stock.current,
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         bid = _float_or_none(row.get("bid"))
@@ -454,6 +457,7 @@ def _rank_strategy_rows(
                 "source_current": _float_or_none(stock.current),
                 "underlying_price": current,
                 "underlying_price_source": price_source,
+                "underlying_quote_updated_at": quote.get("updated_at"),
                 "contract_symbol": row.get("contract_symbol"),
                 "option_type": row.get("option_type"),
                 "expiration": row.get("expiration"),
@@ -486,7 +490,11 @@ def _rank_sell_put_rows(
     stockvoice_signal: StockVoiceSignal | None = None,
 ) -> list[dict[str, Any]]:
     quote_midpoint = _midpoint(_float_or_none(quote.get("bid_price")), _float_or_none(quote.get("ask_price")))
-    current = _first_float(stock.current, quote.get("last_trade_price"), quote_midpoint)
+    current, price_source = _current_price_with_source(
+        robinhood_last=quote.get("last_trade_price"),
+        robinhood_midpoint=quote_midpoint,
+        source_current=stock.current,
+    )
     out: list[dict[str, Any]] = []
     excluded_count = 0
     for row in rows:
@@ -527,6 +535,9 @@ def _rank_sell_put_rows(
             policy=policy,
             portfolio_nav=portfolio_nav,
         )
+        evaluated["source_current"] = _float_or_none(stock.current)
+        evaluated["underlying_price_source"] = price_source
+        evaluated["underlying_quote_updated_at"] = quote.get("updated_at")
         if stockvoice_signal is not None:
             evaluated["stockvoice_signal"] = stockvoice_signal.to_dict()
         out.append(evaluated)
@@ -585,6 +596,23 @@ def _midpoint(bid: float | None, ask: float | None) -> float | None:
     if bid is None or ask is None:
         return None
     return round((bid + ask) / 2.0, 6)
+
+
+def _current_price_with_source(
+    *,
+    robinhood_last: Any,
+    robinhood_midpoint: float | None,
+    source_current: Any,
+) -> tuple[float | None, str | None]:
+    robinhood_last_float = _float_or_none(robinhood_last)
+    if robinhood_last_float is not None:
+        return robinhood_last_float, "robinhood_quote"
+    if robinhood_midpoint is not None:
+        return robinhood_midpoint, "robinhood_bid_ask_midpoint"
+    source_current_float = _float_or_none(source_current)
+    if source_current_float is not None:
+        return source_current_float, "source_current"
+    return None, None
 
 
 def _first_float(*values: Any) -> float | None:

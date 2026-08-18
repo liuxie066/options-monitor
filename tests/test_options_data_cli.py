@@ -143,7 +143,7 @@ def test_options_data_blogger_opportunities_scans_us_stocks_with_saved_tokens(tm
                 name="SpaceX",
                 exchange="NASDAQ",
                 marketplace="US",
-                current=100.0,
+                current=80.0,
             ),
             XueqiuUserStock(
                 source_user_id="1247347556",
@@ -220,6 +220,8 @@ def test_options_data_blogger_opportunities_scans_us_stocks_with_saved_tokens(tm
         "SPCX260918P00080000",
     ]
     assert {item["underlying_price"] for item in payload["opportunities"]} == {100.0}
+    assert {item["source_current"] for item in payload["opportunities"]} == {80.0}
+    assert {item["underlying_price_source"] for item in payload["opportunities"]} == {"robinhood_quote"}
     assert payload["opportunities"][0]["final_decision"] == "NO_GO"
     assert "delta_too_high" in payload["opportunities"][0]["hard_vetoes"]
     assert payload["opportunities"][0]["annualized_return_on_cash"] > payload["opportunities"][1]["annualized_return_on_cash"]

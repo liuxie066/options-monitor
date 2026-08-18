@@ -266,6 +266,11 @@ def _recommendation_row(row: dict[str, Any]) -> str:
     risk_note = ", ".join(str(item) for item in (vetoes or warnings)[:2])
     stockvoice_note = _stockvoice_note(row.get("stockvoice_signal"))
     source_note = f"{html.escape(stockvoice_note)}" if stockvoice_note else html.escape(str(row.get("name") or ""))
+    price_source = str(row.get("underlying_price_source") or "unknown")
+    quote_time = str(row.get("underlying_quote_updated_at") or "")
+    price_note = price_source.replace("_", " ")
+    if quote_time:
+        price_note = f"{price_note} · {quote_time}"
     return f"""
       <tr>
         <td class="decision-col"><strong>{html.escape(str(row.get("final_decision") or ""))}</strong><span>{html.escape(str(row.get("mature_band") or ""))}</span></td>
@@ -273,7 +278,7 @@ def _recommendation_row(row: dict[str, Any]) -> str:
         <td>{html.escape(strategy)}</td>
         <td><strong>{html.escape(str(row.get("symbol") or ""))}</strong><span>{source_note}</span></td>
         <td>{html.escape(str(row.get("contract_symbol") or ""))}<span>{html.escape(str(row.get("expiration") or ""))}</span></td>
-        <td>{_fmt_money(row.get("underlying_price"))}</td>
+        <td>{_fmt_money(row.get("underlying_price"))}<span>{html.escape(price_note)}</span></td>
         <td>{_fmt_money(row.get("strike"))}</td>
         <td>{_fmt_money(row.get("effective_basis"))}<span>target {_fmt_money(row.get("authorized_target_basis"))}</span></td>
         <td>{_fmt_pct(row.get("out_of_money_pct"))}<span>{html.escape(str(row.get("dte") or "-"))} DTE</span></td>
