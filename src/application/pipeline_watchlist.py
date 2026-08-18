@@ -21,7 +21,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from src.application.config_profiles import deep_merge
+from src.application.config_profiles import ConfigProfileError, deep_merge
 from src.application.config_sections import (
     resolve_templates_config,
     resolve_watchlist_config,
@@ -417,8 +417,11 @@ def _resolve_profile_cfg(item: dict, profiles: dict) -> dict:
     merged: dict = {}
     for name in use_list:
         p = profiles.get(name)
-        if isinstance(p, dict):
-            merged = deep_merge(merged, p)
+        if not isinstance(p, dict):
+            # Fail loudly rather than silently dropping the symbol's config when a
+            # referenced template is renamed/removed (matches config_profiles behavior).
+            raise ConfigProfileError(f"unknown profile reference: {name}")
+        merged = deep_merge(merged, p)
     return merged
 
 
