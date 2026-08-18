@@ -33,6 +33,9 @@ def _memory_context(memory: dict[str, Any]) -> str:
         return ""
     return (
         "Conversation memory from earlier turns. This is context, not executable state. "
+        "Tool findings recorded here are historical snapshots and may be stale — for any "
+        "question about live candidates, runs, positions, notifications, or current status, "
+        "call the relevant read-only tool again instead of repeating recorded tool conclusions. "
         "Current pending Control operations supplied separately remain authoritative.\n"
         + json.dumps(
             {"pinned_state": pinned, "recent_episodes": episodes[-3:]},
