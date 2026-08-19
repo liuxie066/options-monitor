@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import queue
+import re
 import selectors
 import shutil
 import subprocess
@@ -17,6 +19,7 @@ MAX_LINE_BYTES = 1_048_576
 MAX_SAFE_MESSAGE_CHARS = 240
 MIN_NODE_VERSION = (22, 19, 0)
 MAX_FIXTURE_DELAY_MS = 300_000
+_SESSION_ID_PATTERN = re.compile(r"^om_[0-9a-f]{64}$")
 
 _CHILD_ENV_ALLOW = frozenset(
     {
@@ -77,6 +80,19 @@ _TOOL_SLOT_BUSY = False
 
 _StartPayload = dict[str, Any]
 _Envelope = dict[str, Any]
+
+
+def derive_pi_session_id(
+    channel: str,
+    sender: str,
+    conversation: str,
+    authority_scope: str,
+) -> str:
+    parts = (channel, sender, conversation, authority_scope)
+    if any(not _is_nonempty_str(part) or "\0" in part for part in parts):
+        raise ValueError("session identity parts must be non-empty and contain no NUL")
+    material = "om-pi-session-v1\0" + "\0".join(parts)
+    return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _is_pos_int(value: Any) -> bool:
@@ -222,9 +238,12 @@ def _validate_start_payload(payload: Any) -> None:
         raise ValueError("start payload has unknown or missing top-level fields")
 
     if payload["execution_environment"] != "eval":
-        raise ValueError("S1/S2 only accept execution_environment 'eval'")
-    if payload["session_id"] is not None:
-        raise ValueError("S1/S2 require session_id null")
+        raise ValueError("S1-S3 only accept execution_environment 'eval'")
+    session_id = payload["session_id"]
+    if session_id is not None and (
+        not _is_nonempty_str(session_id) or _SESSION_ID_PATTERN.fullmatch(session_id) is None
+    ):
+        raise ValueError("session_id must be null or OM-derived")
     if not _is_nonempty_str(payload["system_prompt"]):
         raise ValueError("system_prompt must be a non-empty string")
     if not _is_nonempty_str(payload["user_message"]):
@@ -243,8 +262,11 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError("runtime_context must hold closed system messages")
 
     _validate_tools(payload["tools"])
-    if payload["recovered_observations"] != []:
-        raise ValueError("S1/S2 require an empty recovered_observations array")
+    recovered = payload["recovered_observations"]
+    if not isinstance(recovered, list) or any(
+        not isinstance(observation, dict) for observation in recovered
+    ):
+        raise ValueError("recovered_observations must be an array of objects")
 
     model = payload["model"]
     if not isinstance(model, dict):
@@ -295,19 +317,40 @@ def _validate_start_payload(payload: Any) -> None:
     debug = payload["debug"]
     if not isinstance(debug, dict):
         raise ValueError("debug must be an object")
+    if "delay_ms" not in debug:
+        raise ValueError("debug.delay_ms is required")
     # S1 accepted a single string fixture; S2 adds a turn array. Keep both so
     # the no-tools eval path stays backward compatible.
+    common_debug_keys = {
+        "delay_ms",
+        "persist_delay_ms",
+        "expected_history",
+        "forbidden_history",
+        "compaction_response",
+    }
     if "fixture_response" in debug:
-        if set(debug) != {"fixture_response", "delay_ms"}:
-            raise ValueError("debug must hold only fixture_response and delay_ms")
+        if not set(debug) <= common_debug_keys | {"fixture_response"}:
+            raise ValueError("debug has unknown fields")
         if not isinstance(debug["fixture_response"], str):
             raise ValueError("debug.fixture_response must be a string")
     elif "fixture_turns" in debug:
-        if set(debug) != {"fixture_turns", "delay_ms"}:
-            raise ValueError("debug must hold only fixture_turns and delay_ms")
+        if not set(debug) <= common_debug_keys | {"fixture_turns"}:
+            raise ValueError("debug has unknown fields")
         _validate_fixture_turns(debug["fixture_turns"])
     else:
         raise ValueError("debug must hold fixture_response or fixture_turns")
+    if "fixture_response" in debug and "fixture_turns" in debug:
+        raise ValueError("debug must hold exactly one fixture kind")
+    for key in ("expected_history", "forbidden_history"):
+        if key in debug and (
+            not isinstance(debug[key], list)
+            or any(not isinstance(item, str) for item in debug[key])
+        ):
+            raise ValueError(f"debug.{key} must be an array of strings")
+    if "compaction_response" in debug and not isinstance(
+        debug["compaction_response"], str
+    ):
+        raise ValueError("debug.compaction_response must be a string")
     delay = debug["delay_ms"]
     if (
         not isinstance(delay, int)
@@ -316,6 +359,16 @@ def _validate_start_payload(payload: Any) -> None:
         or delay > MAX_FIXTURE_DELAY_MS
     ):
         raise ValueError("debug.delay_ms must be an integer within [0, 300000]")
+    persist_delay = debug.get("persist_delay_ms", 0)
+    if (
+        not isinstance(persist_delay, int)
+        or isinstance(persist_delay, bool)
+        or persist_delay < 0
+        or persist_delay > 300_000
+    ):
+        raise ValueError(
+            "debug.persist_delay_ms must be an integer within [0, 300000]"
+        )
 
 
 def _child_env(environ: Mapping[str, str] | None) -> dict[str, str]:
@@ -450,15 +503,15 @@ def _stop_child(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _validate_run_accepted(payload: dict[str, Any]) -> None:
+def _validate_run_accepted(payload: dict[str, Any], expected_session_id: str | None) -> None:
     if set(payload) != {"runtime", "runtime_version", "session_id"}:
         raise ValueError("run.accepted payload shape is invalid")
     if payload["runtime"] != "pi-agent-core":
         raise ValueError("run.accepted runtime is not pi-agent-core")
     if payload["runtime_version"] != "0.84.2":
         raise ValueError("run.accepted runtime_version is not pinned")
-    if payload["session_id"] is not None:
-        raise ValueError("run.accepted session_id must be null")
+    if payload["session_id"] != expected_session_id:
+        raise ValueError("run.accepted session_id does not match run.start")
 
 
 def _validate_agent_event(payload: dict[str, Any]) -> None:
@@ -776,7 +829,9 @@ def run_pi_agent(
                                 if accepted:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "duplicate run.accepted", False)
-                                _validate_run_accepted(payload)
+                                _validate_run_accepted(
+                                    payload, start_payload["session_id"]
+                                )
                                 accepted = True
                             elif type_ == "agent.event":
                                 if not accepted:
