@@ -1144,7 +1144,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
     ) = _frozen_workspace(tmp_path)
     quote_csv = required_root / "parsed" / "NVDA_required_data.csv"
     original_bytes = quote_csv.read_bytes()
-    original_resolve = runner.resolve_frozen_required_data_csv_bytes
+    original_resolve = runner.resolve_frozen_required_data_csv_bytes_batch
     original_load = runner._load_frozen_required_data_quotes
     resolve_calls = 0
 
@@ -1163,7 +1163,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
 
     monkeypatch.setattr(
         runner,
-        "resolve_frozen_required_data_csv_bytes",
+        "resolve_frozen_required_data_csv_bytes_batch",
         _resolve_then_tamper,
     )
     monkeypatch.setattr(
@@ -1193,6 +1193,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
     row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
     assert row["close_mid"] == 2.0
     assert quote_csv.read_bytes() == original_bytes
+    assert resolve_calls == 2
 
 
 def test_legacy_unbound_snapshot_degrades_positions_without_fetch(

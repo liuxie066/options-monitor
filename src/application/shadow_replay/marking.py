@@ -42,8 +42,7 @@ from src.application.shadow_replay.settlement import (
 )
 from src.application.symbol_aliases import load_runtime_symbol_aliases
 from src.application.required_data_snapshot import (
-    load_required_data_snapshot_manifest,
-    resolve_frozen_required_data_csv_bytes,
+    resolve_frozen_required_data_csv_bytes_batch,
 )
 
 
@@ -766,14 +765,13 @@ def _load_manifest_required_data_quote_index(
     allowed_paths: set[Path] | None,
 ) -> dict[str, Any]:
     run_id = required_data_root.parent.name
-    manifest, _root = load_required_data_snapshot_manifest(
+    batch = resolve_frozen_required_data_csv_bytes_batch(
         manifest_path=manifest_path,
         expected_run_id=run_id,
-        expected_required_data_root=required_data_root,
+        required_data_root=required_data_root,
+        require_fresh=False,
     )
-    sealed_at = datetime.fromisoformat(
-        str(manifest["sealed_at_utc"]).replace("Z", "+00:00")
-    )
+    manifest = batch.manifest
     by_contract: dict[str, dict[str, Any]] = {}
     by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     quote_count = 0
@@ -786,13 +784,7 @@ def _load_manifest_required_data_quote_index(
         )
         if allowed_paths is not None and source_path.resolve() not in allowed_paths:
             continue
-        evidence, csv_bytes = resolve_frozen_required_data_csv_bytes(
-            manifest_path=manifest_path,
-            expected_run_id=run_id,
-            symbol=symbol,
-            required_data_root=required_data_root,
-            now=sealed_at,
-        )
+        evidence, csv_bytes = batch.resolve(symbol)
         try:
             rows = [
                 dict(row)

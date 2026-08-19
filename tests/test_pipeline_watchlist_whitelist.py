@@ -60,6 +60,56 @@ def test_watchlist_whitelist_filters_symbols() -> None:
     assert len(out) == 1
 
 
+def test_watchlist_reuses_one_required_data_batch_for_all_symbols() -> None:
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
+
+    batch = object()
+    received: list[object] = []
+
+    def _process_symbol(*args, **kwargs):
+        received.append(kwargs["required_data_snapshot_batch"])
+        return [
+            {
+                "symbol": str(args[2]["symbol"]),
+                "strategy": "sell_put",
+                "candidate_count": 0,
+            }
+        ]
+
+    cfg = {
+        "symbols": [
+            {"symbol": "NVDA", "sell_put": {"enabled": True}},
+            {"symbol": "PDD", "sell_put": {"enabled": True}},
+        ],
+        "templates": {},
+        "runtime": {},
+    }
+    run_watchlist_pipeline(
+        py="python",
+        base=Path("."),
+        cfg=cfg,
+        report_dir=Path("."),
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=True,
+        symbols_arg=None,
+        log=lambda _: None,
+        want_fn=lambda _: True,
+        apply_profiles_fn=lambda item, _profiles: dict(item),
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=lambda **_: ({}, None, None, None),
+        build_symbols_summary_fn=lambda *_: None,
+        build_symbols_digest_fn=lambda *_: None,
+        required_data_snapshot_manifest=Path("manifest.json"),
+        required_data_snapshot_batch=batch,
+    )
+
+    assert received == [batch, batch]
+
+
 def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
     from src.application.strategy_scan_status import publish_strategy_scan_status

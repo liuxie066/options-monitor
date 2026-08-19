@@ -158,7 +158,6 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
 ) -> None:
     import src.application.symbol_monitoring as mod
 
-    captured: dict[str, object] = {}
     scan_kwargs: dict[str, object] = {}
     monkeypatch.setattr(
         mod,
@@ -171,12 +170,8 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
     def _multiplier_writer(**_kwargs):
         raise AssertionError("frozen consumer must not rewrite required data")
 
-    def _ensure_required_data(**kwargs):
-        captured.update(kwargs)
-        kwargs["required_data_csv_bytes_sink_fn"](
-            b"symbol,option_type\nNVDA,put\n"
-        )
-        return {"snapshot_id": "snapshot-1", "receipt_relpath": "receipt.json"}
+    def _ensure_required_data(**_kwargs):
+        raise AssertionError("batch consumer must not resolve the manifest again")
 
     def _scan(**kwargs):
         scan_kwargs.update(kwargs)
@@ -213,6 +208,20 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             "strategy": "combo_yield",
         },
     )
+    batch = mod.FrozenRequiredDataBatch(
+        manifest={},
+        manifest_bytes=b"{}",
+        entries={
+            "NVDA": (
+                {
+                    "snapshot_id": "snapshot-1",
+                    "receipt_relpath": "receipt.json",
+                },
+                b"symbol,option_type\nNVDA,put\n",
+            )
+        },
+        unavailable={},
+    )
 
     out = mod.run_symbol_monitoring(
         inputs=mod.SymbolMonitoringInputs(
@@ -234,13 +243,12 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             is_scheduled=True,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
+            required_data_snapshot_batch=batch,
         ),
         deps=deps,
     )
 
     assert out[0]["candidate_count"] == 0
-    assert captured["fetch_plan"] is None
-    assert captured["required_data_snapshot_run_id"] == "run-1"
     assert scan_kwargs["required_data_frame"].to_dict("records") == [
         {"symbol": "NVDA", "option_type": "put"}
     ]

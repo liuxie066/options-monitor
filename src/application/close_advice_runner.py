@@ -67,10 +67,10 @@ from src.application.close_advice_required_data import (
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.required_data_snapshot import (
+    FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
-    load_required_data_snapshot_manifest_snapshot,
-    resolve_frozen_required_data_csv_bytes,
+    resolve_frozen_required_data_csv_bytes_batch,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
@@ -1383,9 +1383,7 @@ def _frozen_position_plan_reasons(
 
 def _validate_frozen_symbols(
     *,
-    manifest_path: Path,
-    expected_run_id: str,
-    required_data_root: Path,
+    batch: FrozenRequiredDataBatch,
     symbols: set[str],
     expected_manifest_sha256: str,
 ) -> tuple[
@@ -1401,12 +1399,7 @@ def _validate_frozen_symbols(
             (
                 symbol_provenance,
                 symbol_csv_bytes,
-            ) = resolve_frozen_required_data_csv_bytes(
-                manifest_path=manifest_path,
-                expected_run_id=expected_run_id,
-                symbol=symbol,
-                required_data_root=required_data_root,
-            )
+            ) = batch.resolve(symbol)
             if (
                 str(symbol_provenance.get("manifest_sha256") or "")
                 != expected_manifest_sha256
@@ -1586,6 +1579,7 @@ def run_close_advice(
     frozen_plan: dict[str, Any] | None = None
     frozen_plan_path: Path | None = None
     frozen_manifest_payload: dict[str, Any] | None = None
+    frozen_required_data_batch: FrozenRequiredDataBatch | None = None
     frozen_manifest_sha256: str | None = None
     frozen_plan_sha256: str | None = None
     if frozen_mode:
@@ -1595,15 +1589,15 @@ def run_close_advice(
                 raise RequiredDataSnapshotError(
                     "frozen Close Advice run identity is unavailable"
                 )
-            (
-                frozen_manifest_payload,
-                _frozen_root,
-                frozen_manifest_bytes,
-            ) = load_required_data_snapshot_manifest_snapshot(
-                manifest_path=frozen_manifest_path,
-                expected_run_id=run_id,
-                expected_required_data_root=Path(required_data_root),
+            frozen_required_data_batch = (
+                resolve_frozen_required_data_csv_bytes_batch(
+                    manifest_path=frozen_manifest_path,
+                    expected_run_id=run_id,
+                    required_data_root=Path(required_data_root),
+                )
             )
+            frozen_manifest_payload = frozen_required_data_batch.manifest
+            frozen_manifest_bytes = frozen_required_data_batch.manifest_bytes
             frozen_manifest_sha256 = sha256_bytes(frozen_manifest_bytes)
             expected_manifest_sha256 = str(
                 required_data_snapshot_manifest_sha256 or ""
@@ -1633,6 +1627,7 @@ def run_close_advice(
         except (
             OSError,
             ValueError,
+            FrozenRequiredDataUnavailable,
             RequiredDataSnapshotError,
             CloseAdviceRequiredDataPlanError,
         ) as exc:
@@ -1712,16 +1707,13 @@ def run_close_advice(
         )
         try:
             assert frozen_manifest_path is not None
+            assert frozen_required_data_batch is not None
             (
                 frozen_provenance,
                 frozen_symbol_unavailable,
                 frozen_csv_bytes_by_symbol,
             ) = _validate_frozen_symbols(
-                manifest_path=frozen_manifest_path,
-                expected_run_id=str(
-                    required_data_snapshot_run_id or ""
-                ),
-                required_data_root=Path(required_data_root),
+                batch=frozen_required_data_batch,
                 symbols=symbols_to_validate,
                 expected_manifest_sha256=str(frozen_manifest_sha256),
             )
@@ -2018,15 +2010,13 @@ def run_close_advice(
     if frozen_mode:
         try:
             assert frozen_manifest_path is not None
-            (
-                manifest_now,
-                _root_now,
-                manifest_bytes_now,
-            ) = load_required_data_snapshot_manifest_snapshot(
+            revalidated_batch = resolve_frozen_required_data_csv_bytes_batch(
                 manifest_path=frozen_manifest_path,
                 expected_run_id=str(required_data_snapshot_run_id or ""),
-                expected_required_data_root=Path(required_data_root),
+                required_data_root=Path(required_data_root),
             )
+            manifest_now = revalidated_batch.manifest
+            manifest_bytes_now = revalidated_batch.manifest_bytes
             manifest_hash_now = sha256_bytes(manifest_bytes_now)
             if manifest_hash_now != frozen_manifest_sha256:
                 raise RequiredDataSnapshotError(
@@ -2059,9 +2049,7 @@ def run_close_advice(
                 unavailable_now,
                 _revalidated_csv_bytes,
             ) = _validate_frozen_symbols(
-                manifest_path=frozen_manifest_path,
-                expected_run_id=str(required_data_snapshot_run_id or ""),
-                required_data_root=Path(required_data_root),
+                batch=revalidated_batch,
                 symbols=symbols_to_validate,
                 expected_manifest_sha256=str(frozen_manifest_sha256),
             )
@@ -2075,6 +2063,7 @@ def run_close_advice(
             os.replace(attempt_text_path, text_path)
         except (
             OSError,
+            FrozenRequiredDataUnavailable,
             RequiredDataSnapshotError,
             CloseAdviceRequiredDataPlanError,
         ) as exc:
