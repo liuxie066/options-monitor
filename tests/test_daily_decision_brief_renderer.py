@@ -1494,7 +1494,11 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "指标｜门槛年化 15.4% · 预计净收入 $620.00" in message
-    assert "\n\n事件｜" in message
+    assert (
+        "\n\n事件｜Sell Put #1（MSFT）、Sell Put #2（NVDA）、"
+        "Covered Call #1（AAPL）、组合增强 #1（TSLA）："
+        in message
+    )
     assert "**1｜NVDA｜Sell Put｜08-21 $100 Put｜建议平仓**" in message
     assert "参考｜买回参考价 $0.35 · 预计锁定损益 +$285.00" in message
     assert "净兑现比例 92.5%" in message
@@ -1557,7 +1561,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "### 新增策略候选" in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
     assert "| 优先 | 合约 |" not in message
-    assert "\n\n事件｜Sell Put #1：" in message
+    assert "\n\n事件｜Sell Put #1（MSFT）：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额｜暂不可用" in message

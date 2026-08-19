@@ -741,7 +741,10 @@ def _render_candidate_event_card(
     for item in candidates:
         family = str(item.get("family") or "")
         family_counts[family] = family_counts.get(family, 0) + 1
-        label = f"{_STRATEGY_LABELS.get(family, family)} #{family_counts[family]}"
+        label = (
+            f"{_STRATEGY_LABELS.get(family, family)} #{family_counts[family]}"
+            f"（{item.get('symbol') or '未知标的'}）"
+        )
         event_line = str(item.get("event_line") or "").strip()
         if compact:
             event_line = _compact_fixed_report_event(event_line)
