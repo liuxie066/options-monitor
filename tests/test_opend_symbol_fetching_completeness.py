@@ -14,6 +14,33 @@ from src.application.short_vol_metrics import (
     TermMatchedRVObservation,
 )
 from src.application.opening_quote_evidence import OpeningUnderlierObservation
+from src.application.opend_normalize import normalize_opend_option_type
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("PUT", "put"),
+        ("CALL", "call"),
+        ("OptionType.PUT", "put"),
+        ("OptionType.CALL", "call"),
+    ],
+)
+def test_opend_option_type_normalization_accepts_exact_provider_values(
+    value: object,
+    expected: str,
+) -> None:
+    assert normalize_opend_option_type(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", 1, "OUTPUT", "RECALL", "putative", "callback"],
+)
+def test_opend_option_type_normalization_rejects_non_exact_values(
+    value: object,
+) -> None:
+    assert normalize_opend_option_type(value) not in {"put", "call"}
 
 
 def _chain_bundle(*, rows: list[dict[str, object]], source_outcome: str) -> SymbolOptionChainResult:
@@ -377,6 +404,33 @@ def test_malformed_chain_filter_input_is_a_provider_error(
 
     assert payload["meta"]["status"] == "error"
     assert "lacks required filter columns" in str(payload["meta"]["error"])
+
+
+@pytest.mark.parametrize("option_type", ["OUTPUT", "RECALL"])
+def test_option_chain_filter_rejects_non_exact_option_type(
+    option_type: str,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    chain = pd.DataFrame(
+        [
+            {
+                "code": "US.NVDA.2026-06-19.P100",
+                "expiration": "2026-06-19",
+                "strike_price": 100.0,
+                "option_type": option_type,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="invalid option type"):
+        mod._filter_option_chain_for_request(
+            chain=chain,
+            option_types="put",
+            min_strike=None,
+            max_strike=None,
+            side_strike_windows=None,
+        )
 
 
 def test_duplicate_snapshot_code_is_a_typed_overall_error(

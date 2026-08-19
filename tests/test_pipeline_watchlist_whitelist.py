@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 def test_watchlist_whitelist_filters_symbols() -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
@@ -108,6 +110,63 @@ def test_watchlist_reuses_one_required_data_batch_for_all_symbols() -> None:
     )
 
     assert received == [batch, batch]
+
+
+def test_watchlist_default_propagates_batch_initialization_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_watchlist as mod
+    from src.application.required_data_snapshot import (
+        FrozenRequiredDataUnavailable,
+    )
+
+    attempts = 0
+
+    def _fail_batch(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise FrozenRequiredDataUnavailable(
+            symbol="UNKNOWN",
+            reason="manifest_invalid",
+            detail="content hash mismatch",
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        _fail_batch,
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_watchlist_pipeline",
+        lambda **_kwargs: pytest.fail("invalid batch must stop before symbol loop"),
+    )
+
+    with pytest.raises(FrozenRequiredDataUnavailable) as failed:
+        mod.run_watchlist_pipeline_default(
+            py="python3",
+            base=tmp_path,
+            cfg={"symbols": []},
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            shared_state_dir=tmp_path / "shared_state",
+            required_data_dir=tmp_path / "required_data",
+            is_scheduled=True,
+            top_n=3,
+            symbol_timeout_sec=120,
+            portfolio_timeout_sec=120,
+            want_scan=True,
+            no_context=False,
+            symbols_arg=None,
+            log=lambda _message: None,
+            want_fn=lambda name: name == "scan",
+            source_account_run_id="run-1",
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+        )
+
+    assert failed.value.reason == "manifest_invalid"
+    assert attempts == 1
 
 
 def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:

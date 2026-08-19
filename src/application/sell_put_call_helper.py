@@ -491,7 +491,11 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
         "symbol_concentration_after",
         "total_short_put_concentration_after",
     )
-    return {key: row.get(key) for key in fields if key in row}
+    return {
+        key: value
+        for key, value in row.items()
+        if key in fields or str(key).startswith("earnings_")
+    }
 
 
 def _put_leg_passes_assignment_bounds(put_leg: YieldEnhancementLeg, sell_put_cfg: dict[str, Any] | None) -> bool:

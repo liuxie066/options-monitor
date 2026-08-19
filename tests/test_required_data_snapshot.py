@@ -698,6 +698,36 @@ def test_sealed_snapshot_accepts_positive_success_empty_evidence(
     assert evidence["source_observed_at"] == observed_at
 
 
+def test_live_batch_rechecks_success_empty_freshness_when_symbol_is_resolved(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_empty_quote(root, run_id="run-1")
+    seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary(
+            "3690.HK",
+            outcomes={"3690.HK": "success_empty"},
+        ),
+    )
+    batch = resolve_frozen_required_data_csv_bytes_batch(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        required_data_root=root,
+    )
+    expires_at = datetime.fromisoformat(
+        str(batch.entries["3690.HK"][0]["expires_at"]).replace("Z", "+00:00")
+    )
+
+    with pytest.raises(FrozenRequiredDataUnavailable) as stale:
+        batch.resolve("3690.HK", now=expires_at)
+
+    assert stale.value.reason == "receipt_or_payload_mismatch"
+    assert "stale" in stale.value.detail
+
+
 @pytest.mark.parametrize(
     "source_outcome",
     ("provider_error", "parse_error", "not_attempted"),

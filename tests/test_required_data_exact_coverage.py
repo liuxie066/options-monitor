@@ -1055,6 +1055,18 @@ def test_exact_coverage_rejects_invalid_row_values(
         )
 
 
+@pytest.mark.parametrize("option_type", ["OUTPUT", "RECALL"])
+def test_exact_coverage_rejects_non_exact_option_type(option_type: str) -> None:
+    frame = _frame()
+    frame["option_type"] = option_type
+
+    assert not required_data_frame_covers_fetch_plan_debug(frame, _plan())
+    assert not required_data_frame_covers_fetch_plan(
+        df=frame,
+        fetch_plan=_typed_plan(exact_strike=100.0),
+    )
+
+
 def test_typed_and_debug_coverage_reject_missing_dte_column() -> None:
     frame = _frame().drop(columns=["dte"])
 

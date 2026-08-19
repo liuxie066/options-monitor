@@ -1917,7 +1917,7 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
                 "put_strike": 100,
                 "call_strike": 125,
                 "annualized_net_credit_yield": 0.20,
-                **_earnings_evidence(event_date="2026-08-21"),
+                **_earnings_evidence(event_date="2026-08-14"),
                 "earnings_snapshot_hash": "e" * 64,
             }
         ]
@@ -1928,19 +1928,23 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
     action = next(item for item in brief["actions"] if item["action_type"] == "open_combo_yield")
 
     assert action["event_risk"] == candidate["event_risk"]
+    assert candidate["event_risk"]["user_state"] == "confirmed_event"
+    assert candidate["event_risk"]["reason_code"] == "confirmed_distant_earnings_event"
+    assert candidate["event_risk"]["reliable"] is True
+    assert candidate["event_risk"]["evidence_chain_id"] == "e" * 64
     assert candidate["event_risk"]["expiration_relations"] == {
         "put": {
             "expiration": "2026-08-21",
-            "relation": "on_expiration",
-            "days_before_expiration": 0,
+            "relation": "before_expiration",
+            "days_before_expiration": 7,
         },
         "call": {
             "expiration": "2026-08-21",
-            "relation": "on_expiration",
-            "days_before_expiration": 0,
+            "relation": "before_expiration",
+            "days_before_expiration": 7,
         },
     }
-    assert candidate["event_risk"]["in_attention_window"] is True
+    assert candidate["event_risk"]["in_attention_window"] is False
 
 
 def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(tmp_path: Path) -> None:

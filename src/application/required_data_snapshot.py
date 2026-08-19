@@ -90,11 +90,37 @@ class FrozenRequiredDataBatch:
     manifest_bytes: bytes
     entries: dict[str, FrozenRequiredDataEntry]
     unavailable: dict[str, FrozenRequiredDataUnavailable]
+    require_fresh: bool = True
 
-    def resolve(self, symbol: str) -> FrozenRequiredDataEntry:
+    def resolve(
+        self,
+        symbol: str,
+        *,
+        now: datetime | None = None,
+    ) -> FrozenRequiredDataEntry:
         symbol_norm = _required_text(symbol, "symbol").upper()
         resolved = self.entries.get(symbol_norm)
         if resolved is not None:
+            if self.require_fresh:
+                validated, _csv_bytes = resolved
+                try:
+                    _validate_resolved_entry_freshness(
+                        validated=validated,
+                        now=_manifest_timestamp(
+                            now or datetime.now(timezone.utc),
+                            "now",
+                        ),
+                    )
+                except (RequiredDataSnapshotError, SourceReceiptError) as exc:
+                    raise FrozenRequiredDataUnavailable(
+                        symbol=symbol_norm,
+                        reason="receipt_or_payload_mismatch",
+                        detail=str(exc),
+                        snapshot_id=str(validated.get("snapshot_id") or ""),
+                        receipt_relpath=str(
+                            validated.get("receipt_relpath") or ""
+                        ),
+                    ) from exc
             return resolved
         failure = self.unavailable.get(symbol_norm)
         if failure is not None:
@@ -763,6 +789,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
         manifest_bytes=manifest_bytes,
         entries=entries,
         unavailable=unavailable,
+        require_fresh=require_fresh,
     )
 
 

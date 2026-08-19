@@ -59,7 +59,6 @@ from src.application.candidate_snapshot_manifest import (
 )
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
-    FrozenRequiredDataUnavailable,
     resolve_frozen_required_data_csv_bytes_batch,
 )
 
@@ -937,16 +936,13 @@ def run_watchlist_pipeline_default(
     candidate_capture_enabled = bool(account_run_id and want_scan)
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
     if candidate_capture_enabled and required_data_snapshot_manifest is not None:
-        try:
-            required_data_snapshot_batch = (
-                resolve_frozen_required_data_csv_bytes_batch(
-                    manifest_path=required_data_snapshot_manifest,
-                    expected_run_id=account_run_id,
-                    required_data_root=required_data_dir,
-                )
+        required_data_snapshot_batch = (
+            resolve_frozen_required_data_csv_bytes_batch(
+                manifest_path=required_data_snapshot_manifest,
+                expected_run_id=account_run_id,
+                required_data_root=required_data_dir,
             )
-        except FrozenRequiredDataUnavailable:
-            pass
+        )
     result = run_watchlist_pipeline(
         py=py,
         base=base,

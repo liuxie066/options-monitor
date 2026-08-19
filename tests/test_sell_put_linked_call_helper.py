@@ -193,6 +193,73 @@ def _single_put_df(
     return pd.DataFrame([row])
 
 
+def test_yield_enhancement_pair_preserves_funding_put_earnings_evidence(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(
+        tmp_path,
+        dte=44,
+        contract_symbol="NVDA_C112_EARNINGS",
+        strike=112.0,
+        delta=0.15,
+    )
+    earnings_evidence = {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": "earnings_near_expiry.v1",
+        "earnings_window_days": 6,
+        "earnings_market_date": "2026-05-06",
+        "earnings_hard_window_start": "2026-06-13",
+        "earnings_hard_window_end": "2026-06-19",
+        "earnings_hard_coverage_status": "complete",
+        "earnings_hard_reason_codes": [],
+        "earnings_hard_failed_intervals": [],
+        "earnings_soft_window_start": "2026-05-06",
+        "earnings_soft_window_end": "2026-06-12",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_soft_reason_codes": [],
+        "earnings_soft_failed_intervals": [],
+        "earnings_has_event": False,
+        "earnings_blocking_has_event": False,
+        "earnings_event_dates": "",
+        "earnings_blocking_event_dates": "",
+        "earnings_nonblocking_event_dates": "",
+        "earnings_events": [],
+        "earnings_blocking_events": [],
+        "earnings_nonblocking_events": [],
+        "earnings_snapshot_hash": "e" * 64,
+        "earnings_artifact_path": "output_shared/earnings/NVDA.json",
+    }
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(
+            dte=44,
+            funding_put_eligible=True,
+            **earnings_evidence,
+        ),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "min_open_interest": 100,
+            "min_volume": 5,
+        },
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "insurance_underwriting",
+            "min_dte": 20,
+            "max_dte": 60,
+        },
+    )
+
+    assert len(pairs) == 1
+    pair = pairs.iloc[0]
+    for key, expected in earnings_evidence.items():
+        assert pair[key] == expected
+
+
 def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
         build_yield_enhancement_rank_shadow,
