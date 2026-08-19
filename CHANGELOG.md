@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Included each candidate's symbol in Daily Brief event-summary labels.
+
 ## 1.14.9 - 2026-08-18
 
 ### New Features
