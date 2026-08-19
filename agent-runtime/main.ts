@@ -24,15 +24,27 @@ import {
   uuidv7,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  createModels,
+  createProvider,
+  envApiKeyAuth,
+  isRetryableAssistantError,
+} from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type {
   Api,
   AssistantMessage,
   AssistantMessageEventStream,
   Context,
+  FetchFunction,
   Model,
   Models,
+  ProviderStreams,
+  SimpleStreamOptions,
   StreamFn,
+  StreamOptions,
   Usage,
 } from "@earendil-works/pi-ai";
 import type {
@@ -56,6 +68,16 @@ const SESSION_SCHEMA = "om-pi-session.v1";
 const TURN_COMMIT_TYPE = "om.turn.commit.v1";
 const WRITER_LEASE_TTL_MS = 30_000;
 const WRITER_HEARTBEAT_MS = 10_000;
+const OLLAMA_LOCAL_API_KEY = "ollama-local";
+const CONTINUATION_PROMPT =
+  "Continue exactly where the previous answer stopped. Do not repeat earlier text. Return only the continuation.";
+const PROVIDER_API_KINDS: Record<string, Api> = {
+  openai: "openai-responses",
+  deepseek: "openai-completions",
+  kimi: "openai-completions",
+  "kimi-code": "openai-completions",
+  ollama: "openai-completions",
+};
 const COMPACTION_INSTRUCTIONS = [
   "Preserve the user's investment goals and stable preferences.",
   "Keep timestamps on historical claims and preserve unresolved questions and Control references.",
@@ -114,6 +136,22 @@ interface PendingTool {
 interface SessionState {
   entries: Entry[];
   messages: AgentMessage[];
+}
+
+interface RequestCall {
+  attempts: number;
+  statuses: number[];
+}
+
+interface CompletedCall extends RequestCall {
+  usage: JsonObject;
+  usageTotal: JsonObject;
+  modelRetryCount: number;
+}
+
+interface FinalizedCompaction {
+  retryCount: number;
+  usage: JsonObject;
 }
 
 class SafeRunFailure extends Error {
@@ -234,7 +272,13 @@ function validateStart(payload: JsonObject): void {
     "debug",
   ];
   if (!exactKeys(payload, keys)) throw new Error("start payload keys are not closed");
-  if (payload.execution_environment !== "eval") throw new Error("execution_environment must be eval");
+  if (
+    payload.execution_environment !== "local" &&
+    payload.execution_environment !== "eval" &&
+    payload.execution_environment !== "channel"
+  ) {
+    throw new Error("execution_environment is not allowed");
+  }
   if (payload.session_id !== null && (
     !isNonEmptyString(payload.session_id) || !SESSION_ID_PATTERN.test(payload.session_id)
   )) {
@@ -296,11 +340,26 @@ function validateStart(payload: JsonObject): void {
   for (const key of ["provider", "model", "base_url"] as const) {
     if (!isNonEmptyString(model[key])) throw new Error(`model.${key} must be non-empty`);
   }
-  if (model.api_kind !== "openai-responses" && model.api_kind !== "openai-completions") {
-    throw new Error("model.api_kind is not allowed");
+  if (PROVIDER_API_KINDS[model.provider as string] !== model.api_kind) {
+    throw new Error("model provider/API pair is not allowed");
   }
-  for (const key of ["timeout_seconds", "context_window_tokens", "max_output_tokens", "max_attempts"] as const) {
-    if (!isPositiveInteger(model[key])) throw new Error(`model.${key} must be a positive integer`);
+  const modelBounds: Record<string, [number, number]> = {
+    timeout_seconds: [1, 120],
+    context_window_tokens: [4_096, 2_000_000],
+    max_output_tokens: [64, 4_096],
+    max_attempts: [1, 3],
+  };
+  for (const [key, [minimum, maximum]] of Object.entries(modelBounds)) {
+    const value = model[key];
+    if (!isPositiveInteger(value) || value < minimum || value > maximum) {
+      throw new Error(`model.${key} is outside the allowed range`);
+    }
+  }
+  if (
+    (model.context_window_tokens as number) <=
+    (model.max_output_tokens as number) + 2_000
+  ) {
+    throw new Error("model.context_window_tokens must exceed max_output_tokens by more than 2000");
   }
   let baseUrl: URL;
   try {
@@ -327,7 +386,11 @@ function validateStart(payload: JsonObject): void {
     if (!isPositiveInteger(limits[key])) throw new Error(`limits.${key} must be a positive integer`);
   }
 
-  if (!isRecord(payload.debug)) throw new Error("debug must be an object");
+  if (payload.execution_environment !== "eval") {
+    if (payload.debug !== null) throw new Error("debug must be null outside eval");
+    return;
+  }
+  if (!isRecord(payload.debug)) throw new Error("eval debug must be an object");
   const debug = payload.debug;
   const commonDebugKeys = new Set([
     "delay_ms",
@@ -436,7 +499,7 @@ function safeError(code: string, stage: string, message: string, retryable: bool
 
 function modelFromStart(start: JsonObject): Model<Api> {
   const model = start.model as JsonObject;
-  return {
+  const normalized: Model<Api> = {
     id: model.model as string,
     name: model.model as string,
     api: model.api_kind as Api,
@@ -448,6 +511,178 @@ function modelFromStart(start: JsonObject): Model<Api> {
     contextWindow: model.context_window_tokens as number,
     maxTokens: model.max_output_tokens as number,
   };
+  if (model.provider !== "openai") {
+    normalized.compat = {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+    };
+  }
+  return normalized;
+}
+
+class RunMetrics {
+  private readonly pending: RequestCall[] = [];
+  private retryCount = 0;
+  private total: JsonObject = zeroPublicUsage();
+  lastCompleted: CompletedCall | null = null;
+
+  startCall(): RequestCall {
+    const call = { attempts: 0, statuses: [] };
+    this.pending.push(call);
+    return call;
+  }
+
+  beginCompaction(): number {
+    return this.pending.length;
+  }
+
+  finishTurn(message: AssistantMessage): CompletedCall {
+    const call = this.pending.shift() ?? { attempts: 0, statuses: [] };
+    this.retryCount += Math.max(call.attempts - 1, 0);
+    const usage = normalizeUsage(message.usage ?? {});
+    this.total = addPublicUsage(this.total, usage);
+    const completed = {
+      ...call,
+      usage,
+      usageTotal: { ...this.total },
+      modelRetryCount: this.retryCount,
+    };
+    this.lastCompleted = completed;
+    return completed;
+  }
+
+  finishCompaction(
+    pendingStart: number,
+    usage: Record<string, unknown>
+  ): FinalizedCompaction {
+    const calls = this.pending.splice(pendingStart);
+    return {
+      retryCount: calls.reduce(
+        (total, call) => total + Math.max(call.attempts - 1, 0),
+        0
+      ),
+      usage: normalizeUsage(usage),
+    };
+  }
+
+  commitCompaction(compaction: FinalizedCompaction): void {
+    this.retryCount += compaction.retryCount;
+    this.total = addPublicUsage(this.total, compaction.usage);
+  }
+
+  usageTotal(): JsonObject {
+    return { ...this.total };
+  }
+}
+
+function zeroPublicUsage(): JsonObject {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+}
+
+function addPublicUsage(left: JsonObject, right: JsonObject): JsonObject {
+  const out = zeroPublicUsage();
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]) {
+    out[key] = ((left[key] as number | undefined) ?? 0) +
+      ((right[key] as number | undefined) ?? 0);
+  }
+  return out;
+}
+
+function countingFetch(call: RequestCall, delegate: FetchFunction): FetchFunction {
+  return async (input, init) => {
+    call.attempts += 1;
+    const response = await delegate(input, init);
+    call.statuses.push(response.status);
+    return response;
+  };
+}
+
+function withOmRequestPolicy(
+  api: ProviderStreams,
+  start: JsonObject,
+  model: Model<Api>,
+  metrics: RunMetrics,
+  remainingSceneMs: () => number
+): ProviderStreams {
+  const raw = start.model as JsonObject;
+  const modelTimeoutMs = (raw.timeout_seconds as number) * 1_000;
+  const maxAttempts = raw.max_attempts as number;
+
+  const requestOptions = <T extends StreamOptions>(options: T | undefined): T => {
+    const remaining = Math.max(1, Math.floor(remainingSceneMs()));
+    const callerTimeout = options?.timeoutMs ?? modelTimeoutMs;
+    const callerMaxTokens = options?.maxTokens ?? model.maxTokens;
+    const call = metrics.startCall();
+    const delegate = options?.fetch ?? globalThis.fetch;
+    const fixed: StreamOptions = {
+      ...options,
+      timeoutMs: Math.max(1, Math.min(modelTimeoutMs, callerTimeout, remaining)),
+      maxTokens: Math.min(callerMaxTokens, model.maxTokens),
+      maxRetries: maxAttempts - 1,
+      maxRetryDelayMs: Math.max(
+        1,
+        Math.min(options?.maxRetryDelayMs || remaining, remaining)
+      ),
+      fetch: countingFetch(call, delegate),
+    };
+    if (model.provider === "openai" || model.provider === "deepseek" || model.provider === "ollama") {
+      fixed.temperature = 0;
+    }
+    if (model.provider === "deepseek") {
+      fixed.samplingParams = {
+        ...(options?.samplingParams ?? {}),
+        thinking: { type: "disabled" },
+      };
+    }
+    return fixed as T;
+  };
+
+  return {
+    stream: (selected, context, options) =>
+      api.stream(selected, context, requestOptions(options)),
+    streamSimple: (selected, context, options) =>
+      api.streamSimple(
+        selected,
+        context,
+        requestOptions(options as SimpleStreamOptions) as SimpleStreamOptions
+      ),
+  };
+}
+
+function createProviderModels(
+  start: JsonObject,
+  model: Model<Api>,
+  metrics: RunMetrics,
+  remainingSceneMs: () => number
+): Models {
+  const baseApi = model.api === "openai-responses"
+    ? openAIResponsesApi()
+    : openAICompletionsApi();
+  const api = withOmRequestPolicy(baseApi, start, model, metrics, remainingSceneMs);
+  const apiKey = model.provider === "ollama"
+    ? {
+        name: "Ollama local",
+        resolve: async ({ signal }: { signal: AbortSignal }) => {
+          signal.throwIfAborted();
+          return {
+            auth: { apiKey: OLLAMA_LOCAL_API_KEY },
+            source: "process-local sentinel",
+          };
+        },
+      }
+    : envApiKeyAuth("OM model API key", ["OM_PI_MODEL_API_KEY"]);
+  const provider = createProvider({
+    id: model.provider,
+    name: model.provider,
+    baseUrl: model.baseUrl,
+    auth: { apiKey },
+    models: [model],
+    api,
+  });
+  const models = createModels();
+  models.setProvider(provider);
+  return models;
 }
 
 function emptyUsage(): Usage {
@@ -857,6 +1092,8 @@ async function prepareSessionState(
   state: SessionState,
   start: JsonObject,
   model: Model<Api>,
+  models: Models,
+  metrics: RunMetrics,
   systemPrompt: string,
   signal: AbortSignal,
   runId: string
@@ -896,14 +1133,25 @@ async function prepareSessionState(
       safeError("SESSION_ERROR", "session", "session context compaction failed", false)
     );
   }
-  const result = await compact(
-    preparation.value,
-    createFixtureModels(start),
-    model,
-    COMPACTION_INSTRUCTIONS,
-    signal,
-    "off",
-    { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+  const metricsStart = metrics.beginCompaction();
+  let result;
+  try {
+    result = await compact(
+      preparation.value,
+      models,
+      model,
+      COMPACTION_INSTRUCTIONS,
+      signal,
+      "off",
+      { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+    );
+  } catch (error) {
+    metrics.finishCompaction(metricsStart, {});
+    throw error;
+  }
+  const compactionMetrics = metrics.finishCompaction(
+    metricsStart,
+    result.ok && result.value ? result.value.usage : {}
   );
   if (!result.ok || signal.aborted) {
     throw new SafeRunFailure(
@@ -931,6 +1179,7 @@ async function prepareSessionState(
     "main"
   );
   await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "compaction" });
+  metrics.commitCompaction(compactionMetrics);
   return loadCommittedState(session);
 }
 
@@ -969,6 +1218,36 @@ function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): Agen
   return suffix;
 }
 
+function normalizeContinuationSuffix(
+  messages: AgentMessage[],
+  startIndex: number
+): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (suffix.length !== 4) return suffix;
+  const [user, first, synthetic, final] = suffix;
+  if (
+    user.role !== "user" ||
+    first.role !== "assistant" ||
+    first.stopReason !== "length" ||
+    first.content.some((item) => item.type === "toolCall") ||
+    synthetic.role !== "user" ||
+    synthetic.content.length !== 1 ||
+    synthetic.content[0].type !== "text" ||
+    synthetic.content[0].text !== CONTINUATION_PROMPT ||
+    final.role !== "assistant" ||
+    final.content.some((item) => item.type === "toolCall") ||
+    (final.stopReason !== "stop" && final.stopReason !== "length")
+  ) {
+    return suffix;
+  }
+  const merged: AssistantMessage = {
+    ...final,
+    content: [{ type: "text", text: extractText(first) + extractText(final) }],
+    usage: addAssistantUsage(first.usage, final.usage),
+  };
+  return [user, merged];
+}
+
 async function persistTurn(
   session: Session,
   messages: AgentMessage[],
@@ -994,6 +1273,21 @@ function normalizeUsage(usage: Record<string, unknown>): JsonObject {
   return out;
 }
 
+function addAssistantUsage(left: Usage, right: Usage): Usage {
+  const usage = emptyUsage();
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+    usage[key] = Math.max(0, Number(left[key]) || 0) + Math.max(0, Number(right[key]) || 0);
+  }
+  usage.cost = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  };
+  return usage;
+}
+
 function turnData(message: AgentMessage): JsonObject {
   const assistant = message as unknown as AssistantMessage;
   return {
@@ -1004,7 +1298,10 @@ function turnData(message: AgentMessage): JsonObject {
 
 // AgentEvent union (pi-agent-core/types.ts). Message updates, arguments,
 // observations, and tool update events stay inside the Node process.
-function normalizeAgentEvent(event: AgentEvent): { event_type: string; data: JsonObject } | null {
+function normalizeAgentEvent(
+  event: AgentEvent,
+  metrics: RunMetrics
+): { event_type: string; data: JsonObject } | null {
   switch (event.type) {
     case "agent_start":
       return { event_type: "agent_start", data: {} };
@@ -1012,9 +1309,20 @@ function normalizeAgentEvent(event: AgentEvent): { event_type: string; data: Jso
       return { event_type: "turn_start", data: {} };
     case "agent_end":
       return { event_type: "agent_end", data: {} };
-    case "message_end":
+    case "message_end": {
       if ((event.message as { role?: unknown }).role !== "assistant") return null;
-      return { event_type: "model_turn_completed", data: turnData(event.message) };
+      const completed = metrics.finishTurn(event.message as AssistantMessage);
+      return {
+        event_type: "model_turn_completed",
+        data: {
+          stop_reason: (event.message as AssistantMessage).stopReason,
+          attempt_count: completed.attempts,
+          model_retry_count: completed.modelRetryCount,
+          usage: completed.usage,
+          usage_total: completed.usageTotal,
+        },
+      };
+    }
     case "turn_end":
       return { event_type: "turn_end", data: turnData(event.message) };
     case "tool_execution_start":
@@ -1043,6 +1351,23 @@ function lastAssistant(agent: Agent): AssistantMessage | undefined {
 
 function extractText(message: AssistantMessage): string {
   return message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+}
+
+function safeModelFailure(
+  message: AssistantMessage,
+  call: CompletedCall | null
+): JsonObject {
+  const statuses = call?.statuses ?? [];
+  if ((call?.attempts ?? 0) === 0 || statuses.some((status) => status === 401 || status === 403)) {
+    return safeError("MODEL_ERROR", "model", "model authentication failed", false);
+  }
+  const invalidResponse = statuses.some((status) => status >= 200 && status < 300);
+  return safeError(
+    "MODEL_ERROR",
+    "model",
+    invalidResponse ? "model response was invalid" : "model request failed",
+    isRetryableAssistantError(message)
+  );
 }
 
 async function run(): Promise<void> {
@@ -1103,11 +1428,21 @@ async function run(): Promise<void> {
     );
     const limits = payload.limits as JsonObject;
     const startedAt = performance.now();
+    const remainingSceneMs = (): number =>
+      (limits.timeout_seconds as number) * 1_000 - (performance.now() - startedAt);
     const runAbort = new AbortController();
+    const metrics = new RunMetrics();
+    const providerModels = payload.execution_environment === "eval"
+      ? createFixtureModels(payload)
+      : createProviderModels(payload, model, metrics, remainingSceneMs);
+    const streamFn = payload.execution_environment === "eval"
+      ? createFixtureStream(payload)
+      : providerModels.streamSimple.bind(providerModels);
     let assistantTurns = 0;
     let finalizedToolCalls = 0;
     let consecutiveFailedToolBatches = 0;
     let forcedFinalAtTurn: number | null = null;
+    let continuationUsed = false;
     let bridgeFailure: JsonObject | null = null;
     let agent: Agent | undefined;
 
@@ -1129,7 +1464,7 @@ async function run(): Promise<void> {
       emitRun("run.error", error);
       process.exitCode = 1;
     };
-    const finishCancelled = (usage: JsonObject = {}): void => {
+    const finishCancelled = (usage: JsonObject): void => {
       inbound.terminal = true;
       emitRun("run.final", {
         status: "cancelled",
@@ -1220,13 +1555,15 @@ async function run(): Promise<void> {
         sessionState,
         payload,
         model,
+        providerModels,
+        metrics,
         systemPrompt,
         runAbort.signal,
         identity.runId
       );
     } catch (error) {
       if (inbound.error) finishError(inbound.error);
-      else if (inbound.cancelled) finishCancelled();
+      else if (inbound.cancelled) finishCancelled(metrics.usageTotal());
       else finishError(mapSessionFailure(error));
       return;
     }
@@ -1235,7 +1572,7 @@ async function run(): Promise<void> {
       return;
     }
     if (inbound.cancelled) {
-      finishCancelled();
+      finishCancelled(metrics.usageTotal());
       return;
     }
 
@@ -1247,7 +1584,7 @@ async function run(): Promise<void> {
         tools: bridge.tools,
         messages: sessionState.messages,
       },
-      streamFn: createFixtureStream(payload),
+      streamFn,
       convertToLlm,
       toolExecution: "sequential",
       afterToolCall: async ({ result }) => {
@@ -1258,10 +1595,29 @@ async function run(): Promise<void> {
           ? { isError: true }
           : undefined;
       },
-      prepareNextTurnWithContext: ({ context, toolResults }) => {
+      prepareNextTurnWithContext: ({ context, message, newMessages, toolResults }) => {
+        const remainingMs = remainingSceneMs();
+        const eligibleContinuation =
+          !continuationUsed &&
+          forcedFinalAtTurn === null &&
+          message.stopReason === "length" &&
+          extractText(message).trim().length > 0 &&
+          message.content.every((item) => item.type !== "toolCall") &&
+          newMessages.length === 2 &&
+          newMessages[0].role === "user" &&
+          newMessages[1] === message &&
+          assistantTurns < (limits.max_iterations as number) &&
+          remainingMs > (limits.final_answer_reserve_seconds as number) * 1_000;
+        if (eligibleContinuation) {
+          continuationUsed = true;
+          agent?.followUp({
+            role: "user",
+            content: [{ type: "text", text: CONTINUATION_PROMPT }],
+            timestamp: Date.now(),
+          });
+          return { context: { ...context, tools: [] } };
+        }
         if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
-        const remainingMs =
-          (limits.timeout_seconds as number) * 1000 - (performance.now() - startedAt);
         const exhausted =
           assistantTurns >= (limits.max_iterations as number) ||
           finalizedToolCalls >= (limits.max_tool_calls as number) ||
@@ -1286,7 +1642,7 @@ async function run(): Promise<void> {
           ? consecutiveFailedToolBatches + 1
           : 0;
       }
-      const normalized = normalizeAgentEvent(event);
+      const normalized = normalizeAgentEvent(event, metrics);
       if (normalized) emitRun("agent.event", normalized);
     });
 
@@ -1307,7 +1663,7 @@ async function run(): Promise<void> {
       return;
     }
     if (inbound.cancelled) {
-      finishCancelled();
+      finishCancelled(metrics.usageTotal());
       return;
     }
     if (promptFailed) {
@@ -1322,11 +1678,9 @@ async function run(): Promise<void> {
     }
 
     const stopReason = finalMessage.stopReason;
-    const usage = normalizeUsage(finalMessage.usage ?? {});
-    const text = extractText(finalMessage);
     const forcedFinalCompleted =
       forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
-    if (forcedFinalCompleted && text.trim() === "") {
+    if (forcedFinalCompleted && extractText(finalMessage).trim() === "") {
       finishError(
         safeError(
           "BUDGET_EXHAUSTED",
@@ -1339,15 +1693,20 @@ async function run(): Promise<void> {
     }
 
     if (stopReason === "stop" || stopReason === "length") {
-      if (text === "") {
-        finishError(safeError("MODEL_ERROR", "model", "empty answer", false));
-        return;
-      }
       let turnSuffix: AgentMessage[];
       try {
-        turnSuffix = validatedTurnSuffix(agent.state.messages, suffixStart);
+        turnSuffix = normalizeContinuationSuffix(agent.state.messages, suffixStart);
+        turnSuffix = validatedTurnSuffix(turnSuffix, 0);
       } catch {
         finishError(safeError("INTERNAL_ERROR", "runtime", "invalid completed turn", false));
+        return;
+      }
+      const canonicalFinal = turnSuffix[turnSuffix.length - 1] as AssistantMessage;
+      const text = extractText(canonicalFinal);
+      const usage = metrics.usageTotal();
+      const terminationReason = canonicalFinal.stopReason;
+      if (text === "") {
+        finishError(safeError("MODEL_ERROR", "model", "model response was invalid", false));
         return;
       }
       inbound.awaitingAdmission = true;
@@ -1355,7 +1714,7 @@ async function run(): Promise<void> {
         status: "answered",
         text,
         control_request: null,
-        termination_reason: stopReason,
+        termination_reason: terminationReason,
         usage,
       });
       const action = inbound.action ?? (await actionPromise);
@@ -1378,7 +1737,9 @@ async function run(): Promise<void> {
             session,
             turnSuffix,
             identity.runId,
-            ((payload.debug as JsonObject).persist_delay_ms as number | undefined) ?? 0
+            (isRecord(payload.debug)
+              ? (payload.debug.persist_delay_ms as number | undefined)
+              : undefined) ?? 0
           );
         } catch (error) {
           finishError(mapSessionFailure(error));
@@ -1390,7 +1751,7 @@ async function run(): Promise<void> {
         status: "answered",
         text,
         control_request: null,
-        termination_reason: stopReason,
+        termination_reason: terminationReason,
         usage,
         committed: action === "run.commit",
       });
@@ -1398,7 +1759,7 @@ async function run(): Promise<void> {
       return;
     }
 
-    finishError(safeError("MODEL_ERROR", "model", "fixture stream error", false));
+    finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
   } finally {
     if (repository) await repository.close().catch(() => {});
   }

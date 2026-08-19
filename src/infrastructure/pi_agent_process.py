@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
+from urllib.parse import urlsplit
 
 PROTOCOL = "om-pi-ipc.v1"
 MAX_LINE_BYTES = 1_048_576
@@ -69,7 +70,17 @@ _EVENT_TYPES = frozenset(
     }
 )
 
-_STOP_REASONS = frozenset({"stop", "length", "toolUse", "aborted", "error"})
+_STOP_REASONS = frozenset(
+    {"stop", "length", "toolUse", "aborted", "error", "deferred"}
+)
+
+_PROVIDER_API_KINDS = {
+    "openai": "openai-responses",
+    "deepseek": "openai-completions",
+    "kimi": "openai-completions",
+    "kimi-code": "openai-completions",
+    "ollama": "openai-completions",
+}
 
 # Process-wide single active tool worker slot. A live worker owns the slot until
 # its callback actually returns; a second run's tool call fails retryably while
@@ -237,8 +248,9 @@ def _validate_start_payload(payload: Any) -> None:
     if set(payload) != allowed_keys:
         raise ValueError("start payload has unknown or missing top-level fields")
 
-    if payload["execution_environment"] != "eval":
-        raise ValueError("S1-S3 only accept execution_environment 'eval'")
+    execution_environment = payload["execution_environment"]
+    if execution_environment not in {"local", "eval", "channel"}:
+        raise ValueError("execution_environment is not allowed")
     session_id = payload["session_id"]
     if session_id is not None and (
         not _is_nonempty_str(session_id) or _SESSION_ID_PATTERN.fullmatch(session_id) is None
@@ -286,16 +298,24 @@ def _validate_start_payload(payload: Any) -> None:
     for key in ("provider", "model", "base_url"):
         if not _is_nonempty_str(model[key]):
             raise ValueError(f"model.{key} must be a non-empty string")
-    if model["api_kind"] not in {"openai-responses", "openai-completions"}:
-        raise ValueError("model.api_kind is not allowed")
-    for key in (
-        "timeout_seconds",
-        "context_window_tokens",
-        "max_output_tokens",
-        "max_attempts",
-    ):
-        if not _is_pos_int(model[key]):
-            raise ValueError(f"model.{key} must be a positive integer")
+    if _PROVIDER_API_KINDS.get(model["provider"]) != model["api_kind"]:
+        raise ValueError("model provider/API pair is not allowed")
+    bounds = {
+        "timeout_seconds": (1, 120),
+        "context_window_tokens": (4_096, 2_000_000),
+        "max_output_tokens": (64, 4_096),
+        "max_attempts": (1, 3),
+    }
+    for key, (minimum, maximum) in bounds.items():
+        if not _is_pos_int(model[key]) or not minimum <= model[key] <= maximum:
+            raise ValueError(f"model.{key} is outside the allowed range")
+    if model["context_window_tokens"] <= model["max_output_tokens"] + 2_000:
+        raise ValueError(
+            "model.context_window_tokens must exceed max_output_tokens by more than 2000"
+        )
+    parsed_url = urlsplit(model["base_url"])
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError("model.base_url must be an HTTP(S) URL")
 
     limits = payload["limits"]
     if not isinstance(limits, dict):
@@ -315,8 +335,12 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError(f"limits.{key} must be a positive integer")
 
     debug = payload["debug"]
+    if execution_environment != "eval":
+        if debug is not None:
+            raise ValueError("debug must be null outside eval")
+        return
     if not isinstance(debug, dict):
-        raise ValueError("debug must be an object")
+        raise ValueError("eval debug must be an object")
     if "delay_ms" not in debug:
         raise ValueError("debug.delay_ms is required")
     # S1 accepted a single string fixture; S2 adds a turn array. Keep both so
@@ -526,7 +550,24 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
     if event_type in {"agent_start", "turn_start", "agent_end"}:
         if data != {}:
             raise ValueError("lifecycle event data must be empty")
-    elif event_type in {"model_turn_completed", "turn_end"}:
+    elif event_type == "model_turn_completed":
+        if set(data) != {
+            "stop_reason",
+            "attempt_count",
+            "model_retry_count",
+            "usage",
+            "usage_total",
+        }:
+            raise ValueError("turn event data shape is invalid")
+        if data["stop_reason"] not in _STOP_REASONS:
+            raise ValueError("turn event stop_reason is not allowed")
+        for key in ("attempt_count", "model_retry_count"):
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"turn event {key} must be a non-negative integer")
+        _validate_usage(data["usage"])
+        _validate_usage(data["usage_total"])
+    elif event_type == "turn_end":
         if set(data) != {"stop_reason", "usage"}:
             raise ValueError("turn event data shape is invalid")
         if data["stop_reason"] not in _STOP_REASONS:

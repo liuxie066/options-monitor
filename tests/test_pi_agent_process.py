@@ -8,6 +8,8 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,210 @@ from src.infrastructure.pi_agent_process import (  # noqa: E402
     run_pi_agent,
 )
 from src.infrastructure import pi_agent_process as pi_process  # noqa: E402
+from src.application.copilot.model_config import PiModelSettings  # noqa: E402
+
+
+CONTINUATION_PROMPT_FOR_TEST = (
+    "Continue exactly where the previous answer stopped. Do not repeat earlier text. "
+    "Return only the continuation."
+)
+
+
+def _sse(events: list[dict]) -> bytes:
+    return "".join(
+        f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+        for event in events
+    ).encode()
+
+
+def _chat_response(
+    *,
+    text: str = "",
+    finish_reason: str = "stop",
+    usage: tuple[int, int] = (3, 2),
+    tool_call: bool = False,
+) -> bytes:
+    delta: dict = {"role": "assistant"}
+    if text:
+        delta["content"] = text
+    if tool_call:
+        delta["tool_calls"] = [{
+            "index": 0,
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "runtime_status", "arguments": "{\"index\":1}"},
+        }]
+    return _sse([
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "om-test",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+        },
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "om-test",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            "usage": {
+                "prompt_tokens": usage[0],
+                "completion_tokens": usage[1],
+                "total_tokens": sum(usage),
+            },
+        },
+    ]) + b"data: [DONE]\n\n"
+
+
+def _responses_response(
+    *,
+    text: str = "",
+    status: str = "completed",
+    usage: tuple[int, int] = (3, 2),
+    tool_call: bool = False,
+) -> bytes:
+    if tool_call:
+        item = {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "runtime_status",
+            "arguments": "{\"index\":1}",
+        }
+        events = [
+            {"type": "response.output_item.added", "output_index": 0, "item": item},
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "delta": "{\"index\":1}",
+            },
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+        ]
+    else:
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }
+        events = [
+            {"type": "response.output_item.added", "output_index": 0, "item": item},
+            {"type": "response.output_text.delta", "output_index": 0, "delta": text},
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+        ]
+    response = {
+        "id": "resp_1",
+        "object": "response",
+        "status": status,
+        "output": [item],
+        "usage": {
+            "input_tokens": usage[0],
+            "output_tokens": usage[1],
+            "total_tokens": sum(usage),
+        },
+    }
+    if status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    events.append({
+        "type": "response.completed" if status == "completed" else "response.incomplete",
+        "response": response,
+    })
+    return _sse(events)
+
+
+@contextmanager
+def _loopback_server(responses: list[dict]):
+    requests: list[dict] = []
+    scripted = list(responses)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = None
+            requests.append({
+                "path": self.path,
+                "payload": payload,
+                "has_authorization": bool(self.headers.get("Authorization")),
+            })
+            response = scripted.pop(0) if scripted else {
+                "status": 500,
+                "body": b'{"error":{"message":"unscripted"}}',
+                "content_type": "application/json",
+            }
+            started = response.get("started")
+            if started is not None:
+                started.set()
+            delay = float(response.get("delay", 0))
+            if delay:
+                time.sleep(delay)
+            body = response.get("body", b"")
+            if isinstance(body, str):
+                body = body.encode()
+            try:
+                self.send_response(int(response.get("status", 200)))
+                self.send_header("Content-Type", response.get("content_type", "text/event-stream"))
+                for name, value in response.get("headers", {}).items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests
+    finally:
+        server.shutdown()
+        worker.join(timeout=2)
+        server.server_close()
+
+
+def _provider_payload(provider: str, base_url: str, **overrides) -> dict:
+    api_kind = "openai-responses" if provider == "openai" else "openai-completions"
+    payload = _start_payload(
+        execution_environment="local",
+        debug=None,
+        model={
+            "provider": provider,
+            "api_kind": api_kind,
+            "model": "om-test",
+            "base_url": base_url,
+            "timeout_seconds": 3,
+            "context_window_tokens": 24_000,
+            "max_output_tokens": 512,
+            "max_attempts": 2,
+        },
+        limits={
+            **_start_payload()["limits"],
+            "timeout_seconds": 6,
+            "final_answer_reserve_seconds": 1,
+        },
+    )
+    payload.update(overrides)
+    return payload
+
+
+def _provider_env(*, keyed: bool = True, database: Path | None = None) -> dict[str, str]:
+    environ = dict(os.environ)
+    if keyed:
+        environ["OM_PI_MODEL_API_KEY"] = "s4-loopback-secret"
+    else:
+        environ.pop("OM_PI_MODEL_API_KEY", None)
+    if database is not None:
+        environ["OM_PI_SESSION_DB"] = str(database)
+    return environ
 
 
 def _start_payload(**overrides):
@@ -356,6 +562,27 @@ def _node_protocol_case(messages):
             process.wait(timeout=1)
 
 
+def _node_start_rejection(payload: dict) -> tuple[int, str]:
+    command, entry = _runtime_command(None, None)
+    start = {
+        "protocol": "om-pi-ipc.v1",
+        "type": "run.start",
+        "request_id": "req_invalid_start",
+        "run_id": "run_invalid_start",
+        "seq": 1,
+        "payload": payload,
+    }
+    completed = subprocess.run(
+        command,
+        cwd=entry.parent.parent,
+        input=(json.dumps(start) + "\n").encode(),
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    return completed.returncode, completed.stderr.decode(errors="replace")
+
+
 def _fake_tool_call_child(calls) -> str:
     records = "\n".join(
         f'rec("tool.call", {seq}, {json.dumps(call)});'
@@ -393,7 +620,7 @@ rl.on("line", (line) => {
     rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
-    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", usage: { input: 1, output: 1, totalTokens: 2 } } });
+    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: { input: 1, output: 1, totalTokens: 2 }, usage_total: { input: 1, output: 1, totalTokens: 2 } } });
     rec("agent.event", 5, { event_type: "turn_end", data: { stop_reason: "stop", usage: { input: 1, output: 1, totalTokens: 2 } } });
     rec("agent.event", 6, { event_type: "agent_end", data: {} });
     rec("run.proposed", 7, { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: { input: 1, output: 1, totalTokens: 2 } });
@@ -609,6 +836,179 @@ def test_invalid_start_payload_rejected():
     assert result["error"]["code"] == "CONFIG_ERROR"
 
 
+def test_pi_model_settings_is_exact_and_process_payload_is_secret_free():
+    settings = PiModelSettings.from_config(
+        {
+            "provider": "openai",
+            "model": "gpt-test",
+            "base_url": "",
+            "api_key_env": "PRIVATE_TEST_ENV",
+            "timeout_seconds": 90,
+            "context_window_tokens": 24_000,
+            "max_output_tokens": 2_048,
+            "max_attempts": 2,
+        }
+    )
+
+    assert tuple(PiModelSettings.__dataclass_fields__) == (
+        "provider",
+        "api_kind",
+        "model",
+        "base_url",
+        "api_key_env",
+        "credential_name",
+        "timeout_seconds",
+        "context_window_tokens",
+        "max_output_tokens",
+        "max_attempts",
+    )
+    assert settings.api_kind == "openai-responses"
+    assert settings.base_url == "https://api.openai.com/v1"
+    assert settings.api_key_env == "PRIVATE_TEST_ENV"
+    assert settings.credential_name
+    assert settings.process_payload() == {
+        "provider": "openai",
+        "api_kind": "openai-responses",
+        "model": "gpt-test",
+        "base_url": "https://api.openai.com/v1",
+        "timeout_seconds": 90,
+        "context_window_tokens": 24_000,
+        "max_output_tokens": 2_048,
+        "max_attempts": 2,
+    }
+    assert "PRIVATE_TEST_ENV" not in json.dumps(settings.process_payload())
+    assert settings.credential_name not in json.dumps(settings.process_payload())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("context_window_tokens", None),
+        ("context_window_tokens", "24000"),
+        ("context_window_tokens", 4_095),
+        ("timeout_seconds", True),
+        ("timeout_seconds", 121),
+        ("max_output_tokens", 63),
+        ("max_output_tokens", 4_097),
+        ("max_attempts", 0),
+        ("max_attempts", 4),
+    ],
+)
+def test_pi_model_settings_rejects_invalid_numbers_instead_of_clamping(field, value):
+    raw = {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "context_window_tokens": 24_000,
+    }
+    if value is None:
+        raw.pop(field, None)
+    else:
+        raw[field] = value
+
+    with pytest.raises(ValueError):
+        PiModelSettings.from_config(raw)
+
+
+def test_pi_model_settings_rejects_unsafe_context_output_relation():
+    with pytest.raises(ValueError, match="must exceed max_output_tokens"):
+        PiModelSettings.from_config(
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "context_window_tokens": 4_096,
+                "max_output_tokens": 2_096,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_context",
+        "string_context",
+        "timeout_high",
+        "output_low",
+        "attempts_high",
+        "provider_api_mismatch",
+        "invalid_base_url",
+        "local_debug",
+        "channel_debug",
+        "eval_without_fixture",
+    ],
+)
+def test_python_and_node_reject_closed_start_contract_before_provider(case):
+    payload = _start_payload()
+    if case == "missing_context":
+        payload["model"].pop("context_window_tokens")
+    elif case == "string_context":
+        payload["model"]["context_window_tokens"] = "24000"
+    elif case == "timeout_high":
+        payload["model"]["timeout_seconds"] = 121
+    elif case == "output_low":
+        payload["model"]["max_output_tokens"] = 63
+    elif case == "attempts_high":
+        payload["model"]["max_attempts"] = 4
+    elif case == "provider_api_mismatch":
+        payload["model"].update(
+            {"provider": "openai", "api_kind": "openai-completions"}
+        )
+    elif case == "invalid_base_url":
+        payload["model"]["base_url"] = "file:///tmp/provider"
+    elif case in {"local_debug", "channel_debug"}:
+        payload["execution_environment"] = case.removesuffix("_debug")
+    elif case == "eval_without_fixture":
+        payload["debug"] = None
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(case)
+
+    python_result = run_pi_agent(
+        payload,
+        request_id=f"req_{case}",
+        run_id=f"run_{case}",
+        timeout_seconds=60,
+    )
+    assert python_result["ok"] is False
+    assert python_result["error"]["code"] == "CONFIG_ERROR"
+
+    returncode, stderr = _node_start_rejection(payload)
+    assert returncode == 2
+    assert stderr.startswith("diagnostic: ")
+    assert "s4-loopback-secret" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("model_context", "scene_context", "message_chars", "expected_ok"),
+    [
+        (8_000, 12_000, 24_000, False),
+        (12_000, 12_000, 24_000, True),
+        (24_000, 12_000, 36_000, False),
+    ],
+)
+def test_effective_context_budget_is_minimum_of_model_and_scene(
+    model_context, scene_context, message_chars, expected_ok
+):
+    payload = _start_payload(user_message="x" * message_chars)
+    payload["model"]["context_window_tokens"] = model_context
+    payload["limits"]["max_context_tokens"] = scene_context
+
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_context_{model_context}_{scene_context}",
+        run_id=f"run_context_{model_context}_{scene_context}",
+        timeout_seconds=60,
+        on_proposed=lambda _proposal: "commit",
+    )
+
+    assert result["ok"] is expected_ok, result
+    if not expected_ok:
+        assert result["error"] == {
+            "code": "CONFIG_ERROR",
+            "stage": "config",
+            "message": "configured context budget is too small",
+            "retryable": False,
+        }
+
+
 @pytest.mark.parametrize(
     "debug",
     [
@@ -684,7 +1084,7 @@ rl.on("line", (line) => {
     rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
-    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", usage: {} } });
+    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: {}, usage_total: {} } });
     rec("agent.event", 5, { event_type: "turn_end", data: { stop_reason: "stop", usage: {} } });
     rec("agent.event", 6, { event_type: "agent_end", data: {} });
     rec("run.proposed", 7, { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} });
@@ -750,7 +1150,7 @@ rl.on("line", (line) => {
     rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
-    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", usage: {} } });
+    rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: {}, usage_total: {} } });
     rec("agent.event", 5, { event_type: "turn_end", data: { stop_reason: "stop", usage: {} } });
     rec("agent.event", 6, { event_type: "agent_end", data: {} });
     rec("run.proposed", 7, { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} });
@@ -2135,3 +2535,718 @@ def test_session_storage_errors_are_safe(tmp_path):
             },
         }
         assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_suffix", "expected_path"),
+    [
+        ("openai", "", "/responses"),
+        ("deepseek", "", "/chat/completions"),
+        ("kimi", "/v1", "/v1/chat/completions"),
+        ("kimi-code", "/coding/v1", "/coding/v1/chat/completions"),
+        ("ollama", "/v1", "/v1/chat/completions"),
+    ],
+)
+def test_loopback_provider_request_and_tool_round_trip(provider, base_suffix, expected_path):
+    responder = _responses_response if provider == "openai" else _chat_response
+    events: list[dict] = []
+    with _loopback_server([
+        {"body": responder(tool_call=True)},
+        {"body": responder(text="provider answer", usage=(4, 3))},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            provider,
+            root + base_suffix,
+            tools=[_READ_TOOL],
+        )
+        result = run_pi_agent(
+            payload,
+            request_id=f"req_{provider}",
+            run_id=f"run_{provider}",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_tool_call=lambda _call: {"ok": True, "status": "healthy"},
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(keyed=provider != "ollama"),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "provider answer"
+    assert [request["path"] for request in requests] == [expected_path, expected_path]
+    assert all(request["has_authorization"] for request in requests)
+    captured = json.dumps(
+        {"start": payload, "requests": requests, "events": events, "result": result}
+    )
+    assert "s4-loopback-secret" not in captured
+    assert "ollama-local" not in captured
+    assert "OM_PI_MODEL_API_KEY" not in captured
+    first, second = (request["payload"] for request in requests)
+    assert first["model"] == "om-test"
+    if provider == "openai":
+        assert first["max_output_tokens"] == 512
+        assert first["temperature"] == 0
+        assert first["input"][0]["role"] == "system"
+        assert first["tools"][0]["type"] == "function"
+        assert any(item.get("type") == "function_call" for item in second["input"])
+        assert any(item.get("type") == "function_call_output" for item in second["input"])
+    else:
+        assert first.get("max_tokens", first.get("max_completion_tokens")) == 512
+        assert first["messages"][0]["role"] == "system"
+        assert first["tools"][0]["type"] == "function"
+        assert any(message.get("tool_calls") for message in second["messages"])
+        assert any(message.get("role") == "tool" for message in second["messages"])
+        if provider in {"deepseek", "ollama"}:
+            assert first["temperature"] == 0
+        else:
+            assert "temperature" not in first
+        if provider == "deepseek":
+            assert first["thinking"] == {"type": "disabled"}
+        else:
+            assert "thinking" not in first
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert [event["attempt_count"] for event in completed] == [1, 1]
+    assert [event["model_retry_count"] for event in completed] == [0, 0]
+    assert completed[-1]["usage_total"]["totalTokens"] == 12
+    assert result["result"]["usage"]["totalTokens"] == 12
+
+
+def test_loopback_retry_success_and_attempt_counters():
+    events: list[dict] = []
+    with _loopback_server([
+        {
+            "status": 429,
+            "body": '{"error":{"message":"rate limited private detail"}}',
+            "content_type": "application/json",
+            "headers": {"Retry-After": "0"},
+        },
+        {
+            "status": 503,
+            "body": '{"error":{"message":"temporary private detail"}}',
+            "content_type": "application/json",
+            "headers": {"Retry-After": "0"},
+        },
+        {"body": _chat_response(text="retried", usage=(5, 4))},
+    ]) as (root, requests):
+        payload = _provider_payload("deepseek", root)
+        payload["model"]["max_attempts"] = 3
+        result = run_pi_agent(
+            payload,
+            request_id="req_retry",
+            run_id="run_retry",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(),
+        )
+
+    assert result["ok"] is True, result
+    assert len(requests) == 3
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed == [{
+        "stop_reason": "stop",
+        "attempt_count": 3,
+        "model_retry_count": 2,
+        "usage": {"input": 5, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 9},
+        "usage_total": {"input": 5, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 9},
+    }]
+    assert result["result"]["usage"]["totalTokens"] == 9
+
+
+def test_loopback_missing_key_fails_before_http():
+    events: list[dict] = []
+    with _loopback_server([{"body": _chat_response(text="must not run")}]) as (root, requests):
+        result = run_pi_agent(
+            _provider_payload("deepseek", root),
+            request_id="req_missing_key",
+            run_id="run_missing_key",
+            timeout_seconds=6,
+            on_event=events.append,
+            environ=_provider_env(keyed=False),
+        )
+
+    assert requests == []
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "MODEL_ERROR",
+            "stage": "model",
+            "message": "model authentication failed",
+            "retryable": False,
+        },
+    }
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed[0]["attempt_count"] == 0
+    assert completed[0]["model_retry_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("responses", "max_attempts", "expected_message", "expected_attempts"),
+    [
+        (
+            [{"status": 401, "body": '{"error":{"message":"secret auth body"}}', "content_type": "application/json"}],
+            2,
+            "model authentication failed",
+            1,
+        ),
+        (
+            [{"status": 429, "body": '{"error":{"message":"private rate body"}}', "content_type": "application/json", "headers": {"Retry-After": "0"}}] * 2,
+            2,
+            "model request failed",
+            2,
+        ),
+        (
+            [{"status": 200, "body": b"data: not-json\n\n"}],
+            1,
+            "model response was invalid",
+            1,
+        ),
+    ],
+)
+def test_loopback_provider_failures_are_safe(
+    responses, max_attempts, expected_message, expected_attempts
+):
+    events: list[dict] = []
+    with _loopback_server(responses) as (root, requests):
+        payload = _provider_payload("deepseek", root)
+        payload["model"]["max_attempts"] = max_attempts
+        result = run_pi_agent(
+            payload,
+            request_id="req_safe_failure",
+            run_id="run_safe_failure",
+            timeout_seconds=6,
+            on_event=events.append,
+            environ=_provider_env(),
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MODEL_ERROR"
+    assert result["error"]["message"] == expected_message
+    assert len(requests) == expected_attempts
+    encoded = json.dumps(result)
+    assert "secret auth body" not in encoded
+    assert "private rate body" not in encoded
+    assert root not in encoded
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed[0]["attempt_count"] == expected_attempts
+    assert completed[0]["model_retry_count"] == max(expected_attempts - 1, 0)
+
+
+def test_loopback_model_timeout_is_bounded():
+    events: list[dict] = []
+    with _loopback_server([{"delay": 1.5, "body": _chat_response(text="too late")}]) as (root, requests):
+        payload = _provider_payload("deepseek", root)
+        payload["model"].update({"timeout_seconds": 1, "max_attempts": 1})
+        result = run_pi_agent(
+            payload,
+            request_id="req_timeout",
+            run_id="run_timeout",
+            timeout_seconds=6,
+            on_event=events.append,
+            environ=_provider_env(),
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MODEL_ERROR"
+    assert result["error"]["message"] == "model request failed"
+    assert len(requests) == 1
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed[0]["attempt_count"] == 1
+
+
+def test_loopback_host_abort_cancels_inflight_request():
+    started = threading.Event()
+    events: list[dict] = []
+    cancel_checks = 0
+
+    def is_cancelled():
+        nonlocal cancel_checks
+        cancel_checks += 1
+        return started.is_set()
+
+    with _loopback_server([
+        {"started": started, "delay": 2, "body": _chat_response(text="too late")},
+    ]) as (root, requests):
+        payload = _provider_payload("deepseek", root)
+        payload["model"]["max_attempts"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id="req_abort",
+            run_id="run_abort",
+            timeout_seconds=6,
+            on_event=events.append,
+            is_cancelled=is_cancelled,
+            environ=_provider_env(),
+        )
+
+    assert cancel_checks > 1
+    assert len(requests) == 1
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["termination_reason"] == "aborted"
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed[0]["attempt_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("second_reason", "expected_reason"),
+    [("stop", "stop"), ("length", "length")],
+)
+def test_loopback_length_continuation_is_canonical_and_tool_free(
+    tmp_path, second_reason, expected_reason
+):
+    database = tmp_path / f"continuation_{second_reason}.sqlite3"
+    session_id = derive_pi_session_id("feishu", second_reason, "group-1", "key:us")
+    events: list[dict] = []
+    with _loopback_server([
+        {"body": _chat_response(text="first", finish_reason="length", usage=(3, 2))},
+        {"body": _chat_response(text="second", finish_reason=second_reason, usage=(4, 3))},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            tools=[_READ_TOOL],
+            user_message="continue this",
+        )
+        result = run_pi_agent(
+            payload,
+            request_id=f"req_continue_{second_reason}",
+            run_id=f"run_continue_{second_reason}",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "firstsecond"
+    assert result["result"]["termination_reason"] == expected_reason
+    assert result["result"]["usage"]["totalTokens"] == 12
+    assert len(requests) == 2
+    assert "tools" in requests[0]["payload"]
+    assert "tools" not in requests[1]["payload"]
+    assert CONTINUATION_PROMPT_FOR_TEST in json.dumps(requests[1]["payload"])
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert [item["attempt_count"] for item in completed] == [1, 1]
+    assert [item["usage_total"]["totalTokens"] for item in completed] == [5, 12]
+    entries = _session_entries(database, session_id)
+    messages = [entry["payload"]["message"] for entry in entries if entry["type"] == "message"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["content"] == [{"type": "text", "text": "firstsecond"}]
+    assert messages[-1]["usage"]["totalTokens"] == 12
+    assert CONTINUATION_PROMPT_FOR_TEST not in json.dumps(entries)
+
+
+def test_loopback_length_not_continued_without_iteration_budget():
+    with _loopback_server([
+        {"body": _chat_response(text="partial", finish_reason="length")},
+    ]) as (root, requests):
+        payload = _provider_payload("deepseek", root)
+        payload["limits"]["max_iterations"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id="req_no_continue",
+            run_id="run_no_continue",
+            timeout_seconds=6,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "partial"
+    assert result["result"]["termination_reason"] == "length"
+    assert len(requests) == 1
+
+
+def test_loopback_failed_length_continuation_does_not_commit_partial(tmp_path):
+    database = tmp_path / "failed_continuation.sqlite3"
+    session_id = derive_pi_session_id("feishu", "failed", "group-1", "key:us")
+    with _loopback_server([
+        {"body": _chat_response(text="partial", finish_reason="length")},
+        {
+            "status": 500,
+            "body": '{"error":{"message":"failed continuation private"}}',
+            "content_type": "application/json",
+        },
+    ]) as (root, requests):
+        payload = _provider_payload("deepseek", root, session_id=session_id)
+        payload["model"]["max_attempts"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id="req_failed_continue",
+            run_id="run_failed_continue",
+            timeout_seconds=6,
+            environ=_provider_env(database=database),
+        )
+
+    assert len(requests) == 2
+    assert result["ok"] is False
+    assert result["error"]["message"] == "model request failed"
+    assert _session_entries(database, session_id) == []
+    assert "partial" not in json.dumps(result)
+    assert "failed continuation private" not in json.dumps(result)
+
+
+def test_loopback_resumed_session_continuation_uses_only_canonical_history(tmp_path):
+    database = tmp_path / "resumed_continuation.sqlite3"
+    session_id = derive_pi_session_id("feishu", "resumed", "group-1", "key:us")
+    seeded = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="seed question",
+            debug={"fixture_response": "seed answer", "delay_ms": 0},
+        ),
+        run_id="seed_resume",
+    )
+    assert seeded["ok"] is True
+
+    with _loopback_server([
+        {"body": _chat_response(text="left", finish_reason="length")},
+        {"body": _chat_response(text="right", finish_reason="stop")},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="resumed question",
+        )
+        result = run_pi_agent(
+            payload,
+            request_id="req_resumed_continue",
+            run_id="run_resumed_continue",
+            timeout_seconds=6,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "leftright"
+    first_request = json.dumps(requests[0]["payload"])
+    assert "seed question" in first_request
+    assert "seed answer" in first_request
+    entries = _session_entries(database, session_id)
+    encoded = json.dumps(entries)
+    assert "seed question" in encoded
+    assert "resumed question" in encoded
+    assert "leftright" in encoded
+    assert CONTINUATION_PROMPT_FOR_TEST not in encoded
+
+
+def test_loopback_compaction_shares_policy_and_counts_usage_once(tmp_path):
+    database = tmp_path / "provider_compaction.sqlite3"
+    session_id = derive_pi_session_id("feishu", "provider-compaction", "group-1", "key:us")
+    seeded = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="old question " + "q" * 16_000,
+            debug={"fixture_response": "old answer " + "a" * 16_000, "delay_ms": 0},
+        ),
+        run_id="seed_provider_compaction",
+    )
+    assert seeded["ok"] is True
+    events: list[dict] = []
+    with _loopback_server([
+        {
+            "status": 429,
+            "body": '{"error":{"message":"compact retry private"}}',
+            "content_type": "application/json",
+            "headers": {"Retry-After": "0"},
+        },
+        {"body": _chat_response(text="compact summary", usage=(7, 3))},
+        {"body": _chat_response(text="current answer", usage=(5, 4))},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="current question",
+        )
+        payload["model"]["context_window_tokens"] = 8_000
+        payload["limits"]["max_context_tokens"] = 8_000
+        result = run_pi_agent(
+            payload,
+            request_id="req_provider_compaction",
+            run_id="run_provider_compaction",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert len(requests) == 3
+    assert [request["path"] for request in requests] == ["/chat/completions"] * 3
+    completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
+    assert completed == [{
+        "stop_reason": "stop",
+        "attempt_count": 1,
+        "model_retry_count": 1,
+        "usage": {"input": 5, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 9},
+        "usage_total": {"input": 12, "output": 7, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 19},
+    }]
+    assert result["result"]["usage"]["totalTokens"] == 19
+    entries = _session_entries(database, session_id)
+    assert sum(entry["type"] == "compaction" for entry in entries) == 1
+    assert "compact summary" in json.dumps(entries)
+
+
+def test_loopback_split_compaction_drains_counters_before_retried_main(tmp_path):
+    database = tmp_path / "split_provider_compaction.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "split-provider-compaction", "group-1", "key:us"
+    )
+    for index, (question, answer) in enumerate(
+        [
+            ("older question", "older answer"),
+            (
+                "latest question " + "q" * 16_000,
+                "latest answer " + "a" * 16_000,
+            ),
+        ]
+    ):
+        seeded = _run_session(
+            database,
+            session_id,
+            _start_payload(
+                session_id=session_id,
+                user_message=question,
+                debug={"fixture_response": answer, "delay_ms": 0},
+            ),
+            run_id=f"seed_split_provider_compaction_{index}",
+        )
+        assert seeded["ok"] is True, seeded
+
+    events: list[dict] = []
+    with _loopback_server([
+        {"body": _chat_response(text="history summary", usage=(2, 1))},
+        {"body": _chat_response(text="turn prefix summary", usage=(3, 2))},
+        {
+            "status": 503,
+            "body": '{"error":{"message":"main retry private"}}',
+            "content_type": "application/json",
+            "headers": {"Retry-After": "0"},
+        },
+        {"body": _chat_response(text="current answer", usage=(5, 4))},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="current question",
+        )
+        payload["model"]["context_window_tokens"] = 8_000
+        payload["limits"]["max_context_tokens"] = 8_000
+        result = run_pi_agent(
+            payload,
+            request_id="req_split_provider_compaction",
+            run_id="run_split_provider_compaction",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert len(requests) == 4
+    assert [request["path"] for request in requests] == ["/chat/completions"] * 4
+    completed = [
+        event["data"]
+        for event in events
+        if event["event_type"] == "model_turn_completed"
+    ]
+    assert completed == [{
+        "stop_reason": "stop",
+        "attempt_count": 2,
+        "model_retry_count": 1,
+        "usage": {
+            "input": 5,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 9,
+        },
+        "usage_total": {
+            "input": 10,
+            "output": 7,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 17,
+        },
+    }]
+    assert result["result"]["usage"] == completed[0]["usage_total"]
+    entries = _session_entries(database, session_id)
+    assert sum(entry["type"] == "compaction" for entry in entries) == 1
+
+
+def test_loopback_cancelled_main_keeps_committed_compaction_usage(tmp_path):
+    database = tmp_path / "cancel_after_provider_compaction.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "cancel-after-provider-compaction", "group-1", "key:us"
+    )
+    seeded = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="old question " + "q" * 16_000,
+            debug={
+                "fixture_response": "old answer " + "a" * 16_000,
+                "delay_ms": 0,
+            },
+        ),
+        run_id="seed_cancel_after_provider_compaction",
+    )
+    assert seeded["ok"] is True, seeded
+
+    main_started = threading.Event()
+    events: list[dict] = []
+    with _loopback_server([
+        {"body": _chat_response(text="compact summary", usage=(7, 3))},
+        {
+            "started": main_started,
+            "delay": 2,
+            "body": _chat_response(text="too late", usage=(5, 4)),
+        },
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="current question",
+        )
+        payload["model"]["context_window_tokens"] = 8_000
+        payload["limits"]["max_context_tokens"] = 8_000
+        result = run_pi_agent(
+            payload,
+            request_id="req_cancel_after_provider_compaction",
+            run_id="run_cancel_after_provider_compaction",
+            timeout_seconds=6,
+            on_event=events.append,
+            is_cancelled=main_started.is_set,
+            environ=_provider_env(database=database),
+        )
+
+    committed_usage = {
+        "input": 7,
+        "output": 3,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 10,
+    }
+    assert len(requests) == 2
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["usage"] == committed_usage
+    completed = [
+        event["data"]
+        for event in events
+        if event["event_type"] == "model_turn_completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["stop_reason"] == "aborted"
+    assert completed[0]["attempt_count"] == 1
+    assert completed[0]["usage_total"] == committed_usage
+    entries = _session_entries(database, session_id)
+    assert sum(entry["type"] == "compaction" for entry in entries) == 1
+    assert "compact summary" in json.dumps(entries)
+
+
+def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
+    database = tmp_path / "cancel_during_provider_compaction.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "cancel-during-provider-compaction", "group-1", "key:us"
+    )
+    seeded = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="old question " + "q" * 16_000,
+            debug={
+                "fixture_response": "old answer " + "a" * 16_000,
+                "delay_ms": 0,
+            },
+        ),
+        run_id="seed_cancel_during_provider_compaction",
+    )
+    assert seeded["ok"] is True, seeded
+
+    compaction_started = threading.Event()
+    with _loopback_server([
+        {
+            "started": compaction_started,
+            "delay": 2,
+            "body": _chat_response(text="uncommitted summary", usage=(7, 3)),
+        },
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="current question",
+        )
+        payload["model"]["context_window_tokens"] = 8_000
+        payload["limits"]["max_context_tokens"] = 8_000
+        result = run_pi_agent(
+            payload,
+            request_id="req_cancel_during_provider_compaction",
+            run_id="run_cancel_during_provider_compaction",
+            timeout_seconds=6,
+            is_cancelled=compaction_started.is_set,
+            environ=_provider_env(database=database),
+        )
+
+    assert len(requests) == 1
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["usage"] == {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+    }
+    entries = _session_entries(database, session_id)
+    assert sum(entry["type"] == "compaction" for entry in entries) == 0
+    assert "uncommitted summary" not in json.dumps(entries)
+
+
+def test_s4_keeps_the_legacy_application_call_path_unchanged():
+    protected = {
+        "src/application/copilot/local_harness.py": (
+            "def _resolve_model_runner(",
+            "from src.application.copilot.model_client import CopilotModelSettings, build_model_runner",
+        ),
+        "src/application/copilot/model_client.py": (
+            "class CopilotModelSettings:",
+            "def build_model_runner(",
+        ),
+        "src/application/copilot/host.py": (
+            "from src.application.copilot.engine import run_engine",
+            "engine_result = run_engine(",
+        ),
+    }
+    for relative_path, expected_fragments in protected.items():
+        source = (REPO / relative_path).read_text(encoding="utf-8")
+        assert all(fragment in source for fragment in expected_fragments)
+        assert "run_pi_agent" not in source
+        assert "PiModelSettings" not in source
+
+    paths = list(protected)
+    for staged in (False, True):
+        command = ["git", "diff", "--name-only"]
+        if staged:
+            command.append("--cached")
+        command.extend(["--", *paths])
+        changed = subprocess.run(
+            command,
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert changed == ""

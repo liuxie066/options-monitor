@@ -510,10 +510,12 @@ assistant:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
     deepseek-default:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+      context_window_tokens: 24000
 markets:
   us:
     accounts: [lx]
@@ -535,6 +537,7 @@ markets:
                         "base_url": "https://api.openai.com/v1",
                         "model": "gpt-5.2",
                         "api_key_env": "OM_LLM_API_KEY",
+                        "context_window_tokens": 24_000,
                     },
                 },
                 "_resolved": {
@@ -4310,6 +4313,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
             "api_key_env": "OM_LLM_API_KEY",
             "confidence_min": 0.82,
             "timeout_seconds": 32,
+            "context_window_tokens": 24_000,
             "max_output_tokens": 770,
         },
     }}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4493,6 +4497,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
             "api_key_env": "OM_LLM_API_KEY",
             "confidence_min": 0.81,
             "timeout_seconds": 33,
+            "context_window_tokens": 24_000,
             "max_output_tokens": 771,
         },
     }}, ensure_ascii=False, indent=2), encoding="utf-8")
