@@ -75,37 +75,6 @@ The integration does not add:
 - in-place recovery of an interrupted Pi Agent loop;
 - production dual-run or automatic fallback to the legacy Engine.
 
-### 1.5 PlanReview feedback disposition
-
-The 2026-08-16 focused review failed the prior draft on six implementability
-gaps. This revision accepts all six and closes them at their existing owners:
-
-| Finding | Closed design decision |
-|---|---|
-| terminal cleanup could overwrite a valid result | a validated terminal is authoritative; cleanup only reaps the child |
-| cancellation raced with admission | one private Host SQLite CAS selects cancel/commit/discard before protocol delivery |
-| abandoned tool workers could grow without bound | one process-wide read-worker slot; no queue and no second worker |
-| forced kill could not release Pi's writer lease | Host lease releases immediately; Pi lease expires and is fenced after its TTL |
-| Session history crossed config scopes | trusted normalized config scope is part of the Session/lease hash |
-| Scene cap impersonated model capability | every active model profile declares a validated safe context window |
-
-The unused V1 `message_delta` protocol surface is deleted because this release
-has no streaming UI consumer. Strict IPC validation, seven development slices,
-the run-local read reuse guard, lockfile install with `--ignore-scripts`, and
-the no-container process boundary remain: the review found concrete value for
-the first three and no evidence that weakening npm isolation or adding a
-container is required for this scope.
-
-The focused re-review found four remaining ownership gaps. This revision closes
-them without adding a second runtime or a generic event framework:
-
-| Finding | Closed design decision |
-|---|---|
-| external cancellation raced with result admission | one private Host SQLite compare-and-set chooses `cancel`, `commit`, or `discard` |
-| tool-worker events raced with lifecycle events | one run-local lock serializes every Host event/cache mutation and gate close |
-| public `config_path` collapsed to the `default` memory scope | the existing resolver supplies a Host-only canonical path and its hash becomes the authority identity |
-| compaction had two commit owners | pre-run compaction is an independent checkpoint; admission governs only the current-turn suffix |
-
 ## 2. Upstream Capability Decision
 
 Use the stable `Agent` API, not `AgentHarness`.
@@ -2597,9 +2566,9 @@ resolve node and npm from PATH
 ```
 
 An install failure deletes only the temporary target through the existing trap;
-the current release remains unchanged. Re-running against an already active
-release verifies imports rather than mutating its `node_modules`; `--force`
-recreates it through the normal temporary path.
+the current release and running services remain unchanged. Re-running against
+an already active release verifies imports rather than mutating its
+`node_modules`; `--force` recreates it through the normal temporary path.
 
 The installer help and completion message state the Node prerequisite. It does
 not write secrets, create the Session database, start services, or run a live
@@ -2735,6 +2704,10 @@ Then, under separate explicit authorization:
 8. verify Host run/events/outbox and inbound audit, without sending synthetic
    writes.
 
+Switching the `current` symlink activates the Pi call site and its dependencies
+as one release-level operation; no deployment selects them separately. The
+previous complete release remains intact for rollback.
+
 Release, upgrade, live messages, and production Control remain separate
 authorization boundaries.
 
@@ -2757,36 +2730,7 @@ S7 is complete only when:
 - a clean release archive can be installed without repository-local state;
 - the previous release remains selectable and its rollback rehearsal passes.
 
-## 18. Packaging, Cutover, And Rollback
-
-Pi introduces a production Node prerequisite. The installer must not install or
-upgrade Node implicitly. Before S7 cutover:
-
-- setup/update preflight requires `node >=22.19.0` and `npm`;
-- install/update runs
-  `npm ci --omit=dev --ignore-scripts --prefix agent-runtime` inside the target
-  release before switching the `current` symlink;
-- release CI installs the locked Node dependencies and runs the focused Pi
-  tests;
-- runtime verification imports the three pinned packages and confirms the Pi
-  Session path is writable by the service user and the resolved active model
-  has a valid declared context window;
-- failure leaves the previous `current` release and services unchanged.
-
-Cutover is atomic at the release level:
-
-1. deploy a release containing the complete Pi runtime and dependencies;
-2. verify config, Node, package imports, storage, and deterministic tests;
-3. switch the production Copilot call site from legacy Engine to Pi;
-4. verify one controlled read-only local run, then channel behavior;
-5. keep the previous release intact for rollback.
-
-There is no runtime fallback. Rollback selects the previous complete release,
-restarts only the affected service through the controlled upgrade workflow, and
-verifies read-only behavior. Pi's new Session database is preserved; the old
-release simply does not read it.
-
-## 19. Final Acceptance Matrix
+## 18. Final Acceptance Matrix
 
 | Area | Required evidence |
 |---|---|
@@ -2805,7 +2749,7 @@ release simply does not read it.
 | Operations | install, upgrade, verification, and release-level rollback are proven |
 | Cleanup | legacy Engine/model/memory modules and their callers are removed; no production fallback remains |
 
-## 20. Decisions That Are Closed
+## 19. Decisions That Are Closed
 
 - Keep Python for OM business and governance; add Node only for Pi runtime.
 - Use JSONL stdio and one child per request in V1.
