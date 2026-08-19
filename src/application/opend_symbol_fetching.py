@@ -725,15 +725,9 @@ def fetch_symbol_request(
                 dte = None
 
             strike = to_float(_tuple_col(r, chain_columns, 'strike_price'))
-            option_type = str(_tuple_col(r, chain_columns, 'option_type') or '').lower()
-            if option_type in ('call', 'put'):
-                pass
-            else:
-                # futu option_type might be 'CALL'/'PUT' or numeric; best-effort
-                if 'call' in option_type:
-                    option_type = 'call'
-                elif 'put' in option_type:
-                    option_type = 'put'
+            option_type = normalize_opend_option_type(
+                _tuple_col(r, chain_columns, 'option_type')
+            )
 
             srow = snap_map.get(opt_code)
             option_observation = normalize_option_observation(

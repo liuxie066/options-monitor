@@ -221,6 +221,7 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
             )
         },
         unavailable={},
+        require_fresh=False,
     )
 
     out = mod.run_symbol_monitoring(

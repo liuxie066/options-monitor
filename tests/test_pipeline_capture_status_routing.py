@@ -98,6 +98,11 @@ def _run_default_capture(
         "resolve_watchlist_item_runtime_config",
         lambda *, item, **_kwargs: dict(item),
     )
+    monkeypatch.setattr(
+        mod,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        lambda **_kwargs: object(),
+    )
 
     def _fake_pipeline(**kwargs: Any) -> list[dict[str, Any]]:
         from src.application.strategy_scan_status import (
@@ -587,6 +592,22 @@ def _run_full_symbol_capture(
         pipeline_symbol,
         "ensure_required_data",
         _ensure_required_data,
+    )
+
+    class _RequiredDataBatch:
+        def resolve(self, resolved_symbol: str) -> tuple[dict[str, Any], bytes]:
+            evidence = _ensure_required_data(symbol=resolved_symbol)
+            csv_bytes = (
+                b"symbol,option_type\n"
+                if scenario == "success_empty"
+                else f"symbol,option_type\n{resolved_symbol},put\n".encode()
+            )
+            return evidence, csv_bytes
+
+    monkeypatch.setattr(
+        pipeline_watchlist,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        lambda **_kwargs: _RequiredDataBatch(),
     )
     monkeypatch.setattr(
         pipeline_symbol,

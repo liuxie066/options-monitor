@@ -24,10 +24,8 @@ def normalize_iv(iv: float | None) -> float | None:
 
 def normalize_opend_option_type(value: Any) -> str:
     raw = str(value or "").strip().lower()
-    if raw in {"put", "call"}:
-        return raw
-    if "put" in raw:
+    if raw in ("put", "optiontype.put"):
         return "put"
-    if "call" in raw:
+    if raw in ("call", "optiontype.call"):
         return "call"
     return raw
