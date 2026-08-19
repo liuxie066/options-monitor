@@ -13,6 +13,19 @@
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
 - Do not invoke Gateflow, planreview, or deepreview unless the user explicitly requests the named workflow or skill in the current task.
 
+## DeepReview Profile
+
+When the user explicitly invokes deepreview, apply these repository-specific rules in addition to the skill's general workflow:
+
+- Review in this order, skipping irrelevant layers: strategy rationality, OpenD/provider data consistency, then code drift, duplication, and misplaced ownership.
+- Start at the real public or runtime entry point and trace source -> normalization -> decision -> persistence/event/delivery. Documentation, filenames, cache rows, process exit, and scheduler success are not substitutes for authoritative facts.
+- Preserve canonical owners and account, sender, market, and config isolation. Flag downstream fallback, duplicate calculation, loose parsing, or compatibility code that repairs an upstream or domain contract.
+- Distinguish unavailable or partial data, stale cache, provider failure, model failure, and valid zero-result outcomes. Treat `delivery_confirmed` as stronger evidence than successful scheduling, rendering, or provider submission.
+- For writes, prove preview, explicit confirmation, idempotency, one durable effect, readback, receipt, and safe retry or replay behavior, including ambiguous external outcomes.
+- Treat tests as evidence only when they exercise the affected public facade and assert durable or externally visible behavior, including relevant failure, cancellation, stale-data, and retry paths.
+- Report material confirmed defects separately from evidence gaps and unverified leads. Do not turn strategy preferences, speculative abstractions, or style opinions into findings.
+- Keep review read-only. Do not scan providers, send notifications, trade, mutate ledgers or runtime state, or run commands with hidden writes without separate explicit authority.
+
 ## Project Identity
 
 | Property | Value |
