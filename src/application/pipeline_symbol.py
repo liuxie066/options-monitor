@@ -15,6 +15,7 @@ from src.application.exchange_rate_loader import build_converter
 from src.application.prefilters import apply_prefilters
 from src.application.multiplier_steps import apply_multiplier_cache_to_required_data_csv
 from src.application.required_data_steps import ensure_required_data
+from src.application.required_data_snapshot import FrozenRequiredDataBatch
 from src.application.sell_call_steps import (
     empty_sell_call_summary,
     run_sell_call_scan_and_summarize,
@@ -54,6 +55,7 @@ def process_symbol(
     source_producer_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
+    required_data_snapshot_batch: FrozenRequiredDataBatch | None = None,
     candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
@@ -92,6 +94,7 @@ def process_symbol(
             source_producer_run_id=source_producer_run_id,
             required_data_snapshot_manifest=required_data_snapshot_manifest,
             required_data_snapshot_run_id=required_data_snapshot_run_id,
+            required_data_snapshot_batch=required_data_snapshot_batch,
             candidate_capture_status_sink_fn=(
                 candidate_capture_status_sink_fn
             ),

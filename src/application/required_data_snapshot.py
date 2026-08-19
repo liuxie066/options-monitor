@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import csv
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import json
@@ -78,6 +79,36 @@ class FrozenRequiredDataUnavailable(RuntimeError):
         if self.detail:
             message += f": {self.detail}"
         super().__init__(message)
+
+
+FrozenRequiredDataEntry = tuple[dict[str, Any], bytes]
+
+
+@dataclass(frozen=True)
+class FrozenRequiredDataBatch:
+    manifest: dict[str, Any]
+    manifest_bytes: bytes
+    entries: dict[str, FrozenRequiredDataEntry]
+    unavailable: dict[str, FrozenRequiredDataUnavailable]
+
+    def resolve(self, symbol: str) -> FrozenRequiredDataEntry:
+        symbol_norm = _required_text(symbol, "symbol").upper()
+        resolved = self.entries.get(symbol_norm)
+        if resolved is not None:
+            return resolved
+        failure = self.unavailable.get(symbol_norm)
+        if failure is not None:
+            raise FrozenRequiredDataUnavailable(
+                symbol=symbol_norm,
+                reason=failure.reason,
+                detail=failure.detail,
+                snapshot_id=failure.snapshot_id,
+                receipt_relpath=failure.receipt_relpath,
+            )
+        raise FrozenRequiredDataUnavailable(
+            symbol=symbol_norm,
+            reason="symbol_entry_missing",
+        )
 
 
 def seal_required_data_snapshot(
@@ -284,12 +315,17 @@ def load_required_data_snapshot_manifest(
     return payload, root
 
 
-def load_required_data_snapshot_manifest_snapshot(
+def _load_required_data_snapshot_manifest_snapshot(
     *,
     manifest_path: Path,
     expected_run_id: str,
     expected_required_data_root: Path | None = None,
-) -> tuple[dict[str, Any], Path, bytes]:
+) -> tuple[
+    dict[str, Any],
+    Path,
+    bytes,
+    dict[str, FrozenRequiredDataEntry],
+]:
     """Validate one exact manifest byte snapshot and return those bytes."""
 
     path_input = Path(manifest_path)
@@ -373,11 +409,29 @@ def load_required_data_snapshot_manifest_snapshot(
         and root != Path(expected_required_data_root).resolve()
     ):
         raise RequiredDataSnapshotError("required-data snapshot root mismatch")
-    _validate_manifest_symbols(
+    resolved_entries = _validate_manifest_symbols(
         payload=payload,
         root=root,
         run_id=run_id,
         sealed_at=sealed_at,
+    )
+    return payload, root, manifest_bytes, resolved_entries
+
+
+def load_required_data_snapshot_manifest_snapshot(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    expected_required_data_root: Path | None = None,
+) -> tuple[dict[str, Any], Path, bytes]:
+    """Validate one exact manifest byte snapshot and return those bytes."""
+
+    payload, root, manifest_bytes, _resolved_entries = (
+        _load_required_data_snapshot_manifest_snapshot(
+            manifest_path=manifest_path,
+            expected_run_id=expected_run_id,
+            expected_required_data_root=expected_required_data_root,
+        )
     )
     return payload, root, manifest_bytes
 
@@ -449,7 +503,7 @@ def _validate_manifest_symbols(
     root: Path,
     run_id: str,
     sealed_at: datetime,
-) -> None:
+) -> dict[str, FrozenRequiredDataEntry]:
     symbols = payload.get("symbols")
     if not isinstance(symbols, dict):
         raise RequiredDataSnapshotError(
@@ -472,6 +526,7 @@ def _validate_manifest_symbols(
         "source_outcome",
     }
     failed_fields = {"status", "reason", "error_type"}
+    resolved_entries: dict[str, FrozenRequiredDataEntry] = {}
     ready_count = 0
     for symbol_key, raw_entry in symbols.items():
         symbol = _required_text(symbol_key, "manifest symbol").upper()
@@ -492,7 +547,7 @@ def _validate_manifest_symbols(
                     f"{symbol} ready manifest entry fields do not match schema"
                 )
             try:
-                _validate_ready_entry(
+                resolved_entries[symbol] = _validate_ready_entry(
                     root=root,
                     run_id=run_id,
                     symbol=symbol,
@@ -555,6 +610,7 @@ def _validate_manifest_symbols(
         raise RequiredDataSnapshotError(
             "required-data snapshot status contradicts symbol entries"
         )
+    return resolved_entries
 
 
 def resolve_frozen_required_data(
@@ -585,8 +641,54 @@ def resolve_frozen_required_data_csv_bytes(
 ) -> tuple[dict[str, Any], bytes]:
     symbol_norm = _required_text(symbol, "symbol").upper()
     try:
-        manifest, root, manifest_bytes = (
-            load_required_data_snapshot_manifest_snapshot(
+        batch = resolve_frozen_required_data_csv_bytes_batch(
+            manifest_path=manifest_path,
+            expected_run_id=expected_run_id,
+            required_data_root=required_data_root,
+            now=now,
+            require_fresh=False,
+        )
+        validated, csv_bytes = batch.resolve(symbol_norm)
+        try:
+            _validate_resolved_entry_freshness(
+                validated=validated,
+                now=_manifest_timestamp(
+                    now or datetime.now(timezone.utc),
+                    "now",
+                ),
+            )
+        except (RequiredDataSnapshotError, SourceReceiptError) as exc:
+            raise FrozenRequiredDataUnavailable(
+                symbol=symbol_norm,
+                reason="receipt_or_payload_mismatch",
+                detail=str(exc),
+                snapshot_id=str(validated.get("snapshot_id") or ""),
+                receipt_relpath=str(validated.get("receipt_relpath") or ""),
+            ) from exc
+        return validated, csv_bytes
+    except FrozenRequiredDataUnavailable as exc:
+        if exc.symbol == symbol_norm:
+            raise
+        raise FrozenRequiredDataUnavailable(
+            symbol=symbol_norm,
+            reason=exc.reason,
+            detail=exc.detail,
+            snapshot_id=exc.snapshot_id,
+            receipt_relpath=exc.receipt_relpath,
+        ) from exc
+
+
+def resolve_frozen_required_data_csv_bytes_batch(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    required_data_root: Path,
+    now: datetime | None = None,
+    require_fresh: bool = True,
+) -> FrozenRequiredDataBatch:
+    try:
+        manifest, _root, manifest_bytes, resolved_entries = (
+            _load_required_data_snapshot_manifest_snapshot(
                 manifest_path=manifest_path,
                 expected_run_id=expected_run_id,
                 expected_required_data_root=required_data_root,
@@ -594,63 +696,93 @@ def resolve_frozen_required_data_csv_bytes(
         )
     except _RequiredDataSnapshotEntryError as exc:
         raise FrozenRequiredDataUnavailable(
-            symbol=symbol_norm,
+            symbol="UNKNOWN",
             reason="receipt_or_payload_mismatch",
             detail=str(exc),
         ) from exc
     except RequiredDataSnapshotError as exc:
         raise FrozenRequiredDataUnavailable(
-            symbol=symbol_norm,
+            symbol="UNKNOWN",
             reason="manifest_invalid",
             detail=str(exc),
         ) from exc
-    entry = (manifest.get("symbols") or {}).get(symbol_norm)
-    if not isinstance(entry, Mapping):
-        raise FrozenRequiredDataUnavailable(
-            symbol=symbol_norm,
-            reason="symbol_entry_missing",
+
+    manifest_sha256 = sha256_bytes(manifest_bytes)
+    resolved_at: datetime | None = None
+    if require_fresh:
+        try:
+            resolved_at = _manifest_timestamp(
+                now or datetime.now(timezone.utc),
+                "now",
+            )
+        except RequiredDataSnapshotError as exc:
+            raise FrozenRequiredDataUnavailable(
+                symbol="UNKNOWN",
+                reason="receipt_or_payload_mismatch",
+                detail=str(exc),
+            ) from exc
+    entries: dict[str, FrozenRequiredDataEntry] = {}
+    unavailable: dict[str, FrozenRequiredDataUnavailable] = {}
+    for symbol, raw_entry in dict(manifest["symbols"]).items():
+        entry = dict(raw_entry)
+        if str(entry.get("status") or "").strip().lower() != "ready":
+            unavailable[symbol] = FrozenRequiredDataUnavailable(
+                symbol=symbol,
+                reason=str(entry.get("reason") or "symbol_snapshot_failed"),
+                detail=str(entry.get("error_type") or ""),
+            )
+            continue
+        validated, csv_bytes = resolved_entries[symbol]
+        if require_fresh:
+            assert resolved_at is not None
+            try:
+                _validate_resolved_entry_freshness(
+                    validated=validated,
+                    now=resolved_at,
+                )
+            except SourceReceiptError as exc:
+                unavailable[symbol] = FrozenRequiredDataUnavailable(
+                    symbol=symbol,
+                    reason="receipt_or_payload_mismatch",
+                    detail=str(exc),
+                    snapshot_id=str(entry.get("snapshot_id") or ""),
+                    receipt_relpath=str(entry.get("receipt_relpath") or ""),
+                )
+                continue
+        entries[symbol] = (
+            {
+                **validated,
+                "manifest_path": str(Path(manifest_path).resolve()),
+                "manifest_sha256": manifest_sha256,
+                "plan_id": str(manifest["plan_id"]),
+            },
+            csv_bytes,
         )
-    status = str(entry.get("status") or "").strip().lower()
-    if status != "ready":
-        raise FrozenRequiredDataUnavailable(
-            symbol=symbol_norm,
-            reason=str(entry.get("reason") or "symbol_snapshot_failed"),
-            detail=str(entry.get("error_type") or ""),
-        )
-    try:
-        validated, csv_bytes = _validate_ready_entry(
-            root=root,
-            run_id=str(manifest["run_id"]),
-            symbol=symbol_norm,
-            entry=entry,
-            now=now or datetime.now(timezone.utc),
-        )
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        binascii.Error,
-        SourceReceiptError,
-        RequiredDataSnapshotError,
-    ) as exc:
-        raise FrozenRequiredDataUnavailable(
-            symbol=symbol_norm,
-            reason="receipt_or_payload_mismatch",
-            detail=str(exc),
-            snapshot_id=str(entry.get("snapshot_id") or ""),
-            receipt_relpath=str(entry.get("receipt_relpath") or ""),
-        ) from exc
-    return (
-        {
-            **validated,
-            "manifest_path": str(Path(manifest_path).resolve()),
-            "manifest_sha256": sha256_bytes(manifest_bytes),
-            "plan_id": str(manifest["plan_id"]),
-        },
-        csv_bytes,
+    return FrozenRequiredDataBatch(
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        entries=entries,
+        unavailable=unavailable,
     )
+
+
+def _validate_resolved_entry_freshness(
+    *,
+    validated: Mapping[str, Any],
+    now: datetime,
+) -> None:
+    observed_at = _manifest_timestamp(
+        validated.get("source_observed_at"),
+        "source_observed_at",
+    )
+    expires_at = _manifest_timestamp(
+        validated.get("expires_at"),
+        "expires_at",
+    )
+    if observed_at > now:
+        raise SourceReceiptError("source observation is in the future")
+    if now >= expires_at:
+        raise SourceReceiptError("source receipt is stale")
 
 
 def _validate_global_plan_symbols(
@@ -1362,6 +1494,7 @@ def _normalize_source(value: Any) -> str:
 
 
 __all__ = [
+    "FrozenRequiredDataBatch",
     "FrozenRequiredDataUnavailable",
     "REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA",
     "RequiredDataSnapshotError",
@@ -1369,5 +1502,6 @@ __all__ = [
     "load_required_data_snapshot_manifest_snapshot",
     "resolve_frozen_required_data",
     "resolve_frozen_required_data_csv_bytes",
+    "resolve_frozen_required_data_csv_bytes_batch",
     "seal_required_data_snapshot",
 ]

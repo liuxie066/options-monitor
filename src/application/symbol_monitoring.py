@@ -14,7 +14,10 @@ from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
-from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataBatch,
+    FrozenRequiredDataUnavailable,
+)
 from src.application.strategy_scan_status import publish_strategy_scan_status
 from src.application.yield_enhancement_config import (
     COMBO_YIELD_CONFIG_KEY,
@@ -55,6 +58,7 @@ class SymbolMonitoringInputs:
     source_producer_run_id: str | None = None
     required_data_snapshot_manifest: Path | None = None
     required_data_snapshot_run_id: str | None = None
+    required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
     candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None
@@ -313,9 +317,15 @@ def run_symbol_monitoring(
                     ),
                 }
             )
-        quote_evidence = deps.ensure_required_data_fn(
-            **required_data_kwargs,
-        )
+        if inputs.required_data_snapshot_batch is not None:
+            quote_evidence, csv_bytes = inputs.required_data_snapshot_batch.resolve(
+                symbol
+            )
+            _capture_required_data_csv_bytes(csv_bytes)
+        else:
+            quote_evidence = deps.ensure_required_data_fn(
+                **required_data_kwargs,
+            )
     except FrozenRequiredDataUnavailable as exc:
         summary_rows: list[dict[str, Any]] = []
 

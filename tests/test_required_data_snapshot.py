@@ -20,6 +20,7 @@ from src.application.required_data_snapshot import (
     _validate_physical_binding,
     load_required_data_snapshot_manifest_snapshot,
     resolve_frozen_required_data,
+    resolve_frozen_required_data_csv_bytes_batch,
     seal_required_data_snapshot,
 )
 from src.application.required_data_plan_identity import (
@@ -782,14 +783,63 @@ def test_partial_snapshot_keeps_ready_symbol_and_types_failed_symbol(tmp_path: P
     assert manifest["status"] == "partial"
     assert manifest["symbols"]["3690.HK"]["status"] == "ready"
     assert manifest["symbols"]["9898.HK"]["status"] == "failed"
+    batch = resolve_frozen_required_data_csv_bytes_batch(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        required_data_root=root,
+    )
+    evidence, csv_bytes = batch.resolve("3690.HK")
+    assert evidence["snapshot_id"] == manifest["symbols"]["3690.HK"][
+        "snapshot_id"
+    ]
+    assert b"3690.HK" in csv_bytes
     with pytest.raises(FrozenRequiredDataUnavailable) as failed:
+        batch.resolve("9898.HK")
+    assert failed.value.reason == "empty_chain"
+    with pytest.raises(FrozenRequiredDataUnavailable) as compatible:
         resolve_frozen_required_data(
             manifest_path=manifest_path,
             expected_run_id="run-1",
             symbol="9898.HK",
             required_data_root=root,
+            now=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
-    assert failed.value.reason == "empty_chain"
+    assert compatible.value.reason == "empty_chain"
+
+
+def test_batch_validates_each_ready_symbol_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import required_data_snapshot as snapshot
+
+    root, manifest_path = _workspace(tmp_path)
+    for symbol in ("3690.HK", "9898.HK"):
+        _publish_quote(root, run_id="run-1", symbol=symbol)
+    seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK", "9898.HK"),
+    )
+    original_validate = snapshot._validate_ready_entry
+    validated_symbols: list[str] = []
+
+    def _count_validate(**kwargs):
+        validated_symbols.append(str(kwargs["symbol"]))
+        return original_validate(**kwargs)
+
+    monkeypatch.setattr(snapshot, "_validate_ready_entry", _count_validate)
+    batch = snapshot.resolve_frozen_required_data_csv_bytes_batch(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        required_data_root=root,
+    )
+
+    assert validated_symbols == ["3690.HK", "9898.HK"]
+    assert b"3690.HK" in batch.resolve("3690.HK")[1]
+    assert b"9898.HK" in batch.resolve("9898.HK")[1]
+    assert validated_symbols == ["3690.HK", "9898.HK"]
 
 
 def test_contract_mismatch_fails_one_symbol_without_losing_ready_peer(

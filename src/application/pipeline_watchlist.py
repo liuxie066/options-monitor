@@ -57,6 +57,11 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.candidate_snapshot_manifest import (
     publish_candidate_snapshot_manifest,
 )
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataBatch,
+    FrozenRequiredDataUnavailable,
+    resolve_frozen_required_data_csv_bytes_batch,
+)
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
@@ -518,6 +523,7 @@ def run_watchlist_pipeline(
         Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None
     ) = None,
     required_data_snapshot_manifest: Path | None = None,
+    required_data_snapshot_batch: FrozenRequiredDataBatch | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
     prepared_option_positions_context_manifest: Path | None = None,
@@ -750,6 +756,10 @@ def run_watchlist_pipeline(
                         ),
                     }
                 )
+            if required_data_snapshot_batch is not None:
+                advice_scan_kwargs["required_data_snapshot_batch"] = (
+                    required_data_snapshot_batch
+                )
 
             if not want_scan:
                 process_symbol_fn(
@@ -925,6 +935,18 @@ def run_watchlist_pipeline_default(
             )
 
     candidate_capture_enabled = bool(account_run_id and want_scan)
+    required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
+    if candidate_capture_enabled and required_data_snapshot_manifest is not None:
+        try:
+            required_data_snapshot_batch = (
+                resolve_frozen_required_data_csv_bytes_batch(
+                    manifest_path=required_data_snapshot_manifest,
+                    expected_run_id=account_run_id,
+                    required_data_root=required_data_dir,
+                )
+            )
+        except FrozenRequiredDataUnavailable:
+            pass
     result = run_watchlist_pipeline(
         py=py,
         base=base,
@@ -982,6 +1004,7 @@ def run_watchlist_pipeline_default(
             _capture_runtime_context if candidate_capture_enabled else None
         ),
         required_data_snapshot_manifest=required_data_snapshot_manifest,
+        required_data_snapshot_batch=required_data_snapshot_batch,
         prepared_portfolio_context_manifest=prepared_portfolio_context_manifest,
         prepared_portfolio_context_manifest_sha256=(
             prepared_portfolio_context_manifest_sha256
