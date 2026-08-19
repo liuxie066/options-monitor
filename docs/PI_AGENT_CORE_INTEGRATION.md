@@ -1,10 +1,11 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: revised after PlanReview; implementation has not started; focused
-re-review is required before S1.
+Status: S1-S4 are implemented and validated; S5 implementation has not started.
+The production call path remains on the legacy runtime until the complete S7
+release passes its atomic cutover gate.
 
-Last upstream verification: 2026-08-16. The pinned baseline is
-`@earendil-works/pi-agent-core@0.84.2` and
+Last upstream verification: 2026-08-19. The pinned baseline is
+`@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
 `@earendil-works/pi-session-backend-sqlite-node@0.84.2`, which require Node.js
 `>=22.19.0`.
 
@@ -372,7 +373,10 @@ for transient runs.
   "event_type": "model_turn_completed",
   "data": {
     "stop_reason": "stop",
-    "usage": {"input": 10, "output": 5, "totalTokens": 15}
+    "attempt_count": 1,
+    "model_retry_count": 0,
+    "usage": {"input": 10, "output": 5, "totalTokens": 15},
+    "usage_total": {"input": 10, "output": 5, "totalTokens": 15}
   }
 }
 ```
@@ -386,6 +390,16 @@ This is an OM-owned normalized event contract, not a passthrough of arbitrary
 upstream Pi events. Thinking text, provider payloads, credentials, raw tool
 results, text deltas, and private reasoning are prohibited. V1 has no streaming
 UI consumer, so only completed model turns cross the process boundary.
+
+`model_turn_completed.data` has exactly the five fields shown above.
+`attempt_count` is the non-negative number of actual provider HTTP requests for
+that logical model turn; a deterministic fixture turn uses zero.
+`model_retry_count` is the cumulative sum of
+`max(attempt_count - 1, 0)` across completed provider calls in the run,
+including an independently committed pre-run compaction. `usage` belongs to
+the current assistant message and `usage_total` is the cumulative main-turn
+plus committed-compaction usage. `turn_end.data` remains exactly
+`{stop_reason, usage}`. All numeric fields are finite and non-negative.
 
 #### `tool.call`
 
@@ -667,8 +681,11 @@ secret-free model description to Node.
 | `kimi-code` | `openai-completions` | OM custom OpenAI-compatible chat completions mapping | `https://api.kimi.com/coding/v1` |
 | `ollama` | `openai-completions` | OpenAI-compatible chat completions without required key | `http://127.0.0.1:11434/v1` |
 
-Preserve `model`, `base_url`, `timeout_seconds`, `context_window_tokens`,
-`max_output_tokens`, and `max_attempts`. Pi's built-in
+Preserve `model`, `base_url`, `timeout_seconds`, `context_window_tokens`, and
+`max_output_tokens`. A directly supplied legacy runtime `max_attempts` remains
+accepted after strict validation from 1 through 3; when absent it remains 2.
+The current authoring model profiles do not expose that internal retry value,
+so S4 adds no new retry CLI or profile field. Pi's built-in
 `kimiCodingProvider()` uses Anthropic Messages at
 `https://api.kimi.com/coding`, which is not OM's current `kimi-code` contract;
 using it would be an unrelated breaking change. Do not load every Pi builtin
@@ -743,7 +760,7 @@ current slice's exit gate passes.
 | S1 | Pi package, JSONL process boundary, actual `Agent` with deterministic fixture stream | focused protocol tests pass without network, tools, or persistent state |
 | S2 | read-only OM tool bridge with deterministic eval fixtures | schema/allowlist/error/cancellation tests pass; no write tool is visible |
 | S3 | sender-and-config-scoped Pi Session, durable turn commit, context loading and compaction | continuity, key/path/user isolation, crash-lease, partial-write, and independent compaction-checkpoint tests pass |
-| S4 | model context capability plus five provider mappings and error/usage normalization | config/CLI migration and all loopback provider contract fixtures pass; live canaries remain a separate release action |
+| S4 | model context capability plus five provider mappings and error/usage normalization, exercised directly through the Pi process boundary without switching Host or local diagnostics | config/CLI migration and all loopback provider contract fixtures pass; the legacy application call path is unchanged and live canaries remain a separate release action |
 | S5 | Host run events, durable cancel/admission CAS, serialized evidence writes, bounded read-only recovery, progress | concurrent winner/event tests and current run-control regressions pass |
 | S6 | trusted key/path scope, `request_control_preview`, and `./om assistant handle` channel cutover | scope isolation, preview/confirm/apply separation, and channel idempotency pass |
 | S7 | packaging, release gates, atomic cutover, legacy runtime deletion | full tests, setup check, release check, rollback rehearsal, and answer-quality acceptance pass |
@@ -1678,7 +1695,8 @@ S4 replaces OM's hand-written provider clients with Pi AI provider streams
 while keeping provider selection and secret contracts stable. It adds one
 required, operator-declared safe context-window capability to the existing
 model profile. It does not add provider discovery, OAuth login, live model
-catalogs, or a second config file.
+catalogs, or a second config file. S4 proves the selected provider path through
+direct `run_pi_agent()` process tests; it does not switch an application caller.
 
 Modify:
 
@@ -1686,10 +1704,11 @@ Modify:
 agent-runtime/main.ts
 src/infrastructure/pi_agent_process.py
 src/application/copilot/model_config.py
-src/application/copilot/local_harness.py
 src/application/assistant/llm_model_profiles.py
 src/application/config_validator.py
+src/application/config_defaults.py
 src/application/config_yaml.py
+src/application/config_yaml_init.py
 src/interfaces/cli/assistant_ops.py
 configs/system.json
 configs/examples/config.yaml.example
@@ -1697,7 +1716,20 @@ tests/test_pi_agent_process.py
 tests/test_config_yaml.py
 tests/test_validate_config_notifications.py
 tests/test_cli_operator_commands.py
+tests/test_assistant_diagnostics.py
+tests/test_copilot_p1_eval.py
+tests/test_agent_plugin_smoke.py
+tests/test_inbound_control.py
+tests/test_inbound_feishu_ws.py
 ```
+
+`src/application/copilot/local_harness.py`,
+`src/application/copilot/model_client.py`, and
+`src/application/copilot/host.py` are deliberately unchanged in S4. The legacy
+`CopilotModelSettings`, `_resolve_model_runner()`, `ModelRunner`, and
+`run_engine()` remain the application path until S5 switches the shared Host
+call site atomically. S4 must not partially implement that S5 cutover merely to
+exercise a configured provider.
 
 `src/application/llm_provider_registry.py` remains the public provider catalog.
 It changes only if a test exposes a missing existing fact; Pi-specific names do
@@ -1705,8 +1737,10 @@ not enter it.
 
 ### 14.2 Python model normalization and secret handoff
 
-Move the small immutable settings value from the retiring `model_client.py` to
-`model_config.py` and rename it `PiModelSettings`. It contains exactly:
+Add a separate immutable `PiModelSettings` value to `model_config.py`. Do not
+move, rename, or re-export the legacy `CopilotModelSettings` in S4; S5 first
+makes it unreachable and S7 deletes its owner. `PiModelSettings` contains
+exactly:
 
 ```text
 provider, api_kind, model, base_url,
@@ -1714,12 +1748,32 @@ api_key_env, credential_name,
 timeout_seconds, context_window_tokens, max_output_tokens, max_attempts
 ```
 
-`PiModelSettings.from_config(raw)` reuses `require_provider_spec()`, the current
-bounds, default base URLs, and credential names. For OpenAI, an empty OM base
-URL is normalized to `https://api.openai.com/v1` only in the secret-free
+`PiModelSettings.from_config(raw)` reuses `require_provider_spec()`, default
+base URLs, and credential names, but validates rather than clamps. `model` is
+required; `timeout_seconds` defaults to 90 and must be from 1 through 120;
+`max_output_tokens` defaults to 2,048 and must be from 64 through 4,096;
+`max_attempts` defaults to 2 and, when directly supplied by an existing runtime
+config, must be from 1 through 3. These are the current public validator bounds,
+not the broader clamps in the retiring client. For OpenAI, an empty OM base URL
+is normalized to `https://api.openai.com/v1` only in the secret-free
 `run.start.model`; the user-facing config remains unchanged. Python maps the
 registry's `responses` to `openai-responses` and `chat_completions` to
 `openai-completions`. Node accepts only the provider/API pairs in section 8.
+
+`PiModelSettings.process_payload()` returns only `provider`, `api_kind`,
+`model`, `base_url`, `timeout_seconds`, `context_window_tokens`,
+`max_output_tokens`, and `max_attempts`. It never serializes `api_key_env` or
+`credential_name`. S4 uses this method in the direct process contract tests;
+S5 reuses the same method at the Host call site.
+
+S4 removes the temporary S1-S3 eval-only guard from both Python and Node start
+validation. The closed `execution_environment` values become `local`, `eval`,
+and `channel` as specified in section 5.2; `debug` remains a closed fixture
+object only for `eval` and must be `null` otherwise. This enables the direct
+loopback provider contract without switching an application caller. Python and
+Node both enforce the closed provider/API pairs, model field set, numeric
+bounds, context/output safety relation, and HTTP(S) base URL before any
+provider request.
 
 `context_window_tokens` is required for every authoring profile that can become
 active and is copied unchanged into generated `assistant.llm`. It is an
@@ -1731,39 +1785,41 @@ the Scene limit. Repository examples use the existing conservative
 `24_000`-token policy cap.
 
 The migration is explicit: add `assistant.llm.context_window_tokens: 24000` to
-`configs/system.json`, add `context_window_tokens: 24000` to every shipped
-`assistant.models.<profile>` example, include the field in
+`configs/system.json` and its invariant mirror in
+`src/application/config_defaults.py`, add `context_window_tokens: 24000` to
+every shipped `assistant.models.<profile>` example and both canonical starter
+profiles in `config_yaml_init.py`, include the field in
 `LlmModelProfile.llm_config()` and its public non-secret payload, and preserve
 it through `build-assistant` into resolved runtime config. Existing user YAML
 profiles are not silently defaulted: an enabled Copilot profile must be edited
 and rebuilt before setup/preflight passes.
 
+Test-fixture migration is equally narrow: add `context_window_tokens: 24000`
+only to otherwise-valid model objects with a provider and model that reach
+`PiModelSettings`, active assistant validation, diagnostics, runtime status, P1
+evaluation, or an inbound channel gate. Do not add the field to an empty
+`llm:{}` used with an explicitly injected legacy `ModelRunner`, to a disabled
+Copilot fixture, or to a deliberately invalid config whose asserted failure
+precedes model-context validation. Do not relax existing assertions or add a
+test-only default.
+
 `./om assistant model add` gains required
 `--context-window-tokens`; it passes the value directly through
 `add_model_profile_to_config()` and the same validator. `model list/current`
 show the declared value. No provider-specific default table or discovery call
-is added.
+is added. `max_attempts` remains an internal runtime default and is not added
+to `LlmModelProfile`, authoring YAML, or this CLI.
 
 `model_api_key_configured()` validates through `PiModelSettings` instead of
-importing `CopilotModelSettings`. A new private `_resolve_model_api_key()` in
-`model_config.py` reuses `resolve_secret()` and returns the credential only to
-`local_harness.py`. That value is passed to `run_pi_agent()` as
-`OM_PI_MODEL_API_KEY`; it is never inserted into the payload, contract,
-decision trace, event, or exception text. Ollama resolves no user secret.
-
-`local_harness._resolve_model_runner()` becomes `_resolve_pi_model()`. Existing
-precedence remains:
-
-```text
-eval model_turn_json
-or explicit model_config_json
-or assistant_config_path
-or MODEL_REQUIRED
-```
-
-The eval script is converted mechanically to S2 `debug.fixture_turns`. The two
-real configuration sources return `(PiModelSettings, api_key, error)` and do
-not construct a Python model callable.
+importing `CopilotModelSettings`. S4 loopback tests pass a fake credential only
+through the already allowlisted `OM_PI_MODEL_API_KEY` child environment; the
+value never enters `run.start`, Session, events, returned errors, or captured
+test payloads. Ollama resolves no user secret; the Node provider uses only a
+fixed process-local non-secret sentinel required by Pi's OpenAI Completions
+auth contract. That sentinel uses no credential store or persistence and never
+enters `run.start`, Session, events, returned errors, or captured test payloads.
+The private secret-resolution helper and local-harness handoff are added when
+S5 switches that caller, not as unused S4 scaffolding.
 
 ### 14.3 Selected Pi model/provider
 
@@ -1788,7 +1844,27 @@ maxTokens         = model.max_output_tokens
 `reasoning=false` preserves the current product behavior: private reasoning is
 not requested, streamed, stored, or exposed. Image input remains out of scope.
 
-Provider construction is exact:
+Use only these lazy API imports:
+
+```text
+@earendil-works/pi-ai/api/openai-responses.lazy
+@earendil-works/pi-ai/api/openai-completions.lazy
+```
+
+For each run, call `createProvider()` with the selected model and API, then
+register it with a fresh `createModels()` instance. Keyed providers declare
+`auth.apiKey = envApiKeyAuth("OM model API key",
+["OM_PI_MODEL_API_KEY"])`. Pi 0.84.2 rejects an empty `auth:{}` for the OpenAI
+Completions adapter before sending HTTP, so Ollama declares a pinned resolver
+that returns the fixed process-local non-secret sentinel `ollama-local`. It
+requires no user secret and uses no credential store or persistence.
+`createModels()` therefore remains the single auth application point and passes
+the resolved `apiKey` into the selected API options. No builtin catalog, stored
+credential, login flow, or process-wide provider registry is loaded. The
+sentinel is an adapter compatibility value only and never enters `run.start`,
+Session, events, returned errors, or captured test payloads.
+
+The provider mapping is exact:
 
 | OM profile | Pi API implementation | Request options |
 |---|---|---|
@@ -1796,7 +1872,7 @@ Provider construction is exact:
 | `deepseek` | `openAICompletionsApi()` | `temperature: 0`, `samplingParams.thinking={type:"disabled"}` |
 | `kimi` | `openAICompletionsApi()` | omit temperature and thinking |
 | `kimi-code` | `openAICompletionsApi()` | omit temperature and thinking |
-| `ollama` | `openAICompletionsApi()` | `temperature: 0`, internal placeholder key `ollama` |
+| `ollama` | `openAICompletionsApi()` | `temperature: 0`, process-local non-secret sentinel auth |
 
 For non-OpenAI completions mappings, set compatibility overrides
 `supportsStore:false`, `supportsDeveloperRole:false`, and
@@ -1806,30 +1882,44 @@ override. Kimi Code deliberately does not use Pi's built-in
 `kimiCodingProvider()`, whose Anthropic Messages endpoint differs from OM's
 existing API contract.
 
-The one selected provider wraps its Pi API implementation and injects, in both
-`stream` and `streamSimple`, on every provider request:
+One run-local `withOmRequestPolicy()` wrapper covers both `stream` and
+`streamSimple` of the selected Pi API. For every logical provider call it
+preserves the resolved `apiKey` and caller `signal`, then applies:
 
 ```text
-apiKey, signal, timeoutMs,
-maxTokens = model.max_output_tokens,
+timeoutMs = min(model timeout, remaining Scene deadline),
+maxTokens = min(caller maxTokens or model maxTokens, model maxTokens),
 maxRetries = model.max_attempts - 1,
 maxRetryDelayMs bounded by the remaining Scene deadline,
+fetch = one run-local counting fetch,
 temperature and samplingParams from the table
 ```
 
-Pi's OpenAI adapters disable SDK retries and apply this explicit retry count,
-so `max_attempts` remains the total provider-attempt ceiling. The same bounded
-provider wrapper is used by main Agent turns and compaction. Pi's additional
-outer compaction retry is disabled, preventing nested retries from exceeding
-that ceiling. Retry callbacks emit only attempt counts and safe categories,
-never provider error text.
+The caller's smaller `maxTokens` is preserved so Pi compaction can use its
+summary reserve instead of being expanded to the normal answer ceiling. Pi's
+OpenAI adapters disable SDK retries and apply their own interruptible
+`retryProviderRequest()` with the supplied `maxRetries`, so `max_attempts`
+remains the total HTTP-attempt ceiling. Pi exposes no callback or assistant
+field carrying that attempt count. The counting `fetch` increments immediately
+before every delegated HTTP request; because V1 model calls and compaction are
+sequential, one active per-call counter is sufficient. It resets for each
+logical stream, is read when that assistant/compaction completes, and feeds the
+normalized counters in section 5.3. It never records a URL, headers, body, key,
+or provider error text.
+
+The same request-policy wrapper is used by main Agent turns and compaction.
+Pi's additional outer compaction retry remains disabled, preventing nested
+retries from exceeding the configured provider ceiling. A retry exhaustion or
+pre-response failure closes the active counter before returning the safe error.
 
 ### 14.4 Provider response and error normalization
 
 Pi owns native tool-call parsing and streaming. Node counts usage once per
 completed assistant message and reports only non-negative finite token fields.
 `run.final.usage` is the sum of main turns plus committed compaction calls;
-Host events distinguish `usage` for a turn from `usage_total` for the run.
+each `model_turn_completed` carries the per-call request count, cumulative
+retry count, current usage, and cumulative usage defined in section 5.3. Host
+events therefore distinguish `usage` for a turn from `usage_total` for the run.
 Cost and reasoning tokens are not emitted in V1.
 
 Final Pi stop reasons map as follows:
@@ -1837,11 +1927,38 @@ Final Pi stop reasons map as follows:
 | Pi stop reason | OM process outcome |
 |---|---|
 | `stop` | answered when final text is non-empty |
-| `length` | one Pi continuation while budget remains; otherwise the accumulated non-empty text is answered with `termination_reason:length` |
+| `length` | at most one normalized follow-up continuation under the rule below; otherwise accumulated non-empty text is answered with `termination_reason:length` |
 | `toolUse` | normal loop continuation |
 | `aborted` | cancelled only after an accepted Host cancel; otherwise model error |
 | `error` | `MODEL_ERROR` |
 | `deferred` | `MODEL_ERROR`; deferred mode is not enabled |
+
+Pi does not automatically continue a truncated assistant message, and
+`Agent.continue()` rejects an assistant as the last transcript message. S4
+therefore uses the existing `Agent.followUp()` queue, not `Agent.continue()`:
+
+1. `prepareNextTurn()` may schedule a continuation only when the first
+   `length` assistant contains non-empty text and no tool call, no continuation
+   has been used, one assistant-turn slot remains, and the final-answer time
+   reserve has not been reached.
+2. It queues exactly one synthetic user message: `Continue exactly where the
+   previous answer stopped. Do not repeat earlier text. Return only the
+   continuation.` It returns the next-turn context with `tools: []`.
+3. The follow-up consumes the normal iteration and deadline budgets. A second
+   `length` response is not continued again. An error or abort during the
+   follow-up remains an error or accepted cancellation; partial text is not
+   committed after a failed continuation.
+4. Before `validatedTurnSuffix()` and `run.proposed`, one private normalizer
+   recognizes only the exact sequence `original user -> length assistant ->
+   synthetic user -> final assistant`. It removes the synthetic user and
+   replaces both assistants with one canonical assistant whose text is the two
+   text fragments concatenated without a delimiter, whose stop reason and
+   provider identity come from the final assistant, and whose non-negative
+   usage fields are summed.
+5. Per-physical-turn lifecycle events and counters remain visible, but
+   `run.final` and Pi Session receive only the normalized original-user/final-
+   assistant group. The synthetic instruction can never enter durable history
+   or future context.
 
 Use Pi's `isRetryableAssistantError()` only to set the safe retryable Boolean.
 The public message is fixed by category (`model authentication failed`, `model
@@ -1866,14 +1983,51 @@ body:
    next provider request correctly;
 7. timeout, retryable 429/5xx, non-retryable auth failure, malformed stream,
    abort, and retry exhaustion map to the closed safe result;
-8. `max_attempts` is the observed request ceiling and usage is counted once;
-9. missing/invalid `context_window_tokens` fails before spawn; valid values
-   below, equal to, and above the Scene cap produce
-   `min(model.contextWindow, limits.max_context_tokens)` as the effective
-   context budget;
-10. `assistant model add` requires and round-trips the declared capability, and
-    build-assistant preserves it in resolved `assistant.llm`;
-11. captured payloads and emitted events contain no `OM_PI_MODEL_API_KEY` value.
+8. keyed profiles resolve only the fake `OM_PI_MODEL_API_KEY`, Ollama uses only
+   the fixed process-local non-secret sentinel resolver, and no provider loads
+   a builtin catalog or stored login;
+9. the loopback server's request count, each event's `attempt_count`, cumulative
+   `model_retry_count`, and the `max_attempts` ceiling agree for successful,
+   retried, exhausted, and aborted requests;
+10. main-turn and compaction usage are each counted once, compaction uses the
+    same bounded request policy without an outer retry, and
+    `usage_total`/`run.final.usage` include both;
+11. one eligible `length` result performs exactly one tool-free follow-up,
+    joins text without a delimiter, sums usage, and persists no synthetic user;
+    a second `length`, failed continuation, insufficient budget, and resumed
+    Session each follow the rule in section 14.4;
+12. missing/invalid `context_window_tokens` and out-of-range timeout, output,
+    or direct `max_attempts` fail rather than clamp before spawn; valid context
+    values below, equal to, and above the Scene cap produce
+    `min(model.contextWindow, limits.max_context_tokens)` as the effective
+    context budget; local/channel accept only `debug:null`, while eval still
+    requires a closed fixture;
+13. `assistant model add` requires and round-trips the declared capability,
+    model list/current display it, and build-assistant preserves it in resolved
+    `assistant.llm` without adding an author-facing retry field;
+14. captured payloads and emitted events contain no `OM_PI_MODEL_API_KEY`
+    value; and
+15. current legacy local-harness/Host tests remain green and a source/diff
+    guard proves S4 did not replace `_resolve_model_runner()`, `ModelRunner`, or
+    `run_engine()`.
+
+Run the provider contract and every directly affected config consumer in the
+same S4 gate:
+
+```bash
+npm ci --ignore-scripts --prefix agent-runtime
+./.venv/bin/python -m pytest -q \
+  tests/test_pi_agent_process.py \
+  tests/test_config_yaml.py \
+  tests/test_validate_config_notifications.py \
+  tests/test_cli_operator_commands.py \
+  tests/test_assistant_diagnostics.py \
+  tests/test_copilot_p1_eval.py \
+  tests/test_agent_plugin_smoke.py \
+  tests/test_inbound_control.py \
+  tests/test_inbound_feishu_ws.py \
+  tests/test_copilot_phase1.py
+```
 
 Live provider calls are not part of automated S4. One read-only live canary per
 configured production provider is a separate, explicit acceptance action
@@ -1893,6 +2047,7 @@ Modify:
 ```text
 src/application/copilot/host.py
 src/application/copilot/local_harness.py
+src/application/copilot/model_config.py
 src/application/copilot/host_store.py
 src/application/copilot/event_store.py
 src/interfaces/cli/copilot_ops.py
@@ -1919,6 +2074,25 @@ opaque session_key
 control preview specs
 resume source and recovered observations
 ```
+
+At this S5 boundary, `local_harness._resolve_model_runner()` becomes
+`_resolve_pi_model()` with the existing precedence:
+
+```text
+eval model_turn_json
+or explicit model_config_json
+or assistant_config_path
+or MODEL_REQUIRED
+```
+
+The eval script is converted mechanically to the existing
+`debug.fixture_turns`. The two configured sources return validated
+`PiModelSettings` rather than a Python callable. A new private
+`_resolve_model_api_key()` in `model_config.py` reuses `resolve_secret()` and
+returns the credential only to `local_harness.py`, which places it in the
+allowlisted child environment as `OM_PI_MODEL_API_KEY`. Ollama returns no
+credential. Neither helper puts a secret in the process payload, contract,
+decision trace, event, Session, or exception text.
 
 `run_contract()` keeps contract validation, `start_run()`, Scene construction,
 tool projection, cancellation checks, result admission, final event, and
