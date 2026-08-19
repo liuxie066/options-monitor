@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ sys.path.insert(0, str(REPO))
 
 from src.infrastructure.pi_agent_process import (  # noqa: E402
     _runtime_command,
+    derive_pi_session_id,
     run_pi_agent,
 )
 from src.infrastructure import pi_agent_process as pi_process  # noqa: E402
@@ -94,6 +96,169 @@ def _tool_turn(
             }
         ]
     }
+
+
+def _session_env(database: Path) -> dict[str, str]:
+    environ = dict(os.environ)
+    environ["OM_PI_SESSION_DB"] = str(database)
+    return environ
+
+
+def _run_session(
+    database: Path,
+    session_id: str,
+    payload: dict,
+    *,
+    decision: str = "commit",
+    run_id: str = "run_session",
+    **kwargs,
+):
+    return run_pi_agent(
+        payload,
+        request_id=f"req_{run_id}",
+        run_id=run_id,
+        timeout_seconds=payload["limits"]["timeout_seconds"],
+        on_proposed=lambda _payload: decision,
+        environ=_session_env(database),
+        **kwargs,
+    )
+
+
+def _session_entries(database: Path, session_id: str) -> list[dict]:
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT seq, id, parent_id, type, payload FROM entries "
+            "WHERE session_id = ? ORDER BY seq",
+            (session_id,),
+        ).fetchall()
+    return [
+        {
+            "seq": seq,
+            "id": entry_id,
+            "parent_id": parent_id,
+            "type": type_,
+            "payload": json.loads(payload),
+        }
+        for seq, entry_id, parent_id, type_, payload in rows
+    ]
+
+
+def _set_latest_assistant_usage(
+    database: Path, session_id: str, total_tokens: int
+) -> None:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT id, payload FROM entries "
+            "WHERE session_id = ? AND type = 'message' ORDER BY seq DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        assert row is not None
+        entry_id, encoded = row
+        payload = json.loads(encoded)
+        assert payload["message"]["role"] == "assistant"
+        payload["message"]["usage"] = {
+            "input": total_tokens,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": total_tokens,
+            "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0,
+            },
+        }
+        connection.execute(
+            "UPDATE entries SET payload = ? WHERE session_id = ? AND id = ?",
+            (json.dumps(payload), session_id, entry_id),
+        )
+
+
+def _read_child_record(process, buffer: bytearray, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    while b"\n" not in buffer:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("timed out waiting for Node record")
+        ready, _, _ = select.select([process.stdout], [], [], remaining)
+        if not ready:
+            raise AssertionError("timed out waiting for Node record")
+        chunk = os.read(process.stdout.fileno(), 65536)
+        if not chunk:
+            stderr = process.stderr.read().decode(errors="replace")
+            raise AssertionError(f"Node exited before expected record: {stderr}")
+        buffer.extend(chunk)
+    line, _, remainder = buffer.partition(b"\n")
+    buffer[:] = remainder
+    return json.loads(line)
+
+
+def _write_child_record(process, identity, seq, type_, payload):
+    record = {
+        "protocol": "om-pi-ipc.v1",
+        "type": type_,
+        **identity,
+        "seq": seq,
+        "payload": payload,
+    }
+    process.stdin.write((json.dumps(record) + "\n").encode())
+    process.stdin.flush()
+
+
+def _start_node_until_proposed(database, payload, run_id):
+    command, entry = _runtime_command(None, None)
+    identity = {"request_id": f"req_{run_id}", "run_id": run_id}
+    process = subprocess.Popen(
+        command,
+        cwd=entry.parent.parent,
+        env=_session_env(database),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    _write_child_record(process, identity, 1, "run.start", payload)
+    buffer = bytearray()
+    next_seq = 2
+    try:
+        while True:
+            record = _read_child_record(process, buffer)
+            if record["type"] == "tool.call":
+                call = record["payload"]
+                _write_child_record(
+                    process,
+                    identity,
+                    next_seq,
+                    "tool.result",
+                    {
+                        "call_id": call["call_id"],
+                        "tool_name": call["tool_name"],
+                        "observation": {"ok": True, "source": run_id},
+                    },
+                )
+                next_seq += 1
+            elif record["type"] == "run.proposed":
+                return process, identity, next_seq
+            elif record["type"] == "run.error":
+                process.wait(timeout=2)
+                stderr = process.stderr.read().decode(errors="replace")
+                raise AssertionError((record, stderr))
+    except Exception:
+        process.kill()
+        process.wait(timeout=2)
+        raise
+
+
+def _lease_expiration(database: Path, session_id: str) -> int:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT expires_at_ms FROM writer_leases WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    assert row is not None
+    return row[0]
 
 
 def _wait_for_tool_slot(expected: bool, timeout: float = 2.0) -> bool:
@@ -442,6 +607,26 @@ def test_invalid_start_payload_rejected():
     )
     assert result["ok"] is False
     assert result["error"]["code"] == "CONFIG_ERROR"
+
+
+@pytest.mark.parametrize(
+    "debug",
+    [
+        {"fixture_response": "hello"},
+        {"fixture_turns": [{"text": "hello"}]},
+    ],
+)
+def test_missing_fixture_delay_is_rejected(debug):
+    result = run_pi_agent(
+        _start_payload(debug=debug),
+        request_id="req_missing_delay",
+        run_id="run_missing_delay",
+        timeout_seconds=60,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert result["error"]["stage"] == "config"
 
 
 def test_timeout_mismatch_rejected():
@@ -1040,3 +1225,913 @@ def test_budget_exhaustion_without_text_is_not_a_successful_answer():
         "retryable": False,
     }
     assert len(calls) == 1
+
+
+def test_session_id_is_sender_and_authority_scoped():
+    first = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+
+    assert first == derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    assert first.startswith("om_") and len(first) == 67
+    assert first != derive_pi_session_id("feishu", "sender-b", "group-1", "key:us")
+    assert first != derive_pi_session_id("feishu", "sender-a", "group-1", "key:hk")
+    assert first != derive_pi_session_id(
+        "feishu", "sender-a", "group-1", "path:" + "a" * 64
+    )
+    with pytest.raises(ValueError):
+        derive_pi_session_id("feishu", "", "group-1", "key:us")
+    with pytest.raises(ValueError):
+        derive_pi_session_id("feishu\0other", "sender-a", "group-1", "key:us")
+
+
+def test_persisted_session_continuity_and_scope_isolation(tmp_path):
+    database = tmp_path / "pi_sessions.sqlite3"
+    session_a = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    first_question = "unique-first-question"
+    first_answer = "unique-first-answer"
+    first_observation = "unique-first-tool-observation"
+    first_payload = _tool_payload(
+        [_tool_turn(arguments={"index": 1}), {"text": first_answer}],
+        session_id=session_a,
+        user_message=first_question,
+    )
+
+    first = _run_session(
+        database,
+        session_a,
+        first_payload,
+        run_id="turn_1",
+        on_tool_call=lambda _call: {"ok": True, "value": first_observation},
+    )
+    second = _run_session(
+        database,
+        session_a,
+        _start_payload(
+            session_id=session_a,
+            user_message="second-question",
+            debug={
+                "fixture_response": "second-answer",
+                "delay_ms": 0,
+                "expected_history": [
+                    first_question,
+                    first_observation,
+                    first_answer,
+                ],
+            },
+        ),
+        run_id="turn_2",
+    )
+
+    assert first["ok"] is True and first["result"]["committed"] is True
+    assert second["ok"] is True and second["result"]["committed"] is True
+
+    isolated_ids = [
+        derive_pi_session_id("feishu", "sender-b", "group-1", "key:us"),
+        derive_pi_session_id("feishu", "sender-a", "group-1", "key:hk"),
+        derive_pi_session_id(
+            "feishu", "sender-a", "group-1", "path:" + "a" * 64
+        ),
+    ]
+    for index, isolated_id in enumerate(isolated_ids):
+        result = _run_session(
+            database,
+            isolated_id,
+            _start_payload(
+                session_id=isolated_id,
+                user_message=f"isolated-{index}",
+                debug={
+                    "fixture_response": "isolated-answer",
+                    "delay_ms": 0,
+                    "forbidden_history": [
+                        first_question,
+                        first_observation,
+                        first_answer,
+                    ],
+                },
+            ),
+            run_id=f"isolated_{index}",
+        )
+        assert result["ok"] is True
+
+
+def test_persisted_session_survives_runtime_cwd_change(tmp_path):
+    database = tmp_path / "pi_sessions.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    runtime = REPO / "agent-runtime" / "main.ts"
+    entries = []
+    for release in ("release-a", "release-b"):
+        release_dir = tmp_path / release
+        release_dir.mkdir()
+        entry = release_dir / "main.ts"
+        entry.symlink_to(runtime)
+        entries.append(entry)
+
+    first = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="before-upgrade",
+            debug={"fixture_response": "before-upgrade-answer", "delay_ms": 0},
+        ),
+        run_id="before_upgrade",
+        runtime_entry=entries[0],
+    )
+    second = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="after-upgrade",
+            debug={
+                "fixture_response": "after-upgrade-answer",
+                "delay_ms": 0,
+                "expected_history": ["before-upgrade", "before-upgrade-answer"],
+            },
+        ),
+        run_id="after_upgrade",
+        runtime_entry=entries[1],
+    )
+
+    assert first["ok"] is True and first["result"]["committed"] is True
+    assert second["ok"] is True and second["result"]["committed"] is True
+
+
+def test_transient_eval_run_does_not_create_session_database(tmp_path):
+    database = tmp_path / "pi_sessions.sqlite3"
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_transient",
+        run_id="run_transient",
+        timeout_seconds=60,
+        on_proposed=lambda _payload: "commit",
+        environ=_session_env(database),
+    )
+
+    assert result["ok"] is True
+    assert database.exists() is False
+
+
+def test_only_admitted_turn_messages_are_persisted(tmp_path):
+    database = tmp_path / "pi_sessions.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    runtime_secret = "ephemeral-control-snapshot"
+    recovered_secret = "ephemeral-recovered-observation"
+    committed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="committed-question",
+            runtime_context=[{"role": "system", "content": runtime_secret}],
+            recovered_observations=[{"summary": recovered_secret}],
+            debug={"fixture_response": "committed-answer", "delay_ms": 0},
+        ),
+        run_id="committed",
+    )
+    baseline = _session_entries(database, session_id)
+
+    discarded = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="discarded-question",
+            debug={"fixture_response": "discarded-answer", "delay_ms": 0},
+        ),
+        decision="discard",
+        run_id="discarded",
+    )
+
+    started = time.monotonic()
+    cancelled = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="cancelled-question",
+            debug={"fixture_response": "cancelled-answer", "delay_ms": 5_000},
+        ),
+        run_id="cancelled",
+        is_cancelled=lambda: time.monotonic() - started > 0.2,
+    )
+    failed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="failed-question",
+            debug={"fixture_response": "", "delay_ms": 0},
+        ),
+        run_id="failed",
+    )
+    after = _session_entries(database, session_id)
+    persisted = json.dumps(after, ensure_ascii=False)
+
+    assert committed["ok"] is True
+    assert discarded["ok"] is True and discarded["result"]["committed"] is False
+    assert cancelled["ok"] is True and cancelled["result"]["status"] == "cancelled"
+    assert failed["ok"] is False and failed["error"]["code"] == "MODEL_ERROR"
+    assert after == baseline
+    for forbidden in (
+        runtime_secret,
+        recovered_secret,
+        "discarded-question",
+        "discarded-answer",
+        "cancelled-question",
+        "cancelled-answer",
+        "failed-question",
+    ):
+        assert forbidden not in persisted
+
+
+def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
+    cases = []
+    for appended_messages in range(1, 5):
+        database = tmp_path / f"partial_{appended_messages}.sqlite3"
+        session_id = derive_pi_session_id(
+            "feishu", f"sender-{appended_messages}", "group-1", "key:us"
+        )
+        baseline_question = f"baseline-question-{appended_messages}"
+        baseline_answer = f"baseline-answer-{appended_messages}"
+        assert _run_session(
+            database,
+            session_id,
+            _start_payload(
+                session_id=session_id,
+                user_message=baseline_question,
+                debug={"fixture_response": baseline_answer, "delay_ms": 0},
+            ),
+            run_id=f"baseline_{appended_messages}",
+        )["ok"]
+        baseline = _session_entries(database, session_id)
+        baseline_marker = baseline[-1]["id"]
+        partial_question = f"partial-question-{appended_messages}"
+        partial_answer = f"partial-answer-{appended_messages}"
+        payload = _tool_payload(
+            [_tool_turn(arguments={"index": appended_messages}), {"text": partial_answer}],
+            session_id=session_id,
+            user_message=partial_question,
+        )
+        payload["debug"]["persist_delay_ms"] = 750
+        process, identity, seq = _start_node_until_proposed(
+            database, payload, f"partial_{appended_messages}"
+        )
+        _write_child_record(process, identity, seq, "run.commit", {})
+
+        target = len(baseline) + appended_messages
+        deadline = time.monotonic() + 10
+        while len(_session_entries(database, session_id)) < target:
+            if time.monotonic() >= deadline:
+                process.kill()
+                raise AssertionError(f"append point {appended_messages} was not reached")
+            time.sleep(0.02)
+        process.kill()
+        process.wait(timeout=2)
+        cases.append(
+            (
+                database,
+                session_id,
+                baseline_marker,
+                baseline_question,
+                baseline_answer,
+                partial_question,
+                partial_answer,
+            )
+        )
+
+    compact_database = tmp_path / "compaction_crash.sqlite3"
+    compact_session = derive_pi_session_id(
+        "feishu", "compaction-crash", "group-1", "key:us"
+    )
+    old_question = "old-question-" + "q" * 16_000
+    old_answer = "old-answer-" + "a" * 16_000
+    assert _run_session(
+        compact_database,
+        compact_session,
+        _start_payload(
+            session_id=compact_session,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id="compact_seed",
+    )["ok"]
+    compact_before = _session_entries(compact_database, compact_session)
+    crash_question = "crashed-after-compaction"
+    crash_payload = _start_payload(
+        session_id=compact_session,
+        user_message=crash_question,
+        model={
+            **_start_payload()["model"],
+            "context_window_tokens": 8_000,
+        },
+        limits={**_start_payload()["limits"], "max_context_tokens": 8_000},
+        debug={
+            "fixture_response": "uncommitted-after-compaction",
+            "delay_ms": 0,
+            "compaction_response": "compact-crash-summary",
+        },
+    )
+    compact_process, _, _ = _start_node_until_proposed(
+        compact_database, crash_payload, "compact_crash"
+    )
+    compact_process.kill()
+    compact_process.wait(timeout=2)
+    compact_after = _session_entries(compact_database, compact_session)
+
+    assert [entry["type"] for entry in compact_after[len(compact_before) :]] == [
+        "compaction",
+        "custom",
+    ]
+    assert crash_question not in json.dumps(compact_after, ensure_ascii=False)
+    busy = _run_session(
+        compact_database,
+        compact_session,
+        _start_payload(
+            session_id=compact_session,
+            debug={"fixture_response": "busy", "delay_ms": 0},
+        ),
+        run_id="busy_before_ttl",
+    )
+    assert busy == {
+        "ok": False,
+        "error": {
+            "code": "SESSION_ERROR",
+            "stage": "session",
+            "message": "session is temporarily busy",
+            "retryable": True,
+        },
+    }
+
+    expirations = [
+        _lease_expiration(database, session_id)
+        for database, session_id, *_ in cases
+    ]
+    expirations.append(_lease_expiration(compact_database, compact_session))
+    time.sleep(max(0, max(expirations) / 1000 - time.time()) + 0.2)
+
+    for (
+        database,
+        session_id,
+        baseline_marker,
+        baseline_question,
+        baseline_answer,
+        partial_question,
+        partial_answer,
+    ) in cases:
+        recovered_question = f"recovery-question-{session_id[-4:]}"
+        recovered = _run_session(
+            database,
+            session_id,
+            _start_payload(
+                session_id=session_id,
+                user_message=recovered_question,
+                debug={
+                    "fixture_response": "recovered-answer",
+                    "delay_ms": 0,
+                    "expected_history": [baseline_question, baseline_answer],
+                    "forbidden_history": [partial_question, partial_answer],
+                },
+            ),
+            run_id=f"recovered_{session_id[-4:]}",
+        )
+        assert recovered["ok"] is True, recovered
+        recovered_entry = next(
+            entry
+            for entry in _session_entries(database, session_id)
+            if recovered_question in json.dumps(entry["payload"], ensure_ascii=False)
+        )
+        assert recovered_entry["parent_id"] == baseline_marker
+
+    compact_recovered = _run_session(
+        compact_database,
+        compact_session,
+        _start_payload(
+            session_id=compact_session,
+            user_message="after-compaction-crash",
+            model={
+                **_start_payload()["model"],
+                "context_window_tokens": 8_000,
+            },
+            limits={**_start_payload()["limits"], "max_context_tokens": 8_000},
+            debug={
+                "fixture_response": "recovered-after-compaction",
+                "delay_ms": 0,
+                "expected_history": ["compact-crash-summary", old_answer],
+                "forbidden_history": [old_question, crash_question],
+            },
+        ),
+        run_id="compact_recovered",
+    )
+    assert compact_recovered["ok"] is True
+
+
+@pytest.mark.parametrize("decision", ["discard", "cancel"])
+def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decision):
+    database = tmp_path / f"compaction_{decision}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"sender-{decision}", "group-1", "key:us"
+    )
+    old_question = "checkpoint-old-question-" + "q" * 16_000
+    old_answer = "checkpoint-old-answer-" + "a" * 16_000
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id=f"seed_{decision}",
+    )["ok"]
+    before = _session_entries(database, session_id)
+    rejected_question = f"rejected-{decision}-question"
+    rejected = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=rejected_question,
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": f"rejected-{decision}-answer",
+                "delay_ms": 0,
+                "compaction_response": f"summary-{decision}",
+                "expected_history": [f"summary-{decision}", old_answer],
+                "forbidden_history": [old_question],
+            },
+        ),
+        decision=decision,
+        run_id=f"reject_{decision}",
+    )
+    after = _session_entries(database, session_id)
+
+    assert rejected["ok"] is True, rejected
+    assert rejected["result"]["committed"] is False
+    assert [entry["type"] for entry in after[len(before) :]] == [
+        "compaction",
+        "custom",
+    ]
+    assert after[-1]["payload"]["data"]["kind"] == "compaction"
+    assert rejected_question not in json.dumps(after, ensure_ascii=False)
+
+    followup = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=f"followup-{decision}",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "followup-answer",
+                "delay_ms": 0,
+                "expected_history": [f"summary-{decision}", old_answer],
+                "forbidden_history": [old_question, rejected_question],
+            },
+        ),
+        run_id=f"followup_{decision}",
+    )
+    assert followup["ok"] is True
+
+
+def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
+    database = tmp_path / "compaction_tool.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    old_question = "tool-old-question-" + "q" * 16_000
+    old_answer = "tool-old-answer-" + "a" * 16_000
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id="tool_seed",
+    )["ok"]
+    before = _session_entries(database, session_id)
+    current_question = "current-tool-question"
+    observation = {"ok": True, "value": "current-tool-observation"}
+    payload = _tool_payload(
+        [_tool_turn(arguments={"index": 7}), {"text": "current-tool-answer"}],
+        session_id=session_id,
+        user_message=current_question,
+        model=model,
+        limits=limits,
+    )
+    payload["debug"].update(
+        {
+            "compaction_response": "tool-compaction-summary",
+            "expected_history": ["tool-compaction-summary", old_answer],
+            "forbidden_history": [old_question],
+        }
+    )
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="tool_compacted",
+        on_tool_call=lambda _call: observation,
+    )
+    appended = _session_entries(database, session_id)[len(before) :]
+
+    assert result["ok"] is True, result
+    assert [entry["type"] for entry in appended] == [
+        "compaction",
+        "custom",
+        "message",
+        "message",
+        "message",
+        "message",
+        "custom",
+    ]
+    compaction = appended[0]["payload"]
+    assert "tool-compaction-summary" in compaction["summary"]
+    assert old_answer in json.dumps(compaction["retainedTail"], ensure_ascii=False)
+    assert compaction["tokensBefore"] > 0
+    assert isinstance(compaction["usage"], dict)
+    assert appended[1]["payload"]["data"]["kind"] == "compaction"
+    roles = [entry["payload"]["message"]["role"] for entry in appended[2:6]]
+    assert roles == ["user", "assistant", "toolResult", "assistant"]
+    assert current_question in json.dumps(appended[2:], ensure_ascii=False)
+    assert observation["value"] in json.dumps(appended[2:], ensure_ascii=False)
+    assert appended[-1]["payload"]["data"]["kind"] == "turn"
+    assert {entry["type"] for entry in _session_entries(database, session_id)} <= {
+        "message",
+        "compaction",
+        "custom",
+    }
+    assert all(
+        entry["payload"]["customType"] == "om.turn.commit.v1"
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "custom"
+    )
+
+
+def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
+    database = tmp_path / "failed_compaction.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    old_question = "failed-old-question-" + "q" * 16_000
+    old_answer = "failed-old-answer-" + "a" * 16_000
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id="failed_seed",
+    )["ok"]
+    before = _session_entries(database, session_id)
+
+    failed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="failed-current-question",
+            model=model,
+            limits=limits,
+            debug={"fixture_response": "unused", "delay_ms": 0},
+        ),
+        run_id="failed_compaction",
+    )
+    assert failed == {
+        "ok": False,
+        "error": {
+            "code": "SESSION_ERROR",
+            "stage": "session",
+            "message": "session context compaction failed",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == before
+
+    recovered = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="recovered-current-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "recovered-current-answer",
+                "delay_ms": 0,
+                "compaction_response": "recovered-summary",
+                "expected_history": ["recovered-summary", old_answer],
+                "forbidden_history": [old_question, "failed-current-question"],
+            },
+        ),
+        run_id="recovered_compaction",
+    )
+    assert recovered["ok"] is True, recovered
+
+
+@pytest.mark.parametrize(
+    ("shape", "compaction_response"),
+    [("boundary", ""), ("split", " \n\t")],
+)
+def test_blank_compaction_completion_keeps_previous_committed_branch(
+    tmp_path, shape, compaction_response
+):
+    database = tmp_path / f"blank_compaction_{shape}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"blank-{shape}", "group-1", "key:us"
+    )
+    if shape == "boundary":
+        committed_turns = [
+            ("boundary-first-question-" + "q" * 6_000, "boundary-first-answer-" + "a" * 6_000),
+            ("boundary-last-question-" + "q" * 6_000, "boundary-last-answer-" + "a" * 6_000),
+        ]
+    else:
+        committed_turns = [
+            ("split-question-" + "q" * 16_000, "split-answer-" + "a" * 16_000),
+        ]
+    for index, (question, answer) in enumerate(committed_turns):
+        assert _run_session(
+            database,
+            session_id,
+            _start_payload(
+                session_id=session_id,
+                user_message=question,
+                debug={"fixture_response": answer, "delay_ms": 0},
+            ),
+            run_id=f"blank_{shape}_seed_{index}",
+        )["ok"]
+    before = _session_entries(database, session_id)
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+
+    failed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=f"blank-{shape}-current-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "must-not-run",
+                "delay_ms": 0,
+                "compaction_response": compaction_response,
+            },
+        ),
+        run_id=f"blank_{shape}_failed",
+    )
+
+    assert failed == {
+        "ok": False,
+        "error": {
+            "code": "SESSION_ERROR",
+            "stage": "session",
+            "message": "session context compaction failed",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == before
+
+    recovered = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=f"blank-{shape}-recovery-question",
+            debug={
+                "fixture_response": "recovered-answer",
+                "delay_ms": 0,
+                "expected_history": [
+                    item for turn in committed_turns for item in turn
+                ],
+                "forbidden_history": [f"blank-{shape}-current-question"],
+            },
+        ),
+        run_id=f"blank_{shape}_recovered",
+    )
+    assert recovered["ok"] is True, recovered
+
+
+def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path):
+    database = tmp_path / "oversized_compaction.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "oversized-compaction", "group-1", "key:us"
+    )
+    old_question = "oversized-question"
+    old_answer = "oversized-answer-" + "a" * 30_000
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id="oversized_seed",
+    )["ok"]
+    before = _session_entries(database, session_id)
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+
+    failed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="oversized-current-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "must-not-run",
+                "delay_ms": 0,
+                "compaction_response": "oversized-summary",
+            },
+        ),
+        run_id="oversized_failed",
+    )
+
+    assert failed == {
+        "ok": False,
+        "error": {
+            "code": "SESSION_ERROR",
+            "stage": "session",
+            "message": "compacted context exceeds configured budget",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == before
+
+    recovered = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="oversized-recovery-question",
+            debug={
+                "fixture_response": "oversized-recovery-answer",
+                "delay_ms": 0,
+                "expected_history": [old_question, old_answer],
+                "forbidden_history": ["oversized-current-question"],
+            },
+        ),
+        run_id="oversized_recovered",
+    )
+    assert recovered["ok"] is True, recovered
+
+
+def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
+    database = tmp_path / "provider_usage_compaction.sqlite3"
+    session_id = derive_pi_session_id("feishu", "provider-usage", "group-1", "key:us")
+    old_question = "provider-usage-question-" + "q" * 16_000
+    old_answer = "provider-usage-answer-" + "a" * 16_000
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=old_question,
+            debug={"fixture_response": old_answer, "delay_ms": 0},
+        ),
+        run_id="provider_usage_seed",
+    )["ok"]
+    _set_latest_assistant_usage(database, session_id, 7_000)
+
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
+    compacted = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="provider-usage-current-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "provider-usage-current-answer",
+                "delay_ms": 0,
+                "compaction_response": "provider-usage-summary",
+                "expected_history": ["provider-usage-summary", old_answer],
+                "forbidden_history": [old_question],
+            },
+        ),
+        run_id="provider_usage_compacted",
+    )
+    assert compacted["ok"] is True, compacted
+    compaction_count = sum(
+        entry["type"] == "compaction"
+        for entry in _session_entries(database, session_id)
+    )
+
+    followup = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="provider-usage-followup-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "provider-usage-followup-answer",
+                "delay_ms": 0,
+                "expected_history": [
+                    "provider-usage-summary",
+                    old_answer,
+                    "provider-usage-current-question",
+                    "provider-usage-current-answer",
+                ],
+                "forbidden_history": [old_question],
+            },
+        ),
+        run_id="provider_usage_followup",
+    )
+
+    assert followup["ok"] is True, followup
+    assert sum(
+        entry["type"] == "compaction"
+        for entry in _session_entries(database, session_id)
+    ) == compaction_count
+
+    _set_latest_assistant_usage(database, session_id, 7_000)
+    measured = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="provider-usage-measured-question",
+            model=model,
+            limits=limits,
+            debug={
+                "fixture_response": "provider-usage-measured-answer",
+                "delay_ms": 0,
+                "compaction_response": "provider-usage-measured-summary",
+            },
+        ),
+        run_id="provider_usage_measured",
+    )
+
+    assert measured["ok"] is True, measured
+    assert sum(
+        entry["type"] == "compaction"
+        for entry in _session_entries(database, session_id)
+    ) == compaction_count + 1
+
+
+def test_session_storage_errors_are_safe(tmp_path):
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
+    payload = _start_payload(session_id=session_id)
+    missing_env = dict(os.environ)
+    missing_env.pop("OM_PI_SESSION_DB", None)
+    missing = run_pi_agent(
+        payload,
+        request_id="req_missing_db",
+        run_id="missing_db",
+        timeout_seconds=60,
+        environ=missing_env,
+    )
+
+    corrupt_database = tmp_path / "corrupt.sqlite3"
+    corrupt_database.write_bytes(b"not sqlite")
+    corrupt = _run_session(
+        corrupt_database,
+        session_id,
+        payload,
+        run_id="corrupt_db",
+    )
+
+    metadata_database = tmp_path / "metadata.sqlite3"
+    assert _run_session(
+        metadata_database,
+        session_id,
+        payload,
+        run_id="metadata_seed",
+    )["ok"]
+    with sqlite3.connect(metadata_database) as connection:
+        connection.execute(
+            "UPDATE sessions SET metadata = ? WHERE id = ?",
+            (json.dumps({"schema": "unknown"}), session_id),
+        )
+    metadata = _run_session(
+        metadata_database,
+        session_id,
+        payload,
+        run_id="bad_metadata",
+    )
+
+    for result in (missing, corrupt, metadata):
+        assert result == {
+            "ok": False,
+            "error": {
+                "code": "SESSION_ERROR",
+                "stage": "session",
+                "message": "session storage is unavailable",
+                "retryable": False,
+            },
+        }
+        assert str(tmp_path) not in json.dumps(result)

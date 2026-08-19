@@ -594,7 +594,7 @@ bounded, tagged blocks for items 2 and 3. It then loads item 4 into
 system prompt is rebuilt every run and never persisted. Current tool facts and
 pending operations always outrank remembered conversation text.
 
-Use Pi's exported `estimateContextTokens`, `shouldCompact`,
+Use Pi's exported `estimateContextTokens`, `estimateTokens`, `shouldCompact`,
 `prepareCompaction`, and `compact` functions. The adapter decides when to call
 them and persists the returned compaction entry; it must not implement another
 summarization algorithm. OM supplies fixed financial-conversation compaction
@@ -1557,16 +1557,18 @@ Python. The Session receives no Host event or outbox data.
 
 ### 13.5 Compaction policy
 
-Before prompting, Node estimates committed history with
-`estimateContextTokens()`, the effective system prompt with Pi AI's
-`estimateTextTokens()`, and the current user message with `estimateTokens()`.
-It computes:
+Before prompting, Node normally estimates committed history with
+`estimateContextTokens()`. After a compaction, retained assistant usage still
+describes the replaced prefix, so Node sums Pi's `estimateTokens()` across the
+rebuilt context until an assistant committed after that checkpoint supplies
+fresh non-zero provider usage. The effective system prompt and current user
+message also use `estimateTokens()`. It computes:
 
 ```text
 context_window = min(model.contextWindow, limits.max_context_tokens)
-fixed_input_tokens = estimateTextTokens(effective_system_prompt)
+fixed_input_tokens = estimateTokens(effective_system_prompt)
                    + estimateTokens(current_user_message)
-history_tokens = estimateContextTokens(committed_history).tokens
+history_tokens = provider-aware estimate, or structural estimate after compaction
 context_tokens = fixed_input_tokens + history_tokens
 reserve_tokens = model.maxTokens
 usable_history_tokens = context_window - reserve_tokens - fixed_input_tokens
@@ -1583,14 +1585,23 @@ main run. Pi's outer compaction retry is disabled so it cannot multiply OM's
 provider attempt limit. OM's fixed custom instructions are those in section
 6.4.
 
-On success, Node constructs
+An empty or whitespace-only summarizer completion is a failure before Pi can
+compose a split-turn wrapper. Before publishing a successful result, Node
+builds the candidate context from the compaction summary and retained tail and
+uses Pi's structural per-message estimate. This prevents a retained assistant's
+pre-compaction provider usage from describing history that the summary already
+replaced. If the candidate still exceeds
+`context_window - reserve_tokens`, the run returns `SESSION_ERROR` without a
+Session write; it does not run a second compaction loop.
+
+After that preflight, Node constructs
 `{type:"compaction", ...compactResult.value}` and calls
 `Session.appendEntry(compactionEntry, "main")`, then appends
 `Session.appendCustomEntry("om.turn.commit.v1",
-{run_id, kind:"compaction"})`. It reloads through
-`buildSessionContext()` and rechecks the token estimate before prompting. If
-the compacted total still exceeds `context_window - reserve_tokens`, the run
-returns `SESSION_ERROR`; it does not run a second compaction loop.
+{run_id, kind:"compaction"})` and reloads through
+`buildSessionContext()`. Later turns continue with structural estimation until
+an assistant committed after this compaction supplies fresh non-zero provider
+usage; from that point the latest provider usage is authoritative again.
 
 This marker commits only the maintenance rewrite of history that was already
 committed before the current request. It remains valid if the later current
@@ -1648,6 +1659,12 @@ Focused tests use a temporary SQLite file and prove:
 13. forced child termination releases the Host lease but the Pi lease rejects a
     second writer before TTL, permits fenced takeover after TTL, and never
     requires Python to delete the writer row.
+14. empty and whitespace-only compaction completions at both a turn boundary
+    and a split turn write no checkpoint and leave the previous committed
+    branch recoverable;
+15. retained pre-compaction provider usage cannot reject or immediately repeat
+    a successful compaction, while fresh provider usage committed after the
+    checkpoint becomes authoritative for the next threshold decision.
 
 S3 exits when these tests pass repeatedly against the real pinned SQLite
 backend and inspecting the database shows only Pi entries plus the OM commit

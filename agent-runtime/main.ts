@@ -1,4 +1,5 @@
-// S2 Node runtime: one real Pi Agent run with sequential Host tools over
+// S3 Node runtime: one real Pi Agent run with durable Pi Session history and
+// sequential Host tools over
 // `om-pi-ipc.v1` JSONL stdio.
 //
 // Pinned to @earendil-works/pi-agent-core@0.84.2 and @earendil-works/pi-ai@0.84.2.
@@ -7,7 +8,22 @@
 // src/infrastructure/pi_agent_process.py.
 
 import process from "node:process";
-import { Agent } from "@earendil-works/pi-agent-core";
+import path from "node:path";
+import {
+  Agent,
+  SessionError,
+  buildSessionContext,
+  compact,
+  convertToLlm,
+  createCompactionSummaryMessage,
+  estimateContextTokens,
+  estimateTokens,
+  getLastAssistantUsage,
+  prepareCompaction,
+  shouldCompact,
+  uuidv7,
+} from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type {
   Api,
@@ -15,15 +31,37 @@ import type {
   AssistantMessageEventStream,
   Context,
   Model,
+  Models,
   StreamFn,
   Usage,
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type {
+  AgentEvent,
+  AgentMessage,
+  AgentTool,
+  Entry,
+  Session,
+} from "@earendil-works/pi-agent-core";
+import {
+  SqliteSessionRepository,
+  createNodeSqliteFactory,
+} from "@earendil-works/pi-session-backend-sqlite-node";
 
 const PROTOCOL = "om-pi-ipc.v1";
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_SAFE_MESSAGE_CHARS = 240;
 const MAX_FIXTURE_DELAY_MS = 300_000;
+const SESSION_ID_PATTERN = /^om_[0-9a-f]{64}$/;
+const SESSION_SCHEMA = "om-pi-session.v1";
+const TURN_COMMIT_TYPE = "om.turn.commit.v1";
+const WRITER_LEASE_TTL_MS = 30_000;
+const WRITER_HEARTBEAT_MS = 10_000;
+const COMPACTION_INSTRUCTIONS = [
+  "Preserve the user's investment goals and stable preferences.",
+  "Keep timestamps on historical claims and preserve unresolved questions and Control references.",
+  "Never present remembered financial facts as current facts.",
+  "Omit coding and file-operation guidance.",
+].join(" ");
 
 const ALLOWED_ERROR_CODES = new Set([
   "PROTOCOL_ERROR",
@@ -71,6 +109,20 @@ interface PendingTool {
   reject: (error: Error) => void;
   signal?: AbortSignal;
   abortListener?: () => void;
+}
+
+interface SessionState {
+  entries: Entry[];
+  messages: AgentMessage[];
+}
+
+class SafeRunFailure extends Error {
+  readonly payload: JsonObject;
+
+  constructor(payload: JsonObject) {
+    super("safe run failure");
+    this.payload = payload;
+  }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -183,7 +235,11 @@ function validateStart(payload: JsonObject): void {
   ];
   if (!exactKeys(payload, keys)) throw new Error("start payload keys are not closed");
   if (payload.execution_environment !== "eval") throw new Error("execution_environment must be eval");
-  if (payload.session_id !== null) throw new Error("session_id must be null");
+  if (payload.session_id !== null && (
+    !isNonEmptyString(payload.session_id) || !SESSION_ID_PATTERN.test(payload.session_id)
+  )) {
+    throw new Error("session_id must be null or OM-derived");
+  }
   if (!isNonEmptyString(payload.system_prompt)) throw new Error("system_prompt must be non-empty");
   if (!isNonEmptyString(payload.user_message)) throw new Error("user_message must be non-empty");
 
@@ -214,8 +270,11 @@ function validateStart(payload: JsonObject): void {
     }
     toolNames.add(tool.name);
   }
-  if (!Array.isArray(payload.recovered_observations) || payload.recovered_observations.length !== 0) {
-    throw new Error("S1/S2 require an empty recovered_observations array");
+  if (!Array.isArray(payload.recovered_observations)) {
+    throw new Error("recovered_observations must be an array");
+  }
+  for (const observation of payload.recovered_observations) {
+    if (!isRecord(observation)) throw new Error("recovered observation must be an object");
   }
 
   if (!isRecord(payload.model)) throw new Error("model must be an object");
@@ -270,15 +329,30 @@ function validateStart(payload: JsonObject): void {
 
   if (!isRecord(payload.debug)) throw new Error("debug must be an object");
   const debug = payload.debug;
+  const commonDebugKeys = new Set([
+    "delay_ms",
+    "persist_delay_ms",
+    "expected_history",
+    "forbidden_history",
+    "compaction_response",
+  ]);
+  const fixtureKey = Object.hasOwn(debug, "fixture_response")
+    ? "fixture_response"
+    : Object.hasOwn(debug, "fixture_turns")
+      ? "fixture_turns"
+      : null;
+  if (
+    fixtureKey === null ||
+    Object.keys(debug).some((key) => key !== fixtureKey && !commonDebugKeys.has(key))
+  ) {
+    throw new Error("debug fields are not closed");
+  }
   if (Object.hasOwn(debug, "fixture_response")) {
-    if (!exactKeys(debug, ["fixture_response", "delay_ms"])) {
-      throw new Error("debug fields are not closed");
-    }
     if (typeof debug.fixture_response !== "string") {
       throw new Error("debug.fixture_response must be a string");
     }
   } else if (Object.hasOwn(debug, "fixture_turns")) {
-    if (!exactKeys(debug, ["fixture_turns", "delay_ms"]) || !Array.isArray(debug.fixture_turns)) {
+    if (!Array.isArray(debug.fixture_turns)) {
       throw new Error("debug.fixture_turns must be a closed array fixture");
     }
     for (const turn of debug.fixture_turns) {
@@ -307,6 +381,17 @@ function validateStart(payload: JsonObject): void {
   } else {
     throw new Error("debug fixture is missing");
   }
+  for (const key of ["expected_history", "forbidden_history"] as const) {
+    if (
+      Object.hasOwn(debug, key) &&
+      (!Array.isArray(debug[key]) || !debug[key].every((item) => typeof item === "string"))
+    ) {
+      throw new Error(`debug.${key} must be a string array`);
+    }
+  }
+  if (Object.hasOwn(debug, "compaction_response") && typeof debug.compaction_response !== "string") {
+    throw new Error("debug.compaction_response must be a string");
+  }
   const delay = debug.delay_ms;
   if (
     typeof delay !== "number" ||
@@ -315,6 +400,14 @@ function validateStart(payload: JsonObject): void {
     delay > MAX_FIXTURE_DELAY_MS
   ) {
     throw new Error("debug.delay_ms must be within [0, 300000]");
+  }
+  if (
+    Object.hasOwn(debug, "persist_delay_ms") &&
+    (!Number.isInteger(debug.persist_delay_ms) ||
+      (debug.persist_delay_ms as number) < 0 ||
+      (debug.persist_delay_ms as number) > MAX_FIXTURE_DELAY_MS)
+  ) {
+    throw new Error("debug.persist_delay_ms must be within [0, 300000]");
   }
 }
 
@@ -452,6 +545,16 @@ function createFixtureStream(start: JsonObject): StreamFn {
         return;
       }
       if (!turn) throw new Error("fixture turns exhausted");
+      const persistedHistory = stableJson(context.messages);
+      let expectedOffset = 0;
+      for (const expected of (debug.expected_history ?? []) as string[]) {
+        const found = persistedHistory.indexOf(expected, expectedOffset);
+        if (found < 0) throw new Error("fixture history mismatch");
+        expectedOffset = found + expected.length;
+      }
+      for (const forbidden of (debug.forbidden_history ?? []) as string[]) {
+        if (persistedHistory.includes(forbidden)) throw new Error("fixture history leak");
+      }
       if (expectedResults.length > 0 && !fixtureContextHasResults(context, expectedResults)) {
         throw new Error("fixture context mismatch");
       }
@@ -492,6 +595,30 @@ function createFixtureStream(start: JsonObject): StreamFn {
     });
     return stream;
   };
+}
+
+function createFixtureModels(start: JsonObject): Models {
+  const debug = start.debug as JsonObject;
+  const delayMs = debug.delay_ms as number;
+  return {
+    completeSimple: async (model, _context, options) => {
+      await waitAbortOrDelay(options?.signal, delayMs);
+      if (options?.signal?.aborted) {
+        return makeAssistantMessage(model, [], "aborted", "aborted");
+      }
+      if (
+        typeof debug.compaction_response !== "string" ||
+        debug.compaction_response.trim().length === 0
+      ) {
+        return makeAssistantMessage(model, [], "error", "fixture compaction failed");
+      }
+      return makeAssistantMessage(
+        model,
+        [{ type: "text", text: debug.compaction_response }],
+        "stop"
+      );
+    },
+  } as Models;
 }
 
 function createToolBridge(
@@ -596,12 +723,263 @@ function createToolBridge(
   };
 }
 
-function effectiveSystemPrompt(systemPrompt: string, runtimeContext: JsonObject[]): string {
+function effectiveSystemPrompt(
+  systemPrompt: string,
+  runtimeContext: JsonObject[],
+  recoveredObservations: JsonObject[]
+): string {
   const parts = [systemPrompt];
-  for (const item of runtimeContext) {
-    if (typeof item.content === "string") parts.push(item.content);
+  if (runtimeContext.length > 0) {
+    parts.push(
+      `<om-runtime-context>\n${runtimeContext.map((item) => item.content as string).join("\n\n")}\n</om-runtime-context>`
+    );
+  }
+  if (recoveredObservations.length > 0) {
+    parts.push(
+      `<om-recovered-observations>\n${stableJson(recoveredObservations)}\n</om-recovered-observations>`
+    );
   }
   return parts.join("\n\n");
+}
+
+function isCommitMarker(entry: Entry): boolean {
+  return entry.type === "custom" &&
+    entry.customType === TURN_COMMIT_TYPE &&
+    isRecord(entry.data) &&
+    exactKeys(entry.data, ["run_id", "kind"]) &&
+    isNonEmptyString(entry.data.run_id) &&
+    (entry.data.kind === "turn" || entry.data.kind === "compaction");
+}
+
+async function loadCommittedState(session: Session): Promise<SessionState> {
+  const reachable = await session.findEntriesOnBranch({ order: "oldestFirst" });
+  let committedLeaf: string | null = null;
+  for (const entry of reachable) {
+    if (isCommitMarker(entry)) committedLeaf = entry.id;
+  }
+  await session.moveLane("main", committedLeaf);
+  const entries = await session.findEntriesOnBranch({ order: "oldestFirst" });
+  return { entries, messages: buildSessionContext(entries).messages };
+}
+
+async function openPiSession(sessionId: string): Promise<{
+  repository: SqliteSessionRepository;
+  session: Session;
+  state: SessionState;
+}> {
+  const databasePath = process.env.OM_PI_SESSION_DB;
+  if (
+    !isNonEmptyString(databasePath) ||
+    databasePath.includes("\0") ||
+    !path.isAbsolute(databasePath)
+  ) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
+    );
+  }
+
+  const repositoryRoot = process.cwd();
+  const repository = new SqliteSessionRepository({
+    env: new NodeExecutionEnv({ cwd: repositoryRoot }),
+    sqlite: createNodeSqliteFactory(),
+    databasePath,
+    writerLease: {
+      ttlMs: WRITER_LEASE_TTL_MS,
+      heartbeatIntervalMs: WRITER_HEARTBEAT_MS,
+    },
+  });
+  try {
+    const metadata = (await repository.list()).find((candidate) => candidate.id === sessionId);
+    let session: Session;
+    if (metadata) {
+      if (
+        !isRecord(metadata.metadata) ||
+        !exactKeys(metadata.metadata, ["schema"]) ||
+        metadata.metadata.schema !== SESSION_SCHEMA
+      ) {
+        throw new SafeRunFailure(
+          safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
+        );
+      }
+      session = await repository.open(metadata);
+    } else {
+      session = await repository.create({
+        id: sessionId,
+        cwd: repositoryRoot,
+        metadata: { schema: SESSION_SCHEMA },
+      });
+    }
+    return { repository, session, state: await loadCommittedState(session) };
+  } catch (error) {
+    await repository.close().catch(() => {});
+    throw error;
+  }
+}
+
+function mapSessionFailure(error: unknown): JsonObject {
+  if (error instanceof SafeRunFailure) return error.payload;
+  const retryable = error instanceof SessionError &&
+    error.code === "storage" &&
+    error.message.includes("active writer");
+  return safeError(
+    "SESSION_ERROR",
+    "session",
+    retryable ? "session is temporarily busy" : "session storage is unavailable",
+    retryable
+  );
+}
+
+function textTokenEstimate(text: string): number {
+  return estimateTokens({
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: 0,
+  });
+}
+
+function estimateStructuralContextTokens(messages: AgentMessage[]): number {
+  return messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
+}
+
+function estimateSessionContextTokens(state: SessionState): number {
+  const compactionIndex = state.entries.findLastIndex((entry) => entry.type === "compaction");
+  if (
+    compactionIndex < 0 ||
+    getLastAssistantUsage(state.entries.slice(compactionIndex + 1)) !== undefined
+  ) {
+    return estimateContextTokens(state.messages).tokens;
+  }
+  return estimateStructuralContextTokens(state.messages);
+}
+
+async function prepareSessionState(
+  session: Session | null,
+  state: SessionState,
+  start: JsonObject,
+  model: Model<Api>,
+  systemPrompt: string,
+  signal: AbortSignal,
+  runId: string
+): Promise<SessionState> {
+  const limits = start.limits as JsonObject;
+  const contextWindow = Math.min(
+    model.contextWindow,
+    limits.max_context_tokens as number
+  );
+  const reserveTokens = model.maxTokens;
+  const fixedInputTokens = textTokenEstimate(systemPrompt) +
+    textTokenEstimate(start.user_message as string);
+  const usableHistoryTokens = contextWindow - reserveTokens - fixedInputTokens;
+  if (usableHistoryTokens <= 2_000) {
+    throw new SafeRunFailure(
+      safeError("CONFIG_ERROR", "config", "configured context budget is too small", false)
+    );
+  }
+
+  const settings = {
+    enabled: true,
+    reserveTokens,
+    keepRecentTokens: Math.max(2_000, Math.floor(usableHistoryTokens / 2)),
+  };
+  const historyTokens = estimateSessionContextTokens(state);
+  const contextTokens = fixedInputTokens + historyTokens;
+  if (!shouldCompact(contextTokens, contextWindow, settings)) return state;
+  if (!session) {
+    throw new SafeRunFailure(
+      safeError("CONFIG_ERROR", "config", "input exceeds configured context budget", false)
+    );
+  }
+
+  const preparation = prepareCompaction(state.entries, settings);
+  if (!preparation.ok || preparation.value === undefined) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session context compaction failed", false)
+    );
+  }
+  const result = await compact(
+    preparation.value,
+    createFixtureModels(start),
+    model,
+    COMPACTION_INSTRUCTIONS,
+    signal,
+    "off",
+    { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+  );
+  if (!result.ok || signal.aborted) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session context compaction failed", false)
+    );
+  }
+
+  const compactedMessages = [
+    createCompactionSummaryMessage(
+      result.value.summary,
+      result.value.tokensBefore,
+      Date.now()
+    ),
+    ...result.value.retainedTail,
+  ];
+  const compactedTokens = fixedInputTokens + estimateStructuralContextTokens(compactedMessages);
+  if (compactedTokens > contextWindow - reserveTokens) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "compacted context exceeds configured budget", false)
+    );
+  }
+
+  await session.appendEntry(
+    { type: "compaction", id: uuidv7(), ...result.value },
+    "main"
+  );
+  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "compaction" });
+  return loadCommittedState(session);
+}
+
+function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (suffix.length < 2 || suffix[0].role !== "user") {
+    throw new Error("turn suffix does not start with a user message");
+  }
+  let index = 1;
+  while (index < suffix.length) {
+    const assistant = suffix[index];
+    if (assistant.role !== "assistant") throw new Error("turn suffix group is incomplete");
+    index += 1;
+    const calls = assistant.content.filter((item) => item.type === "toolCall");
+    for (const call of calls) {
+      const result = suffix[index];
+      if (
+        !result ||
+        result.role !== "toolResult" ||
+        result.toolCallId !== call.id ||
+        result.toolName !== call.name
+      ) {
+        throw new Error("turn suffix tool result is incomplete");
+      }
+      index += 1;
+    }
+  }
+  const last = suffix[suffix.length - 1];
+  if (
+    last.role !== "assistant" ||
+    (last.stopReason !== "stop" && last.stopReason !== "length") ||
+    last.content.some((item) => item.type === "toolCall")
+  ) {
+    throw new Error("turn suffix has no final answer");
+  }
+  return suffix;
+}
+
+async function persistTurn(
+  session: Session,
+  messages: AgentMessage[],
+  runId: string,
+  persistDelayMs: number
+): Promise<void> {
+  for (const message of messages) {
+    await session.appendMessage(JSON.parse(JSON.stringify(message)) as AgentMessage);
+    if (persistDelayMs > 0) await waitAbortOrDelay(undefined, persistDelayMs);
+  }
+  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "turn" });
 }
 
 function normalizeUsage(usage: Record<string, unknown>): JsonObject {
@@ -693,250 +1071,66 @@ async function run(): Promise<void> {
     nodeSeq += 1;
     emit(type, p, identity, nodeSeq);
   };
-
-  emitRun("run.accepted", {
-    runtime: "pi-agent-core",
-    runtime_version: "0.84.2",
-    session_id: null,
-  });
-
-  const model = modelFromStart(payload);
-  const systemPrompt = effectiveSystemPrompt(
-    payload.system_prompt as string,
-    payload.runtime_context as JsonObject[]
-  );
-  const limits = payload.limits as JsonObject;
-  const startedAt = performance.now();
-  let assistantTurns = 0;
-  let finalizedToolCalls = 0;
-  let consecutiveFailedToolBatches = 0;
-  let forcedFinalAtTurn: number | null = null;
-  let bridgeFailure: JsonObject | null = null;
-  let agent: Agent | undefined;
-
-  const inbound = {
-    expectedSeq: 2,
-    cancelled: false,
-    terminal: false,
-    awaitingAdmission: false,
-    action: null as string | null,
-    error: null as JsonObject | null,
-  };
-  let resolveAction!: (action: string | null) => void;
-  const actionPromise = new Promise<string | null>((resolve) => {
-    resolveAction = resolve;
-  });
-
-  const bridge = createToolBridge(payload, emitRun, (message) => {
-    if (!bridgeFailure) {
-      bridgeFailure = safeError("TOOL_BRIDGE_ERROR", "tool", message, false);
-      agent?.abort();
-    }
-  });
-
-  agent = new Agent({
-    initialState: {
-      systemPrompt,
-      model,
-      thinkingLevel: "off",
-      tools: bridge.tools,
-      messages: [],
-    },
-    streamFn: createFixtureStream(payload),
-    toolExecution: "sequential",
-    afterToolCall: async ({ result }) => {
-      const details = result.details;
-      return isRecord(details) &&
-        isRecord(details.observation) &&
-        details.observation.ok === false
-        ? { isError: true }
-        : undefined;
-    },
-    prepareNextTurnWithContext: ({ context, toolResults }) => {
-      if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
-      const remainingMs =
-        (limits.timeout_seconds as number) * 1000 - (performance.now() - startedAt);
-      const exhausted =
-        assistantTurns >= (limits.max_iterations as number) ||
-        finalizedToolCalls >= (limits.max_tool_calls as number) ||
-        consecutiveFailedToolBatches >=
-          (limits.max_consecutive_failed_tool_batches as number) ||
-        remainingMs <= (limits.final_answer_reserve_seconds as number) * 1000;
-      if (!exhausted) return undefined;
-      forcedFinalAtTurn = assistantTurns;
-      return { context: { ...context, tools: [] } };
-    },
-    shouldStopAfterTurn: () =>
-      forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
-  });
-
-  agent.subscribe((event) => {
-    if (event.type === "message_end" && event.message.role === "assistant") {
-      assistantTurns += 1;
-    } else if (event.type === "tool_execution_end") {
-      finalizedToolCalls += 1;
-    } else if (event.type === "turn_end" && event.toolResults.length > 0) {
-      consecutiveFailedToolBatches = event.toolResults.every((result) => result.isError)
-        ? consecutiveFailedToolBatches + 1
-        : 0;
-    }
-    const normalized = normalizeAgentEvent(event);
-    if (normalized) emitRun("agent.event", normalized);
-  });
-
-  const failInbound = (): void => {
-    if (inbound.terminal || inbound.error) return;
-    inbound.error = safeError("PROTOCOL_ERROR", "protocol", "invalid host record", false);
-    bridge.rejectPending();
-    resolveAction(null);
-    agent?.abort();
-  };
-
-  const pumpInbound = async (): Promise<void> => {
-    try {
-      for await (const line of lines) {
-        if (inbound.terminal) throw new Error("record after terminal");
-        const envelope = parseEnvelope(
-          line,
-          inbound.expectedSeq,
-          identity,
-          new Set(["tool.result", "run.cancel", "run.commit", "run.discard"])
-        );
-        inbound.expectedSeq += 1;
-
-        if (envelope.type === "tool.result") {
-          if (inbound.cancelled || inbound.awaitingAdmission || inbound.action) {
-            throw new Error("tool result outside active tool call");
-          }
-          bridge.acceptResult(envelope.payload);
-          continue;
-        }
-        if (envelope.type === "run.cancel") {
-          if (
-            !exactKeys(envelope.payload, ["reason"]) ||
-            !isNonEmptyString(envelope.payload.reason) ||
-            inbound.cancelled ||
-            inbound.action
-          ) {
-            throw new Error("invalid cancellation");
-          }
-          inbound.cancelled = true;
-          inbound.action = envelope.type;
-          bridge.cancelPending();
-          resolveAction(envelope.type);
-          agent?.abort();
-          continue;
-        }
-        if (
-          !exactKeys(envelope.payload, []) ||
-          !inbound.awaitingAdmission ||
-          inbound.cancelled ||
-          inbound.action ||
-          bridge.hasPending()
-        ) {
-          throw new Error("invalid admission action");
-        }
-        inbound.action = envelope.type;
-        resolveAction(envelope.type);
-      }
-      if (!inbound.terminal) throw new Error("stdin closed before terminal");
-    } catch {
-      failInbound();
-    }
-  };
-
-  const promptPromise = agent.prompt(payload.user_message as string);
-  void pumpInbound();
-
-  let promptFailed = false;
+  const sessionId = payload.session_id as string | null;
+  let repository: SqliteSessionRepository | null = null;
+  let session: Session | null = null;
+  let sessionState: SessionState = { entries: [], messages: [] };
   try {
-    await promptPromise;
-  } catch {
-    promptFailed = true;
-  }
-
-  const finishError = (error: JsonObject): void => {
-    inbound.terminal = true;
-    emitRun("run.error", error);
+    if (sessionId !== null) {
+      const opened = await openPiSession(sessionId);
+      repository = opened.repository;
+      session = opened.session;
+      sessionState = opened.state;
+    }
+  } catch (error) {
+    emitRun("run.error", mapSessionFailure(error));
     process.exitCode = 1;
-  };
+    return;
+  }
 
-  if (inbound.error) {
-    finishError(inbound.error);
-    return;
-  }
-  if (bridgeFailure) {
-    finishError(bridgeFailure);
-    return;
-  }
-  if (inbound.cancelled) {
-    inbound.terminal = true;
-    emitRun("run.final", {
-      status: "cancelled",
-      text: "",
-      control_request: null,
-      termination_reason: "aborted",
-      usage: {},
-      committed: false,
+  try {
+    emitRun("run.accepted", {
+      runtime: "pi-agent-core",
+      runtime_version: "0.84.2",
+      session_id: sessionId,
     });
-    process.exitCode = 0;
-    return;
-  }
 
-  if (promptFailed) {
-    finishError(safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
-    return;
-  }
-
-  const finalMessage = lastAssistant(agent);
-  if (!finalMessage) {
-    finishError(safeError("INTERNAL_ERROR", "runtime", "no assistant message", false));
-    return;
-  }
-
-  const stopReason = finalMessage.stopReason;
-  const usage = normalizeUsage(finalMessage.usage ?? {});
-  const text = extractText(finalMessage);
-  const forcedFinalCompleted =
-    forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
-
-  if (forcedFinalCompleted && text.trim() === "") {
-    finishError(
-      safeError(
-        "BUDGET_EXHAUSTED",
-        "budget",
-        "agent budget exhausted without a final answer",
-        false
-      )
+    const model = modelFromStart(payload);
+    const systemPrompt = effectiveSystemPrompt(
+      payload.system_prompt as string,
+      payload.runtime_context as JsonObject[],
+      payload.recovered_observations as JsonObject[]
     );
-    return;
-  }
+    const limits = payload.limits as JsonObject;
+    const startedAt = performance.now();
+    const runAbort = new AbortController();
+    let assistantTurns = 0;
+    let finalizedToolCalls = 0;
+    let consecutiveFailedToolBatches = 0;
+    let forcedFinalAtTurn: number | null = null;
+    let bridgeFailure: JsonObject | null = null;
+    let agent: Agent | undefined;
 
-  if (stopReason === "stop" || stopReason === "length") {
-    if (text === "") {
-      finishError(safeError("MODEL_ERROR", "model", "empty answer", false));
-      return;
-    }
-    inbound.awaitingAdmission = true;
-    emitRun("run.proposed", {
-      status: "answered",
-      text,
-      control_request: null,
-      termination_reason: stopReason,
-      usage,
+    const inbound = {
+      expectedSeq: 2,
+      cancelled: false,
+      terminal: false,
+      awaitingAdmission: false,
+      action: null as string | null,
+      error: null as JsonObject | null,
+    };
+    let resolveAction!: (action: string | null) => void;
+    const actionPromise = new Promise<string | null>((resolve) => {
+      resolveAction = resolve;
     });
-    const action = inbound.action ?? (await actionPromise);
-    inbound.awaitingAdmission = false;
-    if (inbound.error) {
-      finishError(inbound.error);
-      return;
-    }
-    if (!action) {
-      finishError(safeError("PROTOCOL_ERROR", "protocol", "missing action", false));
-      return;
-    }
-    inbound.terminal = true;
-    if (action === "run.cancel") {
+
+    const finishError = (error: JsonObject): void => {
+      inbound.terminal = true;
+      emitRun("run.error", error);
+      process.exitCode = 1;
+    };
+    const finishCancelled = (usage: JsonObject = {}): void => {
+      inbound.terminal = true;
       emitRun("run.final", {
         status: "cancelled",
         text: "",
@@ -945,7 +1139,253 @@ async function run(): Promise<void> {
         usage,
         committed: false,
       });
-    } else {
+      process.exitCode = 0;
+    };
+
+    const bridge = createToolBridge(payload, emitRun, (message) => {
+      if (!bridgeFailure) {
+        bridgeFailure = safeError("TOOL_BRIDGE_ERROR", "tool", message, false);
+        runAbort.abort();
+        agent?.abort();
+      }
+    });
+
+    const failInbound = (): void => {
+      if (inbound.terminal || inbound.error) return;
+      inbound.error = safeError("PROTOCOL_ERROR", "protocol", "invalid host record", false);
+      bridge.rejectPending();
+      resolveAction(null);
+      runAbort.abort();
+      agent?.abort();
+    };
+
+    const pumpInbound = async (): Promise<void> => {
+      try {
+        for await (const line of lines) {
+          if (inbound.terminal) throw new Error("record after terminal");
+          const envelope = parseEnvelope(
+            line,
+            inbound.expectedSeq,
+            identity,
+            new Set(["tool.result", "run.cancel", "run.commit", "run.discard"])
+          );
+          inbound.expectedSeq += 1;
+
+          if (envelope.type === "tool.result") {
+            if (inbound.cancelled || inbound.awaitingAdmission || inbound.action) {
+              throw new Error("tool result outside active tool call");
+            }
+            bridge.acceptResult(envelope.payload);
+            continue;
+          }
+          if (envelope.type === "run.cancel") {
+            if (
+              !exactKeys(envelope.payload, ["reason"]) ||
+              !isNonEmptyString(envelope.payload.reason) ||
+              inbound.cancelled ||
+              inbound.action
+            ) {
+              throw new Error("invalid cancellation");
+            }
+            inbound.cancelled = true;
+            inbound.action = envelope.type;
+            bridge.cancelPending();
+            resolveAction(envelope.type);
+            runAbort.abort();
+            agent?.abort();
+            continue;
+          }
+          if (
+            !exactKeys(envelope.payload, []) ||
+            !inbound.awaitingAdmission ||
+            inbound.cancelled ||
+            inbound.action ||
+            bridge.hasPending()
+          ) {
+            throw new Error("invalid admission action");
+          }
+          inbound.action = envelope.type;
+          resolveAction(envelope.type);
+        }
+        if (!inbound.terminal) throw new Error("stdin closed before terminal");
+      } catch {
+        failInbound();
+      }
+    };
+    void pumpInbound();
+
+    try {
+      sessionState = await prepareSessionState(
+        session,
+        sessionState,
+        payload,
+        model,
+        systemPrompt,
+        runAbort.signal,
+        identity.runId
+      );
+    } catch (error) {
+      if (inbound.error) finishError(inbound.error);
+      else if (inbound.cancelled) finishCancelled();
+      else finishError(mapSessionFailure(error));
+      return;
+    }
+    if (inbound.error) {
+      finishError(inbound.error);
+      return;
+    }
+    if (inbound.cancelled) {
+      finishCancelled();
+      return;
+    }
+
+    agent = new Agent({
+      initialState: {
+        systemPrompt,
+        model,
+        thinkingLevel: "off",
+        tools: bridge.tools,
+        messages: sessionState.messages,
+      },
+      streamFn: createFixtureStream(payload),
+      convertToLlm,
+      toolExecution: "sequential",
+      afterToolCall: async ({ result }) => {
+        const details = result.details;
+        return isRecord(details) &&
+          isRecord(details.observation) &&
+          details.observation.ok === false
+          ? { isError: true }
+          : undefined;
+      },
+      prepareNextTurnWithContext: ({ context, toolResults }) => {
+        if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
+        const remainingMs =
+          (limits.timeout_seconds as number) * 1000 - (performance.now() - startedAt);
+        const exhausted =
+          assistantTurns >= (limits.max_iterations as number) ||
+          finalizedToolCalls >= (limits.max_tool_calls as number) ||
+          consecutiveFailedToolBatches >=
+            (limits.max_consecutive_failed_tool_batches as number) ||
+          remainingMs <= (limits.final_answer_reserve_seconds as number) * 1000;
+        if (!exhausted) return undefined;
+        forcedFinalAtTurn = assistantTurns;
+        return { context: { ...context, tools: [] } };
+      },
+      shouldStopAfterTurn: () =>
+        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
+    });
+
+    agent.subscribe((event) => {
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        assistantTurns += 1;
+      } else if (event.type === "tool_execution_end") {
+        finalizedToolCalls += 1;
+      } else if (event.type === "turn_end" && event.toolResults.length > 0) {
+        consecutiveFailedToolBatches = event.toolResults.every((result) => result.isError)
+          ? consecutiveFailedToolBatches + 1
+          : 0;
+      }
+      const normalized = normalizeAgentEvent(event);
+      if (normalized) emitRun("agent.event", normalized);
+    });
+
+    const suffixStart = agent.state.messages.length;
+    let promptFailed = false;
+    try {
+      await agent.prompt(payload.user_message as string);
+    } catch {
+      promptFailed = true;
+    }
+
+    if (inbound.error) {
+      finishError(inbound.error);
+      return;
+    }
+    if (bridgeFailure) {
+      finishError(bridgeFailure);
+      return;
+    }
+    if (inbound.cancelled) {
+      finishCancelled();
+      return;
+    }
+    if (promptFailed) {
+      finishError(safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
+      return;
+    }
+
+    const finalMessage = lastAssistant(agent);
+    if (!finalMessage) {
+      finishError(safeError("INTERNAL_ERROR", "runtime", "no assistant message", false));
+      return;
+    }
+
+    const stopReason = finalMessage.stopReason;
+    const usage = normalizeUsage(finalMessage.usage ?? {});
+    const text = extractText(finalMessage);
+    const forcedFinalCompleted =
+      forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
+    if (forcedFinalCompleted && text.trim() === "") {
+      finishError(
+        safeError(
+          "BUDGET_EXHAUSTED",
+          "budget",
+          "agent budget exhausted without a final answer",
+          false
+        )
+      );
+      return;
+    }
+
+    if (stopReason === "stop" || stopReason === "length") {
+      if (text === "") {
+        finishError(safeError("MODEL_ERROR", "model", "empty answer", false));
+        return;
+      }
+      let turnSuffix: AgentMessage[];
+      try {
+        turnSuffix = validatedTurnSuffix(agent.state.messages, suffixStart);
+      } catch {
+        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid completed turn", false));
+        return;
+      }
+      inbound.awaitingAdmission = true;
+      emitRun("run.proposed", {
+        status: "answered",
+        text,
+        control_request: null,
+        termination_reason: stopReason,
+        usage,
+      });
+      const action = inbound.action ?? (await actionPromise);
+      inbound.awaitingAdmission = false;
+      if (inbound.error) {
+        finishError(inbound.error);
+        return;
+      }
+      if (!action) {
+        finishError(safeError("PROTOCOL_ERROR", "protocol", "missing action", false));
+        return;
+      }
+      if (action === "run.cancel") {
+        finishCancelled(usage);
+        return;
+      }
+      if (action === "run.commit" && session) {
+        try {
+          await persistTurn(
+            session,
+            turnSuffix,
+            identity.runId,
+            ((payload.debug as JsonObject).persist_delay_ms as number | undefined) ?? 0
+          );
+        } catch (error) {
+          finishError(mapSessionFailure(error));
+          return;
+        }
+      }
+      inbound.terminal = true;
       emitRun("run.final", {
         status: "answered",
         text,
@@ -954,12 +1394,14 @@ async function run(): Promise<void> {
         usage,
         committed: action === "run.commit",
       });
+      process.exitCode = 0;
+      return;
     }
-    process.exitCode = 0;
-    return;
-  }
 
-  finishError(safeError("MODEL_ERROR", "model", "fixture stream error", false));
+    finishError(safeError("MODEL_ERROR", "model", "fixture stream error", false));
+  } finally {
+    if (repository) await repository.close().catch(() => {});
+  }
 }
 
 process.stdin.on("error", () => {});
