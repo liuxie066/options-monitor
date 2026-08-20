@@ -176,10 +176,32 @@ def _run_command(
     }
     if env is not None:
         kwargs["env"] = env
-    proc = run_cmd(
-        command,
-        **kwargs,
-    )
+    try:
+        proc = run_cmd(
+            command,
+            **kwargs,
+        )
+    except subprocess.SubprocessError as exc:
+        stdout = str(getattr(exc, "stdout", None) or getattr(exc, "output", None) or "")
+        stderr = str(getattr(exc, "stderr", None) or f"{type(exc).__name__}: {exc}")
+        return {
+            "command": command,
+            "cwd": str(cwd) if cwd is not None else None,
+            "started_at": started_at,
+            "ended_at": utc_now_iso(),
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "returncode": None,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+            "ok": False,
+            "subprocess_error": type(exc).__name__,
+            **(
+                {"timed_out": True, "timeout_seconds": timeout}
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else {}
+            ),
+            **({"env_overrides": sorted(set(env) - set(os.environ))} if env is not None else {}),
+        }
     rc = int(getattr(proc, "returncode", 1))
     stdout = str(getattr(proc, "stdout", "") or "")
     stderr = str(getattr(proc, "stderr", "") or "")
@@ -238,6 +260,12 @@ class RuntimePrepareError(RuntimeError):
     def __init__(self, message: str, *, runtime_prepare: dict[str, Any]) -> None:
         super().__init__(message)
         self.runtime_prepare = runtime_prepare
+
+
+class _PiRuntimePrepareError(RuntimeError):
+    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 class ServiceTransitionError(RuntimeError):
@@ -1588,6 +1616,77 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def _node_version_tuple(raw: str) -> tuple[int, int, int] | None:
+    parts = str(raw or "").strip().removeprefix("v").split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def _ensure_pi_runtime(
+    target_dir: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    package_lock = target_dir / "agent-runtime" / "package-lock.json"
+    smoke_script = target_dir / "scripts" / "pi_runtime_smoke.sh"
+    details: dict[str, Any] = {
+        "node_version": None,
+        "npm_version": None,
+        "package_lock_sha256": None,
+    }
+    try:
+        details["package_lock_sha256"] = hashlib.sha256(package_lock.read_bytes()).hexdigest()
+        if not smoke_script.is_file():
+            raise RuntimeError(f"Pi runtime smoke script is missing: {smoke_script}")
+
+        node_result = _run_required(
+            ["node", "--version"],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=30,
+        )
+        node_version = str(node_result.get("stdout") or "").strip()
+        details["node_version"] = node_version
+        parsed_node = _node_version_tuple(node_version)
+        if parsed_node is None or parsed_node < (22, 19, 0):
+            raise RuntimeError(f"Node >= 22.19.0 is required; observed={node_version or 'unusable'}")
+
+        npm_result = _run_required(
+            ["npm", "--version"],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=30,
+        )
+        details["npm_version"] = str(npm_result.get("stdout") or "").strip() or None
+        _run_required(
+            ["npm", "ci", "--omit=dev", "--ignore-scripts", "--prefix", "agent-runtime"],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=1200,
+        )
+        _run_required(
+            [
+                "bash",
+                "scripts/pi_runtime_smoke.sh",
+                "--root",
+                str(target_dir),
+                "--python",
+                str(_release_python(target_dir)),
+            ],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=180,
+        )
+        return details
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise _PiRuntimePrepareError(str(exc), details=details) from exc
+
+
 def _dependency_context(*, include_server: bool, python_spec: str, installer_mode: str) -> dict[str, Any]:
     return {
         "include_server": bool(include_server),
@@ -1871,10 +1970,13 @@ def _ensure_release_runtime(
                 "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
             ]
         )
+        runtime_prepare["pi_runtime"] = _ensure_pi_runtime(target_dir, run_cmd, operations)
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
     except RuntimeError as exc:
+        if isinstance(exc, _PiRuntimePrepareError):
+            runtime_prepare["pi_runtime"] = exc.details
         if not runtime_prepare["venv_reused"]:
             shutil.rmtree(build_venv, ignore_errors=True)
         runtime_prepare["ended_at"] = utc_now_iso()

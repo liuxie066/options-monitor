@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import patch
 
-from src.application.copilot.agent import ModelRequest, ModelRunner
 from src.application.copilot.control_handoff import CONTROL_PREVIEW_TOOL
 from src.application.copilot.host import run_contract as _run_contract
 from src.application.copilot.model_config import PiModelSettings
@@ -21,6 +23,37 @@ _TEST_MODEL = PiModelSettings(
     max_output_tokens=2_048,
     max_attempts=1,
 )
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ModelTurn:
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
+    attempt_count: int = 1
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    messages: tuple[dict[str, Any], ...]
+    tools: tuple[dict[str, Any], ...]
+    force_finish: bool = False
+    timeout_seconds: int | None = None
+    is_cancelled: Callable[[], bool] | None = None
+    iteration_id: str | None = None
+    context_hash: str | None = None
+
+
+ModelRunner = Callable[[ModelRequest], ModelTurn]
 
 
 def fake_pi_agent(model_runner: ModelRunner):
@@ -249,4 +282,12 @@ def run_contract(contract, *, model_runner=None, **kwargs):
         return _run_contract(contract, **kwargs)
 
 
-__all__ = ["_TEST_MODEL", "fake_pi_agent", "run_contract"]
+__all__ = [
+    "_TEST_MODEL",
+    "ModelRequest",
+    "ModelRunner",
+    "ModelTurn",
+    "ToolCall",
+    "fake_pi_agent",
+    "run_contract",
+]

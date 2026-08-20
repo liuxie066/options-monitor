@@ -8,9 +8,8 @@ from typing import Any
 import pytest
 
 from src.application.copilot import tools as copilot_tools
-from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, new_id
-from tests.copilot_pi_test_support import run_contract
+from tests.copilot_pi_test_support import ModelRequest, ModelTurn, ToolCall, run_contract
 from src.application.copilot.service import prepare_contract
 
 

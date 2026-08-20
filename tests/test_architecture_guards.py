@@ -207,6 +207,31 @@ def test_copilot_local_harness_is_phase1_composition_only() -> None:
     assert "def _resolve_pi_model(" in harness_text
 
 
+def test_copilot_has_no_retired_python_agent_runtime() -> None:
+    copilot_root = ROOT / "src" / "application" / "copilot"
+    retired_modules = {
+        "src.application.copilot.agent",
+        "src.application.copilot.conversation_memory",
+        "src.application.copilot.engine",
+        "src.application.copilot.model_client",
+    }
+    assert not any((copilot_root / f"{name.rsplit('.', 1)[-1]}.py").exists() for name in retired_modules)
+
+    offenders: list[str] = []
+    for path in sorted(copilot_root.glob("*.py")):
+        relative = str(path.relative_to(ROOT))
+        for module in _imported_modules(path):
+            if module in retired_modules:
+                offenders.append(f"{relative}:import:{module}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "run_engine(" in line or "build_model_runner(" in line:
+                offenders.append(f"{relative}:call:{line.strip()}")
+            if "OM_" in line and ("ENGINE" in line or "LEGACY" in line):
+                offenders.append(f"{relative}:runtime-selector:{line.strip()}")
+
+    assert offenders == []
+
+
 def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
     copilot_root = ROOT / "src" / "application" / "copilot"
     forbidden_by_file = {

@@ -68,9 +68,5 @@
     "final_answer_reserve_seconds": 45,
     "max_context_chars": 96000,
     "max_context_tokens": 24000
-  },
-  "conversation": {
-    "enabled": true,
-    "max_messages": 20
   }
 }

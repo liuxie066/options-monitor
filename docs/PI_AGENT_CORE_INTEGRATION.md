@@ -1,19 +1,23 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: S1-S6 are implemented and validated in source; S7 has not started. The
-Assistant channel entry and shared Host call path use Pi Agent Core on this
-unreleased development branch. Deployed production remains on its last released
-runtime until the complete S7 release passes its atomic cutover gate.
+Status: S1-S7 are implemented and validated in source on this unreleased
+development branch. The Assistant channel entry and shared Host call path use
+Pi Agent Core, the legacy Python Agent runtime is removed, and the mixed
+Python/Node release gates are present. No release, deployment, configured-
+provider canary, or production rollback rehearsal has been performed. Deployed
+production remains on its last released runtime until separately authorized
+release and upgrade gates pass.
 
 Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
 `@earendil-works/pi-session-backend-sqlite-node@0.84.2`, which require Node.js
 `>=22.19.0`.
 
-This document is the single planning authority for replacing OM's generic
-Copilot runtime with Pi Agent Core. The current production architecture remains
-documented in [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) until the
-cutover is complete.
+This document is the single planning and implementation authority for replacing
+OM's generic Copilot runtime with Pi Agent Core. The currently deployed
+production architecture remains documented in
+[OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) until a separately
+authorized release and upgrade complete the operational cutover.
 
 ## 1. Product Requirement
 
@@ -733,13 +737,13 @@ current slice's exit gate passes.
 | S4 | model context capability plus five provider mappings and error/usage normalization, exercised directly through the Pi process boundary without switching Host or local diagnostics | config/CLI migration and all loopback provider contract fixtures pass; the legacy application call path is unchanged and live canaries remain a separate release action |
 | S5 | Host run events, durable cancel/admission CAS, serialized evidence writes, bounded read-only recovery, progress | concurrent winner/event tests and current run-control regressions pass |
 | S6 | trusted key/path scope, `request_control_preview`, and `./om assistant handle` channel cutover | scope isolation, preview/confirm/apply separation, and channel idempotency pass |
-| S7 | packaging, release gates, atomic cutover, legacy runtime deletion | full tests, setup check, release check, rollback rehearsal, and answer-quality acceptance pass |
+| S7 | packaging, release gates, atomic cutover, legacy runtime deletion | source/full tests and deterministic rollback preservation pass; release, configured-provider quality review, and production rehearsal remain separately authorized |
 
 Sections 11 through 17 are the executable specifications for S1 through S7.
 They are one implementation plan, not seven independently released product
-modes. S1-S5 are source-delivery slices only; deployed production remains on
-its last released call path until the complete S7 release passes the atomic
-cutover gate.
+modes. S1-S7 were delivered as one unreleased source migration; deployed
+production remains on its last released call path until the separate release
+and controlled-upgrade gates pass.
 
 ## 11. S1 Executable Development Specification
 
@@ -2035,9 +2039,10 @@ tests/copilot_eval/test_answer_quality.py
 tests/test_pi_agent_process.py
 ```
 
-No public command changes. `engine.py`, `model_client.py`, and
-`conversation_memory.py` remain present but unreachable until S7 deletes them.
-There is no environment flag or fallback selecting them.
+No public command changed in S5. At that slice boundary, `engine.py`,
+`model_client.py`, and `conversation_memory.py` were unreachable but still
+present; S7 later deleted them. There is no environment flag or fallback
+selecting them.
 
 ### 15.2 `local_harness` and `host.run_contract`
 
@@ -2343,9 +2348,9 @@ expectations. Prove:
 11. no import or call from `host.py` or `local_harness.py` reaches `engine`,
    `model_client`, or `conversation_memory`.
 
-S5 exits when focused Copilot/Host tests and the Pi process tests pass. The code
-is not released independently; S6 and S7 complete channel and operational
-acceptance first.
+S5 exited when focused Copilot/Host tests and the Pi process tests passed. The
+code was not released independently; S6 and S7 subsequently completed the
+source channel and operational work.
 
 ### 15.9 Implementation record
 
@@ -2363,8 +2368,9 @@ S5 completed its source cutover on 2026-08-20:
   suite, compatibility suites, architecture guards, dependency install, static
   checks, and repository guardrails pass.
 
-This implementation record is not a release decision. S6 still owns trusted
-channel/Control cutover, and S7 still owns legacy deletion and release gates.
+This implementation record is not a release decision. The later S6 and S7
+records describe the completed source channel cutover, legacy deletion, and
+release gates.
 
 ## 16. S6 Control And Channel Cutover Detailed Design
 
@@ -2576,33 +2582,68 @@ S6 completed its source cutover on 2026-08-20:
   tests; compatibility suites, Ruff, Node syntax, repository guardrails, and
   diff checks also pass.
 
-This implementation record is not a release decision. S7 still owns packaging,
-atomic install/rollback checks, and removal of the unreachable legacy runtime.
+This implementation record is not a release decision. The S7 record below
+describes the later packaging, atomic install/rollback checks, and removal of
+the unreachable legacy runtime.
 
 ## 17. S7 Packaging, Atomic Cutover, And Cleanup Detailed Design
 
 ### 17.1 Objective and operational files
 
-S7 makes the mixed Python/Node release installable and rollback-safe, runs the
-full acceptance gate, and removes the now-unreachable generic OM runtime.
+S7 makes the mixed Python/Node release installable and rollback-safe, adds the
+release gates, and removes the now-unreachable generic OM runtime. Its exact
+source ownership is:
 
-Modify only the existing operational surfaces that own these checks:
+Create:
 
 ```text
-scripts/install.sh
-scripts/release_preflight.sh
-src/application/service_upgrade.py
-src/application/setup/check.py
-.github/workflows/guardrails.yml
-.github/workflows/_release-reusable.yml
-tests/test_install_script.py
-tests/test_setup_check.py
-tests/test_service_deploy.py
+scripts/pi_runtime_smoke.sh
 ```
 
-The already-added `agent-runtime/package.json`, lockfile, and `main.ts` are
-included by the existing source archive. No container, bundled executable,
-Node version manager, or package cache service is added.
+Modify:
+
+```text
+.github/workflows/_release-reusable.yml
+.github/workflows/guardrails.yml
+docs/DEPENDENCY_GRAPH.md                 # generated
+docs/dependency_graph.mmd                # generated
+docs/INDEX.md
+docs/PI_AGENT_CORE_INTEGRATION.md
+scripts/install.sh
+scripts/release_preflight.sh
+src/application/copilot/host.py
+src/application/copilot/host_store.py
+src/application/copilot/local_harness.py
+src/application/copilot/om_chat.scene.json
+src/application/copilot/scene.py
+src/application/release_test_plan.py
+src/application/service_upgrade.py
+src/application/setup/check.py
+tests/copilot_eval/test_answer_quality.py
+tests/copilot_pi_test_support.py
+tests/test_architecture_guards.py
+tests/test_copilot_conversation_memory.py
+tests/test_copilot_phase1.py
+tests/test_inbound_control.py
+tests/test_install_script.py
+tests/test_pi_agent_process.py
+tests/test_release_test_plan.py
+tests/test_service_deploy.py
+tests/test_setup_check.py
+```
+
+Delete:
+
+```text
+src/application/copilot/agent.py
+src/application/copilot/conversation_memory.py
+src/application/copilot/engine.py
+src/application/copilot/model_client.py
+```
+
+The already-added `agent-runtime/package.json`, lockfile, and `main.ts` remain
+unchanged in S7 and are included by the existing source archive. No container,
+bundled executable, Node version manager, or package cache service is added.
 
 ### 17.2 Runtime prerequisite and install behavior
 
@@ -2617,13 +2658,22 @@ resolve node and npm from PATH
 -> npm ci --omit=dev --ignore-scripts --prefix agent-runtime
 -> import pi-agent-core, pi-ai, and sqlite-node packages with Node
 -> run the deterministic Pi process smoke
--> only then move target and switch current symlink
+-> validate and stage both CLI wrappers when enabled
+-> only then move the target, publish wrappers, and atomically replace current
 ```
 
-An install failure deletes only the temporary target through the existing trap;
-the current release and running services remain unchanged. Re-running against
-an already active release verifies imports rather than mutating its
-`node_modules`; `--force` recreates it through the normal temporary path.
+The final `current` publication uses a same-directory temporary symlink plus
+Python `os.replace()`, so readers never observe the unlink/create gap produced
+by BSD/macOS `ln -sfn`. Existing wrappers are backed up byte-for-byte; candidate
+CLI validation, wrapper staging/publication, or final-link failure leaves the
+old `current` selection and wrappers unchanged. A fully prepared candidate may
+remain as an inactive release after a final publication failure; it is never
+selected implicitly.
+
+Re-running the active version validates its VERSION and deterministic Pi smoke
+without rerunning npm or mutating `node_modules`. `--force` is rejected before
+mutation for the active target. It may replace an inactive target, but only
+after the temporary candidate passes all Python/Pi preparation and smoke gates.
 
 The installer help and completion message state the Node prerequisite. It does
 not write secrets, create the Session database, start services, or run a live
@@ -2645,6 +2695,11 @@ hash and observed Node version are recorded in `runtime_prepare.pi_runtime` for
 audit. A partial target may remain for diagnosis, but it is never activated;
 the next confirmed upgrade reruns
 `npm ci --omit=dev --ignore-scripts --prefix agent-runtime` from the lockfile.
+Missing/old Node, npm/install/import/smoke failure, and subprocess timeout all
+become the existing structured `RuntimePrepareError`. The failure payload keeps
+the observed Node/npm versions and lock hash available in
+`runtime_prepare.pi_runtime`, and preparation stops before runtime-config commit
+or symlink activation.
 
 `_dependency_hash()` continues to describe only the cached Python virtualenv.
 Mixing the Node lock into that hash would rebuild an unrelated Python cache.
@@ -2659,7 +2714,7 @@ Mixing the Node lock into that hash would rebuild an unrelated Python cache.
 | `install.npm` | npm missing |
 | `install.pi_packages` | locked production package import fails |
 | `copilot.model_context` | active `context_window_tokens` is missing/invalid or is not greater than `max_output_tokens + 2000` |
-| `copilot.pi_session_path` | parent of the derived Host-sibling Session database is missing or not writable |
+| `copilot.pi_session_path` | lexical parent of the derived Host-sibling Session database is missing, unwritable, or an immediate symlink rejected by private storage |
 
 The check does not create the database or install packages. It gives the exact
 remediation (`npm ci --omit=dev --ignore-scripts --prefix agent-runtime`) and
@@ -2669,14 +2724,24 @@ does not query a provider or infer a value from the model name.
 
 `release_preflight.sh`, Guardrails, and reusable Release CI set up Node
 `22.19.0`, run locked production install, execute `tests/test_pi_agent_process.py`
-and the focused Copilot/Control suites, then continue through current Python
-checks. `tests/test_pi_agent_process.py` reads the three package versions and
-the lockfile root package directly and requires exact `0.84.2`; the existing
-release check remains unchanged. No check queries npm or the network.
+plus the focused Copilot, P1 evaluator, Control, operations, release-plan, and
+answer-quality suites, then continue through current Python checks.
+`tests/test_pi_agent_process.py` reads the three package versions and the
+lockfile root package directly and requires exact `0.84.2`; no gate performs
+version discovery with `npm view` or calls a configured model provider. Locked
+`npm ci` may fetch only the package-lock-selected artifacts when they are not
+already cached.
+
+`release_test_plan.py` maps every exact Pi runtime, packaging, workflow,
+diagnostic, test-support, and architecture-guard owner to one `pi_runtime`
+rule. `scripts/release_preflight.sh` also selects the existing
+`service_release` rule, preventing future edits to these gates from receiving a
+fast-only test plan.
 
 The release archive still comes from `git archive`; `node_modules` is never
-published. Release CI proves a clean archive can restore packages solely from
-the lockfile before publishing.
+published. Release CI extracts the archive into runner temporary storage, uses
+the absolute checkout virtualenv Python, restores packages solely from the
+archive lockfile, and runs the shared deterministic smoke before publishing.
 
 ### 17.5 Legacy deletion and guards
 
@@ -2695,9 +2760,11 @@ Remove the now-unused transcript surface at the same time:
   and public exports;
 - `host_store.py`: the two legacy transcript methods, while leaving database
   columns and historical rows untouched;
-- `channel_facade.py`: `record_channel_turn()` and its export;
 - `scene.py` and `om_chat.scene.json`: `conversation_max_messages()` and the
   obsolete `conversation` block.
+
+`channel_facade.py` already had no `record_channel_turn()` caller or export at
+the S7 boundary, so it requires no cleanup diff.
 
 Delete or rewrite tests that assert their private implementation behavior.
 Keep tests for public result, tool, Control, run, cancellation, recovery, and
@@ -2724,26 +2791,37 @@ restore a second Agent loop.
 
 ### 17.6 Pre-release commands and acceptance order
 
-The development release gate is:
+The source gate is:
 
 ```bash
 npm ci --omit=dev --ignore-scripts --prefix agent-runtime
+bash scripts/pi_runtime_smoke.sh --root . --python ./.venv/bin/python
 ./.venv/bin/python -m ruff check .
 ./.venv/bin/python -m pytest -q tests/test_pi_agent_process.py
 ./.venv/bin/python -m pytest -q \
   tests/test_copilot_phase1.py \
   tests/test_copilot_conversation_memory.py \
+  tests/test_copilot_p1_eval.py \
   tests/test_inbound_control.py \
   tests/test_setup_check.py \
   tests/test_cli_operator_commands.py \
   tests/test_install_script.py \
   tests/test_service_deploy.py \
-  tests/test_release_check.py
-./scripts/release_preflight.sh --full --allow-dirty
+  tests/test_release_check.py \
+  tests/test_release_test_plan.py \
+  tests/copilot_eval/test_answer_quality.py
+./.venv/bin/python -m pytest -q
+./.venv/bin/python scripts/generate_dependency_graph.py --check
 git diff --check
 ```
 
-Then, under separate explicit authorization:
+`scripts/release_preflight.sh --full --allow-dirty` is the release-final wrapper
+around the same locked install, smoke, release metadata, dependency graph, and
+full pytest gates. It is expected to reject an unreleased development commit
+layout when release-delta metadata is not yet final; S7 does not weaken or
+bypass that existing release authority.
+
+Then, under separate explicit release/operations authorization:
 
 1. install the candidate in a non-production release directory;
 2. run `om setup check` and deterministic local eval;
@@ -2773,17 +2851,65 @@ the existing controlled upgrade/rollback path and restarts only the affected
 service according to its preserved activation state. It does not downgrade or
 delete `pi_sessions.sqlite3`; the old release simply does not read it.
 
-S7 is complete only when:
+S7 source implementation is complete when:
 
 - the full Python suite and all Pi tests pass from a clean locked install;
 - setup, install, release, service-upgrade, and rollback tests pass;
-- `scripts/copilot_p1_eval.py` and the existing answer-quality suite meet their
-  current safety/quality gates with Pi;
+- the P1 evaluator source/unit gate and existing answer-quality suite pass with
+  the deterministic Pi path;
 - public Agent/Control/cancellation/recovery/outbox behavior passes the final
   acceptance matrix;
 - source search proves no legacy runtime caller/fallback remains;
-- a clean release archive can be installed without repository-local state;
-- the previous release remains selectable and its rollback rehearsal passes.
+- the exact final staged or committed tree passes a real `git archive` restore:
+  extraction occurs outside the checkout, Node packages are restored solely
+  from the archived lockfile, and the shared smoke uses an absolute checkout
+  virtualenv Python without an archive-local Python or checked-in
+  `node_modules` dependency;
+- deterministic rollback tests select the previous release and preserve the
+  effective `output_shared/state/pi_sessions.sqlite3` bytes after both dry-run
+  and confirmed rollback.
+
+Full release/cutover acceptance remains pending until separately authorized
+configured-provider P1 reports and human review pass, release metadata and the
+clean archive gate pass in release CI, the candidate is published and upgraded
+through the controlled workflow, and the non-production/production canaries
+and rollback rehearsal above complete. Source completion is not evidence that
+any deployed runtime changed.
+
+### 17.8 Implementation record
+
+S7 completed its source implementation on 2026-08-20:
+
+- the installer now validates Node/npm and the real Pi child, rejects active
+  `--force`, prepares inactive candidates off-path, restores wrapper bytes on
+  publication failure, and publishes `current` with a same-directory
+  `os.replace()`;
+- the single smoke script removes inherited Python/runtime/model/session
+  configuration and proves a real Pi fixture answer without creating Session
+  state or calling a provider;
+- controlled service preparation records Node/npm/lock evidence and maps
+  non-zero exits and timeouts into the existing structured failure before
+  config commit or activation;
+- setup reports the active model context and lexical Host-sibling Pi Session
+  path without writes, including private-storage symlink rejection;
+- release preflight, both workflows, and the release-test planner own the
+  locked npm, Pi process, P1 evaluator, answer-quality, clean-archive, and
+  operations gates;
+- the four legacy Python Agent modules and transcript APIs are deleted while
+  historical SQLite columns/rows and Host Control, cancellation, recovery,
+  metrics, leases, outbox, and channel isolation remain intact;
+- the locked npm install, real Pi smoke, Ruff, shell syntax, generated graph
+  (`609` production modules, `0` cycles), focused suites, full suite
+  (`5428 passed, 10 skipped`), and final aggregate DeepReview pass;
+- the exact final staged tree was restored through `git archive` outside the
+  checkout with no archive-local virtualenv or `node_modules`; locked npm
+  restored `95` packages and the shared real-Pi smoke passed from that archive.
+
+The release-final preflight was also exercised and stopped at the unchanged
+release-delta metadata authority because this branch has not entered an
+authorized release commit sequence. No VERSION, tag, Release, deployment,
+configured-provider request, live message, production state, or production
+rollback was changed or executed.
 
 ## 18. Final Acceptance Matrix
 
