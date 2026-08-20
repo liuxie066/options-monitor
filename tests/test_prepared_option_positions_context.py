@@ -327,6 +327,53 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         )
 
 
+def test_prepare_fails_account_closed_when_wheel_projection_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import prepared_option_positions_context as mod
+
+    run_id = "run-wheel-projection-failure"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "test",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_wheel_read_model_from_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken")),
+    )
+
+    batch = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+    )
+
+    assert set(batch.manifests) == {"lx", "sy"}
+    assert batch.wheel_read_models_by_account == {}
+    assert batch.unavailable_by_account == {
+        "lx": "wheel_projection_failed:RuntimeError",
+        "sy": "wheel_projection_failed:RuntimeError",
+    }
+
 def test_one_ledger_freezes_account_isolated_option_contexts(
     monkeypatch,
     tmp_path: Path,

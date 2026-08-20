@@ -11,6 +11,8 @@ from domain.domain.wheel import (
     build_wheel_call_rank_key,
     build_wheel_event,
     evaluate_wheel_call_candidate,
+    project_wheel_call_intents,
+    project_wheel_call_linkage_candidates,
     project_wheel_lifecycles,
 )
 from src.application.ledger.commands import record_manual_assignment
@@ -281,12 +283,21 @@ def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
         {"basis": "estimated", "amount": 15},
         1,
     )
+    negative_delta = evaluate_wheel_call_candidate(
+        batch,
+        {**candidate, "delta": -0.31},
+        {"min_delta": 0.30},
+        {"basis": "estimated", "amount": 15},
+        1,
+    )
 
     assert accepted["accepted"] is True
     assert accepted["projected_lifecycle_net_pnl_if_called"] == 705
     assert accepted["projected_lifecycle_pnl_scope"] == "final_total_if_called"
     assert below_cost["wheel_candidate_status"] == "rejected"
     assert "wheel_call_strike_below_cost_floor" in below_cost["reason_codes"]
+    assert negative_delta["wheel_candidate_status"] == "rejected"
+    assert "wheel_call_delta_below_min" in negative_delta["reason_codes"]
 
 
 def test_wheel_candidate_rank_uses_lifecycle_pnl_before_covered_call_ties() -> None:
@@ -308,3 +319,81 @@ def test_wheel_candidate_rank_uses_lifecycle_pnl_before_covered_call_ties() -> N
     )
 
     assert higher_lifecycle["sort_tuple"] < lower_lifecycle["sort_tuple"]
+
+
+def test_void_removes_intent_and_linkage_rejection_from_standalone_projections() -> None:
+    intent = build_wheel_event(
+        event_id="intent-created-1",
+        account="lx",
+        stock_lot_id="stock-1",
+        event_type="wheel_call_intent_created",
+        occurred_at_ms=2_000,
+        recorded_at_ms=2_001,
+        intent_id="intent-1",
+        payload={"contracts": 1, "multiplier": 100, "expires_at_ms": 9_000},
+    )
+    rejection = build_wheel_event(
+        event_id="linkage-rejected-1",
+        account="lx",
+        stock_lot_id="stock-1",
+        event_type="wheel_call_linkage_rejected",
+        occurred_at_ms=2_100,
+        recorded_at_ms=2_101,
+        payload={"call_open_event_id": "call-open-1"},
+    )
+    void_intent = build_wheel_event(
+        event_id="void-intent-1",
+        account="lx",
+        stock_lot_id="stock-1",
+        event_type="wheel_event_voided",
+        occurred_at_ms=2_200,
+        recorded_at_ms=2_201,
+        payload={"target_wheel_event_id": intent["event_id"]},
+    )
+    void_rejection = build_wheel_event(
+        event_id="void-rejection-1",
+        account="lx",
+        stock_lot_id="stock-1",
+        event_type="wheel_event_voided",
+        occurred_at_ms=2_300,
+        recorded_at_ms=2_301,
+        payload={"target_wheel_event_id": rejection["event_id"]},
+    )
+
+    assert project_wheel_call_intents(
+        [intent, void_intent],
+        account="lx",
+        stock_lot_id="stock-1",
+        as_of_ms=3_000,
+    ) == []
+    candidates = project_wheel_call_linkage_candidates(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": "stock-1",
+                "lifecycle_status": "active",
+                "integrity_status": "trusted",
+                "active_call_lot_ids": [],
+                "shares_remaining": 100,
+                "batch_generation_hash": "generation-1",
+            }
+        ],
+        [
+            {
+                "record_id": "call-lot-1",
+                "fields": {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "option_type": "call",
+                    "side": "short",
+                    "status": "open",
+                    "contracts_open": 1,
+                    "multiplier": 100,
+                    "source_event_id": "call-open-1",
+                },
+            }
+        ],
+        [rejection, void_rejection],
+    )
+    assert len(candidates) == 1

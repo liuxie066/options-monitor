@@ -10,6 +10,7 @@ from domain.domain.wheel import (
     wheel_called_away_event_from_call_assignment,
     wheel_started_event_from_assignment,
 )
+from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
@@ -213,6 +214,14 @@ def prepare_wheel_intent_open_event(
         account=account,
         as_of_ms=instant,
     )
+    contract_key = getattr(event, "contract_key", None)
+    current_coverage = revalidate_opening_share_coverage(
+        coverage_fact,
+        list(rows.get("account_position_lots") or []),
+        batches,
+        account=account,
+        symbol=str(getattr(contract_key, "underlying_symbol", "") or ""),
+    )
     known_trade_ids = {
         str(item.get("event_id") or "").strip()
         for item in rows.get("trade_events") or []
@@ -237,9 +246,9 @@ def prepare_wheel_intent_open_event(
                 intent_payload if isinstance(intent_payload, Mapping) else intent
             )
             intent_coverage = {
-                **dict(coverage_fact),
+                **current_coverage,
                 "shares_available_for_cover": int(
-                    coverage_fact.get("shares_available_for_cover") or 0
+                    current_coverage.get("shares_available_for_cover") or 0
                 )
                 + int(intent.get("remaining_contracts") or 0)
                 * int(intent_payload.get("multiplier") or 0),

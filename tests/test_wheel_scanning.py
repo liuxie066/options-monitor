@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 
 from conftest import phase2_opening_row
 from src.application.wheel import (
@@ -103,12 +104,69 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim() -> None:
                 ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
             )
         },
-        int(AS_OF.timestamp() * 1000),
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
     )
 
     assert result["scope_results"][0]["reason_code"] == "candidates_found"
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["capacity_claims"][0]["requested_shares"] == 100
+
+
+def test_wheel_scan_uses_decision_time_and_ignores_ineligible_sibling() -> None:
+    model = _read_model()
+    model["as_of_ms"] = int((AS_OF - timedelta(minutes=5)).timestamp() * 1000)
+    valid = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-05-06",
+            "dte": 35,
+            "contract_symbol": "NVDA-CALL-110",
+            "multiplier": 100,
+            "currency": "USD",
+            "strike": 110,
+            "spot": 100,
+            "bid": 2.0,
+            "ask": 2.2,
+            "last_price": 2.1,
+            "mid": 2.1,
+            "open_interest": 500,
+            "volume": 50,
+            "implied_volatility": 0.30,
+            "term_matched_rv": 0.20,
+            "delta": 0.35,
+            "snapshot_received_at_utc": "2026-04-01T15:00:10Z",
+        }
+    )
+    ineligible = {
+        **valid,
+        "contract_symbol": "NVDA-CALL-115",
+        "bid": 0.0,
+        "opening_contract_status": "ineligible",
+        "opening_contract_reason_codes": ["option_no_current_bid"],
+    }
+
+    result = run_wheel_call_scan(
+        model,
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([valid, ineligible])}},
+        {},
+        {
+            "exchange_rate_converter": CurrencyConverter(
+                ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+            )
+        },
+        decision_time_ms=int((AS_OF + timedelta(minutes=1)).timestamp() * 1000),
+    )
+
+    decision = result["calculation_decisions"][0]
+    reject = decision["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "contract_ineligible"
+    assert "option_no_current_bid" in str(
+        decision["normalized_input"]["opening_contract_reason_codes"]
+    )
+    assert result["scope_results"][0]["reason_code"] == "candidates_found"
+    assert len(result["raw_candidates"]["stock-1"]) == 1
 
 
 def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() -> None:
@@ -155,7 +213,12 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
         wheel_read_model=model,
         wheel_scan={
             "scope_results": [
-                {"symbol": "NVDA", "stock_lot_id": "stock-1", "status": "completed"}
+                {
+                    "symbol": "NVDA",
+                    "stock_lot_id": "stock-1",
+                    "status": "completed",
+                    "reason_code": "partial_data",
+                }
             ],
             "raw_candidates": {
                 "stock-1": [
@@ -189,6 +252,7 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
     )
     assert ordinary_allocation["granted_contracts"] == 0
     assert captured["scope_results"][0]["candidate_count"] == 1
+    assert captured["scope_results"][0]["reason_code"] == "partial_data"
 
 
 def test_wheel_scan_disabled_keeps_batch_status_without_candidate_demand() -> None:
@@ -198,9 +262,169 @@ def test_wheel_scan_disabled_keeps_batch_status_without_candidate_demand() -> No
         {"frames": {}},
         {},
         {},
-        int(AS_OF.timestamp() * 1000),
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
     )
 
     assert result["scope_results"][0]["reason_code"] == "wheel_disabled"
     assert result["raw_candidates"] == {}
     assert result["capacity_claims"] == []
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["term_matched_rv", "implied_volatility", "multiplier", "bid", "ask"],
+)
+def test_wheel_scan_marks_missing_candidate_evidence_unavailable(
+    missing_field: str,
+) -> None:
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-05-06",
+            "dte": 35,
+            "contract_symbol": "NVDA-CALL-110",
+            "multiplier": 100,
+            "currency": "USD",
+            "strike": 110,
+            "spot": 100,
+            "bid": 2.0,
+            "ask": 2.2,
+            "last_price": 2.1,
+            "mid": 2.1,
+            "open_interest": 500,
+            "volume": 50,
+            "implied_volatility": 0.30,
+            "term_matched_rv": 0.20,
+            "delta": 0.35,
+        }
+    )
+    row[missing_field] = None
+    result = run_wheel_call_scan(
+        _read_model(),
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([row])}},
+        {},
+        {
+            "exchange_rate_converter": CurrencyConverter(
+                ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+            )
+        },
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+
+    assert result["scope_results"][0]["status"] == "unavailable"
+    assert result["scope_results"][0]["reason_code"] == "data_unavailable"
+
+
+def test_wheel_scan_preserves_partial_data_when_another_candidate_is_valid() -> None:
+    valid = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-05-06",
+            "dte": 35,
+            "contract_symbol": "NVDA-CALL-110",
+            "multiplier": 100,
+            "currency": "USD",
+            "strike": 110,
+            "spot": 100,
+            "bid": 2.0,
+            "ask": 2.2,
+            "last_price": 2.1,
+            "mid": 2.1,
+            "open_interest": 500,
+            "volume": 50,
+            "implied_volatility": 0.30,
+            "term_matched_rv": 0.20,
+            "delta": 0.35,
+        }
+    )
+    unavailable = {**valid, "contract_symbol": "NVDA-CALL-115", "bid": None}
+    result = run_wheel_call_scan(
+        _read_model(),
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([valid, unavailable])}},
+        {},
+        {
+            "exchange_rate_converter": CurrencyConverter(
+                ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+            )
+        },
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+
+    assert len(result["raw_candidates"]["stock-1"]) == 1
+    assert result["scope_results"][0]["status"] == "completed"
+    assert result["scope_results"][0]["reason_code"] == "partial_data"
+
+
+def test_partial_capacity_grant_recomputes_final_candidate_economics() -> None:
+    model = _read_model()
+    model["batches"][0]["shares_remaining"] = 200
+    model["assigned_stock_projection"]["_all_assigned_stock_lots"][0][
+        "remaining_stock_cost_basis"
+    ] = 20_020
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-05-06",
+            "dte": 35,
+            "contract_symbol": "NVDA-CALL-110",
+            "multiplier": 100,
+            "currency": "USD",
+            "strike": 110,
+            "spot": 100,
+            "bid": 2.0,
+            "ask": 2.2,
+            "last_price": 2.1,
+            "mid": 2.1,
+            "open_interest": 500,
+            "volume": 50,
+            "implied_volatility": 0.30,
+            "term_matched_rv": 0.20,
+            "delta": 0.35,
+        }
+    )
+    scan = run_wheel_call_scan(
+        model,
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([row])}},
+        {},
+        {
+            "exchange_rate_converter": CurrencyConverter(
+                ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+            ),
+            "stock_exit_fee_fact_fn": lambda _stock, _candidate, shares: {
+                "basis": "estimated",
+                "amount": 10 if shares == 100 else 100,
+            },
+        },
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    captured = finalize_wheel_capacity(
+        account="lx",
+        wheel_read_model=model,
+        wheel_scan=scan,
+        opening_call_candidates=[],
+        coverage_facts=[
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 100,
+                "shares_locked": 0,
+                "shares_reserved": 0,
+                "capacity_identity_hash": "capacity-1",
+            }
+        ],
+    )
+
+    raw = captured["batches"][0]["raw_candidates"][0]
+    final = captured["batches"][0]["final_candidate"]
+    assert raw["contracts"] == 2
+    assert final["granted_contracts"] == 1
+    assert final["candidate_covered_shares"] == 100
+    assert final["estimated_stock_exit_fees"] == 10
+    assert final["candidate_call_net_premium"] * 2 == raw["candidate_call_net_premium"]

@@ -11,6 +11,7 @@ from domain.domain.ledger.position_fields import (
     effective_multiplier,
     effective_strike,
 )
+from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from domain.domain.wheel import (
     build_wheel_event,
     plan_wheel_call_intent_cancel,
@@ -346,10 +347,23 @@ def create_wheel_call_intent(
             for item in summaries
         ):
             raise ValueError("broker_order_id already belongs to an active Wheel intent")
+        current_coverage = revalidate_opening_share_coverage(
+            coverage_fact,
+            list(rows.get("account_position_lots") or []),
+            list(
+                build_wheel_read_model_from_rows(
+                    rows,
+                    account=account_value,
+                    as_of_ms=instant,
+                )["batches"]
+            ),
+            account=account_value,
+            symbol=str(batch.get("symbol") or ""),
+        )
         event = plan_wheel_call_intent_create(
             batch,
             candidate,
-            coverage_fact,
+            current_coverage,
             expires_at_ms,
             request_value,
             actor_value,

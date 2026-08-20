@@ -80,6 +80,74 @@ def test_opening_share_capacity_fails_closed_when_existing_coverage_is_excessive
     assert result["risk_level"] == "high"
 
 
+def test_opening_share_capacity_invalid_claim_blocks_its_whole_pool() -> None:
+    allocations = allocate_opening_share_capacity(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 200,
+                "shares_locked": 0,
+                "shares_reserved": 0,
+            }
+        ],
+        [
+            {
+                "claim_id": "broken",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": "bad",
+                "multiplier": 100,
+            },
+            {
+                "claim_id": "valid",
+                "strategy_family": "covered_call",
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": 1,
+                "multiplier": 100,
+            },
+        ],
+    )
+
+    assert allocations[0]["allocation_reason"] == "share_capacity_claim_invalid"
+    assert allocations[1]["allocation_reason"] == "share_capacity_pool_invalid"
+    assert allocations[1]["granted_contracts"] == 0
+
+
+def test_opening_share_capacity_duplicate_claim_identity_blocks_pool() -> None:
+    allocations = allocate_opening_share_capacity(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 200,
+                "shares_locked": 0,
+                "shares_reserved": 0,
+            }
+        ],
+        [
+            {
+                "claim_id": "duplicate",
+                "strategy_family": family,
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": 1,
+                "multiplier": 100,
+            }
+            for family in ("wheel", "covered_call")
+        ],
+    )
+
+    assert {row["allocation_reason"] for row in allocations} == {
+        "share_capacity_claim_invalid"
+    }
+    assert {row["granted_contracts"] for row in allocations} == {0}
+
+
 def test_portfolio_capacity_shadow_allocates_in_existing_order_without_optimizer() -> None:
     rows = [
         {"account": "lx", "symbol": "NVDA", "strategy_family": "sell_put", "cash_free_cny": 10_000, "cash_required_cny": 6_000},

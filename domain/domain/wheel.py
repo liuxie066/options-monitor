@@ -110,7 +110,7 @@ def evaluate_wheel_call_candidate(
     covered_shares = contract_count * multiplier_int
     if covered_shares <= 0 or covered_shares > int(shares_remaining):
         reasons.append("wheel_batch_capacity_insufficient")
-    if abs(delta) < min_delta:
+    if delta < min_delta:
         reasons.append("wheel_call_delta_below_min")
     if strike < spot:
         reasons.append("wheel_call_strike_below_spot")
@@ -960,6 +960,70 @@ def _intent_state(
     return active, reasons, summaries
 
 
+def _effective_wheel_events(
+    wheel_events: Sequence[Mapping[str, Any]],
+    *,
+    as_of_ms: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], set[str]]]:
+    events_by_id: dict[str, dict[str, Any]] = {}
+    invalid_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for raw in wheel_events:
+        group = (
+            str(raw.get("account") or "").strip().lower(),
+            str(raw.get("stock_lot_id") or "").strip(),
+        )
+        try:
+            event = normalize_wheel_event(raw)
+        except (TypeError, ValueError):
+            if all(group):
+                invalid_by_group[group].add("invalid_wheel_event")
+            continue
+        if as_of_ms is not None and int(event["occurred_at_ms"]) > int(as_of_ms):
+            continue
+        previous = events_by_id.get(event["event_id"])
+        if previous is not None and previous["payload_hash"] != event["payload_hash"]:
+            invalid_by_group[(event["account"], event["stock_lot_id"])].add(
+                "wheel_event_id_conflict"
+            )
+            invalid_by_group[(previous["account"], previous["stock_lot_id"])].add(
+                "wheel_event_id_conflict"
+            )
+            continue
+        if previous is None or event["recorded_at_ms"] < previous["recorded_at_ms"]:
+            events_by_id[event["event_id"]] = event
+
+    voided_ids: set[str] = set()
+    valid_void_ids: set[str] = set()
+    for event in events_by_id.values():
+        if event["event_type"] != "wheel_event_voided":
+            continue
+        group = (event["account"], event["stock_lot_id"])
+        target_id = str(event["payload"].get("target_wheel_event_id") or "").strip()
+        target = events_by_id.get(target_id)
+        if (
+            target is None
+            or target["event_type"] == "wheel_event_voided"
+            or (target["account"], target["stock_lot_id"]) != group
+        ):
+            invalid_by_group[group].add("wheel_void_target_invalid")
+            continue
+        voided_ids.add(target_id)
+        valid_void_ids.add(event["event_id"])
+
+    return (
+        [
+            event
+            for event in events_by_id.values()
+            if event["event_id"] not in voided_ids
+            and (
+                event["event_type"] != "wheel_event_voided"
+                or event["event_id"] in valid_void_ids
+            )
+        ],
+        invalid_by_group,
+    )
+
+
 def project_wheel_call_intents(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
@@ -971,13 +1035,15 @@ def project_wheel_call_intents(
     account_value = _required_text(account, "account").lower()
     stock_lot_value = _required_text(stock_lot_id, "stock_lot_id")
     instant = _positive_int(as_of_ms, "as_of_ms")
-    events = [
-        normalize_wheel_event(event)
-        for event in wheel_events
-        if str(event.get("account") or "").strip().lower() == account_value
-        and str(event.get("stock_lot_id") or "").strip() == stock_lot_value
-        and int(event.get("occurred_at_ms") or 0) <= instant
-    ]
+    events, _invalid = _effective_wheel_events(
+        [
+            event
+            for event in wheel_events
+            if str(event.get("account") or "").strip().lower() == account_value
+            and str(event.get("stock_lot_id") or "").strip() == stock_lot_value
+        ],
+        as_of_ms=instant,
+    )
     _active, _reasons, summaries = _intent_state(
         events,
         as_of_ms=instant,
@@ -991,12 +1057,13 @@ def project_wheel_call_linkage_candidates(
     unlinked_short_call_lots: Sequence[Mapping[str, Any]],
     rejected_linkages: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    effective_linkages, _invalid = _effective_wheel_events(rejected_linkages)
     rejected = {
         (
             str((event.get("payload") or {}).get("call_open_event_id") or "").strip(),
             str(event.get("stock_lot_id") or "").strip(),
         )
-        for event in rejected_linkages
+        for event in effective_linkages
         if str(event.get("event_type") or "").strip()
         == "wheel_call_linkage_rejected"
     }
@@ -1112,58 +1179,10 @@ def project_wheel_lifecycles(
     """Rebuild Wheel batches from immutable facts; never guesses a missing link."""
 
     instant = _positive_int(as_of_ms, "as_of_ms")
-    events_by_id: dict[str, dict[str, Any]] = {}
-    invalid_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for raw in wheel_events:
-        group = (
-            str(raw.get("account") or "").strip().lower(),
-            str(raw.get("stock_lot_id") or "").strip(),
-        )
-        try:
-            event = normalize_wheel_event(raw)
-        except (TypeError, ValueError):
-            if all(group):
-                invalid_by_group[group].add("invalid_wheel_event")
-            continue
-        previous = events_by_id.get(event["event_id"])
-        if previous is not None and previous["payload_hash"] != event["payload_hash"]:
-            invalid_by_group[(event["account"], event["stock_lot_id"])].add(
-                "wheel_event_id_conflict"
-            )
-            invalid_by_group[(previous["account"], previous["stock_lot_id"])].add(
-                "wheel_event_id_conflict"
-            )
-            continue
-        if previous is None or event["recorded_at_ms"] < previous["recorded_at_ms"]:
-            events_by_id[event["event_id"]] = event
-
-    voided_ids: set[str] = set()
-    valid_void_ids: set[str] = set()
-    for event in events_by_id.values():
-        if event["event_type"] != "wheel_event_voided":
-            continue
-        group = (event["account"], event["stock_lot_id"])
-        target_id = str(event["payload"].get("target_wheel_event_id") or "").strip()
-        target = events_by_id.get(target_id)
-        if (
-            target is None
-            or target["event_type"] == "wheel_event_voided"
-            or (target["account"], target["stock_lot_id"]) != group
-        ):
-            invalid_by_group[group].add("wheel_void_target_invalid")
-            continue
-        voided_ids.add(target_id)
-        valid_void_ids.add(event["event_id"])
-
-    effective_events = [
-        event
-        for event in events_by_id.values()
-        if event["event_id"] not in voided_ids
-        and (
-            event["event_type"] != "wheel_event_voided"
-            or event["event_id"] in valid_void_ids
-        )
-    ]
+    effective_events, invalid_by_group = _effective_wheel_events(
+        wheel_events,
+        as_of_ms=instant,
+    )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for event in effective_events:
         grouped[(event["account"], event["stock_lot_id"])].append(event)

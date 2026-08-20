@@ -121,10 +121,12 @@ def _calculation_decision_record(
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
-    if opening_status != "ready":
-        reject_reason = specific_reason
-        if not opening_status:
-            reject_reason = REJECT_INPUT_INVALID
+    if opening_status == "ineligible":
+        reject_reason = REJECT_CONTRACT_INELIGIBLE
+    elif opening_status in {"data_unavailable", "market_closed"}:
+        reject_reason = REJECT_EVIDENCE_UNAVAILABLE
+    elif opening_status != "ready":
+        reject_reason = REJECT_INPUT_INVALID
     elif specific_reason in _DEFINITIVE_CALCULATION_REASONS:
         reject_reason = REJECT_POLICY_REJECTED
     else:

@@ -308,16 +308,11 @@ def prepare_option_positions_contexts(
                         as_of_ms=lifecycle_now_ms,
                     )
                 except Exception as exc:
-                    wheel_model = {
-                        "schema_version": "wheel_read_model.v1",
-                        "account": account,
-                        "as_of_ms": lifecycle_now_ms,
-                        "status": "data_unavailable",
-                        "reason": f"wheel_projection_failed:{type(exc).__name__}",
-                        "batches": [],
-                        "linkage_candidates": [],
-                        "assigned_stock_projection": {},
-                    }
+                    unavailable[account] = (
+                        f"wheel_projection_failed:{type(exc).__name__}"
+                    )
+                    records_by_account.pop(account, None)
+                    continue
                 context["wheel_read_model"] = wheel_model
                 context["decision_state_snapshot"] = dict(
                     snapshots[account]

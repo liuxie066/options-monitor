@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
@@ -47,6 +47,7 @@ from src.application.positions.assigned_stock_view import build_assigned_stock_v
 from src.application.positions.context_cache import (
     invalidate_option_positions_context_cache_for_repo,
 )
+from src.application.wheel.config import resolve_wheel_config
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -788,6 +789,7 @@ def execute_manual_assignment(
     dry_run: bool,
     as_of_ms: int | None = None,
     request_id: str | None = None,
+    runtime_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     request_id_value = str(request_id or "").strip()
     if not request_id_value:
@@ -808,9 +810,33 @@ def execute_manual_assignment(
         "as_of_ms": as_of_ms,
         "request_id": request_id_value,
     }
+    preview = preview_manual_assignment(repo, **kwargs)
+    wheel_start_enabled = False
+    if isinstance(runtime_config, Mapping):
+        record_ids = list(
+            (preview.get("close_target_resolution") or {}).get("record_ids") or []
+        )
+        target_accounts = {
+            str(repo.get_position_lot_fields(str(record_id)).get("account") or "").strip()
+            for record_id in record_ids
+        }
+        target_accounts.discard("")
+        if len(target_accounts) != 1:
+            raise ValueError("manual assignment target account is not unique")
+        wheel_start_enabled = bool(
+            resolve_wheel_config(
+                runtime_config,
+                next(iter(target_accounts)),
+            ).get("enabled_for_new_lifecycle")
+        )
     if dry_run:
-        return preview_manual_assignment(repo, **kwargs)
-    out = record_manual_assignment(repo, **kwargs)
+        return {**preview, "wheel_start_enabled": wheel_start_enabled}
+    out = record_manual_assignment(
+        repo,
+        **kwargs,
+        wheel_start_enabled=wheel_start_enabled,
+    )
+    out["wheel_start_enabled"] = wheel_start_enabled
     result = out.get("result") if isinstance(out.get("result"), dict) else {}
     return _apply_result_payload(
         repo,
