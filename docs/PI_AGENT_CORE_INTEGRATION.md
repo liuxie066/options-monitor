@@ -1,9 +1,9 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: S1-S5 are implemented and validated in source; S6 and S7 have not
-started. The shared Host call path uses Pi Agent Core on this unreleased
-development branch. Deployed production remains on its last released runtime
-until the complete S7 release passes its atomic cutover gate.
+Status: S1-S6 are implemented and validated in source; S7 has not started. The
+Assistant channel entry and shared Host call path use Pi Agent Core on this
+unreleased development branch. Deployed production remains on its last released
+runtime until the complete S7 release passes its atomic cutover gate.
 
 Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
@@ -2572,7 +2572,7 @@ S6 completed its source cutover on 2026-08-20:
   to the existing deterministic preview/confirm/cancel path;
 - mixed or repeated Control batches are blocked inside Node before any Host tool
   callback, while Python revalidates every accepted preview and protocol result;
-- the focused channel, inbound Control, and real Pi process gate passes with 338
+- the focused channel, inbound Control, and real Pi process gate passes with 340
   tests; compatibility suites, Ruff, Node syntax, repository guardrails, and
   diff checks also pass.
 

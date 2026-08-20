@@ -3722,6 +3722,93 @@ def test_invalid_control_preview_observation_is_recoverable(tmp_path):
     assert "INVALID_ACTION" in json.dumps(_session_entries(database, session_id))
 
 
+@pytest.mark.parametrize("repair_kind", ["mixed_batch", "invalid_arguments"])
+def test_control_preview_repair_can_commit_a_valid_request(tmp_path, repair_kind):
+    database = tmp_path / f"control-repair-{repair_kind}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"sender-repair-{repair_kind}", "group-1", "key:us"
+    )
+    valid_turn = _tool_turn(
+        call_id="control_valid",
+        tool_name="request_control_preview",
+        arguments={
+            "intent_name": "upgrade_now",
+            "arguments": {"target_version": "1.2.400"},
+        },
+    )
+    if repair_kind == "mixed_batch":
+        first_turn = {
+            "tool_calls": [
+                {
+                    "call_id": "control_mixed",
+                    "tool_name": "request_control_preview",
+                    "arguments": {"intent_name": "upgrade_now", "arguments": {}},
+                },
+                {"call_id": "read_mixed", "tool_name": "runtime_status", "arguments": {}},
+            ]
+        }
+        tools = [_CONTROL_TOOL, _READ_TOOL]
+    else:
+        first_turn = _tool_turn(
+            call_id="control_invalid",
+            tool_name="request_control_preview",
+            arguments={
+                "intent_name": "upgrade_now",
+                "arguments": {"unsupported": "value"},
+            },
+        )
+        tools = [_CONTROL_TOOL]
+    payload = _start_payload(
+        session_id=session_id,
+        tools=tools,
+        debug={"fixture_turns": [first_turn, valid_turn], "delay_ms": 0},
+    )
+    calls: list[dict] = []
+    control_request = {
+        "intent_name": "upgrade_now",
+        "arguments": {"target_version": "1.2.400"},
+        "source": "copilot_control_preview",
+        "confidence": 1.0,
+    }
+
+    def on_tool_call(call):
+        calls.append(call)
+        if repair_kind == "invalid_arguments" and len(calls) == 1:
+            return {
+                "observation": {"ok": False, "status": "failed", "error": "INVALID_ACTION"},
+                "control_request": None,
+            }
+        return {
+            "observation": {"ok": True, "status": "preview_requested"},
+            "control_request": control_request,
+        }
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id=f"control_repair_{repair_kind}",
+        on_tool_call=on_tool_call,
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "control_requested"
+    assert result["result"]["control_request"] == control_request
+    assert result["result"]["committed"] is True
+    assert len(calls) == (1 if repair_kind == "mixed_batch" else 2)
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    expected_roles = ["user", "assistant", "toolResult", "assistant", "toolResult"]
+    if repair_kind == "mixed_batch":
+        expected_roles.insert(3, "toolResult")
+    assert [message["role"] for message in messages] == expected_roles
+    assert "INVALID_ACTION" in json.dumps(messages[:-2])
+    assert "preview_requested" in json.dumps(messages[-1])
+
+
 def test_malformed_control_bridge_result_fails_closed(tmp_path):
     database = tmp_path / "control-malformed.sqlite3"
     session_id = derive_pi_session_id("feishu", "sender-bad", "group-1", "key:us")
