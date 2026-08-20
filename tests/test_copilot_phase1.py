@@ -20,6 +20,7 @@ from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot import channel_facade
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.infrastructure.openai_chat_completions import create_chat_completion
+from src.infrastructure.pi_agent_process import derive_pi_session_id
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.copilot.service import prepare_contract
 from src.application.agent_tool_contracts import AgentToolError
@@ -56,8 +57,18 @@ def _call(name: str, arguments: dict, call_id: str = "call_1") -> ToolCall:
     return ToolCall(call_id=call_id, name=name, arguments=arguments)
 
 
+def _channel_session_id() -> str:
+    return derive_pi_session_id("test", "test-user", "test-conversation", "key:us")
+
+
 def test_service_is_thin_and_uses_one_general_scene() -> None:
-    for text in ("7月收益", "结论呢", "最近有哪些值得关注的问题？", "分析平仓操作是否合理"):
+    for text in (
+        "7月收益",
+        "结论呢",
+        "最近有哪些值得关注的问题？",
+        "分析平仓操作是否合理",
+        "检查 OM 当前运行状态和配置",
+    ):
         prepared = prepare_contract(_request(text), reference_year=2026)
         assert not isinstance(prepared, AppResult)
         assert prepared.scene_name == GENERAL_SCENE
@@ -93,8 +104,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     manifest = build_scene_manifest(_contract(), "run_test")
 
     assert definition["scene"] == GENERAL_SCENE
-    assert definition["version"] == "v4"
-    assert manifest.scene_version == "v4"
+    assert definition["version"] == "v5"
+    assert manifest.scene_version == "v5"
     assert manifest.messages[0]["role"] == "system"
     assert manifest.messages[0]["content"] == definition["system_prompt"]
     runtime_context = json.loads(manifest.messages[1]["content"].splitlines()[-1])
@@ -947,6 +958,10 @@ def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch,
             )
         }
     )
+    if environment == "channel":
+        kwargs["session_key"] = derive_pi_session_id(
+            "test", "test-user", "test-conversation", "key:us"
+        )
 
     result = local_harness.run_prepared_contract(prepared, **kwargs)
 
@@ -1466,6 +1481,108 @@ def test_channel_without_authenticated_session_identity_is_rejected_before_pi_sp
     assert calls == 0
 
 
+def test_host_rebinds_channel_session_to_canonical_path_scope(tmp_path) -> None:
+    config_path = tmp_path / "config.us.json"
+    alias = tmp_path / "config.alias.json"
+    config_path.write_text("{}", encoding="utf-8")
+    alias.symlink_to(config_path)
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_path=str(alias)),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    _, _, canonical_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=str(alias)
+    )
+    canonical_session = derive_pi_session_id(
+        "feishu", "ou_1", "group_1", canonical_scope
+    )
+    alias_session = derive_pi_session_id(
+        "feishu", "ou_1", "group_1", "path:" + "0" * 64
+    )
+    calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        return ModelTurn(text="结论：运行正常。")
+
+    rejected = run_contract(prepared, model_runner=model, session_key=alias_session)
+    accepted = run_contract(prepared, model_runner=model, session_key=canonical_session)
+
+    assert rejected.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert accepted.status == "answered"
+    assert calls == 1
+
+
+def test_channel_config_path_is_not_returned_to_the_model(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "private" / "config.us.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}", encoding="utf-8")
+    canonical = str(config_path.resolve())
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_path=canonical),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    _, _, authority_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=canonical
+    )
+    requests: list[ModelRequest] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        if not any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(tool_calls=(_call("runtime_status", {}),))
+        return ModelTurn(text="结论：运行正常。")
+
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, _payload, *, allowed_tools: {
+            "ok": True,
+            "data": {"status": "healthy"},
+        },
+    )
+    result = run_contract(
+        prepared,
+        model_runner=model,
+        session_key=derive_pi_session_id(
+            "feishu", "ou_1", "group_1", authority_scope
+        ),
+    )
+
+    assert result.status == "answered"
+    assert len(requests) == 2
+    assert canonical not in json.dumps(requests[-1].messages, ensure_ascii=False)
+    tool_message = next(item for item in requests[-1].messages if item.get("role") == "tool")
+    assert "tool_input" not in json.loads(tool_message["content"])
+    tool_event = next(event for event in result.events if event.type == "tool_result")
+    assert tool_event.payload["tool_input"]["config_path"] == ".../config.us.json"
+
+
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
     calls: list[dict] = []
 
@@ -1690,7 +1807,12 @@ def test_channel_manifest_exposes_catalog_driven_control_preview_only() -> None:
     local_result = run_contract(_contract("检查运行状态"), model_runner=model)
     channel_prepared = prepare_contract(_request("升级到最新版", environment="channel"), reference_year=2026)
     assert not isinstance(channel_prepared, AppResult)
-    channel_result = run_contract(channel_prepared, model_runner=model, control_preview_specs=preview_specs)
+    channel_result = run_contract(
+        channel_prepared,
+        model_runner=model,
+        control_preview_specs=preview_specs,
+        session_key=_channel_session_id(),
+    )
 
     assert local_result.status == "answered"
     assert channel_result.status == "answered"
@@ -1723,7 +1845,7 @@ def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> 
         assert request["source"] == "copilot_control_preview"
 
 
-def test_s5_control_preview_stays_outside_the_read_tool_bridge(monkeypatch) -> None:
+def test_s6_control_preview_terminates_without_a_second_model_turn(monkeypatch) -> None:
     executed = False
 
     def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
@@ -1745,18 +1867,81 @@ def test_s5_control_preview_stays_outside_the_read_tool_bridge(monkeypatch) -> N
                     ),
                 )
             )
-        observation = json.loads(next(item for item in request.messages if item.get("role") == "tool")["content"])
-        assert observation["error"] == "POLICY_ERROR"
-        return ModelTurn(text="结论：S5 只开放只读工具；Control 接线由 S6 完成。")
+        raise AssertionError("valid control preview must terminate before another model turn")
 
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
     prepared = prepare_contract(_request("升级到 1.2.400", environment="channel"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
+    result = run_contract(
+        prepared,
+        model_runner=model,
+        control_preview_specs=preview_operation_capabilities(),
+        session_key=_channel_session_id(),
+    )
 
-    assert result.status == "answered"
-    assert result.control_request is None
+    assert result.status == "control_requested"
+    assert result.user_response == ""
+    assert result.control_request == {
+        "intent_name": "upgrade_now",
+        "arguments": {"target_version": "1.2.400"},
+        "source": "copilot_control_preview",
+        "confidence": 1.0,
+    }
+    assert calls == 1
     assert executed is False
+
+
+def test_cancelled_control_preview_keeps_the_closed_bridge_shape(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        captured.append(
+            on_tool_call(
+                {
+                    "call_id": "control_cancelled",
+                    "tool_name": CONTROL_PREVIEW_TOOL,
+                    "arguments": {"intent_name": "upgrade_now", "arguments": {}},
+                }
+            )
+        )
+        return {
+            "ok": False,
+            "error": {
+                "code": "CANCELLED",
+                "stage": "cancel",
+                "message": "cancelled",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = prepare_contract(
+        _request("升级到最新版", environment="channel"), reference_year=2026
+    )
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(
+        prepared,
+        model_settings=_TEST_MODEL,
+        session_key=_channel_session_id(),
+        control_preview_specs=preview_operation_capabilities(),
+        is_cancelled=lambda: True,
+    )
+
+    assert result.status == "cancelled"
+    assert captured == [
+        {
+            "observation": {
+                "tool_name": CONTROL_PREVIEW_TOOL,
+                "ok": False,
+                "status": "failed",
+                "error": "CANCELLED",
+                "code": "CANCELLED",
+                "message": "run cancelled before tool execution",
+                "retryable": False,
+            },
+            "control_request": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize("intent_name", ["upgrade_confirm", "manual_trade_confirm", "symbol_cancel"])
@@ -1782,7 +1967,7 @@ def test_host_preserves_conversation_context() -> None:
     assert manifest.messages[-3:] == [*context, {"role": "user", "content": "结论呢"}]
 
 
-def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatch, tmp_path) -> None:
+def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
 
@@ -1819,6 +2004,8 @@ def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatc
     assert result.status == "answered"
     messages = captured["messages"]
     assert isinstance(messages, list)
+    assert len(messages) == 2
+    assert "旧历史" not in str(messages)
     assert messages[-2]["role"] == "system"
     assert "Authoritative pending Control operations" in messages[-2]["content"]
     assert '"operation_id": "in_upgrade"' in messages[-2]["content"]
@@ -1848,6 +2035,7 @@ def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkey
     assert result.status == "answered"
     messages = captured["messages"]
     assert isinstance(messages, list)
+    assert len(messages) == 2
     assert "pending_operations=[]" in messages[-2]["content"]
 
 
@@ -1898,6 +2086,7 @@ def test_scene_prepared_records_stable_prompt_and_projected_tool_fingerprints() 
         channel_contract,
         model_runner=model,
         control_preview_specs=preview_operation_capabilities(),
+        session_key=_channel_session_id(),
     )
 
     def prepared_payload(result: AppResult) -> dict:
@@ -1908,7 +2097,7 @@ def test_scene_prepared_records_stable_prompt_and_projected_tool_fingerprints() 
     portfolio_payload = prepared_payload(with_portfolio)
     control_payload = prepared_payload(with_control)
 
-    assert base_payload["scene_version"] == "v4"
+    assert base_payload["scene_version"] == "v5"
     assert len(base_payload["compiled_prompt_sha256"]) == 64
     assert len(base_payload["tool_schema_sha256"]) == 64
     assert base_payload["compiled_prompt_sha256"] == portfolio_payload["compiled_prompt_sha256"]

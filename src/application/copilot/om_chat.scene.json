@@ -1,6 +1,6 @@
 {
   "scene": "om_chat",
-  "version": "v4",
+  "version": "v5",
   "description": "General read-first options-monitor copilot with deterministic Control previews",
   "prompt_fragments": [
     "prompts/base_behavior.md",
@@ -17,6 +17,10 @@
     {
       "name": "config_key",
       "authority": "fixed_tool_scope"
+    },
+    {
+      "name": "config_path",
+      "authority": "host_only_tool_scope"
     },
     {
       "name": "symbol",

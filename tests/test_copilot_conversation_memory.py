@@ -9,13 +9,14 @@ import pytest
 
 from src.application.copilot import channel_facade, local_harness, tools as copilot_tools
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
-from src.application.copilot.contracts import AppResult, CopilotRequest, new_id
+from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, new_id
 from src.application.copilot.conversation_memory import prepare_contract_with_existing_memory
 from tests.copilot_pi_test_support import _TEST_MODEL, fake_pi_agent, run_contract
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.application.copilot.service import prepare_contract
 from src.interfaces.cli.copilot_ops import _successful_observations, handle_copilot_command
+from src.infrastructure.pi_agent_process import derive_pi_session_id
 
 
 def test_conversation_memory_injects_existing_state_without_mutation(tmp_path) -> None:
@@ -131,7 +132,7 @@ def test_memory_update_rejects_nonfinite_numbers_without_rewrite(tmp_path) -> No
     assert store.session_memory("feishu:chat") == expected_memory
 
 
-def test_s5_rejects_legacy_channel_history_before_pi_spawn(
+def test_s6_channel_ignores_legacy_history_and_does_not_rewrite_it(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -172,12 +173,11 @@ def test_s5_rejects_legacy_channel_history_before_pi_spawn(
         host_db_path=str(database),
     )
 
-    assert result.status == "failed"
-    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
-    assert requests == []
-    turns = store.session_turns("feishu:chat_1")
-    assert turns[:-1] == expected_turns
-    assert turns[-1]["assistant_final"] == "Copilot 未能准备只读执行场景。"
+    assert result.status == "answered"
+    assert len(requests) == 1
+    assert "不应注入" not in str(requests[0].messages)
+    assert "q0" not in str(requests[0].messages)
+    assert store.session_turns("feishu:chat_1") == expected_turns
     with sqlite3.connect(store.path) as conn:
         stored_row = conn.execute(
             "SELECT memory_json FROM copilot_sessions WHERE session_key = 'feishu:chat_1'"
@@ -236,13 +236,21 @@ def test_online_run_with_uncompacted_backlog_only_invokes_main_model(monkeypatch
     assert len(store.session_turns("feishu:chat")) == 9
 
 
-def test_successful_channel_answer_records_turn_after_run(monkeypatch, tmp_path) -> None:
+def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
+    monkeypatch, tmp_path
+) -> None:
     database = tmp_path / "copilot.sqlite3"
+    captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+
+    def fake_run(_prepared, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return AppResult(status="answered", user_response="结论：运行正常。")
+
     monkeypatch.setattr(
         channel_facade,
         "run_prepared_contract",
-        lambda _prepared, **_kwargs: AppResult(status="answered", user_response="结论：运行正常。"),
+        fake_run,
     )
 
     result = channel_facade.run_channel_request(
@@ -255,10 +263,122 @@ def test_successful_channel_answer_records_turn_after_run(monkeypatch, tmp_path)
     )
 
     assert result.status == "answered"
-    turns = CopilotHostStore(database).session_turns("feishu:chat_1")
-    assert len(turns) == 1
-    assert turns[0]["user_text"] == "检查运行状态"
-    assert turns[0]["assistant_final"] == "结论：运行正常。"
+    assert captured["session_key"] == derive_pi_session_id(
+        "feishu", "ou_1", "chat_1", "key:us"
+    )
+    assert CopilotHostStore(database).session_turns("feishu:chat_1") == ()
+
+
+def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path) -> None:
+    first = tmp_path / "config-a.json"
+    second = tmp_path / "config-b.json"
+    alias = tmp_path / "config-alias.json"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    alias.symlink_to(first)
+
+    _, canonical, scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=str(alias)
+    )
+    _, _, same_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=str(first)
+    )
+    _, _, other_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=str(second)
+    )
+
+    assert canonical == str(first.resolve())
+    assert scope == same_scope
+    assert scope != other_scope
+    first_session = channel_facade._channel_session_key(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="group_1",
+        authority_scope=scope,
+    )
+    assert first_session != channel_facade._channel_session_key(
+        channel="feishu",
+        sender_id="ou_2",
+        conversation_id="group_1",
+        authority_scope=scope,
+    )
+    assert first_session != channel_facade._channel_session_key(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="group_1",
+        authority_scope=other_scope,
+    )
+    assert channel_facade._channel_session_key(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id=None,
+        authority_scope=scope,
+    ) == derive_pi_session_id("feishu", "ou_1", "sender:ou_1", scope)
+
+
+def test_invalid_channel_identity_or_scope_fails_before_model_gate(monkeypatch, tmp_path) -> None:
+    invoked = False
+    directory = tmp_path / "config-directory"
+    directory.mkdir()
+
+    def unexpected_gate(_path):
+        nonlocal invoked
+        invoked = True
+        return None
+
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", unexpected_gate)
+    cases = (
+        {"config_key": "us", "sender_id": ""},
+        {"config_key": "us", "config_path": str(tmp_path / "missing.json")},
+        {"config_key": None, "config_path": str(tmp_path / "missing.json")},
+        {"config_key": None, "config_path": str(directory)},
+    )
+
+    for case in cases:
+        request = {
+            "user_message": "检查运行状态",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "group_1",
+            **case,
+        }
+        result = channel_facade.run_channel_request(**request)
+        assert result.error == {
+            "code": "CHANNEL_NOT_READY",
+            "reason": "channel_identity_or_scope_invalid",
+        }
+    assert invoked is False
+
+
+def test_channel_config_path_stays_out_of_model_visible_context(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "private" / "config.us.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+
+    def fake_run(prepared, **kwargs):  # type: ignore[no-untyped-def]
+        captured["prepared"] = prepared
+        captured.update(kwargs)
+        return AppResult(status="answered", user_response="结论：运行正常。")
+
+    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    result = channel_facade.run_channel_request(
+        user_message="检查运行状态",
+        config_key=None,
+        config_path=str(config_path),
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="group_1",
+        host_db_path=str(tmp_path / "audit.sqlite3"),
+    )
+
+    prepared = captured["prepared"]
+    canonical = str(config_path.resolve())
+    assert result.status == "answered"
+    assert prepared.input["config_path"] == canonical
+    assert canonical not in json.dumps(prepared.input["messages"], ensure_ascii=False)
+    assert canonical not in str(captured["session_key"])
 
 
 def test_host_store_migrates_existing_session_schema(tmp_path) -> None:
@@ -367,7 +487,7 @@ def test_failed_read_only_run_resumes_with_recovered_observation(monkeypatch, tm
         for item in store.run_events(resumed.run_id)
         if item["type"] == "scene_prepared"
     )
-    assert resumed_scene["scene_version"] == "v4"
+    assert resumed_scene["scene_version"] == "v5"
     assert resumed_scene["compiled_prompt_sha256"] == failed_scene["compiled_prompt_sha256"]
     assert resumed_scene["tool_schema_sha256"] == failed_scene["tool_schema_sha256"]
 
@@ -981,12 +1101,8 @@ def _contract(text: str):
             request_id=new_id("req"),
             source_entry="test",
             user_message=text,
-            execution_environment="channel",
-            trusted_tool_scope={
-                "authenticated_channel": "test",
-                "authenticated_sender_id": "test-user",
-                "authenticated_conversation_id": "test-conversation",
-            },
+            explicit_scope=CopilotScope(config_key="us"),
+            execution_environment="local",
         ),
         reference_year=2026,
     )

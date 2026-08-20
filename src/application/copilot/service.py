@@ -14,6 +14,7 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
         )
     scope = request.explicit_scope
     config_key = _text(scope.config_key, lower=True)
+    config_path = _text(scope.config_path)
     symbol = _text(scope.symbol, upper=True)
     month = _text(scope.month)
     messages = [dict(item) for item in request.context_messages]
@@ -41,6 +42,7 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
         input={
             "user_message": message,
             "config_key": config_key,
+            "config_path": config_path,
             "symbol": symbol,
             "month": month,
             "reference_year": int(reference_year),
@@ -54,7 +56,12 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
         decision_trace={
             "scope_sources": {
                 key: f"explicit_scope.{key}"
-                for key, value in (("config_key", config_key), ("symbol", symbol), ("month", month))
+                for key, value in (
+                    ("config_key", config_key),
+                    ("config_path", config_path),
+                    ("symbol", symbol),
+                    ("month", month),
+                )
                 if value
             },
             "selected_scene": GENERAL_SCENE,
