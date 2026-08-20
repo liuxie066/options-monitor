@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.
+
 ## 1.14.11 - 2026-08-20
 
 ### Bug Fixes

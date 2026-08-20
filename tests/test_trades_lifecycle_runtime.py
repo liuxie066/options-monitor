@@ -163,6 +163,44 @@ def test_applied_due_requires_seal_sink_before_provider() -> None:
     assert factory_calls == 0
 
 
+def test_timing_after_intake_propagates_wheel_start_policy(monkeypatch) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    captured: dict[str, Any] = {}
+
+    class Repo:
+        def get_trade_lifecycle_timing_policy(self, _case_id: str) -> dict[str, Any]:
+            return {"policy_schema": "lifecycle_timing_policy.v1"}
+
+    def reconcile(_repo: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"status": "applied"}
+
+    monkeypatch.setattr(mod, "reconcile_lifecycle_close_reason", reconcile)
+
+    result = mod.ensure_lifecycle_timing_after_intake(
+        Repo(),
+        payload={},
+        result={
+            "diagnostics": {
+                "lifecycle_adoption": {
+                    "lifecycle_case": {
+                        "case_id": "case-wheel-start",
+                        "status": "waiting_settlement_evidence",
+                    }
+                }
+            }
+        },
+        now_ms=1_000,
+        apply_changes=True,
+        wheel_start_enabled=True,
+    )
+
+    assert result is not None
+    assert captured["case_id"] == "case-wheel-start"
+    assert captured["wheel_start_enabled"] is True
+
+
 def _candidate(case_id: str) -> dict:
     return {
         "lifecycle_case": {

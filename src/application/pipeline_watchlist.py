@@ -1098,7 +1098,7 @@ def run_watchlist_pipeline_default(
                         cny_per_hkd_exchange_rate=cny_per_hkd,
                     )
                 },
-                int(wheel_read_model.get("as_of_ms") or 0),
+                decision_time_ms=int(captured_at.timestamp() * 1000),
             )
             wheel_capture = finalize_wheel_capacity(
                 account=account,

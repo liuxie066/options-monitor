@@ -794,7 +794,7 @@ def _payload_with_preview_locked_values(payload: dict[str, Any], preview: dict[s
 
 
 def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
-    _data_config, repo = _open_repo_for_payload(payload)
+    _data_config, repo, cfg = _open_repo_for_payload(payload)
     args = dict(payload.get("arguments") or {})
     try:
         if payload.get("operation_type") == "manual_open":
@@ -802,7 +802,12 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
         elif payload.get("operation_type") == "manual_close":
             out = execute_manual_close(repo, dry_run=True, **args)
         elif payload.get("operation_type") == "manual_assignment":
-            out = execute_manual_assignment(repo, dry_run=True, **args)
+            out = execute_manual_assignment(
+                repo,
+                dry_run=True,
+                runtime_config=cfg,
+                **args,
+            )
         elif payload.get("operation_type") == "manual_expiry":
             preview_args = dict(args)
             preview_args.pop("close_reason", None)
@@ -817,7 +822,7 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
-    _data_config, repo = _open_repo_for_payload(payload)
+    _data_config, repo, cfg = _open_repo_for_payload(payload)
     args = dict(payload.get("arguments") or {})
     try:
         if payload.get("operation_type") == "manual_open":
@@ -825,7 +830,12 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
         elif payload.get("operation_type") == "manual_close":
             out = execute_manual_close(repo, dry_run=False, **args)
         elif payload.get("operation_type") == "manual_assignment":
-            out = execute_manual_assignment(repo, dry_run=False, **args)
+            out = execute_manual_assignment(
+                repo,
+                dry_run=False,
+                runtime_config=cfg,
+                **args,
+            )
         elif payload.get("operation_type") == "manual_expiry":
             out = record_lifecycle_expire_close(
                 repo,
@@ -842,12 +852,17 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     return _json_safe(out)
 
 
-def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any]:
+def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
     raw_config = payload.get("config")
     config = cast(dict[str, Any], raw_config) if isinstance(raw_config, dict) else {}
     config_key = str(config.get("config_key") or "").strip().lower() or None
     config_path, cfg = load_runtime_config(config_key=config_key, config_path=config.get("config_path"))
-    return open_position_ledger_from_runtime_config(base=repo_base(), cfg=cfg, config_path=config_path)
+    data_config, repo = open_position_ledger_from_runtime_config(
+        base=repo_base(),
+        cfg=cfg,
+        config_path=config_path,
+    )
+    return data_config, repo, cfg
 
 
 def _require_runtime_config_scope(request: AssistantRequest) -> None:

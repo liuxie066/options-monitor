@@ -34,6 +34,7 @@ from src.application.trades.state import (
     upsert_deal_state,
     write_trade_intake_state,
 )
+from src.application.wheel.config import resolve_wheel_config
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.deal_identity import broker_deal_key_from_payload
 from src.application.trades.history_backfill import OpenDHistoryDealClient
@@ -236,6 +237,15 @@ def _process_payload(
         )
 
     def _resolve_with_wheel_intent(deal: Any, **kwargs: Any) -> Any:
+        deal_account = str(getattr(deal, "internal_account", "") or "").strip()
+        wheel_start_enabled = bool(
+            isinstance(config, dict)
+            and deal_account
+            and resolve_wheel_config(
+                config,
+                deal_account,
+            ).get("enabled_for_new_lifecycle")
+        )
         if not (
             apply_changes
             and isinstance(config, dict)
@@ -244,7 +254,11 @@ def _process_payload(
             and str(getattr(deal, "side", "") or "").lower() == "sell"
             and str(getattr(deal, "option_type", "") or "").lower() == "call"
         ):
-            return resolve_trade_deal(deal, **kwargs)
+            return resolve_trade_deal(
+                deal,
+                **kwargs,
+                wheel_start_enabled=wheel_start_enabled,
+            )
         coverage_fact = _wheel_intent_coverage_fact(
             repo=kwargs["repo"],
             deal=deal,
@@ -253,6 +267,7 @@ def _process_payload(
         return resolve_trade_deal(
             deal,
             **kwargs,
+            wheel_start_enabled=wheel_start_enabled,
             persist_trade_event_fn=lambda active_repo, active_deal: (
                 record_trade_event_with_wheel_intent(
                     active_repo,
@@ -1568,6 +1583,12 @@ def _run_listener_source_loop(
                 quote_dependency_error=quote_dependency_error,
                 now_ms=int(time.time() * 1000),
                 apply_changes=True,
+                wheel_start_enabled=bool(
+                    resolve_wheel_config(
+                        cfg,
+                        str(source.get("account") or ""),
+                    ).get("enabled_for_new_lifecycle")
+                ),
             )
             if timing is not None:
                 result["lifecycle_timing"] = timing
@@ -1864,6 +1885,12 @@ def _run_listener_source_loop(
                                         settlement_process_metrics
                                     ),
                                     seal_sink=_settlement_seal_sink,
+                                    wheel_start_enabled=bool(
+                                        resolve_wheel_config(
+                                            cfg,
+                                            str(source.get("account") or ""),
+                                        ).get("enabled_for_new_lifecycle")
+                                    ),
                                 )
                             )
                         status_state[

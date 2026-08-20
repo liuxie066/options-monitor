@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_position_lots import OpenPositionCommand
@@ -151,3 +154,61 @@ def test_prepared_context_reuses_one_ledger_read_for_active_wheel(
         "max_dte": 45,
         "requires_realized_volatility": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("sell_put_enabled", "sell_call_enabled", "combo_enabled"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_wheel_required_data_preserves_existing_strategy_config_matrix(
+    sell_put_enabled: bool,
+    sell_call_enabled: bool,
+    combo_enabled: bool,
+) -> None:
+    config = {
+        "wheel": {"enabled": True, "accounts": ["acct_a"]},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+                "sell_put": {"enabled": sell_put_enabled},
+                "sell_call": {"enabled": sell_call_enabled},
+                "yield_enhancement": {
+                    "enabled": combo_enabled,
+                    "variant": "sp_lc",
+                },
+            }
+        ],
+    }
+    original = deepcopy(config)
+    merged = merge_wheel_requirements_into_prefetch_config(
+        base_config=config,
+        candidate_config=config,
+        account_configs={"acct_a": config},
+        wheel_read_models={
+            "acct_a": {
+                "batches": [
+                    {
+                        "symbol": "NVDA",
+                        "lifecycle_status": "active",
+                        "integrity_status": "trusted",
+                        "phase": "ready",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert config == original
+    for key in ("sell_put", "sell_call", "yield_enhancement"):
+        assert merged["symbols"][0][key] == original["symbols"][0][key]
+    assert merged["symbols"][0]["_wheel_call"]["enabled"] is True

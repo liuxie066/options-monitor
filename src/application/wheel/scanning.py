@@ -22,6 +22,8 @@ from src.application.candidate_models import CandidateBaseValues, CandidateContr
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
+    evidence_summary_from_decisions,
+    project_evidence_scan_status,
     run_candidate_scan,
 )
 from src.application.required_data_snapshot import (
@@ -116,7 +118,7 @@ def _candidate_universe(
     frames: Mapping[str, pd.DataFrame],
     input_root: Path,
     exchange_rate_converter: Any,
-    as_of_ms: int,
+    decision_time_ms: int,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     decisions: list[dict[str, Any]] = []
 
@@ -126,7 +128,10 @@ def _candidate_universe(
                 contract.to_gate_payload(),
                 mode="call",
                 avg_cost=None,
-                now_utc=datetime.fromtimestamp(as_of_ms / 1000, tz=timezone.utc),
+                now_utc=datetime.fromtimestamp(
+                    decision_time_ms / 1000,
+                    tz=timezone.utc,
+                ),
             )
         except CandidateCalculationError:
             return None
@@ -180,6 +185,12 @@ def _candidate_universe(
     )
 
 
+def _decision_symbol(record: Mapping[str, Any]) -> str:
+    decision = record.get("opening_decision")
+    source = decision if isinstance(decision, Mapping) else record
+    return str(source.get("symbol") or "").strip().upper()
+
+
 def _exit_fee_fact(
     *,
     stock: Mapping[str, Any],
@@ -210,7 +221,8 @@ def run_wheel_call_scan(
     required_data_snapshot: FrozenRequiredDataBatch | Mapping[str, Any],
     coverage_fact: Mapping[str, Any],
     fee_context: Any,
-    as_of_ms: int,
+    *,
+    decision_time_ms: int,
 ) -> dict[str, Any]:
     """Build Wheel Call candidates from one already-frozen required-data batch."""
 
@@ -236,12 +248,39 @@ def run_wheel_call_scan(
         frames=frames,
         input_root=Path("."),
         exchange_rate_converter=converter,
-        as_of_ms=int(as_of_ms),
+        decision_time_ms=int(decision_time_ms),
     ) if symbols else (pd.DataFrame(), [])
     universe_by_symbol = {
         symbol: [dict(row) for row in universe.loc[universe["symbol"] == symbol].to_dict("records")]
         for symbol in symbols
     } if not universe.empty else {symbol: [] for symbol in symbols}
+    decisions_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+    for decision in calculation_decisions:
+        symbol = _decision_symbol(decision)
+        if symbol in decisions_by_symbol:
+            decisions_by_symbol[symbol].append(decision)
+    common_candidates_by_symbol: dict[str, list[dict[str, Any]]] = {
+        symbol: [] for symbol in symbols
+    }
+    for symbol, candidates in universe_by_symbol.items():
+        for candidate in candidates:
+            decision = evaluate_opening_candidate_policy(
+                candidate,
+                mode="call",
+                min_dte=int(wheel_config["min_dte"]),
+                max_dte=int(wheel_config["max_dte"]),
+                min_annualized_return=float(wheel_config["min_annualized_net_premium_return"]),
+                min_net_premium_cny=float(wheel_config["min_net_premium_cny"]),
+                min_iv_rv_ratio=float(wheel_config["min_iv_rv_ratio"]),
+                min_iv_minus_rv=float(wheel_config["min_iv_minus_rv"]),
+                max_spread_ratio=float(wheel_config["max_spread_ratio"]),
+                require_earnings_evidence=False,
+                reject_known_earnings=False,
+                apply_default_call_strike_cap=False,
+            )
+            decisions_by_symbol[symbol].append(decision)
+            if decision["accepted"]:
+                common_candidates_by_symbol[symbol].append(candidate)
     scopes: list[dict[str, Any]] = []
     raw_by_batch: dict[str, list[dict[str, Any]]] = {}
     claims: list[dict[str, Any]] = []
@@ -281,36 +320,29 @@ def run_wheel_call_scan(
         batch = _batch_economics(raw_batch, stock)
         evaluated: list[dict[str, Any]] = []
         data_unavailable = False
-        for candidate in universe_by_symbol.get(symbol, []):
-            common = evaluate_opening_candidate_policy(
-                candidate,
-                mode="call",
-                min_dte=int(wheel_config["min_dte"]),
-                max_dte=int(wheel_config["max_dte"]),
-                min_annualized_return=float(wheel_config["min_annualized_net_premium_return"]),
-                min_net_premium_cny=float(wheel_config["min_net_premium_cny"]),
-                min_iv_rv_ratio=float(wheel_config["min_iv_rv_ratio"]),
-                min_iv_minus_rv=float(wheel_config["min_iv_minus_rv"]),
-                max_spread_ratio=float(wheel_config["max_spread_ratio"]),
-                require_earnings_evidence=False,
-                reject_known_earnings=False,
-                apply_default_call_strike_cap=False,
-            )
-            if not common["accepted"]:
-                continue
+        for candidate in common_candidates_by_symbol.get(symbol, []):
             multiplier = 0
             try:
                 multiplier = int(float(candidate.get("multiplier") or 0))
                 contracts = int(batch.get("shares_remaining") or 0) // multiplier
             except (TypeError, ValueError, ZeroDivisionError):
                 contracts = 0
-            fee = _exit_fee_fact(
-                stock=stock,
-                candidate=candidate,
-                shares=contracts * max(multiplier, 0),
-                fee_context=fee_context,
-            )
-            item = evaluate_wheel_call_candidate(batch, candidate, wheel_config, fee, contracts)
+            grant_evaluations: dict[str, dict[str, Any]] = {}
+            for grant in range(1, contracts + 1):
+                fee = _exit_fee_fact(
+                    stock=stock,
+                    candidate=candidate,
+                    shares=grant * max(multiplier, 0),
+                    fee_context=fee_context,
+                )
+                grant_evaluations[str(grant)] = evaluate_wheel_call_candidate(
+                    batch,
+                    candidate,
+                    wheel_config,
+                    fee,
+                    grant,
+                )
+            item = grant_evaluations.get(str(contracts), {})
             if item.get("wheel_candidate_status") == "data_unavailable":
                 data_unavailable = True
                 continue
@@ -321,9 +353,18 @@ def run_wheel_call_scan(
                 {"stock_lot_id": stock_lot_id, "contract_symbol": item.get("contract_symbol")}
             )[:24]
             item["rank_key"] = build_wheel_call_rank_key(item)
+            item["_grant_evaluations"] = grant_evaluations
             evaluated.append(item)
         evaluated.sort(key=lambda row: tuple((row.get("rank_key") or {}).get("sort_tuple") or ()))
         raw_by_batch[stock_lot_id] = evaluated
+        evidence = evidence_summary_from_decisions(
+            decisions=decisions_by_symbol.get(symbol, []),
+            accepted_count=len(common_candidates_by_symbol.get(symbol, [])),
+        )
+        evidence_status, evidence_reason = project_evidence_scan_status(
+            evidence=evidence,
+            candidate_count=len(evaluated),
+        )
         if evaluated:
             top = evaluated[0]
             claims.append(
@@ -340,12 +381,27 @@ def run_wheel_call_scan(
                     "assignment_at_ms": stock.get("assigned_at_ms"),
                 }
             )
-            scopes.append({**base_scope, "status": "completed", "reason_code": "candidates_found", "candidate_count": len(evaluated)})
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "completed",
+                    "reason_code": (
+                        "partial_data"
+                        if data_unavailable or evidence_reason == "partial_data"
+                        else "candidates_found"
+                    ),
+                    "candidate_count": len(evaluated),
+                }
+            )
         else:
             scopes.append({
                 **base_scope,
-                "status": "unavailable" if data_unavailable else "completed",
-                "reason_code": "wheel_candidate_data_unavailable" if data_unavailable else "no_candidate",
+                "status": "unavailable" if data_unavailable else evidence_status,
+                "reason_code": (
+                    "wheel_candidate_data_unavailable"
+                    if data_unavailable
+                    else evidence_reason or "no_candidate"
+                ),
             })
     return {
         "account": account,

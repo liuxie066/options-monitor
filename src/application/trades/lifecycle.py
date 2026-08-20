@@ -61,6 +61,7 @@ def resolve_lifecycle_trade_deal(
     *,
     repo: Any,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution | None:
     if _is_stock_settlement_leg(deal):
         evidence = _evidence_from_deal(deal, evidence_type="stock_settlement_leg", case_id=None)
@@ -82,9 +83,19 @@ def resolve_lifecycle_trade_deal(
             )
         ):
             return None
-        return _resolve_stock_settlement_leg(deal, repo=repo, apply_changes=apply_changes)
+        return _resolve_stock_settlement_leg(
+            deal,
+            repo=repo,
+            apply_changes=apply_changes,
+            wheel_start_enabled=wheel_start_enabled,
+        )
     if _is_zero_price_option_close(deal):
-        return _resolve_zero_price_option_close(deal, repo=repo, apply_changes=apply_changes)
+        return _resolve_zero_price_option_close(
+            deal,
+            repo=repo,
+            apply_changes=apply_changes,
+            wheel_start_enabled=wheel_start_enabled,
+        )
     return None
 
 
@@ -126,6 +137,7 @@ def _resolve_zero_price_option_close(
     *,
     repo: Any,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution:
     if not apply_changes:
         return _preview_zero_price_option_close(deal, repo=repo)
@@ -222,6 +234,7 @@ def _resolve_zero_price_option_close(
                 option_evidence=accepted_evidence,
                 stock_evidence=stock_evidence,
                 apply_changes=True,
+                wheel_start_enabled=wheel_start_enabled,
             )
             for stock_evidence in matching_stock_evidences
         ]
@@ -342,12 +355,14 @@ def _resolve_stock_settlement_leg(
     *,
     repo: Any,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution:
     evidence = _evidence_from_deal(deal, evidence_type="stock_settlement_leg", case_id=None)
     return _resolve_stock_settlement_evidence(
         evidence,
         repo=repo,
         apply_changes=apply_changes,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 
@@ -360,6 +375,7 @@ def reconcile_polled_stock_settlement_evidence(
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     consume_unresolved_attempt: bool = True,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution:
     payload = dict(evidence or {})
     if (
@@ -379,6 +395,7 @@ def reconcile_polled_stock_settlement_evidence(
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
         consume_unresolved_attempt=consume_unresolved_attempt,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 
@@ -391,6 +408,7 @@ def _resolve_stock_settlement_evidence(
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
     consume_unresolved_attempt: bool = True,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution:
     matching_cases = _find_matching_option_cases(
         repo,
@@ -591,6 +609,7 @@ def _resolve_stock_settlement_evidence(
         ),
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 
@@ -605,6 +624,7 @@ def _write_lifecycle_close_from_case(
     expected_lifecycle_generation_token: str | None = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution:
     if not apply_changes:
         raise ValueError("lifecycle close write requires apply_changes")
@@ -628,6 +648,7 @@ def _write_lifecycle_close_from_case(
         ),
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
+        wheel_start_enabled=wheel_start_enabled,
     )
     if v2_result is not None:
         return v2_result
@@ -661,8 +682,7 @@ def _write_lifecycle_close_from_case(
         )
     try:
         record_fn = record_lifecycle_assignment if normalized_decision == "assignment" else record_lifecycle_exercise
-        ledger_result = record_fn(
-            repo,
+        record_kwargs = dict(
             broker=case.get("broker") or "富途",
             account=case.get("account"),
             symbol=case.get("symbol"),
@@ -685,6 +705,9 @@ def _write_lifecycle_close_from_case(
                 "price": stock.get("stock_price"),
             },
         )
+        if normalized_decision == "assignment":
+            record_kwargs["wheel_start_enabled"] = wheel_start_enabled
+        ledger_result = record_fn(repo, **record_kwargs)
     except LotCloseResolutionError as exc:
         conflict_event = _find_conflicting_expire_close_event(repo, case)
         failed = _case_with_decision(
@@ -753,6 +776,7 @@ def _write_v2_lifecycle_close_from_case(
     expected_lifecycle_generation_token: str | None = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleTradeResolution | None:
     option_source_id = str(
         (option_evidence or {}).get("source_event_id") or ""
@@ -824,6 +848,7 @@ def _write_v2_lifecycle_close_from_case(
         ),
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
+        wheel_start_enabled=wheel_start_enabled,
     )
     if (
         result.status == "needs_review"

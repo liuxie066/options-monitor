@@ -307,6 +307,7 @@ def resolve_trade_deal(
     apply_changes: bool,
     persist_trade_event_fn=None,
     retry_failed_deal: bool = False,
+    wheel_start_enabled: bool = False,
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
     state_entry = _deal_state_entry(state, deal)
@@ -371,7 +372,12 @@ def resolve_trade_deal(
                 ],
             },
         )
-    lifecycle_result = resolve_lifecycle_trade_deal(deal, repo=repo, apply_changes=apply_changes)
+    lifecycle_result = resolve_lifecycle_trade_deal(
+        deal,
+        repo=repo,
+        apply_changes=apply_changes,
+        wheel_start_enabled=wheel_start_enabled,
+    )
     if lifecycle_result is not None and lifecycle_result.handled:
         return _from_lifecycle_resolution(deal, lifecycle_result)
     if deal.symbol and not deal.option_type:

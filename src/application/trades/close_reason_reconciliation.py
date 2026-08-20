@@ -109,6 +109,7 @@ def reconcile_lifecycle_close_reason(
     coherent_facts: Mapping[str, Any] | None = None,
     refresh_read_model: bool = True,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     if not apply_changes and attempt_audit is not None:
         raise ValueError(
@@ -224,6 +225,11 @@ def reconcile_lifecycle_close_reason(
         }
     poll_results: list[dict[str, Any]] = []
     for candidate in stock_candidates:
+        poll_kwargs = (
+            {"wheel_start_enabled": True}
+            if wheel_start_enabled
+            else {}
+        )
         resolution = (
             reconcile_polled_stock_settlement_evidence(
                 repo,
@@ -239,6 +245,7 @@ def reconcile_lifecycle_close_reason(
                 ),
                 attempt_audit=remaining_attempt_audit,
                 consume_unresolved_attempt=False,
+                **poll_kwargs,
             )
         )
         resolution_diagnostics = dict(resolution.diagnostics)
@@ -678,17 +685,24 @@ def _reconcile_deadline_without_effective_pairing(
     read_model: dict[str, Any],
     now_ms: int,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any] | None:
     case_id = str(lifecycle_case.get("case_id") or "").strip()
     evidence_status = str(
         read_model.get("lifecycle_evidence_status") or ""
     ).strip().lower()
     if evidence_status != "missing":
+        wheel_kwargs = (
+            {"wheel_start_enabled": True}
+            if wheel_start_enabled
+            else {}
+        )
         return reconcile_lifecycle_close_reason(
             repo,
             case_id=case_id,
             now_ms=int(now_ms),
             apply_changes=apply_changes,
+            **wheel_kwargs,
         )
     if str(read_model.get("reason_state") or "").strip().lower() != "needs_review":
         return None
@@ -773,6 +787,7 @@ def reconcile_due_lifecycle_cases(
     prepared_read_models: (
         Mapping[str, dict[str, Any]] | None
     ) = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     if not account_value:
@@ -870,6 +885,7 @@ def reconcile_due_lifecycle_cases(
                     read_model=dict(read_model),
                     now_ms=int(now_ms),
                     apply_changes=apply_changes,
+                    wheel_start_enabled=wheel_start_enabled,
                 )
             except LifecycleCaseDataError as exc:
                 results.append(
@@ -928,12 +944,18 @@ def reconcile_due_lifecycle_cases(
             )
             continue
         try:
+            wheel_kwargs = (
+                {"wheel_start_enabled": True}
+                if wheel_start_enabled
+                else {}
+            )
             result = reconcile_lifecycle_close_reason(
                 repo,
                 case_id=case_id,
                 now_ms=now_ms,
                 observation=observation,
                 apply_changes=apply_changes,
+                **wheel_kwargs,
             )
         except LifecycleCaseDataError as exc:
             results.append(

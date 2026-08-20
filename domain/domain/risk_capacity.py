@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import math
 from typing import Any, Callable, Mapping
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+
 
 @dataclass(frozen=True)
 class SellPutCashCapacity:
@@ -353,6 +355,99 @@ def compute_short_call_locked_shares(
     return max(0, int(multiplier_v * open_contracts))
 
 
+def revalidate_opening_share_coverage(
+    coverage_fact: Mapping[str, Any],
+    position_lots: list[Mapping[str, Any]],
+    wheel_batches: list[Mapping[str, Any]],
+    *,
+    account: str,
+    symbol: str,
+) -> dict[str, Any]:
+    """Refresh ledger-owned coverage inside the caller's current transaction."""
+
+    account_value = str(account or "").strip().lower()
+    symbol_value = str(symbol or "").strip().upper()
+    fact = dict(coverage_fact or {})
+    if (
+        str(fact.get("account") or "").strip().lower() != account_value
+        or str(fact.get("symbol") or "").strip().upper() != symbol_value
+        or str(fact.get("status") or "").strip().lower() != "available"
+    ):
+        return {**fact, "status": "unavailable", "reason": "coverage_fact_invalid"}
+    locked = 0
+    for raw in position_lots:
+        fields = raw.get("fields") if isinstance(raw.get("fields"), Mapping) else raw
+        if (
+            str(fields.get("account") or "").strip().lower() != account_value
+            or str(fields.get("symbol") or "").strip().upper() != symbol_value
+            or str(fields.get("option_type") or "").strip().lower() != "call"
+            or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+            != "short"
+            or str(fields.get("status") or "").strip().lower() == "close"
+        ):
+            continue
+        shares = compute_short_call_locked_shares(
+            contracts_open=fields.get("contracts_open", fields.get("contracts")),
+            contracts_total=fields.get("contracts"),
+            multiplier=fields.get("multiplier"),
+            underlying_share_locked=fields.get("underlying_share_locked"),
+        )
+        if shares is None:
+            return {
+                **fact,
+                "status": "unavailable",
+                "reason": "short_call_locked_shares_basis_missing",
+            }
+        locked += shares
+    reserved = sum(
+        int(batch.get("active_intent_reserved_shares") or 0)
+        for batch in wheel_batches
+        if str(batch.get("account") or "").strip().lower() == account_value
+        and str(batch.get("symbol") or "").strip().upper() == symbol_value
+        and str(batch.get("lifecycle_status") or "") == "active"
+    )
+    try:
+        prior_locked = int(fact.get("shares_locked") or 0)
+        prior_reserved = int(fact.get("shares_reserved") or 0)
+        eligible = int(
+            fact.get("shares_eligible")
+            if fact.get("shares_eligible") is not None
+            else int(fact.get("shares_available_for_cover"))
+            + prior_locked
+            + prior_reserved
+        )
+    except (TypeError, ValueError):
+        return {**fact, "status": "unavailable", "reason": "shares_eligible_invalid"}
+    status = "available" if min(eligible, locked, reserved) >= 0 else "unavailable"
+    if locked + reserved > eligible:
+        status = "unavailable"
+    reason = None if status == "available" else "share_capacity_oversubscribed"
+    identity = str(fact.get("capacity_identity_hash") or "").strip()
+    if (
+        prior_locked != locked
+        or prior_reserved != reserved
+    ):
+        identity = canonical_sha256(
+            {
+                "prior_capacity_identity_hash": identity,
+                "account": account_value,
+                "symbol": symbol_value,
+                "shares_eligible": eligible,
+                "shares_locked": locked,
+                "shares_reserved": reserved,
+            }
+        )
+    return {
+        **fact,
+        "status": status,
+        "reason": reason,
+        "shares_locked": locked,
+        "shares_reserved": reserved,
+        "shares_available_for_cover": max(0, eligible - locked - reserved),
+        "capacity_identity_hash": identity,
+    }
+
+
 def compute_short_put_cash_secured(
     *,
     contracts_open: Any,
@@ -396,28 +491,65 @@ def allocate_opening_share_capacity(
         key = (account, symbol)
         facts[key] = dict(raw) if key not in facts else {"status": "unavailable"}
 
-    indexed = list(enumerate(claims))
+    def _positive_exact_int(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        number = _to_float(value)
+        if number is None or number <= 0 or not number.is_integer():
+            return 0
+        return int(number)
+
+    prepared: list[dict[str, Any]] = []
+    claim_indexes: dict[str, list[int]] = {}
+    invalid_indexes: set[int] = set()
+    for index, raw in enumerate(claims):
+        row = dict(raw)
+        account = str(row.get("account") or "").strip().lower()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        claim_id = str(row.get("claim_id") or "").strip()
+        multiplier = _positive_exact_int(row.get("multiplier"))
+        requested = _positive_exact_int(row.get("requested_contracts"))
+        assignment_at = _to_float(row.get("assignment_at_ms")) or 0.0
+        if not account or not symbol or not claim_id or not multiplier or not requested:
+            invalid_indexes.add(index)
+        claim_indexes.setdefault(claim_id, []).append(index)
+        prepared.append(
+            {
+                "row": row,
+                "key": (account, symbol),
+                "multiplier": multiplier,
+                "requested": requested,
+                "assignment_at": assignment_at,
+            }
+        )
+    for claim_id, indexes in claim_indexes.items():
+        if not claim_id or len(indexes) > 1:
+            invalid_indexes.update(indexes)
+    invalid_pools = {
+        prepared[index]["key"]
+        for index in invalid_indexes
+        if all(prepared[index]["key"])
+    }
+
+    indexed = list(enumerate(prepared))
     indexed.sort(
         key=lambda item: (
-            0 if str(item[1].get("strategy_family") or "").lower() == "wheel" else 1,
-            int(item[1].get("assignment_at_ms") or 0),
-            str(item[1].get("stock_lot_id") or ""),
+            0
+            if str(item[1]["row"].get("strategy_family") or "").lower() == "wheel"
+            else 1,
+            item[1]["assignment_at"],
+            str(item[1]["row"].get("stock_lot_id") or ""),
             item[0],
         )
     )
     remaining: dict[tuple[str, str], int] = {}
     out_by_index: dict[int, dict[str, Any]] = {}
-    for index, raw in indexed:
-        row = dict(raw)
-        account = str(row.get("account") or "").strip().lower()
-        symbol = str(row.get("symbol") or "").strip().upper()
-        key = (account, symbol)
+    for index, prepared_claim in indexed:
+        row = dict(prepared_claim["row"])
+        key = prepared_claim["key"]
         fact = facts.get(key)
-        try:
-            multiplier = int(row.get("multiplier"))
-            requested = int(row.get("requested_contracts"))
-        except (TypeError, ValueError):
-            multiplier = requested = 0
+        multiplier = int(prepared_claim["multiplier"])
+        requested = int(prepared_claim["requested"])
         result = {
             **row,
             "requested_contracts": max(0, requested),
@@ -429,14 +561,18 @@ def allocate_opening_share_capacity(
             "allocation_status": "blocked",
             "allocation_reason": "share_capacity_fact_unavailable",
         }
+        if index in invalid_indexes:
+            result["allocation_reason"] = "share_capacity_claim_invalid"
+            out_by_index[index] = result
+            continue
+        if key in invalid_pools:
+            result["allocation_reason"] = "share_capacity_pool_invalid"
+            out_by_index[index] = result
+            continue
         if (
             not isinstance(fact, Mapping)
             or str(fact.get("status") or "").lower() != "available"
         ):
-            out_by_index[index] = result
-            continue
-        if multiplier <= 0 or requested <= 0:
-            result["allocation_reason"] = "share_capacity_claim_invalid"
             out_by_index[index] = result
             continue
         if key not in remaining:

@@ -208,10 +208,14 @@ def finalize_wheel_capacity(
         batch = batches_by_id.get(stock_lot_id)
         if batch is None:
             continue
-        raw_candidates = [
+        internal_candidates = [
             dict(item)
             for item in raw_by_batch.get(stock_lot_id) or []
             if isinstance(item, Mapping)
+        ]
+        raw_candidates = [
+            {key: value for key, value in item.items() if key != "_grant_evaluations"}
+            for item in internal_candidates
         ]
         allocation = by_claim.get(f"wheel:{stock_lot_id}")
         granted = int((allocation or {}).get("granted_contracts") or 0)
@@ -225,12 +229,27 @@ def finalize_wheel_capacity(
             {},
         )
         final = None
-        if raw_candidates and granted > 0:
+        if internal_candidates and granted > 0:
+            top = internal_candidates[0]
+            grant_evaluations = top.get("_grant_evaluations")
+            grant_evaluations = (
+                grant_evaluations if isinstance(grant_evaluations, Mapping) else None
+            )
+            exact = (
+                grant_evaluations.get(str(granted))
+                if grant_evaluations is not None
+                else top
+            )
+            exact = exact if isinstance(exact, Mapping) else None
+        else:
+            top = exact = None
+        if top is not None and exact is not None and bool(exact.get("accepted", True)):
             final = {
-                **raw_candidates[0],
+                **{key: value for key, value in top.items() if key != "_grant_evaluations"},
+                **dict(exact),
                 "account": account,
                 "stock_lot_id": stock_lot_id,
-                "final_candidate_id": raw_candidates[0]["candidate_id"],
+                "final_candidate_id": top["candidate_id"],
                 "requested_contracts": int(
                     (allocation or {}).get("requested_contracts") or 0
                 ),
@@ -261,6 +280,8 @@ def finalize_wheel_capacity(
                 "reason_code": (
                     (allocation or {}).get("allocation_reason")
                     if raw_candidates and granted <= 0
+                    else "wheel_capacity_grant_candidate_rejected"
+                    if raw_candidates and granted > 0 and final is None
                     else source_scope.get("reason_code")
                 ),
                 "raw_candidates": raw_candidates,
@@ -279,9 +300,13 @@ def finalize_wheel_capacity(
         ]
         raw_count = sum(len(row.get("raw_candidates") or []) for row in symbol_batches)
         statuses = {str(row.get("status") or "") for row in source_scopes}
+        partial_data = any(
+            str(row.get("reason_code") or "") == "partial_data"
+            for row in source_scopes
+        )
         if statuses == {"completed"}:
             status = "completed"
-            reason = None if raw_count else "no_candidate"
+            reason = "partial_data" if partial_data else None if raw_count else "no_candidate"
         elif statuses == {"not_applicable"}:
             status = "not_applicable"
             reason = str(source_scopes[0].get("reason_code") or "wheel_not_applicable")

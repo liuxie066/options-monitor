@@ -34,6 +34,7 @@ def resolve_lifecycle_manually(
     void_terminal_event_id: str | None = None,
     apply_changes: bool = False,
     now_ms: int,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     """Preview or atomically apply one evidence-backed manual resolution."""
 
@@ -176,6 +177,7 @@ def resolve_lifecycle_manually(
             if correction_void_event is not None
             else None
         ),
+        wheel_start_enabled=wheel_start_enabled,
     )
     next_revision = (
         int(

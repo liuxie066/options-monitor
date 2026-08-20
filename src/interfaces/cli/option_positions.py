@@ -99,6 +99,7 @@ from src.application.trades.receipt import (
     send_trade_lifecycle_outbox_payload,
 )
 from src.application.cash_conversion import utc_now_ms
+from src.application.wheel.config import resolve_wheel_config
 from src.infrastructure.futu_gateway import (
     build_ready_futu_broker_gateway,
     build_ready_futu_quote_gateway,
@@ -412,6 +413,11 @@ def main(argv: list[str] | None = None) -> int:
     p_assign.add_argument('--stock-qty', type=int, required=True, help='settled stock shares')
     p_assign.add_argument('--stock-price', type=float, required=True, help='settlement stock price; should be close to strike')
     p_assign.add_argument(
+        '--config',
+        default=None,
+        help='runtime config used to decide whether this assignment starts Wheel',
+    )
+    p_assign.add_argument(
         '--request-id',
         required=True,
         help='stable idempotency key reused for preview, apply, and retry',
@@ -590,6 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         help='path to one canonical lifecycle evidence JSON object',
     )
     p_lifecycle_reconcile.add_argument('--observed-at-ms', type=int, default=None)
+    p_lifecycle_reconcile.add_argument('--config', default=None)
     p_lifecycle_reconcile.add_argument('--format', default='json', choices=['json', 'text'])
     _add_local_write_flags(p_lifecycle_reconcile, high_risk=True)
     p_lifecycle_confirm_expired = lifecycle_sub.add_parser(
@@ -657,6 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         command.add_argument('--broker-ref', default=None)
         command.add_argument('--note', default=None)
+        command.add_argument('--config', default=None)
         if command_name == 'correct':
             command.add_argument(
                 '--void-terminal-event-id',
@@ -1308,6 +1316,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'assign':
         control = write_controls["assign"]
         dry_run = not bool(control["write_requested"])
+        runtime_config = (
+            _load_json_object(_resolve_path_under(args.config, base=base))
+            if args.config
+            else None
+        )
         try:
             out = execute_manual_assignment(
                 repo,
@@ -1325,6 +1338,7 @@ def main(argv: list[str] | None = None) -> int:
                 stock_price=float(args.stock_price),
                 dry_run=dry_run,
                 request_id=args.request_id,
+                runtime_config=runtime_config,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -1643,6 +1657,17 @@ def main(argv: list[str] | None = None) -> int:
                 evidence = _load_json_object(
                     _resolve_path_under(evidence_path, base=base)
                 )
+                wheel_start_enabled = False
+                if args.config:
+                    lifecycle_cfg = _load_json_object(
+                        _resolve_path_under(args.config, base=base)
+                    )
+                    wheel_start_enabled = bool(
+                        resolve_wheel_config(
+                            lifecycle_cfg,
+                            str(evidence.get("account") or args.account or ""),
+                        ).get("enabled_for_new_lifecycle")
+                    )
                 reconciliation = reconcile_lifecycle_evidence(
                     repo,
                     evidence=evidence,
@@ -1650,6 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
                     target_lot_id=args.target_lot_id,
                     apply_changes=not dry_run,
                     now_ms=args.observed_at_ms,
+                    wheel_start_enabled=wheel_start_enabled,
                 ).to_dict()
             cases = list_trade_lifecycle_cases(
                 repo,
@@ -1732,6 +1758,27 @@ def main(argv: list[str] | None = None) -> int:
                 if args.observed_at_ms is not None
                 else utc_now_ms()
             )
+            wheel_start_enabled = False
+            if args.config:
+                lifecycle_cfg = _load_json_object(
+                    _resolve_path_under(args.config, base=base)
+                )
+                lifecycle_case = next(
+                    (
+                        row
+                        for row in list_trade_lifecycle_cases(repo)
+                        if str(row.get("case_id") or "") == str(args.case_id)
+                    ),
+                    None,
+                )
+                if lifecycle_case is None:
+                    raise SystemExit(f"lifecycle case not found: {args.case_id}")
+                wheel_start_enabled = bool(
+                    resolve_wheel_config(
+                        lifecycle_cfg,
+                        str(lifecycle_case.get("account") or ""),
+                    ).get("enabled_for_new_lifecycle")
+                )
             result = resolve_lifecycle_manually(
                 repo,
                 case_id=str(args.case_id),
@@ -1746,6 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 apply_changes=not dry_run,
                 now_ms=observed_at_ms,
+                wheel_start_enabled=wheel_start_enabled,
             )
             payload = attach_write_contract(
                 {
@@ -1817,12 +1865,18 @@ def main(argv: list[str] | None = None) -> int:
             source = sources[0]
             if not str(source.get("account") or "").strip():
                 source["account"] = account_value
+            wheel_start_enabled = bool(
+                resolve_wheel_config(cfg, account_value).get(
+                    "enabled_for_new_lifecycle"
+                )
+            )
             if dry_run:
                 result = reconcile_due_lifecycle_cases_for_source(
                     repo,
                     source=source,
                     now_ms=observed_at_ms,
                     apply_changes=False,
+                    wheel_start_enabled=wheel_start_enabled,
                 )
             else:
                 binding = resolve_account_broker_binding_sets(
@@ -1897,6 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
                             now_ms=observed_at_ms,
                             apply_changes=True,
                             seal_sink=seal_sink,
+                            wheel_start_enabled=wheel_start_enabled,
                         )
                     )
                 finally:

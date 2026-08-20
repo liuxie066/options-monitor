@@ -515,6 +515,7 @@ def ensure_lifecycle_timing_after_intake(
     quote_dependency_error: str | None = None,
     now_ms: int,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any] | None:
     quote_gateway = quote_gateway or gateway
     adoption = _lifecycle_adoption(result)
@@ -644,6 +645,7 @@ def ensure_lifecycle_timing_after_intake(
         case_id=case_id,
         now_ms=int(now_ms),
         apply_changes=True,
+        wheel_start_enabled=wheel_start_enabled,
     )
     return {**binding, "reconciliation": reconciliation}
 
@@ -666,6 +668,7 @@ def reconcile_due_lifecycle_cases_for_source(
     settlement_control_now_ms_fn: Callable[[], int] | None = None,
     process_metrics: dict[str, int] | None = None,
     seal_sink: Callable[[dict[str, Any]], None] | None = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     if apply_changes and seal_sink is None:
         raise ValueError("applied lifecycle reconciliation requires a seal sink")
@@ -690,6 +693,7 @@ def reconcile_due_lifecycle_cases_for_source(
             process_metrics=process_metrics,
             provider_batch_lease=provider_batch_lease,
             touched_heads=touched_heads,
+            wheel_start_enabled=wheel_start_enabled,
         )
     finally:
         provider_batch_lease.close()
@@ -721,6 +725,7 @@ def _reconcile_due_lifecycle_cases_for_source(
     process_metrics: dict[str, int] | None = None,
     provider_batch_lease: _SettlementProviderBatchLease,
     touched_heads: list[dict[str, Any]],
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     account = str(source.get("account") or "").strip().lower()
     account_ids = [
@@ -769,6 +774,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             now_ms=int(now_ms),
             apply_changes=False,
             observation_collector=None,
+            wheel_start_enabled=wheel_start_enabled,
         )
 
     control_now_ms_fn = (
@@ -818,6 +824,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             case_ids=tuple(candidates_by_id),
             now_ms=int(now_ms),
             apply_changes=True,
+            wheel_start_enabled=wheel_start_enabled,
         )
         return _control_store_unavailable_result(
             account=account,
@@ -1024,6 +1031,7 @@ def _reconcile_due_lifecycle_cases_for_source(
             observation_collector=None,
             case_ids=needs_plan,
             prepared_read_models=prepared_models,
+            wheel_start_enabled=wheel_start_enabled,
         )
         plan_results = _results_by_case(local_result)
         post_plan_candidates = _due_candidates_by_id(
@@ -1514,6 +1522,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                     observation_collector=None,
                     case_ids=eligible_provider_case_ids,
                     prepared_read_models=current_models,
+                    wheel_start_enabled=wheel_start_enabled,
                 )
                 validation_results = _results_by_case(validation)
                 preparation_lease_error = (
@@ -2207,6 +2216,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                             ),
                             refresh_read_model=False,
                             attempt_audit=envelope,
+                            wheel_start_enabled=wheel_start_enabled,
                         )
                     except Exception as exc:
                         outcome, audit_outcome_kind = (
@@ -2607,6 +2617,7 @@ def _plan_due_cases(
     case_ids: tuple[str, ...],
     now_ms: int,
     apply_changes: bool,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     if not case_ids:
         return {
@@ -2630,6 +2641,7 @@ def _plan_due_cases(
         observation_collector=None,
         case_ids=case_ids,
         prepared_read_models=read_models,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 

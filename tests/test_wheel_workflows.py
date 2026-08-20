@@ -14,6 +14,7 @@ from src.application.ledger.writer import (
     persist_trade_event_with_wheel_intent,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.positions.workflows import execute_manual_assignment
 from src.application.wheel import (
     build_wheel_read_model,
     cancel_wheel_call_intent,
@@ -93,6 +94,9 @@ def _create_call_intent(
         "symbol": "NVDA",
         "capacity_identity_hash": "capacity-1",
         "status": "available",
+        "shares_eligible": 100,
+        "shares_locked": 0,
+        "shares_reserved": 0,
         "shares_available_for_cover": 100,
     }
     created = create_wheel_call_intent(
@@ -217,6 +221,107 @@ def test_assignment_replay_does_not_backfill_wheel_start(tmp_path: Path) -> None
 
     assert replay["result"]["created"] is False
     assert repo.list_wheel_events(account="lx") == []
+
+
+def test_manual_assignment_uses_runtime_wheel_config_to_start_lifecycle(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2.5,
+            opened_at_ms=1_000,
+        ),
+    )
+
+    execute_manual_assignment(
+        repo,
+        record_id=str(repo.list_position_lots()[0]["record_id"]),
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100,
+        dry_run=False,
+        as_of_ms=2_000,
+        request_id="configured-assignment-1",
+        runtime_config={"wheel": {"enabled": True, "accounts": ["lx"]}},
+    )
+
+    assert build_wheel_read_model(repo, "lx", 3_000)["batches"][0]["phase"] == "ready"
+
+
+def test_intent_creation_revalidates_current_ledger_share_coverage(
+    tmp_path: Path,
+) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    _open_unlinked_call(repo, event_time_ms=3_500)
+    snapshot = {
+        "account": "lx",
+        "snapshot_hash": "snapshot-stale",
+        "batches": [
+            {
+                "stock_lot_id": stock_lot_id,
+                "batch_generation_hash": batch["batch_generation_hash"],
+                "final_candidate": {
+                    "final_candidate_id": "candidate-stale",
+                    "symbol": "NVDA",
+                    "stock_lot_id": stock_lot_id,
+                    "strike": 110,
+                    "expiration_ymd": "2026-08-21",
+                    "granted_contracts": 1,
+                    "multiplier": 100,
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="batch generation changed|coverage is unavailable|coverage is insufficient",
+    ):
+        create_wheel_call_intent(
+            repo,
+            candidate_snapshot=snapshot,
+            account="lx",
+            stock_lot_id=stock_lot_id,
+            final_candidate_id="candidate-stale",
+            expected_snapshot_hash="snapshot-stale",
+            expected_batch_generation_hash=batch["batch_generation_hash"],
+            expires_at_ms=10_000,
+            request_id="intent-stale-1",
+            actor="tester",
+            coverage_fact={
+                "account": "lx",
+                "symbol": "NVDA",
+                "capacity_identity_hash": "capacity-before-race",
+                "status": "available",
+                "shares_eligible": 100,
+                "shares_locked": 0,
+                "shares_reserved": 0,
+                "shares_available_for_cover": 100,
+            },
+            apply_changes=True,
+            as_of_ms=4_000,
+        )
+    assert not any(
+        event["event_type"] == "wheel_call_intent_created"
+        for event in repo.list_wheel_events(account="lx")
+    )
 
 
 def test_wheel_call_intent_create_and_cancel(tmp_path: Path) -> None:
