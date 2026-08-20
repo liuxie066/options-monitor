@@ -133,7 +133,19 @@ def build_wheel_event(
 
 def _trade_event_fact(event: Any) -> dict[str, Any]:
     if isinstance(event, Mapping):
-        return dict(event)
+        out = dict(event)
+        key = event.get("contract_key")
+        key = key if isinstance(key, Mapping) else {}
+        for target, source in (
+            ("account", "account"),
+            ("symbol", "underlying_symbol"),
+            ("option_type", "option_type"),
+            ("position_side", "position_side"),
+            ("strike", "strike"),
+            ("expiration_ymd", "expiration_ymd"),
+        ):
+            out.setdefault(target, key.get(source))
+        return out
     contract_key = getattr(event, "contract_key", None)
     key = contract_key.to_dict() if hasattr(contract_key, "to_dict") else {}
     return {
@@ -144,10 +156,13 @@ def _trade_event_fact(event: Any) -> dict[str, Any]:
         "symbol": key.get("underlying_symbol"),
         "option_type": key.get("option_type"),
         "position_side": key.get("position_side"),
+        "strike": key.get("strike"),
+        "expiration_ymd": key.get("expiration_ymd"),
         "contracts": getattr(event, "contracts", None),
         "multiplier": getattr(event, "multiplier", None),
         "currency": getattr(event, "currency", None),
         "target_lot_id": getattr(event, "target_lot_id", None),
+        "lot_id": getattr(event, "lot_id", None),
         "raw_payload": dict(getattr(event, "raw_payload", None) or {}),
     }
 
@@ -335,6 +350,243 @@ def plan_wheel_manual_end(
     )
 
 
+def _coverage_capacity(
+    coverage_fact: Mapping[str, Any],
+    *,
+    account: str,
+    symbol: str,
+    contracts: int,
+    multiplier: int,
+) -> None:
+    if not isinstance(coverage_fact, Mapping):
+        raise ValueError("Wheel Call requires coverage_fact")
+    if str(coverage_fact.get("account") or "").strip().lower() != account:
+        raise ValueError("Wheel Call coverage account mismatch")
+    if str(coverage_fact.get("symbol") or "").strip().upper() != symbol:
+        raise ValueError("Wheel Call coverage symbol mismatch")
+    if not str(coverage_fact.get("capacity_identity_hash") or "").strip():
+        raise ValueError("Wheel Call coverage identity is unavailable")
+    if str(coverage_fact.get("status") or "").strip().lower() != "available":
+        raise ValueError("Wheel Call coverage is unavailable")
+    try:
+        shares_available = int(coverage_fact.get("shares_available_for_cover"))
+    except (TypeError, ValueError):
+        raise ValueError("Wheel Call available shares are invalid") from None
+    if shares_available < contracts * multiplier:
+        raise ValueError("Wheel Call coverage is insufficient")
+
+
+def plan_wheel_call_intent_create(
+    batch: Mapping[str, Any],
+    final_candidate: Mapping[str, Any],
+    coverage_fact: Mapping[str, Any],
+    expires_at_ms: int,
+    request_id: str,
+    actor: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    broker_order_id: str | None = None,
+) -> dict[str, Any]:
+    if batch.get("lifecycle_status") != "active":
+        raise ValueError("Wheel lifecycle is not active")
+    if batch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel lifecycle integrity is not trusted")
+    if batch.get("active_call_lot_ids") or batch.get("active_intent_ids"):
+        raise ValueError("Wheel batch already has an active Call or intent")
+    if batch.get("phase") != "ready":
+        raise ValueError("Wheel batch is not ready for a Call intent")
+    account = _required_text(batch.get("account"), "account").lower()
+    symbol = _required_text(batch.get("symbol"), "symbol").upper()
+    stock_lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
+    candidate_id = _required_text(
+        final_candidate.get("final_candidate_id")
+        or final_candidate.get("candidate_id"),
+        "final_candidate_id",
+    )
+    contracts = _positive_int(
+        final_candidate.get("granted_contracts"),
+        "granted_contracts",
+    )
+    multiplier = _positive_int(final_candidate.get("multiplier"), "multiplier")
+    strike = float(final_candidate.get("strike") or 0)
+    expiration_ymd = _required_text(
+        final_candidate.get("expiration_ymd") or final_candidate.get("expiration"),
+        "expiration_ymd",
+    )
+    if strike <= 0:
+        raise ValueError("Wheel Call candidate strike must be positive")
+    if str(final_candidate.get("account") or account).strip().lower() != account:
+        raise ValueError("Wheel Call candidate account mismatch")
+    if str(final_candidate.get("symbol") or "").strip().upper() != symbol:
+        raise ValueError("Wheel Call candidate symbol mismatch")
+    if str(final_candidate.get("stock_lot_id") or "").strip() != stock_lot_id:
+        raise ValueError("Wheel Call candidate stock batch mismatch")
+    if int(batch.get("shares_remaining") or 0) < contracts * multiplier:
+        raise ValueError("Wheel batch shares are insufficient")
+    now = _positive_int(occurred_at_ms, "occurred_at_ms")
+    expiry = _positive_int(expires_at_ms, "expires_at_ms")
+    if expiry <= now:
+        raise ValueError("Wheel Call intent expiry must be in the future")
+    _coverage_capacity(
+        coverage_fact,
+        account=account,
+        symbol=symbol,
+        contracts=contracts,
+        multiplier=multiplier,
+    )
+    request = _required_text(request_id, "request_id")
+    actor_value = _required_text(actor, "actor")
+    digest = canonical_sha256(
+        {"account": account, "stock_lot_id": stock_lot_id, "request_id": request}
+    )[:24]
+    intent_id = f"wheel-call-intent:{digest}"
+    return build_wheel_event(
+        event_id=f"wheel-call-intent-created:{digest}",
+        account=account,
+        stock_lot_id=stock_lot_id,
+        event_type="wheel_call_intent_created",
+        occurred_at_ms=now,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        payload={
+            "schema_version": "wheel_call_intent_created.v1",
+            "request_id": request,
+            "actor": actor_value,
+            "final_candidate_id": candidate_id,
+            "snapshot_hash": str(final_candidate.get("snapshot_hash") or "").strip(),
+            "batch_generation_hash": str(batch.get("batch_generation_hash") or ""),
+            "capacity_identity_hash": str(
+                coverage_fact.get("capacity_identity_hash") or ""
+            ).strip(),
+            "symbol": symbol,
+            "strike": strike,
+            "expiration_ymd": expiration_ymd,
+            "contracts": contracts,
+            "multiplier": multiplier,
+            "expires_at_ms": expiry,
+            "broker_order_id": str(broker_order_id or "").strip() or None,
+        },
+    )
+
+
+def plan_wheel_call_intent_cancel(
+    batch: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    request_id: str,
+    actor: str,
+    broker_order_inactive_confirmed: bool,
+    reason: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+) -> dict[str, Any] | None:
+    if batch.get("lifecycle_status") != "active" or batch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel batch is not an active trusted lifecycle")
+    if not broker_order_inactive_confirmed:
+        raise ValueError("broker_order_inactive_confirmed=true is required")
+    if str(intent.get("status") or "") != "active":
+        return None
+    intent_id = _required_text(intent.get("intent_id"), "intent_id")
+    request = _required_text(request_id, "request_id")
+    account = _required_text(batch.get("account"), "account").lower()
+    stock_lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
+    digest = canonical_sha256(
+        {
+            "account": account,
+            "stock_lot_id": stock_lot_id,
+            "intent_id": intent_id,
+            "request_id": request,
+        }
+    )[:24]
+    return build_wheel_event(
+        event_id=f"wheel-call-intent-cancelled:{digest}",
+        account=account,
+        stock_lot_id=stock_lot_id,
+        event_type="wheel_call_intent_cancelled",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        payload={
+            "schema_version": "wheel_call_intent_cancelled.v1",
+            "request_id": request,
+            "actor": _required_text(actor, "actor"),
+            "reason": _required_text(reason, "reason"),
+            "broker_order_inactive_confirmed": True,
+            "remaining_contracts": int(intent.get("remaining_contracts") or 0),
+            "batch_generation_hash": str(batch.get("batch_generation_hash") or ""),
+        },
+    )
+
+
+def plan_wheel_call_intent_consume(
+    batch: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    fill: Any,
+    coverage_fact: Mapping[str, Any],
+    *,
+    recorded_at_ms: int,
+) -> dict[str, Any]:
+    if batch.get("lifecycle_status") != "active" or batch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel batch is not an active trusted lifecycle")
+    if str(intent.get("status") or "") != "active":
+        raise ValueError("Wheel Call intent is not active")
+    event = _trade_event_fact(fill)
+    if (
+        _event_type(event) != "open"
+        or _trade_option_type(event) != "call"
+        or _trade_position_side(event) != "short"
+    ):
+        raise ValueError("Wheel Call intent can only consume a Short Call open")
+    payload = intent.get("payload")
+    payload = payload if isinstance(payload, Mapping) else intent
+    event_id = _required_text(event.get("event_id"), "source_trade_event_id")
+    contracts = _positive_int(event.get("contracts"), "fill contracts")
+    multiplier = _positive_int(event.get("multiplier"), "fill multiplier")
+    occurred_at_ms = _positive_int(event.get("event_time_ms"), "fill occurred_at_ms")
+    if contracts > int(intent.get("remaining_contracts") or 0):
+        raise ValueError("Wheel Call fill exceeds intent remainder")
+    if not (
+        int(intent.get("created_at_ms") or 0)
+        <= occurred_at_ms
+        <= int(intent.get("expires_at_ms") or 0)
+    ):
+        raise ValueError("Wheel Call fill is outside the intent window")
+    if (
+        _trade_account(event) != str(batch.get("account") or "")
+        or _trade_symbol(event) != str(batch.get("symbol") or "")
+        or float(event.get("strike") or 0) != float(payload.get("strike") or 0)
+        or str(event.get("expiration_ymd") or "")
+        != str(payload.get("expiration_ymd") or "")
+        or multiplier != int(payload.get("multiplier") or 0)
+    ):
+        raise ValueError("Wheel Call fill does not match the intent contract")
+    _coverage_capacity(
+        coverage_fact,
+        account=str(batch.get("account") or ""),
+        symbol=str(batch.get("symbol") or ""),
+        contracts=contracts,
+        multiplier=multiplier,
+    )
+    intent_id = _required_text(intent.get("intent_id"), "intent_id")
+    return build_wheel_event(
+        event_id=f"wheel-call-intent-consumed:{intent_id}:{event_id}",
+        account=str(batch.get("account") or ""),
+        stock_lot_id=str(batch.get("stock_lot_id") or ""),
+        event_type="wheel_call_intent_consumed",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        source_trade_event_id=event_id,
+        payload={
+            "schema_version": "wheel_call_intent_consumed.v1",
+            "contracts": contracts,
+            "multiplier": multiplier,
+            "call_lot_id": str(event.get("lot_id") or f"lot_{event_id}"),
+        },
+    )
+
+
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     fields = row.get("fields")
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
@@ -458,7 +710,7 @@ def _intent_state(
     *,
     as_of_ms: int,
     known_trade_event_ids: set[str],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     by_intent: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     reasons: list[str] = []
     for event in events:
@@ -471,6 +723,7 @@ def _intent_state(
             continue
         by_intent[intent_id].append(event)
     active: list[str] = []
+    summaries: list[dict[str, Any]] = []
     for intent_id in sorted(by_intent):
         intent_events = by_intent[intent_id]
         created = [item for item in intent_events if item["event_type"] == "wheel_call_intent_created"]
@@ -478,6 +731,7 @@ def _intent_state(
         consumed = [item for item in intent_events if item["event_type"] == "wheel_call_intent_consumed"]
         if len(created) != 1:
             reasons.append("intent_creation_conflict")
+            summaries.append({"intent_id": intent_id, "status": "conflict"})
             continue
         creation = created[0]
         created_contracts = _intent_contracts(creation["payload"])
@@ -487,13 +741,16 @@ def _intent_state(
             expires_at_ms = 0
         if created_contracts is None or expires_at_ms <= int(creation["occurred_at_ms"]):
             reasons.append("intent_contract_invalid")
+            summaries.append({"intent_id": intent_id, "status": "conflict"})
             continue
         if len(cancelled) > 1:
             reasons.append("intent_cancellation_conflict")
+            summaries.append({"intent_id": intent_id, "status": "conflict"})
             continue
         cancel_at = int(cancelled[0]["occurred_at_ms"]) if cancelled else None
         if cancel_at is not None and cancel_at < int(creation["occurred_at_ms"]):
             reasons.append("intent_causality_conflict")
+            summaries.append({"intent_id": intent_id, "status": "conflict"})
             continue
         consumed_contracts = 0
         intent_conflict = False
@@ -514,10 +771,176 @@ def _intent_state(
             consumed_contracts += quantity
         if intent_conflict or consumed_contracts > created_contracts:
             reasons.append("intent_consumption_conflict")
+            summaries.append({"intent_id": intent_id, "status": "conflict"})
             continue
-        if consumed_contracts < created_contracts and cancel_at is None and as_of_ms <= expires_at_ms:
+        remaining = created_contracts - consumed_contracts
+        status = (
+            "cancelled"
+            if cancel_at is not None
+            else "consumed"
+            if remaining == 0
+            else "expired"
+            if as_of_ms > expires_at_ms
+            else "active"
+        )
+        if status == "active":
             active.append(intent_id)
-    return active, reasons
+        summaries.append(
+            {
+                "intent_id": intent_id,
+                "status": status,
+                "created_event_id": creation["event_id"],
+                "created_at_ms": int(creation["occurred_at_ms"]),
+                "expires_at_ms": expires_at_ms,
+                "contracts": created_contracts,
+                "consumed_contracts": consumed_contracts,
+                "remaining_contracts": remaining,
+                "payload": dict(creation["payload"]),
+            }
+        )
+    return active, reasons, summaries
+
+
+def project_wheel_call_intents(
+    wheel_events: Sequence[Mapping[str, Any]],
+    *,
+    account: str,
+    stock_lot_id: str,
+    as_of_ms: int,
+    known_trade_event_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    account_value = _required_text(account, "account").lower()
+    stock_lot_value = _required_text(stock_lot_id, "stock_lot_id")
+    instant = _positive_int(as_of_ms, "as_of_ms")
+    events = [
+        normalize_wheel_event(event)
+        for event in wheel_events
+        if str(event.get("account") or "").strip().lower() == account_value
+        and str(event.get("stock_lot_id") or "").strip() == stock_lot_value
+        and int(event.get("occurred_at_ms") or 0) <= instant
+    ]
+    _active, _reasons, summaries = _intent_state(
+        events,
+        as_of_ms=instant,
+        known_trade_event_ids=set(known_trade_event_ids or ()),
+    )
+    return summaries
+
+
+def project_wheel_call_linkage_candidates(
+    wheel_batches: Sequence[Mapping[str, Any]],
+    unlinked_short_call_lots: Sequence[Mapping[str, Any]],
+    rejected_linkages: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rejected = {
+        (
+            str((event.get("payload") or {}).get("call_open_event_id") or "").strip(),
+            str(event.get("stock_lot_id") or "").strip(),
+        )
+        for event in rejected_linkages
+        if str(event.get("event_type") or "").strip()
+        == "wheel_call_linkage_rejected"
+    }
+    candidates: list[dict[str, Any]] = []
+    for row in unlinked_short_call_lots:
+        fields = _lot_fields(row)
+        if (
+            str(fields.get("option_type") or "").strip().lower() != "call"
+            or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+            != "short"
+            or _contracts_open(fields) <= 0
+            or any(
+                str(fields.get(key) or "").strip()
+                for key in (
+                    "strategy",
+                    "leg_role",
+                    "strategy_group_id",
+                    "source_stock_lot_id",
+                )
+            )
+        ):
+            continue
+        call_record_id = _required_text(row.get("record_id"), "call_record_id")
+        call_open_event_id = _required_text(
+            fields.get("source_event_id"),
+            "call_open_event_id",
+        )
+        account = str(fields.get("account") or "").strip().lower()
+        symbol = str(fields.get("symbol") or "").strip().upper()
+        for batch in wheel_batches:
+            stock_lot_id = str(batch.get("stock_lot_id") or "").strip()
+            if (
+                batch.get("lifecycle_status") != "active"
+                or batch.get("integrity_status") != "trusted"
+                or batch.get("active_call_lot_ids")
+                or str(batch.get("account") or "").strip().lower() != account
+                or str(batch.get("symbol") or "").strip().upper() != symbol
+                or (call_open_event_id, stock_lot_id) in rejected
+            ):
+                continue
+            try:
+                required_shares = _contracts_open(fields) * int(
+                    float(fields.get("multiplier") or 0)
+                )
+                shares_remaining = int(batch.get("shares_remaining"))
+            except (TypeError, ValueError):
+                continue
+            if required_shares <= 0 or shares_remaining < required_shares:
+                continue
+            digest = canonical_sha256(
+                {
+                    "call_open_event_id": call_open_event_id,
+                    "stock_lot_id": stock_lot_id,
+                }
+            )[:24]
+            stable_call = {
+                key: fields.get(key)
+                for key in (
+                    "account",
+                    "symbol",
+                    "option_type",
+                    "side",
+                    "contracts_open",
+                    "strike",
+                    "expiration_ymd",
+                    "expiration",
+                    "multiplier",
+                    "source_event_id",
+                )
+            }
+            candidates.append(
+                {
+                    "linkage_candidate_id": f"wheel-call-linkage:{digest}",
+                    "input_snapshot_hash": canonical_sha256(
+                        {
+                            "call_record_id": call_record_id,
+                            "call": stable_call,
+                            "stock_lot_id": stock_lot_id,
+                            "batch_generation_hash": batch.get(
+                                "batch_generation_hash"
+                            ),
+                        }
+                    ),
+                    "account": account,
+                    "symbol": symbol,
+                    "call_record_id": call_record_id,
+                    "call_open_event_id": call_open_event_id,
+                    "stock_lot_id": stock_lot_id,
+                    "contracts": _contracts_open(fields),
+                    "multiplier": int(float(fields.get("multiplier") or 0)),
+                    "required_shares": required_shares,
+                    "batch_generation_hash": batch.get("batch_generation_hash"),
+                }
+            )
+    return sorted(
+        candidates,
+        key=lambda item: (
+            str(item["account"]),
+            str(item["symbol"]),
+            str(item["call_record_id"]),
+            str(item["stock_lot_id"]),
+        ),
+    )
 
 
 def project_wheel_lifecycles(
@@ -680,7 +1103,7 @@ def project_wheel_lifecycles(
             if source_id not in assignment_ids:
                 reasons.add("wheel_called_away_source_invalid")
 
-        active_intent_ids, intent_reasons = _intent_state(
+        active_intent_ids, intent_reasons, intent_summaries = _intent_state(
             batch_events,
             as_of_ms=instant,
             known_trade_event_ids=set(trade_by_id),
@@ -714,6 +1137,42 @@ def project_wheel_lifecycles(
                 reasons.add("wheel_call_multiplier_invalid")
         if shares_remaining is not None and locked_shares > shares_remaining:
             reasons.add("wheel_call_overcovers_batch")
+        rejected_call_event_ids = {
+            str((item.get("payload") or {}).get("call_open_event_id") or "").strip()
+            for item in batch_events
+            if item["event_type"] == "wheel_call_linkage_rejected"
+        }
+        unresolved_lots: list[tuple[str, dict[str, Any]]] = []
+        for record_id, fields in lots:
+            if (
+                str(fields.get("account") or "").strip().lower() != account
+                or str(fields.get("symbol") or "").strip().upper()
+                != str((stock_row or {}).get("symbol") or _trade_symbol(start_trade or {}))
+                or str(fields.get("option_type") or "").strip().lower() != "call"
+                or str(fields.get("side") or "").strip().lower() != "short"
+                or _contracts_open(fields) <= 0
+                or any(
+                    str(fields.get(key) or "").strip()
+                    for key in (
+                        "strategy",
+                        "leg_role",
+                        "strategy_group_id",
+                        "source_stock_lot_id",
+                    )
+                )
+                or str(fields.get("source_event_id") or "").strip()
+                in rejected_call_event_ids
+            ):
+                continue
+            try:
+                required = _contracts_open(fields) * int(
+                    float(fields.get("multiplier") or 0)
+                )
+            except (TypeError, ValueError):
+                continue
+            if shares_remaining is not None and 0 < required <= shares_remaining:
+                unresolved_lots.append((record_id, fields))
+        unresolved_call_lot_ids = sorted(record_id for record_id, _fields in unresolved_lots)
         if manual_events and (active_call_lot_ids or active_intent_ids):
             reasons.add("manual_end_has_active_call_or_intent")
         if called_events and shares_remaining != 0:
@@ -756,6 +1215,8 @@ def project_wheel_lifecycles(
         )
         if integrity_status == "conflict" or lifecycle_status != "active":
             phase = None
+        elif unresolved_call_lot_ids:
+            phase = "linkage_unresolved"
         elif active_call_lot_ids:
             phase = "call_open"
         elif active_intent_ids:
@@ -767,7 +1228,9 @@ def project_wheel_lifecycles(
         else:
             phase = "ready"
 
-        related_lot_ids = {record_id for record_id, _fields in linked_lots}
+        related_lot_ids = {
+            record_id for record_id, _fields in [*linked_lots, *unresolved_lots]
+        }
         related_trade_ids = {
             start_trade_id,
             *assignment_ids,
@@ -809,13 +1272,15 @@ def project_wheel_lifecycles(
             ],
             "position_lots": [
                 {"record_id": record_id, "fields": fields}
-                for record_id, fields in linked_lots
+                for record_id, fields in [*linked_lots, *unresolved_lots]
             ],
             "trade_events": related_trades,
             "assigned_stock": _stable_stock_fact(stock_row),
         }
         batch_generation_hash = canonical_sha256(generation_payload)
         result = {
+            "account": account,
+            "symbol": str((stock_row or {}).get("symbol") or _trade_symbol(start_trade or {})),
             "stock_lot_id": stock_lot_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,
@@ -826,7 +1291,14 @@ def project_wheel_lifecycles(
             "start_event_id": start["event_id"],
             "terminal_event_id": terminal["event_id"] if terminal is not None else None,
             "active_call_lot_ids": active_call_lot_ids,
+            "unresolved_call_lot_ids": unresolved_call_lot_ids,
             "active_intent_ids": active_intent_ids,
+            "active_intent_reserved_shares": sum(
+                int(item.get("remaining_contracts") or 0)
+                * int((item.get("payload") or {}).get("multiplier") or 0)
+                for item in intent_summaries
+                if item.get("status") == "active"
+            ),
             "candidate": None,
         }
         result["projection_hash"] = canonical_sha256(
@@ -847,7 +1319,12 @@ __all__ = [
     "WHEEL_PROJECTION_SCHEMA",
     "build_wheel_event",
     "normalize_wheel_event",
+    "plan_wheel_call_intent_cancel",
+    "plan_wheel_call_intent_consume",
+    "plan_wheel_call_intent_create",
     "plan_wheel_manual_end",
+    "project_wheel_call_linkage_candidates",
+    "project_wheel_call_intents",
     "project_wheel_lifecycles",
     "wheel_called_away_event_from_call_assignment",
     "wheel_event_payload_hash",

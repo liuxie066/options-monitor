@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from domain.domain.combo_identity import (
     build_combo_identity_intent,
@@ -4998,12 +4998,15 @@ def persist_trade_event_objects_atomically(
     lifecycle_case_update: dict[str, Any] | None = None,
     lifecycle_allocations: Sequence[dict[str, Any]] | None = None,
     wheel_start_enabled: bool = False,
+    wheel_intent_coverage_fact: Mapping[str, Any] | None = None,
 ) -> list[LedgerWriteResult]:
     """Persist explicitly targeted canonical events in one transaction."""
 
     from src.application.wheel.trade_companions import (
+        append_and_verify_wheel_intent_consumption,
         append_wheel_trade_companions,
         capture_wheel_trade_companion_context,
+        prepare_wheel_intent_open_event,
     )
 
     events = list(events)
@@ -5036,6 +5039,29 @@ def persist_trade_event_objects_atomically(
             event_ids,
             conn=conn,
         )
+        wheel_intent_events: dict[str, dict[str, Any]] = {}
+        wheel_linkage_status: dict[str, str] = {}
+        if wheel_intent_coverage_fact is not None:
+            if len(storage_events) != 1:
+                raise ValueError("Wheel intent intake requires one unsplit fill")
+            original = storage_events[0]
+            if original.event_id in existing_by_id:
+                wheel_linkage_status[original.event_id] = "existing_trade_event"
+            else:
+                rows = sqlite_repo.read_lifecycle_account_rows(
+                    account=original.contract_key.account,
+                    conn=conn,
+                )
+                linked, intent_event, status = prepare_wheel_intent_open_event(
+                    rows,
+                    original,
+                    wheel_intent_coverage_fact,
+                    recorded_at_ms=utc_now_ms(),
+                )
+                storage_events[0] = linked
+                wheel_linkage_status[original.event_id] = status
+                if intent_event is not None:
+                    wheel_intent_events[original.event_id] = intent_event
         fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
         storage_events = [
@@ -5093,6 +5119,18 @@ def persist_trade_event_objects_atomically(
             context=wheel_context,
             recorded_at_ms=observed_at_ms,
         )
+        for event, created in zip(storage_events, created_flags, strict=True):
+            intent_event = wheel_intent_events.get(event.event_id)
+            if intent_event is None:
+                continue
+            if not created:
+                raise ValueError("Wheel intent-linked fill unexpectedly replayed")
+            append_and_verify_wheel_intent_consumption(
+                sqlite_repo,
+                conn=conn,
+                linked_event=event,
+                intent_event=intent_event,
+            )
         notification_intent = _normal_close_notification_intent(
             storage_events
         )
@@ -5212,7 +5250,21 @@ def persist_trade_event_objects_atomically(
                     "position_lot_count": int(runtime.position_lot_count),
                     "decision_projection": decision_projection,
                     **diagnostics,
-                    "wheel_event_id": wheel_companions.get(event.event_id),
+                    **(
+                        {"wheel_event_id": wheel_companions[event.event_id]}
+                        if event.event_id in wheel_companions
+                        else {}
+                    ),
+                    **(
+                        {
+                            "wheel_intent_event_id": (
+                                wheel_intent_events.get(event.event_id) or {}
+                            ).get("event_id"),
+                            "wheel_linkage_status": wheel_linkage_status[event.event_id],
+                        }
+                        if event.event_id in wheel_linkage_status
+                        else {}
+                    ),
                     **(
                         {
                             "notification_outbox_id": notification_intent[
@@ -5236,6 +5288,18 @@ def persist_trade_event_objects_atomically(
         _run,
         require_projection_publication=True,
     )
+
+
+def persist_trade_event_with_wheel_intent(
+    repo: Any,
+    deal: Any,
+    coverage_fact: Mapping[str, Any],
+) -> LedgerWriteResult:
+    return persist_trade_event_objects_atomically(
+        repo,
+        [_trade_event_from_normalized_deal(deal)],
+        wheel_intent_coverage_fact=coverage_fact,
+    )[0]
 
 
 def _events_for_storage(

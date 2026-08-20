@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from domain.domain.wheel import project_wheel_lifecycles
+from domain.domain.wheel import (
+    project_wheel_call_linkage_candidates,
+    project_wheel_lifecycles,
+)
 from src.application.performance.adapters import (
     ledger_performance_inputs_from_rows,
     load_assigned_stock_projection,
@@ -59,12 +62,17 @@ def build_wheel_read_model_from_rows(
             candidate = matches[0].get("final_candidate")
             if isinstance(candidate, Mapping):
                 batch["candidate"] = dict(candidate)
+    linkage_candidates = project_wheel_call_linkage_candidates(
+        batches,
+        rows.get("account_position_lots") or [],
+        rows.get("account_wheel_events") or [],
+    )
     return {
         "schema_version": WHEEL_READ_MODEL_SCHEMA,
         "account": account_value,
         "as_of_ms": instant,
         "batches": batches,
-        "linkage_candidates": [],
+        "linkage_candidates": linkage_candidates,
         "assigned_stock_projection": assigned_stock,
     }
 

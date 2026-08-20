@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from domain.domain.wheel import (
+    plan_wheel_call_intent_consume,
+    project_wheel_call_intents,
     wheel_called_away_event_from_call_assignment,
     wheel_started_event_from_assignment,
 )
@@ -169,7 +172,130 @@ def append_wheel_trade_companions(
     return companion_by_trade
 
 
+def prepare_wheel_intent_open_event(
+    rows: Mapping[str, Any],
+    event: Any,
+    coverage_fact: Mapping[str, Any],
+    *,
+    recorded_at_ms: int,
+) -> tuple[Any, dict[str, Any] | None, str]:
+    from src.application.wheel.read_model import build_wheel_read_model_from_rows
+
+    if (
+        str(getattr(event, "event_type", "") or "").strip().lower() != "open"
+        or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
+        != "call"
+        or str(getattr(getattr(event, "contract_key", None), "position_side", ""))
+        != "short"
+    ):
+        return event, None, "not_short_call_open"
+    account = _event_account(event)
+    instant = _event_time_ms(event)
+    model = build_wheel_read_model_from_rows(
+        rows,
+        account=account,
+        as_of_ms=instant,
+    )
+    known_trade_ids = {
+        str(item.get("event_id") or "").strip()
+        for item in rows.get("trade_events") or []
+        if str(item.get("event_id") or "").strip()
+    }
+    plans: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for batch in model["batches"]:
+        if batch["lifecycle_status"] != "active" or batch["integrity_status"] != "trusted":
+            continue
+        summaries = project_wheel_call_intents(
+            rows.get("account_wheel_events") or [],
+            account=account,
+            stock_lot_id=batch["stock_lot_id"],
+            as_of_ms=instant,
+            known_trade_event_ids=known_trade_ids,
+        )
+        for intent in summaries:
+            if intent.get("status") != "active":
+                continue
+            try:
+                plan = plan_wheel_call_intent_consume(
+                    batch,
+                    intent,
+                    event,
+                    coverage_fact,
+                    recorded_at_ms=recorded_at_ms,
+                )
+            except ValueError:
+                continue
+            plans.append((batch, plan))
+    if not plans:
+        return event, None, "no_matching_intent"
+    if len(plans) != 1:
+        return event, None, "ambiguous_matching_intent"
+    batch, plan = plans[0]
+    raw_payload = {
+        **dict(getattr(event, "raw_payload", None) or {}),
+        "strategy": "wheel",
+        "leg_role": "wheel_call",
+        "source_stock_lot_id": batch["stock_lot_id"],
+        "wheel_call_intent_id": plan["intent_id"],
+    }
+    return (
+        replace(
+            event,
+            lot_id=str(getattr(event, "lot_id", "") or f"lot_{event.event_id}"),
+            raw_payload=raw_payload,
+        ),
+        plan,
+        "matched_intent",
+    )
+
+
+def append_and_verify_wheel_intent_consumption(
+    repo: Any,
+    *,
+    conn: Any,
+    linked_event: Any,
+    intent_event: Mapping[str, Any],
+) -> None:
+    from src.application.wheel.read_model import build_wheel_read_model_from_rows
+
+    if not repo.append_wheel_event_once(intent_event, conn=conn):
+        raise ValueError("Wheel Call intent consumption unexpectedly replayed")
+    lot_id = str(
+        getattr(linked_event, "lot_id", "")
+        or getattr(linked_event, "target_lot_id", "")
+        or ""
+    ).strip()
+    fields = repo.get_position_lot_fields(lot_id, conn=conn)
+    if (
+        str(fields.get("strategy") or "") != "wheel"
+        or str(fields.get("leg_role") or "") != "wheel_call"
+        or str(fields.get("source_stock_lot_id") or "")
+        != str(intent_event.get("stock_lot_id") or "")
+    ):
+        raise ValueError("Wheel Call intent linkage verification failed")
+    account = _event_account(linked_event)
+    model = build_wheel_read_model_from_rows(
+        repo.read_lifecycle_account_rows(account=account, conn=conn),
+        account=account,
+        as_of_ms=max(_event_time_ms(linked_event), 1),
+    )
+    matches = [
+        batch
+        for batch in model["batches"]
+        if batch["stock_lot_id"] == intent_event["stock_lot_id"]
+    ]
+    if (
+        len(matches) != 1
+        or matches[0]["integrity_status"] != "trusted"
+        or lot_id not in matches[0]["active_call_lot_ids"]
+        or intent_event["intent_id"] in matches[0]["active_intent_ids"]
+    ):
+        raise ValueError("Wheel Call intent projection verification failed")
+
+
 __all__ = [
+    "append_and_verify_wheel_intent_consumption",
     "append_wheel_trade_companions",
     "capture_wheel_trade_companion_context",
+    "prepare_wheel_intent_open_event",
 ]

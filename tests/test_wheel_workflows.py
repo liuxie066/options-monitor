@@ -9,8 +9,19 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.ledger.writer import persist_trade_event_objects_atomically
-from src.application.wheel import build_wheel_read_model, end_wheel_lifecycle
+from src.application.ledger.writer import (
+    persist_trade_event_objects_atomically,
+    persist_trade_event_with_wheel_intent,
+)
+from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.wheel import (
+    build_wheel_read_model,
+    cancel_wheel_call_intent,
+    confirm_wheel_call_linkage,
+    create_wheel_call_intent,
+    end_wheel_lifecycle,
+    reject_wheel_call_linkage,
+)
 
 
 def _assign_short_put(
@@ -51,6 +62,89 @@ def _assign_short_put(
     )
     assignment_event_id = str(result["result"]["event_id"])
     return repo, put_lot_id, f"assigned-stock-{assignment_event_id}"
+
+
+def _create_call_intent(
+    repo: SQLiteOptionPositionsRepository,
+    stock_lot_id: str,
+) -> tuple[dict, dict]:
+    batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    snapshot = {
+        "account": "lx",
+        "snapshot_hash": "snapshot-1",
+        "batches": [
+            {
+                "stock_lot_id": stock_lot_id,
+                "batch_generation_hash": batch["batch_generation_hash"],
+                "final_candidate": {
+                    "final_candidate_id": "candidate-1",
+                    "symbol": "NVDA",
+                    "stock_lot_id": stock_lot_id,
+                    "strike": 110,
+                    "expiration_ymd": "2026-08-21",
+                    "granted_contracts": 1,
+                    "multiplier": 100,
+                },
+            }
+        ],
+    }
+    coverage = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "capacity_identity_hash": "capacity-1",
+        "status": "available",
+        "shares_available_for_cover": 100,
+    }
+    created = create_wheel_call_intent(
+        repo,
+        candidate_snapshot=snapshot,
+        account="lx",
+        stock_lot_id=stock_lot_id,
+        final_candidate_id="candidate-1",
+        expected_snapshot_hash="snapshot-1",
+        expected_batch_generation_hash=batch["batch_generation_hash"],
+        expires_at_ms=10_000,
+        request_id="intent-create-1",
+        actor="tester",
+        coverage_fact=coverage,
+        apply_changes=True,
+        as_of_ms=4_000,
+    )
+    return created, coverage
+
+
+def _open_unlinked_call(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    event_time_ms: int = 3_000,
+) -> str:
+    call_lot_id = "unlinked-call-lot-1"
+    persist_trade_event_objects_atomically(
+        repo,
+        [
+            TradeEvent(
+                event_id="unlinked-call-open-1",
+                event_type="open",
+                event_time_ms=event_time_ms,
+                contract_key=ContractKey.from_values(
+                    broker="富途",
+                    account="lx",
+                    underlying_symbol="NVDA",
+                    option_type="call",
+                    position_side="short",
+                    strike=110,
+                    expiration_ymd="2026-08-21",
+                ),
+                contracts=1,
+                price=2,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                lot_id=call_lot_id,
+            )
+        ],
+    )
+    return call_lot_id
 
 
 def test_assignment_starts_wheel_and_manual_end_is_cas_idempotent(
@@ -123,6 +217,237 @@ def test_assignment_replay_does_not_backfill_wheel_start(tmp_path: Path) -> None
 
     assert replay["result"]["created"] is False
     assert repo.list_wheel_events(account="lx") == []
+
+
+def test_wheel_call_intent_create_and_cancel(tmp_path: Path) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    created, _coverage = _create_call_intent(repo, stock_lot_id)
+    pending = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
+    cancelled = cancel_wheel_call_intent(
+        repo,
+        account="lx",
+        stock_lot_id=stock_lot_id,
+        intent_id=created["intent_id"],
+        expected_batch_generation_hash=pending["batch_generation_hash"],
+        request_id="intent-cancel-1",
+        actor="tester",
+        broker_order_inactive_confirmed=True,
+        reason="order cancelled",
+        apply_changes=True,
+        as_of_ms=6_000,
+    )
+
+    ready = build_wheel_read_model(repo, "lx", 7_000)["batches"][0]
+    assert created["status"] == "created"
+    assert pending["phase"] == "call_pending"
+    assert pending["active_intent_reserved_shares"] == 100
+    assert cancelled["status"] == "cancelled"
+    assert ready["phase"] == "ready"
+    assert ready["active_intent_ids"] == []
+
+
+def test_short_call_fill_consumes_matching_intent_atomically(tmp_path: Path) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    created, coverage = _create_call_intent(repo, stock_lot_id)
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="call-fill-1",
+        order_id="call-order-1",
+        symbol="NVDA",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=2,
+        strike=110,
+        multiplier=100,
+        multiplier_source="broker",
+        expiration_ymd="2026-08-21",
+        currency="USD",
+        trade_time_ms=5_000,
+        raw_payload={"deal_id": "call-fill-1"},
+    )
+
+    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
+
+    batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
+    call_lot = next(
+        item
+        for item in repo.list_position_lots()
+        if item["fields"].get("option_type") == "call"
+    )
+    assert result["wheel_linkage_status"] == "matched_intent"
+    assert result["wheel_intent_event_id"]
+    assert call_lot["fields"]["strategy"] == "wheel"
+    assert call_lot["fields"]["source_stock_lot_id"] == stock_lot_id
+    assert batch["phase"] == "call_open"
+    assert batch["active_intent_ids"] == []
+    assert created["intent_id"] not in batch["active_intent_ids"]
+
+
+def test_unmatched_short_call_fill_stays_unlinked_and_is_still_recorded(
+    tmp_path: Path,
+) -> None:
+    repo, _put_lot_id, _stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="unmatched-call-fill",
+        order_id="unmatched-call-order",
+        symbol="NVDA",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=2,
+        strike=110,
+        multiplier=100,
+        multiplier_source="broker",
+        expiration_ymd="2026-08-21",
+        currency="USD",
+        trade_time_ms=5_000,
+        raw_payload={"deal_id": "unmatched-call-fill"},
+    )
+    coverage = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "capacity_identity_hash": "capacity-1",
+        "status": "available",
+        "shares_available_for_cover": 100,
+    }
+
+    result = persist_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
+
+    call_lot = next(
+        item
+        for item in repo.list_position_lots()
+        if item["fields"].get("option_type") == "call"
+    )
+    model = build_wheel_read_model(repo, "lx", 6_000)
+    assert result["created"] is True
+    assert result["wheel_linkage_status"] == "no_matching_intent"
+    assert call_lot["fields"].get("strategy") is None
+    assert model["batches"][0]["phase"] == "linkage_unresolved"
+    assert len(model["linkage_candidates"]) == 1
+
+
+def test_manual_wheel_call_linkage_confirm_uses_narrow_adjust(tmp_path: Path) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    call_lot_id = _open_unlinked_call(repo)
+    model = build_wheel_read_model(repo, "lx", 4_000)
+    candidate = model["linkage_candidates"][0]
+
+    result = confirm_wheel_call_linkage(
+        repo,
+        account="lx",
+        call_record_id=call_lot_id,
+        stock_lot_id=stock_lot_id,
+        linkage_candidate_id=candidate["linkage_candidate_id"],
+        expected_input_hash=candidate["input_snapshot_hash"],
+        expected_batch_generation_hash=candidate["batch_generation_hash"],
+        request_id="link-confirm-1",
+        actor="tester",
+        coverage_fact={
+            "account": "lx",
+            "symbol": "NVDA",
+            "capacity_identity_hash": "capacity-1",
+            "status": "insufficient",
+            "shares_available_for_cover": 0,
+        },
+        apply_changes=True,
+        as_of_ms=5_000,
+    )
+
+    fields = repo.get_position_lot_fields(call_lot_id)
+    batch = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
+    adjust = next(item for item in repo.list_trade_events() if item["event_type"] == "adjust")
+    assert result["status"] == "confirmed"
+    assert fields["strategy"] == "wheel"
+    assert fields["source_stock_lot_id"] == stock_lot_id
+    assert set(adjust["raw_payload"]["patch"]) == {
+        "last_action_at",
+        "strategy",
+        "leg_role",
+        "source_stock_lot_id",
+    }
+    assert batch["phase"] == "call_open"
+
+
+def test_manual_linkage_consumes_unique_intent_valid_at_fill(tmp_path: Path) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    created, coverage = _create_call_intent(repo, stock_lot_id)
+    call_lot_id = _open_unlinked_call(repo, event_time_ms=5_000)
+    candidate = build_wheel_read_model(repo, "lx", 6_000)["linkage_candidates"][0]
+
+    result = confirm_wheel_call_linkage(
+        repo,
+        account="lx",
+        call_record_id=call_lot_id,
+        stock_lot_id=stock_lot_id,
+        linkage_candidate_id=candidate["linkage_candidate_id"],
+        expected_input_hash=candidate["input_snapshot_hash"],
+        expected_batch_generation_hash=candidate["batch_generation_hash"],
+        request_id="link-confirm-with-intent",
+        actor="tester",
+        coverage_fact=coverage,
+        apply_changes=True,
+        as_of_ms=6_000,
+    )
+
+    batch = build_wheel_read_model(repo, "lx", 7_000)["batches"][0]
+    assert result["intent_event_id"]
+    assert created["intent_id"] not in batch["active_intent_ids"]
+    assert batch["phase"] == "call_open"
+
+
+def test_manual_wheel_call_linkage_rejects_only_selected_relation(
+    tmp_path: Path,
+) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    call_lot_id = _open_unlinked_call(repo)
+    candidate = build_wheel_read_model(repo, "lx", 4_000)["linkage_candidates"][0]
+
+    result = reject_wheel_call_linkage(
+        repo,
+        account="lx",
+        call_record_id=call_lot_id,
+        stock_lot_id=stock_lot_id,
+        linkage_candidate_id=candidate["linkage_candidate_id"],
+        expected_input_hash=candidate["input_snapshot_hash"],
+        expected_batch_generation_hash=candidate["batch_generation_hash"],
+        request_id="link-reject-1",
+        actor="tester",
+        reason="not this Wheel batch",
+        apply_changes=True,
+        as_of_ms=5_000,
+    )
+
+    model = build_wheel_read_model(repo, "lx", 6_000)
+    assert result["status"] == "rejected"
+    assert model["linkage_candidates"] == []
+    assert repo.get_position_lot_fields(call_lot_id).get("strategy") is None
+    assert model["batches"][0]["phase"] == "ready"
 
 
 def test_partial_wheel_call_assignment_keeps_batch_active(tmp_path: Path) -> None:
