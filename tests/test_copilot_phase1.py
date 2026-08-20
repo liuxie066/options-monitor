@@ -5,9 +5,8 @@ import json
 
 import pytest
 
-from src.application.copilot import tools as copilot_tools
+from src.application.copilot import local_harness, tools as copilot_tools
 from src.application.copilot import scene as copilot_scene
-from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, SceneManifest, new_id
 from src.application.copilot.control_handoff import (
     CONTROL_PREVIEW_TOOL,
@@ -15,16 +14,20 @@ from src.application.copilot.control_handoff import (
     control_preview_tool_description,
 )
 from src.application.assistant.capability_catalog import preview_operation_capabilities
-from src.application.copilot.host import record_session_turn, session_messages
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot import channel_facade
-from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
-from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.pi_agent_process import derive_pi_session_id
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.copilot.service import prepare_contract
 from src.application.agent_tool_contracts import AgentToolError
-from tests.copilot_pi_test_support import _TEST_MODEL, fake_pi_agent, run_contract
+from tests.copilot_pi_test_support import (
+    _TEST_MODEL,
+    ModelRequest,
+    ModelTurn,
+    ToolCall,
+    fake_pi_agent,
+    run_contract,
+)
 
 
 def _request(text: str, *, context=(), environment: str = "local") -> CopilotRequest:
@@ -971,6 +974,106 @@ def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch,
     assert (captured[0]["start"]["debug"] is not None) is (environment == "eval")
 
 
+def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -> None:
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    captured: dict[str, object] = {}
+
+    def unexpected_load(**_kwargs):
+        raise AssertionError("implicit Assistant config must not be read")
+
+    def fake_run(_prepared, **kwargs):
+        captured.update(kwargs)
+        return AppResult(status="answered", user_response="Pi runtime ready.")
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", unexpected_load)
+    monkeypatch.setattr(local_harness, "run_contract", fake_run)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert result.status == "answered"
+    assert captured["enabled_optional_toolsets"] == frozenset()
+
+
+def test_ordinary_run_still_rejects_invalid_implicit_assistant_toolsets(monkeypatch) -> None:
+    calls = 0
+
+    def invalid_load(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return None, "invalid_assistant_config"
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", invalid_load)
+    result = local_harness.run_prepared_contract(
+        _contract("检查入口"),
+        model_config_json=json.dumps(
+            {
+                "provider": "ollama",
+                "model": "om-test",
+                "context_window_tokens": 24_000,
+            }
+        ),
+    )
+
+    assert calls == 1
+    assert result.error == {"code": "MODEL_CONFIG_ERROR", "reason": "invalid_assistant_config"}
+
+
+def test_eval_model_turn_with_explicit_assistant_config_fails_closed(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.assistant.json"
+    calls: list[str | None] = []
+
+    def valid_load(*, config_path, require_config):
+        calls.append(config_path)
+        assert require_config is True
+        return frozenset(), None
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", valid_load)
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        assistant_config_path=str(config_path),
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert calls == [str(config_path)]
+    assert result.error == {
+        "code": "MODEL_CONFIG_ERROR",
+        "reason": "model_turn_conflicts_with_model_config",
+    }
+
+
+def test_eval_model_turn_with_model_config_still_fails_closed(monkeypatch) -> None:
+    def unexpected_load(**_kwargs):
+        raise AssertionError("implicit Assistant config must not be read")
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", unexpected_load)
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_config_json=json.dumps(
+            {
+                "provider": "ollama",
+                "model": "om-test",
+                "context_window_tokens": 24_000,
+            }
+        ),
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert result.error == {
+        "code": "MODEL_CONFIG_ERROR",
+        "reason": "model_turn_conflicts_with_model_config",
+    }
+
+
 def test_local_harness_passes_model_secret_only_in_allowlisted_child_environment(monkeypatch) -> None:
     from src.application.copilot import local_harness
 
@@ -1140,272 +1243,6 @@ def test_explicit_month_scope_is_not_pruned_by_model_mtd_arguments(monkeypatch) 
             "month": "2026-06",
         }
     ]
-
-
-def test_budget_exhaustion_returns_tool_results_for_entire_native_batch(monkeypatch) -> None:
-    contract = _contract("同时检查运行状态和收益")
-    manifest = build_scene_manifest(contract, "run_budget_batch")
-    manifest = replace(manifest, limits={**manifest.limits, "max_tool_calls": 1})
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        if not any(item.get("role") == "tool" for item in request.messages):
-            return ModelTurn(
-                tool_calls=(
-                    _call("runtime_status", {"config_key": "us"}, "batch_1"),
-                    _call("option_performance_report", {"month": "2026-07"}, "batch_2"),
-                )
-            )
-        return ModelTurn(text="只完成了运行状态检查，收益工具因预算限制未执行。")
-
-    monkeypatch.setattr(
-        copilot_tools,
-        "call_read_tool",
-        lambda name, payload, *, allowed_tools: {"ok": True, "data": {"status": "healthy"}},
-    )
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda name, payload: copilot_tools.call_read_tool(
-            name, payload, allowed_tools=tuple(manifest.allowed_tools)
-        ),
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    tool_messages = [item for item in requests[-1].messages if item.get("role") == "tool"]
-    assert [item["tool_call_id"] for item in tool_messages] == ["batch_1", "batch_2"]
-    assert json.loads(tool_messages[-1]["content"])["error"] == "BUDGET_EXHAUSTED"
-    assert result.status == "answered"
-
-
-def test_context_compaction_keeps_native_tool_call_pairs() -> None:
-    contract = _contract("总结上下文")
-    manifest = build_scene_manifest(contract, "run_context_budget")
-    manifest = replace(manifest, limits={**manifest.limits, "max_context_chars": 16_000})
-    requests: list[ModelRequest] = []
-    turns = iter(
-        (
-            ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "context_1"),)),
-            ModelTurn(text="结论：运行状态正常。"),
-        )
-    )
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        return next(turns)
-
-    from src.application.copilot.engine import run_engine
-
-    run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    final_messages = list(requests[-1].messages)
-    assert any(
-        item.get("role") == "user" and item.get("content") == "总结上下文"
-        for item in final_messages
-    )
-    assistant_index = next(index for index, item in enumerate(final_messages) if item.get("tool_calls"))
-    assert final_messages[assistant_index + 1]["role"] == "tool"
-    assert final_messages[assistant_index + 1]["tool_call_id"] == "context_1"
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-
-
-def test_context_compaction_preserves_current_request_and_each_current_turn_tool_group() -> None:
-    contract = _contract("分析6月的期权操作有没有不合理")
-    manifest = build_scene_manifest(contract, "run_multi_group_context")
-    manifest = replace(manifest, limits={**manifest.limits, "max_context_chars": 16_000})
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        tool_call_ids = {
-            str(item.get("tool_call_id") or "")
-            for item in request.messages
-            if item.get("role") == "tool"
-        }
-        if "context_report" not in tool_call_ids:
-            return ModelTurn(
-                tool_calls=(
-                    _call(
-                        "option_performance_report",
-                        {"period": "month", "month": "2026-06"},
-                        "context_report",
-                    ),
-                )
-            )
-        if "context_catalog" not in tool_call_ids:
-            return ModelTurn(
-                tool_calls=(
-                    _call("analysis_catalog", {"view": ""}, "context_catalog"),
-                )
-            )
-        return ModelTurn(text="结论：已基于6月业务事实完成复盘。")
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda name, _payload: {
-            "ok": True,
-            "data": {
-                "source": name,
-                "summary": "x" * 20_000,
-                "rows": [{"symbol": f"SYM{index}", "value": index} for index in range(500)],
-            },
-        },
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    final_messages = list(requests[-1].messages)
-    assert any(
-        item.get("role") == "user"
-        and item.get("content") == "分析6月的期权操作有没有不合理"
-        for item in final_messages
-    )
-    assert [
-        item["tool_call_id"]
-        for item in final_messages
-        if item.get("role") == "tool"
-    ] == ["context_report", "context_catalog"]
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-    assert result.status == "answered"
-
-
-def test_context_compaction_preserves_authoritative_system_context() -> None:
-    contract = _contract("总结上下文")
-    manifest = build_scene_manifest(contract, "run_context_authority")
-    manifest = replace(
-        manifest,
-        messages=[
-            *manifest.messages[:1],
-            {
-                "role": "system",
-                "content": (
-                    "Authoritative pending Control operations for this conversation. "
-                    'pending_operations=[{"operation_id":"in_upgrade","status":"previewed"}]'
-                ),
-            },
-            *manifest.messages[1:],
-        ],
-        limits={**manifest.limits, "max_context_chars": 16_000},
-    )
-    requests: list[ModelRequest] = []
-    turns = iter(
-        (
-            ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "context_authority_1"),)),
-            ModelTurn(text="结论：已保留待确认操作上下文。"),
-        )
-    )
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        return next(turns)
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    assert result.status == "answered"
-    final_messages = list(requests[-1].messages)
-    assert any("in_upgrade" in str(item.get("content") or "") for item in final_messages if item.get("role") == "system")
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-    assert result.status == "answered"
-
-
-def test_context_compaction_preserves_financial_identity_fields() -> None:
-    contract = _contract("总结收益")
-    manifest = build_scene_manifest(contract, "run_context_identity")
-    manifest = replace(
-        manifest,
-        limits={**manifest.limits, "max_context_chars": 16_000, "max_context_tokens": 4_000},
-    )
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        if not any(item.get("role") == "tool" for item in request.messages):
-            return ModelTurn(tool_calls=(_call("option_performance_report", {"month": "2026-07"}, "identity_1"),))
-        return ModelTurn(text="结论：lx 账户 7 月美元收益为正。", finish_reason="stop")
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {
-            "ok": True,
-            "data": {
-                "period": {"kind": "month", "requested_start_date": "2026-07-01"},
-                "scope": {"account": "lx", "accounts": ["lx"]},
-                "pnl": {"period_total_net": {"by_currency": {"USD": 1.0}, "status": "observed"}},
-                "quality": {"status": "observed", "missing": []},
-                "notes": "x" * 20_000,
-                "rows": [{"symbol": f"SYM{index}", "premium": index} for index in range(500)],
-            },
-        },
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    tool_message = next(item for item in requests[-1].messages if item.get("role") == "tool")
-    projected = json.loads(tool_message["content"])
-    assert projected["scope"]["account"] == "lx"
-    assert projected["pnl"]["period_total_net"]["by_currency"] == {"USD": "1.0"}
-    assert projected["period"]["requested_start_date"] == "2026-07-01"
-    assert projected["context_compacted"] is True
-    assert result.status == "answered"
 
 
 def test_truncated_model_answer_is_continued_and_joined() -> None:
@@ -1976,13 +1813,6 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
         return AppResult(status="answered", user_response="结论：请明确要修改哪条预览。")
 
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
-    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
-    store.record_session_turn(
-        "wechat:conversation-1",
-        "升级到最新版",
-        "旧历史：升级预览等待确认。",
-        max_messages=10,
-    )
     result = channel_facade.run_channel_request(
         user_message="改成 1.2.400",
         config_key="us",
@@ -1990,7 +1820,7 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
         channel="wechat",
         sender_id="ou_1",
         conversation_id="conversation-1",
-        host_db_path=str(store.path),
+        host_db_path=str(tmp_path / "copilot.sqlite3"),
         control_context=(
             {
                 "operation_id": "in_upgrade",
@@ -2005,7 +1835,6 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
     messages = captured["messages"]
     assert isinstance(messages, list)
     assert len(messages) == 2
-    assert "旧历史" not in str(messages)
     assert messages[-2]["role"] == "system"
     assert "Authoritative pending Control operations" in messages[-2]["content"]
     assert '"operation_id": "in_upgrade"' in messages[-2]["content"]
@@ -2039,29 +1868,17 @@ def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkey
     assert "pending_operations=[]" in messages[-2]["content"]
 
 
-def test_session_store_keeps_bounded_recent_messages() -> None:
-    key = f"test:{new_id('session')}"
-    for index in range(15):
-        record_session_turn(key, f"u{index}", f"a{index}")
-    messages = session_messages(key)
-    assert len(messages) == load_general_scene()["conversation"]["max_messages"]
-    assert messages[-1] == {"role": "assistant", "content": "a14"}
-
-
-def test_host_store_persists_sessions_and_run_events(tmp_path) -> None:
+def test_host_store_persists_run_events(tmp_path) -> None:
     store = CopilotHostStore(tmp_path / "copilot.db")
     key = "wechat:conversation-1"
-    record_session_turn(key, "7月收益", "收益为正。", host_store=store)
-
-    reopened = CopilotHostStore(tmp_path / "copilot.db")
-    assert session_messages(key, host_store=reopened)[-1]["content"] == "收益为正。"
 
     result = run_contract(
         _contract("运行状态"),
         model_runner=lambda _request: ModelTurn(text="结论：运行正常。"),
-        host_store=reopened,
+        host_store=store,
         session_key=key,
     )
+    reopened = CopilotHostStore(tmp_path / "copilot.db")
     record = reopened.run_record(result.run_id)
     assert record is not None
     assert record["status"] == "answered"
@@ -2147,209 +1964,3 @@ def test_empty_request_needs_clarification() -> None:
     assert isinstance(result, AppResult)
     assert result.status == "needs_clarification"
     assert result.user_response
-
-
-def test_openai_responses_runner_uses_native_tools_and_parses_calls() -> None:
-    captured: dict = {}
-
-    def create_response_fn(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "incomplete",
-            "incomplete_details": {"reason": "max_output_tokens"},
-            "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
-            "output": [
-                {
-                    "type": "function_call",
-                    "call_id": "call_7",
-                    "name": "runtime_status",
-                    "arguments": '{"config_key":"us"}',
-                }
-            ]
-        }
-
-    runner = build_model_runner(
-        CopilotModelSettings(provider="openai", model="gpt-test", api_key_env="TEST_KEY"),
-        environ={"TEST_KEY": "secret"},
-        create_response_fn=create_response_fn,
-    )
-    turn = runner(
-        ModelRequest(
-            messages=(
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "status"},
-            ),
-            tools=(
-                {
-                    "name": "runtime_status",
-                    "description": "status",
-                    "input_schema": {"type": "object", "properties": {"config_key": {"type": "string"}}},
-                },
-            ),
-            timeout_seconds=37,
-        )
-    )
-
-    assert captured["instructions"] == "system"
-    assert captured["tools"][0]["type"] == "function"
-    assert captured["timeout"] == 37
-    assert turn.tool_calls[0].arguments == {"config_key": "us"}
-    assert turn.finish_reason == "length"
-    assert turn.usage == {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}
-
-
-def test_chat_completions_runner_uses_native_tool_messages() -> None:
-    captured: dict = {}
-
-    def create_chat_completion_fn(**kwargs):
-        captured.update(kwargs)
-        return {
-            "choices": [{"message": {"content": "完成", "tool_calls": []}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
-        }
-
-    runner = build_model_runner(
-        CopilotModelSettings(provider="deepseek", model="deepseek-chat", api_key_env="TEST_KEY"),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-    )
-    turn = runner(
-        ModelRequest(
-            messages=(
-                {"role": "user", "content": "status"},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {"id": "call_1", "name": "runtime_status", "arguments": {"config_key": "us"}}
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_1",
-                    "name": "runtime_status",
-                    "content": '{"ok":true}',
-                },
-            ),
-            tools=(
-                {
-                    "name": "runtime_status",
-                    "description": "status",
-                    "input_schema": {"type": "object", "properties": {}},
-                },
-            ),
-        )
-    )
-
-    assert captured["tools"][0]["function"]["name"] == "runtime_status"
-    assert captured["messages"][1]["tool_calls"] == [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "runtime_status", "arguments": '{"config_key": "us"}'},
-        }
-    ]
-    assert captured["messages"][2] == {
-        "role": "tool",
-        "tool_call_id": "call_1",
-        "content": '{"ok":true}',
-    }
-    assert turn.text == "完成"
-    assert turn.finish_reason == "stop"
-    assert turn.usage == {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
-
-
-def test_ollama_runner_does_not_require_api_key_or_send_thinking() -> None:
-    captured: dict = {}
-
-    def create_chat_completion_fn(**kwargs):
-        captured.update(kwargs)
-        return {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]}
-
-    runner = build_model_runner(
-        CopilotModelSettings.from_config({"provider": "ollama", "model": "gpt-oss:20b"}),
-        environ={},
-        create_chat_completion_fn=create_chat_completion_fn,
-    )
-
-    turn = runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-
-    assert turn.text == "完成"
-    assert captured["api_key"] == ""
-    assert captured["base_url"] == "http://127.0.0.1:11434/v1"
-    assert captured["thinking"] is None
-
-
-def test_chat_completion_omits_authorization_without_api_key() -> None:
-    captured: dict = {}
-
-    def post(url, payload, *, headers, timeout):
-        captured.update(url=url, payload=payload, headers=headers, timeout=timeout)
-        return {"choices": []}
-
-    create_chat_completion(
-        model="gpt-oss:20b",
-        base_url="http://127.0.0.1:11434/v1",
-        messages=[{"role": "user", "content": "status"}],
-        http_post_json_fn=post,
-    )
-
-    assert captured["headers"] == {"Content-Type": "application/json"}
-
-
-def test_model_runner_retries_only_transient_errors() -> None:
-    attempts: list[int] = []
-    sleeps: list[float] = []
-
-    class TransientError(Exception):
-        http_status = 429
-
-    def create_chat_completion_fn(**_kwargs):
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise TransientError("rate limited")
-        return {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]}
-
-    runner = build_model_runner(
-        CopilotModelSettings(
-            provider="deepseek",
-            model="deepseek-chat",
-            api_key_env="TEST_KEY",
-            max_attempts=3,
-        ),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-        sleep_fn=sleeps.append,
-    )
-
-    turn = runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-
-    assert turn.text == "完成"
-    assert turn.attempt_count == 2
-    assert len(attempts) == 2
-    assert sleeps == [0.25]
-
-
-def test_model_runner_does_not_retry_non_transient_errors() -> None:
-    attempts = 0
-
-    def create_chat_completion_fn(**_kwargs):
-        nonlocal attempts
-        attempts += 1
-        raise ValueError("invalid request")
-
-    runner = build_model_runner(
-        CopilotModelSettings(
-            provider="deepseek",
-            model="deepseek-chat",
-            api_key_env="TEST_KEY",
-            max_attempts=3,
-        ),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-        sleep_fn=lambda _seconds: None,
-    )
-
-    with pytest.raises(ValueError, match="invalid request"):
-        runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-    assert attempts == 1

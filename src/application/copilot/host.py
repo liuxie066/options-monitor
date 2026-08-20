@@ -22,7 +22,7 @@ from src.application.copilot.event_store import CopilotEventLog
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_config import PiModelSettings
 from src.application.copilot.result_admission import admit_result_with_decision
-from src.application.copilot.scene import build_scene_manifest, conversation_max_messages, scene_policy_rejection_reason
+from src.application.copilot.scene import build_scene_manifest, scene_policy_rejection_reason
 from src.application.research.redaction import redact_value
 from src.infrastructure.pi_agent_process import (
     derive_pi_local_session_id,
@@ -35,7 +35,6 @@ CancellationChecker = Callable[[], bool]
 FixtureObservationLoader = Callable[[str | None], list[dict[str, Any]]]
 _SESSION_LOCK = Lock()
 _RUNNING_SESSIONS: set[str] = set()
-_SESSION_MESSAGES: dict[str, list[dict[str, str]]] = {}
 _PROCESS_ERROR_CODES = {
     "CONFIG_ERROR": "CONFIG_ERROR",
     "PI_RUNTIME_UNAVAILABLE": "DEPENDENCY_MISSING",
@@ -49,51 +48,6 @@ _PROCESS_ERROR_CODES = {
     "PROTOCOL_ERROR": "INTERNAL_ERROR",
     "INTERNAL_ERROR": "INTERNAL_ERROR",
 }
-
-
-def session_messages(
-    session_key: str,
-    *,
-    host_store: CopilotHostStore | None = None,
-) -> tuple[dict[str, str], ...]:
-    if host_store is not None:
-        return tuple(dict(item) for item in host_store.session_messages(session_key))
-    with _SESSION_LOCK:
-        return tuple(dict(item) for item in _SESSION_MESSAGES.get(session_key, ()))
-
-
-def record_session_turn(
-    session_key: str,
-    user_message: str,
-    assistant_message: str,
-    *,
-    host_store: CopilotHostStore | None = None,
-    tool_uses: tuple[dict[str, Any], ...] = (),
-    warnings: tuple[str, ...] = (),
-    errors: tuple[str, ...] = (),
-) -> None:
-    if host_store is not None:
-        host_store.record_session_turn(
-            session_key,
-            user_message,
-            assistant_message,
-            max_messages=conversation_max_messages(),
-            tool_uses=tool_uses,
-            warnings=warnings,
-            errors=errors,
-        )
-        return
-    with _SESSION_LOCK:
-        messages = _SESSION_MESSAGES.setdefault(session_key, [])
-        messages.extend(
-            (
-                {"role": "user", "content": str(user_message)},
-                {"role": "assistant", "content": str(assistant_message)},
-            )
-        )
-        max_messages = conversation_max_messages()
-        if max_messages and len(messages) > max_messages:
-            del messages[:-max_messages]
 
 
 @contextmanager
@@ -1026,4 +980,4 @@ def _default_fixture_observations(fixture_id: str | None) -> list[dict[str, Any]
     return provider.fixture_observations(fixture_id)
 
 
-__all__ = ["host_lane_slot", "record_session_turn", "run_contract", "session_messages", "session_run_slot"]
+__all__ = ["host_lane_slot", "run_contract", "session_run_slot"]

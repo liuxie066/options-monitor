@@ -25,7 +25,6 @@ from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allow
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.inbound_service import handle_assistant_request
 from src.application.copilot.contracts import AppResult
-from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.control_handoff import control_preview_tool_description
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
@@ -153,12 +152,6 @@ def test_copilot_write_request_hands_off_to_deterministic_control_preview(
     assert seen[0].intent_name == intent_name
     assert seen[0].arguments == control_arguments
     assert seen[0].source == "copilot_control_preview"
-    assert (
-        CopilotHostStore(tmp_path / "audit.sqlite3").session_messages(
-            "wechat:wechat:chat_a:ou_1"
-        )
-        == ()
-    )
     audit = InboundAuditStore(tmp_path / "audit.sqlite3").list_recent(
         conversation_id="wechat:chat_a:ou_1", limit=1
     )[0]
@@ -879,7 +872,6 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert confirmed["data"]["control"]["safety_class"] == "write_apply"
     assert confirmed["data"]["control"]["requires_confirmation"] is False
     assert confirmed["data"]["control"]["intent_name"] == "manual_trade_confirm"
-    assert CopilotHostStore(audit_db).session_messages("feishu:feishu:ou_1") == ()
     assert InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1") == []
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
@@ -1958,7 +1950,6 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert cancelled["data"]["preview"]["summary"]["current_version"] == "1.2.110"
     assert cancelled["data"]["preview"]["summary"]["target_version"] == "1.2.111"
     assert len(calls) == 1
-    assert CopilotHostStore(audit_db).session_messages("feishu:feishu:chat_a:ou_1") == ()
     assert InboundOperationStore(audit_db).list_pending_operations(
         channel="feishu",
         sender_id="ou_1",

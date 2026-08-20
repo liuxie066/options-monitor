@@ -34,6 +34,19 @@ CONTINUATION_PROMPT_FOR_TEST = (
 )
 
 
+def test_pi_runtime_dependencies_are_exactly_pinned():
+    expected = {
+        "@earendil-works/pi-agent-core": "0.84.2",
+        "@earendil-works/pi-ai": "0.84.2",
+        "@earendil-works/pi-session-backend-sqlite-node": "0.84.2",
+    }
+    package = json.loads((REPO / "agent-runtime/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((REPO / "agent-runtime/package-lock.json").read_text(encoding="utf-8"))
+
+    assert package["dependencies"] == expected
+    assert lock["packages"][""]["dependencies"] == expected
+
+
 def _sse(events: list[dict]) -> bytes:
     return "".join(
         f"data: {json.dumps(event, separators=(',', ':'))}\n\n"

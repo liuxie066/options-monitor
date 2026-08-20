@@ -93,10 +93,14 @@ def run_prepared_contract(
     resumed_from: str | None = None,
     recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
-    enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
-        config_path=assistant_config_path,
-        require_config=bool(str(assistant_config_path or "").strip()),
-    )
+    implicit_model_turn = model_turn_json is not None and not str(assistant_config_path or "").strip()
+    if implicit_model_turn:
+        enabled_optional_toolsets, settings_error = frozenset(), None
+    else:
+        enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
+            config_path=assistant_config_path,
+            require_config=bool(str(assistant_config_path or "").strip()),
+        )
     if settings_error or enabled_optional_toolsets is None:
         return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
     model_settings, debug, model_error = _resolve_pi_model(
