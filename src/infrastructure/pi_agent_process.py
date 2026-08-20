@@ -63,6 +63,8 @@ _EVENT_TYPES = frozenset(
         "agent_start",
         "turn_start",
         "model_turn_completed",
+        "context_compaction_committed",
+        "forced_final_activated",
         "turn_end",
         "agent_end",
         "tool_execution_start",
@@ -103,6 +105,14 @@ def derive_pi_session_id(
     if any(not _is_nonempty_str(part) or "\0" in part for part in parts):
         raise ValueError("session identity parts must be non-empty and contain no NUL")
     material = "om-pi-session-v1\0" + "\0".join(parts)
+    return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def derive_pi_local_session_id(authority_scope: str, session_key: str) -> str:
+    parts = (authority_scope, session_key)
+    if any(not _is_nonempty_str(part) or "\0" in part for part in parts):
+        raise ValueError("local session identity parts must be non-empty and contain no NUL")
+    material = "local\0" + authority_scope + "\0" + session_key
     return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -567,6 +577,21 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
                 raise ValueError(f"turn event {key} must be a non-negative integer")
         _validate_usage(data["usage"])
         _validate_usage(data["usage_total"])
+    elif event_type == "forced_final_activated":
+        if set(data) != {"reason"} or data["reason"] not in {
+            "model_turn_limit",
+            "tool_call_limit",
+            "tool_failure_limit",
+            "time_reserve",
+        }:
+            raise ValueError("forced-final event data shape is invalid")
+    elif event_type == "context_compaction_committed":
+        if set(data) != {"compaction_count", "usage_total"}:
+            raise ValueError("compaction event data shape is invalid")
+        count = data["compaction_count"]
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("compaction_count must be a positive integer")
+        _validate_usage(data["usage_total"])
     elif event_type == "turn_end":
         if set(data) != {"stop_reason", "usage"}:
             raise ValueError("turn event data shape is invalid")
@@ -734,6 +759,7 @@ def run_pi_agent(
     cancel_sent = False
     cancel_deadline: float | None = None
     post_terminal_deadline: float | None = None
+    proposal_seen = False
     decision_written = False
     decision: str | None = None
     stdout_buffer = b""
@@ -865,6 +891,14 @@ def run_pi_agent(
                             )
                             node_seq += 1
                             payload = obj["payload"]
+                            if not accepted and type_ not in {"run.accepted", "run.error"}:
+                                _stop_child(process)
+                                return _safe_failure(
+                                    "PROTOCOL_ERROR",
+                                    "protocol",
+                                    "record before run.accepted",
+                                    False,
+                                )
 
                             if type_ == "run.accepted":
                                 if accepted:
@@ -930,12 +964,16 @@ def run_pi_agent(
                                 if saw_terminal:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal after terminal", False)
+                                if proposal_seen:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "duplicate proposal", False)
+                                proposal_seen = True
+                                _validate_terminal_payload(payload, final=False)
                                 if cancel_sent:
                                     # Host cancellation is already the durable
                                     # winner; the buffered proposal is superseded.
                                     # Do not open a second admission decision.
                                     continue
-                                _validate_terminal_payload(payload, final=False)
                                 if on_proposed is None:
                                     _stop_child(process)
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "missing proposal callback", False)
@@ -949,10 +987,29 @@ def run_pi_agent(
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "invalid proposal decision", False)
                                 type_map = {"commit": "run.commit", "discard": "run.discard", "cancel": "run.cancel"}
                                 payload_map = {"commit": {}, "discard": {}, "cancel": {"reason": "host_cancel_requested"}}
-                                line_out = _encode_envelope(type_map[decision], payload_map[decision], identity, py_seq)
-                                py_seq += 1
-                                process.stdin.write(line_out)
-                                process.stdin.flush()
+                                try:
+                                    line_out = _encode_envelope(
+                                        type_map[decision], payload_map[decision], identity, py_seq
+                                    )
+                                    py_seq += 1
+                                    process.stdin.write(line_out)
+                                    process.stdin.flush()
+                                except ValueError:
+                                    _stop_child(process)
+                                    return _safe_failure(
+                                        "PROTOCOL_ERROR",
+                                        "protocol",
+                                        "invalid admission decision envelope",
+                                        False,
+                                    )
+                                except OSError:
+                                    _stop_child(process)
+                                    return _safe_failure(
+                                        "PI_PROCESS_EXITED",
+                                        "process",
+                                        "child closed stdin before admission decision",
+                                        True,
+                                    )
                                 decision_written = True
                                 if decision == "cancel":
                                     cancel_sent = True

@@ -416,6 +416,7 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         "    deepseek-default:\n"
         "      provider: deepseek\n"
         "      model: deepseek-chat\n"
+        "      context_window_tokens: 24000\n"
         "      api_key_env: DEEPSEEK_API_KEY\n",
         encoding="utf-8",
     )

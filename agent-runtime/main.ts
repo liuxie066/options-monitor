@@ -1549,6 +1549,9 @@ async function run(): Promise<void> {
     };
     void pumpInbound();
 
+    const compactionCountBefore = sessionState.entries.filter(
+      (entry) => entry.type === "compaction"
+    ).length;
     try {
       sessionState = await prepareSessionState(
         session,
@@ -1566,6 +1569,18 @@ async function run(): Promise<void> {
       else if (inbound.cancelled) finishCancelled(metrics.usageTotal());
       else finishError(mapSessionFailure(error));
       return;
+    }
+    const committedCompactions = sessionState.entries.filter(
+      (entry) => entry.type === "compaction"
+    ).length - compactionCountBefore;
+    if (committedCompactions > 0) {
+      emitRun("agent.event", {
+        event_type: "context_compaction_committed",
+        data: {
+          compaction_count: committedCompactions,
+          usage_total: metrics.usageTotal(),
+        },
+      });
     }
     if (inbound.error) {
       finishError(inbound.error);
@@ -1626,6 +1641,19 @@ async function run(): Promise<void> {
           remainingMs <= (limits.final_answer_reserve_seconds as number) * 1000;
         if (!exhausted) return undefined;
         forcedFinalAtTurn = assistantTurns;
+        emitRun("agent.event", {
+          event_type: "forced_final_activated",
+          data: {
+            reason: assistantTurns >= (limits.max_iterations as number)
+              ? "model_turn_limit"
+              : finalizedToolCalls >= (limits.max_tool_calls as number)
+                ? "tool_call_limit"
+                : consecutiveFailedToolBatches >=
+                    (limits.max_consecutive_failed_tool_batches as number)
+                  ? "tool_failure_limit"
+                  : "time_reserve",
+          },
+        });
         return { context: { ...context, tools: [] } };
       },
       shouldStopAfterTurn: () =>

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
+from argparse import Namespace
 
 import pytest
 
@@ -8,10 +11,11 @@ from src.application.copilot import channel_facade, local_harness, tools as copi
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, new_id
 from src.application.copilot.conversation_memory import prepare_contract_with_existing_memory
-from src.application.copilot.host import run_contract
+from tests.copilot_pi_test_support import _TEST_MODEL, fake_pi_agent, run_contract
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.application.copilot.service import prepare_contract
+from src.interfaces.cli.copilot_ops import _successful_observations, handle_copilot_command
 
 
 def test_conversation_memory_injects_existing_state_without_mutation(tmp_path) -> None:
@@ -127,7 +131,7 @@ def test_memory_update_rejects_nonfinite_numbers_without_rewrite(tmp_path) -> No
     assert store.session_memory("feishu:chat") == expected_memory
 
 
-def test_feishu_channel_nonfinite_memory_fails_open_to_single_main_model_call(
+def test_s5_rejects_legacy_channel_history_before_pi_spawn(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -152,7 +156,12 @@ def test_feishu_channel_nonfinite_memory_fails_open_to_single_main_model_call(
         return ModelTurn(text="结论：主模型正常回答。")
 
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
-    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+    monkeypatch.setattr(
+        local_harness,
+        "_resolve_pi_model",
+        lambda **_kwargs: (_TEST_MODEL, None, None),
+    )
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", fake_pi_agent(model))
 
     result = channel_facade.run_channel_request(
         user_message="继续分析",
@@ -163,13 +172,12 @@ def test_feishu_channel_nonfinite_memory_fails_open_to_single_main_model_call(
         host_db_path=str(database),
     )
 
-    assert result.status == "answered"
-    assert len(requests) == 1
-    assert "不应注入" not in str(requests[0].messages)
+    assert result.status == "failed"
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert requests == []
     turns = store.session_turns("feishu:chat_1")
     assert turns[:-1] == expected_turns
-    assert turns[-1]["user_text"] == "继续分析"
-    assert turns[-1]["assistant_final"] == "结论：主模型正常回答。"
+    assert turns[-1]["assistant_final"] == "Copilot 未能准备只读执行场景。"
     with sqlite3.connect(store.path) as conn:
         stored_row = conn.execute(
             "SELECT memory_json FROM copilot_sessions WHERE session_key = 'feishu:chat_1'"
@@ -205,7 +213,12 @@ def test_online_run_with_uncompacted_backlog_only_invokes_main_model(monkeypatch
         requests.append(request)
         return ModelTurn(text="结论：已完成主模型回答。")
 
-    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+    monkeypatch.setattr(
+        local_harness,
+        "_resolve_pi_model",
+        lambda **_kwargs: (_TEST_MODEL, None, None),
+    )
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", fake_pi_agent(model))
 
     result = local_harness.run_prepared_contract(
         _contract("继续"),
@@ -329,7 +342,11 @@ def test_failed_read_only_run_resumes_with_recovered_observation(monkeypatch, tm
     resumed = run_contract(
         contract,
         model_runner=lambda request: ModelTurn(
-            text="结论：恢复后确认运行正常。" if "Recovered read-only observations" in request.messages[-1]["content"] else ""
+            text=(
+                "结论：恢复后确认运行正常。"
+                if any("<om-recovered-observations>" in str(item.get("content") or "") for item in request.messages)
+                else ""
+            )
         ),
         host_store=store,
         session_key=session_key,
@@ -363,6 +380,261 @@ def test_cancel_request_only_updates_active_run(tmp_path) -> None:
     assert store.request_cancel("run_active") is True
     assert store.is_cancel_requested("run_active") is True
     assert store.request_cancel("missing") is False
+
+
+def test_cancel_command_reports_closed_admission_boundary(tmp_path) -> None:
+    payload = handle_copilot_command(
+        Namespace(
+            copilot_command="cancel",
+            host_db=str(tmp_path / "copilot.sqlite3"),
+            run_id="missing",
+        )
+    )
+
+    assert payload["status"] == "not_ready"
+    assert payload["user_response"] == "该运行不存在、已作出准入决定或已进入终态。"
+
+
+def test_recovery_observations_are_success_only_bounded_and_redacted() -> None:
+    events = [
+        {
+            "type": "tool_result",
+            "payload": {"ok": True, "ref": f"obs_{index}", "api_key": f"secret-{index}"},
+        }
+        for index in range(10)
+    ]
+    events.extend(
+        (
+            {"type": "tool_result", "payload": {"ok": False, "ref": "failed", "secret": "no"}},
+            {"type": "tool_call", "payload": {"ok": True, "ref": "not-a-result"}},
+        )
+    )
+
+    recovered = _successful_observations(events)
+
+    assert [item["ref"] for item in recovered] == [f"obs_{index}" for index in range(2, 10)]
+    assert "secret-" not in json.dumps(recovered, ensure_ascii=False)
+
+
+def test_cancel_and_commit_compare_and_set_have_exactly_one_winner(tmp_path) -> None:
+    path = tmp_path / "copilot.sqlite3"
+    starter = CopilotHostStore(path)
+    cancel_store = CopilotHostStore(path)
+    decision_store = CopilotHostStore(path)
+
+    for index in range(12):
+        run_id = f"run_race_{index}"
+        starter.start_run(run_id, contract=_contract("运行状态"), session_key="wechat:chat")
+        barrier = threading.Barrier(3)
+        outcome: dict[str, object] = {}
+
+        def cancel() -> None:
+            barrier.wait()
+            outcome["cancel"] = cancel_store.request_cancel(run_id)
+
+        def commit() -> None:
+            barrier.wait()
+            outcome["decision"] = decision_store.claim_admission_decision(run_id, "commit")
+
+        workers = [threading.Thread(target=cancel), threading.Thread(target=commit)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+
+        state = str(starter.run_record(run_id)["admission_state"])
+        assert state in {"cancel", "commit"}
+        if state == "cancel":
+            assert outcome == {"cancel": True, "decision": "cancel"}
+        else:
+            assert outcome == {"cancel": False, "decision": "commit"}
+
+
+def test_host_admission_persists_commit_and_discard(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+
+    accepted = run_contract(
+        _contract("运行状态"),
+        model_runner=lambda _request: ModelTurn(text="结论：运行正常。"),
+        host_store=store,
+    )
+    rejected = run_contract(
+        _contract("运行状态"),
+        model_runner=lambda _request: ModelTurn(text="```markdown\n未闭合"),
+        host_store=store,
+    )
+
+    assert accepted.status == "answered"
+    assert store.run_record(accepted.run_id)["admission_state"] == "commit"
+    assert rejected.status == "failed"
+    assert rejected.error["code"] == "RESULT_REJECTED"
+    assert store.run_record(rejected.run_id)["admission_state"] == "discard"
+
+
+def test_unknown_session_commit_is_private_safe_and_not_resumable(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    secret = "provider-secret-that-must-not-escape"
+
+    def exits_after_commit(_start, *, on_proposed, **_kwargs):
+        decision = on_proposed(
+            {
+                "status": "answered",
+                "text": "结论：运行正常。",
+                "control_request": None,
+                "termination_reason": "stop",
+                "usage": {},
+            }
+        )
+        assert decision == "commit"
+        return {
+            "ok": False,
+            "error": {
+                "code": "PI_PROCESS_EXITED",
+                "stage": "process",
+                "message": secret,
+                "retryable": True,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", exits_after_commit)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+    events = store.run_events(result.run_id)
+
+    assert result.status == "failed"
+    assert result.error == {"code": "MODEL_ERROR"}
+    assert secret not in json.dumps(result.decision_trace, ensure_ascii=False)
+    assert any(
+        item["payload"].get("session_commit_outcome") == "unknown"
+        for item in events
+        if item["type"] == "model_error"
+    )
+    assert store.run_record(result.run_id)["admission_state"] == "commit"
+    assert store.resume_source(result.run_id) is None
+
+
+def test_process_adapter_exception_finishes_host_run_once(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+
+    def broken_process(*_args, **_kwargs):
+        raise RuntimeError("provider-secret-that-must-not-escape")
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", broken_process)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+
+    record = store.run_record(result.run_id)
+    assert result.status == "failed"
+    assert result.error == {"code": "INTERNAL_ERROR"}
+    assert record["status"] == "failed"
+    assert sum(item["type"] == "final_result" for item in store.run_events(result.run_id)) == 1
+    assert "provider-secret" not in json.dumps(result.decision_trace, ensure_ascii=False)
+
+
+def test_cancel_winner_overrides_concurrent_process_failure(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+
+    def failed_after_cancel(_start, *, run_id, **_kwargs):
+        assert store.request_cancel(run_id) is True
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "provider failed",
+                "retryable": True,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", failed_after_cancel)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+
+    assert result.status == "cancelled"
+    assert result.error == {"code": "CANCELLED"}
+    assert store.run_record(result.run_id)["admission_state"] == "cancel"
+    assert any(item["type"] == "run_cancelled" for item in store.run_events(result.run_id))
+
+
+def test_cancelled_final_cannot_overwrite_a_committed_admission(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+
+    def contradictory_child(_start, *, on_proposed, **_kwargs):
+        decision = on_proposed(
+            {
+                "status": "answered",
+                "text": "结论：运行正常。",
+                "control_request": None,
+                "termination_reason": "stop",
+                "usage": {},
+            }
+        )
+        assert decision == "commit"
+        return {
+            "ok": True,
+            "result": {
+                "status": "cancelled",
+                "text": "",
+                "control_request": None,
+                "termination_reason": "aborted",
+                "usage": {},
+                "committed": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", contradictory_child)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+
+    assert result.status == "failed"
+    assert result.error == {"code": "INTERNAL_ERROR"}
+    assert result.decision_trace["pi_process"]["session_commit_outcome"] == "unknown"
+    assert store.run_record(result.run_id)["admission_state"] == "commit"
+
+
+def test_late_tool_callback_cannot_mutate_finished_host_run(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    release = threading.Event()
+    done = threading.Event()
+    late_result: list[dict] = []
+    executed = False
+
+    def read_tool(*_args, **_kwargs):
+        nonlocal executed
+        executed = True
+        return {"ok": True, "data": {}}
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        def late_call() -> None:
+            release.wait(timeout=2)
+            late_result.append(
+                on_tool_call(
+                    {"call_id": "late_1", "tool_name": "runtime_status", "arguments": {}}
+                )
+            )
+            done.set()
+
+        threading.Thread(target=late_call, daemon=True).start()
+        return {
+            "ok": False,
+            "error": {
+                "code": "PI_PROCESS_TIMEOUT",
+                "stage": "deadline",
+                "message": "timed out",
+                "retryable": True,
+            },
+        }
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", read_tool)
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+    before = store.run_events(result.run_id)
+    release.set()
+    assert done.wait(timeout=2)
+    after = store.run_events(result.run_id)
+
+    assert result.status == "failed"
+    assert late_result[0]["error"] == "CANCELLED"
+    assert executed is False
+    assert after == before
 
 
 def test_model_runner_honors_cancellation_before_provider_call() -> None:
@@ -448,6 +720,34 @@ def test_stale_run_is_interrupted_and_resume_attempts_are_bounded(tmp_path) -> N
     assert store.resume_source("run_stale", max_attempts=2) is None
 
 
+def test_stale_run_claimed_commit_is_not_resumable(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    store.start_run("run_stale_commit", contract=_contract("运行状态"), session_key="wechat:chat")
+    assert store.claim_admission_decision("run_stale_commit", "commit") == "commit"
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE copilot_runs SET started_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE run_id = 'run_stale_commit'"
+        )
+
+    assert store.mark_stale_runs_interrupted(older_than_seconds=1) == 1
+    assert store.resume_source("run_stale_commit") is None
+
+
+def test_stale_run_claimed_cancel_is_not_resumable(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    store.start_run("run_stale_cancel", contract=_contract("运行状态"), session_key="wechat:chat")
+    assert store.request_cancel("run_stale_cancel") is True
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE copilot_runs SET started_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE run_id = 'run_stale_cancel'"
+        )
+
+    assert store.mark_stale_runs_interrupted(older_than_seconds=1) == 1
+    assert store.resume_source("run_stale_cancel") is None
+
+
 def test_run_trace_persists_iteration_usage_and_termination(tmp_path) -> None:
     store = CopilotHostStore(tmp_path / "copilot.sqlite3")
     result = run_contract(
@@ -464,15 +764,43 @@ def test_run_trace_persists_iteration_usage_and_termination(tmp_path) -> None:
     record = store.run_record(result.run_id)
     metrics = __import__("json").loads(record["metrics_json"])
     events = store.run_events(result.run_id)
-    context_event = next(item for item in events if item["type"] == "iteration_context_snapshot")
+    started_event = next(item for item in events if item["type"] == "model_turn_started")
+    completed_event = next(item for item in events if item["type"] == "model_turn_completed")
     scene_event = next(item for item in events if item["type"] == "scene_prepared")
-    assert context_event["payload"]["iteration_id"].startswith("iter_")
-    assert len(context_event["payload"]["context_hash"]) == 64
+    assert started_event["payload"] == {"iteration": 1}
+    assert completed_event["payload"]["usage_total"]["totalTokens"] == 15
     assert len(scene_event["payload"]["compiled_prompt_sha256"]) == 64
-    assert scene_event["payload"]["compiled_prompt_sha256"] != context_event["payload"]["context_hash"]
     assert metrics["model_turn_count"] == 1
-    assert metrics["usage"]["total_tokens"] == 15
-    assert record["termination_reason"] == "final_answer"
+    assert metrics["usage"]["totalTokens"] == 15
+    assert record["termination_reason"] == "completed"
+
+
+def test_committed_compaction_usage_survives_later_process_failure(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    usage = {"input": 7, "output": 3, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10}
+
+    def process(_start, *, on_event, **_kwargs):
+        on_event(
+            {
+                "event_type": "context_compaction_committed",
+                "data": {"compaction_count": 1, "usage_total": usage},
+            }
+        )
+        return {
+            "ok": False,
+            "error": {
+                "code": "PI_PROCESS_EXITED",
+                "stage": "process",
+                "message": "child exited",
+                "retryable": True,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    result = run_contract(_contract("运行状态"), model_settings=_TEST_MODEL, host_store=store)
+
+    assert result.status == "failed"
+    assert json.loads(store.run_record(result.run_id)["metrics_json"])["usage"] == usage
 
 
 def test_run_progress_exposes_only_coarse_public_labels(monkeypatch, tmp_path) -> None:
@@ -640,16 +968,11 @@ def test_malformed_tool_arguments_are_traceable_and_recoverable() -> None:
 
     result = run_contract(_contract("运行状态"), model_runner=lambda _request: next(turns))
 
-    protocol = next(event for event in result.events if event.type == "tool_protocol_error")
     assert result.status == "answered"
-    assert protocol.payload["iteration_id"].startswith("iter_")
-    assert protocol.payload["tool_call_id"] == "call_bad_json"
-    assert protocol.payload["error_category"] == "malformed_arguments"
-    assert protocol.payload["partial_tool_name"] == "runtime_status"
-    assert len(protocol.payload["partial_arguments"]) <= 500
     observation = next(event for event in result.events if event.type == "tool_result")
+    assert observation.payload["tool_call_id"] == "call_bad_json"
     assert observation.payload["error"] == "INPUT_ERROR"
-    assert "valid JSON" in observation.payload["hint"]
+    assert "x" * 100 not in str(observation.payload)
 
 
 def _contract(text: str):
@@ -659,6 +982,11 @@ def _contract(text: str):
             source_entry="test",
             user_message=text,
             execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "test",
+                "authenticated_sender_id": "test-user",
+                "authenticated_conversation_id": "test-conversation",
+            },
         ),
         reference_year=2026,
     )

@@ -10,7 +10,7 @@ import pytest
 from src.application.copilot import tools as copilot_tools
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, new_id
-from src.application.copilot.host import run_contract
+from tests.copilot_pi_test_support import run_contract
 from src.application.copilot.service import prepare_contract
 
 
@@ -480,6 +480,11 @@ def test_freeform_answer_quality_scenarios(monkeypatch, scenario: Scenario) -> N
 
     result = run_contract(prepared, model_runner=model)
 
+    if scenario.context:
+        assert result.status == "failed"
+        assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+        assert requests == []
+        return
     assert result.status == "answered"
     assert tuple(name for name, _payload in calls) == scenario.expected_tools
     for term in scenario.expected_terms:
@@ -490,8 +495,6 @@ def test_freeform_answer_quality_scenarios(monkeypatch, scenario: Scenario) -> N
     assert positions == sorted(positions)
     if scenario.max_response_chars is not None:
         assert len(result.user_response) <= scenario.max_response_chars
-    if scenario.context:
-        assert list(requests[0].messages[-3:-1]) == list(scenario.context)
     assert "an options trader focused on quantitative trading" in requests[0].messages[0]["content"]
 
 

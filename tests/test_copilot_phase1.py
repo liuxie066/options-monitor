@@ -15,7 +15,7 @@ from src.application.copilot.control_handoff import (
     control_preview_tool_description,
 )
 from src.application.assistant.capability_catalog import preview_operation_capabilities
-from src.application.copilot.host import record_session_turn, run_contract, session_messages
+from src.application.copilot.host import record_session_turn, session_messages
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot import channel_facade
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
@@ -23,6 +23,7 @@ from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.copilot.service import prepare_contract
 from src.application.agent_tool_contracts import AgentToolError
+from tests.copilot_pi_test_support import _TEST_MODEL, fake_pi_agent, run_contract
 
 
 def _request(text: str, *, context=(), environment: str = "local") -> CopilotRequest:
@@ -33,6 +34,15 @@ def _request(text: str, *, context=(), environment: str = "local") -> CopilotReq
         explicit_scope=CopilotScope(config_key="us"),
         context_messages=tuple(context),
         execution_environment=environment,
+        trusted_tool_scope=(
+            {
+                "authenticated_channel": "test",
+                "authenticated_sender_id": "test-user",
+                "authenticated_conversation_id": "test-conversation",
+            }
+            if environment == "channel"
+            else {}
+        ),
     )
 
 
@@ -793,9 +803,9 @@ def test_tool_result_is_returned_as_standard_tool_message(monkeypatch) -> None:
     tool_message = next(item for item in requests[1].messages if item.get("role") == "tool")
     assert tool_message["tool_call_id"] == "call_1"
     projected = json.loads(tool_message["content"])
-    assert projected["status"] == "healthy"
-    assert "ok" not in projected
-    assert "value" not in projected
+    assert projected["status"] == "complete"
+    assert projected["ok"] is True
+    assert projected["value"]["status"] == "healthy"
 
 
 def test_disabled_portfolio_toolset_blocks_model_attempt_before_tool_execution(monkeypatch) -> None:
@@ -879,7 +889,12 @@ def test_prepared_contract_reloads_current_portfolio_toolset_on_resume(monkeypat
         calls.append(name)
         return {"ok": True, "data": {"status": "healthy"}}
 
-    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+    monkeypatch.setattr(
+        local_harness,
+        "_resolve_pi_model",
+        lambda **_kwargs: (_TEST_MODEL, None, None),
+    )
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", fake_pi_agent(model))
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
     prepared = _contract("查询 portfolio")
 
@@ -895,6 +910,91 @@ def test_prepared_contract_reloads_current_portfolio_toolset_on_resume(monkeypat
     assert first.status == "answered"
     assert resumed.status == "answered"
     assert calls == ["portfolio_query"]
+
+
+@pytest.mark.parametrize("environment", ["eval", "local", "channel"])
+def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch, environment: str) -> None:
+    from src.application.copilot import local_harness
+
+    captured: list[dict] = []
+
+    def process(start_payload, *, on_proposed, environ, **_kwargs):
+        captured.append({"start": start_payload, "environ": dict(environ or {})})
+        proposal = {
+            "status": "answered",
+            "text": "结论：统一进入 Pi Agent Core。",
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = prepare_contract(_request("检查入口", environment=environment), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    kwargs = (
+        {"model_turn_json": json.dumps({"text": "结论：统一进入 Pi Agent Core。"})}
+        if environment == "eval"
+        else {
+            "model_config_json": json.dumps(
+                {
+                    "provider": "ollama",
+                    "model": "om-test",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "context_window_tokens": 24_000,
+                }
+            )
+        }
+    )
+
+    result = local_harness.run_prepared_contract(prepared, **kwargs)
+
+    assert result.status == "answered"
+    assert len(captured) == 1
+    assert captured[0]["start"]["execution_environment"] == environment
+    assert (captured[0]["start"]["debug"] is not None) is (environment == "eval")
+
+
+def test_local_harness_passes_model_secret_only_in_allowlisted_child_environment(monkeypatch) -> None:
+    from src.application.copilot import local_harness
+
+    captured: dict[str, object] = {}
+    secret = "s5-model-secret"
+
+    def process(start_payload, *, on_proposed, environ, **_kwargs):
+        captured["start"] = start_payload
+        captured["environ"] = dict(environ or {})
+        proposal = {
+            "status": "answered",
+            "text": "结论：凭据隔离完成。",
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = _contract("检查凭据隔离")
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_config_json=json.dumps(
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "context_window_tokens": 24_000,
+            }
+        ),
+    )
+
+    assert result.status == "answered"
+    assert secret not in json.dumps(captured["start"], ensure_ascii=False)
+    child_environ = captured["environ"]
+    assert isinstance(child_environ, dict)
+    assert child_environ["OM_PI_MODEL_API_KEY"] == secret
+    assert "DEEPSEEK_API_KEY" not in child_environ
 
 
 def test_model_arguments_are_not_dropped_by_tool_wrapper(monkeypatch) -> None:
@@ -1305,143 +1405,65 @@ def test_truncated_model_answer_is_continued_and_joined() -> None:
 
     assert result.status == "answered"
     assert result.user_response == "结论：7月收益为正，主要来自权利金。"
-    continuation = next(event for event in result.events if event.type == "model_continuation_requested")
-    assert continuation.payload["continuation_count"] == 1
     completed = [event for event in result.events if event.type == "model_turn_completed"]
-    assert completed[0].payload["finish_reason"] == "length"
+    assert completed[0].payload["stop_reason"] == "length"
     assert completed[-1].payload["model_retry_count"] == 1
     terminated = next(event for event in result.events if event.type == "agent_terminated")
-    assert terminated.payload["reason"] == "final_answer"
+    assert terminated.payload["reason"] == "completed"
 
 
-@pytest.mark.parametrize(
-    ("prior_answer", "expected_reason"),
-    (
-        (
-            "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-            "因此无法确认 0700.HK 被哪些条件过滤。",
-            "repeated_prior_answer",
-        ),
-        ("结论：上次检查未取得结果。", "tool_reference_without_current_observation"),
-    ),
-)
-def test_stale_no_evidence_answer_rechecks_with_current_tool(
-    monkeypatch,
-    prior_answer: str,
-    expected_reason: str,
-) -> None:
-    stale_answer = (
-        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-        "因此无法确认 0700.HK 被哪些条件过滤。"
-    )
-    request = replace(
-        _request(
-            "0700.HK 在 lx 账户为什么被过滤？",
-            context=(
-                {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
-                {"role": "assistant", "content": prior_answer},
-            ),
-            environment="channel",
-        ),
-        explicit_scope=CopilotScope(config_key="hk"),
-    )
-    prepared = prepare_contract(request, reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    model_calls = 0
-    tool_calls: list[tuple[str, dict]] = []
-
-    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
-        assert name in allowed_tools
-        tool_calls.append((name, dict(payload)))
-        return {
-            "ok": True,
-            "data": {
-                "account": "lx",
-                "symbol": "0700.HK",
-                "status": "rejected",
-                "reason_counts": {"risk_iv_minus_rv": 33},
-            },
-        }
-
-    def model(model_request: ModelRequest) -> ModelTurn:
-        nonlocal model_calls
-        model_calls += 1
-        if model_calls == 1:
-            return ModelTurn(text=stale_answer)
-        if model_calls == 2:
-            assert any(
-                item.get("role") == "system" and "not current evidence" in str(item.get("content"))
-                for item in model_request.messages
-            )
-            return ModelTurn(
-                tool_calls=(
-                    _call(
-                        "candidate_filter_explain",
-                        {
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "function": "sell_put",
-                            "run_selector": "latest_notification",
-                            "notification_date": "2026-08-14",
-                        },
-                    ),
-                )
-            )
-        assert any(item.get("role") == "tool" for item in model_request.messages)
-        return ModelTurn(text="结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。")
-
-    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
-    result = run_contract(prepared, model_runner=model)
-
-    assert result.status == "answered"
-    assert result.user_response == "结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。"
-    assert model_calls == 3
-    assert tool_calls == [
-        (
-            "candidate_filter_explain",
-            {
-                "config_key": "hk",
-                "account": "lx",
-                "symbol": "0700.HK",
-                "function": "sell_put",
-                "run_selector": "latest_notification",
-                "notification_date": "2026-08-14",
-            },
-        )
-    ]
-    event = next(event for event in result.events if event.type == "fresh_evidence_recheck_requested")
-    assert event.payload["reason"] == expected_reason
-
-
-def test_stale_no_evidence_answer_fails_closed_when_model_skips_recheck() -> None:
-    stale_answer = (
-        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-        "因此无法确认 0700.HK 被哪些条件过滤。"
-    )
-    model_calls = 0
-
-    def model(_request: ModelRequest) -> ModelTurn:
-        nonlocal model_calls
-        model_calls += 1
-        return ModelTurn(text=stale_answer)
-
+def test_legacy_history_is_rejected_before_pi_spawn() -> None:
     prepared = prepare_contract(
         _request(
             "0700.HK 在 lx 账户为什么被过滤？",
             context=(
                 {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
-                {"role": "assistant", "content": stale_answer},
+                {"role": "assistant", "content": "上次检查没有取得当前证据。"},
             ),
+            environment="channel",
         ),
         reference_year=2026,
     )
     assert not isinstance(prepared, AppResult)
+    model_calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal model_calls
+        model_calls += 1
+        return ModelTurn(text="不应执行")
+
     result = run_contract(prepared, model_runner=model)
 
-    assert result.status == "insufficient_evidence"
-    assert result.user_response == "本轮未取得可验证的当前证据，无法给出事实结论。"
-    assert model_calls == 2
-    assert any(event.type == "fresh_evidence_recheck_failed" for event in result.events)
+    assert result.status == "failed"
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert model_calls == 0
+    assert any(event.type == "scene_preparation_failed" for event in result.events)
+    assert all("fresh_evidence" not in event.type for event in result.events)
+
+
+def test_channel_without_authenticated_session_identity_is_rejected_before_pi_spawn() -> None:
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_key="us"),
+            execution_environment="channel",
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        return ModelTurn(text="不应执行")
+
+    result = run_contract(prepared, model_runner=model)
+
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert calls == 0
 
 
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
@@ -1483,7 +1505,8 @@ def test_identical_repeated_call_reuses_successful_observation(monkeypatch) -> N
         if len(tool_messages) == 1:
             return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "call_2"),))
         reused = json.loads(tool_messages[-1]["content"])
-        assert reused["status"] == "healthy"
+        assert reused["status"] == "complete"
+        assert reused["value"]["status"] == "healthy"
         assert reused["reused"] is True
         assert reused["reused_from_ref"] == "obs_1"
         return ModelTurn(text="重复检查没有必要，已有状态显示运行正常。")
@@ -1574,7 +1597,10 @@ def test_budget_exhaustion_forces_final_text_without_tools(monkeypatch) -> None:
             run_id=run_id,
             scene_name=GENERAL_SCENE,
             execution_environment="local",
-            messages=[{"role": "user", "content": "7月收益"}],
+            messages=[
+                {"role": "system", "content": "只读测试场景。"},
+                {"role": "user", "content": "7月收益"},
+            ],
             allowed_tools=["runtime_status"],
             limits={"max_model_turns": 1, "max_tool_calls": 1, "timeout_seconds": 180},
             output_schema={"type": "text"},
@@ -1598,6 +1624,7 @@ def test_budget_exhaustion_forces_final_text_without_tools(monkeypatch) -> None:
     assert requests[-1].force_finish is True
     assert result.status == "answered"
     assert "缺少收益数据" in result.user_response
+    assert any(event.type == "agent_budget_fallback" for event in result.events)
 
 
 def test_model_failure_after_observation_attempts_forced_final_answer(monkeypatch) -> None:
@@ -1622,9 +1649,12 @@ def test_model_failure_after_observation_attempts_forced_final_answer(monkeypatc
 
     assert result.status == "answered"
     assert "模型中途超时" in result.user_response
-    assert any(event.type == "model_error" for event in result.events)
+    assert any(
+        event.type == "model_turn_completed" and event.payload["stop_reason"] == "error"
+        for event in result.events
+    )
     terminated = next(event for event in result.events if event.type == "agent_terminated")
-    assert terminated.payload["reason"] == "forced_final_answer"
+    assert terminated.payload["reason"] == "completed"
 
 
 def test_non_read_tool_call_is_rejected_without_execution(monkeypatch) -> None:
@@ -1693,7 +1723,7 @@ def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> 
         assert request["source"] == "copilot_control_preview"
 
 
-def test_channel_control_preview_returns_structured_request_without_execution(monkeypatch) -> None:
+def test_s5_control_preview_stays_outside_the_read_tool_bridge(monkeypatch) -> None:
     executed = False
 
     def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
@@ -1701,80 +1731,44 @@ def test_channel_control_preview_returns_structured_request_without_execution(mo
         executed = True
         return {"ok": True, "data": {}}
 
-    def model(_request: ModelRequest) -> ModelTurn:
-        return ModelTurn(
-            tool_calls=(
-                _call(
-                    CONTROL_PREVIEW_TOOL,
-                    {"intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}},
-                ),
+    calls = 0
+
+    def model(request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        CONTROL_PREVIEW_TOOL,
+                        {"intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}},
+                    ),
+                )
             )
-        )
+        observation = json.loads(next(item for item in request.messages if item.get("role") == "tool")["content"])
+        assert observation["error"] == "POLICY_ERROR"
+        return ModelTurn(text="结论：S5 只开放只读工具；Control 接线由 S6 完成。")
 
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
     prepared = prepare_contract(_request("升级到 1.2.400", environment="channel"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
     result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
 
-    assert result.status == "control_requested"
-    assert result.control_request == {
-        "intent_name": "upgrade_now",
-        "arguments": {"target_version": "1.2.400"},
-        "source": "copilot_control_preview",
-        "confidence": 1.0,
-    }
+    assert result.status == "answered"
+    assert result.control_request is None
     assert executed is False
 
 
 @pytest.mark.parametrize("intent_name", ["upgrade_confirm", "manual_trade_confirm", "symbol_cancel"])
 def test_channel_control_preview_rejects_confirm_and_cancel_intents(intent_name: str) -> None:
-    calls = 0
+    request, error = build_control_preview_request(
+        {"intent_name": intent_name, "arguments": {}},
+        user_message="确认执行",
+        specs=preview_operation_capabilities(),
+    )
 
-    def model(request: ModelRequest) -> ModelTurn:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelTurn(
-                tool_calls=(
-                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": intent_name, "arguments": {}}),
-                )
-            )
-        error = json.loads(next(item for item in request.messages if item.get("role") == "tool")["content"])
-        assert error["error"] == "INVALID_ACTION"
-        return ModelTurn(text="结论：确认或取消必须由确定性权限流程处理。")
-
-    prepared = prepare_contract(_request("确认执行", environment="channel"), reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
-
-    assert result.status == "answered"
-    assert result.control_request is None
-
-
-def test_channel_control_preview_cannot_be_mixed_with_read_tools() -> None:
-    calls = 0
-
-    def model(request: ModelRequest) -> ModelTurn:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelTurn(
-                tool_calls=(
-                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": "upgrade_now", "arguments": {}}, "control_1"),
-                    _call("runtime_status", {"config_key": "us"}, "read_1"),
-                )
-            )
-        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
-        assert len(tool_messages) == 1
-        assert json.loads(tool_messages[0]["content"])["error"] == "INVALID_ACTION"
-        return ModelTurn(text="结论：写操作预览需要单独请求。")
-
-    prepared = prepare_contract(_request("检查状态并升级", environment="channel"), reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
-
-    assert result.status == "answered"
-    assert result.control_request is None
+    assert request is None
+    assert error
 
 
 def test_host_preserves_conversation_context() -> None:
