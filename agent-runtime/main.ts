@@ -69,6 +69,7 @@ const TURN_COMMIT_TYPE = "om.turn.commit.v1";
 const WRITER_LEASE_TTL_MS = 30_000;
 const WRITER_HEARTBEAT_MS = 10_000;
 const OLLAMA_LOCAL_API_KEY = "ollama-local";
+const CONTROL_PREVIEW_TOOL = "request_control_preview";
 const CONTINUATION_PROMPT =
   "Continue exactly where the previous answer stopped. Do not repeat earlier text. Return only the continuation.";
 const PROVIDER_API_KINDS: Record<string, Api> = {
@@ -127,10 +128,15 @@ type FixtureTurn = { text: string } | { tool_calls: FixtureToolCall[] };
 interface PendingTool {
   callId: string;
   toolName: string;
-  resolve: (observation: JsonObject) => void;
+  resolve: (result: ToolBridgeResult) => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
   abortListener?: () => void;
+}
+
+interface ToolBridgeResult {
+  observation: JsonObject;
+  controlRequest: JsonObject | null;
 }
 
 interface SessionState {
@@ -178,6 +184,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
+}
+
+function isControlRequest(value: unknown): value is JsonObject {
+  return isRecord(value) &&
+    exactKeys(value, ["intent_name", "arguments", "source", "confidence"]) &&
+    isNonEmptyString(value.intent_name) &&
+    isRecord(value.arguments) &&
+    value.source === "copilot_control_preview" &&
+    value.confidence === 1;
 }
 
 // Incremental line reader. Must yield each complete line as it arrives rather
@@ -866,8 +881,10 @@ function createToolBridge(
   cancelPending: () => void;
   rejectPending: () => void;
   hasPending: () => boolean;
+  controlRequest: () => JsonObject | null;
 } {
   let pending: PendingTool | null = null;
+  let controlRequest: JsonObject | null = null;
 
   const settlePending = (error?: Error): void => {
     const current = pending;
@@ -891,7 +908,7 @@ function createToolBridge(
         throw new Error("tool bridge failed");
       }
       if (signal?.aborted) throw new Error("tool call aborted");
-      const observation = await new Promise<JsonObject>((resolve, reject) => {
+      const result = await new Promise<ToolBridgeResult>((resolve, reject) => {
         const abortListener = (): void => {
           if (pending?.callId !== toolCallId) return;
           pending = null;
@@ -920,9 +937,9 @@ function createToolBridge(
         }
       });
       return {
-        content: [{ type: "text", text: stableJson(observation) }],
-        details: { observation },
-        terminate: false,
+        content: [{ type: "text", text: stableJson(result.observation) }],
+        details: { observation: result.observation },
+        terminate: result.controlRequest !== null,
       };
     },
   }));
@@ -930,8 +947,14 @@ function createToolBridge(
   return {
     tools,
     acceptResult(result) {
+      const hasControlRequest = Object.hasOwn(result, "control_request");
       if (
-        !exactKeys(result, ["call_id", "tool_name", "observation"]) ||
+        !exactKeys(
+          result,
+          hasControlRequest
+            ? ["call_id", "tool_name", "observation", "control_request"]
+            : ["call_id", "tool_name", "observation"]
+        ) ||
         !isNonEmptyString(result.call_id) ||
         !isNonEmptyString(result.tool_name) ||
         !isRecord(result.observation) ||
@@ -941,12 +964,33 @@ function createToolBridge(
       ) {
         throw new Error("tool result mismatch");
       }
+      if (
+        hasControlRequest &&
+        (pending.toolName !== CONTROL_PREVIEW_TOOL ||
+          controlRequest !== null ||
+          !isControlRequest(result.control_request) ||
+          result.observation.ok !== true ||
+          result.observation.status !== "preview_requested")
+      ) {
+        throw new Error("control tool result mismatch");
+      }
+      if (
+        pending.toolName === CONTROL_PREVIEW_TOOL &&
+        !hasControlRequest &&
+        result.observation.ok !== false
+      ) {
+        throw new Error("control tool result is incomplete");
+      }
       const current = pending;
       pending = null;
       if (current.signal && current.abortListener) {
         current.signal.removeEventListener("abort", current.abortListener);
       }
-      current.resolve(result.observation);
+      if (hasControlRequest) controlRequest = result.control_request as JsonObject;
+      current.resolve({
+        observation: result.observation,
+        controlRequest: hasControlRequest ? controlRequest : null,
+      });
     },
     cancelPending() {
       settlePending(new Error("tool call aborted"));
@@ -955,6 +999,7 @@ function createToolBridge(
       settlePending(new Error("tool bridge failed"));
     },
     hasPending: () => pending !== null,
+    controlRequest: () => controlRequest,
   };
 }
 
@@ -1214,6 +1259,31 @@ function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): Agen
     last.content.some((item) => item.type === "toolCall")
   ) {
     throw new Error("turn suffix has no final answer");
+  }
+  return suffix;
+}
+
+function validatedControlTurnSuffix(
+  messages: AgentMessage[],
+  startIndex: number
+): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (
+    suffix.length !== 3 ||
+    suffix[0].role !== "user" ||
+    suffix[1].role !== "assistant" ||
+    suffix[2].role !== "toolResult"
+  ) {
+    throw new Error("control turn suffix is incomplete");
+  }
+  const calls = suffix[1].content.filter((item) => item.type === "toolCall");
+  if (
+    calls.length !== 1 ||
+    calls[0].name !== CONTROL_PREVIEW_TOOL ||
+    suffix[2].toolCallId !== calls[0].id ||
+    suffix[2].toolName !== CONTROL_PREVIEW_TOOL
+  ) {
+    throw new Error("control turn suffix is invalid");
   }
   return suffix;
 }
@@ -1602,6 +1672,25 @@ async function run(): Promise<void> {
       streamFn,
       convertToLlm,
       toolExecution: "sequential",
+      beforeToolCall: async ({ assistantMessage, toolCall }) => {
+        const calls = assistantMessage.content.filter((item) => item.type === "toolCall");
+        const controlCalls = calls.filter((item) => item.name === CONTROL_PREVIEW_TOOL);
+        if (controlCalls.length > 0 && (calls.length !== 1 || controlCalls.length !== 1)) {
+          return {
+            block: true,
+            reason: stableJson({
+              tool_name: toolCall.name,
+              ok: false,
+              status: "failed",
+              error: "INVALID_ACTION",
+              code: "INVALID_ACTION",
+              message: "control preview must be the only call in its tool batch",
+              retryable: false,
+            }),
+          };
+        }
+        return undefined;
+      },
       afterToolCall: async ({ result }) => {
         const details = result.details;
         return isRecord(details) &&
@@ -1705,23 +1794,42 @@ async function run(): Promise<void> {
       return;
     }
 
-    const stopReason = finalMessage.stopReason;
-    const forcedFinalCompleted =
-      forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
-    if (forcedFinalCompleted && extractText(finalMessage).trim() === "") {
-      finishError(
-        safeError(
-          "BUDGET_EXHAUSTED",
-          "budget",
-          "agent budget exhausted without a final answer",
-          false
-        )
-      );
-      return;
-    }
-
-    if (stopReason === "stop" || stopReason === "length") {
-      let turnSuffix: AgentMessage[];
+    let status: "answered" | "control_requested";
+    let text: string;
+    let controlRequest: JsonObject | null;
+    let terminationReason: string;
+    let turnSuffix: AgentMessage[];
+    controlRequest = bridge.controlRequest();
+    if (controlRequest !== null) {
+      status = "control_requested";
+      text = "";
+      terminationReason = "control_preview_requested";
+      try {
+        turnSuffix = validatedControlTurnSuffix(agent.state.messages, suffixStart);
+      } catch {
+        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid control turn", false));
+        return;
+      }
+    } else {
+      const stopReason = finalMessage.stopReason;
+      const forcedFinalCompleted =
+        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
+      if (forcedFinalCompleted && extractText(finalMessage).trim() === "") {
+        finishError(
+          safeError(
+            "BUDGET_EXHAUSTED",
+            "budget",
+            "agent budget exhausted without a final answer",
+            false
+          )
+        );
+        return;
+      }
+      if (stopReason !== "stop" && stopReason !== "length") {
+        finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
+        return;
+      }
+      status = "answered";
       try {
         turnSuffix = normalizeContinuationSuffix(agent.state.messages, suffixStart);
         turnSuffix = validatedTurnSuffix(turnSuffix, 0);
@@ -1730,64 +1838,63 @@ async function run(): Promise<void> {
         return;
       }
       const canonicalFinal = turnSuffix[turnSuffix.length - 1] as AssistantMessage;
-      const text = extractText(canonicalFinal);
-      const usage = metrics.usageTotal();
-      const terminationReason = canonicalFinal.stopReason;
+      text = extractText(canonicalFinal);
+      terminationReason = canonicalFinal.stopReason;
       if (text === "") {
         finishError(safeError("MODEL_ERROR", "model", "model response was invalid", false));
         return;
       }
-      inbound.awaitingAdmission = true;
-      emitRun("run.proposed", {
-        status: "answered",
-        text,
-        control_request: null,
-        termination_reason: terminationReason,
-        usage,
-      });
-      const action = inbound.action ?? (await actionPromise);
-      inbound.awaitingAdmission = false;
-      if (inbound.error) {
-        finishError(inbound.error);
-        return;
-      }
-      if (!action) {
-        finishError(safeError("PROTOCOL_ERROR", "protocol", "missing action", false));
-        return;
-      }
-      if (action === "run.cancel") {
-        finishCancelled(usage);
-        return;
-      }
-      if (action === "run.commit" && session) {
-        try {
-          await persistTurn(
-            session,
-            turnSuffix,
-            identity.runId,
-            (isRecord(payload.debug)
-              ? (payload.debug.persist_delay_ms as number | undefined)
-              : undefined) ?? 0
-          );
-        } catch (error) {
-          finishError(mapSessionFailure(error));
-          return;
-        }
-      }
-      inbound.terminal = true;
-      emitRun("run.final", {
-        status: "answered",
-        text,
-        control_request: null,
-        termination_reason: terminationReason,
-        usage,
-        committed: action === "run.commit",
-      });
-      process.exitCode = 0;
-      return;
     }
 
-    finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
+    const usage = metrics.usageTotal();
+    inbound.awaitingAdmission = true;
+    emitRun("run.proposed", {
+      status,
+      text,
+      control_request: controlRequest,
+      termination_reason: terminationReason,
+      usage,
+    });
+    const action = inbound.action ?? (await actionPromise);
+    inbound.awaitingAdmission = false;
+    if (inbound.error) {
+      finishError(inbound.error);
+      return;
+    }
+    if (!action) {
+      finishError(safeError("PROTOCOL_ERROR", "protocol", "missing action", false));
+      return;
+    }
+    if (action === "run.cancel") {
+      finishCancelled(usage);
+      return;
+    }
+    if (action === "run.commit" && session) {
+      try {
+        await persistTurn(
+          session,
+          turnSuffix,
+          identity.runId,
+          (isRecord(payload.debug)
+            ? (payload.debug.persist_delay_ms as number | undefined)
+            : undefined) ?? 0
+        );
+      } catch (error) {
+        finishError(mapSessionFailure(error));
+        return;
+      }
+    }
+    inbound.terminal = true;
+    emitRun("run.final", {
+      status,
+      text,
+      control_request: controlRequest,
+      termination_reason: terminationReason,
+      usage,
+      committed: action === "run.commit",
+    });
+    process.exitCode = 0;
+    return;
   } finally {
     if (repository) await repository.close().catch(() => {});
   }

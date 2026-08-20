@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch
 
 from src.application.copilot.agent import ModelRequest, ModelRunner
+from src.application.copilot.control_handoff import CONTROL_PREVIEW_TOOL
 from src.application.copilot.host import run_contract as _run_contract
 from src.application.copilot.model_config import PiModelSettings
 
@@ -107,13 +108,19 @@ def fake_pi_agent(model_runner: ModelRunner):
             )
             return turn
 
-        def finalize(text: str):
+        def finalize(
+            text: str,
+            *,
+            status: str = "answered",
+            control_request: dict | None = None,
+            termination_reason: str = "stop",
+        ):
             on_event({"event_type": "agent_end", "data": {}})
             proposal = {
-                "status": "answered",
+                "status": status,
                 "text": text,
-                "control_request": None,
-                "termination_reason": "stop",
+                "control_request": control_request,
+                "termination_reason": termination_reason,
                 "usage": dict(usage_total),
             }
             decision = on_proposed(proposal)
@@ -171,13 +178,18 @@ def fake_pi_agent(model_runner: ModelRunner):
                 else:
                     tool_calls += 1
                     try:
-                        observation = on_tool_call(
+                        callback_result = on_tool_call(
                             {
                                 "call_id": call.call_id,
                                 "tool_name": call.name,
                                 "arguments": dict(call.arguments),
                             }
                         )
+                        if call.name == CONTROL_PREVIEW_TOOL:
+                            observation = callback_result["observation"]
+                            control_request = callback_result["control_request"]
+                        else:
+                            observation = callback_result
                     except Exception:
                         return {
                             "ok": False,
@@ -197,6 +209,13 @@ def fake_pi_agent(model_runner: ModelRunner):
                         "content": json.dumps(observation, ensure_ascii=False, default=str),
                     }
                 )
+                if call.name == CONTROL_PREVIEW_TOOL and control_request is not None:
+                    return finalize(
+                        "",
+                        status="control_requested",
+                        control_request=control_request,
+                        termination_reason="control_preview_requested",
+                    )
 
         if observations:
             on_event(

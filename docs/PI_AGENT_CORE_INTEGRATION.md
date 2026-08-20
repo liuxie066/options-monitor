@@ -2382,10 +2382,13 @@ src/application/copilot/contracts.py
 src/application/copilot/service.py
 src/application/copilot/om_chat.scene.json
 src/application/copilot/channel_facade.py
+src/application/copilot/host.py
 src/application/assistant/inbound_service.py
 tests/test_copilot_phase1.py
 tests/test_copilot_conversation_memory.py
 tests/test_inbound_control.py
+tests/test_pi_agent_process.py
+tests/copilot_pi_test_support.py
 ```
 
 `./om assistant handle` remains the product entry. `./om copilot run/eval` stay
@@ -2553,6 +2556,28 @@ Adapt existing tests to prove:
 S6 exits when the channel and inbound Control suites pass with the real Pi
 process boundary and temporary databases. No production message is sent as
 part of automated acceptance.
+
+### 16.7 Implementation record
+
+S6 completed its source cutover on 2026-08-20:
+
+- `./om assistant handle` now reaches the Pi-backed Host through one strict,
+  sender-and-authority-scoped Session identity; legacy channel history and
+  Control-receipt memory are no longer read or written;
+- explicit config paths are canonicalized before identity derivation, remain
+  Host-only tool scope, and do not enter model-visible context or Pi Session
+  storage as plaintext identity metadata;
+- `request_control_preview` is the only Agent mutation surface, terminates a
+  valid Pi turn without executing Control, and hands the validated request back
+  to the existing deterministic preview/confirm/cancel path;
+- mixed or repeated Control batches are blocked inside Node before any Host tool
+  callback, while Python revalidates every accepted preview and protocol result;
+- the focused channel, inbound Control, and real Pi process gate passes with 338
+  tests; compatibility suites, Ruff, Node syntax, repository guardrails, and
+  diff checks also pass.
+
+This implementation record is not a release decision. S7 still owns packaging,
+atomic install/rollback checks, and removal of the unreachable legacy runtime.
 
 ## 17. S7 Packaging, Atomic Cutover, And Cleanup Detailed Design
 

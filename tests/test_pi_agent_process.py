@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import select
 import sqlite3
@@ -275,6 +276,20 @@ _READ_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {"index": {"type": "integer"}},
+        "additionalProperties": False,
+    },
+}
+
+_CONTROL_TOOL = {
+    "name": "request_control_preview",
+    "description": "Request a deterministic control preview",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "intent_name": {"type": "string", "enum": ["upgrade_now"]},
+            "arguments": {"type": "object"},
+        },
+        "required": ["intent_name", "arguments"],
         "additionalProperties": False,
     },
 }
@@ -3553,6 +3568,210 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
     entries = _session_entries(database, session_id)
     assert sum(entry["type"] == "compaction" for entry in entries) == 0
     assert "uncommitted summary" not in json.dumps(entries)
+
+
+def test_control_preview_terminates_and_commits_only_the_pi_turn(tmp_path):
+    database = tmp_path / "control.sqlite3"
+    plaintext_path = "/private/authority/config.us.json"
+    authority_scope = "path:" + hashlib.sha256(plaintext_path.encode()).hexdigest()
+    session_id = derive_pi_session_id("feishu", "sender-a", "group-1", authority_scope)
+    control_request = {
+        "intent_name": "upgrade_now",
+        "arguments": {"target_version": "1.2.400"},
+        "source": "copilot_control_preview",
+        "confidence": 1.0,
+    }
+    calls: list[dict] = []
+    proposals: list[dict] = []
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_CONTROL_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    tool_name="request_control_preview",
+                    arguments={
+                        "intent_name": "upgrade_now",
+                        "arguments": {"target_version": "1.2.400"},
+                    },
+                )
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    result = run_pi_agent(
+        payload,
+        request_id="req_control",
+        run_id="run_control",
+        timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call)
+        or {
+            "observation": {"ok": True, "status": "preview_requested"},
+            "control_request": control_request,
+        },
+        on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+        environ=_session_env(database),
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"] == {**proposals[0], "committed": True}
+    assert proposals[0]["status"] == "control_requested"
+    assert proposals[0]["text"] == ""
+    assert proposals[0]["control_request"] == control_request
+    assert proposals[0]["termination_reason"] == "control_preview_requested"
+    assert len(calls) == 1
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    assert [message["role"] for message in messages] == ["user", "assistant", "toolResult"]
+    assert "preview_requested" in json.dumps(messages[-1])
+    assert "operation_id" not in json.dumps(messages)
+    database_bytes = database.read_bytes()
+    for private_identity in (plaintext_path, "sender-a", "group-1"):
+        assert private_identity.encode() not in database_bytes
+
+
+@pytest.mark.parametrize("batch_kind", ["mixed", "multiple"])
+def test_control_preview_batch_violation_blocks_every_call_in_node(tmp_path, batch_kind):
+    database = tmp_path / f"control-{batch_kind}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"sender-{batch_kind}", "group-1", "key:us"
+    )
+    control_call = {
+        "call_id": "control_1",
+        "tool_name": "request_control_preview",
+        "arguments": {"intent_name": "upgrade_now", "arguments": {}},
+    }
+    second_call = (
+        {"call_id": "read_1", "tool_name": "runtime_status", "arguments": {}}
+        if batch_kind == "mixed"
+        else {**control_call, "call_id": "control_2"}
+    )
+    tools = [_CONTROL_TOOL, _READ_TOOL] if batch_kind == "mixed" else [_CONTROL_TOOL]
+    calls: list[dict] = []
+    payload = _start_payload(
+        session_id=session_id,
+        tools=tools,
+        debug={
+            "fixture_turns": [
+                {"tool_calls": [control_call, second_call]},
+                {"text": "已改为一次只请求一个预览。"},
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id=f"control_{batch_kind}",
+        on_tool_call=lambda call: calls.append(call) or {"ok": True},
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "answered"
+    assert calls == []
+    assert "INVALID_ACTION" in json.dumps(_session_entries(database, session_id))
+
+
+def test_invalid_control_preview_observation_is_recoverable(tmp_path):
+    database = tmp_path / "control-invalid.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-invalid", "group-1", "key:us")
+    calls: list[dict] = []
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_CONTROL_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    tool_name="request_control_preview",
+                    arguments={
+                        "intent_name": "upgrade_now",
+                        "arguments": {"unsupported": "value"},
+                    },
+                ),
+                {"text": "请明确一个受支持的预览操作。"},
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="control_invalid",
+        on_tool_call=lambda call: calls.append(call)
+        or {
+            "observation": {
+                "ok": False,
+                "status": "failed",
+                "error": "INVALID_ACTION",
+            },
+            "control_request": None,
+        },
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "answered"
+    assert len(calls) == 1
+    assert "INVALID_ACTION" in json.dumps(_session_entries(database, session_id))
+
+
+def test_malformed_control_bridge_result_fails_closed(tmp_path):
+    database = tmp_path / "control-malformed.sqlite3"
+    session_id = derive_pi_session_id("feishu", "sender-bad", "group-1", "key:us")
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_CONTROL_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    tool_name="request_control_preview",
+                    arguments={"intent_name": "upgrade_now", "arguments": {}},
+                )
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="control_malformed",
+        on_tool_call=lambda _call: {"ok": True},
+    )
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "TOOL_BRIDGE_ERROR",
+            "stage": "tool",
+            "message": "observation is invalid or exceeds line ceiling",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == []
+
+
+def test_s6_channel_cutover_has_no_legacy_conversation_side_channel():
+    channel = (REPO / "src/application/copilot/channel_facade.py").read_text(encoding="utf-8")
+    inbound = (REPO / "src/application/assistant/inbound_service.py").read_text(encoding="utf-8")
+
+    for source in (channel, inbound):
+        for legacy_name in (
+            "session_messages",
+            "record_session_turn",
+            "record_channel_turn",
+            "_tool_uses",
+            "_event_messages",
+        ):
+            assert legacy_name not in source
 
 
 def test_s5_application_call_path_uses_pi_without_legacy_fallback():

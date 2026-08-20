@@ -49,6 +49,7 @@ def utc_now_iso() -> str:
 @dataclass(frozen=True)
 class CopilotScope:
     config_key: str | None = None
+    config_path: str | None = None
     symbol: str | None = None
     month: str | None = None
 

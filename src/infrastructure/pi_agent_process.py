@@ -22,6 +22,7 @@ MAX_SAFE_MESSAGE_CHARS = 240
 MIN_NODE_VERSION = (22, 19, 0)
 MAX_FIXTURE_DELAY_MS = 300_000
 _SESSION_ID_PATTERN = re.compile(r"^om_[0-9a-f]{64}$")
+_CONTROL_PREVIEW_TOOL = "request_control_preview"
 
 _CHILD_ENV_ALLOW = frozenset(
     {
@@ -209,6 +210,52 @@ def _validate_tool_call_payload(payload: Any) -> None:
         raise ValueError("tool.call tool_name must be a non-empty string")
     if not isinstance(payload["arguments"], dict):
         raise ValueError("tool.call arguments must be an object")
+
+
+def _validate_control_request(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "intent_name",
+        "arguments",
+        "source",
+        "confidence",
+    }:
+        raise ValueError("control_request shape is invalid")
+    if not _is_nonempty_str(value["intent_name"]):
+        raise ValueError("control_request intent_name must be non-empty")
+    if not isinstance(value["arguments"], dict):
+        raise ValueError("control_request arguments must be an object")
+    if (
+        value["source"] != "copilot_control_preview"
+        or isinstance(value["confidence"], bool)
+        or value["confidence"] != 1.0
+    ):
+        raise ValueError("control_request authority fields are invalid")
+
+
+def _tool_result_payload(
+    *,
+    call_id: str,
+    tool_name: str,
+    callback_result: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "observation": callback_result,
+    }
+    if tool_name != _CONTROL_PREVIEW_TOOL:
+        return payload
+    if set(callback_result) != {"observation", "control_request"}:
+        raise ValueError("control preview callback result is invalid")
+    observation = callback_result["observation"]
+    control_request = callback_result["control_request"]
+    if not isinstance(observation, dict):
+        raise ValueError("control preview observation must be an object")
+    payload["observation"] = observation
+    if control_request is not None:
+        _validate_control_request(control_request)
+        payload["control_request"] = control_request
+    return payload
 
 
 def _run_tool_worker(
@@ -634,24 +681,30 @@ def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
         }
     if set(payload) != required:
         raise ValueError("terminal payload has unknown or missing fields")
-    if status not in {"answered", "cancelled"}:
-        raise ValueError("S1/S2 terminal status is not allowed")
+    if status not in {"answered", "control_requested", "cancelled"}:
+        raise ValueError("terminal status is not allowed")
     if not isinstance(payload["text"], str):
         raise ValueError("terminal text must be a string")
-    if payload["control_request"] is not None:
-        raise ValueError("S1/S2 terminal control_request must be null")
     reason = payload["termination_reason"]
     _validate_usage(payload["usage"])
     if status == "answered":
+        if payload["control_request"] is not None:
+            raise ValueError("answered terminal control_request must be null")
         if reason not in {"stop", "length"}:
             raise ValueError("answered termination_reason must be stop or length")
+    elif status == "control_requested":
+        if payload["text"] != "" or reason != "control_preview_requested":
+            raise ValueError("control_requested terminal fields are invalid")
+        _validate_control_request(payload["control_request"])
     else:
+        if payload["control_request"] is not None:
+            raise ValueError("cancelled terminal control_request must be null")
         if reason != "aborted":
             raise ValueError("cancelled termination_reason must be aborted")
         if payload["text"] != "":
             raise ValueError("cancelled terminal text must be empty")
-    if not final and status != "answered":
-        raise ValueError("S1/S2 proposal permits only an answered candidate")
+    if not final and status == "cancelled":
+        raise ValueError("proposal cannot be cancelled")
     if final:
         if not isinstance(payload["committed"], bool):
             raise ValueError("run.final committed must be a boolean")
@@ -1030,10 +1083,10 @@ def run_pi_agent(
                                 ):
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "terminal while tool call is outstanding", False)
-                                if payload["status"] == "answered":
+                                if payload["status"] in {"answered", "control_requested"}:
                                     if proposed_result is None or decision not in {"commit", "discard"}:
                                         _stop_child(process)
-                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "answered final before admission", False)
+                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "admitted final before admission", False)
                                     expected_final = copy.deepcopy(proposed_result)
                                     expected_final["committed"] = decision == "commit"
                                     if payload != expected_final:
@@ -1077,7 +1130,11 @@ def run_pi_agent(
                 try:
                     line_out = _encode_envelope(
                         "tool.result",
-                        {"call_id": call_id, "tool_name": tool_name, "observation": observation},
+                        _tool_result_payload(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            callback_result=observation,
+                        ),
                         identity,
                         py_seq,
                     )

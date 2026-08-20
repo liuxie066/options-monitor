@@ -10,8 +10,13 @@ from threading import Lock
 from typing import Any, Callable, Mapping
 
 from src.application.agent_tool_registry import get_tool_definition
+from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.copilot import tools as copilot_tools
-from src.application.copilot.control_handoff import control_preview_tool_description
+from src.application.copilot.control_handoff import (
+    CONTROL_PREVIEW_TOOL,
+    build_control_preview_request,
+    control_preview_tool_description,
+)
 from src.application.copilot.contracts import AppResult, ExecutionContract, SceneManifest, new_id
 from src.application.copilot.event_store import CopilotEventLog
 from src.application.copilot.host_store import CopilotHostStore
@@ -244,6 +249,13 @@ def run_contract(
                 ok=False,
             ),
         )
+    projected_control_specs = (
+        control_preview_specs
+        if contract.execution_environment == "channel"
+        and str(contract.input.get("authenticated_channel") or "").strip()
+        and str(contract.input.get("authenticated_sender_id") or "").strip()
+        else ()
+    )
     try:
         scene_manifest = (
             build_scene_manifest(
@@ -256,7 +268,7 @@ def run_contract(
         )
         manifest = _manifest_with_tool_descriptions(
             scene_manifest,
-            control_preview_specs=control_preview_specs if contract.execution_environment == "channel" else (),
+            control_preview_specs=projected_control_specs,
         )
         system_prompt, runtime_context, user_message = _manifest_prompt_parts(
             manifest,
@@ -407,6 +419,11 @@ def run_contract(
         call_id = str(call.get("call_id") or "")
         arguments = dict(call.get("arguments") or {})
 
+        def bridge_observation(observation: dict[str, Any]) -> dict[str, Any]:
+            if tool_name == CONTROL_PREVIEW_TOOL:
+                return {"observation": observation, "control_request": None}
+            return observation
+
         def reject(code: str, message: str) -> dict[str, Any]:
             nonlocal observation_count
             observation_count += 1
@@ -419,10 +436,52 @@ def run_contract(
             return observation
 
         if cancellation_requested():
-            return _tool_error(tool_name, "CANCELLED", "run cancelled before tool execution")
+            return bridge_observation(
+                _tool_error(tool_name, "CANCELLED", "run cancelled before tool execution")
+            )
         with run_lock:
             if not tool_events_open or finalized:
-                return _tool_error(tool_name, "CANCELLED", "run is no longer active")
+                return bridge_observation(
+                    _tool_error(tool_name, "CANCELLED", "run is no longer active")
+                )
+            if tool_name == CONTROL_PREVIEW_TOOL:
+                event_log.record(
+                    "tool_call",
+                    {
+                        "tool_call_id": call_id,
+                        "tool_name": tool_name,
+                        "tool_input": redact_value(arguments),
+                    },
+                )
+                control_request, control_error = build_control_preview_request(
+                    arguments,
+                    user_message=str(contract.input.get("user_message") or ""),
+                    specs=projected_control_specs,
+                )
+                if control_error or control_request is None:
+                    return {
+                        "observation": reject(
+                            "INVALID_ACTION",
+                            "control preview request is invalid",
+                        ),
+                        "control_request": None,
+                    }
+                observation_count += 1
+                observation = {"ok": True, "status": "preview_requested"}
+                event_log.record(
+                    "tool_result",
+                    {
+                        **observation,
+                        "ref": f"obs_{observation_count}",
+                        "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                    },
+                    f"obs_{observation_count}",
+                )
+                return {
+                    "observation": observation,
+                    "control_request": control_request,
+                }
             definition = get_tool_definition(tool_name)
             if (
                 tool_name not in manifest.allowed_tools
@@ -504,10 +563,9 @@ def run_contract(
             observation.setdefault("ref", f"obs_{observation_count}")
             observation.setdefault("tool_name", tool_name)
             observation["tool_call_id"] = call_id
-            observation["tool_input"] = redact_value(payload)
             event_log.record(
                 "tool_result",
-                observation,
+                {**observation, "tool_input": redact_value(payload)},
                 str(observation.get("ref") or "") or None,
             )
             if observation.get("ok") is True:
@@ -814,6 +872,7 @@ def _pi_session_id(contract: ExecutionContract, session_key: str | None) -> str 
     if contract.execution_environment == "eval":
         return None
     config_key = str(contract.input.get("config_key") or "").strip().lower()
+    config_path = str(contract.input.get("config_path") or "").strip()
     authority_scope = f"key:{config_key or 'default'}"
     if contract.execution_environment != "channel":
         if not str(session_key or "").strip():
@@ -822,14 +881,26 @@ def _pi_session_id(contract: ExecutionContract, session_key: str | None) -> str 
     channel = str(contract.input.get("authenticated_channel") or "").strip().lower()
     sender = str(contract.input.get("authenticated_sender_id") or "").strip()
     conversation = str(contract.input.get("authenticated_conversation_id") or "").strip()
-    if not channel or not sender:
+    if not channel or not sender or bool(config_key) == bool(config_path):
         raise ValueError("channel Session identity is incomplete")
-    return derive_pi_session_id(
+    if config_path:
+        resolved_path = resolve_runtime_config_path(config_path=config_path).resolve(strict=True)
+        if not resolved_path.is_file():
+            raise ValueError("channel config_path must resolve to a regular file")
+        authority_scope = "path:" + hashlib.sha256(
+            str(resolved_path).encode("utf-8")
+        ).hexdigest()
+    else:
+        resolve_runtime_config_path(config_key=config_key)
+    expected = derive_pi_session_id(
         channel,
         sender,
         conversation or f"sender:{sender}",
         authority_scope,
     )
+    if session_key != expected:
+        raise ValueError("channel lease and Pi Session identity differ")
+    return expected
 
 
 def _bounded_recovered_observations(

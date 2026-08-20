@@ -14,7 +14,7 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.renderer import render_inbound_text
-from src.application.copilot.channel_facade import record_channel_turn, run_channel_request
+from src.application.copilot.channel_facade import run_channel_request
 from src.application.copilot.contracts import AppResult
 from src.application.tool_execution import execute_tool
 
@@ -192,11 +192,16 @@ def _run_copilot(request: AssistantRequest, *, command_id: str, audit_db: Any) -
     return run_channel_request(
         user_message=request.text,
         config_key=request.config_key,
+        config_path=request.config_path,
         request_id=command_id,
         assistant_config_path=request.assistant_config_path,
         channel=request.channel,
         sender_id=request.sender_id,
-        conversation_id=request.conversation_id,
+        conversation_id=(
+            None
+            if request.conversation_id == f"{request.channel}:{request.sender_id}"
+            else request.conversation_id
+        ),
         host_db_path=str(audit_db),
         control_preview_specs=preview_operation_capabilities(),
         control_context=tuple(dict(item) for item in pending),
@@ -312,21 +317,6 @@ def _record_and_return(
     response: dict[str, Any],
     error_code: str | None = None,
 ) -> dict[str, Any]:
-    receipt = _control_receipt_message(control=control, response=response)
-    if receipt:
-        try:
-            record_channel_turn(
-                channel=request.channel,
-                sender_id=request.sender_id,
-                conversation_id=request.conversation_id,
-                host_db_path=str(store.path),
-                user_message=request.text,
-                assistant_message=receipt,
-            )
-        except Exception:
-            meta = dict(response.get("meta") or {})
-            meta["control_context_recorded"] = False
-            response["meta"] = meta
     store.record_result(
         {
             "command_id": command_id,
@@ -349,23 +339,6 @@ def _record_and_return(
         }
     )
     return response
-
-
-def _control_receipt_message(*, control: ControlExecution | None, response: dict[str, Any]) -> str:
-    if control is None or control.action_kind != "operation":
-        return ""
-    data = response.get("data") if isinstance(response.get("data"), dict) else {}
-    receipt = {
-        "type": "control_receipt",
-        "intent_name": control.intent_name,
-        "operation_id": data.get("operation_id"),
-        "operation_type": data.get("operation_type"),
-        "status": data.get("status") or control.status,
-        "requires_confirmation": bool(control.requires_confirmation),
-        "arguments": dict(control.payload),
-        "response_text": str(data.get("response_text") or control.response_text or ""),
-    }
-    return "Control receipt (authoritative):\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _duplicate_response(existing: dict[str, Any]) -> dict[str, Any]:
