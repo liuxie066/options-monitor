@@ -58,6 +58,18 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
 SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
 LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
 LEGACY_SELL_PUT_OTM_FIELDS = ('min_otm_pct',)
+WHEEL_ALLOWED_FIELDS = {
+    'enabled',
+    'accounts',
+    'min_dte',
+    'max_dte',
+    'min_delta',
+    'min_annualized_net_premium_return',
+    'min_net_premium_cny',
+    'max_spread_ratio',
+    'min_iv_rv_ratio',
+    'min_iv_minus_rv',
+}
 YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
     'target_price',
     'target_price_mode',
@@ -288,6 +300,40 @@ def validate_non_negative_integer(value, path: str):
         die(f'{path} must be an integer')
     if int(numeric) < 0:
         die(f'{path} must be >= 0')
+
+
+def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
+    if not isinstance(raw, dict):
+        die(f'{path} must be an object')
+    _reject_unknown_keys(raw, WHEEL_ALLOWED_FIELDS, path)
+    enabled = raw.get('enabled')
+    if not isinstance(enabled, bool):
+        die(f'{path}.enabled must be a boolean')
+    accounts = raw.get('accounts')
+    if not isinstance(accounts, list):
+        die(f'{path}.accounts must be a list')
+    normalized = [str(value or '').strip().lower() for value in accounts]
+    if any(not value for value in normalized):
+        die(f'{path}.accounts contains an empty account')
+    if len(normalized) != len(set(normalized)):
+        die(f'{path}.accounts contains duplicate labels after trim + lowercase normalization')
+    unknown = sorted(set(normalized) - set(market_accounts))
+    if unknown:
+        die(f'{path}.accounts contains accounts outside the current market: {", ".join(unknown)}')
+    if enabled and not normalized:
+        die(f'{path}.accounts must not be empty when enabled')
+    for key in ('min_dte', 'max_dte'):
+        validate_positive_integer(raw.get(key), f'{path}.{key}')
+    if int(raw['min_dte']) > int(raw['max_dte']):
+        die(f'{path}.min_dte must be <= {path}.max_dte')
+    for key in ('min_delta', 'min_annualized_net_premium_return', 'max_spread_ratio'):
+        value = _finite_number(raw.get(key), f'{path}.{key}')
+        if value <= 0 or value > 1:
+            die(f'{path}.{key} must be within (0, 1]')
+    validate_positive_number(raw.get('min_net_premium_cny'), f'{path}.min_net_premium_cny')
+    for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
+        if _finite_number(raw.get(key), f'{path}.{key}') < 0:
+            die(f'{path}.{key} must be >= 0')
 
 
 def _validate_optional_non_negative_number(cfg: dict, key: str, path: str):
@@ -916,6 +962,10 @@ def validate_config(cfg: dict):
         )
         if len(normalized_accounts) != raw_account_count:
             die('accounts contains duplicate labels after trim + lowercase normalization')
+
+    wheel = cfg.get('wheel')
+    if wheel is not None:
+        _validate_wheel_config(wheel, 'wheel', accounts_from_config(cfg))
 
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
     _validate_watchdog_config(cfg.get('watchdog'))

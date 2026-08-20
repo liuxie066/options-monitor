@@ -72,6 +72,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
             }
         },
+        "wheel": {
+            "enabled": False,
+            "accounts": [],
+            "min_dte": 30,
+            "max_dte": 45,
+            "min_delta": 0.30,
+            "min_annualized_net_premium_return": 0.10,
+            "min_net_premium_cny": 50.0,
+            "max_spread_ratio": 0.40,
+            "min_iv_rv_ratio": 1.10,
+            "min_iv_minus_rv": 0.05,
+        },
         "intake": {
             "symbol_aliases": {
                 "中海油": "0883.HK",

@@ -83,6 +83,18 @@ OPENING_STRATEGY_AUTHORING_FIELDS = OPENING_STRATEGY_ALLOWED_FIELDS | {"dte", "s
 YIELD_ENHANCEMENT_AUTHORING_FIELDS = {
     key for key in YIELD_ENHANCEMENT_ALLOWED_FIELDS if not key.startswith("_")
 }
+WHEEL_AUTHORING_FIELDS = {
+    "enabled",
+    "accounts",
+    "min_dte",
+    "max_dte",
+    "min_delta",
+    "min_annualized_net_premium_return",
+    "min_net_premium_cny",
+    "max_spread_ratio",
+    "min_iv_rv_ratio",
+    "min_iv_minus_rv",
+}
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -445,6 +457,19 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for raw_key, raw_value in raw.items():
         key = str(raw_key or "").strip()
+        if key == "wheel":
+            if not path.startswith("markets."):
+                raise AgentToolError(
+                    code="CONFIG_ERROR",
+                    message=f"{path}.wheel is only supported under markets.<market>.features",
+                )
+            out["wheel"] = _normalize_strategy(
+                raw_value,
+                path=f"{path}.wheel",
+                allow_ranges=False,
+                allowed_keys=WHEEL_AUTHORING_FIELDS,
+            )
+            continue
         if key == "close_advice":
             close_advice = _normalize_strategy(raw_value, path=f"{path}.close_advice", allow_ranges=False)
             out["close_advice"] = close_advice

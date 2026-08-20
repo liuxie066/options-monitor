@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.engine.candidate_engine import build_candidate_rank_key
 
 
 WHEEL_EVENT_TYPES = frozenset(
@@ -20,6 +22,163 @@ WHEEL_EVENT_TYPES = frozenset(
 )
 WHEEL_EVENT_SCHEMA = "wheel_event.v1"
 WHEEL_PROJECTION_SCHEMA = "wheel_projection.v1"
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def evaluate_wheel_call_candidate(
+    batch: Mapping[str, Any],
+    normalized_candidate: Mapping[str, Any],
+    wheel_policy: Mapping[str, Any],
+    stock_exit_fee_fact: Mapping[str, Any],
+    contracts: int,
+) -> dict[str, Any]:
+    """Apply only Wheel batch economics after common Call policy acceptance."""
+
+    result = dict(normalized_candidate)
+    reasons: list[str] = []
+    unavailable: list[str] = []
+    try:
+        contract_count = _positive_int(contracts, "contracts")
+    except ValueError:
+        contract_count = 0
+        unavailable.append("contracts_unavailable")
+    multiplier = _finite_float(result.get("multiplier"))
+    delta = _finite_float(result.get("delta"))
+    strike = _finite_float(result.get("strike"))
+    spot = _finite_float(result.get("spot"))
+    net_premium_per_contract = _finite_float(
+        result.get("net_premium", result.get("net_income"))
+    )
+    shares_remaining = _finite_float(batch.get("shares_remaining"))
+    remaining_basis = _finite_float(batch.get("remaining_stock_cost_basis"))
+    realized_put = _finite_float(batch.get("realized_sell_put_net_pnl"))
+    realized_calls = _finite_float(batch.get("realized_prior_call_net_pnl"))
+    realized_stock = _finite_float(batch.get("realized_prior_stock_sale_net_pnl"))
+    fee_amount = _finite_float(stock_exit_fee_fact.get("amount"))
+    fee_basis = str(stock_exit_fee_fact.get("basis") or "").strip().lower()
+    min_delta = _finite_float(wheel_policy.get("min_delta"))
+    for field, value in (
+        ("multiplier_unavailable", multiplier),
+        ("delta_unavailable", delta),
+        ("strike_unavailable", strike),
+        ("spot_unavailable", spot),
+        ("candidate_net_premium_unavailable", net_premium_per_contract),
+        ("shares_remaining_unavailable", shares_remaining),
+        ("remaining_stock_cost_basis_unavailable", remaining_basis),
+        ("realized_sell_put_net_pnl_unavailable", realized_put),
+        ("realized_prior_call_net_pnl_unavailable", realized_calls),
+        ("realized_prior_stock_sale_net_pnl_unavailable", realized_stock),
+        ("stock_exit_fee_unavailable", fee_amount),
+        ("wheel_min_delta_unavailable", min_delta),
+    ):
+        if value is None:
+            unavailable.append(field)
+    if fee_basis not in {"actual", "estimated"}:
+        unavailable.append("stock_exit_fee_unavailable")
+    if unavailable:
+        return {
+            **result,
+            "accepted": False,
+            "wheel_candidate_status": "data_unavailable",
+            "reason_codes": sorted(set(unavailable)),
+        }
+
+    assert multiplier is not None
+    assert delta is not None
+    assert strike is not None
+    assert spot is not None
+    assert net_premium_per_contract is not None
+    assert shares_remaining is not None
+    assert remaining_basis is not None
+    assert realized_put is not None
+    assert realized_calls is not None
+    assert realized_stock is not None
+    assert fee_amount is not None
+    assert min_delta is not None
+    multiplier_int = int(multiplier)
+    if multiplier_int <= 0 or multiplier != multiplier_int:
+        unavailable.append("multiplier_unavailable")
+    covered_shares = contract_count * multiplier_int
+    if covered_shares <= 0 or covered_shares > int(shares_remaining):
+        reasons.append("wheel_batch_capacity_insufficient")
+    if abs(delta) < min_delta:
+        reasons.append("wheel_call_delta_below_min")
+    if strike < spot:
+        reasons.append("wheel_call_strike_below_spot")
+    if shares_remaining <= 0 or remaining_basis < 0 or spot <= 0:
+        unavailable.append("remaining_stock_cost_basis_unavailable")
+    if unavailable:
+        return {
+            **result,
+            "accepted": False,
+            "wheel_candidate_status": "data_unavailable",
+            "reason_codes": sorted(set(unavailable)),
+        }
+
+    allocated_basis = remaining_basis * covered_shares / shares_remaining
+    sale_net = strike * covered_shares - fee_amount
+    if sale_net < allocated_basis:
+        reasons.append("wheel_call_strike_below_cost_floor")
+    candidate_premium = net_premium_per_contract * contract_count
+    projected_stock_pnl = sale_net - allocated_basis
+    projected_lifecycle_pnl = (
+        realized_put
+        + realized_calls
+        + realized_stock
+        + candidate_premium
+        + projected_stock_pnl
+    )
+    covered_market_value = spot * covered_shares
+    result.update(
+        {
+            "accepted": not reasons,
+            "wheel_candidate_status": "accepted" if not reasons else "rejected",
+            "reason_codes": sorted(set(reasons)),
+            "contracts": contract_count,
+            "candidate_covered_shares": covered_shares,
+            "allocated_remaining_stock_cost_basis": round(allocated_basis, 6),
+            "estimated_stock_exit_fees": round(fee_amount, 6),
+            "stock_exit_fee_basis": fee_basis,
+            "candidate_call_net_premium": round(candidate_premium, 6),
+            "projected_remaining_stock_sale_net_pnl_at_strike": round(projected_stock_pnl, 6),
+            "projected_lifecycle_net_pnl_if_called": round(projected_lifecycle_pnl, 6),
+            "projected_lifecycle_return_if_called": round(
+                projected_lifecycle_pnl / covered_market_value,
+                10,
+            ),
+            "projected_lifecycle_pnl_scope": (
+                "final_total_if_called"
+                if covered_shares == int(shares_remaining)
+                else "cumulative_after_this_call"
+            ),
+        }
+    )
+    return result
+
+
+def build_wheel_call_rank_key(evaluated_candidate: Mapping[str, Any]) -> dict[str, Any]:
+    lifecycle_pnl = _finite_float(
+        evaluated_candidate.get("projected_lifecycle_net_pnl_if_called")
+    )
+    call_key = build_candidate_rank_key(dict(evaluated_candidate), mode="call")
+    return {
+        "projected_lifecycle_net_pnl_if_called": lifecycle_pnl,
+        "covered_call_rank_key": call_key,
+        "sort_tuple": (
+            lifecycle_pnl is None,
+            -float(lifecycle_pnl or 0.0),
+            *tuple(call_key["sort_tuple"]),
+        ),
+    }
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -1317,7 +1476,9 @@ __all__ = [
     "WHEEL_EVENT_SCHEMA",
     "WHEEL_EVENT_TYPES",
     "WHEEL_PROJECTION_SCHEMA",
+    "build_wheel_call_rank_key",
     "build_wheel_event",
+    "evaluate_wheel_call_candidate",
     "normalize_wheel_event",
     "plan_wheel_call_intent_cancel",
     "plan_wheel_call_intent_consume",

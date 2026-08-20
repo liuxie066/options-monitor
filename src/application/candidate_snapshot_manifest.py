@@ -30,6 +30,12 @@ from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
+from src.application.wheel.candidate_snapshot import (
+    WHEEL_CANDIDATE_SNAPSHOT_FILE,
+    WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
+    WheelCandidateSnapshotError,
+    load_wheel_candidate_snapshot,
+)
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
@@ -50,11 +56,13 @@ _OWNER_FILES = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE,
 }
 _OWNER_SCHEMAS = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
     "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
+    "wheel": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
 }
 
 
@@ -156,11 +164,17 @@ def _snapshot_strategy_scopes(
     candidate_counts: dict[tuple[str, str], int] = {
         key: 0 for key in expected_by_key
     }
-    selected_rows = (
-        snapshot.get("ranked_candidates")
-        if owner == "opening"
-        else snapshot.get("ranked_pairs")
-    ) or []
+    if owner == "opening":
+        selected_rows = snapshot.get("ranked_candidates") or []
+    elif owner == "wheel":
+        selected_rows = [
+            batch["final_candidate"]
+            for batch in snapshot.get("batches") or []
+            if isinstance(batch, Mapping)
+            and isinstance(batch.get("final_candidate"), Mapping)
+        ]
+    else:
+        selected_rows = snapshot.get("ranked_pairs") or []
     for raw in selected_rows:
         if not isinstance(raw, Mapping):
             raise CandidateSnapshotManifestError(
@@ -172,6 +186,11 @@ def _snapshot_strategy_scopes(
             key = (
                 str(facts_map.get("symbol") or raw.get("symbol") or "").strip().upper(),
                 str(raw.get("strategy_mode") or "").strip().lower(),
+            )
+        elif owner == "wheel":
+            key = (
+                str(raw.get("symbol") or "").strip().upper(),
+                "wheel",
             )
         else:
             key = (
@@ -248,10 +267,13 @@ def _load_owner_snapshot(
             return load_combo_yield_candidate_snapshot(base=base, run_id=run_id, account=account)
         if owner == "cc_lp":
             return load_cc_lp_candidate_snapshot(base=base, run_id=run_id, account=account)
+        if owner == "wheel":
+            return load_wheel_candidate_snapshot(base=base, run_id=run_id, account=account)
     except (
         OpeningCandidateSnapshotError,
         ComboYieldCandidateSnapshotError,
         CcLpCandidateSnapshotError,
+        WheelCandidateSnapshotError,
     ) as exc:
         raise CandidateSnapshotManifestError(
             f"candidate owner snapshot is invalid: {owner}"

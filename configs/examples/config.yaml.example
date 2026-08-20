@@ -22,6 +22,18 @@ templates:
 markets:
   us:
     accounts: [lx, sy]
+    features:
+      wheel:
+        enabled: false
+        accounts: []
+        min_dte: 30
+        max_dte: 45
+        min_delta: 0.30
+        min_annualized_net_premium_return: 0.10
+        min_net_premium_cny: 50
+        max_spread_ratio: 0.40
+        min_iv_rv_ratio: 1.10
+        min_iv_minus_rv: 0.05
     symbols:
       - NVDA
       - FUTU
