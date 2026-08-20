@@ -30,10 +30,31 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
       - name: Install dependencies
         run: |
           bash scripts/install_agent_plugin.sh
           ./.venv/bin/pip install pytest
+
+      - name: Prepare Pi runtime
+        run: |
+          npm ci --omit=dev --ignore-scripts --prefix agent-runtime
+          bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
+
+      - name: Pi runtime and Copilot release gate
+        run: |
+          ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
+          ./.venv/bin/python -m pytest \
+            tests/test_copilot_phase1.py \
+            tests/test_copilot_conversation_memory.py \
+            tests/test_copilot_p1_eval.py \
+            tests/test_install_script.py \
+            tests/test_release_test_plan.py \
+            tests/copilot_eval/test_answer_quality.py
 
       - name: Validate release metadata
         run: |
@@ -64,6 +85,15 @@ jobs:
       - name: Build source archive
         run: |
           git archive --format=tar.gz --output options-monitor-${{ inputs.tag }}.tar.gz HEAD
+
+      - name: Verify source archive Pi runtime
+        run: |
+          CHECKOUT_PYTHON="${{ github.workspace }}/.venv/bin/python"
+          ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"
+          tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"
+          cd "${ARCHIVE_ROOT}"
+          npm ci --omit=dev --ignore-scripts --prefix "${ARCHIVE_ROOT}/agent-runtime"
+          bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" --python "${CHECKOUT_PYTHON}"
 
       - name: Publish release
         uses: softprops/action-gh-release@v3

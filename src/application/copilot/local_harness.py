@@ -1,22 +1,51 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
+import os
+from pathlib import Path
 from typing import Any
 
-from src.application.copilot.agent import ModelRequest, ModelRunner, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, ExecutionContract
-from src.application.copilot.conversation_memory import prepare_contract_with_existing_memory
 from src.application.copilot.eval_fixtures import fixture_observations
 from src.application.copilot.host import run_contract
 from src.application.copilot.host_store import CopilotHostStore
-from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.application.copilot.model_config import (
+    PiModelSettings,
+    _resolve_model_api_key,
     load_assistant_copilot_toolsets,
     load_assistant_llm_config,
-    model_api_key_configured,
 )
+from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.copilot.service import prepare_contract
+
+
+_EVAL_MODEL = PiModelSettings(
+    provider="deepseek",
+    api_kind="openai-completions",
+    model="om-eval-fixture",
+    base_url="https://example.invalid/v1",
+    api_key_env="",
+    credential_name="",
+    timeout_seconds=90,
+    context_window_tokens=24_000,
+    max_output_tokens=2_048,
+    max_attempts=1,
+)
+_CHILD_ENV_NAMES = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 
 
 def run_local_request(
@@ -64,13 +93,17 @@ def run_prepared_contract(
     resumed_from: str | None = None,
     recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
-    enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
-        config_path=assistant_config_path,
-        require_config=bool(str(assistant_config_path or "").strip()),
-    )
+    implicit_model_turn = model_turn_json is not None and not str(assistant_config_path or "").strip()
+    if implicit_model_turn:
+        enabled_optional_toolsets, settings_error = frozenset(), None
+    else:
+        enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
+            config_path=assistant_config_path,
+            require_config=bool(str(assistant_config_path or "").strip()),
+        )
     if settings_error or enabled_optional_toolsets is None:
         return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
-    model_runner, model_error = _resolve_model_runner(
+    model_settings, debug, model_error = _resolve_pi_model(
         model_config_json=model_config_json,
         assistant_config_path=assistant_config_path,
         model_turn_json=model_turn_json,
@@ -78,15 +111,49 @@ def run_prepared_contract(
     )
     if model_error:
         return _invalid_model_config_result(prepared, model_error)
-    if model_runner is not None and host_store is not None and session_key:
-        prepared = prepare_contract_with_existing_memory(
-            prepared,
-            store=host_store,
-            session_key=session_key,
+    try:
+        api_key = (
+            None
+            if debug is not None or model_settings is None
+            else _resolve_model_api_key(model_settings)
+        )
+    except Exception:
+        api_key = None
+    if (
+        model_settings is not None
+        and debug is None
+        and provider_requires_api_key(model_settings.provider)
+        and not api_key
+    ):
+        reason = (
+            "assistant_model_api_key_missing"
+            if str(assistant_config_path or "").strip()
+            else "model_api_key_missing"
+        )
+        return _invalid_model_config_result(prepared, reason)
+    child_environ = {
+        name: os.environ[name]
+        for name in _CHILD_ENV_NAMES
+        if os.environ.get(name)
+    }
+    if api_key:
+        child_environ["OM_PI_MODEL_API_KEY"] = api_key
+    if session_key:
+        child_environ["OM_PI_SESSION_DB"] = str(
+            (
+                host_store.path.with_name("pi_sessions.sqlite3")
+                if host_store is not None
+                else Path(__file__).resolve().parents[3]
+                / "output_shared"
+                / "state"
+                / "pi_sessions.sqlite3"
+            ).absolute()
         )
     return run_contract(
         prepared,
-        model_runner=model_runner,
+        model_settings=model_settings,
+        debug=debug,
+        process_environ=child_environ,
         fixture_observations_loader=fixture_observations,
         host_store=host_store,
         session_key=session_key,
@@ -97,81 +164,77 @@ def run_prepared_contract(
     )
 
 
-def _resolve_model_runner(
+def _resolve_pi_model(
     *,
     model_config_json: str | None,
     assistant_config_path: str | None,
     model_turn_json: str | None,
     execution_environment: str,
-) -> tuple[ModelRunner | None, str | None]:
+) -> tuple[PiModelSettings | None, dict[str, Any] | None, str | None]:
     configured_sources = sum(bool(str(item or "").strip()) for item in (model_config_json, assistant_config_path))
     if configured_sources > 1:
-        return None, "ambiguous_model_source"
+        return None, None, "ambiguous_model_source"
     if model_turn_json is not None:
         if configured_sources:
-            return None, "model_turn_conflicts_with_model_config"
-        return _scripted_model_runner(model_turn_json, execution_environment=execution_environment)
+            return None, None, "model_turn_conflicts_with_model_config"
+        return _eval_model(model_turn_json, execution_environment=execution_environment)
     if model_config_json:
-        return _model_runner_from_json(model_config_json)
-    return _model_runner_from_assistant_config(assistant_config_path)
+        settings, error = _model_from_json(model_config_json)
+        return settings, None, error
+    settings, error = _model_from_assistant_config(assistant_config_path)
+    return settings, None, error
 
 
-def _scripted_model_runner(
+def _eval_model(
     model_turn_json: str,
     *,
     execution_environment: str,
-) -> tuple[ModelRunner | None, str | None]:
+) -> tuple[PiModelSettings | None, dict[str, Any] | None, str | None]:
     if execution_environment != "eval":
-        return None, "model_turn_requires_eval"
+        return None, None, "model_turn_requires_eval"
     try:
         raw = json.loads(model_turn_json)
         items = raw if isinstance(raw, list) else [raw]
-        turns = [_model_turn(item) for item in items]
+        turns = [_fixture_turn(item) for item in items]
         if not turns:
             raise ValueError("at least one model turn is required")
     except Exception:
-        return None, "invalid_model_turn"
-    queue = list(turns)
-
-    def _run(_request: ModelRequest) -> ModelTurn:
-        if not queue:
-            return ModelTurn(text="评估模型脚本没有提供后续回答。")
-        return deepcopy(queue.pop(0))
-
-    return _run, None
+        return None, None, "invalid_model_turn"
+    return _EVAL_MODEL, {"fixture_turns": turns, "delay_ms": 0}, None
 
 
-def _model_turn(raw: Any) -> ModelTurn:
+def _fixture_turn(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("model turn must be an object")
-    calls: list[ToolCall] = []
+    calls: list[dict[str, Any]] = []
     for index, item in enumerate(raw.get("tool_calls") or [], start=1):
         if not isinstance(item, dict):
             raise ValueError("tool call must be an object")
+        tool_name = str(item.get("name") or "").strip()
+        arguments = item.get("arguments") or {}
+        if not tool_name or not isinstance(arguments, dict):
+            raise ValueError("tool call is invalid")
         calls.append(
-            ToolCall(
-                call_id=str(item.get("call_id") or item.get("id") or f"call_{index}"),
-                name=str(item.get("name") or "").strip(),
-                arguments=dict(item.get("arguments") or {}),
-            )
+            {
+                "call_id": str(item.get("call_id") or item.get("id") or f"call_{index}"),
+                "tool_name": tool_name,
+                "arguments": dict(arguments),
+            }
         )
-    return ModelTurn(text=str(raw.get("text") or "").strip(), tool_calls=tuple(calls), raw=dict(raw))
+    return {"tool_calls": calls} if calls else {"text": str(raw.get("text") or "").strip()}
 
 
-def _model_runner_from_json(model_config_json: str) -> tuple[ModelRunner | None, str | None]:
+def _model_from_json(model_config_json: str) -> tuple[PiModelSettings | None, str | None]:
     try:
         raw = json.loads(model_config_json)
         if not isinstance(raw, dict):
             raise ValueError("model config must be an object")
-        ok, key_error = model_api_key_configured(raw)
-        if not ok:
-            return None, key_error
-        return build_model_runner(CopilotModelSettings.from_config(raw)), None
+        return PiModelSettings.from_config(raw), None
     except Exception:
         return None, "invalid_model_config"
 
 
-def _model_runner_from_assistant_config(path: str | None) -> tuple[ModelRunner | None, str | None]:
+def _model_from_assistant_config(path: str | None) -> tuple[PiModelSettings | None, str | None]:
     require_config = bool(str(path or "").strip())
     if not require_config:
         return None, None
@@ -180,11 +243,8 @@ def _model_runner_from_assistant_config(path: str | None) -> tuple[ModelRunner |
         return None, load_error
     if not raw:
         return None, None
-    ok, key_error = model_api_key_configured(raw)
-    if not ok:
-        return None, "assistant_model_api_key_missing" if key_error == "model_api_key_missing" else key_error
     try:
-        return build_model_runner(CopilotModelSettings.from_config(raw)), None
+        return PiModelSettings.from_config(raw), None
     except Exception:
         return None, "invalid_model_config"
 

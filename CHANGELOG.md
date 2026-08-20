@@ -5,6 +5,11 @@
 ### New Features
 - Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.
 
+## 1.14.12 - 2026-08-20
+
+### Bug Fixes
+- Corrected required-data prefetch observability for merged OpenD requests by aggregating per-request provider work while preserving de-duplicated snapshot counts and rejecting malformed child metadata.
+
 ## 1.14.11 - 2026-08-20
 
 ### Bug Fixes

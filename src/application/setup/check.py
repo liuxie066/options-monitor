@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import platform
+import re
 import shutil
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,10 +14,19 @@ from typing import Any, Iterable
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.platform_profile import PlatformProfile, current_platform_profile
+from src.application.copilot.model_config import PiModelSettings, load_assistant_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
 from src.infrastructure.futu_gateway import inspect_futu_sdk_earnings_calendar_capability
+from src.infrastructure.private_storage import private_path
+
+
+_MINIMUM_NODE_VERSION = (22, 19, 0)
+_PI_IMPORT_EXPRESSION = (
+    'await Promise.all(["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", '
+    '"@earendil-works/pi-session-backend-sqlite-node"].map((name) => import(name)))'
+)
 
 
 def run_setup_check(
@@ -72,6 +84,68 @@ def run_setup_check(
         hint="./.venv/bin/pip install -r requirements.txt -c constraints.txt" if missing_deps else None,
     )
 
+    node_path = shutil.which("node")
+    node_version = ""
+    node_version_tuple: tuple[int, int, int] | None = None
+    if node_path:
+        try:
+            observed = subprocess.run(
+                [node_path, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            node_version = str(observed.stdout or observed.stderr or "").strip()
+            match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", node_version)
+            if observed.returncode == 0 and match:
+                node_version_tuple = tuple(int(part) for part in match.groups())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    node_ok = node_version_tuple is not None and node_version_tuple >= _MINIMUM_NODE_VERSION
+    add(
+        "install.node",
+        "ok" if node_ok else "error",
+        "Node runtime meets the Pi minimum" if node_ok else "Node >= 22.19.0 is required for the Pi runtime",
+        {"executable": node_path, "version": node_version or None, "minimum": "22.19.0"},
+        hint=None if node_ok else "Install Node 22.19.0 or newer and rerun ./om setup check.",
+    )
+
+    npm_path = shutil.which("npm")
+    add(
+        "install.npm",
+        "ok" if npm_path else "error",
+        "npm is available" if npm_path else "npm is required for locked Pi package installation",
+        {"executable": npm_path},
+        hint=None if npm_path else "Install npm for Node 22.19.0 or newer and rerun ./om setup check.",
+    )
+
+    agent_runtime = root / "agent-runtime"
+    pi_packages_ok = False
+    pi_packages_error = "Node runtime is unavailable"
+    if node_ok:
+        try:
+            imported = subprocess.run(
+                [str(node_path), "--input-type=module", "--eval", _PI_IMPORT_EXPRESSION],
+                cwd=agent_runtime,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            pi_packages_ok = imported.returncode == 0
+            if not pi_packages_ok:
+                pi_packages_error = str(imported.stderr or imported.stdout or "package import failed").strip()[-1000:]
+        except (OSError, subprocess.SubprocessError) as exc:
+            pi_packages_error = f"{type(exc).__name__}: {exc}"
+    add(
+        "install.pi_packages",
+        "ok" if pi_packages_ok else "error",
+        "locked Pi packages import successfully" if pi_packages_ok else "locked Pi package import failed",
+        {"agent_runtime": str(agent_runtime), "error": None if pi_packages_ok else pi_packages_error},
+        hint=None if pi_packages_ok else "npm ci --omit=dev --ignore-scripts --prefix agent-runtime",
+    )
+
     earnings_calendar_capability = inspect_futu_sdk_earnings_calendar_capability()
     earnings_calendar_supported = bool(earnings_calendar_capability.get("supported"))
     minimum_futu_version = str(earnings_calendar_capability.get("minimum_version") or "10.9.6908")
@@ -107,6 +181,65 @@ def run_setup_check(
         repo_root=root,
         env_file=env_file,
         include_local_env_file=include_local_env_file,
+    )
+    runtime = resolve_runtime_root(repo_root=root, environ=effective_env.values)
+
+    repo_assistant_config = root / "config.assistant.json"
+    assistant_config = (
+        repo_assistant_config
+        if repo_assistant_config.exists()
+        else runtime.runtime_root / "resolved" / "config.assistant.json"
+    )
+    model_raw, model_error = load_assistant_llm_config(
+        config_path=assistant_config,
+        require_config=False,
+    )
+    model_settings: PiModelSettings | None = None
+    if model_raw is not None and model_error is None:
+        try:
+            model_settings = PiModelSettings.from_config(model_raw)
+        except Exception:
+            model_error = "invalid_model_config"
+    model_context_ok = model_settings is not None
+    add(
+        "copilot.model_context",
+        "ok" if model_context_ok else "error",
+        "active Pi model context is valid" if model_context_ok else "active Pi model context is missing or invalid",
+        {
+            "config_path": str(assistant_config),
+            "context_window_tokens": model_settings.context_window_tokens if model_settings else None,
+            "max_output_tokens": model_settings.max_output_tokens if model_settings else None,
+            "error": model_error or (None if model_settings else "model_context_missing"),
+        },
+        hint=None if model_context_ok else "Build or fix the resolved assistant config with a valid context_window_tokens value.",
+    )
+
+    audit_raw = str(effective_env.values.get("OM_INBOUND_AUDIT_DB") or "").strip()
+    audit_db = Path(audit_raw).expanduser() if audit_raw else runtime.runtime_root / "output_shared" / "state" / "inbound_control.sqlite3"
+    if not audit_db.is_absolute():
+        audit_db = root / audit_db
+    audit_db = private_path(audit_db)
+    pi_session_path = audit_db.with_name("pi_sessions.sqlite3")
+    session_parent = pi_session_path.parent
+    session_parent_is_symlink = session_parent.is_symlink()
+    session_parent_ok = (
+        session_parent.is_dir()
+        and not session_parent_is_symlink
+        and os.access(session_parent, os.W_OK | os.X_OK)
+    )
+    add(
+        "copilot.pi_session_path",
+        "ok" if session_parent_ok else "error",
+        "Pi Session parent exists and is writable" if session_parent_ok else "Pi Session parent is missing or not writable",
+        {
+            "host_audit_db": str(audit_db),
+            "pi_session_path": str(pi_session_path),
+            "parent": str(session_parent),
+            "parent_exists": session_parent.is_dir(),
+            "parent_is_symlink": session_parent_is_symlink,
+            "session_exists": pi_session_path.exists(),
+        },
+        hint=None if session_parent_ok else f"Create and grant write access to the Session parent: {session_parent}",
     )
     installer_mode = str(effective_env.values.get("OM_UPGRADE_INSTALLER") or "auto").strip().lower()
     if installer_mode not in {"auto", "uv", "pip"}:
@@ -146,7 +279,6 @@ def run_setup_check(
         hint="./om settings doctor",
     )
 
-    runtime = resolve_runtime_root(repo_root=root)
     config_ok_markets: list[str] = []
     for market in selected_markets:
         config_path = runtime.runtime_root / f"config.{market}.json"

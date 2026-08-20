@@ -384,6 +384,16 @@ def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_re
             die(f'{path}.max_output_tokens must be >= 64')
         if int(llm_cfg.get('max_output_tokens')) > 4096:
             die(f'{path}.max_output_tokens must be <= 4096')
+    if 'context_window_tokens' in llm_cfg and llm_cfg.get('context_window_tokens') is not None:
+        validate_positive_integer(llm_cfg.get('context_window_tokens'), f'{path}.context_window_tokens')
+        context_window_tokens = int(llm_cfg.get('context_window_tokens'))
+        if context_window_tokens < 4096:
+            die(f'{path}.context_window_tokens must be >= 4096')
+        if context_window_tokens > 2_000_000:
+            die(f'{path}.context_window_tokens must be <= 2000000')
+        max_output_tokens = int(llm_cfg.get('max_output_tokens') or 2048)
+        if context_window_tokens <= max_output_tokens + 2000:
+            die(f'{path}.context_window_tokens must exceed max_output_tokens by more than 2000')
     llm_provider = str(llm_cfg.get('provider') or '').strip()
     supported_providers = supported_llm_providers()
     if llm_provider and llm_provider not in supported_providers:
@@ -393,6 +403,8 @@ def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_re
             die(f'{path}.provider is required when {required_reason}')
         if not str(llm_cfg.get('model') or '').strip():
             die(f'{path}.model is required when {required_reason}')
+        if llm_cfg.get('context_window_tokens') is None:
+            die(f'{path}.context_window_tokens is required when {required_reason}')
 
 
 def _validate_inbound_config(cfg: dict) -> None:
@@ -477,7 +489,12 @@ def _validate_assistant_config(cfg: dict) -> None:
     _validate_llm_config(
         llm,
         path='assistant.llm',
-        enabled=False,
+        enabled=bool(
+            assistant.get('enabled') is not False
+            and copilot.get('enabled') is True
+            and str(llm.get('provider') or '').strip()
+            and str(llm.get('model') or '').strip()
+        ),
         required_reason='assistant Copilot uses LLM',
     )
 

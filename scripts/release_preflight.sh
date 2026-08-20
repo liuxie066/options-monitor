@@ -75,6 +75,25 @@ run_step() {
 echo "[PREFLIGHT] root=${ROOT}"
 echo "[PREFLIGHT] python=$("${PYTHON_BIN}" --version 2>&1)"
 
+NODE_BIN="$(command -v node || true)"
+NPM_BIN="$(command -v npm || true)"
+if [[ -z "${NODE_BIN}" ]]; then
+  echo "[PREFLIGHT_ERROR] Node >=22.19.0 is required" >&2
+  exit 1
+fi
+if [[ -z "${NPM_BIN}" ]]; then
+  echo "[PREFLIGHT_ERROR] npm is required" >&2
+  exit 1
+fi
+NODE_VERSION="$("${NODE_BIN}" --version 2>/dev/null || true)"
+if [[ ! "${NODE_VERSION}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+   (( 10#${BASH_REMATCH[1]:-0} < 22 )) ||
+   (( 10#${BASH_REMATCH[1]:-0} == 22 && 10#${BASH_REMATCH[2]:-0} < 19 )); then
+  echo "[PREFLIGHT_ERROR] Node >=22.19.0 is required; observed=${NODE_VERSION:-unknown}" >&2
+  exit 1
+fi
+echo "[PREFLIGHT] node=${NODE_VERSION}"
+
 status="$(git -C "${ROOT}" status --short)"
 if [[ -n "${status}" ]]; then
   echo "[PREFLIGHT_WARN] git worktree has uncommitted changes:"
@@ -87,6 +106,11 @@ else
   echo "[PREFLIGHT_OK] git worktree clean"
 fi
 
+run_step "Pi runtime locked install" \
+  "${NPM_BIN}" ci --omit=dev --ignore-scripts --prefix agent-runtime
+run_step "Pi runtime smoke" \
+  bash scripts/pi_runtime_smoke.sh --root "${ROOT}" --python "${PYTHON_BIN}"
+
 VERSION="$(tr -d '\n' < "${ROOT}/VERSION")"
 run_step "release metadata" \
   "${PYTHON_BIN}" scripts/release_check.py --tag "v${VERSION}" --require-current-taxonomy --require-delta-coverage
@@ -96,6 +120,21 @@ if [[ "${CHECK_DEPS}" -eq 1 ]]; then
 fi
 
 if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
+  run_step "Pi runtime focused tests" \
+    "${PYTHON_BIN}" -m pytest tests/test_pi_agent_process.py
+  run_step "Copilot, Control, and operations focused tests" \
+    "${PYTHON_BIN}" -m pytest \
+      tests/test_copilot_phase1.py \
+      tests/test_copilot_conversation_memory.py \
+      tests/test_copilot_p1_eval.py \
+      tests/test_inbound_control.py \
+      tests/test_setup_check.py \
+      tests/test_cli_operator_commands.py \
+      tests/test_install_script.py \
+      tests/test_service_deploy.py \
+      tests/test_release_check.py \
+      tests/test_release_test_plan.py \
+      tests/copilot_eval/test_answer_quality.py
   run_step "agent/plugin focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
   run_step "research domain focused tests" \

@@ -80,6 +80,66 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
     assert all("test_assistant_context_validation.py" not in command for command in plan["commands"])
 
 
+@pytest.mark.parametrize(
+    "changed_file",
+    [
+        ".github/workflows/_release-reusable.yml",
+        ".github/workflows/guardrails.yml",
+        "agent-runtime/package.json",
+        "agent-runtime/package-lock.json",
+        "agent-runtime/main.ts",
+        "scripts/copilot_p1_eval.py",
+        "scripts/install.sh",
+        "scripts/release_preflight.sh",
+        "scripts/pi_runtime_smoke.sh",
+        "src/application/copilot/host.py",
+        "src/application/release_test_plan.py",
+        "src/application/service_upgrade.py",
+        "src/application/setup/check.py",
+        "src/infrastructure/pi_agent_process.py",
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "tests/copilot_pi_test_support.py",
+        "tests/test_architecture_guards.py",
+        "tests/test_pi_agent_process.py",
+        "tests/test_copilot_p1_eval.py",
+        "tests/test_copilot_phase1.py",
+        "tests/test_copilot_conversation_memory.py",
+        "tests/test_inbound_control.py",
+        "tests/test_setup_check.py",
+        "tests/test_cli_operator_commands.py",
+        "tests/test_install_script.py",
+        "tests/test_service_deploy.py",
+        "tests/test_release_check.py",
+        "tests/test_release_test_plan.py",
+        "tests/copilot_eval/test_answer_quality.py",
+    ],
+)
+def test_release_test_plan_maps_every_pi_runtime_surface(changed_file: str) -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(changed_files=[changed_file], mode="standard")
+
+    assert "pi_runtime" in {rule["name"] for rule in plan["matched_rules"]}
+    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
+    assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
+    assert any("tests/test_copilot_p1_eval.py" in command for command in plan["commands"])
+    assert any("tests/copilot_eval/test_answer_quality.py" in command for command in plan["commands"])
+
+
+def test_release_preflight_maps_to_service_and_pi_runtime_gates() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(changed_files=["scripts/release_preflight.sh"], mode="standard")
+
+    matched_rules = {rule["name"] for rule in plan["matched_rules"]}
+    assert {"service_release", "pi_runtime"} <= matched_rules
+    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
+    assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
+    assert any("tests/test_copilot_p1_eval.py" in command for command in plan["commands"])
+    assert any("tests/copilot_eval/test_answer_quality.py" in command for command in plan["commands"])
+    assert any("tests/test_release_test_plan.py" in command for command in plan["commands"])
+
+
 def test_release_test_plan_requires_current_taxonomy_when_version_changes() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
@@ -224,7 +284,72 @@ def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
             assert suite in text, f"{workflow.name} is missing required suite {suite}"
 
 
-def _run_release_preflight_with_fake_python(tmp_path: Path, *args: str) -> list[str]:
+def test_required_pr_and_release_workflows_pin_and_gate_pi_runtime() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflows = (
+        root / ".github" / "workflows" / "guardrails.yml",
+        root / ".github" / "workflows" / "_release-reusable.yml",
+    )
+    required_suites = (
+        "tests/test_pi_agent_process.py",
+        "tests/test_copilot_p1_eval.py",
+        "tests/test_copilot_phase1.py",
+        "tests/test_copilot_conversation_memory.py",
+        "tests/test_inbound_control.py",
+        "tests/test_setup_check.py",
+        "tests/test_cli_operator_commands.py",
+        "tests/test_install_script.py",
+        "tests/test_service_deploy.py",
+        "tests/test_release_check.py",
+        "tests/test_release_test_plan.py",
+        "tests/copilot_eval/test_answer_quality.py",
+    )
+
+    for workflow in workflows:
+        text = workflow.read_text(encoding="utf-8")
+        assert text.count("uses: actions/setup-node@v4") == 1
+        assert text.count("node-version: '22.19.0'") == 1
+        assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
+        assert (
+            'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
+            '--python "${{ github.workspace }}/.venv/bin/python"'
+        ) in text
+        assert "npm view" not in text
+        assert text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") < text.index(
+            "scripts/pi_runtime_smoke.sh"
+        ) < text.index("tests/test_pi_agent_process.py")
+        for suite in required_suites:
+            assert suite in text, f"{workflow.name} is missing Pi suite {suite}"
+
+
+def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
+    root = Path(__file__).resolve().parents[1]
+    text = (root / ".github/workflows/_release-reusable.yml").read_text(encoding="utf-8")
+
+    build_at = text.index("- name: Build source archive")
+    verify_at = text.index("- name: Verify source archive Pi runtime")
+    publish_at = text.index("- name: Publish release")
+    assert build_at < verify_at < publish_at
+
+    verify = text[verify_at:publish_at]
+    assert 'CHECKOUT_PYTHON="${{ github.workspace }}/.venv/bin/python"' in verify
+    assert 'ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"' in verify
+    assert 'tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"' in verify
+    assert 'cd "${ARCHIVE_ROOT}"' in verify
+    assert 'npm ci --omit=dev --ignore-scripts --prefix "${ARCHIVE_ROOT}/agent-runtime"' in verify
+    assert (
+        'bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" '
+        '--python "${CHECKOUT_PYTHON}"'
+    ) in verify
+    assert "--prefix agent-runtime" not in verify
+    assert '--python ".venv/bin/python"' not in verify
+
+
+def _run_release_preflight_with_fake_python(
+    tmp_path: Path,
+    *args: str,
+    node_version: str = "v22.19.0",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     root = Path(__file__).resolve().parents[1]
     log_path = tmp_path / "python-commands.log"
     fake_python = tmp_path / "python3.12"
@@ -244,8 +369,35 @@ printf '%s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    fake_node = tmp_path / "node"
+    fake_node.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\\n' "${OM_TEST_NODE_VERSION}"
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(0o755)
+    fake_npm = tmp_path / "npm"
+    fake_npm.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'npm %s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
+""",
+        encoding="utf-8",
+    )
+    fake_npm.chmod(0o755)
     env = dict(os.environ)
-    env.update({"OM_PYTHON": str(fake_python), "OM_TEST_PYTHON_LOG": str(log_path)})
+    env.update(
+        {
+            "OM_PYTHON": str(fake_python),
+            "OM_TEST_PYTHON_LOG": str(log_path),
+            "OM_TEST_NODE_VERSION": node_version,
+            "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
+        }
+    )
 
     proc = subprocess.run(
         ["bash", "scripts/release_preflight.sh", "--allow-dirty", *args],
@@ -256,22 +408,35 @@ printf '%s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
         check=False,
     )
 
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    return log_path.read_text(encoding="utf-8").splitlines()
+    commands = log_path.read_text(encoding="utf-8").splitlines() if log_path.exists() else []
+    return proc, commands
 
 
 def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
-    commands = _run_release_preflight_with_fake_python(tmp_path, "--full")
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path, "--full")
 
+    assert proc.returncode == 0, proc.stderr or proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == ["-m pytest"]
+    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
+    assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
 
 
 def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> None:
-    commands = _run_release_preflight_with_fake_python(tmp_path)
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path)
 
+    assert proc.returncode == 0, proc.stderr or proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == [
+        "-m pytest tests/test_pi_agent_process.py",
+        (
+            "-m pytest tests/test_copilot_phase1.py tests/test_copilot_conversation_memory.py "
+            "tests/test_copilot_p1_eval.py tests/test_inbound_control.py "
+            "tests/test_setup_check.py "
+            "tests/test_cli_operator_commands.py tests/test_install_script.py "
+            "tests/test_service_deploy.py tests/test_release_check.py "
+            "tests/test_release_test_plan.py tests/copilot_eval/test_answer_quality.py"
+        ),
         "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
         (
             "-m pytest tests/test_research.py tests/test_research_archive.py "
@@ -285,6 +450,16 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
             "tests/test_cli_operator_commands.py"
         ),
     ]
+    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
+    assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+
+
+def test_release_preflight_rejects_old_node_before_npm(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path, node_version="v22.18.9")
+
+    assert proc.returncode == 1
+    assert "Node >=22.19.0 is required; observed=v22.18.9" in proc.stderr
+    assert not any(command.startswith("npm ") for command in commands)
 
 
 def test_release_version_recommendation_maps_to_release_focused_tests() -> None:

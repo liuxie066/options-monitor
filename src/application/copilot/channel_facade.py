@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from typing import Any
 
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.copilot.contracts import (
     AppResult,
     CopilotRequest,
@@ -11,17 +14,19 @@ from src.application.copilot.contracts import (
     ExecutionContract,
     new_id,
 )
-from src.application.copilot.local_harness import run_prepared_contract
-from src.application.copilot.host import host_lane_slot, record_session_turn, session_messages, session_run_slot
+from src.application.copilot.host import host_lane_slot, session_run_slot
 from src.application.copilot.host_store import CopilotHostStore
+from src.application.copilot.local_harness import run_prepared_contract
 from src.application.copilot.model_config import load_assistant_llm_config, model_api_key_configured
 from src.application.copilot.service import prepare_contract
+from src.infrastructure.pi_agent_process import derive_pi_session_id
 
 
 def run_channel_request(
     *,
     user_message: str,
     config_key: str | None,
+    config_path: str | None = None,
     request_id: str | None = None,
     reference_year: int | None = None,
     assistant_config_path: str | None = None,
@@ -33,48 +38,45 @@ def run_channel_request(
     control_context: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     year = reference_year or date.today().year
-    model_gate = _channel_model_gate(assistant_config_path)
-    if model_gate:
-        request = _channel_request(
-            user_message=user_message,
+    effective_request_id = request_id or new_id("req")
+    try:
+        resolved_key, resolved_path, authority_scope = _resolve_authority_scope(
             config_key=config_key,
-            request_id=request_id,
-            context_messages=(),
+            config_path=config_path,
+        )
+        session_key = _channel_session_key(
             channel=channel,
             sender_id=sender_id,
             conversation_id=conversation_id,
+            authority_scope=authority_scope,
         )
+    except (AgentToolError, OSError, RuntimeError, ValueError):
         return _request_not_ready(
-            request,
+            effective_request_id,
+            reason="channel_identity_or_scope_invalid",
+            message="渠道身份或数据作用域不可用",
+        )
+    model_gate = _channel_model_gate(assistant_config_path)
+    if model_gate:
+        return _request_not_ready(
+            effective_request_id,
             reason=model_gate,
             message="渠道 Copilot 需要显式可用的 assistant 模型配置",
         )
-    session_key = _channel_session_key(channel=channel, sender_id=sender_id, conversation_id=conversation_id)
     host_store = CopilotHostStore(host_db_path) if str(host_db_path or "").strip() else None
     with session_run_slot(session_key, host_store=host_store, ttl_seconds=300) as entered:
         if not entered:
-            request = _channel_request(
-                user_message=user_message,
-                config_key=config_key,
-                request_id=request_id,
-                context_messages=(),
-                channel=channel,
-                sender_id=sender_id,
-                conversation_id=conversation_id,
-            )
             return _request_not_ready(
-                request,
+                effective_request_id,
                 reason="channel_run_already_running",
                 message="同一会话已有 Copilot 分析正在运行",
             )
         request = _channel_request(
             user_message=user_message,
-            config_key=config_key,
-            request_id=request_id,
-            context_messages=_context_messages(
-                session_messages(session_key, host_store=host_store),
-                control_context=control_context,
-            ),
+            config_key=resolved_key,
+            config_path=resolved_path,
+            request_id=effective_request_id,
+            context_messages=_context_messages(control_context=control_context),
             channel=channel,
             sender_id=sender_id,
             conversation_id=conversation_id,
@@ -88,7 +90,7 @@ def run_channel_request(
         with host_lane_slot("chat_read", host_store=host_store, limit=2, ttl_seconds=300) as lane_entered:
             if not lane_entered:
                 return _request_not_ready(
-                    request,
+                    request.request_id,
                     reason="channel_capacity_exhausted",
                     message="Copilot 当前分析任务已达到并发上限",
                 )
@@ -102,71 +104,15 @@ def run_channel_request(
                 )
             except Exception:
                 result = _channel_run_failed(prepared)
-        if result.user_response.strip():
-            record_session_turn(
-                session_key,
-                user_message,
-                result.user_response,
-                host_store=host_store,
-                tool_uses=_tool_uses(result),
-                warnings=_event_messages(result, "warning"),
-                errors=_event_messages(result, "model_error", "tool_failure_fallback"),
-            )
         return result
 
 
-def record_channel_turn(
-    *,
-    channel: str | None,
-    sender_id: str | None,
-    conversation_id: str | None,
-    host_db_path: str | None,
-    user_message: str,
-    assistant_message: str,
-) -> None:
-    session_key = _channel_session_key(channel=channel, sender_id=sender_id, conversation_id=conversation_id)
-    host_store = CopilotHostStore(host_db_path) if str(host_db_path or "").strip() else None
-    record_session_turn(session_key, user_message, assistant_message, host_store=host_store)
-
-
-def _tool_uses(result: AppResult) -> tuple[dict[str, Any], ...]:
-    calls: dict[str, dict[str, Any]] = {}
-    completed: list[dict[str, Any]] = []
-    for event in result.events:
-        call_id = str(event.payload.get("tool_call_id") or "")
-        if event.type == "tool_call":
-            calls[call_id] = {
-                "name": str(event.payload.get("tool_name") or ""),
-                "arguments": dict(event.payload.get("tool_input") or {}),
-            }
-        elif event.type == "tool_result":
-            item = dict(calls.get(call_id) or {})
-            item["ok"] = bool(event.payload.get("ok"))
-            item["result_summary"] = event.payload.get("summary") or event.payload.get("error") or ""
-            completed.append(item)
-    return tuple(item for item in completed if item.get("name"))
-
-
-def _event_messages(result: AppResult, *event_types: str) -> tuple[str, ...]:
-    allowed = set(event_types)
-    messages: list[str] = []
-    for event in result.events:
-        if event.type not in allowed:
-            continue
-        text = str(event.payload.get("message") or event.payload.get("reason") or event.type).strip()
-        if text:
-            messages.append(text)
-    return tuple(messages)
-
-
 def _context_messages(
-    messages: tuple[dict[str, Any], ...],
     *,
     control_context: tuple[dict[str, Any], ...],
 ) -> tuple[dict[str, Any], ...]:
     snapshot = json.dumps(list(control_context), ensure_ascii=False, sort_keys=True, default=str)
     return (
-        *messages,
         {
             "role": "system",
             "content": (
@@ -194,16 +140,51 @@ def _channel_model_gate(assistant_config_path: str | None) -> str | None:
     return None
 
 
-def _channel_session_key(*, channel: str | None, sender_id: str | None, conversation_id: str | None) -> str:
-    channel_key = str(channel or "unknown").strip().lower() or "unknown"
-    conversation_key = str(conversation_id or "").strip() or f"sender:{str(sender_id or '').strip() or 'unknown'}"
-    return f"{channel_key}:{conversation_key}"
+def _resolve_authority_scope(
+    *,
+    config_key: str | None,
+    config_path: str | None,
+) -> tuple[str | None, str | None, str]:
+    key = str(config_key or "").strip().lower()
+    raw_path = str(config_path or "").strip()
+    if bool(key) == bool(raw_path):
+        raise ValueError("exactly one channel data scope is required")
+    if key:
+        resolve_runtime_config_path(config_key=key)
+        return key, None, f"key:{key}"
+    resolved = resolve_runtime_config_path(config_path=raw_path).resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError("channel config_path must resolve to a regular file")
+    canonical_path = str(resolved)
+    path_digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
+    return None, canonical_path, f"path:{path_digest}"
+
+
+def _channel_session_key(
+    *,
+    channel: str | None,
+    sender_id: str | None,
+    conversation_id: str | None,
+    authority_scope: str,
+) -> str:
+    channel_key = str(channel or "").strip().lower()
+    sender_key = str(sender_id or "").strip()
+    if not channel_key or not sender_key:
+        raise ValueError("authenticated channel identity is required")
+    conversation_key = str(conversation_id or "").strip() or f"sender:{sender_key}"
+    return derive_pi_session_id(
+        channel_key,
+        sender_key,
+        conversation_key,
+        authority_scope,
+    )
 
 
 def _channel_request(
     *,
     user_message: str,
     config_key: str | None,
+    config_path: str | None,
     request_id: str | None,
     context_messages: tuple[dict[str, str], ...],
     channel: str | None,
@@ -217,7 +198,7 @@ def _channel_request(
         request_id=request_id or new_id("req"),
         source_entry="channel",
         user_message=user_message,
-        explicit_scope=CopilotScope(config_key=config_key),
+        explicit_scope=CopilotScope(config_key=config_key, config_path=config_path),
         context_messages=tuple(dict(item) for item in context_messages),
         execution_environment="channel",
         trusted_tool_scope={
@@ -228,12 +209,12 @@ def _channel_request(
     )
 
 
-def _request_not_ready(request: CopilotRequest, *, reason: str, message: str) -> AppResult:
+def _request_not_ready(request_id: str, *, reason: str, message: str) -> AppResult:
     return AppResult(
         status="not_ready",
         user_response=f"{message}；本次没有调用工具。",
         error={"code": "CHANNEL_NOT_READY", "reason": reason},
-        request_id=request.request_id,
+        request_id=request_id,
         decision_trace={"channel_gate": reason},
     )
 
@@ -261,4 +242,4 @@ def _channel_run_failed(contract: ExecutionContract) -> AppResult:
     )
 
 
-__all__ = ["record_channel_turn", "run_channel_request"]
+__all__ = ["run_channel_request"]
