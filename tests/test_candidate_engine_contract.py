@@ -156,6 +156,20 @@ def test_covered_call_recall_window_starts_at_spot_and_caps_at_120_pct() -> None
     )
 
 
+def test_wheel_can_disable_only_the_default_covered_call_strike_cap() -> None:
+    decision = evaluate_opening_candidate_policy(
+        _policy_row(mode="call", strike=140.0),
+        mode="call",
+        min_strike=100.0,
+        max_strike=None,
+        require_earnings_evidence=False,
+        reject_known_earnings=False,
+        apply_default_call_strike_cap=False,
+    )
+
+    assert decision["accepted"] is True
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [

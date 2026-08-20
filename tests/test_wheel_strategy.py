@@ -7,7 +7,12 @@ import pytest
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 from domain.domain.option_position_lots import OpenPositionCommand
-from domain.domain.wheel import build_wheel_event, project_wheel_lifecycles
+from domain.domain.wheel import (
+    build_wheel_call_rank_key,
+    build_wheel_event,
+    evaluate_wheel_call_candidate,
+    project_wheel_lifecycles,
+)
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.wheel import build_wheel_read_model
@@ -237,3 +242,69 @@ def test_position_lot_patch_accepts_first_class_stock_lot_link() -> None:
     )
 
     assert patch["source_stock_lot_id"] == "assigned-stock-assign-put"
+
+
+def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
+    batch = {
+        "shares_remaining": 100,
+        "remaining_stock_cost_basis": 10_010,
+        "realized_sell_put_net_pnl": 240,
+        "realized_prior_call_net_pnl": 100,
+        "realized_prior_stock_sale_net_pnl": 0,
+    }
+    candidate = {
+        "symbol": "NVDA",
+        "contract_symbol": "NVDA-CALL-102",
+        "strike": 102,
+        "spot": 100,
+        "delta": 0.31,
+        "multiplier": 100,
+        "net_premium": 190,
+        "net_premium_cny": 1_350,
+        "period_net_premium_return": 0.019,
+        "annualized_net_premium_return": 0.16,
+        "spread_ratio": 0.1,
+        "open_interest": 500,
+    }
+
+    accepted = evaluate_wheel_call_candidate(
+        batch,
+        candidate,
+        {"min_delta": 0.30},
+        {"basis": "estimated", "amount": 15},
+        1,
+    )
+    below_cost = evaluate_wheel_call_candidate(
+        batch,
+        {**candidate, "strike": 100},
+        {"min_delta": 0.30},
+        {"basis": "estimated", "amount": 15},
+        1,
+    )
+
+    assert accepted["accepted"] is True
+    assert accepted["projected_lifecycle_net_pnl_if_called"] == 705
+    assert accepted["projected_lifecycle_pnl_scope"] == "final_total_if_called"
+    assert below_cost["wheel_candidate_status"] == "rejected"
+    assert "wheel_call_strike_below_cost_floor" in below_cost["reason_codes"]
+
+
+def test_wheel_candidate_rank_uses_lifecycle_pnl_before_covered_call_ties() -> None:
+    higher_lifecycle = build_wheel_call_rank_key(
+        {
+            "projected_lifecycle_net_pnl_if_called": 500,
+            "period_net_premium_return": 0.01,
+            "strike": 105,
+            "contract_symbol": "LOW-PREMIUM",
+        }
+    )
+    lower_lifecycle = build_wheel_call_rank_key(
+        {
+            "projected_lifecycle_net_pnl_if_called": 400,
+            "period_net_premium_return": 0.03,
+            "strike": 120,
+            "contract_symbol": "HIGH-PREMIUM",
+        }
+    )
+
+    assert higher_lifecycle["sort_tuple"] < lower_lifecycle["sort_tuple"]

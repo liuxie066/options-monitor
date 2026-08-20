@@ -128,6 +128,62 @@ markets:
     assert "min_annualized_net_return" in message
 
 
+def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "  us:\n    accounts: [lx, sy]\n",
+            "  us:\n"
+            "    accounts: [lx, sy]\n"
+            "    features:\n"
+            "      wheel:\n"
+            "        enabled: true\n"
+            "        accounts: [lx]\n"
+            "        min_dte: 30\n"
+            "        max_dte: 45\n"
+            "        min_delta: 0.30\n"
+            "        min_annualized_net_premium_return: 0.10\n"
+            "        min_net_premium_cny: 50\n"
+            "        max_spread_ratio: 0.40\n"
+            "        min_iv_rv_ratio: 1.10\n"
+            "        min_iv_minus_rv: 0.05\n",
+            1,
+        ),
+    )
+
+    config, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert config["wheel"]["enabled"] is True
+    assert config["wheel"]["accounts"] == ["lx"]
+    assert config["symbols"][0]["sell_call"]["enabled"] is False
+
+
+def test_yaml_wheel_rejects_unknown_v1_field(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "  us:\n    accounts: [lx, sy]\n",
+            "  us:\n"
+            "    accounts: [lx, sy]\n"
+            "    features:\n"
+            "      wheel:\n"
+            "        max_lifecycle_days: 90\n",
+            1,
+        ),
+    )
+
+    with pytest.raises(AgentToolError, match="max_lifecycle_days"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+
 def test_yaml_config_rejects_retired_ai_decision_advice_at_root(
     tmp_path: Path,
 ) -> None:

@@ -330,6 +330,8 @@ def _family_owner_mode(family: str, *, owner: str) -> tuple[str, str]:
         return "opening", "call"
     if family == "combo_yield" and owner in {"sp_lc", "cc_lp"}:
         return owner, "combo_yield"
+    if family == "wheel" and owner == "wheel":
+        return "wheel", "wheel"
     raise StrategyScanStatusError(f"unknown strategy family/owner: {family}/{owner}")
 
 

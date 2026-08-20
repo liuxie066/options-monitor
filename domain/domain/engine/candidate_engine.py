@@ -619,6 +619,7 @@ def evaluate_opening_candidate_policy(
     max_spread_ratio: float | None = None,
     require_earnings_evidence: bool = True,
     reject_known_earnings: bool = True,
+    apply_default_call_strike_cap: bool = True,
 ) -> dict[str, Any]:
     """Evaluate the common formal opening gates owned by Candidate Engine."""
 
@@ -708,11 +709,12 @@ def evaluate_opening_candidate_policy(
             effective_min_strike = max(
                 value for value in (resolved_min_strike, spot) if value is not None
             )
-            effective_max_strike = min(
-                value
-                for value in (resolved_max_strike, effective_min_strike * 1.20)
-                if value is not None
-            )
+            if apply_default_call_strike_cap:
+                effective_max_strike = min(
+                    value
+                    for value in (resolved_max_strike, effective_min_strike * 1.20)
+                    if value is not None
+                )
     if effective_min_strike is not None and (
         strike is None or strike < effective_min_strike
     ):
