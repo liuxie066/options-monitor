@@ -5,11 +5,14 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
+from src.application.account_config import accounts_from_config
+from src.application.agent_tool_config import load_runtime_config
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.capability_catalog import preview_operation_capabilities
+from src.application.assistant.capability_catalog import commands_by_intent, preview_operation_capabilities
 from src.application.assistant.inbound_control import ControlExecution, ExecuteToolFn, execute_explicit_control
+from src.application.assistant.monitor_run_operations import _load_market_runtime_config, _resolve_market
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
@@ -20,6 +23,16 @@ from src.application.tool_execution import execute_tool
 
 
 ParseCommandFn = Callable[[str, Callable[[], date] | None], ControlCommand | None]
+_ACCOUNT_SCOPED_COMMANDS = frozenset(
+    command
+    for intent_name in (
+        "position_query",
+        "assigned_stock_position_query",
+        "option_performance_report",
+        "monitor_run_now",
+    )
+    for command in commands_by_intent()[intent_name]
+)
 
 
 def handle_assistant_request(
@@ -170,7 +183,11 @@ def _parse_command(
 ) -> ControlCommand | None:
     if parse_command_fn is not None:
         return parse_command_fn(request.text, now_fn)
-    command = parse_assistant_command(request.text, now_fn=now_fn)
+    command = parse_assistant_command(
+        request.text,
+        now_fn=now_fn,
+        accounts=_configured_accounts_for_command(request),
+    )
     if command is not None:
         return command
     permission_response = parse_permission_response(
@@ -181,6 +198,24 @@ def _parse_command(
     if permission_response is not None:
         return permission_response
     return None
+
+
+def _configured_accounts_for_command(request: AssistantRequest) -> list[str] | None:
+    command = str(request.text or "").strip().split(maxsplit=1)[0].lower()
+    if command not in _ACCOUNT_SCOPED_COMMANDS:
+        return None
+    try:
+        if command in commands_by_intent()["monitor_run_now"]:
+            market = _resolve_market({}, request=request, symbols=[])
+            _path, cfg = _load_market_runtime_config(market, request=request)
+        else:
+            _path, cfg = load_runtime_config(
+                config_key=request.config_key,
+                config_path=request.config_path,
+            )
+        return accounts_from_config(cfg, fallback=())
+    except (AgentToolError, OSError, ValueError):
+        return None
 
 
 def _run_copilot(request: AssistantRequest, *, command_id: str, audit_db: Any) -> AppResult:

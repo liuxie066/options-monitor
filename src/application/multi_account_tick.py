@@ -12,7 +12,7 @@ from src.infrastructure.io_utils import (
     utc_now,
 )
 from src.infrastructure.run_log import RunLogger
-from src.application.account_config import accounts_from_config
+from src.application.account_config import resolve_configured_accounts
 from src.application.config_sections import resolve_watchlist_config
 from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
@@ -196,10 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         # never revive schema fields removed by the currently running release.
         validate_config(deepcopy(base_cfg))
     try:
-        if args.accounts is None:
-            args.accounts = accounts_from_config(base_cfg)
-        else:
-            args.accounts = accounts_from_config({'accounts': args.accounts})
+        args.accounts = resolve_configured_accounts(base_cfg, args.accounts)
     except ValueError as exc:
         raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
     args.default_account = _resolve_default_account(args.default_account, args.accounts)

@@ -6,6 +6,7 @@ import re
 from typing import Any, Literal, cast
 
 from domain.domain.symbol_identity import canonical_symbol
+from src.application.account_config import normalize_account_label, normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.payload_helpers import optional_text as _optional_text
 
@@ -14,7 +15,7 @@ PositionStatus = Literal["open", "close", "all"]
 OptionType = Literal["put", "call"]
 PositionSide = Literal["short", "long"]
 
-_ACCOUNT_RE = re.compile(r"(?<![a-z0-9_])(lx|sy)(?![a-z0-9_])", re.IGNORECASE)
+_DEFAULT_QUERY_ACCOUNTS = ("lx", "sy")
 _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])(?!\d)")
 _MONTH_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
 _MONTH_CN_RE = re.compile(r"(?<!\d)(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
@@ -153,15 +154,21 @@ class PositionQuery:
         )
 
 
-def parse_position_query_text(text: str, *, today: date) -> PositionQuery:
+def parse_position_query_text(
+    text: str,
+    *,
+    today: date,
+    accounts: list[str] | tuple[str, ...] | None = None,
+) -> PositionQuery:
     raw = str(text or "").strip()
     compact = re.sub(r"\s+", "", raw.lower())
     lower = raw.lower()
+    account_values = normalize_accounts(accounts, fallback=_DEFAULT_QUERY_ACCOUNTS)
     expiration = _parse_expiration(raw, compact=compact, today=today)
     return PositionQuery(
-        account=_extract_account(raw),
+        account=_extract_account(raw, accounts=account_values),
         status=_parse_status(compact, lower),
-        symbol=_extract_symbol(raw),
+        symbol=_extract_symbol(raw, accounts=account_values),
         option_type=_parse_option_type(compact, lower),
         side=_parse_side(compact, lower),
         strike=_parse_strike(raw),
@@ -174,9 +181,16 @@ def position_query_intent_arguments(query: PositionQuery) -> dict[str, Any]:
     return query.to_payload()
 
 
-def _extract_account(text: str) -> str | None:
-    match = _ACCOUNT_RE.search(text)
+def _extract_account(text: str, *, accounts: list[str]) -> str | None:
+    match = _account_pattern(accounts).search(text)
     return match.group(1).lower() if match else None
+
+
+def _account_pattern(accounts: list[str]) -> re.Pattern[str]:
+    return re.compile(
+        r"(?<![a-z0-9_-])(" + "|".join(re.escape(account) for account in accounts) + r")(?![a-z0-9_-])",
+        re.IGNORECASE,
+    )
 
 
 def _parse_status(compact: str, lower: str) -> PositionStatus:
@@ -284,13 +298,14 @@ def _last_day_of_month(year: int, month: int) -> date:
     return date(year, month + 1, 1) - timedelta(days=1)
 
 
-def _extract_symbol(text: str) -> str | None:
-    for match in _SYMBOL_RE.finditer(text):
+def _extract_symbol(text: str, *, accounts: list[str]) -> str | None:
+    text_without_accounts = _account_pattern(accounts).sub(" ", text)
+    for match in _SYMBOL_RE.finditer(text_without_accounts):
         raw = match.group(1).strip()
         if not raw or raw.lower() in _SYMBOL_STOP_WORDS or raw in _SYMBOL_STOP_WORDS:
             continue
-        before = text[match.start() - 1] if match.start() > 0 else ""
-        after = text[match.end()] if match.end() < len(text) else ""
+        before = text_without_accounts[match.start() - 1] if match.start() > 0 else ""
+        after = text_without_accounts[match.end()] if match.end() < len(text_without_accounts) else ""
         if raw.isdigit() and (before in {"-", "/", "."} or after in {"-", "/", "."}):
             continue
         if raw.isdigit() and len(raw) < 3:
@@ -305,10 +320,10 @@ def _normalize_account(value: Any) -> str | None:
     text = _optional_text(value)
     if text is None:
         return None
-    normalized = text.lower()
-    if normalized not in {"lx", "sy"}:
-        raise AgentToolError(code="INPUT_ERROR", message="position query account must be lx or sy")
-    return normalized
+    try:
+        return normalize_account_label(text)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=f"position query account is invalid: {exc}") from exc
 
 
 def _normalize_status(value: Any) -> PositionStatus:

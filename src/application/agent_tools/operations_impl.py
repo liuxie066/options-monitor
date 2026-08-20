@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from src.application.account_config import resolve_configured_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import assigned_stock_event_log, ledger_store_payload
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
@@ -626,6 +627,18 @@ def option_positions_read_tool(
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported option_positions_read action: {action}")
 
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    query_payload = _dict(payload.get("query"))
+    requested_account = _optional_text(
+        query_payload.get("account") if action == "list" else payload.get("account")
+    )
+    if action == "list" and requested_account is None:
+        requested_account = _optional_text(payload.get("account"))
+    try:
+        account = normalize_account(requested_account) if requested_account else None
+        if account:
+            resolve_configured_accounts(cfg, [account])
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     portfolio_raw = cfg.get("portfolio")
     portfolio_cfg = cast(dict[str, Any], portfolio_raw) if isinstance(portfolio_raw, dict) else {}
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
@@ -640,10 +653,10 @@ def option_positions_read_tool(
 
     data: dict[str, Any]
     if action == "list":
-        query = _dict(payload.get("query"))
+        query = query_payload
         expiration_query = _dict(query.get("expiration"))
         broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
-        account = _optional_text(query.get("account") if "account" in query else payload.get("account"))
+        account = account or _optional_text(payload.get("account"))
         status = _scalar_text(query.get("status") if "status" in query else payload.get("status"), default="open").lower()
         if status == "closed":
             status = "close"

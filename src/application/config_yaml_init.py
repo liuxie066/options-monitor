@@ -92,6 +92,11 @@ def _starter_yaml_payload(
                 code="INPUT_ERROR",
                 message=f"external holdings account is invalid: {exc}",
             ) from exc
+    if external_account == account_label:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="account_label and external_holdings_account must use different labels",
+        )
     if external_account:
         accounts[external_account] = {
             "type": "external_holdings",

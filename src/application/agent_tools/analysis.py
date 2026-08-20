@@ -982,26 +982,26 @@ def _analysis_catalog_tool(
     }
     query_patterns = [
         {
-            "question": "对比 lx 和 sy 的账户利润，有什么不同？",
+            "question": "按账户对比利润，有什么不同？",
             "sql": (
                 "select month, account, period_total_pnl_net_cny, period_total_pnl_net_status "
                 "from option_monthly_performance "
-                "where account in ('lx','sy') order by month, account"
+                "order by month, account"
             ),
         },
         {
-            "question": "对比 lx 和 sy 的现金变动",
+            "question": "按账户对比现金变动",
             "sql": (
                 "select month, account, component, amount_cny, amount_by_ccy, metric_status "
-                "from option_cash_components where account in ('lx','sy') order by month, account, component"
+                "from option_cash_components order by month, account, component"
             ),
         },
         {
-            "question": "对比 lx 和 sy 的开仓权利金活动",
+            "question": "按账户对比开仓权利金活动",
             "sql": (
                 "select month, account, component, amount_cny, amount_by_ccy, metric_status "
                 "from option_activity_components where component = 'premium_collected' "
-                "and account in ('lx','sy') order by month, account"
+                "order by month, account"
             ),
         },
         {

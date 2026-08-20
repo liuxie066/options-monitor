@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
 from domain.storage.json_io import atomic_write_json as write_json
 from domain.storage.repositories import run_repo, state_repo
-from src.application.account_config import accounts_from_config
+from src.application.account_config import accounts_from_config, resolve_configured_accounts
 from src.application.config_loader import load_config
 from src.application.positions.maintenance import (
     format_auto_close_summary,
@@ -214,12 +214,6 @@ def run_auto_close_expired(
     runlog: _RunLoggerLike | None = None,
 ) -> dict[str, Any]:
     base = base.resolve()
-    logger = runlog or RunLogger(base)
-    run_id = logger.run_id
-    run_dir = run_repo.ensure_run_dir(base, run_id)
-    run_repo.ensure_run_state_dir(base, run_id)
-    state_repo.write_last_run_dir_pointer(base, run_id)
-
     runtime_config: dict[str, Any]
     resolved_config_path: Path | None = None
     if config_path is not None:
@@ -238,10 +232,22 @@ def run_auto_close_expired(
         if isinstance(runtime_config["portfolio"], dict):
             runtime_config["portfolio"]["data_config"] = str(data_config)
 
-    account_ids = accounts_from_config({"accounts": accounts}, fallback=()) if accounts else accounts_from_config(runtime_config)
-    account_ids = [str(item).strip().lower() for item in account_ids if str(item).strip()]
+    try:
+        account_ids = (
+            resolve_configured_accounts(runtime_config, accounts or None)
+            if config_path is not None
+            else accounts_from_config({"accounts": accounts}, fallback=())
+        )
+    except ValueError as exc:
+        raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
     if not account_ids:
         raise SystemExit("--accounts is required when runtime config does not define accounts")
+
+    logger = runlog or RunLogger(base)
+    run_id = logger.run_id
+    run_dir = run_repo.ensure_run_dir(base, run_id)
+    run_repo.ensure_run_state_dir(base, run_id)
+    state_repo.write_last_run_dir_pointer(base, run_id)
 
     dry_run = not bool(apply_mode)
     account_results: list[dict[str, Any]] = []

@@ -11,8 +11,13 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
-from src.application.account_config import AccountRuntimePlan, build_account_runtime_plan
+from src.application.account_config import (
+    AccountRuntimePlan,
+    accounts_from_config,
+    build_account_runtime_plan,
+)
 from src.application.config_yaml import (
+    load_yaml_config_file,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
 )
@@ -433,10 +438,59 @@ def _runtime_configs_by_market(
         else:
             config_path = config_by_market.get(market)
             if config_path is None or not config_path.exists():
-                raise ValueError(f"strategy_lab_recorder config is missing for market: {market}")
+                raise ValueError(f"runtime config is missing for market: {market}")
             config = _read_json_config(config_path)
         configs[market] = config
     return configs
+
+
+def _resolve_service_account_scopes(
+    *,
+    repo_root: Path,
+    config_yaml_path: Path | None,
+    config_by_market: dict[str, Path],
+    market_values: list[str],
+    accounts: list[str] | tuple[str, ...] | None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    selected = normalize_accounts(accounts)
+    has_runtime_configs = all(config_by_market[market].exists() for market in market_values)
+    if config_yaml_path is not None:
+        if not config_yaml_path.exists():
+            return selected, {market: list(selected) for market in market_values}
+        raw_yaml = load_yaml_config_file(config_yaml_path)
+        raw_markets = raw_yaml.get("markets")
+        if not isinstance(raw_markets, dict) or any(market not in raw_markets for market in market_values):
+            return selected, {market: list(selected) for market in market_values}
+    if config_yaml_path is None and not has_runtime_configs:
+        return selected, {market: list(selected) for market in market_values}
+
+    configs = _runtime_configs_by_market(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+    )
+    configured = {
+        market: accounts_from_config(configs[market], fallback=())
+        for market in market_values
+    }
+
+    configured_union = list(dict.fromkeys(
+        account
+        for market in market_values
+        for account in configured[market]
+    ))
+    if accounts is None:
+        selected = configured_union
+
+    by_market = {
+        market: [account for account in selected if account in configured[market]]
+        for market in market_values
+    }
+    empty_markets = [market for market, values in by_market.items() if not values]
+    if empty_markets:
+        raise ValueError(f"selected account scope is empty for markets: {', '.join(empty_markets)}")
+    return selected, by_market
 
 
 def _configured_account_names(config: dict[str, Any]) -> set[str]:
@@ -1229,10 +1283,6 @@ def render_service_bundle(
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
-    if include_strategy_lab_top1 and (
-        "hk" not in market_values or "lx" not in account_values
-    ):
-        raise ValueError("Strategy Lab Top1 requires selected market hk and account lx")
     if include_strategy_lab_top1 and env_file_path is None:
         raise ValueError("Strategy Lab Top1 requires a non-empty service env file")
     recorder_source = normalize_strategy_lab_recorder_source(strategy_lab_recorder_source)
@@ -1253,6 +1303,17 @@ def render_service_bundle(
         if config_yaml is not None and str(config_yaml).strip()
         else None
     )
+    account_values, accounts_by_market = _resolve_service_account_scopes(
+        repo_root=repo,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+        accounts=accounts,
+    )
+    if include_strategy_lab_top1 and (
+        "hk" not in market_values or "lx" not in account_values
+    ):
+        raise ValueError("Strategy Lab Top1 requires selected market hk and account lx")
     config_authoring = (
         {
             "source": "yaml",
@@ -1392,6 +1453,7 @@ def render_service_bundle(
 
     if target_key == "systemd":
         for market in market_values:
+            market_accounts = accounts_by_market[market]
             service_name = f"options-monitor-tick-{market}.service"
             timer_name = f"options-monitor-tick-{market}.timer"
             tick_args = [
@@ -1403,7 +1465,7 @@ def render_service_bundle(
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
-                *account_values,
+                *market_accounts,
                 "--timeout",
                 str(int(timeout_seconds)),
                 "--lock-path",
@@ -1451,7 +1513,7 @@ def render_service_bundle(
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
-                *account_values,
+                *market_accounts,
                 "--apply",
                 "--yes",
                 "--quiet",
@@ -2188,6 +2250,7 @@ def render_service_bundle(
                 )
     else:
         for market in market_values:
+            market_accounts = accounts_by_market[market]
             label = f"com.options-monitor.tick-{market}"
             tick_args = [
                 om,
@@ -2198,7 +2261,7 @@ def render_service_bundle(
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
-                *account_values,
+                *market_accounts,
                 "--timeout",
                 str(int(timeout_seconds)),
                 "--lock-path",
@@ -2234,7 +2297,7 @@ def render_service_bundle(
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
-                *account_values,
+                *market_accounts,
                 "--apply",
                 "--yes",
                 "--quiet",
