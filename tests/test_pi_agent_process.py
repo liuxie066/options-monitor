@@ -606,6 +606,35 @@ rl.once("line", () => {
     )
 
 
+def _fake_protocol_child(records, *, final_after_decision=None) -> str:
+    scripted = [
+        {"type": type_, "payload": payload} for type_, payload in records
+    ]
+    return f"""
+import {{ createInterface }} from "node:readline";
+const rl = createInterface({{ input: process.stdin, crlfDelay: Infinity }});
+const rec = (type, seq, payload) =>
+  process.stdout.write(JSON.stringify({{
+    protocol: "om-pi-ipc.v1", type, request_id: "req_1", run_id: "run_1",
+    seq, payload,
+  }}) + "\\n");
+const scripted = {json.dumps(scripted)};
+const finalPayload = {json.dumps(final_after_decision)};
+let n = 0;
+rl.on("line", (line) => {{
+  n += 1;
+  if (n === 1) {{
+    rec("run.accepted", 1, {{ runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null }});
+    scripted.forEach((record, index) => rec(record.type, index + 2, record.payload));
+  }} else if (n === 2 && finalPayload !== null) {{
+    const committed = JSON.parse(line).type === "run.commit";
+    rec("run.final", scripted.length + 2, {{ ...finalPayload, committed }});
+    process.exit(0);
+  }}
+}});
+"""
+
+
 _HAPPY_CHILD = """
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -1193,6 +1222,214 @@ setInterval(() => {}, 1000);
     assert result["ok"] is False
     assert result["error"]["code"] == "PROTOCOL_ERROR"
     assert proposals == 0
+
+
+@pytest.mark.parametrize(
+    ("record_type", "record_payload"),
+    [
+        (
+            "run.proposed",
+            {
+                "status": "answered",
+                "text": "unearned",
+                "control_request": None,
+                "termination_reason": "stop",
+                "usage": {},
+            },
+        ),
+        (
+            "run.final",
+            {
+                "status": "answered",
+                "text": "unearned",
+                "control_request": None,
+                "termination_reason": "stop",
+                "usage": {},
+                "committed": False,
+            },
+        ),
+        (
+            "run.error",
+            {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "failed",
+                "retryable": False,
+            },
+        ),
+    ],
+)
+def test_result_record_while_tool_callback_is_outstanding_fails_protocol(
+    tmp_path, record_type, record_payload
+):
+    final = {
+        "status": "answered",
+        "text": "unearned",
+        "control_request": None,
+        "termination_reason": "stop",
+        "usage": {},
+    }
+    entry = _write_fake(
+        tmp_path,
+        _fake_protocol_child(
+            [
+                (
+                    "tool.call",
+                    {
+                        "call_id": "call_1",
+                        "tool_name": "runtime_status",
+                        "arguments": {},
+                    },
+                ),
+                (record_type, record_payload),
+            ],
+            final_after_decision=final if record_type == "run.proposed" else None,
+        ),
+    )
+    release = threading.Event()
+
+    def slow_tool(_payload):
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    try:
+        result = run_pi_agent(
+            _start_payload(tools=[_READ_TOOL]),
+            request_id="req_1",
+            run_id="run_1",
+            timeout_seconds=60,
+            on_tool_call=slow_tool,
+            on_proposed=lambda _proposal: "commit",
+            runtime_entry=entry,
+        )
+        assert result["ok"] is False
+        assert result["error"]["code"] == "PROTOCOL_ERROR"
+    finally:
+        release.set()
+        assert _wait_for_tool_slot(False)
+
+
+def test_tool_call_after_proposal_fails_protocol(tmp_path):
+    proposal = {
+        "status": "answered",
+        "text": "hello",
+        "control_request": None,
+        "termination_reason": "stop",
+        "usage": {},
+    }
+    entry = _write_fake(
+        tmp_path,
+        _fake_protocol_child(
+            [
+                ("run.proposed", proposal),
+                (
+                    "tool.call",
+                    {
+                        "call_id": "call_1",
+                        "tool_name": "runtime_status",
+                        "arguments": {},
+                    },
+                ),
+            ],
+            final_after_decision=proposal,
+        ),
+    )
+    calls = []
+
+    result = run_pi_agent(
+        _start_payload(tools=[_READ_TOOL]),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_tool_call=lambda payload: calls.append(payload) or {"ok": True},
+        on_proposed=lambda _proposal: "commit",
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("text", "different-session-answer"),
+        ("termination_reason", "length"),
+        ("usage", {"input": 999}),
+    ],
+)
+def test_final_answer_must_match_proposed_candidate(tmp_path, field, value):
+    proposal = {
+        "status": "answered",
+        "text": "hello",
+        "control_request": None,
+        "termination_reason": "stop",
+        "usage": {},
+    }
+    final = dict(proposal)
+    final[field] = value
+    entry = _write_fake(
+        tmp_path,
+        _fake_protocol_child(
+            [("run.proposed", proposal)], final_after_decision=final
+        ),
+    )
+
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_proposed=lambda _proposal: "commit",
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+
+
+@pytest.mark.parametrize("decision", ["commit", "discard"])
+def test_deadline_after_admission_does_not_send_cancel(
+    tmp_path, monkeypatch, decision
+):
+    proposal = {
+        "status": "answered",
+        "text": "hello",
+        "control_request": None,
+        "termination_reason": "stop",
+        "usage": {},
+    }
+    entry = _write_fake(
+        tmp_path,
+        _fake_protocol_child([("run.proposed", proposal)]),
+    )
+    outbound = []
+    original_encode = pi_process._encode_envelope
+
+    def capture_encode(type_, payload, identity, seq):
+        outbound.append(type_)
+        return original_encode(type_, payload, identity, seq)
+
+    monkeypatch.setattr(pi_process, "_encode_envelope", capture_encode)
+    payload = _start_payload()
+    payload["model"]["timeout_seconds"] = 1
+    payload["limits"]["timeout_seconds"] = 1
+    payload["limits"]["final_answer_reserve_seconds"] = 1
+
+    result = run_pi_agent(
+        payload,
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=1,
+        on_proposed=lambda _proposal: decision,
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PI_PROCESS_TIMEOUT"
+    assert f"run.{decision}" in outbound
+    assert "run.cancel" not in outbound
 
 
 def test_terminal_then_hang_preserves_validated_result(tmp_path):
