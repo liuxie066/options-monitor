@@ -1268,20 +1268,39 @@ function validatedControlTurnSuffix(
   startIndex: number
 ): AgentMessage[] {
   const suffix = messages.slice(startIndex);
-  if (
-    suffix.length !== 3 ||
-    suffix[0].role !== "user" ||
-    suffix[1].role !== "assistant" ||
-    suffix[2].role !== "toolResult"
-  ) {
+  if (suffix.length < 3 || suffix[0].role !== "user") {
     throw new Error("control turn suffix is incomplete");
   }
-  const calls = suffix[1].content.filter((item) => item.type === "toolCall");
+  let index = 1;
+  let finalCalls: AssistantMessage["content"] = [];
+  while (index < suffix.length) {
+    const assistant = suffix[index];
+    if (assistant.role !== "assistant") throw new Error("control turn group is incomplete");
+    index += 1;
+    const calls = assistant.content.filter((item) => item.type === "toolCall");
+    if (calls.length === 0) throw new Error("control turn group has no tool call");
+    for (const call of calls) {
+      const result = suffix[index];
+      if (
+        !result ||
+        result.role !== "toolResult" ||
+        result.toolCallId !== call.id ||
+        result.toolName !== call.name
+      ) {
+        throw new Error("control turn tool result is incomplete");
+      }
+      index += 1;
+    }
+    finalCalls = calls;
+  }
+  const finalResult = suffix[suffix.length - 1];
   if (
-    calls.length !== 1 ||
-    calls[0].name !== CONTROL_PREVIEW_TOOL ||
-    suffix[2].toolCallId !== calls[0].id ||
-    suffix[2].toolName !== CONTROL_PREVIEW_TOOL
+    finalCalls.length !== 1 ||
+    finalCalls[0].type !== "toolCall" ||
+    finalCalls[0].name !== CONTROL_PREVIEW_TOOL ||
+    finalResult.role !== "toolResult" ||
+    finalResult.toolCallId !== finalCalls[0].id ||
+    finalResult.toolName !== CONTROL_PREVIEW_TOOL
   ) {
     throw new Error("control turn suffix is invalid");
   }
