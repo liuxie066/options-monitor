@@ -53,6 +53,7 @@ def persist_assignment_events(
     source: str = "option_lifecycle_decision",
     manual_request_id: str | None = None,
     manual_request_intent_hash: str | None = None,
+    wheel_start_enabled: bool = False,
 ) -> list[LifecycleLedgerWrite]:
     return _persist_lifecycle_close_events(
         repo,
@@ -66,6 +67,7 @@ def persist_assignment_events(
         source=source,
         manual_request_id=manual_request_id,
         manual_request_intent_hash=manual_request_intent_hash,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 
@@ -170,6 +172,7 @@ def _persist_lifecycle_close_events(
     allocation_evidence_id: str | None = None,
     manual_request_id: str | None = None,
     manual_request_intent_hash: str | None = None,
+    wheel_start_enabled: bool = False,
 ) -> list[LifecycleLedgerWrite]:
     normalized_event_type = str(event_type or "").strip().lower()
     if normalized_event_type not in {"assignment", "exercise", "expire_close"}:
@@ -284,6 +287,7 @@ def _persist_lifecycle_close_events(
         [event for _match, _contracts, _preflight, event in prepared],
         lifecycle_case_update=case_update or None,
         lifecycle_allocations=allocation_rows,
+        wheel_start_enabled=wheel_start_enabled,
     )
     writes: list[LifecycleLedgerWrite] = []
     for (match, contracts, ledger_preflight, _event), result in zip(
@@ -346,6 +350,7 @@ def persist_assignment_event(
     evidence_ids: list[str] | tuple[str, ...] | None = None,
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
+    wheel_start_enabled: bool = False,
 ) -> LifecycleLedgerWrite:
     if len(close_target_resolution.matches) != 1:
         raise ValueError(f"expected one assignment target, got {len(close_target_resolution.matches)}")
@@ -358,6 +363,7 @@ def persist_assignment_event(
         evidence_ids=evidence_ids,
         stock_settlement=stock_settlement,
         source=source,
+        wheel_start_enabled=wheel_start_enabled,
     )
     if len(writes) != 1:
         raise ValueError(f"expected one assignment write, got {len(writes)}")

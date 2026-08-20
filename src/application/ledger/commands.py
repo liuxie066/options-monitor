@@ -1050,6 +1050,7 @@ def record_manual_assignment(
     stock_price: float,
     as_of_ms: int | None = None,
     request_id: str | None = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     request_id_value = str(request_id or "").strip()
     intent_hash = (
@@ -1120,6 +1121,7 @@ def record_manual_assignment(
         source="manual_assignment",
         manual_request_id=request_id_value or None,
         manual_request_intent_hash=intent_hash,
+        wheel_start_enabled=wheel_start_enabled,
     )
     operations = [write.operation.to_payload() for write in writes]
     return {
@@ -1369,6 +1371,7 @@ def record_lifecycle_assignment(
     case_id: str | None,
     evidence_ids: list[str] | tuple[str, ...] | None,
     stock_settlement: dict[str, Any] | None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     selector = LotCloseSelector.from_values(
         broker=broker,
@@ -1389,6 +1392,7 @@ def record_lifecycle_assignment(
         case_id=case_id,
         evidence_ids=evidence_ids or [],
         stock_settlement=dict(stock_settlement or {}),
+        wheel_start_enabled=wheel_start_enabled,
     )
     return {
         "close_target_resolution": close_target_resolution,
@@ -2058,6 +2062,7 @@ def record_lifecycle_allocation(
     notification_transition_type: str | None = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     return apply_lifecycle_allocation_atomically(
         repo,
@@ -2077,6 +2082,7 @@ def record_lifecycle_allocation(
         notification_transition_type=notification_transition_type,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
+        wheel_start_enabled=wheel_start_enabled,
     )
 
 

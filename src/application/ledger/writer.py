@@ -102,8 +102,6 @@ from src.application.cash_conversion import (
     load_cash_fx_payload,
     utc_now_ms,
 )
-
-
 _APPEND_SAFE_EVENT_TYPES = frozenset(
     {
         "open",
@@ -1933,8 +1931,14 @@ def apply_lifecycle_allocation_atomically(
     notification_transition_type: str | None = None,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> dict[str, Any]:
     """Adopt evidence, terminal events, projection and allocations as one fact."""
+
+    from src.application.wheel.trade_companions import (
+        append_wheel_trade_companions,
+        capture_wheel_trade_companion_context,
+    )
 
     case_id_value = str(case_id or "").strip()
     evidence_payload = dict(evidence or {})
@@ -2351,6 +2355,12 @@ def apply_lifecycle_allocation_atomically(
             if close_claim is not None
             else False
         )
+        wheel_context = capture_wheel_trade_companion_context(
+            sqlite_repo,
+            conn=conn,
+            events=event_rows,
+            wheel_start_enabled=wheel_start_enabled,
+        )
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
             [*correction_void_rows, *event_rows],
@@ -2360,6 +2370,14 @@ def apply_lifecycle_allocation_atomically(
         correction_count = len(correction_void_rows)
         correction_void_created = list(runtime.created_flags[:correction_count])
         terminal_event_created = list(runtime.created_flags[correction_count:])
+        wheel_companions = append_wheel_trade_companions(
+            sqlite_repo,
+            conn=conn,
+            events=event_rows,
+            created_flags=terminal_event_created,
+            context=wheel_context,
+            recorded_at_ms=utc_now_ms(),
+        )
         allocation_created = [
             sqlite_repo.insert_trade_lifecycle_allocation(item, conn=conn)
             for item in allocation_rows
@@ -2617,6 +2635,7 @@ def apply_lifecycle_allocation_atomically(
             "close_source_claim_created": close_claim_created,
             "terminal_event_ids": [item.event_id for item in event_rows],
             "terminal_events_created": terminal_event_created,
+            "wheel_event_ids_by_trade_event": wheel_companions,
             "correction_void_event_ids": [
                 item.event_id for item in correction_void_rows
             ],
@@ -4978,8 +4997,14 @@ def persist_trade_event_objects_atomically(
     *,
     lifecycle_case_update: dict[str, Any] | None = None,
     lifecycle_allocations: Sequence[dict[str, Any]] | None = None,
+    wheel_start_enabled: bool = False,
 ) -> list[LedgerWriteResult]:
     """Persist explicitly targeted canonical events in one transaction."""
+
+    from src.application.wheel.trade_companions import (
+        append_wheel_trade_companions,
+        capture_wheel_trade_companion_context,
+    )
 
     events = list(events)
     case_update = dict(lifecycle_case_update or {})
@@ -5023,6 +5048,12 @@ def persist_trade_event_objects_atomically(
             )
             for event in storage_events
         ]
+        wheel_context = capture_wheel_trade_companion_context(
+            sqlite_repo,
+            conn=conn,
+            events=storage_events,
+            wheel_start_enabled=wheel_start_enabled,
+        )
         prior_case_fact: dict[str, Any] | None = None
         if case_update:
             case_id_value = str(case_update.get("case_id") or "").strip()
@@ -5054,6 +5085,14 @@ def persist_trade_event_objects_atomically(
             ),
         )
         created_flags = runtime.created_flags
+        wheel_companions = append_wheel_trade_companions(
+            sqlite_repo,
+            conn=conn,
+            events=storage_events,
+            created_flags=created_flags,
+            context=wheel_context,
+            recorded_at_ms=observed_at_ms,
+        )
         notification_intent = _normal_close_notification_intent(
             storage_events
         )
@@ -5173,6 +5212,7 @@ def persist_trade_event_objects_atomically(
                     "position_lot_count": int(runtime.position_lot_count),
                     "decision_projection": decision_projection,
                     **diagnostics,
+                    "wheel_event_id": wheel_companions.get(event.event_id),
                     **(
                         {
                             "notification_outbox_id": notification_intent[
