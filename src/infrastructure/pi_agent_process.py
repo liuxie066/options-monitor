@@ -496,7 +496,7 @@ def _runtime_command(
         entry = runtime_entry
     if not entry.is_file():
         raise LookupError("runtime entry is missing")
-    return [node, str(entry)], entry
+    return [node, "--no-warnings", str(entry)], entry
 
 
 def _encode_envelope(
