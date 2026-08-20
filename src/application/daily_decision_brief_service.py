@@ -57,6 +57,10 @@ from src.application.cc_lp_candidate_snapshot import (
     CcLpCandidateSnapshotError,
     validate_cc_lp_candidate_snapshot,
 )
+from src.application.wheel.candidate_snapshot import (
+    WheelCandidateSnapshotError,
+    validate_wheel_candidate_snapshot,
+)
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     CandidateSnapshotManifestError,
@@ -152,6 +156,7 @@ def assemble_daily_decision_brief(
         "opening": set(),
         "sp_lc": set(),
         "cc_lp": set(),
+        "wheel": set(),
     }
     if candidate_bundle is not None:
         manifest = dict(candidate_bundle["manifest"])
@@ -221,12 +226,14 @@ def assemble_daily_decision_brief(
                     "opening": set(),
                     "sp_lc": set(),
                     "cc_lp": set(),
+                    "wheel": set(),
                 }
                 candidate_bundle = None
 
     opening_applicable = bool(expected_owner_modes["opening"])
     sp_lc_applicable = bool(expected_owner_modes["sp_lc"])
     cc_lp_applicable = bool(expected_owner_modes["cc_lp"])
+    wheel_applicable = bool(expected_owner_modes["wheel"])
 
     (
         put_rows,
@@ -273,6 +280,21 @@ def assemble_daily_decision_brief(
         snapshot=bundle_owners.get("cc_lp"),
         unavailable_reason=candidate_bundle_unavailable_reason,
         not_applicable=(candidate_bundle is not None and not cc_lp_applicable),
+    )
+    wheel_batches, wheel_rows, wheel_available = _load_wheel_snapshot_family(
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        snapshot=bundle_owners.get("wheel"),
+        unavailable_reason=candidate_bundle_unavailable_reason,
+        not_applicable=(candidate_bundle is not None and not wheel_applicable),
+    )
+    call_rows = _apply_shared_covered_call_allocations(
+        call_rows,
+        snapshot=bundle_owners.get("wheel") if wheel_applicable else None,
+        account=account_norm,
     )
     close_rows, close_available = _load_close_advice(
         path=run_account_dir / "close_advice.csv",
@@ -353,6 +375,7 @@ def assemble_daily_decision_brief(
     put_rows = _dedupe_rows(put_rows, family="sell_put")
     call_rows = _dedupe_rows(call_rows, family="covered_call")
     combo_rows = _dedupe_rows(combo_rows, family="combo_yield")
+    wheel_rows = _dedupe_rows(wheel_rows, family="wheel")
     close_rows = _dedupe_close_rows(close_rows)
     selected_close_rows = select_close_advice_notification_rows(
         close_rows,
@@ -374,17 +397,22 @@ def assemble_daily_decision_brief(
         call_rows, call_available = [], False
     if "combo_yield" in failed_families:
         combo_rows, combo_available = [], False
+    if "wheel" in failed_families:
+        wheel_rows, wheel_available = [], False
 
     selected_puts = put_rows[:max_candidates]
     selected_calls = call_rows[:max_candidates]
     ranked_combos = combo_rows
     selected_combos = ranked_combos[:max_candidates]
+    selected_wheel = wheel_rows[:max_candidates]
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
         "sell_put": [],
         "covered_call": [],
         "combo_yield": [],
     }
+    if wheel_applicable or wheel_batches:
+        candidate_payloads["wheel"] = []
     positions: list[dict[str, Any]] = []
     capacity: dict[str, Any] = {}
     required_context_missing = 0
@@ -454,7 +482,7 @@ def assemble_daily_decision_brief(
                 event_risk=event_risk,
             )
         )
-        if cap is not None:
+        if cap is not None and int(cap.get("contracts_available") or 0) >= 1:
             actions.append(
                 _candidate_action(
                     row,
@@ -493,6 +521,27 @@ def assemble_daily_decision_brief(
                 event_risk=event_risk,
             )
         )
+
+    for rank, row in enumerate(selected_wheel, start=1):
+        cap = _wheel_capacity(row)
+        candidate_payloads.setdefault("wheel", []).append(
+            _candidate_view(
+                row,
+                family="wheel",
+                rank=rank,
+                capacity=cap,
+            )
+        )
+        if cap["contracts_available"] >= 1:
+            actions.append(
+                _candidate_action(
+                    row,
+                    family="wheel",
+                    account=account_norm,
+                    rank=rank,
+                    capacity=cap,
+                )
+            )
 
     for row in close_rows:
         notification_eligible = id(row) in selected_close_row_ids
@@ -570,7 +619,13 @@ def assemble_daily_decision_brief(
     result_view = _account_result_view(account_result)
     pipeline_failed = not bool(pipeline_succeeded)
     all_decision_sources_unavailable = not any(
-        (put_available, call_available, combo_available, close_available)
+        (
+            put_available,
+            call_available,
+            combo_available,
+            wheel_available,
+            close_available,
+        )
     )
     all_required_context_unavailable = (
         required_context_rows > 0
@@ -590,7 +645,7 @@ def assemble_daily_decision_brief(
         indexed_expected_families and not indexed_completed_families
     )
     if indexed_candidate_sources_failed or (
-        strategy_failures and not (put_rows or call_rows or combo_rows)
+        strategy_failures and not (put_rows or call_rows or combo_rows or wheel_rows)
     ):
         blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
@@ -625,6 +680,7 @@ def assemble_daily_decision_brief(
             ranked_puts=put_rows,
             ranked_calls=call_rows,
             combo_rows=combo_rows,
+            wheel_rows=wheel_rows,
             data_gaps=data_gaps,
         )
         if actionability == "live_actionable"
@@ -643,8 +699,7 @@ def assemble_daily_decision_brief(
         data_gaps=deduped_data_gaps,
     )
 
-    return normalize_daily_decision_brief(
-        {
+    brief_payload = {
             "market": market_norm,
             "market_trading_date": market_date,
             "account": account_norm,
@@ -667,7 +722,9 @@ def assemble_daily_decision_brief(
             "data_gaps": deduped_data_gaps,
             "source_artifacts": _dedupe_source_artifacts(source_artifacts),
         }
-    )
+    if wheel_applicable or wheel_batches:
+        brief_payload["wheel_batches"] = wheel_batches
+    return normalize_daily_decision_brief(brief_payload)
 
 
 def assemble_daily_decision_briefs(
@@ -1000,6 +1057,149 @@ def _load_cc_lp_snapshot_family(
         }
     )
     return market_rows, True
+
+
+def _load_wheel_snapshot_family(
+    *,
+    run_id: str,
+    account: str,
+    market: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+    snapshot: Mapping[str, Any] | None = None,
+    unavailable_reason: str | None = None,
+    not_applicable: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    if not_applicable:
+        return [], [], False
+    try:
+        if snapshot is None:
+            raise WheelCandidateSnapshotError(
+                unavailable_reason or "Wheel snapshot is not manifest-bound"
+            )
+        validate_wheel_candidate_snapshot(
+            snapshot,
+            expected_run_id=run_id,
+            expected_account=account,
+        )
+    except WheelCandidateSnapshotError as exc:
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "wheel",
+                "reason": "wheel_snapshot_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return [], [], False
+    snapshot_market = str(snapshot.get("market") or "").strip().upper()
+    if snapshot_market and snapshot_market != market:
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "strategy_family": "wheel",
+                "reason": "wheel_snapshot_market_mismatch",
+            }
+        )
+        return [], [], False
+
+    batch_views: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for source_row, raw in enumerate(snapshot.get("batches") or [], start=1):
+        batch = _json_safe(dict(raw))
+        symbol = canonical_symbol(batch.get("symbol"))
+        if not symbol or symbol_market(symbol) != market:
+            continue
+        final = batch.get("final_candidate")
+        final = dict(final) if isinstance(final, Mapping) else None
+        stock_lot_id = _text(batch.get("stock_lot_id"))
+        view = {
+            "position_lot_id": stock_lot_id,
+            "symbol": symbol,
+            "shares_remaining": int(batch.get("shares_remaining") or 0),
+            "status": _text(batch.get("phase") or batch.get("candidate_status")),
+            "reason_code": _text(batch.get("reason_code")) or None,
+            "recommended_contracts": int(batch.get("granted_contracts") or 0),
+            "expiration": _text(
+                (final or {}).get("expiration")
+                or (final or {}).get("expiration_ymd")
+            ),
+            "strike": (final or {}).get("strike"),
+            "candidate_call_net_premium": (final or {}).get(
+                "candidate_call_net_premium"
+            ),
+            "projected_lifecycle_net_pnl_if_called": (final or {}).get(
+                "projected_lifecycle_net_pnl_if_called"
+            ),
+            "projected_lifecycle_pnl_scope": (final or {}).get(
+                "projected_lifecycle_pnl_scope"
+            ),
+        }
+        batch_views.append(view)
+        if final is None:
+            continue
+        candidates.append(
+            {
+                **final,
+                "symbol": symbol,
+                "position_lot_id": stock_lot_id,
+                "stock_lot_id": stock_lot_id,
+                "expiration": _text(
+                    final.get("expiration") or final.get("expiration_ymd")
+                ),
+                "granted_contracts": int(batch.get("granted_contracts") or 0),
+                "candidate_snapshot_hash": snapshot.get("snapshot_hash"),
+                "_source_path": "state/wheel_candidate_snapshot.json",
+                "_source_row": source_row,
+            }
+        )
+    source_artifacts.append(
+        {
+            "kind": "wheel_candidate_snapshot",
+            "path": "state/wheel_candidate_snapshot.json",
+            "row_count": len(batch_views),
+            "opening_status": snapshot.get("opening_status"),
+            "content_sha256": snapshot.get("content_sha256"),
+        }
+    )
+    return batch_views, candidates, True
+
+
+def _apply_shared_covered_call_allocations(
+    rows: list[dict[str, Any]],
+    *,
+    snapshot: Mapping[str, Any] | None,
+    account: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, Mapping):
+        return rows
+    grants: dict[str, list[int]] = {}
+    for allocation in snapshot.get("capacity_allocations") or []:
+        if not isinstance(allocation, Mapping):
+            continue
+        if str(allocation.get("strategy_family") or "") != "covered_call":
+            continue
+        if str(allocation.get("account") or "").strip().lower() != account:
+            continue
+        symbol = canonical_symbol(allocation.get("symbol"))
+        if symbol:
+            grants.setdefault(symbol, []).append(
+                max(0, int(allocation.get("granted_contracts") or 0))
+            )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = canonical_symbol(row.get("symbol"))
+        if symbol in grants and len(grants[symbol]) == 1:
+            out.append(
+                {
+                    **row,
+                    "call_covered_contracts_available": grants[symbol][0],
+                    "shared_coverage_allocation": "wheel_candidate_snapshot",
+                }
+            )
+        else:
+            out.append(row)
+    return out
 
 
 def _load_close_advice(
@@ -1394,6 +1594,7 @@ def _build_candidate_index(
     ranked_puts: list[dict[str, Any]],
     ranked_calls: list[dict[str, Any]],
     combo_rows: list[dict[str, Any]],
+    wheel_rows: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
@@ -1401,6 +1602,7 @@ def _build_candidate_index(
         ("sell_put", ranked_puts, _sell_put_capacity),
         ("covered_call", ranked_calls, _covered_call_capacity),
         ("combo_yield", combo_rows, _sell_put_capacity),
+        ("wheel", wheel_rows, _wheel_capacity),
     )
     for family, rows, capacity_fn in families:
         for rank, row in enumerate(rows, start=1):
@@ -1416,6 +1618,7 @@ def _build_candidate_index(
                     market=market,
                     symbol=row.get("symbol"),
                     strategy_family=family,
+                    position_lot_id=row.get("position_lot_id"),
                 )
             except ValueError:
                 data_gaps.append(_row_gap(row, family, "candidate_identity_invalid"))
@@ -1470,6 +1673,7 @@ def _candidate_contract_is_complete(row: Mapping[str, Any], *, family: str) -> b
             _text(row.get("contract_symbol") or row.get("code")),
             _text(row.get("expiration") or row.get("expiration_ymd")),
             _number(row.get("strike")),
+            _text(row.get("position_lot_id")) if family == "wheel" else True,
         )
     )
 
@@ -1522,6 +1726,22 @@ def _covered_call_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
         "accepted": contracts >= 1,
         "reason": result.reason if explicit is None else ("share_capacity_supported" if contracts >= 1 else "share_capacity_insufficient"),
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
+    }
+
+
+def _wheel_capacity(row: Mapping[str, Any]) -> dict[str, Any]:
+    contracts = max(0, int(row.get("granted_contracts") or 0))
+    return {
+        "contracts_available": contracts,
+        "accepted": contracts >= 1,
+        "reason": (
+            "share_capacity_supported"
+            if contracts >= 1
+            else "share_capacity_insufficient"
+        ),
+        "contract_symbol": _text(
+            row.get("contract_symbol") or row.get("code")
+        ).upper(),
     }
 
 
@@ -1580,7 +1800,14 @@ def _candidate_action(
         "expiration": _text(row.get("expiration") or row.get("expiration_ymd")),
         "strike": row.get("strike"),
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
-        "title": "Sell Put 候选" if family == "sell_put" else "Covered Call 候选",
+        "position_lot_id": _text(row.get("position_lot_id")),
+        "title": (
+            "Sell Put 候选"
+            if family == "sell_put"
+            else "Wheel 候选"
+            if family == "wheel"
+            else "Covered Call 候选"
+        ),
         "reason": _text(row.get("reason") or (capacity or {}).get("reason") or "已通过现有候选过滤"),
         "metrics": {**_candidate_metrics(row, rank=rank), "capacity": dict(capacity or {})},
         "event_risk": dict(event_risk or {}),
@@ -1638,6 +1865,7 @@ def _candidate_view(
         "symbol": _text(row.get("symbol")).upper(),
         "option_type": "put" if family == "sell_put" else "call",
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
+        "position_lot_id": _text(row.get("position_lot_id")),
         "expiration": _text(row.get("expiration") or row.get("expiration_ymd")),
         "strike": _number(row.get("strike")),
         "priority": _priority_from_row(row, default="P1"),
@@ -1774,6 +2002,10 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
         "net_credit_retention",
         "call_cost_to_put_credit",
         "combo_spread_ratio",
+        "candidate_call_net_premium",
+        "projected_lifecycle_net_pnl_if_called",
+        "projected_lifecycle_return_if_called",
+        "projected_lifecycle_pnl_scope",
     )
     out = {"rank": rank}
     out.update({key: _json_safe(row.get(key)) for key in keys if row.get(key) is not None})
@@ -1819,6 +2051,8 @@ def _dedupe_rows(rows: list[dict[str, Any]], *, family: str) -> list[dict[str, A
                 _text(row.get("put_contract_symbol")).upper(),
                 _text(row.get("call_contract_symbol")).upper(),
             )
+        elif family == "wheel":
+            identity = (_text(row.get("position_lot_id")),)
         else:
             identity = (
                 _text(row.get("symbol")).upper(),
@@ -2354,8 +2588,11 @@ def _strategy_summary(
     active = sum(1 for item in actions if item.get("state") == "active")
     summary = (
         f"有效行动 {active} 条；候选证据：Sell Put {len(candidates['sell_put'])}，"
-        f"Covered Call {len(candidates['covered_call'])}，Combo Yield {len(candidates['combo_yield'])}"
+        f"Covered Call {len(candidates['covered_call'])}，"
+        f"Combo Yield {len(candidates['combo_yield'])}"
     )
+    if "wheel" in candidates:
+        summary += f"，Wheel {len(candidates['wheel'])}"
     if data_gaps:
         summary += f"；数据缺口 {len(data_gaps)} 条"
     return summary + "。"

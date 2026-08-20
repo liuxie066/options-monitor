@@ -381,6 +381,102 @@ def compute_short_put_cash_secured(
     return max(0.0, float(cash_secured))
 
 
+def allocate_opening_share_capacity(
+    coverage_facts: list[dict[str, Any]],
+    claims: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Allocate one shared stock pool to Wheel first, then ordinary CC."""
+
+    facts: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in coverage_facts:
+        account = str(raw.get("account") or "").strip().lower()
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        if not account or not symbol:
+            continue
+        key = (account, symbol)
+        facts[key] = dict(raw) if key not in facts else {"status": "unavailable"}
+
+    indexed = list(enumerate(claims))
+    indexed.sort(
+        key=lambda item: (
+            0 if str(item[1].get("strategy_family") or "").lower() == "wheel" else 1,
+            int(item[1].get("assignment_at_ms") or 0),
+            str(item[1].get("stock_lot_id") or ""),
+            item[0],
+        )
+    )
+    remaining: dict[tuple[str, str], int] = {}
+    out_by_index: dict[int, dict[str, Any]] = {}
+    for index, raw in indexed:
+        row = dict(raw)
+        account = str(row.get("account") or "").strip().lower()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        key = (account, symbol)
+        fact = facts.get(key)
+        try:
+            multiplier = int(row.get("multiplier"))
+            requested = int(row.get("requested_contracts"))
+        except (TypeError, ValueError):
+            multiplier = requested = 0
+        result = {
+            **row,
+            "requested_contracts": max(0, requested),
+            "requested_shares": max(0, requested * multiplier),
+            "granted_contracts": 0,
+            "granted_shares": 0,
+            "capacity_before": None,
+            "capacity_after": None,
+            "allocation_status": "blocked",
+            "allocation_reason": "share_capacity_fact_unavailable",
+        }
+        if (
+            not isinstance(fact, Mapping)
+            or str(fact.get("status") or "").lower() != "available"
+        ):
+            out_by_index[index] = result
+            continue
+        if multiplier <= 0 or requested <= 0:
+            result["allocation_reason"] = "share_capacity_claim_invalid"
+            out_by_index[index] = result
+            continue
+        if key not in remaining:
+            try:
+                eligible = int(fact.get("shares_eligible"))
+                occupied = int(fact.get("shares_locked"))
+                reserved = int(fact.get("shares_reserved"))
+            except (TypeError, ValueError):
+                result["allocation_reason"] = "share_capacity_fact_invalid"
+                out_by_index[index] = result
+                continue
+            if min(eligible, occupied, reserved) < 0 or occupied + reserved > eligible:
+                result["allocation_reason"] = "share_capacity_oversubscribed"
+                result["risk_level"] = "high"
+                out_by_index[index] = result
+                remaining[key] = 0
+                continue
+            remaining[key] = eligible - occupied - reserved
+        before = remaining[key]
+        granted = min(requested, before // multiplier)
+        after = before - granted * multiplier
+        remaining[key] = after
+        result.update(
+            granted_contracts=granted,
+            granted_shares=granted * multiplier,
+            capacity_before=before,
+            capacity_after=after,
+            allocation_status=("allocated" if granted else "blocked"),
+            allocation_reason=(
+                "share_capacity_supported"
+                if granted == requested
+                else "share_capacity_partially_supported"
+                if granted
+                else "share_capacity_insufficient"
+            ),
+        )
+        out_by_index[index] = result
+    return [out_by_index[index] for index in range(len(claims))]
+
+
 def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Greedily allocate existing ranked candidates without changing their rank."""
 

@@ -21,7 +21,9 @@ DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION = "daily_decision_brief_diff.v1"
 ACTIONABILITIES = frozenset({"live_actionable", "planning_only", "blocked"})
 ACTION_PRIORITIES = ("P0", "P1", "P2")
 ACTION_STATES = frozenset({"active", "invalidated", "blocked", "observe"})
-_CANDIDATE_STRATEGY_FAMILIES = frozenset({"sell_put", "covered_call", "combo_yield"})
+_CANDIDATE_STRATEGY_FAMILIES = frozenset(
+    {"sell_put", "covered_call", "combo_yield", "wheel"}
+)
 _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "rank",
     "symbol",
@@ -31,6 +33,7 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "expiration",
     "strike",
     "strategy_group_id",
+    "position_lot_id",
     "candidate_pair_id",
     "structure_mode",
     "put_contract_symbol",
@@ -90,6 +93,7 @@ def build_daily_brief_candidate_identity(
     market: Any,
     symbol: Any,
     strategy_family: Any,
+    position_lot_id: Any = None,
 ) -> str:
     account_norm = _lower(account)
     market_norm = _upper(market)
@@ -105,7 +109,13 @@ def build_daily_brief_candidate_identity(
         raise ValueError(f"candidate symbol does not belong to market {market_norm}: {symbol!r}")
     if family_norm not in _CANDIDATE_STRATEGY_FAMILIES:
         raise ValueError(f"unsupported candidate strategy family: {strategy_family!r}")
-    return f"candidate:v1:{account_norm}:{market_norm}:{symbol_norm}:{family_norm}"
+    identity = f"candidate:v1:{account_norm}:{market_norm}:{symbol_norm}:{family_norm}"
+    if family_norm != "wheel":
+        return identity
+    lot_id = str(position_lot_id or "").strip()
+    if not lot_id or ":" in lot_id:
+        raise ValueError("valid position_lot_id is required for Wheel candidate identity")
+    return f"{identity}:{lot_id}"
 
 
 def decide_daily_brief_notification(
@@ -250,6 +260,10 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
         }
     )
+    if "wheel_batches" in src:
+        out["wheel_batches"] = _mapping_list(
+            src.get("wheel_batches"), field="wheel_batches"
+        )
     return out
 
 
@@ -403,6 +417,7 @@ def _normalize_candidate_index(
             market=market,
             symbol=symbol,
             strategy_family=family,
+            position_lot_id=representative.get("position_lot_id"),
         )
         supplied_identity = str(item.get("identity") or "").strip()
         if supplied_identity and supplied_identity != identity:
@@ -413,7 +428,9 @@ def _normalize_candidate_index(
         contract_count = _nonnegative_int(item.get("contract_count"), field="contract_count")
         if contract_count < 1:
             raise ValueError("candidate_index contract_count must be positive")
-        family_norm = identity.rsplit(":", 1)[-1]
+        family_norm = canonical_strategy_id(str(family or ""))
+        if family_norm == "sell_call":
+            family_norm = "covered_call"
         representative_view = _candidate_representative_view(
             representative,
             symbol=symbol,
@@ -479,12 +496,15 @@ def _derive_candidate_index_from_actions(
                 market=market,
                 symbol=action.get("symbol"),
                 strategy_family=action.get("strategy_family"),
+                position_lot_id=action.get("position_lot_id"),
             )
         except ValueError:
             continue
         item = grouped.get(identity)
         if item is None:
-            family = identity.rsplit(":", 1)[-1]
+            family = canonical_strategy_id(str(action.get("strategy_family") or ""))
+            if family == "sell_call":
+                family = "covered_call"
             symbol = canonical_symbol(action.get("symbol"))
             grouped[identity] = {
                 "identity": identity,

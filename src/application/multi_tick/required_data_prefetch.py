@@ -326,6 +326,7 @@ def _build_single_prefetch_fetch_plan(
     limit_exp = 0
     sell_put_cfg = _as_dict(symbol_cfg.get("sell_put"))
     sell_call_cfg = _as_dict(symbol_cfg.get("sell_call"))
+    wheel_call_cfg = _as_dict(symbol_cfg.get("_wheel_call"))
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
     want_put = bool(sell_put_cfg.get("enabled", False))
@@ -349,6 +350,7 @@ def _build_single_prefetch_fetch_plan(
         want_call=want_call,
         sell_put_cfg=sell_put_cfg,
         sell_call_cfg=sell_call_cfg,
+        wheel_call_cfg=wheel_call_cfg,
         yield_enhancement_cfg=yield_enhancement_cfg,
         position_requirements=position_requirements,
         symbol_cfg=symbol_cfg,

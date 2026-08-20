@@ -6,10 +6,7 @@ from domain.domain.wheel import (
     project_wheel_call_linkage_candidates,
     project_wheel_lifecycles,
 )
-from src.application.performance.adapters import (
-    ledger_performance_inputs_from_rows,
-    load_assigned_stock_projection,
-)
+from src.application.ledger.api import project_assigned_stock_lifecycle_from_rows
 
 
 WHEEL_READ_MODEL_SCHEMA = "wheel_read_model.v1"
@@ -83,8 +80,8 @@ def build_assigned_stock_projection_from_rows(
     account: str,
     as_of_ms: int,
 ) -> dict[str, Any]:
-    return load_assigned_stock_projection(
-        ledger_performance_inputs_from_rows(rows),
+    return project_assigned_stock_lifecycle_from_rows(
+        rows,
         as_of_ms=int(as_of_ms),
         quote_snapshots=[],
         account=str(account or "").strip().lower(),

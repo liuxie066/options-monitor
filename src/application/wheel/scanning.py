@@ -266,10 +266,10 @@ def run_wheel_call_scan(
             scopes.append({**base_scope, "status": "failed", "reason_code": "wheel_integrity_conflict"})
             continue
         if not enabled:
-            scopes.append({**base_scope, "status": "completed", "reason_code": "wheel_disabled"})
+            scopes.append({**base_scope, "status": "not_applicable", "reason_code": "wheel_disabled"})
             continue
         if raw_batch.get("phase") != "ready":
-            scopes.append({**base_scope, "status": "completed", "reason_code": f"wheel_{raw_batch.get('phase') or 'not_ready'}"})
+            scopes.append({**base_scope, "status": "not_applicable", "reason_code": f"wheel_{raw_batch.get('phase') or 'not_ready'}"})
             continue
         if symbol in unavailable_symbols:
             scopes.append({**base_scope, "status": "unavailable", "reason_code": unavailable_symbols[symbol]})

@@ -44,6 +44,7 @@ from src.application.prepared_option_positions_context import (
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
     merge_close_advice_requirements_into_prefetch_config,
+    merge_wheel_requirements_into_prefetch_config,
 )
 from src.application.close_advice_required_data import (
     CloseAdviceRequiredDataPlanError,
@@ -395,6 +396,9 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     snapshot_manifest_sha256: str | None = None
     close_advice_required_data_plan_path: Path | None = None
     prepared_context_metrics: list[dict[str, Any]] = []
+    wheel_scope_by_account: dict[str, bool] = {
+        account: False for account in account_ids
+    }
 
     if scanning_accounts and not request.prefetch_done:
         run_started_at_utc = datetime.now(timezone.utc)
@@ -642,10 +646,42 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 if account not in invalid_prepared_option_accounts
             }
 
+        for account in list(scanning_accounts):
+            model = prepared_options.wheel_read_models_by_account.get(account) or {}
+            wheel_scope_by_account[account] = any(
+                isinstance(batch, Mapping)
+                and str(batch.get("lifecycle_status") or "") == "active"
+                for batch in model.get("batches") or []
+            )
+        scanning_accounts = [
+            account
+            for account in scanning_accounts
+            if resolve_watchlist_config(scanning_configs[account])
+            or wheel_scope_by_account[account]
+        ]
+        scanning_configs = {
+            account: scanning_configs[account] for account in scanning_accounts
+        }
+
         union_cfg = build_cross_account_prefetch_config(
             base_config=request.base_cfg,
             account_configs=scanning_configs,
             prepared_portfolio_contexts=prepared_contexts,
+        )
+        union_cfg = merge_wheel_requirements_into_prefetch_config(
+            base_config=request.base_cfg,
+            candidate_config=union_cfg,
+            account_configs=scanning_configs,
+            wheel_read_models=prepared_options.wheel_read_models_by_account,
+            allowed_symbols=(
+                {
+                    item.strip()
+                    for item in str(request.symbols_arg).split(",")
+                    if item.strip()
+                }
+                if request.symbols_arg
+                else None
+            ),
         )
         try:
             if scanning_configs:
@@ -826,7 +862,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 prepared_option_digest = sha256_bytes(
                     prepared_option.read_bytes()
                 )
-                load_prepared_option_positions_context(
+                recovered_option_context = load_prepared_option_positions_context(
                     manifest_path=prepared_option,
                     expected_base=request.base,
                     expected_run_id=request.run_id,
@@ -836,6 +872,15 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     ),
                     expected_manifest_sha256=prepared_option_digest,
                     expected_runtime_config=config,
+                )
+                model = recovered_option_context.get("wheel_read_model")
+                wheel_scope_by_account[account_key] = bool(
+                    isinstance(model, Mapping)
+                    and any(
+                        isinstance(batch, Mapping)
+                        and str(batch.get("lifecycle_status") or "") == "active"
+                        for batch in model.get("batches") or []
+                    )
                 )
             except PreparedPortfolioContextError as exc:
                 account_config_errors[account_key] = AccountRunConfigError(
@@ -964,6 +1009,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         prepared_option_manifest_sha256_by_account.get(acct)
                     ),
                     account_config_generation_frozen=True,
+                    has_wheel_scope=wheel_scope_by_account.get(acct, False),
                     required_data_snapshot_status=snapshot_status,
                     required_data_snapshot_sha256=snapshot_manifest_sha256,
                     close_advice_required_data_plan=(
@@ -1340,7 +1386,9 @@ def _account_pipeline_is_required(
     gate = decide_account_scan_gate(
         should_run=should_run,
         has_symbols=(
-            (not request.markets_to_run) or bool(resolve_watchlist_config(cfg))
+            (not request.markets_to_run)
+            or bool(resolve_watchlist_config(cfg))
+            or isinstance(cfg.get("wheel"), Mapping)
         ),
         reason=reason,
     )

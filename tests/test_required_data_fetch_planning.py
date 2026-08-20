@@ -333,7 +333,96 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert call_plan.strike_window.max_strike > 505.0
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 606.00
     assert "exact spot-based 20% cap" in call_plan.planning_reason
+
+
+def test_wheel_call_fetch_uses_spot_floor_unbounded_max_and_rv(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2026-05-29", "2026-06-12", "2026-06-26"],
+    )
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=0,
+        want_put=False,
+        want_call=False,
+        wheel_call_cfg={
+            "enabled": True,
+            "min_dte": 30,
+            "max_dte": 45,
+            "requires_realized_volatility": True,
+        },
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert len(plan.side_plans) == 1
+    assert plan.side_plans[0].min_dte == 30
+    assert plan.side_plans[0].max_dte == 45
+    assert plan.side_plans[0].strike_window.min_strike == 100.0
+    assert plan.side_plans[0].strike_window.max_strike is None
+    assert plan.require_realized_volatility is True
     assert plan.merged_specs[0].include_realized_volatility is True
+
+
+def test_wheel_prefetch_demand_is_added_only_for_ready_active_batch() -> None:
+    from src.application.required_data_prefetch_planning import (
+        merge_wheel_requirements_into_prefetch_config,
+    )
+
+    config = {
+        "wheel": {
+            "enabled": True,
+            "accounts": ["lx"],
+            "min_dte": 30,
+            "max_dte": 45,
+        },
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+    merged = merge_wheel_requirements_into_prefetch_config(
+        base_config=config,
+        candidate_config={**config, "symbols": []},
+        account_configs={"lx": config},
+        wheel_read_models={
+            "lx": {
+                "batches": [
+                    {
+                        "symbol": "NVDA",
+                        "lifecycle_status": "active",
+                        "integrity_status": "trusted",
+                        "phase": "ready",
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "lifecycle_status": "ended",
+                        "integrity_status": "trusted",
+                        "phase": "ended",
+                    },
+                ]
+            }
+        },
+    )
+
+    assert [item["symbol"] for item in merged["symbols"]] == ["NVDA"]
+    assert merged["symbols"][0]["_wheel_call"] == {
+        "enabled": True,
+        "min_dte": 30,
+        "max_dte": 45,
+        "requires_realized_volatility": True,
+    }
 
 
 def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, tmp_path: Path) -> None:

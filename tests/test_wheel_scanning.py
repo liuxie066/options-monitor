@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from conftest import phase2_opening_row
-from src.application.wheel import run_wheel_call_scan
+from src.application.wheel import (
+    build_shared_coverage_facts,
+    finalize_wheel_capacity,
+    run_wheel_call_scan,
+)
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
@@ -105,6 +109,86 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim() -> None:
     assert result["scope_results"][0]["reason_code"] == "candidates_found"
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["capacity_claims"][0]["requested_shares"] == 100
+
+
+def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() -> None:
+    model = {
+        "account": "lx",
+        "batches": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": "stock-1",
+                "lifecycle_status": "active",
+                "active_intent_reserved_shares": 0,
+                "batch_generation_hash": "a" * 64,
+                "projection_hash": "b" * 64,
+            }
+        ],
+    }
+    facts = build_shared_coverage_facts(
+        account="lx",
+        portfolio_context={
+            "source_observed_at": "2026-04-01T00:00:00+00:00",
+            "stocks_by_symbol": {
+                "NVDA": {"shares": 200, "can_sell_qty": 200}
+            },
+        },
+        option_context={
+            "locked_shares_status": "available",
+            "locked_shares_by_symbol": {"NVDA": 100},
+            "locked_shares_unavailable_by_symbol": {},
+            "prepared_authority": {"ledger_generation_sha256": "c" * 64},
+        },
+        wheel_read_model=model,
+    )
+    ordinary = [
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "NVDA-CC",
+            "multiplier": 100,
+            "max_new_contracts": 1,
+        }
+    ]
+    captured = finalize_wheel_capacity(
+        account="lx",
+        wheel_read_model=model,
+        wheel_scan={
+            "scope_results": [
+                {"symbol": "NVDA", "stock_lot_id": "stock-1", "status": "completed"}
+            ],
+            "raw_candidates": {
+                "stock-1": [
+                    {
+                        "candidate_id": "wheel-candidate",
+                        "symbol": "NVDA",
+                        "multiplier": 100,
+                    }
+                ]
+            },
+            "capacity_claims": [
+                {
+                    "claim_id": "wheel:stock-1",
+                    "strategy_family": "wheel",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "stock_lot_id": "stock-1",
+                    "assignment_at_ms": 1,
+                    "requested_contracts": 1,
+                    "multiplier": 100,
+                }
+            ],
+        },
+        opening_call_candidates=ordinary,
+        coverage_facts=facts,
+    )
+
+    assert captured["batches"][0]["granted_contracts"] == 1
+    ordinary_allocation = next(
+        row for row in captured["allocations"] if row["claim_id"] == "covered_call:NVDA"
+    )
+    assert ordinary_allocation["granted_contracts"] == 0
+    assert captured["scope_results"][0]["candidate_count"] == 1
 
 
 def test_wheel_scan_disabled_keeps_batch_status_without_candidate_demand() -> None:

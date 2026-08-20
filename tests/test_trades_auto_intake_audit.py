@@ -217,6 +217,86 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
     assert any(event.get("phase") == "ledger_persisted" for event in events)
 
 
+def test_auto_intake_routes_short_call_open_through_wheel_intent_writer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.trades.auto_intake as intake
+
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="wheel-call-1",
+        order_id="wheel-order-1",
+        symbol="NVDA",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=2.0,
+        strike=110.0,
+        multiplier=100,
+        multiplier_source="broker",
+        expiration_ymd="2026-08-21",
+        currency="USD",
+        trade_time_ms=1_000,
+        raw_payload={"deal_id": "wheel-call-1"},
+    )
+    coverage = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "status": "available",
+        "shares_available_for_cover": 0,
+        "capacity_identity_hash": "capacity-1",
+    }
+    calls: list[tuple[object, object, dict]] = []
+
+    monkeypatch.setattr(intake, "_wheel_intent_coverage_fact", lambda **_kwargs: coverage)
+    monkeypatch.setattr(
+        intake,
+        "record_trade_event_with_wheel_intent",
+        lambda repo, active_deal, fact: calls.append((repo, active_deal, fact)),
+    )
+
+    class _Result:
+        def to_dict(self) -> dict:
+            return {"status": "applied"}
+
+    def _resolve(active_deal, **kwargs):
+        kwargs["persist_trade_event_fn"](kwargs["repo"], active_deal)
+        return _Result()
+
+    def _process(_payload, **kwargs):
+        return kwargs["resolve_trade_deal_fn"](
+            deal,
+            repo=kwargs["repo"],
+            state={},
+            apply_changes=True,
+            retry_failed_deal=False,
+        ).to_dict()
+
+    repo = object()
+    monkeypatch.setattr(intake, "resolve_trade_deal", _resolve)
+    monkeypatch.setattr(intake, "process_trade_payload", _process)
+
+    out = intake._process_payload(
+        {"deal_id": "wheel-call-1"},
+        repo=repo,
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        futu_account_ids=["REAL_1"],
+        apply_changes=True,
+        host="127.0.0.1",
+        port=11111,
+        config={"accounts": {"lx": {}}},
+    )
+
+    assert out == {"status": "applied"}
+    assert calls == [(repo, deal, coverage)]
+
+
 def test_process_payload_close_invalidates_context_and_attaches_projection_diagnostics(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     account_ctx = runtime_root / "output_accounts" / "lx" / "state" / "option_positions_context.json"

@@ -59,6 +59,9 @@ from src.application.ledger.event_codec import (
     trade_event_application_payload,
     valid_void_target_event_id,
 )
+from src.application.ledger.assigned_stock_projection import (
+    project_assigned_stock_lifecycle_from_rows,
+)
 from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
@@ -163,6 +166,16 @@ from src.application.ledger.current_decision_projection import (
 from src.application.ledger.projector_implementation import (
     compute_projector_implementation_fingerprint,
     loaded_projector_implementation_fingerprint,
+)
+from src.application.ledger.writer import (
+    _finish_trade_event_decision_projection as finalize_trade_event_decision_projection,
+    persist_trade_event_with_wheel_intent as record_trade_event_with_wheel_intent,
+)
+from src.application.ledger.current_decision_projection import (
+    capture_trade_event_decision_projection_fence,
+)
+from src.application.ledger.wheel_trade_companions import (
+    append_and_verify_wheel_intent_consumption,
 )
 from src.application.ledger.position_projection_runtime import (
     position_projection_runtime_telemetry,
@@ -315,6 +328,7 @@ __all__ = [
     "build_lifecycle_case_decision_fact",
     "build_lifecycle_quality_fact",
     "capture_current_decision_projection_fence",
+    "capture_trade_event_decision_projection_fence",
     "compact_assigned_stock_view",
     "current_decision_projection_row",
     "CurrentDecisionProjectionError",
@@ -360,6 +374,7 @@ __all__ = [
     "preview_trade_event_repair",
     "preview_trade_event_void",
     "project_trade_event_log",
+    "project_assigned_stock_lifecycle_from_rows",
     "resolve_position_data_config_path",
     "resolve_position_ledger_sqlite_path",
     "record_broker_trade_close",
@@ -382,6 +397,8 @@ __all__ = [
     "record_manual_position_close",
     "record_manual_position_open",
     "record_normalized_trade_event",
+    "record_trade_event_with_wheel_intent",
+    "append_and_verify_wheel_intent_consumption",
     "record_trade_event_repair",
     "record_trade_event_void",
     "reject_post_trade_combo_pair",
@@ -399,6 +416,7 @@ __all__ = [
     "summarize_broker_trade_close_candidates",
     "supersede_post_trade_combo_pair",
     "finalize_current_decision_projection",
+    "finalize_trade_event_decision_projection",
     "preview_current_decision_projection_oracle",
     "trade_event_economic_allocations",
     "trade_event_application_payload",

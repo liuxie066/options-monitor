@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -39,6 +39,7 @@ from src.application.tick_run_workspace import (
 )
 from src.infrastructure.exchange_rates import exchange_rate_observation_status
 from src.application.payload_helpers import required_text
+from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
 
 
@@ -66,6 +67,9 @@ class PreparedOptionPositionsBatch:
     observed_at_utc: str
     ledger_read_count: int
     fx_observation_count: int
+    wheel_read_models_by_account: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
 
 
 def prepare_option_positions_contexts(
@@ -194,6 +198,7 @@ def prepare_option_positions_contexts(
 
     manifests: dict[str, dict[str, Any]] = {}
     records_by_account: dict[str, list[dict[str, Any]]] = {}
+    wheel_models_by_account: dict[str, dict[str, Any]] = {}
     for ledger_path, accounts in sorted(
         accounts_by_ledger_path.items(),
         key=lambda item: str(item[0]),
@@ -202,27 +207,20 @@ def prepare_option_positions_contexts(
         if not isinstance(rows_by_account, dict):
             continue
         try:
-            generation_payloads = {
-                account: {
-                    "trade_events": list(rows_by_account[account]["trade_events"]),
-                    "stored_position_lots": list(
-                        rows_by_account[account]["stored_position_lots"]
-                    ),
-                }
-                for account in accounts
+            first_rows = rows_by_account[accounts[0]]
+            generation_payload = {
+                "trade_events": list(first_rows["trade_events"]),
+                "stored_position_lots": list(first_rows["stored_position_lots"]),
+                "wheel_events_by_account": {
+                    account: list(
+                        rows_by_account[account].get("account_wheel_events")
+                        or []
+                    )
+                    for account in sorted(accounts)
+                },
             }
-            generation_hashes = {
-                canonical_sha256(payload)
-                for payload in generation_payloads.values()
-            }
-            if len(generation_hashes) != 1:
-                raise PreparedOptionPositionsContextError(
-                    "multi-account ledger generation is inconsistent"
-                )
-            ledger_generation_sha256 = next(iter(generation_hashes))
-            records = list(
-                generation_payloads[accounts[0]]["stored_position_lots"]
-            )
+            ledger_generation_sha256 = canonical_sha256(generation_payload)
+            records = list(first_rows["stored_position_lots"])
             snapshots = {}
             for account in accounts:
                 try:
@@ -303,6 +301,24 @@ def prepare_option_positions_contexts(
                     "source_observed_at": observed_at_utc,
                 }
                 context = dict(context)
+                try:
+                    wheel_model = build_wheel_read_model_from_rows(
+                        rows_by_account[account],
+                        account=account,
+                        as_of_ms=lifecycle_now_ms,
+                    )
+                except Exception as exc:
+                    wheel_model = {
+                        "schema_version": "wheel_read_model.v1",
+                        "account": account,
+                        "as_of_ms": lifecycle_now_ms,
+                        "status": "data_unavailable",
+                        "reason": f"wheel_projection_failed:{type(exc).__name__}",
+                        "batches": [],
+                        "linkage_candidates": [],
+                        "assigned_stock_projection": {},
+                    }
+                context["wheel_read_model"] = wheel_model
                 context["decision_state_snapshot"] = dict(
                     snapshots[account]
                 )
@@ -347,6 +363,7 @@ def prepare_option_positions_contexts(
                     records_by_account.pop(account, None)
                     continue
                 manifests[account] = manifest
+                wheel_models_by_account[account] = wheel_model
 
     for account, reason in sorted(unavailable.items()):
         if account in manifests:
@@ -373,6 +390,7 @@ def prepare_option_positions_contexts(
         observed_at_utc=observed_at_utc,
         ledger_read_count=ledger_read_count,
         fx_observation_count=1,
+        wheel_read_models_by_account=wheel_models_by_account,
     )
 
 

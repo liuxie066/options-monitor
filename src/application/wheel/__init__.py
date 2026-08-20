@@ -4,6 +4,10 @@ from src.application.wheel.read_model import (
     build_wheel_read_model_from_rows,
 )
 from src.application.wheel.scanning import run_wheel_call_scan
+from src.application.wheel.capacity import (
+    build_shared_coverage_facts,
+    finalize_wheel_capacity,
+)
 from src.application.wheel.workflows import (
     cancel_wheel_call_intent,
     confirm_wheel_call_linkage,
@@ -23,6 +27,8 @@ __all__ = [
     "reject_wheel_call_linkage",
     "resolve_wheel_config",
     "run_wheel_call_scan",
+    "build_shared_coverage_facts",
+    "finalize_wheel_capacity",
     "seal_wheel_candidate_snapshot",
     "validate_wheel_candidate_snapshot",
 ]

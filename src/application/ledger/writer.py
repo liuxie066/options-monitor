@@ -1935,7 +1935,7 @@ def apply_lifecycle_allocation_atomically(
 ) -> dict[str, Any]:
     """Adopt evidence, terminal events, projection and allocations as one fact."""
 
-    from src.application.wheel.trade_companions import (
+    from src.application.ledger.wheel_trade_companions import (
         append_wheel_trade_companions,
         capture_wheel_trade_companion_context,
     )
@@ -5002,7 +5002,7 @@ def persist_trade_event_objects_atomically(
 ) -> list[LedgerWriteResult]:
     """Persist explicitly targeted canonical events in one transaction."""
 
-    from src.application.wheel.trade_companions import (
+    from src.application.ledger.wheel_trade_companions import (
         append_and_verify_wheel_intent_consumption,
         append_wheel_trade_companions,
         capture_wheel_trade_companion_context,

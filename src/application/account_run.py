@@ -79,6 +79,7 @@ class AccountRunRequest:
     required_data_snapshot_sha256: str | None = None
     close_advice_required_data_plan: Path | None = None
     account_config_generation_frozen: bool = False
+    has_wheel_scope: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,7 +384,11 @@ def run_one_account(
 
     scan_gate = decide_account_scan_gate(
         should_run=should_run,
-        has_symbols=((not request.markets_to_run) or bool(resolve_watchlist_config(cfg))),
+        has_symbols=(
+            (not request.markets_to_run)
+            or bool(resolve_watchlist_config(cfg))
+            or request.has_wheel_scope
+        ),
         reason=reason,
     )
     if not bool(scan_gate.get("run_pipeline")):

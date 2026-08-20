@@ -390,6 +390,7 @@ def _resolve_sell_call_strike_window(
     fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
     strike_buffer_pct: float = 0.0,
+    unbounded_max: bool = False,
 ) -> tuple[StrikeWindowPlan, str, list[str]]:
     del fallback_min_pct
     min_strike = _safe_float(sell_call_cfg.get("min_strike"))
@@ -400,10 +401,18 @@ def _resolve_sell_call_strike_window(
             value for value in (min_strike, spot_reference) if value is not None
         )
         derived_max = base_min * (1.0 + float(fallback_max_pct))
-        base_max = min(max_strike, derived_max) if max_strike is not None else derived_max
+        base_max = (
+            None
+            if unbounded_max and max_strike is None
+            else min(max_strike, derived_max)
+            if max_strike is not None
+            else derived_max
+        )
         buffer_pct = max(float(strike_buffer_pct), 0.0)
         fetch_max = (
-            base_max
+            None
+            if base_max is None
+            else base_max
             if base_max < base_min
             else base_max * (1.0 + buffer_pct)
         )
@@ -420,7 +429,7 @@ def _resolve_sell_call_strike_window(
                 if min_strike is not None or max_strike is not None
                 else f"derive {source_prefix} exact 20% bounds from spot reference"
             )
-        if base_max < base_min:
+        if base_max is not None and base_max < base_min:
             reason = f"{source_prefix} has no feasible strike window because configured max is below recall min"
         fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike"] if min_strike is not None or max_strike is not None else ["spot"]
         if has_spot and "spot" not in fields:
@@ -467,6 +476,7 @@ def _resolve_call_side_plan(
     fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
     strike_buffer_pct: float = 0.0,
+    unbounded_max: bool = False,
 ) -> OptionSideFetchPlan:
     window = resolve_candidate_window(sell_call_cfg, defaults=defaults)
     filtered = _filter_expirations_by_dte(
@@ -484,6 +494,7 @@ def _resolve_call_side_plan(
         fallback_min_pct=fallback_min_pct,
         fallback_max_pct=fallback_max_pct,
         strike_buffer_pct=strike_buffer_pct,
+        unbounded_max=unbounded_max,
     )
     return OptionSideFetchPlan(
         option_type="call",
@@ -1019,6 +1030,7 @@ def build_required_data_fetch_plan(
     want_call: bool,
     sell_put_cfg: dict | None = None,
     sell_call_cfg: dict | None = None,
+    wheel_call_cfg: dict | None = None,
     yield_enhancement_cfg: dict | None = None,
     position_requirements: list[dict[str, Any]] | None = None,
     symbol_cfg: dict[str, Any] | None = None,
@@ -1053,6 +1065,7 @@ def build_required_data_fetch_plan(
     )
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
+    wheel_call_cfg = dict(wheel_call_cfg or {})
     resolved_yield_enhancement_cfg = dict(yield_enhancement_cfg or {})
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sell_put_cfg)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=sell_call_cfg)
@@ -1254,6 +1267,21 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
+    if bool(wheel_call_cfg.get("enabled", False)):
+        side_plans.append(
+            _resolve_call_side_plan(
+                symbol=symbol,
+                sell_call_cfg=wheel_call_cfg,
+                limit_expirations=limit_expirations,
+                available_expirations=available_expirations,
+                trading_date=trading_date,
+                spot_reference=spot_reference,
+                source_prefix="wheel.call",
+                fallback_min_pct=0.0,
+                fallback_max_pct=0.0,
+                unbounded_max=True,
+            )
+        )
     if combo_yield_enabled:
         side_plans.append(
             _resolve_combo_yield_call_plan(
@@ -1298,6 +1326,7 @@ def build_required_data_fetch_plan(
             bool(item.get("requires_realized_volatility"))
             for item in ready_position_requirements
         )
+        or bool(wheel_call_cfg.get("requires_realized_volatility", False))
     )
     return RequiredDataFetchPlanBundle(
         symbol=symbol,

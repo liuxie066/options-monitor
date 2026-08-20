@@ -111,11 +111,11 @@ def _opening_status(scopes: list[Mapping[str, Any]], batches: list[Mapping[str, 
     if not scopes:
         raise CandidateSnapshotContractError("Wheel candidate scopes are missing")
     states = {str(row.get("status") or "") for row in scopes}
-    selected = sum(1 for row in batches if row.get("final_candidate") is not None)
+    candidate_count = sum(len(row.get("raw_candidates") or []) for row in batches)
     if states == {"completed"}:
         if any(row.get("reason_code") == "partial_data" for row in scopes):
             return "partial_data"
-        return "candidates_found" if selected else "no_candidate"
+        return "candidates_found" if candidate_count else "no_candidate"
     if states == {"not_applicable"}:
         return "not_applicable"
     if "completed" in states or "not_applicable" in states:
@@ -150,6 +150,14 @@ def validate_wheel_candidate_snapshot(
             raise WheelCandidateSnapshotError("Wheel required-data dependency hash mismatch")
         scopes = _scopes(item.get("scope_results") or [])
         batches = _batches(item.get("batches") or [], account=expected_account)
+        allocations = normalize_json_value(
+            item.get("capacity_allocations") or [],
+            field="capacity_allocations",
+        )
+        if not isinstance(allocations, list) or any(
+            not isinstance(row, Mapping) for row in allocations
+        ):
+            raise WheelCandidateSnapshotError("Wheel capacity allocations are invalid")
         if item.get("opening_status") != _opening_status(scopes, batches):
             raise WheelCandidateSnapshotError("Wheel candidate snapshot terminal status mismatch")
         binding = {
@@ -160,6 +168,7 @@ def validate_wheel_candidate_snapshot(
             "required_data_manifest_sha256": item["required_data_manifest_sha256"],
             "scope_results": scopes,
             "batches": batches,
+            "capacity_allocations": allocations,
         }
         if canonical_sha256(binding) != item["snapshot_hash"]:
             raise WheelCandidateSnapshotError("Wheel candidate snapshot input hash mismatch")
@@ -178,6 +187,7 @@ def seal_wheel_candidate_snapshot(
     dependencies: Iterable[Mapping[str, Any]],
     scope_results: Iterable[Mapping[str, Any]],
     batches: Iterable[Mapping[str, Any]],
+    capacity_allocations: Iterable[Mapping[str, Any]] = (),
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     try:
@@ -189,6 +199,10 @@ def seal_wheel_candidate_snapshot(
         dependency_rows = normalize_dependencies(dependencies)
         scopes = _scopes(scope_results)
         batch_rows = _batches(batches, account=acct)
+        allocation_rows = normalize_json_value(
+            [dict(row) for row in capacity_allocations],
+            field="capacity_allocations",
+        )
         seal_time = utc_timestamp(sealed_at or datetime.now(timezone.utc))
     except CandidateSnapshotContractError as exc:
         raise WheelCandidateSnapshotError(str(exc)) from exc
@@ -201,6 +215,7 @@ def seal_wheel_candidate_snapshot(
         "required_data_manifest_sha256": required_data_hash,
         "scope_results": scopes,
         "batches": batch_rows,
+        "capacity_allocations": allocation_rows,
     }
     payload = {
         "schema_version": WHEEL_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -216,6 +231,7 @@ def seal_wheel_candidate_snapshot(
         "opening_status": _opening_status(scopes, batch_rows),
         "scope_results": scopes,
         "batches": batch_rows,
+        "capacity_allocations": allocation_rows,
         "snapshot_hash": canonical_sha256(binding),
     }
     payload["content_sha256"] = canonical_sha256(payload)

@@ -160,6 +160,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
+    sub.add_parser("wheel", help="Wheel lifecycle operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
 
     add_run_commands(sub)
@@ -208,6 +209,10 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.option_positions import main as run_option_positions_cli
 
         return int(run_option_positions_cli(actual_argv[1:]))
+    if actual_argv and actual_argv[0] == "wheel":
+        from src.interfaces.cli.wheel import main as run_wheel_cli
+
+        return int(run_wheel_cli(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "trade-events":
         from src.interfaces.cli.trade_events import main as run_trade_events_cli
 

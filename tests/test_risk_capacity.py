@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.risk_capacity import (
+    allocate_opening_share_capacity,
     allocate_portfolio_capacity_shadow,
     compute_sell_call_share_capacity,
     compute_sell_put_cash_capacity,
@@ -8,6 +9,75 @@ from domain.domain.risk_capacity import (
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
 )
+
+
+def test_opening_share_capacity_prioritizes_wheel_and_grants_whole_contracts() -> None:
+    allocations = allocate_opening_share_capacity(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 300,
+                "shares_locked": 100,
+                "shares_reserved": 0,
+            }
+        ],
+        [
+            {
+                "claim_id": "cc",
+                "strategy_family": "covered_call",
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": 2,
+                "multiplier": 100,
+            },
+            {
+                "claim_id": "wheel",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": "stock-1",
+                "assignment_at_ms": 1,
+                "requested_contracts": 1,
+                "multiplier": 100,
+            },
+        ],
+    )
+
+    assert allocations[0]["granted_contracts"] == 1
+    assert allocations[0]["allocation_reason"] == "share_capacity_partially_supported"
+    assert allocations[1]["granted_contracts"] == 1
+    assert allocations[1]["capacity_before"] == 200
+
+
+def test_opening_share_capacity_fails_closed_when_existing_coverage_is_excessive() -> None:
+    result = allocate_opening_share_capacity(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 100,
+                "shares_locked": 200,
+                "shares_reserved": 0,
+            }
+        ],
+        [
+            {
+                "claim_id": "wheel",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": 1,
+                "multiplier": 100,
+            }
+        ],
+    )[0]
+
+    assert result["granted_contracts"] == 0
+    assert result["allocation_reason"] == "share_capacity_oversubscribed"
+    assert result["risk_level"] == "high"
 
 
 def test_portfolio_capacity_shadow_allocates_in_existing_order_without_optimizer() -> None:
