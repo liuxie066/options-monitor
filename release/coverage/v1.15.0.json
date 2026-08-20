@@ -1,0 +1,137 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.0",
+  "base": {
+    "tag": "v1.14.12",
+    "commit": "e32d9549ac4f8c383b0c926174a11ea39665bdaf"
+  },
+  "reviewed_head": "18ae5dfcb3340da32a6a95b78604b151a91312b0",
+  "commits": [
+    {
+      "sha": "3e0cdec1b86b61c0f364d014327cf4b4063932d0",
+      "subject": "feat(pi-agent): add durable S3 sessions and compaction"
+    },
+    {
+      "sha": "c7e542801ef13ac15cc3cec6f4996e4f26192323",
+      "subject": "feat(pi-agent): add S4 provider integration"
+    },
+    {
+      "sha": "f864f0d2aa01b428b2c8ee6c3c96fed9bff0fa91",
+      "subject": "docs(pi-agent): trim integration plan duplication"
+    },
+    {
+      "sha": "49e6ea8379dfcca0a67f8f8cf7c92da9c3d5eaa4",
+      "subject": "feat(pi-agent): switch Host to Pi Agent Core"
+    },
+    {
+      "sha": "dcafc2272596051ef6a50ed384feda9a11f1f425",
+      "subject": "fix(copilot): enforce Pi admission invariants"
+    },
+    {
+      "sha": "25ea61678f2783ee56c24b4b40a360bae03b9c75",
+      "subject": "feat(assistant): cut channel control over to Pi"
+    },
+    {
+      "sha": "d16162f09516e5fc86147422bb5e5cc9ba597d03",
+      "subject": "docs(wheel): add v1 product and implementation contract"
+    },
+    {
+      "sha": "6fc2eb81ec066094f6587cd3b5969258efed23f1",
+      "subject": "feat(wheel): add lifecycle event projection"
+    },
+    {
+      "sha": "e8cc41d50081990d3095ca63fc3905980d0dcd5b",
+      "subject": "fix(pi-agent): preserve repaired control turns"
+    },
+    {
+      "sha": "13741370b8715aa0338ad3911fb0b868496927b9",
+      "subject": "feat(wheel): add atomic lifecycle transitions"
+    },
+    {
+      "sha": "f9da8cc5699ef8b0475c66708924c90f50e82e2d",
+      "subject": "feat(wheel): add call intent attribution"
+    },
+    {
+      "sha": "0af229b29109de51b085ac96a736a2d960b20e13",
+      "subject": "feat(wheel): add candidate policy and snapshot"
+    },
+    {
+      "sha": "428342be5878340571c7e7c1eb5672b1aa77ef31",
+      "subject": "feat(wheel): integrate monitoring and operator controls"
+    },
+    {
+      "sha": "010631fc58200a588f08f1bd9f93dd211e39259a",
+      "subject": "feat(copilot): complete Pi Agent Core cutover"
+    },
+    {
+      "sha": "b2569ecd7115cc351df66983e5c4a344b4c727d4",
+      "subject": "merge(pi-agent): integrate S7 into main"
+    },
+    {
+      "sha": "9317997345385390c5b8c4439691a279d1dcd4de",
+      "subject": "fix(pi-agent): keep Node stderr diagnostics stable"
+    },
+    {
+      "sha": "9e5b10eea9280854466884b9a80c0f29abb70577",
+      "subject": "fix(wheel): harden lifecycle attribution and scans"
+    },
+    {
+      "sha": "672ecca7b0b5df6a3577ad66a484c9e223ac5393",
+      "subject": "chore(wheel): merge latest main"
+    },
+    {
+      "sha": "18ae5dfcb3340da32a6a95b78604b151a91312b0",
+      "subject": "fix(accounts): enforce per-market runtime scope"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Completed the Pi Agent Core cutover for Assistant conversations, adding durable scoped sessions, provider-backed execution, guarded control handling, and rollback-safe release packaging while starting new Pi-backed conversation memory fresh at cutover.",
+      "commits": [
+        "3e0cdec1b86b61c0f364d014327cf4b4063932d0",
+        "c7e542801ef13ac15cc3cec6f4996e4f26192323",
+        "49e6ea8379dfcca0a67f8f8cf7c92da9c3d5eaa4",
+        "dcafc2272596051ef6a50ed384feda9a11f1f425",
+        "25ea61678f2783ee56c24b4b40a360bae03b9c75",
+        "e8cc41d50081990d3095ca63fc3905980d0dcd5b",
+        "010631fc58200a588f08f1bd9f93dd211e39259a",
+        "9317997345385390c5b8c4439691a279d1dcd4de"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.",
+      "commits": [
+        "d16162f09516e5fc86147422bb5e5cc9ba597d03",
+        "6fc2eb81ec066094f6587cd3b5969258efed23f1",
+        "13741370b8715aa0338ad3911fb0b868496927b9",
+        "f9da8cc5699ef8b0475c66708924c90f50e82e2d",
+        "0af229b29109de51b085ac96a736a2d960b20e13",
+        "428342be5878340571c7e7c1eb5672b1aa77ef31",
+        "9e5b10eea9280854466884b9a80c0f29abb70577"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Scoped service, Tick, auto-close, and Assistant account selection to each market's runtime configuration, preventing HK-only setups and custom account labels from inheriting or accepting unrelated `lx` / `sy` accounts.",
+      "commits": [
+        "18ae5dfcb3340da32a6a95b78604b151a91312b0"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "f864f0d2aa01b428b2c8ee6c3c96fed9bff0fa91",
+      "reason": "Removed duplicated implementation-plan prose without changing runtime or operator behavior."
+    },
+    {
+      "commit": "b2569ecd7115cc351df66983e5c4a344b4c727d4",
+      "reason": "Merge-only integration commit; the Pi Agent Core changes are mapped to their constituent commits."
+    },
+    {
+      "commit": "672ecca7b0b5df6a3577ad66a484c9e223ac5393",
+      "reason": "Merge-only synchronization commit; the Wheel and Pi Agent Core changes are mapped to their constituent commits."
+    }
+  ]
+}

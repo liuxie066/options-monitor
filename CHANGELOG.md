@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## 1.15.0 - 2026-08-21
+
 ### New Features
+- Completed the Pi Agent Core cutover for Assistant conversations, adding durable scoped sessions, provider-backed execution, guarded control handling, and rollback-safe release packaging while starting new Pi-backed conversation memory fresh at cutover.
 - Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.
 
 ### Bug Fixes
