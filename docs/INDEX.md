@@ -40,6 +40,7 @@
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：scheduled report、增量提醒和主动查询体验。
+- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：Sell Put 指派后的批次级 Covered Call 监控、共享覆盖和生命周期边界。
 - [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)：策略实验、证据要求和生产边界。
 
 ## 技术架构与核心合同
