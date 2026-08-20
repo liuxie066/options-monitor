@@ -1,8 +1,9 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: S1-S4 are implemented and validated; S5 implementation has not started.
-The production call path remains on the legacy runtime until the complete S7
-release passes its atomic cutover gate.
+Status: S1-S5 are implemented and validated in source; S6 and S7 have not
+started. The shared Host call path uses Pi Agent Core on this unreleased
+development branch. Deployed production remains on its last released runtime
+until the complete S7 release passes its atomic cutover gate.
 
 Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
@@ -736,8 +737,9 @@ current slice's exit gate passes.
 
 Sections 11 through 17 are the executable specifications for S1 through S7.
 They are one implementation plan, not seven independently released product
-modes. Production remains on the legacy call path until the complete S7 release
-passes the atomic cutover gate.
+modes. S1-S5 are source-delivery slices only; deployed production remains on
+its last released call path until the complete S7 release passes the atomic
+cutover gate.
 
 ## 11. S1 Executable Development Specification
 
@@ -2014,15 +2016,18 @@ flow through `run_prepared_contract()` and `run_contract()`.
 Modify:
 
 ```text
+agent-runtime/main.ts
 src/application/copilot/host.py
 src/application/copilot/local_harness.py
 src/application/copilot/model_config.py
 src/application/copilot/host_store.py
-src/application/copilot/event_store.py
 src/interfaces/cli/copilot_ops.py
 src/infrastructure/pi_agent_process.py
+tests/copilot_pi_test_support.py
+tests/test_architecture_guards.py
 tests/test_copilot_phase1.py
 tests/test_copilot_conversation_memory.py
+tests/copilot_eval/test_answer_quality.py
 tests/test_pi_agent_process.py
 ```
 
@@ -2288,7 +2293,8 @@ lease row; the next normal request may retry after expiry and fenced takeover.
 
 - only failed/interrupted read-only runs within the current attempt ceiling are
   resumable;
-- a run with `session_commit_outcome:"unknown"` is rejected as non-resumable;
+- a run whose durable admission winner is `commit` or `cancel`, or whose event
+  contains `session_commit_outcome:"unknown"`, is rejected as non-resumable;
 - `_successful_observations()` extracts only prior canonical `tool_result`
   events whose compact observation is `ok:true`;
 - observations are bounded, redacted again, and injected as an ephemeral
@@ -2335,6 +2341,25 @@ expectations. Prove:
 S5 exits when focused Copilot/Host tests and the Pi process tests pass. The code
 is not released independently; S6 and S7 complete channel and operational
 acceptance first.
+
+### 15.9 Implementation record
+
+S5 completed its source cutover on 2026-08-20:
+
+- `host.run_contract()` now has one Pi process path and no Engine fallback;
+- Host owns canonical read-tool execution, serialized run evidence, durable
+  cancel/admission CAS, safe process errors, and bounded successful recovery;
+- Pi owns the generic model/tool loop, continuation, committed compaction, and
+  Session turn persistence;
+- adapter exceptions, late tool completion, a committed-but-unacknowledged
+  Session turn, and a Host restart after durable `commit` or `cancel` all fail
+  closed without replay;
+- the deterministic CLI eval, focused Host suites, real loopback Pi process
+  suite, compatibility suites, architecture guards, dependency install, static
+  checks, and repository guardrails pass.
+
+This implementation record is not a release decision. S6 still owns trusted
+channel/Control cutover, and S7 still owns legacy deletion and release gates.
 
 ## 16. S6 Control And Channel Cutover Detailed Design
 

@@ -12,7 +12,7 @@ from src.application.llm_provider_registry import (
     provider_requires_api_key,
     require_provider_spec,
 )
-from src.application.secret_store import SecretProvider, resolve_secret_status
+from src.application.secret_store import SecretProvider, resolve_secret, resolve_secret_status
 
 
 _PI_API_KINDS = {
@@ -207,6 +207,22 @@ def model_api_key_configured(
     if not status.configured:
         return False, "model_api_key_missing"
     return True, None
+
+
+def _resolve_model_api_key(
+    settings: PiModelSettings,
+    *,
+    environ: dict[str, str] | None = None,
+    secret_provider: SecretProvider | None = None,
+) -> str | None:
+    if not provider_requires_api_key(settings.provider):
+        return None
+    return resolve_secret(
+        settings.credential_name,
+        provider=secret_provider,
+        environ=environ,
+        legacy_env_name=settings.api_key_env,
+    )
 
 
 def _assistant_config_path(

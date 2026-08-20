@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO))
 
 from src.infrastructure.pi_agent_process import (  # noqa: E402
     _runtime_command,
+    derive_pi_local_session_id,
     derive_pi_session_id,
     run_pi_agent,
 )
@@ -1119,6 +1120,81 @@ def test_record_after_terminal_fails_protocol(tmp_path):
     assert result["error"]["stage"] == "protocol"
 
 
+def test_duplicate_proposal_fails_protocol(tmp_path):
+    child = """
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const rec = (type, seq, payload) =>
+  process.stdout.write(JSON.stringify({
+    protocol: "om-pi-ipc.v1", type, request_id: "req_1", run_id: "run_1",
+    seq, payload,
+  }) + "\\n");
+rl.once("line", () => {
+  rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+  const proposal = { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} };
+  rec("run.proposed", 2, proposal);
+  rec("run.proposed", 3, proposal);
+  setInterval(() => {}, 1000);
+});
+"""
+    entry = _write_fake(tmp_path, child)
+    proposals = 0
+
+    def admit(_proposal):
+        nonlocal proposals
+        proposals += 1
+        return "commit"
+
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_proposed=admit,
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+    assert proposals == 1
+
+
+def test_proposal_before_run_accepted_fails_protocol(tmp_path):
+    entry = _write_fake(
+        tmp_path,
+        """
+process.stdout.write(JSON.stringify({
+  protocol: "om-pi-ipc.v1",
+  type: "run.proposed",
+  request_id: "req_1",
+  run_id: "run_1",
+  seq: 1,
+  payload: { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} },
+}) + "\\n");
+setInterval(() => {}, 1000);
+""",
+    )
+    proposals = 0
+
+    def admit(_proposal):
+        nonlocal proposals
+        proposals += 1
+        return "commit"
+
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_proposed=admit,
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+    assert proposals == 0
+
+
 def test_terminal_then_hang_preserves_validated_result(tmp_path):
     child = _TRACE_HEAD + """
     setInterval(() => {}, 1000);
@@ -1574,15 +1650,15 @@ def test_timeout_discards_late_tool_value_but_worker_owns_slot():
 
 
 @pytest.mark.parametrize(
-    ("limit_name", "observation"),
+    ("limit_name", "observation", "reason"),
     [
-        ("max_iterations", {"ok": True}),
-        ("max_tool_calls", {"ok": True}),
-        ("max_consecutive_failed_tool_batches", {"ok": False}),
-        ("final_answer_reserve_seconds", {"ok": True}),
+        ("max_iterations", {"ok": True}, "model_turn_limit"),
+        ("max_tool_calls", {"ok": True}, "tool_call_limit"),
+        ("max_consecutive_failed_tool_batches", {"ok": False}, "tool_failure_limit"),
+        ("final_answer_reserve_seconds", {"ok": True}, "time_reserve"),
     ],
 )
-def test_budget_limit_allows_one_tool_free_final_turn(limit_name, observation):
+def test_budget_limit_allows_one_tool_free_final_turn(limit_name, observation, reason):
     payload = _tool_payload([_tool_turn(), {"text": "forced final"}])
     payload["limits"][limit_name] = (
         payload["limits"]["timeout_seconds"]
@@ -1590,18 +1666,24 @@ def test_budget_limit_allows_one_tool_free_final_turn(limit_name, observation):
         else 1
     )
     calls = []
+    events = []
     result = run_pi_agent(
         payload,
         request_id="req_1",
         run_id="run_1",
         timeout_seconds=60,
         on_tool_call=lambda call: calls.append(call) or observation,
+        on_event=events.append,
         on_proposed=lambda _payload: "commit",
     )
 
     assert result["ok"] is True
     assert result["result"]["text"] == "forced final"
     assert len(calls) == 1
+    assert {
+        "event_type": "forced_final_activated",
+        "data": {"reason": reason},
+    } in events
 
 
 def test_budget_exhaustion_without_text_is_not_a_successful_answer():
@@ -1641,6 +1723,17 @@ def test_session_id_is_sender_and_authority_scoped():
         derive_pi_session_id("feishu", "", "group-1", "key:us")
     with pytest.raises(ValueError):
         derive_pi_session_id("feishu\0other", "sender-a", "group-1", "key:us")
+
+
+def test_local_session_id_is_key_and_authority_scoped():
+    first = derive_pi_local_session_id("key:us", "cli:portfolio")
+
+    assert first == derive_pi_local_session_id("key:us", "cli:portfolio")
+    assert first.startswith("om_") and len(first) == 67
+    assert first != derive_pi_local_session_id("key:hk", "cli:portfolio")
+    assert first != derive_pi_local_session_id("key:us", "cli:other")
+    with pytest.raises(ValueError):
+        derive_pi_local_session_id("", "cli:portfolio")
 
 
 def test_persisted_session_continuity_and_scope_isolation(tmp_path):
@@ -3150,6 +3243,13 @@ def test_loopback_cancelled_main_keeps_committed_compaction_usage(tmp_path):
     assert completed[0]["stop_reason"] == "aborted"
     assert completed[0]["attempt_count"] == 1
     assert completed[0]["usage_total"] == committed_usage
+    assert any(
+        event == {
+            "event_type": "context_compaction_committed",
+            "data": {"compaction_count": 1, "usage_total": committed_usage},
+        }
+        for event in events
+    )
     entries = _session_entries(database, session_id)
     assert sum(entry["type"] == "compaction" for entry in entries) == 1
     assert "compact summary" in json.dumps(entries)
@@ -3176,6 +3276,7 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
     assert seeded["ok"] is True, seeded
 
     compaction_started = threading.Event()
+    events: list[dict] = []
     with _loopback_server([
         {
             "started": compaction_started,
@@ -3196,6 +3297,7 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
             request_id="req_cancel_during_provider_compaction",
             run_id="run_cancel_during_provider_compaction",
             timeout_seconds=6,
+            on_event=events.append,
             is_cancelled=compaction_started.is_set,
             environ=_provider_env(database=database),
         )
@@ -3210,43 +3312,24 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
         "cacheWrite": 0,
         "totalTokens": 0,
     }
+    assert all(event["event_type"] != "context_compaction_committed" for event in events)
     entries = _session_entries(database, session_id)
     assert sum(entry["type"] == "compaction" for entry in entries) == 0
     assert "uncommitted summary" not in json.dumps(entries)
 
 
-def test_s4_keeps_the_legacy_application_call_path_unchanged():
-    protected = {
-        "src/application/copilot/local_harness.py": (
-            "def _resolve_model_runner(",
-            "from src.application.copilot.model_client import CopilotModelSettings, build_model_runner",
-        ),
-        "src/application/copilot/model_client.py": (
-            "class CopilotModelSettings:",
-            "def build_model_runner(",
-        ),
-        "src/application/copilot/host.py": (
-            "from src.application.copilot.engine import run_engine",
-            "engine_result = run_engine(",
-        ),
-    }
-    for relative_path, expected_fragments in protected.items():
-        source = (REPO / relative_path).read_text(encoding="utf-8")
-        assert all(fragment in source for fragment in expected_fragments)
-        assert "run_pi_agent" not in source
-        assert "PiModelSettings" not in source
+def test_s5_application_call_path_uses_pi_without_legacy_fallback():
+    host = (REPO / "src/application/copilot/host.py").read_text(encoding="utf-8")
+    harness = (REPO / "src/application/copilot/local_harness.py").read_text(encoding="utf-8")
 
-    paths = list(protected)
-    for staged in (False, True):
-        command = ["git", "diff", "--name-only"]
-        if staged:
-            command.append("--cached")
-        command.extend(["--", *paths])
-        changed = subprocess.run(
-            command,
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        assert changed == ""
+    assert "run_pi_agent(" in host
+    assert "PiModelSettings" in host
+    assert "def _resolve_pi_model(" in harness
+    assert "PiModelSettings" in harness
+    for source in (host, harness):
+        assert "copilot.engine" not in source
+        assert "copilot.model_client" not in source
+        assert "copilot.conversation_memory" not in source
+        assert "_resolve_model_runner" not in source
+        assert "model_runner" not in source
+        assert "run_engine(" not in source

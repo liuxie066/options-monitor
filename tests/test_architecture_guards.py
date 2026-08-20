@@ -191,7 +191,8 @@ def test_copilot_local_harness_is_phase1_composition_only() -> None:
     assert "src.application.copilot.service" in imports
     assert "src.application.copilot.host" in imports
     assert "src.application.copilot.model_config" in imports
-    assert "src.application.copilot.model_client" in imports
+    assert "src.application.copilot.model_client" not in imports
+    assert "src.application.copilot.conversation_memory" not in imports
     assert "src.application.copilot.model_decider" not in imports
     assert "src.application.copilot.scene" not in imports
     assert "src.application.copilot.tools" not in imports
@@ -202,6 +203,8 @@ def test_copilot_local_harness_is_phase1_composition_only() -> None:
     assert "operations_diagnostics" not in harness_text
     assert "candidate_filter_diagnostics" not in harness_text
     assert "analysis_query" not in harness_text
+    assert "PiModelSettings" in harness_text
+    assert "def _resolve_pi_model(" in harness_text
 
 
 def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
