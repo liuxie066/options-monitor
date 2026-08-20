@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.assigned_stock import (
     assigned_stock_allocation_row,
@@ -42,15 +42,42 @@ class OptionValuationInputs:
 
 def load_ledger_performance_inputs(repo: Any) -> LedgerPerformanceInputs:
     rows = ledger_api.trade_event_log(repo)
-    projection = ledger_api.project_trade_event_log(rows)
+    assigned_stock_log = ledger_api.assigned_stock_event_log(repo)
+    return ledger_performance_inputs_from_rows(
+        {
+            "trade_events": rows,
+            "account_assigned_stock_events": assigned_stock_log.events,
+        },
+        extra_diagnostics=assigned_stock_log.diagnostics,
+    )
+
+
+def ledger_performance_inputs_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    extra_diagnostics: Any = (),
+) -> LedgerPerformanceInputs:
+    """Adapt an already-frozen ledger snapshot without reading the repository again."""
+
+    event_rows = [
+        dict(item)
+        for item in rows.get("trade_events") or []
+        if isinstance(item, dict)
+    ]
+    assigned_stock_events = [
+        dict(item)
+        for item in rows.get("account_assigned_stock_events") or []
+        if isinstance(item, dict)
+    ]
+    projection = ledger_api.project_trade_event_log(event_rows)
     metadata_by_event_id = {
         str(row.get("event_id") or "").strip(): _diagnostic_metadata(row)
-        for row in rows
+        for row in event_rows
         if str(row.get("event_id") or "").strip()
     }
     events: list[TradeEvent] = []
     adapter_diagnostics: list[dict[str, Any]] = []
-    for row in rows:
+    for row in event_rows:
         try:
             events.append(_trade_event_from_application_payload(row))
         except (TypeError, ValueError) as exc:
@@ -69,14 +96,13 @@ def load_ledger_performance_inputs(repo: Any) -> LedgerPerformanceInputs:
         payload.update(metadata_by_event_id.get(item.event_id, {}))
         diagnostics.append(payload)
     diagnostics.extend(adapter_diagnostics)
-    assigned_stock_log = ledger_api.assigned_stock_event_log(repo)
-    diagnostics.extend(dict(item) for item in assigned_stock_log.diagnostics)
+    diagnostics.extend(dict(item) for item in extra_diagnostics if isinstance(item, dict))
     return LedgerPerformanceInputs(
-        rows=tuple(dict(row) for row in rows),
+        rows=tuple(event_rows),
         events=tuple(events),
         allocations=tuple(projection.ledger_projection.allocations),
         position_lots=tuple(projection.ledger_projection.lots),
-        assigned_stock_events=tuple(dict(item) for item in assigned_stock_log.events),
+        assigned_stock_events=tuple(assigned_stock_events),
         diagnostics=tuple(_dedupe_diagnostics(diagnostics)),
     )
 
@@ -423,6 +449,7 @@ __all__ = [
     "LedgerPerformanceInputs",
     "OptionValuationInputs",
     "assigned_stock_instruments",
+    "ledger_performance_inputs_from_rows",
     "load_assigned_stock_projection",
     "load_ledger_performance_inputs",
     "load_option_valuation_inputs",

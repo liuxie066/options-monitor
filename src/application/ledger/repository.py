@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import effective_expiration, now_ms
 from domain.domain.ledger.position_fingerprint import (
     ordered_position_lots_fingerprint,
 )
+from domain.domain.wheel import normalize_wheel_event
 from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
 from src.application.ledger.lifecycle_attempt_audit import (
     LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
@@ -2115,6 +2116,66 @@ class SQLiteOptionPositionsRepository:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS wheel_events (
+                  event_id TEXT PRIMARY KEY,
+                  account TEXT NOT NULL CHECK(
+                    typeof(account) = 'text'
+                    AND account != ''
+                    AND account = lower(account)
+                  ),
+                  stock_lot_id TEXT NOT NULL CHECK(stock_lot_id != ''),
+                  event_type TEXT NOT NULL CHECK(event_type IN (
+                    'wheel_started',
+                    'wheel_manual_ended',
+                    'wheel_called_away',
+                    'wheel_call_intent_created',
+                    'wheel_call_intent_cancelled',
+                    'wheel_call_intent_consumed',
+                    'wheel_call_linkage_rejected',
+                    'wheel_event_voided'
+                  )),
+                  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms > 0),
+                  recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms > 0),
+                  intent_id TEXT,
+                  source_trade_event_id TEXT,
+                  payload_json TEXT NOT NULL CHECK(
+                    json_valid(payload_json)
+                    AND json_type(payload_json) = 'object'
+                  ),
+                  payload_hash TEXT NOT NULL CHECK(
+                    length(payload_hash) = 64
+                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
+                  ),
+                  FOREIGN KEY(source_trade_event_id) REFERENCES trade_events(event_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
+                ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_update
+                BEFORE UPDATE ON wheel_events
+                BEGIN
+                  SELECT RAISE(ABORT, 'wheel_events is append-only');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_delete
+                BEFORE DELETE ON wheel_events
+                BEGIN
+                  SELECT RAISE(ABORT, 'wheel_events is append-only');
+                END
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_assigned_stock_events_trade_time
                 ON assigned_stock_events(trade_time_ms, stock_event_id)
                 """
@@ -2805,6 +2866,90 @@ class SQLiteOptionPositionsRepository:
                 (account_value,),
             ).fetchall()
         return [_json_object(row["event_json"]) for row in rows]
+
+    def append_wheel_event_once(
+        self,
+        event: Mapping[str, Any],
+        *,
+        conn: sqlite3.Connection,
+    ) -> bool:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("wheel event append requires an active transaction")
+        payload = normalize_wheel_event(event)
+        existing = conn.execute(
+            "SELECT payload_hash FROM wheel_events WHERE event_id = ?",
+            (payload["event_id"],),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["payload_hash"] or "") != payload["payload_hash"]:
+                raise ValueError(
+                    f"wheel event conflict for event_id={payload['event_id']}"
+                )
+            return False
+        conn.execute(
+            """
+            INSERT INTO wheel_events (
+              event_id, account, stock_lot_id, event_type,
+              occurred_at_ms, recorded_at_ms, intent_id,
+              source_trade_event_id, payload_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["event_id"],
+                payload["account"],
+                payload["stock_lot_id"],
+                payload["event_type"],
+                payload["occurred_at_ms"],
+                payload["recorded_at_ms"],
+                payload["intent_id"],
+                payload["source_trade_event_id"],
+                _json_text(payload["payload"]),
+                payload["payload_hash"],
+            ),
+        )
+        return True
+
+    def list_wheel_events(
+        self,
+        *,
+        account: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        account_value = str(account or "").strip().lower()
+        with self._optional_conn(conn) as active_conn:
+            if account_value:
+                rows = active_conn.execute(
+                    """
+                    SELECT * FROM wheel_events
+                    WHERE account = ?
+                    ORDER BY occurred_at_ms ASC, event_id ASC
+                    """,
+                    (account_value,),
+                ).fetchall()
+            else:
+                rows = active_conn.execute(
+                    """
+                    SELECT * FROM wheel_events
+                    ORDER BY occurred_at_ms ASC, event_id ASC
+                    """
+                ).fetchall()
+        return [
+            normalize_wheel_event(
+                {
+                    "event_id": row["event_id"],
+                    "account": row["account"],
+                    "stock_lot_id": row["stock_lot_id"],
+                    "event_type": row["event_type"],
+                    "occurred_at_ms": row["occurred_at_ms"],
+                    "recorded_at_ms": row["recorded_at_ms"],
+                    "intent_id": row["intent_id"],
+                    "source_trade_event_id": row["source_trade_event_id"],
+                    "payload": _json_object(row["payload_json"]),
+                    "payload_hash": row["payload_hash"],
+                }
+            )
+            for row in rows
+        ]
 
     def replace_position_lots(
         self,
@@ -7032,6 +7177,7 @@ class SQLiteOptionPositionsRepository:
         shared_trade_events: Sequence[dict[str, Any]] | None = None,
         shared_position_lots: Sequence[dict[str, Any]] | None = None,
         shared_assigned_stock_events: Sequence[dict[str, Any]] | None = None,
+        shared_wheel_events: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         account_value = str(account or "").strip().lower()
         if not account_value:
@@ -7177,6 +7323,11 @@ class SQLiteOptionPositionsRepository:
                 ).fetchall()
             ]
         )
+        wheel_events = (
+            list(shared_wheel_events)
+            if shared_wheel_events is not None
+            else self.list_wheel_events(conn=conn)
+        )
         identities = self.list_strategy_group_identities(
             account=account_value,
             conn=conn,
@@ -7212,6 +7363,11 @@ class SQLiteOptionPositionsRepository:
                     or ""
                 ).strip().lower()
                 == account_value
+            ],
+            "account_wheel_events": [
+                row
+                for row in wheel_events
+                if str(row.get("account") or "").strip().lower() == account_value
             ],
             "account_combo_identities": identities,
         }
@@ -7309,6 +7465,7 @@ class SQLiteOptionPositionsRepository:
                     """
                 ).fetchall()
             ]
+            wheel_events = self.list_wheel_events(conn=conn)
             rows = {
                 account: self._read_account_decision_state_rows(
                     account=account,
@@ -7316,6 +7473,7 @@ class SQLiteOptionPositionsRepository:
                     shared_trade_events=events,
                     shared_position_lots=lots,
                     shared_assigned_stock_events=assigned_stock_events,
+                    shared_wheel_events=wheel_events,
                 )
                 for account in account_values
             }
