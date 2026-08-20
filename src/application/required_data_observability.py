@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -8,31 +9,57 @@ def extract_fetch_payload_metrics(payload: dict[str, Any] | None) -> dict[str, A
         return _empty_metrics()
     raw_meta = payload.get("meta")
     meta = raw_meta if isinstance(raw_meta, dict) else {}
+    raw_requests = meta.get("requests")
+    if raw_requests is None:
+        provider_meta: list[Mapping[str, Any]] = [meta]
+    elif (
+        not isinstance(raw_requests, list)
+        or not raw_requests
+        or any(not isinstance(item, Mapping) for item in raw_requests)
+    ):
+        raise ValueError("required-data child metrics metadata is invalid")
+    else:
+        provider_meta = raw_requests
     raw_rows = payload.get("rows")
     rows = raw_rows if isinstance(raw_rows, list) else []
+
+    def sum_int(field: str) -> int:
+        return sum(_int(item.get(field)) for item in provider_meta)
+
+    def sum_len(field: str) -> int:
+        return sum(len(item.get(field) or []) for item in provider_meta)
+
+    snapshot_calls = sum_int("snapshot_opend_call_count")
+    spot_snapshot_calls = sum_int("spot_snapshot_opend_calls")
     return {
         "rows": len(rows),
         "expiration_count": _int(payload.get("expiration_count")),
-        "expiration_opend_calls": _int(meta.get("expiration_opend_calls")),
-        "expiration_cache_hits": _int(meta.get("expiration_cache_hits")),
-        "option_chain_opend_calls": _int(meta.get("opend_call_count")),
-        "option_chain_rate_gate_wait_sec": round(_float(meta.get("rate_gate_wait_sec")), 6),
-        "option_chain_cache_hits": len(meta.get("from_cache_expirations") or []),
-        "option_chain_stale_cache_hits": len(meta.get("stale_cache_expirations") or []),
-        "option_chain_fetched_expirations": len(meta.get("fetched_expirations") or []),
+        "expiration_opend_calls": sum_int("expiration_opend_calls"),
+        "expiration_cache_hits": sum_int("expiration_cache_hits"),
+        "option_chain_opend_calls": sum_int("opend_call_count"),
+        "option_chain_rate_gate_wait_sec": round(
+            sum(_float(item.get("rate_gate_wait_sec")) for item in provider_meta),
+            6,
+        ),
+        "option_chain_cache_hits": sum_len("from_cache_expirations"),
+        "option_chain_stale_cache_hits": sum_len("stale_cache_expirations"),
+        "option_chain_fetched_expirations": sum_len("fetched_expirations"),
         "snapshot_requested_codes": _int(
             meta.get("snapshot_requested_codes")
             if meta.get("snapshot_requested_codes") is not None
             else meta.get("option_codes")
         ),
-        "snapshot_opend_calls": _int(meta.get("snapshot_opend_call_count")),
-        "spot_snapshot_opend_calls": _int(meta.get("spot_snapshot_opend_calls")),
-        "market_snapshot_opend_calls": _int(meta.get("snapshot_opend_call_count"))
-        + _int(meta.get("spot_snapshot_opend_calls")),
-        "spot_snapshot_requested_codes": _int(meta.get("spot_snapshot_requested_codes")),
-        "snapshot_rows": _int(meta.get("snapshots_rows")),
-        "snapshot_fallback_filled": _int(meta.get("snapshot_fallback_filled")),
-        "snapshot_fallback_failed": _int(meta.get("snapshot_fallback_failed")),
+        "snapshot_opend_calls": snapshot_calls,
+        "spot_snapshot_opend_calls": spot_snapshot_calls,
+        "market_snapshot_opend_calls": snapshot_calls + spot_snapshot_calls,
+        "spot_snapshot_requested_codes": sum_int("spot_snapshot_requested_codes"),
+        "snapshot_rows": _int(
+            meta.get("snapshots_rows")
+            if meta.get("snapshots_rows") is not None
+            else meta.get("snapshot_returned_codes")
+        ),
+        "snapshot_fallback_filled": sum_int("snapshot_fallback_filled"),
+        "snapshot_fallback_failed": sum_int("snapshot_fallback_failed"),
     }
 
 
