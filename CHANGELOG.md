@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.14.12 - 2026-08-20
+
+### Bug Fixes
+- Corrected required-data prefetch observability for merged OpenD requests by aggregating per-request provider work while preserving de-duplicated snapshot counts and rejecting malformed child metadata.
+
 ## 1.14.11 - 2026-08-20
 
 ### Bug Fixes
