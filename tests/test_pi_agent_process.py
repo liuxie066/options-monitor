@@ -1123,7 +1123,7 @@ def test_runtime_command_honors_injected_environ_path(tmp_path):
 
     command, resolved_entry = _runtime_command(entry, environ={"PATH": str(bin_dir)})
 
-    assert command == [str(fake_node), str(entry)]
+    assert command == [str(fake_node), "--no-warnings", str(entry)]
     assert resolved_entry == entry
 
 
