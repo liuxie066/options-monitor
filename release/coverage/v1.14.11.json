@@ -1,0 +1,30 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.14.11",
+  "base": {
+    "tag": "v1.14.10",
+    "commit": "36f35a285fe6dbd675739df72ca55d550a7da977"
+  },
+  "reviewed_head": "fd75b079008c6ea5e51b8dd5eaacf84dd843c220",
+  "commits": [
+    {
+      "sha": "590e0312194b62dfdde4b8603b59be5a45eaf6d7",
+      "subject": "fix(required-data): batch frozen snapshot validation"
+    },
+    {
+      "sha": "fd75b079008c6ea5e51b8dd5eaacf84dd843c220",
+      "subject": "fix(required-data): harden US HK scan pipeline"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Batch-resolved sealed required-data once per account scan and per consumer validation pass, eliminating per-symbol full-manifest receipt/blob revalidation that could exhaust the quote freshness window and produce incomplete US/HK candidate results.",
+      "commits": [
+        "590e0312194b62dfdde4b8603b59be5a45eaf6d7",
+        "fd75b079008c6ea5e51b8dd5eaacf84dd843c220"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

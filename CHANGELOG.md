@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.14.11 - 2026-08-20
+
 ### Bug Fixes
 - Batch-resolved sealed required-data once per account scan and per consumer validation pass, eliminating per-symbol full-manifest receipt/blob revalidation that could exhaust the quote freshness window and produce incomplete US/HK candidate results.
 
