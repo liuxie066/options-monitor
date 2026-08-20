@@ -144,6 +144,20 @@ def accounts_from_config(config: dict[str, Any] | None, *, fallback: tuple[str, 
     return normalize_accounts(cfg.get("accounts"), fallback=(), strict=True)
 
 
+def resolve_configured_accounts(
+    config: dict[str, Any] | None,
+    requested: Any = None,
+) -> list[str]:
+    configured = accounts_from_config(config, fallback=())
+    if requested is None:
+        return configured
+    selected = normalize_accounts(requested, fallback=(), strict=True)
+    unknown = [account for account in selected if account not in configured]
+    if unknown:
+        raise ValueError(f"accounts are not configured: {', '.join(unknown)}")
+    return selected
+
+
 def parse_lossless_integer(value: Any) -> int | None:
     """Return an integer only when the configured value has exact integer semantics."""
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.symbol_identity import symbol_market
-from src.application.account_config import accounts_from_config, normalize_accounts
+from src.application.account_config import normalize_accounts, resolve_configured_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
@@ -244,14 +244,13 @@ def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, 
     market = _resolve_market(arguments, request=request, symbols=symbols)
     timeout_seconds = _normalize_timeout(arguments.get("timeout_seconds") or arguments.get("timeout"))
     accounts = _normalize_accounts_arg(arguments.get("accounts"))
-    config_path: str | None = None
-    cfg: dict[str, Any] | None = None
-    if not accounts or symbols:
-        config_path, cfg = _load_market_runtime_config(market, request=request)
-    if symbols and cfg is not None:
+    config_path, cfg = _load_market_runtime_config(market, request=request)
+    if symbols:
         symbols = _validate_monitor_symbols(symbols, cfg=cfg)
-    if not accounts and cfg is not None:
-        accounts = accounts_from_config(cfg, fallback=())
+    try:
+        accounts = resolve_configured_accounts(cfg, accounts or None)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     if not accounts:
         raise AgentToolError(
             code="CONFIG_ERROR",
@@ -273,8 +272,7 @@ def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, 
         "timeout_seconds": timeout_seconds,
         "no_send": no_send,
     }
-    if config_path:
-        args["config_path"] = config_path
+    args["config_path"] = config_path
     return {
         "schema_version": "1.0",
         "operation_type": operation_type,

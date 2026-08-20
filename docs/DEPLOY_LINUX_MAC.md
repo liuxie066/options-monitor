@@ -108,6 +108,8 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
+`--accounts` 是跨所选市场的允许列表；每个 tick / auto-close unit 只会收到该市场 runtime config 顶层 `accounts` 中存在的账户。例如 US 配置 `lx, sy`、HK 配置仅 `lx` 时，HK unit 只会使用 `lx`。省略 `--accounts` 时，渲染器直接采用各市场配置的账户并集。
+
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
 推荐的 `--include-secret-credentials` 默认为每个消费 unit 生成只包含所需

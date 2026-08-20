@@ -3443,6 +3443,30 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
     assert calls[0]["timeout_seconds"] == 630
 
 
+def test_inbound_monitor_run_rejects_account_outside_target_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+
+    response = handle_assistant_request(
+        AssistantRequest(
+            text="/monitor-run hk accounts=lx",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_unknown_account",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INPUT_ERROR"
+    assert response["error"]["message"] == "accounts are not configured: lx"
+
+
 def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable_inbound_monitor_run(monkeypatch)
     cfg_path = _write_symbols_runtime_config(tmp_path)
@@ -3457,7 +3481,7 @@ def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/monitor-run hk accounts=lx,sy timeout=900",
+            text="/monitor-run hk accounts=sy timeout=900",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_monitor_run_cancel_preview",

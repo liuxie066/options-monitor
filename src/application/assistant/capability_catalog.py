@@ -33,9 +33,6 @@ AgentCommandSpec = AssistantCommandSpec
 
 COMMAND_CATALOG_SCHEMA_VERSION = "om-assistant-command-catalog-v1"
 
-ACCOUNT_VALUES = ("lx", "sy")
-
-
 def _spec_from_binding(binding: AssistantToolBinding) -> AssistantCommandSpec:
     return AssistantCommandSpec(
         intent_name=binding.intent_name,

@@ -5,6 +5,7 @@ import shlex
 from datetime import date
 from typing import Callable
 
+from src.application.account_config import normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.capability_catalog import commands_by_intent, operation_target_intents
 from src.application.assistant.contracts import ControlCommand
@@ -17,7 +18,7 @@ _YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一�
 _MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$")
-_ACCOUNTS = frozenset({"lx", "sy"})
+_DEFAULT_COMMAND_ACCOUNTS = ("lx", "sy")
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
@@ -37,7 +38,12 @@ _CN_MONTHS = {
 }
 
 
-def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> ControlCommand | None:
+def parse_assistant_command(
+    text: str,
+    *,
+    now_fn: Callable[[], date] | None = None,
+    accounts: list[str] | tuple[str, ...] | None = None,
+) -> ControlCommand | None:
     raw = str(text or "").strip()
     if not raw.startswith("/"):
         return None
@@ -45,6 +51,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
     command = parts[0].lower()
     args = parts[1:]
     today = now_fn() if now_fn is not None else date.today()
+    account_values = normalize_accounts(accounts, fallback=_DEFAULT_COMMAND_ACCOUNTS)
+    account_set = frozenset(account_values)
 
     if command in _COMMANDS["help"]:
         return _intent("help")
@@ -58,11 +66,11 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
         _reject_extra(command, args)
         return _intent("config_validate")
     if command in _COMMANDS["position_query"]:
-        return _parse_positions(command, args, today=today)
+        return _parse_positions(command, args, today=today, accounts=account_values)
     if command in _COMMANDS["assigned_stock_position_query"]:
-        return _parse_assigned_stock(command, args)
+        return _parse_assigned_stock(command, args, accounts=account_set)
     if command in _COMMANDS["option_performance_report"]:
-        return _parse_income(command, args, today=today)
+        return _parse_income(command, args, today=today, accounts=account_set)
     if command in _COMMANDS["runtime_runs"]:
         return _parse_runs(command, args)
     if command in _COMMANDS["runtime_logs"]:
@@ -107,7 +115,7 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
     if command in _COMMANDS["upgrade_now"]:
         return _parse_upgrade_command(command, args)
     if command in _COMMANDS["monitor_run_now"]:
-        return _parse_monitor_run_command(command, args)
+        return _parse_monitor_run_command(command, args, accounts=account_set)
 
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
@@ -134,13 +142,13 @@ def _split_command(raw: str) -> list[str]:
     return parts
 
 
-def _parse_positions(command: str, args: list[str], *, today: date) -> ControlCommand:
+def _parse_positions(command: str, args: list[str], *, today: date, accounts: list[str]) -> ControlCommand:
     raw = "持仓" if not args else f"持仓 {' '.join(args)}"
-    query = parse_position_query_text(raw, today=today)
+    query = parse_position_query_text(raw, today=today, accounts=accounts)
     return _intent("position_query", position_query_intent_arguments(query))
 
 
-def _parse_assigned_stock(command: str, args: list[str]) -> ControlCommand:
+def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[str]) -> ControlCommand:
     account: str | None = None
     status: str = "open"
     symbol: str | None = None
@@ -148,9 +156,9 @@ def _parse_assigned_stock(command: str, args: list[str]) -> ControlCommand:
     refresh_quotes = True
     for arg in args:
         normalized = arg.lower()
-        if normalized in _ACCOUNTS:
+        if normalized in accounts:
             if account is not None and account != normalized:
-                raise _bad_arg(command, arg, "只能指定一个账号：lx 或 sy。")
+                raise _bad_arg(command, arg, "只能指定一个已配置账户。")
             account = normalized
         elif normalized in {"all", "全部"}:
             status = "all"
@@ -170,7 +178,7 @@ def _parse_assigned_stock(command: str, args: list[str]) -> ControlCommand:
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all] [no-refresh]。",
+                "支持：/assigned-stock [账户|all] [symbol] [open|partially_sold|closed|all] [no-refresh]。",
             )
     payload: dict[str, object] = {
         "assigned_stock_status": status,
@@ -284,11 +292,11 @@ def _parse_upgrade_command(command: str, args: list[str]) -> ControlCommand:
     return _intent("upgrade_now", payload)
 
 
-def _parse_monitor_run_command(command: str, args: list[str]) -> ControlCommand:
+def _parse_monitor_run_command(command: str, args: list[str], *, accounts: frozenset[str]) -> ControlCommand:
     if not args:
-        raise _bad_arg(command, "", "格式：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+        raise _bad_arg(command, "", "格式：/monitor-run hk [accounts=账户1,账户2] [timeout=600]。")
     market: str | None = None
-    accounts: list[str] = []
+    selected_accounts: list[str] = []
     timeout_seconds: int | None = None
     for raw in args:
         normalized = raw.lower()
@@ -300,23 +308,23 @@ def _parse_monitor_run_command(command: str, args: list[str]) -> ControlCommand:
             if market is not None and market != "us":
                 raise _bad_arg(command, raw, "只能指定一个市场：hk 或 us。")
             market = "us"
-        elif normalized in _ACCOUNTS:
-            accounts.append(normalized)
+        elif normalized in accounts:
+            selected_accounts.append(normalized)
         elif "=" in raw:
             key, value = _split_key_value(raw)
             if key == "accounts":
-                accounts.extend(item.strip().lower() for item in re.split(r"[\s,，]+", value) if item.strip())
+                selected_accounts.extend(item.strip().lower() for item in re.split(r"[\s,，]+", value) if item.strip())
             elif key in {"timeout", "timeout_seconds"}:
                 timeout_seconds = _positive_int(value, key)
             else:
-                raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+                raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=账户1,账户2] [timeout=600]。")
         else:
-            raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+            raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=账户1,账户2] [timeout=600]。")
     if market is None:
         raise _bad_arg(command, "", "请明确市场：hk/港股 或 us/美股。")
     payload: dict[str, object] = {"market": market}
-    if accounts:
-        payload["accounts"] = accounts
+    if selected_accounts:
+        payload["accounts"] = selected_accounts
     if timeout_seconds is not None:
         payload["timeout_seconds"] = timeout_seconds
     return _intent("monitor_run_now", payload)
@@ -345,15 +353,15 @@ def _parse_manual_trade_update_command(command: str, args: list[str]) -> Control
     )
 
 
-def _parse_income(command: str, args: list[str], *, today: date) -> ControlCommand:
+def _parse_income(command: str, args: list[str], *, today: date, accounts: frozenset[str]) -> ControlCommand:
     account: str | None = None
     period = "mtd"
     period_value: object | None = None
     for arg in args:
         normalized = arg.lower()
-        if normalized in _ACCOUNTS:
+        if normalized in accounts:
             if account is not None and account != normalized:
-                raise _bad_arg(command, arg, "只能指定一个账号：lx 或 sy。")
+                raise _bad_arg(command, arg, "只能指定一个已配置账户。")
             account = normalized
         elif normalized in {"all", "全部"}:
             continue
@@ -386,7 +394,7 @@ def _parse_income(command: str, args: list[str], *, today: date) -> ControlComma
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/income、/income sy ytd、/income sy 2026、/income sy 2026-05、/income 上月。",
+                "支持：/income、/income [账户] ytd、/income [账户] 2026、/income [账户] 2026-05、/income 上月。",
             )
     payload: dict[str, object] = {"period": period}
     if account:

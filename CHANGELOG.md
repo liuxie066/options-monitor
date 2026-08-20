@@ -5,6 +5,9 @@
 ### New Features
 - Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.
 
+### Bug Fixes
+- Scoped service, Tick, auto-close, and Assistant account selection to each market's runtime configuration, preventing HK-only setups and custom account labels from inheriting or accepting unrelated `lx` / `sy` accounts.
+
 ## 1.14.12 - 2026-08-20
 
 ### Bug Fixes
