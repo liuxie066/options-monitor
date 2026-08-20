@@ -34,12 +34,10 @@ def build_wheel_read_model_from_rows(
     instant = int(as_of_ms)
     if instant <= 0:
         raise ValueError("wheel read model requires as_of_ms > 0")
-    inputs = ledger_performance_inputs_from_rows(rows)
-    assigned_stock = load_assigned_stock_projection(
-        inputs,
-        as_of_ms=instant,
-        quote_snapshots=[],
+    assigned_stock = build_assigned_stock_projection_from_rows(
+        rows,
         account=account_value,
+        as_of_ms=instant,
     )
     batches = project_wheel_lifecycles(
         rows.get("account_wheel_events") or [],
@@ -71,6 +69,20 @@ def build_wheel_read_model_from_rows(
     }
 
 
+def build_assigned_stock_projection_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    as_of_ms: int,
+) -> dict[str, Any]:
+    return load_assigned_stock_projection(
+        ledger_performance_inputs_from_rows(rows),
+        as_of_ms=int(as_of_ms),
+        quote_snapshots=[],
+        account=str(account or "").strip().lower(),
+    )
+
+
 def build_wheel_read_model(
     repo: Any,
     account: str,
@@ -91,6 +103,7 @@ def build_wheel_read_model(
 
 __all__ = [
     "WHEEL_READ_MODEL_SCHEMA",
+    "build_assigned_stock_projection_from_rows",
     "build_wheel_read_model",
     "build_wheel_read_model_from_rows",
 ]

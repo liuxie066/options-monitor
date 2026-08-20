@@ -5,6 +5,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.position_fields import (
+    strategy_metadata_fields_from_payload,
+)
 from domain.domain.lifecycle_allocation import (
     AllocationPlan,
     TERMINAL_TYPES,
@@ -711,6 +714,7 @@ def reconcile_lifecycle_evidence(
     refresh_read_model: bool = True,
     attempt_evidence: dict[str, Any] | None = None,
     attempt_audit: LifecycleAttemptAuditEnvelope | None = None,
+    wheel_start_enabled: bool = False,
 ) -> LifecycleReconciliationResult:
     try:
         normalized = _normalize_evidence(evidence)
@@ -936,6 +940,7 @@ def reconcile_lifecycle_evidence(
                 ),
                 attempt_evidence=attempt_evidence,
                 attempt_audit=attempt_audit,
+                wheel_start_enabled=wheel_start_enabled,
             )
         return LifecycleReconciliationResult(
             status="idempotent" if apply_changes else "dry_run",
@@ -1065,6 +1070,7 @@ def reconcile_lifecycle_evidence(
         notification_transition_type=notification_transition_type,
         attempt_evidence=attempt_evidence,
         attempt_audit=attempt_audit,
+        wheel_start_enabled=wheel_start_enabled,
     )
     return LifecycleReconciliationResult(
         status="applied",
@@ -1530,6 +1536,7 @@ def _terminal_event(
             "source_type": str(evidence.get("source_type") or ""),
             "source_event_id": str(evidence.get("source_event_id") or ""),
             "stock_settlement": dict(evidence.get("stock_settlement") or {}),
+            **strategy_metadata_fields_from_payload(fields),
         },
     )
 

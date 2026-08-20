@@ -131,6 +131,210 @@ def build_wheel_event(
     )
 
 
+def _trade_event_fact(event: Any) -> dict[str, Any]:
+    if isinstance(event, Mapping):
+        return dict(event)
+    contract_key = getattr(event, "contract_key", None)
+    key = contract_key.to_dict() if hasattr(contract_key, "to_dict") else {}
+    return {
+        "event_id": getattr(event, "event_id", None),
+        "event_type": getattr(event, "event_type", None),
+        "event_time_ms": getattr(event, "event_time_ms", None),
+        "account": key.get("account"),
+        "symbol": key.get("underlying_symbol"),
+        "option_type": key.get("option_type"),
+        "position_side": key.get("position_side"),
+        "contracts": getattr(event, "contracts", None),
+        "multiplier": getattr(event, "multiplier", None),
+        "currency": getattr(event, "currency", None),
+        "target_lot_id": getattr(event, "target_lot_id", None),
+        "raw_payload": dict(getattr(event, "raw_payload", None) or {}),
+    }
+
+
+def _stock_settlement(event: Mapping[str, Any]) -> dict[str, Any]:
+    payload = event.get("raw_payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    stock = payload.get("stock_settlement")
+    return dict(stock) if isinstance(stock, Mapping) else {}
+
+
+def wheel_started_event_from_assignment(
+    terminal_event: Any,
+    source_put_lot: Mapping[str, Any],
+    *,
+    recorded_at_ms: int,
+) -> dict[str, Any] | None:
+    event = _trade_event_fact(terminal_event)
+    if _event_type(event) != "assignment":
+        return None
+    fields = _lot_fields(source_put_lot)
+    if (
+        str(fields.get("option_type") or "").strip().lower() != "put"
+        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        != "short"
+    ):
+        return None
+    event_id = _required_text(event.get("event_id"), "source_trade_event_id")
+    account = _required_text(
+        event.get("account") or fields.get("account"),
+        "account",
+    ).lower()
+    stock = _stock_settlement(event)
+    if str(stock.get("side") or "").strip().lower() != "buy":
+        raise ValueError("Wheel start requires buy-side Short Put assignment settlement")
+    contracts = _positive_int(event.get("contracts"), "assignment contracts")
+    try:
+        multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
+        shares = int(stock.get("shares") or stock.get("stock_qty") or 0)
+        price = float(stock.get("price") if stock.get("price") is not None else stock.get("stock_price"))
+    except (TypeError, ValueError):
+        raise ValueError("Wheel start assignment settlement is incomplete") from None
+    if multiplier <= 0 or shares != contracts * multiplier or price < 0:
+        raise ValueError("Wheel start assignment settlement quantity or price is invalid")
+    occurred_at_ms = _positive_int(
+        stock.get("event_time_ms") or event.get("event_time_ms"),
+        "assignment occurred_at_ms",
+    )
+    stock_lot_id = f"assigned-stock-{event_id}"
+    return build_wheel_event(
+        event_id=f"wheel-started:{event_id}",
+        account=account,
+        stock_lot_id=stock_lot_id,
+        event_type="wheel_started",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        source_trade_event_id=event_id,
+        payload={
+            "schema_version": "wheel_started.v1",
+            "source_option_lot_id": str(event.get("target_lot_id") or "").strip(),
+            "shares": shares,
+            "assignment_price": price,
+            "currency": str(stock.get("currency") or event.get("currency") or "").strip().upper(),
+        },
+    )
+
+
+def wheel_called_away_event_from_call_assignment(
+    terminal_event: Any,
+    source_call_lot: Mapping[str, Any],
+    stock_lot_before: Mapping[str, Any] | None,
+    stock_lot_after: Mapping[str, Any] | None,
+    *,
+    recorded_at_ms: int,
+) -> dict[str, Any] | None:
+    event = _trade_event_fact(terminal_event)
+    if _event_type(event) != "assignment":
+        return None
+    fields = _lot_fields(source_call_lot)
+    strategy = str(fields.get("strategy") or "").strip().lower()
+    leg_role = str(fields.get("leg_role") or "").strip().lower()
+    stock_lot_id = str(fields.get("source_stock_lot_id") or "").strip()
+    if strategy != "wheel" and leg_role != "wheel_call" and not stock_lot_id:
+        return None
+    if (
+        strategy != "wheel"
+        or leg_role != "wheel_call"
+        or not stock_lot_id
+        or str(fields.get("strategy_group_id") or "").strip()
+        or str(fields.get("option_type") or "").strip().lower() != "call"
+        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        != "short"
+    ):
+        raise ValueError("Wheel Call assignment has incomplete or conflicting linkage")
+    stock = _stock_settlement(event)
+    if str(stock.get("side") or "").strip().lower() != "sell":
+        raise ValueError("Wheel Call assignment requires sell-side stock settlement")
+    contracts = _positive_int(event.get("contracts"), "assignment contracts")
+    try:
+        multiplier = int(float(event.get("multiplier") or fields.get("multiplier") or 0))
+        shares = int(stock.get("shares") or stock.get("stock_qty") or 0)
+        before = int((stock_lot_before or {}).get("shares_remaining"))
+        after = int((stock_lot_after or {}).get("shares_remaining"))
+    except (TypeError, ValueError):
+        raise ValueError("Wheel Call assignment stock-lot evidence is incomplete") from None
+    if multiplier <= 0 or shares != contracts * multiplier:
+        raise ValueError("Wheel Call assignment settlement quantity is invalid")
+    if (
+        str((stock_lot_before or {}).get("stock_lot_id") or "") != stock_lot_id
+        or str((stock_lot_after or {}).get("stock_lot_id") or "") != stock_lot_id
+        or before - after != shares
+        or after < 0
+    ):
+        raise ValueError("Wheel Call assignment did not exactly reduce its stock batch")
+    if after > 0:
+        return None
+    source_event_id = _required_text(event.get("event_id"), "source_trade_event_id")
+    account = _required_text(
+        event.get("account") or fields.get("account"),
+        "account",
+    ).lower()
+    occurred_at_ms = _positive_int(
+        stock.get("event_time_ms") or event.get("event_time_ms"),
+        "assignment occurred_at_ms",
+    )
+    return build_wheel_event(
+        event_id=f"wheel-called-away:{source_event_id}:{stock_lot_id}",
+        account=account,
+        stock_lot_id=stock_lot_id,
+        event_type="wheel_called_away",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        source_trade_event_id=source_event_id,
+        payload={
+            "schema_version": "wheel_called_away.v1",
+            "source_call_lot_id": str(event.get("target_lot_id") or "").strip(),
+            "shares": shares,
+        },
+    )
+
+
+def plan_wheel_manual_end(
+    wheel_batch: Mapping[str, Any],
+    request_id: str,
+    actor: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    account: str,
+) -> dict[str, Any]:
+    stock_lot_id = _required_text(wheel_batch.get("stock_lot_id"), "stock_lot_id")
+    if wheel_batch.get("lifecycle_status") != "active":
+        raise ValueError("Wheel lifecycle is not active")
+    if wheel_batch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel lifecycle integrity is not trusted")
+    if wheel_batch.get("active_call_lot_ids"):
+        raise ValueError("Wheel lifecycle has an active Call")
+    if wheel_batch.get("active_intent_ids"):
+        raise ValueError("Wheel lifecycle has an active Call intent")
+    request = _required_text(request_id, "request_id")
+    actor_value = _required_text(actor, "actor")
+    account_value = _required_text(account, "account").lower()
+    event_digest = canonical_sha256(
+        {
+            "account": account_value,
+            "stock_lot_id": stock_lot_id,
+            "request_id": request,
+        }
+    )[:24]
+    return build_wheel_event(
+        event_id=f"wheel-manual-ended:{event_digest}",
+        account=account_value,
+        stock_lot_id=stock_lot_id,
+        event_type="wheel_manual_ended",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        payload={
+            "schema_version": "wheel_manual_ended.v1",
+            "request_id": request,
+            "actor": actor_value,
+            "batch_generation_hash": str(
+                wheel_batch.get("batch_generation_hash") or ""
+            ),
+        },
+    )
+
+
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     fields = row.get("fields")
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
@@ -643,6 +847,9 @@ __all__ = [
     "WHEEL_PROJECTION_SCHEMA",
     "build_wheel_event",
     "normalize_wheel_event",
+    "plan_wheel_manual_end",
     "project_wheel_lifecycles",
+    "wheel_called_away_event_from_call_assignment",
     "wheel_event_payload_hash",
+    "wheel_started_event_from_assignment",
 ]
