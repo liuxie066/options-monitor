@@ -10,6 +10,7 @@ from src.application.copilot.contracts import AppResult, CopilotRequest, Copilot
 from src.application.copilot.host import session_run_slot
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.local_harness import run_local_request, run_prepared_contract
+from src.application.research.redaction import redact_value
 
 
 def add_copilot_commands(subparsers: Any) -> argparse.ArgumentParser:
@@ -109,7 +110,7 @@ def handle_copilot_command(args: argparse.Namespace) -> dict[str, Any]:
             execution_environment="local",
         )
         host_store = CopilotHostStore(args.host_db) if args.host_db else None
-        session_key = args.session_key or (f"cli:{request.request_id}" if host_store is not None else None)
+        session_key = args.session_key
         return to_payload(
             _run_local_request(
                 request,
@@ -137,7 +138,11 @@ def handle_copilot_command(args: argparse.Namespace) -> dict[str, Any]:
             "ok": cancelled,
             "status": "cancel_requested" if cancelled else "not_ready",
             "run_id": args.run_id,
-            "user_response": "已请求取消 Copilot 运行。" if cancelled else "该运行不存在或已进入终态。",
+            "user_response": (
+                "已请求取消 Copilot 运行。"
+                if cancelled
+                else "该运行不存在、已作出准入决定或已进入终态。"
+            ),
         }
 
     if args.copilot_command == "events":
@@ -185,7 +190,7 @@ def handle_copilot_command(args: argparse.Namespace) -> dict[str, Any]:
                 model_config_json=args.model_config_json,
                 assistant_config_path=args.assistant_config,
                 host_store=store,
-                session_key=slot_key,
+                session_key=session_key,
                 resumed_from=args.run_id,
                 recovered_observations=recovered,
             )
@@ -250,13 +255,25 @@ def _run_local_request(
 
 
 def _successful_observations(events: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
-    return tuple(
-        dict(item.get("payload") or {})
-        for item in events
-        if item.get("type") == "tool_result"
-        and isinstance(item.get("payload"), dict)
-        and bool(item["payload"].get("ok"))
-    )
+    recovered: list[dict[str, Any]] = []
+    total_chars = 0
+    for item in reversed(events):
+        payload = item.get("payload")
+        if (
+            item.get("type") != "tool_result"
+            or not isinstance(payload, dict)
+            or payload.get("ok") is not True
+        ):
+            continue
+        observation = dict(redact_value(payload))
+        encoded = json.dumps(observation, ensure_ascii=False, default=str)
+        if len(encoded) > 12_000 or total_chars + len(encoded) > 48_000:
+            continue
+        recovered.append(observation)
+        total_chars += len(encoded)
+        if len(recovered) == 8:
+            break
+    return tuple(reversed(recovered))
 
 
 def _run_summary(record: dict[str, Any]) -> dict[str, Any]:

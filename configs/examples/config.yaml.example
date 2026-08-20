@@ -58,6 +58,7 @@ assistant:
       model: deepseek-chat
       confidence_min: 0.75
       timeout_seconds: 90
+      context_window_tokens: 24000
       max_output_tokens: 2048
     kimi-code:
       provider: kimi-code
@@ -65,6 +66,7 @@ assistant:
       model: kimi-for-coding
       confidence_min: 0.75
       timeout_seconds: 90
+      context_window_tokens: 24000
       max_output_tokens: 2048
     openai-default:
       provider: openai
@@ -72,6 +74,7 @@ assistant:
       model: gpt-5.2
       confidence_min: 0.75
       timeout_seconds: 90
+      context_window_tokens: 24000
       max_output_tokens: 2048
 
 inbound:

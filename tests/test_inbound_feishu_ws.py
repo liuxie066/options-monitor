@@ -541,7 +541,12 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
                 "assistant": {
                     "enabled": True,
                     "copilot": {"enabled": True},
-                    "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
+                    "llm": {
+                        "provider": "openai",
+                        "model": "gpt-5.2",
+                        "api_key_env": "OM_LLM_API_KEY",
+                        "context_window_tokens": 24_000,
+                    },
                 }
             }
         ),
@@ -600,7 +605,12 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
             {
                 "assistant": {
                     "copilot": {"enabled": True},
-                    "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
+                    "llm": {
+                        "provider": "openai",
+                        "model": "gpt-5.2",
+                        "api_key_env": "OM_LLM_API_KEY",
+                        "context_window_tokens": 24_000,
+                    },
                 }
             }
         ),
@@ -850,6 +860,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
                         "api_key_env": "OM_LLM_API_KEY",
                         "confidence_min": 0.8,
                         "timeout_seconds": 31,
+                        "context_window_tokens": 24_000,
                         "max_output_tokens": 769,
                     }
                 }

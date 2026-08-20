@@ -95,6 +95,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             ".github/workflows/**",
             "release/coverage/**",
             "scripts/install*",
+            "scripts/release_preflight.sh",
             "scripts/release_check.py",
             "scripts/release_delta.py",
             "scripts/release_test_plan.py",
@@ -121,6 +122,49 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_release_delta_coverage.py "
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
+        ),
+    ),
+    TestRule(
+        name="pi_runtime",
+        patterns=(
+            ".github/workflows/_release-reusable.yml",
+            ".github/workflows/guardrails.yml",
+            "agent-runtime/**",
+            "scripts/copilot_p1_eval.py",
+            "scripts/install.sh",
+            "scripts/release_preflight.sh",
+            "scripts/pi_runtime_smoke.sh",
+            "src/application/copilot/**",
+            "src/application/release_test_plan.py",
+            "src/application/service_upgrade.py",
+            "src/application/setup/check.py",
+            "src/infrastructure/pi_agent_process.py",
+            "docs/PI_AGENT_CORE_INTEGRATION.md",
+            "tests/copilot_pi_test_support.py",
+            "tests/test_architecture_guards.py",
+            "tests/test_pi_agent_process.py",
+            "tests/test_copilot_p1_eval.py",
+            "tests/test_copilot_*.py",
+            "tests/test_inbound_control.py",
+            "tests/test_setup_check.py",
+            "tests/test_cli_operator_commands.py",
+            "tests/test_install_script.py",
+            "tests/test_service_deploy.py",
+            "tests/test_release_check.py",
+            "tests/test_release_test_plan.py",
+            "tests/copilot_eval/**",
+        ),
+        reason="Pi Agent runtime, packaging, or public contract files changed",
+        commands=(
+            "npm ci --omit=dev --ignore-scripts --prefix agent-runtime",
+            "./.venv/bin/python -m pytest tests/test_pi_agent_process.py",
+            "./.venv/bin/python -m pytest tests/test_copilot_phase1.py "
+            "tests/test_copilot_conversation_memory.py tests/test_copilot_p1_eval.py "
+            "tests/test_inbound_control.py "
+            "tests/test_setup_check.py tests/test_cli_operator_commands.py "
+            "tests/test_install_script.py tests/test_service_deploy.py "
+            "tests/test_release_check.py tests/test_release_test_plan.py "
+            "tests/copilot_eval/test_answer_quality.py",
         ),
     ),
     TestRule(
