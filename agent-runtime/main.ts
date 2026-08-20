@@ -1,4 +1,5 @@
-// S2 Node runtime: one real Pi Agent run with sequential Host tools over
+// S3 Node runtime: one real Pi Agent run with durable Pi Session history and
+// sequential Host tools over
 // `om-pi-ipc.v1` JSONL stdio.
 //
 // Pinned to @earendil-works/pi-agent-core@0.84.2 and @earendil-works/pi-ai@0.84.2.
@@ -7,23 +8,83 @@
 // src/infrastructure/pi_agent_process.py.
 
 import process from "node:process";
-import { Agent } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import path from "node:path";
+import {
+  Agent,
+  SessionError,
+  buildSessionContext,
+  compact,
+  convertToLlm,
+  createCompactionSummaryMessage,
+  estimateContextTokens,
+  estimateTokens,
+  getLastAssistantUsage,
+  prepareCompaction,
+  shouldCompact,
+  uuidv7,
+} from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import {
+  createAssistantMessageEventStream,
+  createModels,
+  createProvider,
+  envApiKeyAuth,
+  isRetryableAssistantError,
+} from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type {
   Api,
   AssistantMessage,
   AssistantMessageEventStream,
   Context,
+  FetchFunction,
   Model,
+  Models,
+  ProviderStreams,
+  SimpleStreamOptions,
   StreamFn,
+  StreamOptions,
   Usage,
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type {
+  AgentEvent,
+  AgentMessage,
+  AgentTool,
+  Entry,
+  Session,
+} from "@earendil-works/pi-agent-core";
+import {
+  SqliteSessionRepository,
+  createNodeSqliteFactory,
+} from "@earendil-works/pi-session-backend-sqlite-node";
 
 const PROTOCOL = "om-pi-ipc.v1";
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_SAFE_MESSAGE_CHARS = 240;
 const MAX_FIXTURE_DELAY_MS = 300_000;
+const SESSION_ID_PATTERN = /^om_[0-9a-f]{64}$/;
+const SESSION_SCHEMA = "om-pi-session.v1";
+const TURN_COMMIT_TYPE = "om.turn.commit.v1";
+const WRITER_LEASE_TTL_MS = 30_000;
+const WRITER_HEARTBEAT_MS = 10_000;
+const OLLAMA_LOCAL_API_KEY = "ollama-local";
+const CONTROL_PREVIEW_TOOL = "request_control_preview";
+const CONTINUATION_PROMPT =
+  "Continue exactly where the previous answer stopped. Do not repeat earlier text. Return only the continuation.";
+const PROVIDER_API_KINDS: Record<string, Api> = {
+  openai: "openai-responses",
+  deepseek: "openai-completions",
+  kimi: "openai-completions",
+  "kimi-code": "openai-completions",
+  ollama: "openai-completions",
+};
+const COMPACTION_INSTRUCTIONS = [
+  "Preserve the user's investment goals and stable preferences.",
+  "Keep timestamps on historical claims and preserve unresolved questions and Control references.",
+  "Never present remembered financial facts as current facts.",
+  "Omit coding and file-operation guidance.",
+].join(" ");
 
 const ALLOWED_ERROR_CODES = new Set([
   "PROTOCOL_ERROR",
@@ -67,10 +128,45 @@ type FixtureTurn = { text: string } | { tool_calls: FixtureToolCall[] };
 interface PendingTool {
   callId: string;
   toolName: string;
-  resolve: (observation: JsonObject) => void;
+  resolve: (result: ToolBridgeResult) => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
   abortListener?: () => void;
+}
+
+interface ToolBridgeResult {
+  observation: JsonObject;
+  controlRequest: JsonObject | null;
+}
+
+interface SessionState {
+  entries: Entry[];
+  messages: AgentMessage[];
+}
+
+interface RequestCall {
+  attempts: number;
+  statuses: number[];
+}
+
+interface CompletedCall extends RequestCall {
+  usage: JsonObject;
+  usageTotal: JsonObject;
+  modelRetryCount: number;
+}
+
+interface FinalizedCompaction {
+  retryCount: number;
+  usage: JsonObject;
+}
+
+class SafeRunFailure extends Error {
+  readonly payload: JsonObject;
+
+  constructor(payload: JsonObject) {
+    super("safe run failure");
+    this.payload = payload;
+  }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -88,6 +184,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
+}
+
+function isControlRequest(value: unknown): value is JsonObject {
+  return isRecord(value) &&
+    exactKeys(value, ["intent_name", "arguments", "source", "confidence"]) &&
+    isNonEmptyString(value.intent_name) &&
+    isRecord(value.arguments) &&
+    value.source === "copilot_control_preview" &&
+    value.confidence === 1;
 }
 
 // Incremental line reader. Must yield each complete line as it arrives rather
@@ -182,8 +287,18 @@ function validateStart(payload: JsonObject): void {
     "debug",
   ];
   if (!exactKeys(payload, keys)) throw new Error("start payload keys are not closed");
-  if (payload.execution_environment !== "eval") throw new Error("execution_environment must be eval");
-  if (payload.session_id !== null) throw new Error("session_id must be null");
+  if (
+    payload.execution_environment !== "local" &&
+    payload.execution_environment !== "eval" &&
+    payload.execution_environment !== "channel"
+  ) {
+    throw new Error("execution_environment is not allowed");
+  }
+  if (payload.session_id !== null && (
+    !isNonEmptyString(payload.session_id) || !SESSION_ID_PATTERN.test(payload.session_id)
+  )) {
+    throw new Error("session_id must be null or OM-derived");
+  }
   if (!isNonEmptyString(payload.system_prompt)) throw new Error("system_prompt must be non-empty");
   if (!isNonEmptyString(payload.user_message)) throw new Error("user_message must be non-empty");
 
@@ -214,8 +329,11 @@ function validateStart(payload: JsonObject): void {
     }
     toolNames.add(tool.name);
   }
-  if (!Array.isArray(payload.recovered_observations) || payload.recovered_observations.length !== 0) {
-    throw new Error("S1/S2 require an empty recovered_observations array");
+  if (!Array.isArray(payload.recovered_observations)) {
+    throw new Error("recovered_observations must be an array");
+  }
+  for (const observation of payload.recovered_observations) {
+    if (!isRecord(observation)) throw new Error("recovered observation must be an object");
   }
 
   if (!isRecord(payload.model)) throw new Error("model must be an object");
@@ -237,11 +355,26 @@ function validateStart(payload: JsonObject): void {
   for (const key of ["provider", "model", "base_url"] as const) {
     if (!isNonEmptyString(model[key])) throw new Error(`model.${key} must be non-empty`);
   }
-  if (model.api_kind !== "openai-responses" && model.api_kind !== "openai-completions") {
-    throw new Error("model.api_kind is not allowed");
+  if (PROVIDER_API_KINDS[model.provider as string] !== model.api_kind) {
+    throw new Error("model provider/API pair is not allowed");
   }
-  for (const key of ["timeout_seconds", "context_window_tokens", "max_output_tokens", "max_attempts"] as const) {
-    if (!isPositiveInteger(model[key])) throw new Error(`model.${key} must be a positive integer`);
+  const modelBounds: Record<string, [number, number]> = {
+    timeout_seconds: [1, 120],
+    context_window_tokens: [4_096, 2_000_000],
+    max_output_tokens: [64, 4_096],
+    max_attempts: [1, 3],
+  };
+  for (const [key, [minimum, maximum]] of Object.entries(modelBounds)) {
+    const value = model[key];
+    if (!isPositiveInteger(value) || value < minimum || value > maximum) {
+      throw new Error(`model.${key} is outside the allowed range`);
+    }
+  }
+  if (
+    (model.context_window_tokens as number) <=
+    (model.max_output_tokens as number) + 2_000
+  ) {
+    throw new Error("model.context_window_tokens must exceed max_output_tokens by more than 2000");
   }
   let baseUrl: URL;
   try {
@@ -268,17 +401,36 @@ function validateStart(payload: JsonObject): void {
     if (!isPositiveInteger(limits[key])) throw new Error(`limits.${key} must be a positive integer`);
   }
 
-  if (!isRecord(payload.debug)) throw new Error("debug must be an object");
+  if (payload.execution_environment !== "eval") {
+    if (payload.debug !== null) throw new Error("debug must be null outside eval");
+    return;
+  }
+  if (!isRecord(payload.debug)) throw new Error("eval debug must be an object");
   const debug = payload.debug;
+  const commonDebugKeys = new Set([
+    "delay_ms",
+    "persist_delay_ms",
+    "expected_history",
+    "forbidden_history",
+    "compaction_response",
+  ]);
+  const fixtureKey = Object.hasOwn(debug, "fixture_response")
+    ? "fixture_response"
+    : Object.hasOwn(debug, "fixture_turns")
+      ? "fixture_turns"
+      : null;
+  if (
+    fixtureKey === null ||
+    Object.keys(debug).some((key) => key !== fixtureKey && !commonDebugKeys.has(key))
+  ) {
+    throw new Error("debug fields are not closed");
+  }
   if (Object.hasOwn(debug, "fixture_response")) {
-    if (!exactKeys(debug, ["fixture_response", "delay_ms"])) {
-      throw new Error("debug fields are not closed");
-    }
     if (typeof debug.fixture_response !== "string") {
       throw new Error("debug.fixture_response must be a string");
     }
   } else if (Object.hasOwn(debug, "fixture_turns")) {
-    if (!exactKeys(debug, ["fixture_turns", "delay_ms"]) || !Array.isArray(debug.fixture_turns)) {
+    if (!Array.isArray(debug.fixture_turns)) {
       throw new Error("debug.fixture_turns must be a closed array fixture");
     }
     for (const turn of debug.fixture_turns) {
@@ -307,6 +459,17 @@ function validateStart(payload: JsonObject): void {
   } else {
     throw new Error("debug fixture is missing");
   }
+  for (const key of ["expected_history", "forbidden_history"] as const) {
+    if (
+      Object.hasOwn(debug, key) &&
+      (!Array.isArray(debug[key]) || !debug[key].every((item) => typeof item === "string"))
+    ) {
+      throw new Error(`debug.${key} must be a string array`);
+    }
+  }
+  if (Object.hasOwn(debug, "compaction_response") && typeof debug.compaction_response !== "string") {
+    throw new Error("debug.compaction_response must be a string");
+  }
   const delay = debug.delay_ms;
   if (
     typeof delay !== "number" ||
@@ -315,6 +478,14 @@ function validateStart(payload: JsonObject): void {
     delay > MAX_FIXTURE_DELAY_MS
   ) {
     throw new Error("debug.delay_ms must be within [0, 300000]");
+  }
+  if (
+    Object.hasOwn(debug, "persist_delay_ms") &&
+    (!Number.isInteger(debug.persist_delay_ms) ||
+      (debug.persist_delay_ms as number) < 0 ||
+      (debug.persist_delay_ms as number) > MAX_FIXTURE_DELAY_MS)
+  ) {
+    throw new Error("debug.persist_delay_ms must be within [0, 300000]");
   }
 }
 
@@ -343,7 +514,7 @@ function safeError(code: string, stage: string, message: string, retryable: bool
 
 function modelFromStart(start: JsonObject): Model<Api> {
   const model = start.model as JsonObject;
-  return {
+  const normalized: Model<Api> = {
     id: model.model as string,
     name: model.model as string,
     api: model.api_kind as Api,
@@ -355,6 +526,178 @@ function modelFromStart(start: JsonObject): Model<Api> {
     contextWindow: model.context_window_tokens as number,
     maxTokens: model.max_output_tokens as number,
   };
+  if (model.provider !== "openai") {
+    normalized.compat = {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+    };
+  }
+  return normalized;
+}
+
+class RunMetrics {
+  private readonly pending: RequestCall[] = [];
+  private retryCount = 0;
+  private total: JsonObject = zeroPublicUsage();
+  lastCompleted: CompletedCall | null = null;
+
+  startCall(): RequestCall {
+    const call = { attempts: 0, statuses: [] };
+    this.pending.push(call);
+    return call;
+  }
+
+  beginCompaction(): number {
+    return this.pending.length;
+  }
+
+  finishTurn(message: AssistantMessage): CompletedCall {
+    const call = this.pending.shift() ?? { attempts: 0, statuses: [] };
+    this.retryCount += Math.max(call.attempts - 1, 0);
+    const usage = normalizeUsage(message.usage ?? {});
+    this.total = addPublicUsage(this.total, usage);
+    const completed = {
+      ...call,
+      usage,
+      usageTotal: { ...this.total },
+      modelRetryCount: this.retryCount,
+    };
+    this.lastCompleted = completed;
+    return completed;
+  }
+
+  finishCompaction(
+    pendingStart: number,
+    usage: Record<string, unknown>
+  ): FinalizedCompaction {
+    const calls = this.pending.splice(pendingStart);
+    return {
+      retryCount: calls.reduce(
+        (total, call) => total + Math.max(call.attempts - 1, 0),
+        0
+      ),
+      usage: normalizeUsage(usage),
+    };
+  }
+
+  commitCompaction(compaction: FinalizedCompaction): void {
+    this.retryCount += compaction.retryCount;
+    this.total = addPublicUsage(this.total, compaction.usage);
+  }
+
+  usageTotal(): JsonObject {
+    return { ...this.total };
+  }
+}
+
+function zeroPublicUsage(): JsonObject {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+}
+
+function addPublicUsage(left: JsonObject, right: JsonObject): JsonObject {
+  const out = zeroPublicUsage();
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]) {
+    out[key] = ((left[key] as number | undefined) ?? 0) +
+      ((right[key] as number | undefined) ?? 0);
+  }
+  return out;
+}
+
+function countingFetch(call: RequestCall, delegate: FetchFunction): FetchFunction {
+  return async (input, init) => {
+    call.attempts += 1;
+    const response = await delegate(input, init);
+    call.statuses.push(response.status);
+    return response;
+  };
+}
+
+function withOmRequestPolicy(
+  api: ProviderStreams,
+  start: JsonObject,
+  model: Model<Api>,
+  metrics: RunMetrics,
+  remainingSceneMs: () => number
+): ProviderStreams {
+  const raw = start.model as JsonObject;
+  const modelTimeoutMs = (raw.timeout_seconds as number) * 1_000;
+  const maxAttempts = raw.max_attempts as number;
+
+  const requestOptions = <T extends StreamOptions>(options: T | undefined): T => {
+    const remaining = Math.max(1, Math.floor(remainingSceneMs()));
+    const callerTimeout = options?.timeoutMs ?? modelTimeoutMs;
+    const callerMaxTokens = options?.maxTokens ?? model.maxTokens;
+    const call = metrics.startCall();
+    const delegate = options?.fetch ?? globalThis.fetch;
+    const fixed: StreamOptions = {
+      ...options,
+      timeoutMs: Math.max(1, Math.min(modelTimeoutMs, callerTimeout, remaining)),
+      maxTokens: Math.min(callerMaxTokens, model.maxTokens),
+      maxRetries: maxAttempts - 1,
+      maxRetryDelayMs: Math.max(
+        1,
+        Math.min(options?.maxRetryDelayMs || remaining, remaining)
+      ),
+      fetch: countingFetch(call, delegate),
+    };
+    if (model.provider === "openai" || model.provider === "deepseek" || model.provider === "ollama") {
+      fixed.temperature = 0;
+    }
+    if (model.provider === "deepseek") {
+      fixed.samplingParams = {
+        ...(options?.samplingParams ?? {}),
+        thinking: { type: "disabled" },
+      };
+    }
+    return fixed as T;
+  };
+
+  return {
+    stream: (selected, context, options) =>
+      api.stream(selected, context, requestOptions(options)),
+    streamSimple: (selected, context, options) =>
+      api.streamSimple(
+        selected,
+        context,
+        requestOptions(options as SimpleStreamOptions) as SimpleStreamOptions
+      ),
+  };
+}
+
+function createProviderModels(
+  start: JsonObject,
+  model: Model<Api>,
+  metrics: RunMetrics,
+  remainingSceneMs: () => number
+): Models {
+  const baseApi = model.api === "openai-responses"
+    ? openAIResponsesApi()
+    : openAICompletionsApi();
+  const api = withOmRequestPolicy(baseApi, start, model, metrics, remainingSceneMs);
+  const apiKey = model.provider === "ollama"
+    ? {
+        name: "Ollama local",
+        resolve: async ({ signal }: { signal: AbortSignal }) => {
+          signal.throwIfAborted();
+          return {
+            auth: { apiKey: OLLAMA_LOCAL_API_KEY },
+            source: "process-local sentinel",
+          };
+        },
+      }
+    : envApiKeyAuth("OM model API key", ["OM_PI_MODEL_API_KEY"]);
+  const provider = createProvider({
+    id: model.provider,
+    name: model.provider,
+    baseUrl: model.baseUrl,
+    auth: { apiKey },
+    models: [model],
+    api,
+  });
+  const models = createModels();
+  models.setProvider(provider);
+  return models;
 }
 
 function emptyUsage(): Usage {
@@ -452,6 +795,16 @@ function createFixtureStream(start: JsonObject): StreamFn {
         return;
       }
       if (!turn) throw new Error("fixture turns exhausted");
+      const persistedHistory = stableJson(context.messages);
+      let expectedOffset = 0;
+      for (const expected of (debug.expected_history ?? []) as string[]) {
+        const found = persistedHistory.indexOf(expected, expectedOffset);
+        if (found < 0) throw new Error("fixture history mismatch");
+        expectedOffset = found + expected.length;
+      }
+      for (const forbidden of (debug.forbidden_history ?? []) as string[]) {
+        if (persistedHistory.includes(forbidden)) throw new Error("fixture history leak");
+      }
       if (expectedResults.length > 0 && !fixtureContextHasResults(context, expectedResults)) {
         throw new Error("fixture context mismatch");
       }
@@ -494,6 +847,30 @@ function createFixtureStream(start: JsonObject): StreamFn {
   };
 }
 
+function createFixtureModels(start: JsonObject): Models {
+  const debug = start.debug as JsonObject;
+  const delayMs = debug.delay_ms as number;
+  return {
+    completeSimple: async (model, _context, options) => {
+      await waitAbortOrDelay(options?.signal, delayMs);
+      if (options?.signal?.aborted) {
+        return makeAssistantMessage(model, [], "aborted", "aborted");
+      }
+      if (
+        typeof debug.compaction_response !== "string" ||
+        debug.compaction_response.trim().length === 0
+      ) {
+        return makeAssistantMessage(model, [], "error", "fixture compaction failed");
+      }
+      return makeAssistantMessage(
+        model,
+        [{ type: "text", text: debug.compaction_response }],
+        "stop"
+      );
+    },
+  } as Models;
+}
+
 function createToolBridge(
   start: JsonObject,
   emitRun: (type: string, payload: JsonObject) => void,
@@ -504,8 +881,10 @@ function createToolBridge(
   cancelPending: () => void;
   rejectPending: () => void;
   hasPending: () => boolean;
+  controlRequest: () => JsonObject | null;
 } {
   let pending: PendingTool | null = null;
+  let controlRequest: JsonObject | null = null;
 
   const settlePending = (error?: Error): void => {
     const current = pending;
@@ -529,7 +908,7 @@ function createToolBridge(
         throw new Error("tool bridge failed");
       }
       if (signal?.aborted) throw new Error("tool call aborted");
-      const observation = await new Promise<JsonObject>((resolve, reject) => {
+      const result = await new Promise<ToolBridgeResult>((resolve, reject) => {
         const abortListener = (): void => {
           if (pending?.callId !== toolCallId) return;
           pending = null;
@@ -558,9 +937,9 @@ function createToolBridge(
         }
       });
       return {
-        content: [{ type: "text", text: stableJson(observation) }],
-        details: { observation },
-        terminate: false,
+        content: [{ type: "text", text: stableJson(result.observation) }],
+        details: { observation: result.observation },
+        terminate: result.controlRequest !== null,
       };
     },
   }));
@@ -568,8 +947,14 @@ function createToolBridge(
   return {
     tools,
     acceptResult(result) {
+      const hasControlRequest = Object.hasOwn(result, "control_request");
       if (
-        !exactKeys(result, ["call_id", "tool_name", "observation"]) ||
+        !exactKeys(
+          result,
+          hasControlRequest
+            ? ["call_id", "tool_name", "observation", "control_request"]
+            : ["call_id", "tool_name", "observation"]
+        ) ||
         !isNonEmptyString(result.call_id) ||
         !isNonEmptyString(result.tool_name) ||
         !isRecord(result.observation) ||
@@ -579,12 +964,33 @@ function createToolBridge(
       ) {
         throw new Error("tool result mismatch");
       }
+      if (
+        hasControlRequest &&
+        (pending.toolName !== CONTROL_PREVIEW_TOOL ||
+          controlRequest !== null ||
+          !isControlRequest(result.control_request) ||
+          result.observation.ok !== true ||
+          result.observation.status !== "preview_requested")
+      ) {
+        throw new Error("control tool result mismatch");
+      }
+      if (
+        pending.toolName === CONTROL_PREVIEW_TOOL &&
+        !hasControlRequest &&
+        result.observation.ok !== false
+      ) {
+        throw new Error("control tool result is incomplete");
+      }
       const current = pending;
       pending = null;
       if (current.signal && current.abortListener) {
         current.signal.removeEventListener("abort", current.abortListener);
       }
-      current.resolve(result.observation);
+      if (hasControlRequest) controlRequest = result.control_request as JsonObject;
+      current.resolve({
+        observation: result.observation,
+        controlRequest: hasControlRequest ? controlRequest : null,
+      });
     },
     cancelPending() {
       settlePending(new Error("tool call aborted"));
@@ -593,15 +999,355 @@ function createToolBridge(
       settlePending(new Error("tool bridge failed"));
     },
     hasPending: () => pending !== null,
+    controlRequest: () => controlRequest,
   };
 }
 
-function effectiveSystemPrompt(systemPrompt: string, runtimeContext: JsonObject[]): string {
+function effectiveSystemPrompt(
+  systemPrompt: string,
+  runtimeContext: JsonObject[],
+  recoveredObservations: JsonObject[]
+): string {
   const parts = [systemPrompt];
-  for (const item of runtimeContext) {
-    if (typeof item.content === "string") parts.push(item.content);
+  if (runtimeContext.length > 0) {
+    parts.push(
+      `<om-runtime-context>\n${runtimeContext.map((item) => item.content as string).join("\n\n")}\n</om-runtime-context>`
+    );
+  }
+  if (recoveredObservations.length > 0) {
+    parts.push(
+      `<om-recovered-observations>\n${stableJson(recoveredObservations)}\n</om-recovered-observations>`
+    );
   }
   return parts.join("\n\n");
+}
+
+function isCommitMarker(entry: Entry): boolean {
+  return entry.type === "custom" &&
+    entry.customType === TURN_COMMIT_TYPE &&
+    isRecord(entry.data) &&
+    exactKeys(entry.data, ["run_id", "kind"]) &&
+    isNonEmptyString(entry.data.run_id) &&
+    (entry.data.kind === "turn" || entry.data.kind === "compaction");
+}
+
+async function loadCommittedState(session: Session): Promise<SessionState> {
+  const reachable = await session.findEntriesOnBranch({ order: "oldestFirst" });
+  let committedLeaf: string | null = null;
+  for (const entry of reachable) {
+    if (isCommitMarker(entry)) committedLeaf = entry.id;
+  }
+  await session.moveLane("main", committedLeaf);
+  const entries = await session.findEntriesOnBranch({ order: "oldestFirst" });
+  return { entries, messages: buildSessionContext(entries).messages };
+}
+
+async function openPiSession(sessionId: string): Promise<{
+  repository: SqliteSessionRepository;
+  session: Session;
+  state: SessionState;
+}> {
+  const databasePath = process.env.OM_PI_SESSION_DB;
+  if (
+    !isNonEmptyString(databasePath) ||
+    databasePath.includes("\0") ||
+    !path.isAbsolute(databasePath)
+  ) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
+    );
+  }
+
+  const repositoryRoot = process.cwd();
+  const repository = new SqliteSessionRepository({
+    env: new NodeExecutionEnv({ cwd: repositoryRoot }),
+    sqlite: createNodeSqliteFactory(),
+    databasePath,
+    writerLease: {
+      ttlMs: WRITER_LEASE_TTL_MS,
+      heartbeatIntervalMs: WRITER_HEARTBEAT_MS,
+    },
+  });
+  try {
+    const metadata = (await repository.list()).find((candidate) => candidate.id === sessionId);
+    let session: Session;
+    if (metadata) {
+      if (
+        !isRecord(metadata.metadata) ||
+        !exactKeys(metadata.metadata, ["schema"]) ||
+        metadata.metadata.schema !== SESSION_SCHEMA
+      ) {
+        throw new SafeRunFailure(
+          safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
+        );
+      }
+      session = await repository.open(metadata);
+    } else {
+      session = await repository.create({
+        id: sessionId,
+        cwd: repositoryRoot,
+        metadata: { schema: SESSION_SCHEMA },
+      });
+    }
+    return { repository, session, state: await loadCommittedState(session) };
+  } catch (error) {
+    await repository.close().catch(() => {});
+    throw error;
+  }
+}
+
+function mapSessionFailure(error: unknown): JsonObject {
+  if (error instanceof SafeRunFailure) return error.payload;
+  const retryable = error instanceof SessionError &&
+    error.code === "storage" &&
+    error.message.includes("active writer");
+  return safeError(
+    "SESSION_ERROR",
+    "session",
+    retryable ? "session is temporarily busy" : "session storage is unavailable",
+    retryable
+  );
+}
+
+function textTokenEstimate(text: string): number {
+  return estimateTokens({
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: 0,
+  });
+}
+
+function estimateStructuralContextTokens(messages: AgentMessage[]): number {
+  return messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
+}
+
+function estimateSessionContextTokens(state: SessionState): number {
+  const compactionIndex = state.entries.findLastIndex((entry) => entry.type === "compaction");
+  if (
+    compactionIndex < 0 ||
+    getLastAssistantUsage(state.entries.slice(compactionIndex + 1)) !== undefined
+  ) {
+    return estimateContextTokens(state.messages).tokens;
+  }
+  return estimateStructuralContextTokens(state.messages);
+}
+
+async function prepareSessionState(
+  session: Session | null,
+  state: SessionState,
+  start: JsonObject,
+  model: Model<Api>,
+  models: Models,
+  metrics: RunMetrics,
+  systemPrompt: string,
+  signal: AbortSignal,
+  runId: string
+): Promise<SessionState> {
+  const limits = start.limits as JsonObject;
+  const contextWindow = Math.min(
+    model.contextWindow,
+    limits.max_context_tokens as number
+  );
+  const reserveTokens = model.maxTokens;
+  const fixedInputTokens = textTokenEstimate(systemPrompt) +
+    textTokenEstimate(start.user_message as string);
+  const usableHistoryTokens = contextWindow - reserveTokens - fixedInputTokens;
+  if (usableHistoryTokens <= 2_000) {
+    throw new SafeRunFailure(
+      safeError("CONFIG_ERROR", "config", "configured context budget is too small", false)
+    );
+  }
+
+  const settings = {
+    enabled: true,
+    reserveTokens,
+    keepRecentTokens: Math.max(2_000, Math.floor(usableHistoryTokens / 2)),
+  };
+  const historyTokens = estimateSessionContextTokens(state);
+  const contextTokens = fixedInputTokens + historyTokens;
+  if (!shouldCompact(contextTokens, contextWindow, settings)) return state;
+  if (!session) {
+    throw new SafeRunFailure(
+      safeError("CONFIG_ERROR", "config", "input exceeds configured context budget", false)
+    );
+  }
+
+  const preparation = prepareCompaction(state.entries, settings);
+  if (!preparation.ok || preparation.value === undefined) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session context compaction failed", false)
+    );
+  }
+  const metricsStart = metrics.beginCompaction();
+  let result;
+  try {
+    result = await compact(
+      preparation.value,
+      models,
+      model,
+      COMPACTION_INSTRUCTIONS,
+      signal,
+      "off",
+      { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+    );
+  } catch (error) {
+    metrics.finishCompaction(metricsStart, {});
+    throw error;
+  }
+  const compactionMetrics = metrics.finishCompaction(
+    metricsStart,
+    result.ok && result.value ? result.value.usage : {}
+  );
+  if (!result.ok || signal.aborted) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session context compaction failed", false)
+    );
+  }
+
+  const compactedMessages = [
+    createCompactionSummaryMessage(
+      result.value.summary,
+      result.value.tokensBefore,
+      Date.now()
+    ),
+    ...result.value.retainedTail,
+  ];
+  const compactedTokens = fixedInputTokens + estimateStructuralContextTokens(compactedMessages);
+  if (compactedTokens > contextWindow - reserveTokens) {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "compacted context exceeds configured budget", false)
+    );
+  }
+
+  await session.appendEntry(
+    { type: "compaction", id: uuidv7(), ...result.value },
+    "main"
+  );
+  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "compaction" });
+  metrics.commitCompaction(compactionMetrics);
+  return loadCommittedState(session);
+}
+
+function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (suffix.length < 2 || suffix[0].role !== "user") {
+    throw new Error("turn suffix does not start with a user message");
+  }
+  let index = 1;
+  while (index < suffix.length) {
+    const assistant = suffix[index];
+    if (assistant.role !== "assistant") throw new Error("turn suffix group is incomplete");
+    index += 1;
+    const calls = assistant.content.filter((item) => item.type === "toolCall");
+    for (const call of calls) {
+      const result = suffix[index];
+      if (
+        !result ||
+        result.role !== "toolResult" ||
+        result.toolCallId !== call.id ||
+        result.toolName !== call.name
+      ) {
+        throw new Error("turn suffix tool result is incomplete");
+      }
+      index += 1;
+    }
+  }
+  const last = suffix[suffix.length - 1];
+  if (
+    last.role !== "assistant" ||
+    (last.stopReason !== "stop" && last.stopReason !== "length") ||
+    last.content.some((item) => item.type === "toolCall")
+  ) {
+    throw new Error("turn suffix has no final answer");
+  }
+  return suffix;
+}
+
+function validatedControlTurnSuffix(
+  messages: AgentMessage[],
+  startIndex: number
+): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (suffix.length < 3 || suffix[0].role !== "user") {
+    throw new Error("control turn suffix is incomplete");
+  }
+  let index = 1;
+  let finalCalls: AssistantMessage["content"] = [];
+  while (index < suffix.length) {
+    const assistant = suffix[index];
+    if (assistant.role !== "assistant") throw new Error("control turn group is incomplete");
+    index += 1;
+    const calls = assistant.content.filter((item) => item.type === "toolCall");
+    if (calls.length === 0) throw new Error("control turn group has no tool call");
+    for (const call of calls) {
+      const result = suffix[index];
+      if (
+        !result ||
+        result.role !== "toolResult" ||
+        result.toolCallId !== call.id ||
+        result.toolName !== call.name
+      ) {
+        throw new Error("control turn tool result is incomplete");
+      }
+      index += 1;
+    }
+    finalCalls = calls;
+  }
+  const finalResult = suffix[suffix.length - 1];
+  if (
+    finalCalls.length !== 1 ||
+    finalCalls[0].type !== "toolCall" ||
+    finalCalls[0].name !== CONTROL_PREVIEW_TOOL ||
+    finalResult.role !== "toolResult" ||
+    finalResult.toolCallId !== finalCalls[0].id ||
+    finalResult.toolName !== CONTROL_PREVIEW_TOOL
+  ) {
+    throw new Error("control turn suffix is invalid");
+  }
+  return suffix;
+}
+
+function normalizeContinuationSuffix(
+  messages: AgentMessage[],
+  startIndex: number
+): AgentMessage[] {
+  const suffix = messages.slice(startIndex);
+  if (suffix.length !== 4) return suffix;
+  const [user, first, synthetic, final] = suffix;
+  if (
+    user.role !== "user" ||
+    first.role !== "assistant" ||
+    first.stopReason !== "length" ||
+    first.content.some((item) => item.type === "toolCall") ||
+    synthetic.role !== "user" ||
+    synthetic.content.length !== 1 ||
+    synthetic.content[0].type !== "text" ||
+    synthetic.content[0].text !== CONTINUATION_PROMPT ||
+    final.role !== "assistant" ||
+    final.content.some((item) => item.type === "toolCall") ||
+    (final.stopReason !== "stop" && final.stopReason !== "length")
+  ) {
+    return suffix;
+  }
+  const merged: AssistantMessage = {
+    ...final,
+    content: [{ type: "text", text: extractText(first) + extractText(final) }],
+    usage: addAssistantUsage(first.usage, final.usage),
+  };
+  return [user, merged];
+}
+
+async function persistTurn(
+  session: Session,
+  messages: AgentMessage[],
+  runId: string,
+  persistDelayMs: number
+): Promise<void> {
+  for (const message of messages) {
+    await session.appendMessage(JSON.parse(JSON.stringify(message)) as AgentMessage);
+    if (persistDelayMs > 0) await waitAbortOrDelay(undefined, persistDelayMs);
+  }
+  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "turn" });
 }
 
 function normalizeUsage(usage: Record<string, unknown>): JsonObject {
@@ -616,6 +1362,21 @@ function normalizeUsage(usage: Record<string, unknown>): JsonObject {
   return out;
 }
 
+function addAssistantUsage(left: Usage, right: Usage): Usage {
+  const usage = emptyUsage();
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+    usage[key] = Math.max(0, Number(left[key]) || 0) + Math.max(0, Number(right[key]) || 0);
+  }
+  usage.cost = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  };
+  return usage;
+}
+
 function turnData(message: AgentMessage): JsonObject {
   const assistant = message as unknown as AssistantMessage;
   return {
@@ -626,7 +1387,10 @@ function turnData(message: AgentMessage): JsonObject {
 
 // AgentEvent union (pi-agent-core/types.ts). Message updates, arguments,
 // observations, and tool update events stay inside the Node process.
-function normalizeAgentEvent(event: AgentEvent): { event_type: string; data: JsonObject } | null {
+function normalizeAgentEvent(
+  event: AgentEvent,
+  metrics: RunMetrics
+): { event_type: string; data: JsonObject } | null {
   switch (event.type) {
     case "agent_start":
       return { event_type: "agent_start", data: {} };
@@ -634,9 +1398,20 @@ function normalizeAgentEvent(event: AgentEvent): { event_type: string; data: Jso
       return { event_type: "turn_start", data: {} };
     case "agent_end":
       return { event_type: "agent_end", data: {} };
-    case "message_end":
+    case "message_end": {
       if ((event.message as { role?: unknown }).role !== "assistant") return null;
-      return { event_type: "model_turn_completed", data: turnData(event.message) };
+      const completed = metrics.finishTurn(event.message as AssistantMessage);
+      return {
+        event_type: "model_turn_completed",
+        data: {
+          stop_reason: (event.message as AssistantMessage).stopReason,
+          attempt_count: completed.attempts,
+          model_retry_count: completed.modelRetryCount,
+          usage: completed.usage,
+          usage_total: completed.usageTotal,
+        },
+      };
+    }
     case "turn_end":
       return { event_type: "turn_end", data: turnData(event.message) };
     case "tool_execution_start":
@@ -667,6 +1442,23 @@ function extractText(message: AssistantMessage): string {
   return message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
 }
 
+function safeModelFailure(
+  message: AssistantMessage,
+  call: CompletedCall | null
+): JsonObject {
+  const statuses = call?.statuses ?? [];
+  if ((call?.attempts ?? 0) === 0 || statuses.some((status) => status === 401 || status === 403)) {
+    return safeError("MODEL_ERROR", "model", "model authentication failed", false);
+  }
+  const invalidResponse = statuses.some((status) => status >= 200 && status < 300);
+  return safeError(
+    "MODEL_ERROR",
+    "model",
+    invalidResponse ? "model response was invalid" : "model request failed",
+    isRetryableAssistantError(message)
+  );
+}
+
 async function run(): Promise<void> {
   const lines = readJsonLines(process.stdin);
   const first = await lines.next();
@@ -693,236 +1485,393 @@ async function run(): Promise<void> {
     nodeSeq += 1;
     emit(type, p, identity, nodeSeq);
   };
-
-  emitRun("run.accepted", {
-    runtime: "pi-agent-core",
-    runtime_version: "0.84.2",
-    session_id: null,
-  });
-
-  const model = modelFromStart(payload);
-  const systemPrompt = effectiveSystemPrompt(
-    payload.system_prompt as string,
-    payload.runtime_context as JsonObject[]
-  );
-  const limits = payload.limits as JsonObject;
-  const startedAt = performance.now();
-  let assistantTurns = 0;
-  let finalizedToolCalls = 0;
-  let consecutiveFailedToolBatches = 0;
-  let forcedFinalAtTurn: number | null = null;
-  let bridgeFailure: JsonObject | null = null;
-  let agent: Agent | undefined;
-
-  const inbound = {
-    expectedSeq: 2,
-    cancelled: false,
-    terminal: false,
-    awaitingAdmission: false,
-    action: null as string | null,
-    error: null as JsonObject | null,
-  };
-  let resolveAction!: (action: string | null) => void;
-  const actionPromise = new Promise<string | null>((resolve) => {
-    resolveAction = resolve;
-  });
-
-  const bridge = createToolBridge(payload, emitRun, (message) => {
-    if (!bridgeFailure) {
-      bridgeFailure = safeError("TOOL_BRIDGE_ERROR", "tool", message, false);
-      agent?.abort();
-    }
-  });
-
-  agent = new Agent({
-    initialState: {
-      systemPrompt,
-      model,
-      thinkingLevel: "off",
-      tools: bridge.tools,
-      messages: [],
-    },
-    streamFn: createFixtureStream(payload),
-    toolExecution: "sequential",
-    afterToolCall: async ({ result }) => {
-      const details = result.details;
-      return isRecord(details) &&
-        isRecord(details.observation) &&
-        details.observation.ok === false
-        ? { isError: true }
-        : undefined;
-    },
-    prepareNextTurnWithContext: ({ context, toolResults }) => {
-      if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
-      const remainingMs =
-        (limits.timeout_seconds as number) * 1000 - (performance.now() - startedAt);
-      const exhausted =
-        assistantTurns >= (limits.max_iterations as number) ||
-        finalizedToolCalls >= (limits.max_tool_calls as number) ||
-        consecutiveFailedToolBatches >=
-          (limits.max_consecutive_failed_tool_batches as number) ||
-        remainingMs <= (limits.final_answer_reserve_seconds as number) * 1000;
-      if (!exhausted) return undefined;
-      forcedFinalAtTurn = assistantTurns;
-      return { context: { ...context, tools: [] } };
-    },
-    shouldStopAfterTurn: () =>
-      forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
-  });
-
-  agent.subscribe((event) => {
-    if (event.type === "message_end" && event.message.role === "assistant") {
-      assistantTurns += 1;
-    } else if (event.type === "tool_execution_end") {
-      finalizedToolCalls += 1;
-    } else if (event.type === "turn_end" && event.toolResults.length > 0) {
-      consecutiveFailedToolBatches = event.toolResults.every((result) => result.isError)
-        ? consecutiveFailedToolBatches + 1
-        : 0;
-    }
-    const normalized = normalizeAgentEvent(event);
-    if (normalized) emitRun("agent.event", normalized);
-  });
-
-  const failInbound = (): void => {
-    if (inbound.terminal || inbound.error) return;
-    inbound.error = safeError("PROTOCOL_ERROR", "protocol", "invalid host record", false);
-    bridge.rejectPending();
-    resolveAction(null);
-    agent?.abort();
-  };
-
-  const pumpInbound = async (): Promise<void> => {
-    try {
-      for await (const line of lines) {
-        if (inbound.terminal) throw new Error("record after terminal");
-        const envelope = parseEnvelope(
-          line,
-          inbound.expectedSeq,
-          identity,
-          new Set(["tool.result", "run.cancel", "run.commit", "run.discard"])
-        );
-        inbound.expectedSeq += 1;
-
-        if (envelope.type === "tool.result") {
-          if (inbound.cancelled || inbound.awaitingAdmission || inbound.action) {
-            throw new Error("tool result outside active tool call");
-          }
-          bridge.acceptResult(envelope.payload);
-          continue;
-        }
-        if (envelope.type === "run.cancel") {
-          if (
-            !exactKeys(envelope.payload, ["reason"]) ||
-            !isNonEmptyString(envelope.payload.reason) ||
-            inbound.cancelled ||
-            inbound.action
-          ) {
-            throw new Error("invalid cancellation");
-          }
-          inbound.cancelled = true;
-          inbound.action = envelope.type;
-          bridge.cancelPending();
-          resolveAction(envelope.type);
-          agent?.abort();
-          continue;
-        }
-        if (
-          !exactKeys(envelope.payload, []) ||
-          !inbound.awaitingAdmission ||
-          inbound.cancelled ||
-          inbound.action ||
-          bridge.hasPending()
-        ) {
-          throw new Error("invalid admission action");
-        }
-        inbound.action = envelope.type;
-        resolveAction(envelope.type);
-      }
-      if (!inbound.terminal) throw new Error("stdin closed before terminal");
-    } catch {
-      failInbound();
-    }
-  };
-
-  const promptPromise = agent.prompt(payload.user_message as string);
-  void pumpInbound();
-
-  let promptFailed = false;
+  const sessionId = payload.session_id as string | null;
+  let repository: SqliteSessionRepository | null = null;
+  let session: Session | null = null;
+  let sessionState: SessionState = { entries: [], messages: [] };
   try {
-    await promptPromise;
-  } catch {
-    promptFailed = true;
-  }
-
-  const finishError = (error: JsonObject): void => {
-    inbound.terminal = true;
-    emitRun("run.error", error);
+    if (sessionId !== null) {
+      const opened = await openPiSession(sessionId);
+      repository = opened.repository;
+      session = opened.session;
+      sessionState = opened.state;
+    }
+  } catch (error) {
+    emitRun("run.error", mapSessionFailure(error));
     process.exitCode = 1;
-  };
+    return;
+  }
 
-  if (inbound.error) {
-    finishError(inbound.error);
-    return;
-  }
-  if (bridgeFailure) {
-    finishError(bridgeFailure);
-    return;
-  }
-  if (inbound.cancelled) {
-    inbound.terminal = true;
-    emitRun("run.final", {
-      status: "cancelled",
-      text: "",
-      control_request: null,
-      termination_reason: "aborted",
-      usage: {},
-      committed: false,
+  try {
+    emitRun("run.accepted", {
+      runtime: "pi-agent-core",
+      runtime_version: "0.84.2",
+      session_id: sessionId,
     });
-    process.exitCode = 0;
-    return;
-  }
 
-  if (promptFailed) {
-    finishError(safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
-    return;
-  }
-
-  const finalMessage = lastAssistant(agent);
-  if (!finalMessage) {
-    finishError(safeError("INTERNAL_ERROR", "runtime", "no assistant message", false));
-    return;
-  }
-
-  const stopReason = finalMessage.stopReason;
-  const usage = normalizeUsage(finalMessage.usage ?? {});
-  const text = extractText(finalMessage);
-  const forcedFinalCompleted =
-    forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
-
-  if (forcedFinalCompleted && text.trim() === "") {
-    finishError(
-      safeError(
-        "BUDGET_EXHAUSTED",
-        "budget",
-        "agent budget exhausted without a final answer",
-        false
-      )
+    const model = modelFromStart(payload);
+    const systemPrompt = effectiveSystemPrompt(
+      payload.system_prompt as string,
+      payload.runtime_context as JsonObject[],
+      payload.recovered_observations as JsonObject[]
     );
-    return;
-  }
+    const limits = payload.limits as JsonObject;
+    const startedAt = performance.now();
+    const remainingSceneMs = (): number =>
+      (limits.timeout_seconds as number) * 1_000 - (performance.now() - startedAt);
+    const runAbort = new AbortController();
+    const metrics = new RunMetrics();
+    const providerModels = payload.execution_environment === "eval"
+      ? createFixtureModels(payload)
+      : createProviderModels(payload, model, metrics, remainingSceneMs);
+    const streamFn = payload.execution_environment === "eval"
+      ? createFixtureStream(payload)
+      : providerModels.streamSimple.bind(providerModels);
+    let assistantTurns = 0;
+    let finalizedToolCalls = 0;
+    let consecutiveFailedToolBatches = 0;
+    let forcedFinalAtTurn: number | null = null;
+    let continuationUsed = false;
+    let bridgeFailure: JsonObject | null = null;
+    let agent: Agent | undefined;
 
-  if (stopReason === "stop" || stopReason === "length") {
-    if (text === "") {
-      finishError(safeError("MODEL_ERROR", "model", "empty answer", false));
+    const inbound = {
+      expectedSeq: 2,
+      cancelled: false,
+      terminal: false,
+      awaitingAdmission: false,
+      action: null as string | null,
+      error: null as JsonObject | null,
+    };
+    let resolveAction!: (action: string | null) => void;
+    const actionPromise = new Promise<string | null>((resolve) => {
+      resolveAction = resolve;
+    });
+
+    const finishError = (error: JsonObject): void => {
+      inbound.terminal = true;
+      emitRun("run.error", error);
+      process.exitCode = 1;
+    };
+    const finishCancelled = (usage: JsonObject): void => {
+      inbound.terminal = true;
+      emitRun("run.final", {
+        status: "cancelled",
+        text: "",
+        control_request: null,
+        termination_reason: "aborted",
+        usage,
+        committed: false,
+      });
+      process.exitCode = 0;
+    };
+
+    const bridge = createToolBridge(payload, emitRun, (message) => {
+      if (!bridgeFailure) {
+        bridgeFailure = safeError("TOOL_BRIDGE_ERROR", "tool", message, false);
+        runAbort.abort();
+        agent?.abort();
+      }
+    });
+
+    const failInbound = (): void => {
+      if (inbound.terminal || inbound.error) return;
+      inbound.error = safeError("PROTOCOL_ERROR", "protocol", "invalid host record", false);
+      bridge.rejectPending();
+      resolveAction(null);
+      runAbort.abort();
+      agent?.abort();
+    };
+
+    const pumpInbound = async (): Promise<void> => {
+      try {
+        for await (const line of lines) {
+          if (inbound.terminal) throw new Error("record after terminal");
+          const envelope = parseEnvelope(
+            line,
+            inbound.expectedSeq,
+            identity,
+            new Set(["tool.result", "run.cancel", "run.commit", "run.discard"])
+          );
+          inbound.expectedSeq += 1;
+
+          if (envelope.type === "tool.result") {
+            if (inbound.cancelled || inbound.awaitingAdmission || inbound.action) {
+              throw new Error("tool result outside active tool call");
+            }
+            bridge.acceptResult(envelope.payload);
+            continue;
+          }
+          if (envelope.type === "run.cancel") {
+            if (
+              !exactKeys(envelope.payload, ["reason"]) ||
+              !isNonEmptyString(envelope.payload.reason) ||
+              inbound.cancelled ||
+              inbound.action
+            ) {
+              throw new Error("invalid cancellation");
+            }
+            inbound.cancelled = true;
+            inbound.action = envelope.type;
+            bridge.cancelPending();
+            resolveAction(envelope.type);
+            runAbort.abort();
+            agent?.abort();
+            continue;
+          }
+          if (
+            !exactKeys(envelope.payload, []) ||
+            !inbound.awaitingAdmission ||
+            inbound.cancelled ||
+            inbound.action ||
+            bridge.hasPending()
+          ) {
+            throw new Error("invalid admission action");
+          }
+          inbound.action = envelope.type;
+          resolveAction(envelope.type);
+        }
+        if (!inbound.terminal) throw new Error("stdin closed before terminal");
+      } catch {
+        failInbound();
+      }
+    };
+    void pumpInbound();
+
+    const compactionCountBefore = sessionState.entries.filter(
+      (entry) => entry.type === "compaction"
+    ).length;
+    try {
+      sessionState = await prepareSessionState(
+        session,
+        sessionState,
+        payload,
+        model,
+        providerModels,
+        metrics,
+        systemPrompt,
+        runAbort.signal,
+        identity.runId
+      );
+    } catch (error) {
+      if (inbound.error) finishError(inbound.error);
+      else if (inbound.cancelled) finishCancelled(metrics.usageTotal());
+      else finishError(mapSessionFailure(error));
       return;
     }
+    const committedCompactions = sessionState.entries.filter(
+      (entry) => entry.type === "compaction"
+    ).length - compactionCountBefore;
+    if (committedCompactions > 0) {
+      emitRun("agent.event", {
+        event_type: "context_compaction_committed",
+        data: {
+          compaction_count: committedCompactions,
+          usage_total: metrics.usageTotal(),
+        },
+      });
+    }
+    if (inbound.error) {
+      finishError(inbound.error);
+      return;
+    }
+    if (inbound.cancelled) {
+      finishCancelled(metrics.usageTotal());
+      return;
+    }
+
+    agent = new Agent({
+      initialState: {
+        systemPrompt,
+        model,
+        thinkingLevel: "off",
+        tools: bridge.tools,
+        messages: sessionState.messages,
+      },
+      streamFn,
+      convertToLlm,
+      toolExecution: "sequential",
+      beforeToolCall: async ({ assistantMessage, toolCall }) => {
+        const calls = assistantMessage.content.filter((item) => item.type === "toolCall");
+        const controlCalls = calls.filter((item) => item.name === CONTROL_PREVIEW_TOOL);
+        if (controlCalls.length > 0 && (calls.length !== 1 || controlCalls.length !== 1)) {
+          return {
+            block: true,
+            reason: stableJson({
+              tool_name: toolCall.name,
+              ok: false,
+              status: "failed",
+              error: "INVALID_ACTION",
+              code: "INVALID_ACTION",
+              message: "control preview must be the only call in its tool batch",
+              retryable: false,
+            }),
+          };
+        }
+        return undefined;
+      },
+      afterToolCall: async ({ result }) => {
+        const details = result.details;
+        return isRecord(details) &&
+          isRecord(details.observation) &&
+          details.observation.ok === false
+          ? { isError: true }
+          : undefined;
+      },
+      prepareNextTurnWithContext: ({ context, message, newMessages, toolResults }) => {
+        const remainingMs = remainingSceneMs();
+        const eligibleContinuation =
+          !continuationUsed &&
+          forcedFinalAtTurn === null &&
+          message.stopReason === "length" &&
+          extractText(message).trim().length > 0 &&
+          message.content.every((item) => item.type !== "toolCall") &&
+          newMessages.length === 2 &&
+          newMessages[0].role === "user" &&
+          newMessages[1] === message &&
+          assistantTurns < (limits.max_iterations as number) &&
+          remainingMs > (limits.final_answer_reserve_seconds as number) * 1_000;
+        if (eligibleContinuation) {
+          continuationUsed = true;
+          agent?.followUp({
+            role: "user",
+            content: [{ type: "text", text: CONTINUATION_PROMPT }],
+            timestamp: Date.now(),
+          });
+          return { context: { ...context, tools: [] } };
+        }
+        if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
+        const exhausted =
+          assistantTurns >= (limits.max_iterations as number) ||
+          finalizedToolCalls >= (limits.max_tool_calls as number) ||
+          consecutiveFailedToolBatches >=
+            (limits.max_consecutive_failed_tool_batches as number) ||
+          remainingMs <= (limits.final_answer_reserve_seconds as number) * 1000;
+        if (!exhausted) return undefined;
+        forcedFinalAtTurn = assistantTurns;
+        emitRun("agent.event", {
+          event_type: "forced_final_activated",
+          data: {
+            reason: assistantTurns >= (limits.max_iterations as number)
+              ? "model_turn_limit"
+              : finalizedToolCalls >= (limits.max_tool_calls as number)
+                ? "tool_call_limit"
+                : consecutiveFailedToolBatches >=
+                    (limits.max_consecutive_failed_tool_batches as number)
+                  ? "tool_failure_limit"
+                  : "time_reserve",
+          },
+        });
+        return { context: { ...context, tools: [] } };
+      },
+      shouldStopAfterTurn: () =>
+        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
+    });
+
+    agent.subscribe((event) => {
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        assistantTurns += 1;
+      } else if (event.type === "tool_execution_end") {
+        finalizedToolCalls += 1;
+      } else if (event.type === "turn_end" && event.toolResults.length > 0) {
+        consecutiveFailedToolBatches = event.toolResults.every((result) => result.isError)
+          ? consecutiveFailedToolBatches + 1
+          : 0;
+      }
+      const normalized = normalizeAgentEvent(event, metrics);
+      if (normalized) emitRun("agent.event", normalized);
+    });
+
+    const suffixStart = agent.state.messages.length;
+    let promptFailed = false;
+    try {
+      await agent.prompt(payload.user_message as string);
+    } catch {
+      promptFailed = true;
+    }
+
+    if (inbound.error) {
+      finishError(inbound.error);
+      return;
+    }
+    if (bridgeFailure) {
+      finishError(bridgeFailure);
+      return;
+    }
+    if (inbound.cancelled) {
+      finishCancelled(metrics.usageTotal());
+      return;
+    }
+    if (promptFailed) {
+      finishError(safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
+      return;
+    }
+
+    const finalMessage = lastAssistant(agent);
+    if (!finalMessage) {
+      finishError(safeError("INTERNAL_ERROR", "runtime", "no assistant message", false));
+      return;
+    }
+
+    let status: "answered" | "control_requested";
+    let text: string;
+    let controlRequest: JsonObject | null;
+    let terminationReason: string;
+    let turnSuffix: AgentMessage[];
+    controlRequest = bridge.controlRequest();
+    if (controlRequest !== null) {
+      status = "control_requested";
+      text = "";
+      terminationReason = "control_preview_requested";
+      try {
+        turnSuffix = validatedControlTurnSuffix(agent.state.messages, suffixStart);
+      } catch {
+        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid control turn", false));
+        return;
+      }
+    } else {
+      const stopReason = finalMessage.stopReason;
+      const forcedFinalCompleted =
+        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
+      if (forcedFinalCompleted && extractText(finalMessage).trim() === "") {
+        finishError(
+          safeError(
+            "BUDGET_EXHAUSTED",
+            "budget",
+            "agent budget exhausted without a final answer",
+            false
+          )
+        );
+        return;
+      }
+      if (stopReason !== "stop" && stopReason !== "length") {
+        finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
+        return;
+      }
+      status = "answered";
+      try {
+        turnSuffix = normalizeContinuationSuffix(agent.state.messages, suffixStart);
+        turnSuffix = validatedTurnSuffix(turnSuffix, 0);
+      } catch {
+        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid completed turn", false));
+        return;
+      }
+      const canonicalFinal = turnSuffix[turnSuffix.length - 1] as AssistantMessage;
+      text = extractText(canonicalFinal);
+      terminationReason = canonicalFinal.stopReason;
+      if (text === "") {
+        finishError(safeError("MODEL_ERROR", "model", "model response was invalid", false));
+        return;
+      }
+    }
+
+    const usage = metrics.usageTotal();
     inbound.awaitingAdmission = true;
     emitRun("run.proposed", {
-      status: "answered",
+      status,
       text,
-      control_request: null,
-      termination_reason: stopReason,
+      control_request: controlRequest,
+      termination_reason: terminationReason,
       usage,
     });
     const action = inbound.action ?? (await actionPromise);
@@ -935,31 +1884,39 @@ async function run(): Promise<void> {
       finishError(safeError("PROTOCOL_ERROR", "protocol", "missing action", false));
       return;
     }
-    inbound.terminal = true;
     if (action === "run.cancel") {
-      emitRun("run.final", {
-        status: "cancelled",
-        text: "",
-        control_request: null,
-        termination_reason: "aborted",
-        usage,
-        committed: false,
-      });
-    } else {
-      emitRun("run.final", {
-        status: "answered",
-        text,
-        control_request: null,
-        termination_reason: stopReason,
-        usage,
-        committed: action === "run.commit",
-      });
+      finishCancelled(usage);
+      return;
     }
+    if (action === "run.commit" && session) {
+      try {
+        await persistTurn(
+          session,
+          turnSuffix,
+          identity.runId,
+          (isRecord(payload.debug)
+            ? (payload.debug.persist_delay_ms as number | undefined)
+            : undefined) ?? 0
+        );
+      } catch (error) {
+        finishError(mapSessionFailure(error));
+        return;
+      }
+    }
+    inbound.terminal = true;
+    emitRun("run.final", {
+      status,
+      text,
+      control_request: controlRequest,
+      termination_reason: terminationReason,
+      usage,
+      committed: action === "run.commit",
+    });
     process.exitCode = 0;
     return;
+  } finally {
+    if (repository) await repository.close().catch(() => {});
   }
-
-  finishError(safeError("MODEL_ERROR", "model", "fixture stream error", false));
 }
 
 process.stdin.on("error", () => {});

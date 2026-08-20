@@ -57,6 +57,12 @@ def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
     (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
     (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+    (path / "agent-runtime").mkdir(exist_ok=True)
+    (path / "agent-runtime" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    (path / "scripts").mkdir(exist_ok=True)
+    smoke = path / "scripts" / "pi_runtime_smoke.sh"
+    smoke.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    smoke.chmod(0o755)
 
 
 def test_upgrade_lock_removes_stale_pid_file(tmp_path: Path) -> None:
@@ -416,6 +422,7 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         "    deepseek-default:\n"
         "      provider: deepseek\n"
         "      model: deepseek-chat\n"
+        "      context_window_tokens: 24000\n"
         "      api_key_env: DEEPSEEK_API_KEY\n",
         encoding="utf-8",
     )
@@ -4990,6 +4997,9 @@ def _create_fake_venv_python_at(venv_dir: Path) -> None:
 
 
 def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -> subprocess.CompletedProcess | None:
+    pi_runtime = _fake_pi_runtime_prepare(command)
+    if pi_runtime is not None:
+        return pi_runtime
     if command[:3] == ["git", "clone", "--mirror"]:
         Path(command[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(command, 0, stdout="mirrored\n", stderr="")
@@ -5006,6 +5016,16 @@ def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -
         (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
         (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="extracted\n", stderr="")
+    return None
+
+
+def _fake_pi_runtime_prepare(command: list[str]) -> subprocess.CompletedProcess | None:
+    if command == ["node", "--version"]:
+        return subprocess.CompletedProcess(command, 0, stdout="v22.19.0\n", stderr="")
+    if command == ["npm", "--version"]:
+        return subprocess.CompletedProcess(command, 0, stdout="10.8.2\n", stderr="")
+    if command[:2] == ["npm", "ci"] or command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"]:
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
     return None
 
 
@@ -5254,6 +5274,9 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
@@ -5271,6 +5294,15 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
     assert (target / ".venv").is_symlink()
     assert Path(out["shared_venv_path"]).exists()
     assert not Path(out["shared_venv_build_path"]).exists()
+    assert out["pi_runtime"] == {
+        "node_version": "v22.19.0",
+        "npm_version": "10.8.2",
+        "package_lock_sha256": hashlib.sha256(
+            (target / "agent-runtime" / "package-lock.json").read_bytes()
+        ).hexdigest(),
+    }
+    assert ["npm", "ci", "--omit=dev", "--ignore-scripts", "--prefix", "agent-runtime"] in calls
+    assert any(command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"] for command in calls)
     assert operations and all("duration_seconds" in item for item in operations)
 
 
@@ -5287,6 +5319,9 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
@@ -5321,6 +5356,9 @@ def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -5344,6 +5382,9 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -5387,6 +5428,9 @@ def test_service_upgrade_runtime_prepare_removes_temp_venv_on_install_failure(mo
     _write_runtime_target_with_server_deps(target)
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
@@ -5415,6 +5459,9 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -5441,6 +5488,9 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
@@ -5459,6 +5509,120 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
     assert out["fallback_from"] == "uv"
     assert "uv install failed" in str(out["uv_error"])
     assert any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
+
+
+def test_service_upgrade_pi_prepare_failure_keeps_current_and_precedes_config(monkeypatch, tmp_path: Path) -> None:
+    import src.application.service_upgrade as service_upgrade_module
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    install = tmp_path / "install"
+    releases = install / "releases"
+    previous = releases / "1.0.0"
+    target = releases / "1.0.1"
+    _write_upgrade_release_skeleton(previous, "1.0.0")
+    _write_upgrade_release_skeleton(target, "1.0.1")
+    current = install / "current"
+    current.symlink_to(previous, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "service_upgrade_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "latest_version": "1.0.1",
+            "release_tag": "v1.0.1",
+        },
+    )
+    config_prepare_called = False
+
+    def _prepare_config(**_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal config_prepare_called
+        config_prepare_called = True
+        return {"status": "prepared"}
+
+    monkeypatch.setattr(service_upgrade_module, "_prepare_runtime_configs_for_release", _prepare_config)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            if command[:2] == ["npm", "ci"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="npm failed\n")
+            return pi_runtime
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade_module.service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == previous.resolve()
+    assert config_prepare_called is False
+    assert out["runtime_prepare"]["pi_runtime"]["node_version"] == "v22.19.0"
+
+
+def test_service_upgrade_pi_prepare_reruns_npm_after_partial_failure(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import RuntimePrepareError, _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    npm_attempts = 0
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal npm_attempts
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            if command[:2] == ["npm", "ci"]:
+                npm_attempts += 1
+                if npm_attempts == 1:
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="partial npm failure\n")
+            return pi_runtime
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    with pytest.raises(RuntimePrepareError):
+        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+    assert npm_attempts == 2
+    assert out["pi_runtime"]["node_version"] == "v22.19.0"
+
+
+def test_service_upgrade_pi_smoke_timeout_keeps_structured_prepare_evidence(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import RuntimePrepareError, _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"]:
+            raise subprocess.TimeoutExpired(command, timeout=180)
+        if pi_runtime is not None:
+            return pi_runtime
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    with pytest.raises(RuntimePrepareError) as caught:
+        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert caught.value.runtime_prepare["pi_runtime"]["node_version"] == "v22.19.0"
+    assert caught.value.runtime_prepare["pi_runtime"]["npm_version"] == "10.8.2"
+    assert caught.value.runtime_prepare["pi_runtime"]["package_lock_sha256"]
 
 
 def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
@@ -6632,6 +6796,10 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     current.symlink_to(v101, target_is_directory=True)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    session_db = runtime / "output_shared" / "state" / "pi_sessions.sqlite3"
+    session_db.parent.mkdir(parents=True)
+    session_sentinel = b"SQLite format 3\x00pi-session-sentinel\xff"
+    session_db.write_bytes(session_sentinel)
     write_upgrade_status(
         runtime_root=runtime,
         payload={"status": "upgraded", "current_version": "1.0.0", "target_version": "1.0.1"},
@@ -6640,6 +6808,7 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     dry = service_rollback(repo_root=current, runtime_root=runtime, releases_root=releases)
     assert dry["status"] == "dry_run"
     assert current.resolve() == v101.resolve()
+    assert session_db.read_bytes() == session_sentinel
 
     out = service_rollback(
         repo_root=current,
@@ -6650,6 +6819,7 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     )
     assert out["status"] == "rolled_back"
     assert current.resolve() == v100.resolve()
+    assert session_db.read_bytes() == session_sentinel
 
 
 def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_path: Path) -> None:

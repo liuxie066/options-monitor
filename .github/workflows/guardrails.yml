@@ -21,11 +21,32 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
       - name: Install dependencies
         run: |
           python -m venv .venv
           ./.venv/bin/pip install --upgrade pip
           ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+
+      - name: Prepare Pi runtime
+        run: |
+          npm ci --omit=dev --ignore-scripts --prefix agent-runtime
+          bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
+
+      - name: Pi runtime and Copilot regression
+        run: |
+          ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
+          ./.venv/bin/python -m pytest \
+            tests/test_copilot_phase1.py \
+            tests/test_copilot_conversation_memory.py \
+            tests/test_copilot_p1_eval.py \
+            tests/test_install_script.py \
+            tests/test_release_test_plan.py \
+            tests/copilot_eval/test_answer_quality.py
 
       - name: Lint
         run: |

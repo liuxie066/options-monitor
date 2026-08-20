@@ -22,8 +22,9 @@ Installs the latest GitHub release, or one pinned options-monitor release, into:
   <prefix>/releases/<version>
   <prefix>/current -> <prefix>/releases/<version>
 
-The installer downloads code, installs Python dependencies, updates current,
-and by default creates user-level CLI wrappers. It does not write runtime config,
+The installer requires Node >= 22.19.0 and npm. It downloads code, installs
+locked Python and Pi dependencies, verifies both runtimes, updates current, and
+by default creates user-level CLI wrappers. It does not write runtime config,
 write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
 
@@ -39,7 +40,7 @@ Options:
   --force-cli-wrapper  Overwrite existing non-options-monitor wrapper files.
   --with-server        Also install requirements/server.txt.
   --with-dev           Also install requirements/dev.txt.
-  --force              Recreate the target release directory if it exists.
+  --force              Recreate an inactive target release directory if it exists.
   -h, --help           Show this help.
 EOF
 }
@@ -105,6 +106,29 @@ check_python_runtime() {
 
   "$PYTHON_BIN" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("venv") is not None else 43)' \
     || die "Python venv module is required; executable=$PYTHON_BIN; observed=$runtime_version. Install the Python 3.12 venv package."
+}
+
+check_node_runtime() {
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+  [ -n "$NODE_BIN" ] || die "Node >= 22.19.0 is required; node was not found on PATH. Install Node 22.19.0 or newer."
+  NPM_BIN="$(command -v npm 2>/dev/null || true)"
+  [ -n "$NPM_BIN" ] || die "npm is required. Install npm for Node 22.19.0 or newer."
+  node_version="$("$NODE_BIN" --version 2>/dev/null || true)"
+  if [[ ! "$node_version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "Node >= 22.19.0 is required; observed=${node_version:-unusable}. Install Node 22.19.0 or newer."
+  fi
+  node_major="${BASH_REMATCH[1]}"
+  node_minor="${BASH_REMATCH[2]}"
+  if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
+    die "Node >= 22.19.0 is required; observed=$node_version. Install Node 22.19.0 or newer."
+  fi
+}
+
+run_pi_smoke() {
+  release_dir="$1"
+  smoke_script="$release_dir/scripts/pi_runtime_smoke.sh"
+  [ -x "$smoke_script" ] || die "Pi runtime smoke script is missing or not executable: $smoke_script"
+  "$smoke_script" --root "$release_dir" --python "$release_dir/.venv/bin/python"
 }
 
 quote() {
@@ -225,6 +249,53 @@ EOF
   printf '[install] cli wrapper: %s -> %s\n' "$wrapper_path" "$target"
 }
 
+stage_cli_wrapper() {
+  name="$1"
+  target="$2"
+  validation_target="$3"
+  staged_path="$4"
+
+  [ -x "$validation_target" ] \
+    || die "cannot install CLI wrapper; target is not executable: $validation_target"
+  check_cli_wrapper_path "$name"
+  cat > "$staged_path" <<EOF
+#!/usr/bin/env bash
+# options-monitor managed wrapper
+# target-prefix: $PREFIX
+exec "$target" "\$@"
+EOF
+  chmod +x "$staged_path"
+}
+
+backup_cli_wrapper() {
+  wrapper_path="$1"
+  backup_path="$2"
+  if [ -e "$wrapper_path" ] || [ -L "$wrapper_path" ]; then
+    cp -pP "$wrapper_path" "$backup_path" \
+      || die "failed to back up CLI wrapper: $wrapper_path"
+    return 0
+  fi
+  return 1
+}
+
+restore_cli_wrapper() {
+  wrapper_path="$1"
+  backup_path="$2"
+  existed="$3"
+  if [ "$existed" -eq 1 ]; then
+    mv -f "$backup_path" "$wrapper_path"
+  else
+    rm -f "$wrapper_path"
+  fi
+}
+
+replace_current_link() {
+  staged_link="${CURRENT_LINK}.tmp.$$"
+  rm -f "$staged_link"
+  ln -s "$TARGET_DIR" "$staged_link"
+  "$PYTHON_BIN" -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$staged_link" "$CURRENT_LINK"
+}
+
 check_cli_wrapper_path() {
   name="$1"
   wrapper_path="${BIN_DIR}/${name}"
@@ -254,6 +325,7 @@ bin_dir_in_path() {
 print_next_steps() {
   printf '\n[install] installed options-monitor %s\n' "$TAG"
   printf '[install] current -> %s\n\n' "$TARGET_DIR"
+  printf '[install] Pi runtime verified with Node %s\n\n' "$node_version"
   if [ "$INSTALL_CLI" -eq 1 ]; then
     printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
   fi
@@ -390,28 +462,60 @@ if [ "$INSTALL_CLI" -eq 1 ]; then
 fi
 
 mkdir -p "$RELEASES_DIR"
-if [ -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then
+if { [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; } && [ ! -L "$CURRENT_LINK" ]; then
   die "current path exists and is not a symlink: $CURRENT_LINK"
 fi
 
 ALREADY_INSTALLED=0
-if [ -e "$TARGET_DIR" ]; then
-  if [ "$FORCE" -eq 1 ]; then
-    rm -rf "$TARGET_DIR"
-  elif [ -L "$CURRENT_LINK" ] && [ "$(readlink "$CURRENT_LINK")" = "$TARGET_DIR" ]; then
+REPLACE_INACTIVE_TARGET=0
+TARGET_EXISTS=0
+if [ -e "$TARGET_DIR" ] || [ -L "$TARGET_DIR" ]; then
+  TARGET_EXISTS=1
+fi
+if [ "$TARGET_EXISTS" -eq 1 ]; then
+  TARGET_IS_ACTIVE=0
+  if [ -L "$CURRENT_LINK" ]; then
+    current_target="$(readlink "$CURRENT_LINK")"
+    case "$current_target" in
+      /*) ;;
+      *) current_target="$(dirname "$CURRENT_LINK")/$current_target" ;;
+    esac
+    current_resolved="$(cd "$current_target" 2>/dev/null && pwd -P)" \
+      || die "current symlink target is missing or unreadable: $CURRENT_LINK"
+    target_resolved="$(cd "$TARGET_DIR" 2>/dev/null && pwd -P)" \
+      || die "target release is unreadable: $TARGET_DIR"
+    if [ "$current_resolved" = "$target_resolved" ]; then
+      TARGET_IS_ACTIVE=1
+    fi
+  fi
+  if [ "$TARGET_IS_ACTIVE" -eq 1 ]; then
+    if [ "$FORCE" -eq 1 ]; then
+      die "refusing --force for the active current release: $TARGET_DIR"
+    fi
     ALREADY_INSTALLED=1
+  elif [ "$FORCE" -eq 1 ]; then
+    REPLACE_INACTIVE_TARGET=1
   else
     die "target release already exists but is not the active current release: $TARGET_DIR (pass --force to recreate it)"
   fi
 fi
 
+check_node_runtime
+
 if [ "$ALREADY_INSTALLED" -eq 1 ]; then
   printf '[install] options-monitor %s is already installed\n' "$TAG"
-  install_optional_requirements "$TARGET_DIR"
+  installed_version="$(sed -n '1p' "$TARGET_DIR/VERSION" 2>/dev/null || true)"
+  [ "$installed_version" = "${TAG#v}" ] \
+    || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
+  run_pi_smoke "$TARGET_DIR"
 else
   tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
+  staged_om_wrapper="${BIN_DIR}/.om.tmp.$$"
+  staged_agent_wrapper="${BIN_DIR}/.om-agent.tmp.$$"
+  backup_om_wrapper="${BIN_DIR}/.om.backup.$$"
+  backup_agent_wrapper="${BIN_DIR}/.om-agent.backup.$$"
   rm -rf "$tmp_dir"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  trap 'rm -rf "$tmp_dir"; if [ "$INSTALL_CLI" -eq 1 ]; then rm -f "$staged_om_wrapper" "$staged_agent_wrapper" "$backup_om_wrapper" "$backup_agent_wrapper"; fi; rm -f "${CURRENT_LINK}.tmp.$$"' EXIT
 
   printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
   git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
@@ -423,12 +527,58 @@ else
 
   install_optional_requirements "$tmp_dir"
 
+  printf '[install] installing locked Pi runtime dependencies\n'
+  (
+    cd "$tmp_dir"
+    "$NPM_BIN" ci --omit=dev --ignore-scripts --prefix agent-runtime
+  )
+  run_pi_smoke "$tmp_dir"
+
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    stage_cli_wrapper "om" "${CURRENT_LINK}/om" "$tmp_dir/om" "$staged_om_wrapper"
+    stage_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent" "$tmp_dir/om-agent" "$staged_agent_wrapper"
+    om_wrapper_existed=0
+    agent_wrapper_existed=0
+    if backup_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper"; then
+      om_wrapper_existed=1
+    fi
+    if backup_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper"; then
+      agent_wrapper_existed=1
+    fi
+  fi
+
+  if [ "$REPLACE_INACTIVE_TARGET" -eq 1 ]; then
+    rm -rf "$TARGET_DIR"
+  fi
   mv "$tmp_dir" "$TARGET_DIR"
-  ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
+
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    if ! mv -f "$staged_om_wrapper" "${BIN_DIR}/om"; then
+      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
+      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
+      die "failed to publish CLI wrapper: ${BIN_DIR}/om"
+    fi
+    if ! mv -f "$staged_agent_wrapper" "${BIN_DIR}/om-agent"; then
+      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
+      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
+      die "failed to publish CLI wrapper: ${BIN_DIR}/om-agent"
+    fi
+  fi
+
+  if ! replace_current_link; then
+    if [ "$INSTALL_CLI" -eq 1 ]; then
+      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
+      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
+    fi
+    die "failed to atomically switch current release: $CURRENT_LINK"
+  fi
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    rm -f "$backup_om_wrapper" "$backup_agent_wrapper"
+  fi
   trap - EXIT
 fi
 
-if [ "$INSTALL_CLI" -eq 1 ]; then
+if [ "$INSTALL_CLI" -eq 1 ] && [ "$ALREADY_INSTALLED" -eq 1 ]; then
   write_cli_wrapper "om" "${CURRENT_LINK}/om"
   write_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent"
 fi

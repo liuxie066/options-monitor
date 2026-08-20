@@ -34,6 +34,7 @@ class LlmModelProfile:
     base_url: str
     api_key_env: str
     credential_name: str
+    context_window_tokens: int
     confidence_min: float | None = None
     timeout_seconds: int | None = None
     max_output_tokens: int | None = None
@@ -51,6 +52,7 @@ class LlmModelProfile:
             out["confidence_min"] = float(self.confidence_min)
         if self.timeout_seconds is not None:
             out["timeout_seconds"] = int(self.timeout_seconds)
+        out["context_window_tokens"] = self.context_window_tokens
         if self.max_output_tokens is not None:
             out["max_output_tokens"] = int(self.max_output_tokens)
         return out
@@ -66,6 +68,7 @@ class LlmModelProfile:
             "credential_name": self.credential_name,
             "confidence_min": self.confidence_min,
             "timeout_seconds": self.timeout_seconds,
+            "context_window_tokens": self.context_window_tokens,
             "max_output_tokens": self.max_output_tokens,
         }
         if api_key_configured is not None:
@@ -184,6 +187,11 @@ def parse_model_profile(name: str, raw_profile: Any, *, path: str = "assistant.m
         credential_name=spec.credential_name if spec.requires_api_key else "",
         confidence_min=_optional_float(raw_profile.get("confidence_min"), path=f"{path}.confidence_min"),
         timeout_seconds=_optional_int(raw_profile.get("timeout_seconds"), path=f"{path}.timeout_seconds"),
+        context_window_tokens=_required_context_window_tokens(
+            raw_profile.get("context_window_tokens"),
+            max_output_tokens=raw_profile.get("max_output_tokens", 2048),
+            path=f"{path}.context_window_tokens",
+        ),
         max_output_tokens=_optional_int(raw_profile.get("max_output_tokens"), path=f"{path}.max_output_tokens"),
     )
 
@@ -283,6 +291,7 @@ def add_model_profile_to_config(
     api_key_env: str | None = None,
     confidence_min: float | None = None,
     timeout_seconds: int | None = None,
+    context_window_tokens: int,
     max_output_tokens: int | None = None,
     replace: bool = False,
     activate: bool = False,
@@ -308,6 +317,7 @@ def add_model_profile_to_config(
     for key, value in {
         "confidence_min": confidence_min,
         "timeout_seconds": timeout_seconds,
+        "context_window_tokens": context_window_tokens,
         "max_output_tokens": max_output_tokens,
     }.items():
         if value is not None:
@@ -420,12 +430,36 @@ def _optional_int(value: Any, *, path: str) -> int | None:
     return parsed
 
 
-def _llm_identity(raw: dict[str, Any]) -> dict[str, str]:
+def _required_context_window_tokens(
+    value: Any,
+    *,
+    max_output_tokens: Any,
+    path: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an integer")
+    if not 4_096 <= value <= 2_000_000:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"{path} must be between 4096 and 2000000",
+        )
+    parsed_output = _optional_int(max_output_tokens, path=path.rsplit(".", 1)[0] + ".max_output_tokens")
+    output_limit = 2048 if parsed_output is None else parsed_output
+    if value <= output_limit + 2_000:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"{path} must exceed max_output_tokens by more than 2000",
+        )
+    return value
+
+
+def _llm_identity(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": str(raw.get("provider") or "").strip().lower(),
         "base_url": str(raw.get("base_url") or "").strip(),
         "model": str(raw.get("model") or "").strip(),
         "api_key_env": str(raw.get("api_key_env") or "").strip(),
+        "context_window_tokens": raw.get("context_window_tokens"),
     }
 
 

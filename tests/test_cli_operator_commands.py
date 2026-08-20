@@ -303,6 +303,7 @@ assistant:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
 """,
         encoding="utf-8",
     )
@@ -313,6 +314,7 @@ assistant:
     assert rc == 0
     assert "openai-default" in text
     assert "credential_configured=False" in text
+    assert "context_window_tokens=24000" in text
     assert "OM_LLM_API_KEY" not in text
     assert "api_key_env" not in text
 
@@ -347,6 +349,7 @@ assistant:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
 """,
         encoding="utf-8",
     )
@@ -400,6 +403,8 @@ assistant:
         "deepseek",
         "--model",
         "deepseek-chat",
+        "--context-window-tokens",
+        "24000",
     ])
     payload = _read_json_output(capsys)
 
@@ -409,7 +414,88 @@ assistant:
     assert data["dry_run"] is True
     assert data["write_applied"] is False
     assert data["profile"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert data["profile"]["context_window_tokens"] == 24000
     assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_assistant_model_add_requires_context_window_tokens(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "assistant",
+            "model",
+            "add",
+            "deepseek-default",
+            "--provider",
+            "deepseek",
+            "--model",
+            "deepseek-chat",
+        ])
+
+    assert exc.value.code == 2
+    assert "--context-window-tokens" in capsys.readouterr().err
+
+
+def test_assistant_model_current_text_displays_authoring_and_runtime_context(
+    tmp_path: Path, capsys
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+assistant:
+  enabled: true
+  copilot:
+    enabled: true
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
+""",
+        encoding="utf-8",
+    )
+    runtime_path = tmp_path / "config.assistant.json"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "enabled": True,
+                    "copilot": {"enabled": True},
+                    "llm": {
+                        "provider": "openai",
+                        "model": "gpt-5.2",
+                        "base_url": "",
+                        "api_key_env": "OM_LLM_API_KEY",
+                        "context_window_tokens": 24_000,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "assistant",
+        "model",
+        "current",
+        "--config-yaml",
+        str(config_path),
+        "--assistant-config",
+        str(runtime_path),
+        "--format",
+        "text",
+    ])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "active_model: openai-default" in text
+    assert text.count("context_window_tokens=24000") == 2
+    assert "drift: False" in text
 
 
 def test_assistant_model_use_apply_switches_active_model_and_writes_backup(tmp_path: Path, capsys) -> None:
@@ -435,10 +521,12 @@ assistant:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
     deepseek-default:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+      context_window_tokens: 24000
 """,
         encoding="utf-8",
     )

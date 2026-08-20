@@ -5,9 +5,8 @@ import json
 
 import pytest
 
-from src.application.copilot import tools as copilot_tools
+from src.application.copilot import local_harness, tools as copilot_tools
 from src.application.copilot import scene as copilot_scene
-from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, SceneManifest, new_id
 from src.application.copilot.control_handoff import (
     CONTROL_PREVIEW_TOOL,
@@ -15,14 +14,20 @@ from src.application.copilot.control_handoff import (
     control_preview_tool_description,
 )
 from src.application.assistant.capability_catalog import preview_operation_capabilities
-from src.application.copilot.host import record_session_turn, run_contract, session_messages
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot import channel_facade
-from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
-from src.infrastructure.openai_chat_completions import create_chat_completion
+from src.infrastructure.pi_agent_process import derive_pi_session_id
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.copilot.service import prepare_contract
 from src.application.agent_tool_contracts import AgentToolError
+from tests.copilot_pi_test_support import (
+    _TEST_MODEL,
+    ModelRequest,
+    ModelTurn,
+    ToolCall,
+    fake_pi_agent,
+    run_contract,
+)
 
 
 def _request(text: str, *, context=(), environment: str = "local") -> CopilotRequest:
@@ -33,6 +38,15 @@ def _request(text: str, *, context=(), environment: str = "local") -> CopilotReq
         explicit_scope=CopilotScope(config_key="us"),
         context_messages=tuple(context),
         execution_environment=environment,
+        trusted_tool_scope=(
+            {
+                "authenticated_channel": "test",
+                "authenticated_sender_id": "test-user",
+                "authenticated_conversation_id": "test-conversation",
+            }
+            if environment == "channel"
+            else {}
+        ),
     )
 
 
@@ -46,8 +60,18 @@ def _call(name: str, arguments: dict, call_id: str = "call_1") -> ToolCall:
     return ToolCall(call_id=call_id, name=name, arguments=arguments)
 
 
+def _channel_session_id() -> str:
+    return derive_pi_session_id("test", "test-user", "test-conversation", "key:us")
+
+
 def test_service_is_thin_and_uses_one_general_scene() -> None:
-    for text in ("7月收益", "结论呢", "最近有哪些值得关注的问题？", "分析平仓操作是否合理"):
+    for text in (
+        "7月收益",
+        "结论呢",
+        "最近有哪些值得关注的问题？",
+        "分析平仓操作是否合理",
+        "检查 OM 当前运行状态和配置",
+    ):
         prepared = prepare_contract(_request(text), reference_year=2026)
         assert not isinstance(prepared, AppResult)
         assert prepared.scene_name == GENERAL_SCENE
@@ -83,8 +107,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     manifest = build_scene_manifest(_contract(), "run_test")
 
     assert definition["scene"] == GENERAL_SCENE
-    assert definition["version"] == "v4"
-    assert manifest.scene_version == "v4"
+    assert definition["version"] == "v5"
+    assert manifest.scene_version == "v5"
     assert manifest.messages[0]["role"] == "system"
     assert manifest.messages[0]["content"] == definition["system_prompt"]
     runtime_context = json.loads(manifest.messages[1]["content"].splitlines()[-1])
@@ -793,9 +817,9 @@ def test_tool_result_is_returned_as_standard_tool_message(monkeypatch) -> None:
     tool_message = next(item for item in requests[1].messages if item.get("role") == "tool")
     assert tool_message["tool_call_id"] == "call_1"
     projected = json.loads(tool_message["content"])
-    assert projected["status"] == "healthy"
-    assert "ok" not in projected
-    assert "value" not in projected
+    assert projected["status"] == "complete"
+    assert projected["ok"] is True
+    assert projected["value"]["status"] == "healthy"
 
 
 def test_disabled_portfolio_toolset_blocks_model_attempt_before_tool_execution(monkeypatch) -> None:
@@ -879,7 +903,12 @@ def test_prepared_contract_reloads_current_portfolio_toolset_on_resume(monkeypat
         calls.append(name)
         return {"ok": True, "data": {"status": "healthy"}}
 
-    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+    monkeypatch.setattr(
+        local_harness,
+        "_resolve_pi_model",
+        lambda **_kwargs: (_TEST_MODEL, None, None),
+    )
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", fake_pi_agent(model))
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
     prepared = _contract("查询 portfolio")
 
@@ -895,6 +924,195 @@ def test_prepared_contract_reloads_current_portfolio_toolset_on_resume(monkeypat
     assert first.status == "answered"
     assert resumed.status == "answered"
     assert calls == ["portfolio_query"]
+
+
+@pytest.mark.parametrize("environment", ["eval", "local", "channel"])
+def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch, environment: str) -> None:
+    from src.application.copilot import local_harness
+
+    captured: list[dict] = []
+
+    def process(start_payload, *, on_proposed, environ, **_kwargs):
+        captured.append({"start": start_payload, "environ": dict(environ or {})})
+        proposal = {
+            "status": "answered",
+            "text": "结论：统一进入 Pi Agent Core。",
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = prepare_contract(_request("检查入口", environment=environment), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    kwargs = (
+        {"model_turn_json": json.dumps({"text": "结论：统一进入 Pi Agent Core。"})}
+        if environment == "eval"
+        else {
+            "model_config_json": json.dumps(
+                {
+                    "provider": "ollama",
+                    "model": "om-test",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "context_window_tokens": 24_000,
+                }
+            )
+        }
+    )
+    if environment == "channel":
+        kwargs["session_key"] = derive_pi_session_id(
+            "test", "test-user", "test-conversation", "key:us"
+        )
+
+    result = local_harness.run_prepared_contract(prepared, **kwargs)
+
+    assert result.status == "answered"
+    assert len(captured) == 1
+    assert captured[0]["start"]["execution_environment"] == environment
+    assert (captured[0]["start"]["debug"] is not None) is (environment == "eval")
+
+
+def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -> None:
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    captured: dict[str, object] = {}
+
+    def unexpected_load(**_kwargs):
+        raise AssertionError("implicit Assistant config must not be read")
+
+    def fake_run(_prepared, **kwargs):
+        captured.update(kwargs)
+        return AppResult(status="answered", user_response="Pi runtime ready.")
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", unexpected_load)
+    monkeypatch.setattr(local_harness, "run_contract", fake_run)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert result.status == "answered"
+    assert captured["enabled_optional_toolsets"] == frozenset()
+
+
+def test_ordinary_run_still_rejects_invalid_implicit_assistant_toolsets(monkeypatch) -> None:
+    calls = 0
+
+    def invalid_load(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return None, "invalid_assistant_config"
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", invalid_load)
+    result = local_harness.run_prepared_contract(
+        _contract("检查入口"),
+        model_config_json=json.dumps(
+            {
+                "provider": "ollama",
+                "model": "om-test",
+                "context_window_tokens": 24_000,
+            }
+        ),
+    )
+
+    assert calls == 1
+    assert result.error == {"code": "MODEL_CONFIG_ERROR", "reason": "invalid_assistant_config"}
+
+
+def test_eval_model_turn_with_explicit_assistant_config_fails_closed(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.assistant.json"
+    calls: list[str | None] = []
+
+    def valid_load(*, config_path, require_config):
+        calls.append(config_path)
+        assert require_config is True
+        return frozenset(), None
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", valid_load)
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        assistant_config_path=str(config_path),
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert calls == [str(config_path)]
+    assert result.error == {
+        "code": "MODEL_CONFIG_ERROR",
+        "reason": "model_turn_conflicts_with_model_config",
+    }
+
+
+def test_eval_model_turn_with_model_config_still_fails_closed(monkeypatch) -> None:
+    def unexpected_load(**_kwargs):
+        raise AssertionError("implicit Assistant config must not be read")
+
+    monkeypatch.setattr(local_harness, "load_assistant_copilot_toolsets", unexpected_load)
+    prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_config_json=json.dumps(
+            {
+                "provider": "ollama",
+                "model": "om-test",
+                "context_window_tokens": 24_000,
+            }
+        ),
+        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
+    )
+
+    assert result.error == {
+        "code": "MODEL_CONFIG_ERROR",
+        "reason": "model_turn_conflicts_with_model_config",
+    }
+
+
+def test_local_harness_passes_model_secret_only_in_allowlisted_child_environment(monkeypatch) -> None:
+    from src.application.copilot import local_harness
+
+    captured: dict[str, object] = {}
+    secret = "s5-model-secret"
+
+    def process(start_payload, *, on_proposed, environ, **_kwargs):
+        captured["start"] = start_payload
+        captured["environ"] = dict(environ or {})
+        proposal = {
+            "status": "answered",
+            "text": "结论：凭据隔离完成。",
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = _contract("检查凭据隔离")
+    result = local_harness.run_prepared_contract(
+        prepared,
+        model_config_json=json.dumps(
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "context_window_tokens": 24_000,
+            }
+        ),
+    )
+
+    assert result.status == "answered"
+    assert secret not in json.dumps(captured["start"], ensure_ascii=False)
+    child_environ = captured["environ"]
+    assert isinstance(child_environ, dict)
+    assert child_environ["OM_PI_MODEL_API_KEY"] == secret
+    assert "DEEPSEEK_API_KEY" not in child_environ
 
 
 def test_model_arguments_are_not_dropped_by_tool_wrapper(monkeypatch) -> None:
@@ -1027,272 +1245,6 @@ def test_explicit_month_scope_is_not_pruned_by_model_mtd_arguments(monkeypatch) 
     ]
 
 
-def test_budget_exhaustion_returns_tool_results_for_entire_native_batch(monkeypatch) -> None:
-    contract = _contract("同时检查运行状态和收益")
-    manifest = build_scene_manifest(contract, "run_budget_batch")
-    manifest = replace(manifest, limits={**manifest.limits, "max_tool_calls": 1})
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        if not any(item.get("role") == "tool" for item in request.messages):
-            return ModelTurn(
-                tool_calls=(
-                    _call("runtime_status", {"config_key": "us"}, "batch_1"),
-                    _call("option_performance_report", {"month": "2026-07"}, "batch_2"),
-                )
-            )
-        return ModelTurn(text="只完成了运行状态检查，收益工具因预算限制未执行。")
-
-    monkeypatch.setattr(
-        copilot_tools,
-        "call_read_tool",
-        lambda name, payload, *, allowed_tools: {"ok": True, "data": {"status": "healthy"}},
-    )
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda name, payload: copilot_tools.call_read_tool(
-            name, payload, allowed_tools=tuple(manifest.allowed_tools)
-        ),
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    tool_messages = [item for item in requests[-1].messages if item.get("role") == "tool"]
-    assert [item["tool_call_id"] for item in tool_messages] == ["batch_1", "batch_2"]
-    assert json.loads(tool_messages[-1]["content"])["error"] == "BUDGET_EXHAUSTED"
-    assert result.status == "answered"
-
-
-def test_context_compaction_keeps_native_tool_call_pairs() -> None:
-    contract = _contract("总结上下文")
-    manifest = build_scene_manifest(contract, "run_context_budget")
-    manifest = replace(manifest, limits={**manifest.limits, "max_context_chars": 16_000})
-    requests: list[ModelRequest] = []
-    turns = iter(
-        (
-            ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "context_1"),)),
-            ModelTurn(text="结论：运行状态正常。"),
-        )
-    )
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        return next(turns)
-
-    from src.application.copilot.engine import run_engine
-
-    run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    final_messages = list(requests[-1].messages)
-    assert any(
-        item.get("role") == "user" and item.get("content") == "总结上下文"
-        for item in final_messages
-    )
-    assistant_index = next(index for index, item in enumerate(final_messages) if item.get("tool_calls"))
-    assert final_messages[assistant_index + 1]["role"] == "tool"
-    assert final_messages[assistant_index + 1]["tool_call_id"] == "context_1"
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-
-
-def test_context_compaction_preserves_current_request_and_each_current_turn_tool_group() -> None:
-    contract = _contract("分析6月的期权操作有没有不合理")
-    manifest = build_scene_manifest(contract, "run_multi_group_context")
-    manifest = replace(manifest, limits={**manifest.limits, "max_context_chars": 16_000})
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        tool_call_ids = {
-            str(item.get("tool_call_id") or "")
-            for item in request.messages
-            if item.get("role") == "tool"
-        }
-        if "context_report" not in tool_call_ids:
-            return ModelTurn(
-                tool_calls=(
-                    _call(
-                        "option_performance_report",
-                        {"period": "month", "month": "2026-06"},
-                        "context_report",
-                    ),
-                )
-            )
-        if "context_catalog" not in tool_call_ids:
-            return ModelTurn(
-                tool_calls=(
-                    _call("analysis_catalog", {"view": ""}, "context_catalog"),
-                )
-            )
-        return ModelTurn(text="结论：已基于6月业务事实完成复盘。")
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda name, _payload: {
-            "ok": True,
-            "data": {
-                "source": name,
-                "summary": "x" * 20_000,
-                "rows": [{"symbol": f"SYM{index}", "value": index} for index in range(500)],
-            },
-        },
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    final_messages = list(requests[-1].messages)
-    assert any(
-        item.get("role") == "user"
-        and item.get("content") == "分析6月的期权操作有没有不合理"
-        for item in final_messages
-    )
-    assert [
-        item["tool_call_id"]
-        for item in final_messages
-        if item.get("role") == "tool"
-    ] == ["context_report", "context_catalog"]
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-    assert result.status == "answered"
-
-
-def test_context_compaction_preserves_authoritative_system_context() -> None:
-    contract = _contract("总结上下文")
-    manifest = build_scene_manifest(contract, "run_context_authority")
-    manifest = replace(
-        manifest,
-        messages=[
-            *manifest.messages[:1],
-            {
-                "role": "system",
-                "content": (
-                    "Authoritative pending Control operations for this conversation. "
-                    'pending_operations=[{"operation_id":"in_upgrade","status":"previewed"}]'
-                ),
-            },
-            *manifest.messages[1:],
-        ],
-        limits={**manifest.limits, "max_context_chars": 16_000},
-    )
-    requests: list[ModelRequest] = []
-    turns = iter(
-        (
-            ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "context_authority_1"),)),
-            ModelTurn(text="结论：已保留待确认操作上下文。"),
-        )
-    )
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        return next(turns)
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    assert result.status == "answered"
-    final_messages = list(requests[-1].messages)
-    assert any("in_upgrade" in str(item.get("content") or "") for item in final_messages if item.get("role") == "system")
-    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
-    assert result.status == "answered"
-
-
-def test_context_compaction_preserves_financial_identity_fields() -> None:
-    contract = _contract("总结收益")
-    manifest = build_scene_manifest(contract, "run_context_identity")
-    manifest = replace(
-        manifest,
-        limits={**manifest.limits, "max_context_chars": 16_000, "max_context_tokens": 4_000},
-    )
-    requests: list[ModelRequest] = []
-
-    def model(request: ModelRequest) -> ModelTurn:
-        requests.append(request)
-        if not any(item.get("role") == "tool" for item in request.messages):
-            return ModelTurn(tool_calls=(_call("option_performance_report", {"month": "2026-07"}, "identity_1"),))
-        return ModelTurn(text="结论：lx 账户 7 月美元收益为正。", finish_reason="stop")
-
-    from src.application.copilot.engine import run_engine
-
-    result = run_engine(
-        manifest,
-        user_message=str(contract.input.get("user_message") or ""),
-        record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
-            name,
-            payload,
-            fixed_input=fixed_input,
-        ),
-        call_read_tool=lambda _name, _payload: {
-            "ok": True,
-            "data": {
-                "period": {"kind": "month", "requested_start_date": "2026-07-01"},
-                "scope": {"account": "lx", "accounts": ["lx"]},
-                "pnl": {"period_total_net": {"by_currency": {"USD": 1.0}, "status": "observed"}},
-                "quality": {"status": "observed", "missing": []},
-                "notes": "x" * 20_000,
-                "rows": [{"symbol": f"SYM{index}", "premium": index} for index in range(500)],
-            },
-        },
-        compact_observation=copilot_tools.compact_observation,
-        fixture_observations=lambda _fixture: [],
-        model_runner=model,
-    )
-
-    tool_message = next(item for item in requests[-1].messages if item.get("role") == "tool")
-    projected = json.loads(tool_message["content"])
-    assert projected["scope"]["account"] == "lx"
-    assert projected["pnl"]["period_total_net"]["by_currency"] == {"USD": "1.0"}
-    assert projected["period"]["requested_start_date"] == "2026-07-01"
-    assert projected["context_compacted"] is True
-    assert result.status == "answered"
-
-
 def test_truncated_model_answer_is_continued_and_joined() -> None:
     turns = iter(
         (
@@ -1305,143 +1257,167 @@ def test_truncated_model_answer_is_continued_and_joined() -> None:
 
     assert result.status == "answered"
     assert result.user_response == "结论：7月收益为正，主要来自权利金。"
-    continuation = next(event for event in result.events if event.type == "model_continuation_requested")
-    assert continuation.payload["continuation_count"] == 1
     completed = [event for event in result.events if event.type == "model_turn_completed"]
-    assert completed[0].payload["finish_reason"] == "length"
+    assert completed[0].payload["stop_reason"] == "length"
     assert completed[-1].payload["model_retry_count"] == 1
     terminated = next(event for event in result.events if event.type == "agent_terminated")
-    assert terminated.payload["reason"] == "final_answer"
+    assert terminated.payload["reason"] == "completed"
 
 
-@pytest.mark.parametrize(
-    ("prior_answer", "expected_reason"),
-    (
-        (
-            "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-            "因此无法确认 0700.HK 被哪些条件过滤。",
-            "repeated_prior_answer",
-        ),
-        ("结论：上次检查未取得结果。", "tool_reference_without_current_observation"),
-    ),
-)
-def test_stale_no_evidence_answer_rechecks_with_current_tool(
-    monkeypatch,
-    prior_answer: str,
-    expected_reason: str,
-) -> None:
-    stale_answer = (
-        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-        "因此无法确认 0700.HK 被哪些条件过滤。"
-    )
-    request = replace(
-        _request(
-            "0700.HK 在 lx 账户为什么被过滤？",
-            context=(
-                {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
-                {"role": "assistant", "content": prior_answer},
-            ),
-            environment="channel",
-        ),
-        explicit_scope=CopilotScope(config_key="hk"),
-    )
-    prepared = prepare_contract(request, reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    model_calls = 0
-    tool_calls: list[tuple[str, dict]] = []
-
-    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
-        assert name in allowed_tools
-        tool_calls.append((name, dict(payload)))
-        return {
-            "ok": True,
-            "data": {
-                "account": "lx",
-                "symbol": "0700.HK",
-                "status": "rejected",
-                "reason_counts": {"risk_iv_minus_rv": 33},
-            },
-        }
-
-    def model(model_request: ModelRequest) -> ModelTurn:
-        nonlocal model_calls
-        model_calls += 1
-        if model_calls == 1:
-            return ModelTurn(text=stale_answer)
-        if model_calls == 2:
-            assert any(
-                item.get("role") == "system" and "not current evidence" in str(item.get("content"))
-                for item in model_request.messages
-            )
-            return ModelTurn(
-                tool_calls=(
-                    _call(
-                        "candidate_filter_explain",
-                        {
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "function": "sell_put",
-                            "run_selector": "latest_notification",
-                            "notification_date": "2026-08-14",
-                        },
-                    ),
-                )
-            )
-        assert any(item.get("role") == "tool" for item in model_request.messages)
-        return ModelTurn(text="结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。")
-
-    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
-    result = run_contract(prepared, model_runner=model)
-
-    assert result.status == "answered"
-    assert result.user_response == "结论：本轮快照显示，0700.HK 主要因 IV 减 RV 风险条件被过滤。"
-    assert model_calls == 3
-    assert tool_calls == [
-        (
-            "candidate_filter_explain",
-            {
-                "config_key": "hk",
-                "account": "lx",
-                "symbol": "0700.HK",
-                "function": "sell_put",
-                "run_selector": "latest_notification",
-                "notification_date": "2026-08-14",
-            },
-        )
-    ]
-    event = next(event for event in result.events if event.type == "fresh_evidence_recheck_requested")
-    assert event.payload["reason"] == expected_reason
-
-
-def test_stale_no_evidence_answer_fails_closed_when_model_skips_recheck() -> None:
-    stale_answer = (
-        "结论：当前环境没有可用的运行快照（output_runs 目录不存在，runtime_runs 返回 0 条），"
-        "因此无法确认 0700.HK 被哪些条件过滤。"
-    )
-    model_calls = 0
-
-    def model(_request: ModelRequest) -> ModelTurn:
-        nonlocal model_calls
-        model_calls += 1
-        return ModelTurn(text=stale_answer)
-
+def test_legacy_history_is_rejected_before_pi_spawn() -> None:
     prepared = prepare_contract(
         _request(
             "0700.HK 在 lx 账户为什么被过滤？",
             context=(
                 {"role": "user", "content": "0700.HK 在 lx 账户为什么被过滤？"},
-                {"role": "assistant", "content": stale_answer},
+                {"role": "assistant", "content": "上次检查没有取得当前证据。"},
             ),
+            environment="channel",
         ),
         reference_year=2026,
     )
     assert not isinstance(prepared, AppResult)
+    model_calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal model_calls
+        model_calls += 1
+        return ModelTurn(text="不应执行")
+
     result = run_contract(prepared, model_runner=model)
 
-    assert result.status == "insufficient_evidence"
-    assert result.user_response == "本轮未取得可验证的当前证据，无法给出事实结论。"
-    assert model_calls == 2
-    assert any(event.type == "fresh_evidence_recheck_failed" for event in result.events)
+    assert result.status == "failed"
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert model_calls == 0
+    assert any(event.type == "scene_preparation_failed" for event in result.events)
+    assert all("fresh_evidence" not in event.type for event in result.events)
+
+
+def test_channel_without_authenticated_session_identity_is_rejected_before_pi_spawn() -> None:
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_key="us"),
+            execution_environment="channel",
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        return ModelTurn(text="不应执行")
+
+    result = run_contract(prepared, model_runner=model)
+
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert calls == 0
+
+
+def test_host_rebinds_channel_session_to_canonical_path_scope(tmp_path) -> None:
+    config_path = tmp_path / "config.us.json"
+    alias = tmp_path / "config.alias.json"
+    config_path.write_text("{}", encoding="utf-8")
+    alias.symlink_to(config_path)
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_path=str(alias)),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    _, _, canonical_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=str(alias)
+    )
+    canonical_session = derive_pi_session_id(
+        "feishu", "ou_1", "group_1", canonical_scope
+    )
+    alias_session = derive_pi_session_id(
+        "feishu", "ou_1", "group_1", "path:" + "0" * 64
+    )
+    calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        return ModelTurn(text="结论：运行正常。")
+
+    rejected = run_contract(prepared, model_runner=model, session_key=alias_session)
+    accepted = run_contract(prepared, model_runner=model, session_key=canonical_session)
+
+    assert rejected.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert accepted.status == "answered"
+    assert calls == 1
+
+
+def test_channel_config_path_is_not_returned_to_the_model(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "private" / "config.us.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}", encoding="utf-8")
+    canonical = str(config_path.resolve())
+    prepared = prepare_contract(
+        CopilotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=CopilotScope(config_path=canonical),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    _, _, authority_scope = channel_facade._resolve_authority_scope(
+        config_key=None, config_path=canonical
+    )
+    requests: list[ModelRequest] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        if not any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(tool_calls=(_call("runtime_status", {}),))
+        return ModelTurn(text="结论：运行正常。")
+
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, _payload, *, allowed_tools: {
+            "ok": True,
+            "data": {"status": "healthy"},
+        },
+    )
+    result = run_contract(
+        prepared,
+        model_runner=model,
+        session_key=derive_pi_session_id(
+            "feishu", "ou_1", "group_1", authority_scope
+        ),
+    )
+
+    assert result.status == "answered"
+    assert len(requests) == 2
+    assert canonical not in json.dumps(requests[-1].messages, ensure_ascii=False)
+    tool_message = next(item for item in requests[-1].messages if item.get("role") == "tool")
+    assert "tool_input" not in json.loads(tool_message["content"])
+    tool_event = next(event for event in result.events if event.type == "tool_result")
+    assert tool_event.payload["tool_input"]["config_path"] == ".../config.us.json"
 
 
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
@@ -1483,7 +1459,8 @@ def test_identical_repeated_call_reuses_successful_observation(monkeypatch) -> N
         if len(tool_messages) == 1:
             return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "call_2"),))
         reused = json.loads(tool_messages[-1]["content"])
-        assert reused["status"] == "healthy"
+        assert reused["status"] == "complete"
+        assert reused["value"]["status"] == "healthy"
         assert reused["reused"] is True
         assert reused["reused_from_ref"] == "obs_1"
         return ModelTurn(text="重复检查没有必要，已有状态显示运行正常。")
@@ -1574,7 +1551,10 @@ def test_budget_exhaustion_forces_final_text_without_tools(monkeypatch) -> None:
             run_id=run_id,
             scene_name=GENERAL_SCENE,
             execution_environment="local",
-            messages=[{"role": "user", "content": "7月收益"}],
+            messages=[
+                {"role": "system", "content": "只读测试场景。"},
+                {"role": "user", "content": "7月收益"},
+            ],
             allowed_tools=["runtime_status"],
             limits={"max_model_turns": 1, "max_tool_calls": 1, "timeout_seconds": 180},
             output_schema={"type": "text"},
@@ -1598,6 +1578,7 @@ def test_budget_exhaustion_forces_final_text_without_tools(monkeypatch) -> None:
     assert requests[-1].force_finish is True
     assert result.status == "answered"
     assert "缺少收益数据" in result.user_response
+    assert any(event.type == "agent_budget_fallback" for event in result.events)
 
 
 def test_model_failure_after_observation_attempts_forced_final_answer(monkeypatch) -> None:
@@ -1622,9 +1603,12 @@ def test_model_failure_after_observation_attempts_forced_final_answer(monkeypatc
 
     assert result.status == "answered"
     assert "模型中途超时" in result.user_response
-    assert any(event.type == "model_error" for event in result.events)
+    assert any(
+        event.type == "model_turn_completed" and event.payload["stop_reason"] == "error"
+        for event in result.events
+    )
     terminated = next(event for event in result.events if event.type == "agent_terminated")
-    assert terminated.payload["reason"] == "forced_final_answer"
+    assert terminated.payload["reason"] == "completed"
 
 
 def test_non_read_tool_call_is_rejected_without_execution(monkeypatch) -> None:
@@ -1660,7 +1644,12 @@ def test_channel_manifest_exposes_catalog_driven_control_preview_only() -> None:
     local_result = run_contract(_contract("检查运行状态"), model_runner=model)
     channel_prepared = prepare_contract(_request("升级到最新版", environment="channel"), reference_year=2026)
     assert not isinstance(channel_prepared, AppResult)
-    channel_result = run_contract(channel_prepared, model_runner=model, control_preview_specs=preview_specs)
+    channel_result = run_contract(
+        channel_prepared,
+        model_runner=model,
+        control_preview_specs=preview_specs,
+        session_key=_channel_session_id(),
+    )
 
     assert local_result.status == "answered"
     assert channel_result.status == "answered"
@@ -1693,7 +1682,7 @@ def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> 
         assert request["source"] == "copilot_control_preview"
 
 
-def test_channel_control_preview_returns_structured_request_without_execution(monkeypatch) -> None:
+def test_s6_control_preview_terminates_without_a_second_model_turn(monkeypatch) -> None:
     executed = False
 
     def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
@@ -1701,80 +1690,107 @@ def test_channel_control_preview_returns_structured_request_without_execution(mo
         executed = True
         return {"ok": True, "data": {}}
 
-    def model(_request: ModelRequest) -> ModelTurn:
-        return ModelTurn(
-            tool_calls=(
-                _call(
-                    CONTROL_PREVIEW_TOOL,
-                    {"intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}},
-                ),
+    calls = 0
+
+    def model(request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        CONTROL_PREVIEW_TOOL,
+                        {"intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}},
+                    ),
+                )
             )
-        )
+        raise AssertionError("valid control preview must terminate before another model turn")
 
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
     prepared = prepare_contract(_request("升级到 1.2.400", environment="channel"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
+    result = run_contract(
+        prepared,
+        model_runner=model,
+        control_preview_specs=preview_operation_capabilities(),
+        session_key=_channel_session_id(),
+    )
 
     assert result.status == "control_requested"
+    assert result.user_response == ""
     assert result.control_request == {
         "intent_name": "upgrade_now",
         "arguments": {"target_version": "1.2.400"},
         "source": "copilot_control_preview",
         "confidence": 1.0,
     }
+    assert calls == 1
     assert executed is False
+
+
+def test_cancelled_control_preview_keeps_the_closed_bridge_shape(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        captured.append(
+            on_tool_call(
+                {
+                    "call_id": "control_cancelled",
+                    "tool_name": CONTROL_PREVIEW_TOOL,
+                    "arguments": {"intent_name": "upgrade_now", "arguments": {}},
+                }
+            )
+        )
+        return {
+            "ok": False,
+            "error": {
+                "code": "CANCELLED",
+                "stage": "cancel",
+                "message": "cancelled",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    prepared = prepare_contract(
+        _request("升级到最新版", environment="channel"), reference_year=2026
+    )
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(
+        prepared,
+        model_settings=_TEST_MODEL,
+        session_key=_channel_session_id(),
+        control_preview_specs=preview_operation_capabilities(),
+        is_cancelled=lambda: True,
+    )
+
+    assert result.status == "cancelled"
+    assert captured == [
+        {
+            "observation": {
+                "tool_name": CONTROL_PREVIEW_TOOL,
+                "ok": False,
+                "status": "failed",
+                "error": "CANCELLED",
+                "code": "CANCELLED",
+                "message": "run cancelled before tool execution",
+                "retryable": False,
+            },
+            "control_request": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize("intent_name", ["upgrade_confirm", "manual_trade_confirm", "symbol_cancel"])
 def test_channel_control_preview_rejects_confirm_and_cancel_intents(intent_name: str) -> None:
-    calls = 0
+    request, error = build_control_preview_request(
+        {"intent_name": intent_name, "arguments": {}},
+        user_message="确认执行",
+        specs=preview_operation_capabilities(),
+    )
 
-    def model(request: ModelRequest) -> ModelTurn:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelTurn(
-                tool_calls=(
-                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": intent_name, "arguments": {}}),
-                )
-            )
-        error = json.loads(next(item for item in request.messages if item.get("role") == "tool")["content"])
-        assert error["error"] == "INVALID_ACTION"
-        return ModelTurn(text="结论：确认或取消必须由确定性权限流程处理。")
-
-    prepared = prepare_contract(_request("确认执行", environment="channel"), reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
-
-    assert result.status == "answered"
-    assert result.control_request is None
-
-
-def test_channel_control_preview_cannot_be_mixed_with_read_tools() -> None:
-    calls = 0
-
-    def model(request: ModelRequest) -> ModelTurn:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelTurn(
-                tool_calls=(
-                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": "upgrade_now", "arguments": {}}, "control_1"),
-                    _call("runtime_status", {"config_key": "us"}, "read_1"),
-                )
-            )
-        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
-        assert len(tool_messages) == 1
-        assert json.loads(tool_messages[0]["content"])["error"] == "INVALID_ACTION"
-        return ModelTurn(text="结论：写操作预览需要单独请求。")
-
-    prepared = prepare_contract(_request("检查状态并升级", environment="channel"), reference_year=2026)
-    assert not isinstance(prepared, AppResult)
-    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
-
-    assert result.status == "answered"
-    assert result.control_request is None
+    assert request is None
+    assert error
 
 
 def test_host_preserves_conversation_context() -> None:
@@ -1788,7 +1804,7 @@ def test_host_preserves_conversation_context() -> None:
     assert manifest.messages[-3:] == [*context, {"role": "user", "content": "结论呢"}]
 
 
-def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatch, tmp_path) -> None:
+def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
 
@@ -1797,13 +1813,6 @@ def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatc
         return AppResult(status="answered", user_response="结论：请明确要修改哪条预览。")
 
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
-    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
-    store.record_session_turn(
-        "wechat:conversation-1",
-        "升级到最新版",
-        "旧历史：升级预览等待确认。",
-        max_messages=10,
-    )
     result = channel_facade.run_channel_request(
         user_message="改成 1.2.400",
         config_key="us",
@@ -1811,7 +1820,7 @@ def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatc
         channel="wechat",
         sender_id="ou_1",
         conversation_id="conversation-1",
-        host_db_path=str(store.path),
+        host_db_path=str(tmp_path / "copilot.sqlite3"),
         control_context=(
             {
                 "operation_id": "in_upgrade",
@@ -1825,6 +1834,7 @@ def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatc
     assert result.status == "answered"
     messages = captured["messages"]
     assert isinstance(messages, list)
+    assert len(messages) == 2
     assert messages[-2]["role"] == "system"
     assert "Authoritative pending Control operations" in messages[-2]["content"]
     assert '"operation_id": "in_upgrade"' in messages[-2]["content"]
@@ -1854,32 +1864,21 @@ def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkey
     assert result.status == "answered"
     messages = captured["messages"]
     assert isinstance(messages, list)
+    assert len(messages) == 2
     assert "pending_operations=[]" in messages[-2]["content"]
 
 
-def test_session_store_keeps_bounded_recent_messages() -> None:
-    key = f"test:{new_id('session')}"
-    for index in range(15):
-        record_session_turn(key, f"u{index}", f"a{index}")
-    messages = session_messages(key)
-    assert len(messages) == load_general_scene()["conversation"]["max_messages"]
-    assert messages[-1] == {"role": "assistant", "content": "a14"}
-
-
-def test_host_store_persists_sessions_and_run_events(tmp_path) -> None:
+def test_host_store_persists_run_events(tmp_path) -> None:
     store = CopilotHostStore(tmp_path / "copilot.db")
     key = "wechat:conversation-1"
-    record_session_turn(key, "7月收益", "收益为正。", host_store=store)
-
-    reopened = CopilotHostStore(tmp_path / "copilot.db")
-    assert session_messages(key, host_store=reopened)[-1]["content"] == "收益为正。"
 
     result = run_contract(
         _contract("运行状态"),
         model_runner=lambda _request: ModelTurn(text="结论：运行正常。"),
-        host_store=reopened,
+        host_store=store,
         session_key=key,
     )
+    reopened = CopilotHostStore(tmp_path / "copilot.db")
     record = reopened.run_record(result.run_id)
     assert record is not None
     assert record["status"] == "answered"
@@ -1904,6 +1903,7 @@ def test_scene_prepared_records_stable_prompt_and_projected_tool_fingerprints() 
         channel_contract,
         model_runner=model,
         control_preview_specs=preview_operation_capabilities(),
+        session_key=_channel_session_id(),
     )
 
     def prepared_payload(result: AppResult) -> dict:
@@ -1914,7 +1914,7 @@ def test_scene_prepared_records_stable_prompt_and_projected_tool_fingerprints() 
     portfolio_payload = prepared_payload(with_portfolio)
     control_payload = prepared_payload(with_control)
 
-    assert base_payload["scene_version"] == "v4"
+    assert base_payload["scene_version"] == "v5"
     assert len(base_payload["compiled_prompt_sha256"]) == 64
     assert len(base_payload["tool_schema_sha256"]) == 64
     assert base_payload["compiled_prompt_sha256"] == portfolio_payload["compiled_prompt_sha256"]
@@ -1964,209 +1964,3 @@ def test_empty_request_needs_clarification() -> None:
     assert isinstance(result, AppResult)
     assert result.status == "needs_clarification"
     assert result.user_response
-
-
-def test_openai_responses_runner_uses_native_tools_and_parses_calls() -> None:
-    captured: dict = {}
-
-    def create_response_fn(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "incomplete",
-            "incomplete_details": {"reason": "max_output_tokens"},
-            "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
-            "output": [
-                {
-                    "type": "function_call",
-                    "call_id": "call_7",
-                    "name": "runtime_status",
-                    "arguments": '{"config_key":"us"}',
-                }
-            ]
-        }
-
-    runner = build_model_runner(
-        CopilotModelSettings(provider="openai", model="gpt-test", api_key_env="TEST_KEY"),
-        environ={"TEST_KEY": "secret"},
-        create_response_fn=create_response_fn,
-    )
-    turn = runner(
-        ModelRequest(
-            messages=(
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "status"},
-            ),
-            tools=(
-                {
-                    "name": "runtime_status",
-                    "description": "status",
-                    "input_schema": {"type": "object", "properties": {"config_key": {"type": "string"}}},
-                },
-            ),
-            timeout_seconds=37,
-        )
-    )
-
-    assert captured["instructions"] == "system"
-    assert captured["tools"][0]["type"] == "function"
-    assert captured["timeout"] == 37
-    assert turn.tool_calls[0].arguments == {"config_key": "us"}
-    assert turn.finish_reason == "length"
-    assert turn.usage == {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}
-
-
-def test_chat_completions_runner_uses_native_tool_messages() -> None:
-    captured: dict = {}
-
-    def create_chat_completion_fn(**kwargs):
-        captured.update(kwargs)
-        return {
-            "choices": [{"message": {"content": "完成", "tool_calls": []}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
-        }
-
-    runner = build_model_runner(
-        CopilotModelSettings(provider="deepseek", model="deepseek-chat", api_key_env="TEST_KEY"),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-    )
-    turn = runner(
-        ModelRequest(
-            messages=(
-                {"role": "user", "content": "status"},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {"id": "call_1", "name": "runtime_status", "arguments": {"config_key": "us"}}
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_1",
-                    "name": "runtime_status",
-                    "content": '{"ok":true}',
-                },
-            ),
-            tools=(
-                {
-                    "name": "runtime_status",
-                    "description": "status",
-                    "input_schema": {"type": "object", "properties": {}},
-                },
-            ),
-        )
-    )
-
-    assert captured["tools"][0]["function"]["name"] == "runtime_status"
-    assert captured["messages"][1]["tool_calls"] == [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "runtime_status", "arguments": '{"config_key": "us"}'},
-        }
-    ]
-    assert captured["messages"][2] == {
-        "role": "tool",
-        "tool_call_id": "call_1",
-        "content": '{"ok":true}',
-    }
-    assert turn.text == "完成"
-    assert turn.finish_reason == "stop"
-    assert turn.usage == {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
-
-
-def test_ollama_runner_does_not_require_api_key_or_send_thinking() -> None:
-    captured: dict = {}
-
-    def create_chat_completion_fn(**kwargs):
-        captured.update(kwargs)
-        return {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]}
-
-    runner = build_model_runner(
-        CopilotModelSettings.from_config({"provider": "ollama", "model": "gpt-oss:20b"}),
-        environ={},
-        create_chat_completion_fn=create_chat_completion_fn,
-    )
-
-    turn = runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-
-    assert turn.text == "完成"
-    assert captured["api_key"] == ""
-    assert captured["base_url"] == "http://127.0.0.1:11434/v1"
-    assert captured["thinking"] is None
-
-
-def test_chat_completion_omits_authorization_without_api_key() -> None:
-    captured: dict = {}
-
-    def post(url, payload, *, headers, timeout):
-        captured.update(url=url, payload=payload, headers=headers, timeout=timeout)
-        return {"choices": []}
-
-    create_chat_completion(
-        model="gpt-oss:20b",
-        base_url="http://127.0.0.1:11434/v1",
-        messages=[{"role": "user", "content": "status"}],
-        http_post_json_fn=post,
-    )
-
-    assert captured["headers"] == {"Content-Type": "application/json"}
-
-
-def test_model_runner_retries_only_transient_errors() -> None:
-    attempts: list[int] = []
-    sleeps: list[float] = []
-
-    class TransientError(Exception):
-        http_status = 429
-
-    def create_chat_completion_fn(**_kwargs):
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise TransientError("rate limited")
-        return {"choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}]}
-
-    runner = build_model_runner(
-        CopilotModelSettings(
-            provider="deepseek",
-            model="deepseek-chat",
-            api_key_env="TEST_KEY",
-            max_attempts=3,
-        ),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-        sleep_fn=sleeps.append,
-    )
-
-    turn = runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-
-    assert turn.text == "完成"
-    assert turn.attempt_count == 2
-    assert len(attempts) == 2
-    assert sleeps == [0.25]
-
-
-def test_model_runner_does_not_retry_non_transient_errors() -> None:
-    attempts = 0
-
-    def create_chat_completion_fn(**_kwargs):
-        nonlocal attempts
-        attempts += 1
-        raise ValueError("invalid request")
-
-    runner = build_model_runner(
-        CopilotModelSettings(
-            provider="deepseek",
-            model="deepseek-chat",
-            api_key_env="TEST_KEY",
-            max_attempts=3,
-        ),
-        environ={"TEST_KEY": "secret"},
-        create_chat_completion_fn=create_chat_completion_fn,
-        sleep_fn=lambda _seconds: None,
-    )
-
-    with pytest.raises(ValueError, match="invalid request"):
-        runner(ModelRequest(messages=({"role": "user", "content": "status"},), tools=()))
-    assert attempts == 1

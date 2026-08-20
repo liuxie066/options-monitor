@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import math
 import os
 import queue
+import re
 import selectors
 import shutil
 import subprocess
@@ -11,12 +14,15 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
+from urllib.parse import urlsplit
 
 PROTOCOL = "om-pi-ipc.v1"
 MAX_LINE_BYTES = 1_048_576
 MAX_SAFE_MESSAGE_CHARS = 240
 MIN_NODE_VERSION = (22, 19, 0)
 MAX_FIXTURE_DELAY_MS = 300_000
+_SESSION_ID_PATTERN = re.compile(r"^om_[0-9a-f]{64}$")
+_CONTROL_PREVIEW_TOOL = "request_control_preview"
 
 _CHILD_ENV_ALLOW = frozenset(
     {
@@ -59,6 +65,8 @@ _EVENT_TYPES = frozenset(
         "agent_start",
         "turn_start",
         "model_turn_completed",
+        "context_compaction_committed",
+        "forced_final_activated",
         "turn_end",
         "agent_end",
         "tool_execution_start",
@@ -66,7 +74,17 @@ _EVENT_TYPES = frozenset(
     }
 )
 
-_STOP_REASONS = frozenset({"stop", "length", "toolUse", "aborted", "error"})
+_STOP_REASONS = frozenset(
+    {"stop", "length", "toolUse", "aborted", "error", "deferred"}
+)
+
+_PROVIDER_API_KINDS = {
+    "openai": "openai-responses",
+    "deepseek": "openai-completions",
+    "kimi": "openai-completions",
+    "kimi-code": "openai-completions",
+    "ollama": "openai-completions",
+}
 
 # Process-wide single active tool worker slot. A live worker owns the slot until
 # its callback actually returns; a second run's tool call fails retryably while
@@ -77,6 +95,27 @@ _TOOL_SLOT_BUSY = False
 
 _StartPayload = dict[str, Any]
 _Envelope = dict[str, Any]
+
+
+def derive_pi_session_id(
+    channel: str,
+    sender: str,
+    conversation: str,
+    authority_scope: str,
+) -> str:
+    parts = (channel, sender, conversation, authority_scope)
+    if any(not _is_nonempty_str(part) or "\0" in part for part in parts):
+        raise ValueError("session identity parts must be non-empty and contain no NUL")
+    material = "om-pi-session-v1\0" + "\0".join(parts)
+    return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def derive_pi_local_session_id(authority_scope: str, session_key: str) -> str:
+    parts = (authority_scope, session_key)
+    if any(not _is_nonempty_str(part) or "\0" in part for part in parts):
+        raise ValueError("local session identity parts must be non-empty and contain no NUL")
+    material = "local\0" + authority_scope + "\0" + session_key
+    return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _is_pos_int(value: Any) -> bool:
@@ -173,6 +212,52 @@ def _validate_tool_call_payload(payload: Any) -> None:
         raise ValueError("tool.call arguments must be an object")
 
 
+def _validate_control_request(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "intent_name",
+        "arguments",
+        "source",
+        "confidence",
+    }:
+        raise ValueError("control_request shape is invalid")
+    if not _is_nonempty_str(value["intent_name"]):
+        raise ValueError("control_request intent_name must be non-empty")
+    if not isinstance(value["arguments"], dict):
+        raise ValueError("control_request arguments must be an object")
+    if (
+        value["source"] != "copilot_control_preview"
+        or isinstance(value["confidence"], bool)
+        or value["confidence"] != 1.0
+    ):
+        raise ValueError("control_request authority fields are invalid")
+
+
+def _tool_result_payload(
+    *,
+    call_id: str,
+    tool_name: str,
+    callback_result: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "observation": callback_result,
+    }
+    if tool_name != _CONTROL_PREVIEW_TOOL:
+        return payload
+    if set(callback_result) != {"observation", "control_request"}:
+        raise ValueError("control preview callback result is invalid")
+    observation = callback_result["observation"]
+    control_request = callback_result["control_request"]
+    if not isinstance(observation, dict):
+        raise ValueError("control preview observation must be an object")
+    payload["observation"] = observation
+    if control_request is not None:
+        _validate_control_request(control_request)
+        payload["control_request"] = control_request
+    return payload
+
+
 def _run_tool_worker(
     call_id: str,
     tool_name: str,
@@ -221,10 +306,14 @@ def _validate_start_payload(payload: Any) -> None:
     if set(payload) != allowed_keys:
         raise ValueError("start payload has unknown or missing top-level fields")
 
-    if payload["execution_environment"] != "eval":
-        raise ValueError("S1/S2 only accept execution_environment 'eval'")
-    if payload["session_id"] is not None:
-        raise ValueError("S1/S2 require session_id null")
+    execution_environment = payload["execution_environment"]
+    if execution_environment not in {"local", "eval", "channel"}:
+        raise ValueError("execution_environment is not allowed")
+    session_id = payload["session_id"]
+    if session_id is not None and (
+        not _is_nonempty_str(session_id) or _SESSION_ID_PATTERN.fullmatch(session_id) is None
+    ):
+        raise ValueError("session_id must be null or OM-derived")
     if not _is_nonempty_str(payload["system_prompt"]):
         raise ValueError("system_prompt must be a non-empty string")
     if not _is_nonempty_str(payload["user_message"]):
@@ -243,8 +332,11 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError("runtime_context must hold closed system messages")
 
     _validate_tools(payload["tools"])
-    if payload["recovered_observations"] != []:
-        raise ValueError("S1/S2 require an empty recovered_observations array")
+    recovered = payload["recovered_observations"]
+    if not isinstance(recovered, list) or any(
+        not isinstance(observation, dict) for observation in recovered
+    ):
+        raise ValueError("recovered_observations must be an array of objects")
 
     model = payload["model"]
     if not isinstance(model, dict):
@@ -264,16 +356,24 @@ def _validate_start_payload(payload: Any) -> None:
     for key in ("provider", "model", "base_url"):
         if not _is_nonempty_str(model[key]):
             raise ValueError(f"model.{key} must be a non-empty string")
-    if model["api_kind"] not in {"openai-responses", "openai-completions"}:
-        raise ValueError("model.api_kind is not allowed")
-    for key in (
-        "timeout_seconds",
-        "context_window_tokens",
-        "max_output_tokens",
-        "max_attempts",
-    ):
-        if not _is_pos_int(model[key]):
-            raise ValueError(f"model.{key} must be a positive integer")
+    if _PROVIDER_API_KINDS.get(model["provider"]) != model["api_kind"]:
+        raise ValueError("model provider/API pair is not allowed")
+    bounds = {
+        "timeout_seconds": (1, 120),
+        "context_window_tokens": (4_096, 2_000_000),
+        "max_output_tokens": (64, 4_096),
+        "max_attempts": (1, 3),
+    }
+    for key, (minimum, maximum) in bounds.items():
+        if not _is_pos_int(model[key]) or not minimum <= model[key] <= maximum:
+            raise ValueError(f"model.{key} is outside the allowed range")
+    if model["context_window_tokens"] <= model["max_output_tokens"] + 2_000:
+        raise ValueError(
+            "model.context_window_tokens must exceed max_output_tokens by more than 2000"
+        )
+    parsed_url = urlsplit(model["base_url"])
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError("model.base_url must be an HTTP(S) URL")
 
     limits = payload["limits"]
     if not isinstance(limits, dict):
@@ -293,21 +393,46 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError(f"limits.{key} must be a positive integer")
 
     debug = payload["debug"]
+    if execution_environment != "eval":
+        if debug is not None:
+            raise ValueError("debug must be null outside eval")
+        return
     if not isinstance(debug, dict):
-        raise ValueError("debug must be an object")
+        raise ValueError("eval debug must be an object")
+    if "delay_ms" not in debug:
+        raise ValueError("debug.delay_ms is required")
     # S1 accepted a single string fixture; S2 adds a turn array. Keep both so
     # the no-tools eval path stays backward compatible.
+    common_debug_keys = {
+        "delay_ms",
+        "persist_delay_ms",
+        "expected_history",
+        "forbidden_history",
+        "compaction_response",
+    }
     if "fixture_response" in debug:
-        if set(debug) != {"fixture_response", "delay_ms"}:
-            raise ValueError("debug must hold only fixture_response and delay_ms")
+        if not set(debug) <= common_debug_keys | {"fixture_response"}:
+            raise ValueError("debug has unknown fields")
         if not isinstance(debug["fixture_response"], str):
             raise ValueError("debug.fixture_response must be a string")
     elif "fixture_turns" in debug:
-        if set(debug) != {"fixture_turns", "delay_ms"}:
-            raise ValueError("debug must hold only fixture_turns and delay_ms")
+        if not set(debug) <= common_debug_keys | {"fixture_turns"}:
+            raise ValueError("debug has unknown fields")
         _validate_fixture_turns(debug["fixture_turns"])
     else:
         raise ValueError("debug must hold fixture_response or fixture_turns")
+    if "fixture_response" in debug and "fixture_turns" in debug:
+        raise ValueError("debug must hold exactly one fixture kind")
+    for key in ("expected_history", "forbidden_history"):
+        if key in debug and (
+            not isinstance(debug[key], list)
+            or any(not isinstance(item, str) for item in debug[key])
+        ):
+            raise ValueError(f"debug.{key} must be an array of strings")
+    if "compaction_response" in debug and not isinstance(
+        debug["compaction_response"], str
+    ):
+        raise ValueError("debug.compaction_response must be a string")
     delay = debug["delay_ms"]
     if (
         not isinstance(delay, int)
@@ -316,6 +441,16 @@ def _validate_start_payload(payload: Any) -> None:
         or delay > MAX_FIXTURE_DELAY_MS
     ):
         raise ValueError("debug.delay_ms must be an integer within [0, 300000]")
+    persist_delay = debug.get("persist_delay_ms", 0)
+    if (
+        not isinstance(persist_delay, int)
+        or isinstance(persist_delay, bool)
+        or persist_delay < 0
+        or persist_delay > 300_000
+    ):
+        raise ValueError(
+            "debug.persist_delay_ms must be an integer within [0, 300000]"
+        )
 
 
 def _child_env(environ: Mapping[str, str] | None) -> dict[str, str]:
@@ -450,15 +585,15 @@ def _stop_child(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _validate_run_accepted(payload: dict[str, Any]) -> None:
+def _validate_run_accepted(payload: dict[str, Any], expected_session_id: str | None) -> None:
     if set(payload) != {"runtime", "runtime_version", "session_id"}:
         raise ValueError("run.accepted payload shape is invalid")
     if payload["runtime"] != "pi-agent-core":
         raise ValueError("run.accepted runtime is not pi-agent-core")
     if payload["runtime_version"] != "0.84.2":
         raise ValueError("run.accepted runtime_version is not pinned")
-    if payload["session_id"] is not None:
-        raise ValueError("run.accepted session_id must be null")
+    if payload["session_id"] != expected_session_id:
+        raise ValueError("run.accepted session_id does not match run.start")
 
 
 def _validate_agent_event(payload: dict[str, Any]) -> None:
@@ -473,7 +608,39 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
     if event_type in {"agent_start", "turn_start", "agent_end"}:
         if data != {}:
             raise ValueError("lifecycle event data must be empty")
-    elif event_type in {"model_turn_completed", "turn_end"}:
+    elif event_type == "model_turn_completed":
+        if set(data) != {
+            "stop_reason",
+            "attempt_count",
+            "model_retry_count",
+            "usage",
+            "usage_total",
+        }:
+            raise ValueError("turn event data shape is invalid")
+        if data["stop_reason"] not in _STOP_REASONS:
+            raise ValueError("turn event stop_reason is not allowed")
+        for key in ("attempt_count", "model_retry_count"):
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"turn event {key} must be a non-negative integer")
+        _validate_usage(data["usage"])
+        _validate_usage(data["usage_total"])
+    elif event_type == "forced_final_activated":
+        if set(data) != {"reason"} or data["reason"] not in {
+            "model_turn_limit",
+            "tool_call_limit",
+            "tool_failure_limit",
+            "time_reserve",
+        }:
+            raise ValueError("forced-final event data shape is invalid")
+    elif event_type == "context_compaction_committed":
+        if set(data) != {"compaction_count", "usage_total"}:
+            raise ValueError("compaction event data shape is invalid")
+        count = data["compaction_count"]
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("compaction_count must be a positive integer")
+        _validate_usage(data["usage_total"])
+    elif event_type == "turn_end":
         if set(data) != {"stop_reason", "usage"}:
             raise ValueError("turn event data shape is invalid")
         if data["stop_reason"] not in _STOP_REASONS:
@@ -514,24 +681,30 @@ def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
         }
     if set(payload) != required:
         raise ValueError("terminal payload has unknown or missing fields")
-    if status not in {"answered", "cancelled"}:
-        raise ValueError("S1/S2 terminal status is not allowed")
+    if status not in {"answered", "control_requested", "cancelled"}:
+        raise ValueError("terminal status is not allowed")
     if not isinstance(payload["text"], str):
         raise ValueError("terminal text must be a string")
-    if payload["control_request"] is not None:
-        raise ValueError("S1/S2 terminal control_request must be null")
     reason = payload["termination_reason"]
     _validate_usage(payload["usage"])
     if status == "answered":
+        if payload["control_request"] is not None:
+            raise ValueError("answered terminal control_request must be null")
         if reason not in {"stop", "length"}:
             raise ValueError("answered termination_reason must be stop or length")
+    elif status == "control_requested":
+        if payload["text"] != "" or reason != "control_preview_requested":
+            raise ValueError("control_requested terminal fields are invalid")
+        _validate_control_request(payload["control_request"])
     else:
+        if payload["control_request"] is not None:
+            raise ValueError("cancelled terminal control_request must be null")
         if reason != "aborted":
             raise ValueError("cancelled termination_reason must be aborted")
         if payload["text"] != "":
             raise ValueError("cancelled terminal text must be empty")
-    if not final and status != "answered":
-        raise ValueError("S1/S2 proposal permits only an answered candidate")
+    if not final and status == "cancelled":
+        raise ValueError("proposal cannot be cancelled")
     if final:
         if not isinstance(payload["committed"], bool):
             raise ValueError("run.final committed must be a boolean")
@@ -640,6 +813,8 @@ def run_pi_agent(
     cancel_sent = False
     cancel_deadline: float | None = None
     post_terminal_deadline: float | None = None
+    proposal_seen = False
+    proposed_result: dict[str, Any] | None = None
     decision_written = False
     decision: str | None = None
     stdout_buffer = b""
@@ -675,7 +850,7 @@ def run_pi_agent(
                 _stop_child(process)
                 return _safe_failure("CANCELLED", "cancel", "cancellation grace expired", False)
             if now >= deadline and not saw_terminal:
-                if not cancel_sent:
+                if not cancel_sent and not decision_written:
                     try:
                         cancel_line = _encode_envelope(
                             "run.cancel", {"reason": "deadline"}, identity, py_seq
@@ -771,12 +946,22 @@ def run_pi_agent(
                             )
                             node_seq += 1
                             payload = obj["payload"]
+                            if not accepted and type_ not in {"run.accepted", "run.error"}:
+                                _stop_child(process)
+                                return _safe_failure(
+                                    "PROTOCOL_ERROR",
+                                    "protocol",
+                                    "record before run.accepted",
+                                    False,
+                                )
 
                             if type_ == "run.accepted":
                                 if accepted:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "duplicate run.accepted", False)
-                                _validate_run_accepted(payload)
+                                _validate_run_accepted(
+                                    payload, start_payload["session_id"]
+                                )
                                 accepted = True
                             elif type_ == "agent.event":
                                 if not accepted:
@@ -793,6 +978,9 @@ def run_pi_agent(
                                 if not accepted:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "tool call before accepted", False)
+                                if proposal_seen or decision_written or cancel_sent:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "tool call after admission started", False)
                                 _validate_tool_call_payload(payload)
                                 if payload["tool_name"] not in allowed_tool_names:
                                     _stop_child(process)
@@ -834,12 +1022,20 @@ def run_pi_agent(
                                 if saw_terminal:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal after terminal", False)
+                                if pending_tool is not None:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal while tool call is outstanding", False)
+                                if proposal_seen:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "duplicate proposal", False)
+                                _validate_terminal_payload(payload, final=False)
+                                proposal_seen = True
+                                proposed_result = copy.deepcopy(payload)
                                 if cancel_sent:
                                     # Host cancellation is already the durable
                                     # winner; the buffered proposal is superseded.
                                     # Do not open a second admission decision.
                                     continue
-                                _validate_terminal_payload(payload, final=False)
                                 if on_proposed is None:
                                     _stop_child(process)
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "missing proposal callback", False)
@@ -853,30 +1049,60 @@ def run_pi_agent(
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "invalid proposal decision", False)
                                 type_map = {"commit": "run.commit", "discard": "run.discard", "cancel": "run.cancel"}
                                 payload_map = {"commit": {}, "discard": {}, "cancel": {"reason": "host_cancel_requested"}}
-                                line_out = _encode_envelope(type_map[decision], payload_map[decision], identity, py_seq)
-                                py_seq += 1
-                                process.stdin.write(line_out)
-                                process.stdin.flush()
+                                try:
+                                    line_out = _encode_envelope(
+                                        type_map[decision], payload_map[decision], identity, py_seq
+                                    )
+                                    py_seq += 1
+                                    process.stdin.write(line_out)
+                                    process.stdin.flush()
+                                except ValueError:
+                                    _stop_child(process)
+                                    return _safe_failure(
+                                        "PROTOCOL_ERROR",
+                                        "protocol",
+                                        "invalid admission decision envelope",
+                                        False,
+                                    )
+                                except OSError:
+                                    _stop_child(process)
+                                    return _safe_failure(
+                                        "PI_PROCESS_EXITED",
+                                        "process",
+                                        "child closed stdin before admission decision",
+                                        True,
+                                    )
                                 decision_written = True
                                 if decision == "cancel":
                                     cancel_sent = True
                                     cancel_deadline = time.monotonic() + 2
                             elif type_ == "run.final":
                                 _validate_terminal_payload(payload, final=True)
-                                if decision is not None:
-                                    expected_committed = decision == "commit"
-                                    expected_status = "cancelled" if decision == "cancel" else "answered"
-                                    if payload["status"] != expected_status or payload["committed"] != expected_committed:
-                                        _stop_child(process)
-                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "final does not match admission decision", False)
-                                elif payload["committed"] is not False:
+                                if pending_tool is not None and not (
+                                    cancel_sent and payload["status"] == "cancelled"
+                                ):
                                     _stop_child(process)
-                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "unproposed final must be uncommitted", False)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "terminal while tool call is outstanding", False)
+                                if payload["status"] in {"answered", "control_requested"}:
+                                    if proposed_result is None or decision not in {"commit", "discard"}:
+                                        _stop_child(process)
+                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "admitted final before admission", False)
+                                    expected_final = copy.deepcopy(proposed_result)
+                                    expected_final["committed"] = decision == "commit"
+                                    if payload != expected_final:
+                                        _stop_child(process)
+                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "final does not match proposed result", False)
+                                elif not cancel_sent or payload["committed"] is not False:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "cancelled final without Host cancellation", False)
                                 saw_terminal = True
                                 post_terminal_deadline = time.monotonic() + 1
                                 final_result = payload
                                 final_ok = True
                             elif type_ == "run.error":
+                                if pending_tool is not None:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "terminal while tool call is outstanding", False)
                                 _validate_run_error(payload)
                                 saw_terminal = True
                                 post_terminal_deadline = time.monotonic() + 1
@@ -904,7 +1130,11 @@ def run_pi_agent(
                 try:
                     line_out = _encode_envelope(
                         "tool.result",
-                        {"call_id": call_id, "tool_name": tool_name, "observation": observation},
+                        _tool_result_payload(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            callback_result=observation,
+                        ),
                         identity,
                         py_seq,
                     )
