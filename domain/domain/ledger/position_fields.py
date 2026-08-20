@@ -38,6 +38,7 @@ POSITION_LOT_STRATEGY_PATCH_FIELDS = (
     "strategy",
     "leg_role",
     "strategy_group_id",
+    "source_stock_lot_id",
     "yield_enhancement_mode",
     "strategy_snapshot",
 )
@@ -381,6 +382,7 @@ class PositionLotPatch:
     strategy: _PatchValue = _UNSET
     leg_role: _PatchValue = _UNSET
     strategy_group_id: _PatchValue = _UNSET
+    source_stock_lot_id: _PatchValue = _UNSET
     yield_enhancement_mode: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
 
@@ -437,6 +439,7 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         strategy=payload.get("strategy", _UNSET),
         leg_role=payload.get("leg_role", _UNSET),
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
+        source_stock_lot_id=payload.get("source_stock_lot_id", _UNSET),
         yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
     )
@@ -583,6 +586,7 @@ def build_open_adjustment_patch_contract(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
+    source_stock_lot_id: str | None = None,
     yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -599,6 +603,7 @@ def build_open_adjustment_patch_contract(
             strategy,
             leg_role,
             strategy_group_id,
+            source_stock_lot_id,
             yield_enhancement_mode,
             strategy_snapshot,
         )
@@ -648,6 +653,10 @@ def build_open_adjustment_patch_contract(
     patch_strategy = _optional_patch_text(strategy, "strategy")
     patch_leg_role = _optional_patch_text(leg_role, "leg_role")
     patch_strategy_group_id = _optional_patch_text(strategy_group_id, "strategy_group_id")
+    patch_source_stock_lot_id = _optional_patch_text(
+        source_stock_lot_id,
+        "source_stock_lot_id",
+    )
     patch_yield_enhancement_mode = _optional_patch_text(yield_enhancement_mode, "yield_enhancement_mode")
     patch_strategy_snapshot = _optional_patch_object(strategy_snapshot, "strategy_snapshot")
 
@@ -720,6 +729,7 @@ def build_open_adjustment_patch_contract(
         strategy=patch_strategy,
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
+        source_stock_lot_id=patch_source_stock_lot_id,
         yield_enhancement_mode=patch_yield_enhancement_mode,
         strategy_snapshot=patch_strategy_snapshot,
     )
@@ -737,6 +747,7 @@ def build_open_adjustment_patch(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
+    source_stock_lot_id: str | None = None,
     yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -752,6 +763,7 @@ def build_open_adjustment_patch(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
+        source_stock_lot_id=source_stock_lot_id,
         yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
