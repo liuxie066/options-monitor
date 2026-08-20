@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import copy
 import hashlib
+import json
 import math
 import os
 import queue
@@ -760,6 +761,7 @@ def run_pi_agent(
     cancel_deadline: float | None = None
     post_terminal_deadline: float | None = None
     proposal_seen = False
+    proposed_result: dict[str, Any] | None = None
     decision_written = False
     decision: str | None = None
     stdout_buffer = b""
@@ -795,7 +797,7 @@ def run_pi_agent(
                 _stop_child(process)
                 return _safe_failure("CANCELLED", "cancel", "cancellation grace expired", False)
             if now >= deadline and not saw_terminal:
-                if not cancel_sent:
+                if not cancel_sent and not decision_written:
                     try:
                         cancel_line = _encode_envelope(
                             "run.cancel", {"reason": "deadline"}, identity, py_seq
@@ -923,6 +925,9 @@ def run_pi_agent(
                                 if not accepted:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "tool call before accepted", False)
+                                if proposal_seen or decision_written or cancel_sent:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "tool call after admission started", False)
                                 _validate_tool_call_payload(payload)
                                 if payload["tool_name"] not in allowed_tool_names:
                                     _stop_child(process)
@@ -964,11 +969,15 @@ def run_pi_agent(
                                 if saw_terminal:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal after terminal", False)
+                                if pending_tool is not None:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "proposal while tool call is outstanding", False)
                                 if proposal_seen:
                                     _stop_child(process)
                                     return _safe_failure("PROTOCOL_ERROR", "protocol", "duplicate proposal", False)
-                                proposal_seen = True
                                 _validate_terminal_payload(payload, final=False)
+                                proposal_seen = True
+                                proposed_result = copy.deepcopy(payload)
                                 if cancel_sent:
                                     # Host cancellation is already the durable
                                     # winner; the buffered proposal is superseded.
@@ -1016,20 +1025,31 @@ def run_pi_agent(
                                     cancel_deadline = time.monotonic() + 2
                             elif type_ == "run.final":
                                 _validate_terminal_payload(payload, final=True)
-                                if decision is not None:
-                                    expected_committed = decision == "commit"
-                                    expected_status = "cancelled" if decision == "cancel" else "answered"
-                                    if payload["status"] != expected_status or payload["committed"] != expected_committed:
-                                        _stop_child(process)
-                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "final does not match admission decision", False)
-                                elif payload["committed"] is not False:
+                                if pending_tool is not None and not (
+                                    cancel_sent and payload["status"] == "cancelled"
+                                ):
                                     _stop_child(process)
-                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "unproposed final must be uncommitted", False)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "terminal while tool call is outstanding", False)
+                                if payload["status"] == "answered":
+                                    if proposed_result is None or decision not in {"commit", "discard"}:
+                                        _stop_child(process)
+                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "answered final before admission", False)
+                                    expected_final = copy.deepcopy(proposed_result)
+                                    expected_final["committed"] = decision == "commit"
+                                    if payload != expected_final:
+                                        _stop_child(process)
+                                        return _safe_failure("PROTOCOL_ERROR", "protocol", "final does not match proposed result", False)
+                                elif not cancel_sent or payload["committed"] is not False:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "cancelled final without Host cancellation", False)
                                 saw_terminal = True
                                 post_terminal_deadline = time.monotonic() + 1
                                 final_result = payload
                                 final_ok = True
                             elif type_ == "run.error":
+                                if pending_tool is not None:
+                                    _stop_child(process)
+                                    return _safe_failure("PROTOCOL_ERROR", "protocol", "terminal while tool call is outstanding", False)
                                 _validate_run_error(payload)
                                 saw_terminal = True
                                 post_terminal_deadline = time.monotonic() + 1

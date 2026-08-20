@@ -1123,8 +1123,12 @@ Payload validation after the envelope is also closed:
   object `arguments`.
 
 Receiving a second `run.accepted`, a lifecycle event before acceptance, a
-second proposal, two terminal records, a final before admission, or a terminal
-record while a tool callback is outstanding is `PROTOCOL_ERROR`.
+second proposal, two terminal records, an answered final before admission, a
+tool call after proposal/cancellation, or a proposal/answered final/error while
+a tool callback is outstanding is `PROTOCOL_ERROR`. The sole outstanding-tool
+exception is a cancelled final after Python has already sent `run.cancel`; it
+ends the cancelled run while the late worker remains abandoned as specified in
+section 12.3.
 
 An `on_event` or `on_tool_call` exception aborts and reaps the child, then
 returns a fixed `INTERNAL_ERROR` or `TOOL_BRIDGE_ERROR`; an `on_proposed`
@@ -2186,8 +2190,9 @@ then emits `run.final` with `committed:true`. On `run.discard`, it writes no
 current-turn Session entry and emits the same candidate with
 `committed:false`. A pre-run compaction marker from section 13.5 is already an
 independent committed checkpoint and is not rolled back. Python verifies the
-flag matches its durable decision; Host returns the retained admitted result,
-not an untrusted reconstruction.
+final status, text, control request, termination reason, and usage exactly match
+the stored proposal, with only `committed` derived from its durable decision;
+Host returns the retained admitted result, not an untrusted reconstruction.
 
 Runs cancelled before proposal and failed runs do not propose or commit. If the
 protocol write fails after Host claimed `commit`, or the child exits after
