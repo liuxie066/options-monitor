@@ -255,6 +255,7 @@ def test_short_call_fill_consumes_matching_intent_atomically(tmp_path: Path) -> 
         wheel_start_enabled=True,
     )
     created, coverage = _create_call_intent(repo, stock_lot_id)
+    coverage = {**coverage, "shares_available_for_cover": 0}
     deal = NormalizedTradeDeal(
         broker="富途",
         futu_account_id="REAL_1",

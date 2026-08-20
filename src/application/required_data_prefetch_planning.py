@@ -28,7 +28,9 @@ from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_co
 from src.application.prefilters import apply_prefilters
 from src.application.close_advice_required_data import (
     finalize_close_advice_required_data_plan,
+    resolve_position_fetch_binding,
 )
+from src.application.wheel.config import resolve_wheel_config
 from src.application.required_data_plan_identity import required_data_plan_id
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
@@ -284,6 +286,95 @@ def merge_close_advice_requirements_into_prefetch_config(
     return out, plan
 
 
+def merge_wheel_requirements_into_prefetch_config(
+    *,
+    base_config: dict[str, Any],
+    candidate_config: dict[str, Any],
+    account_configs: dict[str, dict[str, Any]],
+    wheel_read_models: dict[str, dict[str, Any]],
+    allowed_symbols: set[str] | None = None,
+) -> dict[str, Any]:
+    """Add active Wheel Call demand to the shared Required Data plan."""
+
+    items = [
+        deepcopy(item)
+        for item in resolve_watchlist_config(candidate_config)
+        if isinstance(item, dict)
+    ]
+    by_route = {
+        (_symbol_key(str(item.get("symbol") or "")), _candidate_binding_tuple(item)): item
+        for item in items
+    }
+    normalized_allow = (
+        {_symbol_key(item) for item in allowed_symbols}
+        if allowed_symbols is not None
+        else None
+    )
+    demands: dict[tuple[str, tuple[str, str, int]], dict[str, Any]] = {}
+    for account in sorted(account_configs):
+        config = account_configs[account]
+        policy = resolve_wheel_config(config, account)
+        if not policy["enabled_for_new_lifecycle"]:
+            continue
+        model = wheel_read_models.get(account) or {}
+        for batch in model.get("batches") or []:
+            if not isinstance(batch, dict) or any(
+                (
+                    batch.get("lifecycle_status") != "active",
+                    batch.get("integrity_status") != "trusted",
+                    batch.get("phase") != "ready",
+                )
+            ):
+                continue
+            symbol = _symbol_key(str(batch.get("symbol") or ""))
+            binding, error = resolve_position_fetch_binding(
+                symbol=symbol,
+                account_config=config,
+                base_config=base_config,
+            )
+            if (
+                not symbol
+                or (normalized_allow is not None and symbol not in normalized_allow)
+                or binding is None
+                or error is not None
+            ):
+                continue
+            route = (
+                str(binding["source"]),
+                _physical_host(binding["host"]),
+                int(binding["port"]),
+            )
+            key = (symbol, route)
+            current = demands.setdefault(
+                key,
+                {
+                    "enabled": True,
+                    "min_dte": int(policy["min_dte"]),
+                    "max_dte": int(policy["max_dte"]),
+                    "requires_realized_volatility": True,
+                },
+            )
+            current["min_dte"] = min(int(current["min_dte"]), int(policy["min_dte"]))
+            current["max_dte"] = max(int(current["max_dte"]), int(policy["max_dte"]))
+    for (symbol, route), demand in sorted(demands.items()):
+        item = by_route.get((symbol, route))
+        if item is None:
+            item = {
+                "symbol": symbol,
+                "fetch": {"source": route[0], "host": route[1], "port": route[2]},
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+                "yield_enhancement": {"enabled": False},
+            }
+            items.append(item)
+            by_route[(symbol, route)] = item
+        item["_wheel_call"] = demand
+    items.sort(key=_stable_symbol_config_key)
+    out = deepcopy(candidate_config)
+    set_watchlist_config(out, items)
+    return out
+
+
 def _candidate_binding_tuple(
     symbol_cfg: dict[str, Any],
 ) -> tuple[str, str, int]:
@@ -383,6 +474,7 @@ def _has_any_market_demand(symbol_cfg: dict[str, Any]) -> bool:
     return bool(
         _has_non_account_market_demand(symbol_cfg)
         or _as_dict(symbol_cfg.get("sell_call")).get("enabled", False)
+        or _as_dict(symbol_cfg.get("_wheel_call")).get("enabled", False)
     )
 
 

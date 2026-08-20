@@ -1381,6 +1381,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
         stock_qty=100,
         stock_price=100.0,
         as_of_ms=_ms("2026-05-15"),
+        wheel_start_enabled=True,
     )
     assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
     stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
@@ -1404,6 +1405,8 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert assigned_stock_row["assigned_stock_unrealized_pnl"] == -200.0
     assert assigned_stock_row["option_premium_attribution"] == 250.0
     assert assigned_stock_row["assignment_lifecycle_pnl"] == 50.0
+    assert assigned_stock_row["wheel"]["stock_lot_id"] == stock_lot_id
+    assert assigned_stock_row["wheel"]["lifecycle_status"] == "active"
 
     list_wrapped_action = run_tool(
         "option_positions_read",

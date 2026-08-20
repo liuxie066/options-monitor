@@ -239,6 +239,34 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     _assert_no_internal_leak(view)
 
 
+def test_fixed_report_renders_wheel_after_combo_yield() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["wheel_batches"] = [
+        {
+            "position_lot_id": "stock-wheel-1",
+            "symbol": "NVDA",
+            "shares_remaining": 100,
+            "status": "ready",
+            "recommended_contracts": 1,
+            "expiration": "2026-08-21",
+            "strike": 110,
+            "candidate_call_net_premium": 185,
+            "projected_lifecycle_net_pnl_if_called": 1320,
+            "projected_lifecycle_pnl_scope": "final_total_if_called",
+        }
+    ]
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert message.index("## 组合增强") < message.index("## Wheel")
+    assert "NVDA｜Wheel" in message
+    assert "剩余股份｜100 股" in message
+    assert "建议｜卖出 1 张 08-21 $110 Call" in message
+    assert "最终全部叫走后预计总收益｜$1,320.00" in message
+
+
 def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
     from src.application.daily_decision_brief_renderer import (
         build_daily_brief_user_view,

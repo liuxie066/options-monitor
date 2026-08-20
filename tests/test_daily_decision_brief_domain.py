@@ -128,6 +128,27 @@ def test_action_identity_ignores_price_rank_and_return_changes() -> None:
     assert build_daily_brief_action_id(first) == build_daily_brief_action_id(second)
 
 
+def test_wheel_candidate_identity_is_scoped_to_stock_lot() -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_candidate_identity,
+    )
+
+    assert build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        position_lot_id="stock-lot-1",
+    ) == "candidate:v1:lx:US:NVDA:wheel:stock-lot-1"
+    with pytest.raises(ValueError, match="position_lot_id"):
+        build_daily_brief_candidate_identity(
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family="wheel",
+        )
+
+
 def test_action_identity_normalizes_case_and_strike_representation() -> None:
     from domain.domain.daily_decision_brief import build_daily_brief_action_id
 

@@ -79,7 +79,7 @@ def strategy_policy_hash(config: Mapping[str, Any]) -> str:
     cfg = dict(config or {})
     return canonical_sha256(
         {
-            "schema": "opening_candidate_strategy_policy.v2",
+            "schema": "opening_candidate_strategy_policy.v3",
             "earnings_policy": {
                 "version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
                 "near_expiry_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
@@ -89,6 +89,7 @@ def strategy_policy_hash(config: Mapping[str, Any]) -> str:
             "symbols": cfg.get("symbols"),
             "watchlist": cfg.get("watchlist"),
             "outputs": cfg.get("outputs"),
+            "wheel": cfg.get("wheel"),
         }
     )
 

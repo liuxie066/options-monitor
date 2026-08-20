@@ -6,9 +6,33 @@ from typing import Any, Mapping, Sequence
 from domain.domain.wheel import (
     plan_wheel_call_intent_consume,
     project_wheel_call_intents,
+    project_wheel_lifecycles,
     wheel_called_away_event_from_call_assignment,
     wheel_started_event_from_assignment,
 )
+from src.application.ledger.assigned_stock_projection import (
+    project_assigned_stock_lifecycle_from_rows,
+)
+
+
+def _wheel_batches_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    as_of_ms: int,
+) -> list[dict[str, Any]]:
+    assigned_stock = project_assigned_stock_lifecycle_from_rows(
+        rows,
+        account=account,
+        as_of_ms=as_of_ms,
+    )
+    return project_wheel_lifecycles(
+        rows.get("account_wheel_events") or [],
+        rows.get("trade_events") or [],
+        rows.get("account_position_lots") or [],
+        assigned_stock,
+        as_of_ms,
+    )
 
 
 def _event_account(event: Any) -> str:
@@ -77,11 +101,6 @@ def append_wheel_trade_companions(
     context: Mapping[str, Any],
     recorded_at_ms: int,
 ) -> dict[str, str]:
-    from src.application.wheel.read_model import (
-        build_assigned_stock_projection_from_rows,
-        build_wheel_read_model_from_rows,
-    )
-
     source_fields = dict(context.get("source_fields") or {})
     before_rows = dict(context.get("before_rows") or {})
     new_assignments = [
@@ -123,12 +142,12 @@ def append_wheel_trade_companions(
             instant = _event_time_ms(event)
             key = (account, instant)
             if key not in before_assigned:
-                before_assigned[key] = build_assigned_stock_projection_from_rows(
+                before_assigned[key] = project_assigned_stock_lifecycle_from_rows(
                     before_rows[account],
                     account=account,
                     as_of_ms=instant,
                 )
-                after_assigned[key] = build_assigned_stock_projection_from_rows(
+                after_assigned[key] = project_assigned_stock_lifecycle_from_rows(
                     after_rows[account],
                     account=account,
                     as_of_ms=instant,
@@ -156,14 +175,14 @@ def append_wheel_trade_companions(
             if not companion_id:
                 continue
             account = _event_account(event)
-            model = build_wheel_read_model_from_rows(
+            batches = _wheel_batches_from_rows(
                 verification_rows[account],
                 account=account,
                 as_of_ms=max(_event_time_ms(event), 1),
             )
             matches = [
                 batch
-                for batch in model["batches"]
+                for batch in batches
                 if batch["start_event_id"] == companion_id
                 or batch["terminal_event_id"] == companion_id
             ]
@@ -179,8 +198,6 @@ def prepare_wheel_intent_open_event(
     *,
     recorded_at_ms: int,
 ) -> tuple[Any, dict[str, Any] | None, str]:
-    from src.application.wheel.read_model import build_wheel_read_model_from_rows
-
     if (
         str(getattr(event, "event_type", "") or "").strip().lower() != "open"
         or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
@@ -191,7 +208,7 @@ def prepare_wheel_intent_open_event(
         return event, None, "not_short_call_open"
     account = _event_account(event)
     instant = _event_time_ms(event)
-    model = build_wheel_read_model_from_rows(
+    batches = _wheel_batches_from_rows(
         rows,
         account=account,
         as_of_ms=instant,
@@ -202,7 +219,7 @@ def prepare_wheel_intent_open_event(
         if str(item.get("event_id") or "").strip()
     }
     plans: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for batch in model["batches"]:
+    for batch in batches:
         if batch["lifecycle_status"] != "active" or batch["integrity_status"] != "trusted":
             continue
         summaries = project_wheel_call_intents(
@@ -215,12 +232,24 @@ def prepare_wheel_intent_open_event(
         for intent in summaries:
             if intent.get("status") != "active":
                 continue
+            intent_payload = intent.get("payload")
+            intent_payload = (
+                intent_payload if isinstance(intent_payload, Mapping) else intent
+            )
+            intent_coverage = {
+                **dict(coverage_fact),
+                "shares_available_for_cover": int(
+                    coverage_fact.get("shares_available_for_cover") or 0
+                )
+                + int(intent.get("remaining_contracts") or 0)
+                * int(intent_payload.get("multiplier") or 0),
+            }
             try:
                 plan = plan_wheel_call_intent_consume(
                     batch,
                     intent,
                     event,
-                    coverage_fact,
+                    intent_coverage,
                     recorded_at_ms=recorded_at_ms,
                 )
             except ValueError:
@@ -256,8 +285,6 @@ def append_and_verify_wheel_intent_consumption(
     linked_event: Any,
     intent_event: Mapping[str, Any],
 ) -> None:
-    from src.application.wheel.read_model import build_wheel_read_model_from_rows
-
     if not repo.append_wheel_event_once(intent_event, conn=conn):
         raise ValueError("Wheel Call intent consumption unexpectedly replayed")
     lot_id = str(
@@ -274,14 +301,14 @@ def append_and_verify_wheel_intent_consumption(
     ):
         raise ValueError("Wheel Call intent linkage verification failed")
     account = _event_account(linked_event)
-    model = build_wheel_read_model_from_rows(
+    batches = _wheel_batches_from_rows(
         repo.read_lifecycle_account_rows(account=account, conn=conn),
         account=account,
         as_of_ms=max(_event_time_ms(linked_event), 1),
     )
     matches = [
         batch
-        for batch in model["batches"]
+        for batch in batches
         if batch["stock_lot_id"] == intent_event["stock_lot_id"]
     ]
     if (

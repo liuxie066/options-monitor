@@ -10,6 +10,7 @@ from src.application.ledger.api import assigned_stock_event_log, ledger_store_pa
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trade_time_format import add_trade_time_beijing
 from src.application.payload_helpers import as_dict as _dict
+from src.application.wheel.read_model import build_wheel_read_model
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:
@@ -419,12 +420,13 @@ def _assigned_stock_action(
         else as_of_ms is None and "quote_snapshots" not in payload
     )
 
+    read_as_of_ms = as_of_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
     report = build_assigned_stock_view(
         repo,
         account=account,
         broker=broker,
         quote_snapshots=quote_snapshots,
-        as_of_ms=as_of_ms,
+        as_of_ms=read_as_of_ms,
     )
     selected_report_rows = [
         row
@@ -484,7 +486,7 @@ def _assigned_stock_action(
                         account=account,
                         broker=broker,
                         quote_snapshots=quote_snapshots,
-                        as_of_ms=as_of_ms,
+                        as_of_ms=read_as_of_ms,
                     )
                     selected_report_rows = [
                         row
@@ -497,8 +499,31 @@ def _assigned_stock_action(
                             status=status,
                         )
                     ]
-    rows: list[dict[str, Any]] = []
-    for row in selected_report_rows:
+    wheel_batches: dict[tuple[str, str], dict[str, Any]] = {}
+    for account_value in sorted(
+        {
+            str(row.get("account") or "").strip().lower()
+            for row in selected_report_rows
+            if str(row.get("account") or "").strip()
+        }
+    ):
+        model = build_wheel_read_model(repo, account_value, read_as_of_ms)
+        wheel_batches.update(
+            {
+                (account_value, str(batch.get("stock_lot_id") or "").strip()): dict(batch)
+                for batch in model.get("batches") or []
+                if isinstance(batch, dict) and str(batch.get("stock_lot_id") or "").strip()
+            }
+        )
+    rows = []
+    for item in selected_report_rows:
+        row = dict(item)
+        row["wheel"] = wheel_batches.get(
+            (
+                str(row.get("account") or "").strip().lower(),
+                str(row.get("stock_lot_id") or "").strip(),
+            )
+        )
         rows.append(row)
     sale_rows = _assigned_stock_related_rows(
         report.get("assigned_stock_sale_rows"),

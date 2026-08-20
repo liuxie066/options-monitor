@@ -19,16 +19,12 @@ from domain.domain.wheel import (
     plan_wheel_manual_end,
     project_wheel_call_intents,
 )
-from src.application.ledger.api import with_sqlite_repo_transaction
-from src.application.ledger.current_decision_projection import (
-    capture_trade_event_decision_projection_fence,
-)
-from src.application.ledger.position_projection_runtime import (
-    run_position_projection_in_transaction,
-)
-from src.application.ledger.writer import _finish_trade_event_decision_projection
-from src.application.wheel.trade_companions import (
+from src.application.ledger.api import (
     append_and_verify_wheel_intent_consumption,
+    capture_trade_event_decision_projection_fence,
+    finalize_trade_event_decision_projection,
+    run_position_projection_in_transaction,
+    with_sqlite_repo_transaction,
 )
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.write_contract import attach_write_contract
@@ -779,7 +775,7 @@ def confirm_wheel_call_linkage(
                 or linked.get("source_stock_lot_id") != stock_lot_value
             ):
                 raise ValueError("Wheel Call linkage verification failed")
-        _finish_trade_event_decision_projection(
+        finalize_trade_event_decision_projection(
             sqlite_repo,
             conn=conn,
             fence=fence,

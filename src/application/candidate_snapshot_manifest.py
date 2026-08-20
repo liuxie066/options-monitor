@@ -168,10 +168,11 @@ def _snapshot_strategy_scopes(
         selected_rows = snapshot.get("ranked_candidates") or []
     elif owner == "wheel":
         selected_rows = [
-            batch["final_candidate"]
+            candidate
             for batch in snapshot.get("batches") or []
             if isinstance(batch, Mapping)
-            and isinstance(batch.get("final_candidate"), Mapping)
+            for candidate in batch.get("raw_candidates") or []
+            if isinstance(candidate, Mapping)
         ]
     else:
         selected_rows = snapshot.get("ranked_pairs") or []

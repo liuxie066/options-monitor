@@ -3,13 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from domain.domain.assigned_stock import (
-    assigned_stock_allocation_row,
-    assigned_stock_event_time_ms,
-    assigned_stock_position_lot_row,
-    assigned_stock_trade_event_row,
-    project_assigned_stock_lifecycle,
-)
 from domain.domain.ledger import ContractKey, OptionEconomicAllocation, PositionLot, TradeEvent, fee_fact_for_event
 from domain.domain.performance.attribution import resolve_event_attribution
 from domain.domain.performance.models import (
@@ -17,7 +10,6 @@ from domain.domain.performance.models import (
     OptionInstrumentKey,
     StockInstrumentKey,
     ValuationMarkFact,
-    select_valuation_mark,
     OptionValuationPosition,
     quantize_money,
 )
@@ -338,58 +330,17 @@ def load_assigned_stock_projection(
     broker: str | None = None,
     stock_holdings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    instant = int(as_of_ms)
-    rows = [
-        row
-        for row in inputs.rows
-        if _row_event_time_ms(row) <= instant or ledger_api.valid_void_target_event_id(row) is not None
-    ]
-    published = ledger_api.project_trade_event_log(rows)
-    projection = published.ledger_projection
-    current_fields_by_lot_id = {
-        item.record_id: item.fields for item in published.lots
-    }
-    selected_event_ids = {
-        str(row.get("event_id") or "").strip()
-        for row in rows
-        if str(row.get("event_id") or "").strip()
-    }
-    event_rows = [
-        assigned_stock_trade_event_row(event)
-        for event in inputs.events
-        if event.event_id in selected_event_ids
-    ]
-    allocation_rows = [
-        assigned_stock_allocation_row(item) for item in projection.allocations
-    ]
-    option_lot_rows = [
-        assigned_stock_position_lot_row(
-            item,
-            current_fields=current_fields_by_lot_id.get(item.lot_id),
-            valuation_marks=valuation_marks,
-            at_ms=instant,
-        )
-        for item in projection.lots
-    ]
-    quote_rows = [
-        *_stock_quote_rows(valuation_marks, at_ms=instant),
-        *_raw_stock_quote_rows(quote_snapshots),
-    ]
-    return project_assigned_stock_lifecycle(
-        event_rows,
-        assignment_option_rows=allocation_rows,
-        option_open_lots=option_lot_rows,
-        assigned_stock_events=[
-            dict(item)
-            for item in inputs.assigned_stock_events
-            if assigned_stock_event_time_ms(item) <= instant
-        ],
-        quote_snapshots=quote_rows,
+    return ledger_api.project_assigned_stock_lifecycle_from_rows(
+        {
+            "trade_events": list(inputs.rows),
+            "account_assigned_stock_events": list(inputs.assigned_stock_events),
+        },
+        as_of_ms=as_of_ms,
+        valuation_marks=valuation_marks,
+        quote_snapshots=quote_snapshots,
+        account=account,
+        broker=broker,
         stock_holdings=stock_holdings,
-        account_norm=str(account or "").strip().lower() or None,
-        broker_norm=str(broker or "").strip() or None,
-        month=None,
-        as_of_ms=instant,
     )
 
 
@@ -404,45 +355,6 @@ def assigned_stock_instruments(projection: dict[str, Any]) -> tuple[StockInstrum
             continue
         instruments[instrument.instrument_key] = instrument
     return tuple(instruments[key] for key in sorted(instruments))
-
-
-def _stock_quote_rows(valuation_marks: tuple[ValuationMarkFact, ...] | list[ValuationMarkFact], *, at_ms: int) -> list[dict[str, Any]]:
-    stock_instruments = {
-        item.instrument_key: item.instrument
-        for item in valuation_marks
-        if isinstance(item.instrument, StockInstrumentKey)
-    }
-    rows: list[dict[str, Any]] = []
-    for key in sorted(stock_instruments):
-        instrument = stock_instruments[key]
-        selection = select_valuation_mark(
-            list(valuation_marks),
-            instrument_key=instrument.instrument_key,
-            at_ms=at_ms,
-        )
-        fact = selection.fact
-        if fact is None or not isinstance(fact, ValuationMarkFact):
-            continue
-        rows.append(
-            {
-                "symbol": instrument.symbol,
-                "currency": instrument.currency,
-                "spot": float(fact.price),
-                "quote_time_ms": fact.effective_at_ms,
-                "quote_source": fact.source,
-                "quote_status": "stale" if selection.status == "stale" else "fresh",
-                "evidence_fact_id": fact.fact_id,
-            }
-        )
-    return rows
-
-
-def _raw_stock_quote_rows(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, dict):
-        value = value.get("rows") or value.get("quote_snapshots") or [value]
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 __all__ = [

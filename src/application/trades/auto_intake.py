@@ -77,7 +77,10 @@ from src.application.trades.inbox import (
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.futu_quote_routing import resolve_futu_quote_route
-from src.application.ledger.api import open_position_ledger_from_runtime_config
+from src.application.ledger.api import (
+    open_position_ledger_from_runtime_config,
+    record_trade_event_with_wheel_intent,
+)
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import (
     TRADE_INTAKE_SOURCE_CONTEXT_KEY,
@@ -86,12 +89,32 @@ from src.application.trades.intake import (
 )
 from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
 from src.application.write_contract import attach_write_contract, write_control
+from src.application.wheel.capacity import load_shared_coverage_fact
 from src.infrastructure.io_utils import atomic_write_json, utc_now
 from src.infrastructure.portfolio_holdings_sync_client import sync_portfolio_holdings
 from src.infrastructure.futu_gateway import build_futu_gateway
 
 
 TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE = 78
+
+
+def _wheel_intent_coverage_fact(
+    *,
+    repo: Any,
+    deal: Any,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    account = str(getattr(deal, "internal_account", "") or "").strip().lower()
+    symbol = str(getattr(deal, "symbol", "") or "").strip().upper()
+    return load_shared_coverage_fact(
+        repo,
+        config=config,
+        account=account,
+        symbol=symbol,
+        broker=str(getattr(deal, "broker", "") or "futu"),
+        as_of_ms=max(int(getattr(deal, "trade_time_ms", 0) or 0), 1),
+        source_identity=str(getattr(deal, "deal_id", "") or ""),
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -212,6 +235,33 @@ def _process_payload(
             futu_account_ids=futu_account_ids,
         )
 
+    def _resolve_with_wheel_intent(deal: Any, **kwargs: Any) -> Any:
+        if not (
+            apply_changes
+            and isinstance(config, dict)
+            and str(getattr(deal, "position_effect", "") or "").lower()
+            == "open"
+            and str(getattr(deal, "side", "") or "").lower() == "sell"
+            and str(getattr(deal, "option_type", "") or "").lower() == "call"
+        ):
+            return resolve_trade_deal(deal, **kwargs)
+        coverage_fact = _wheel_intent_coverage_fact(
+            repo=kwargs["repo"],
+            deal=deal,
+            config=config,
+        )
+        return resolve_trade_deal(
+            deal,
+            **kwargs,
+            persist_trade_event_fn=lambda active_repo, active_deal: (
+                record_trade_event_with_wheel_intent(
+                    active_repo,
+                    active_deal,
+                    coverage_fact,
+                )
+            ),
+        )
+
     return process_trade_payload(
         payload,
         repo=repo,
@@ -225,7 +275,7 @@ def _process_payload(
         append_trade_intake_audit_fn=append_trade_intake_audit,
         enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
-        resolve_trade_deal_fn=resolve_trade_deal,
+        resolve_trade_deal_fn=_resolve_with_wheel_intent,
         on_result_fn=on_result_fn,
         on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
         retry_failed_deal=retry_failed_deal,

@@ -1,0 +1,74 @@
+{
+  "schema_version": "wheel_compatibility_fixture.v1",
+  "baseline_commit": "d021a3ce82076a5f6a7958303cac8dde5b103cf0",
+  "input_sha256": "fe03ef54000f01a82429aedc31426cd499ea7c4d46db3869a23047f32a35aa36",
+  "synthetic_input": {
+    "base_config": {
+      "wheel": {
+        "enabled": false,
+        "accounts": []
+      },
+      "symbols": [
+        {
+          "symbol": "NVDA",
+          "fetch": {
+            "source": "futu",
+            "host": "127.0.0.1",
+            "port": 11111
+          },
+          "sell_put": {
+            "enabled": true,
+            "min_dte": 30,
+            "max_dte": 45
+          },
+          "sell_call": {
+            "enabled": true,
+            "min_dte": 30,
+            "max_dte": 45
+          }
+        }
+      ]
+    },
+    "account_configs": {
+      "acct_a": {
+        "wheel": {
+          "enabled": false,
+          "accounts": []
+        },
+        "symbols": [
+          {
+            "symbol": "NVDA",
+            "fetch": {
+              "source": "futu",
+              "host": "127.0.0.1",
+              "port": 11111
+            },
+            "sell_put": {
+              "enabled": true,
+              "min_dte": 30,
+              "max_dte": 45
+            },
+            "sell_call": {
+              "enabled": true,
+              "min_dte": 30,
+              "max_dte": 45
+            }
+          }
+        ]
+      }
+    },
+    "wheel_read_models": {
+      "acct_a": {
+        "schema_version": "wheel_read_model.v1",
+        "account": "acct_a",
+        "batches": []
+      }
+    }
+  },
+  "expected": {
+    "wheel_required_data_added": false,
+    "wheel_owner_present": false,
+    "wheel_daily_brief_section_present": false,
+    "ordinary_candidate_config_unchanged": true
+  }
+}

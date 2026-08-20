@@ -25,6 +25,7 @@ _STRATEGY_LABELS = {
     "short_put": "Sell Put",
     "covered_call": "Covered Call",
     "combo_yield": "组合增强",
+    "wheel": "Wheel",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
 _EVENT_TYPE_LABELS = {"earnings": "财报", "ex_dividend": "除息", "split": "拆股"}
@@ -96,6 +97,11 @@ def build_daily_brief_user_view(
         brief,
         diff=normalized_diff,
         limits=cfg,
+    )
+    wheel_batches = _wheel_batch_views(
+        brief,
+        diff=normalized_diff,
+        delivery_kind=delivery_kind,
     )
     (
         position_views,
@@ -174,6 +180,7 @@ def build_daily_brief_user_view(
                 )
             )
         ),
+        "wheel_batches": wheel_batches,
         "positions": position_views,
         "position_total": position_total,
         "position_actionable_total": position_actionable_total,
@@ -461,7 +468,7 @@ def _render_user_view(
     candidate_families = {str(item.get("family") or "") for item in candidates}
     visible_families = candidate_families
     if projection == "candidate_alert":
-        if not candidates:
+        if not candidates and not view.get("wheel_batches"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
             lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
         else:
@@ -510,9 +517,19 @@ def _render_user_view(
                 lines.append(f"补充｜{note}")
         for note in other_omissions:
             lines.append(f"补充｜{note}")
-        if not candidates and not visible_families:
+        if not candidates and not visible_families and not view.get("wheel_batches"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
             lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+
+    wheel_batches = [
+        item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)
+    ]
+    if wheel_batches:
+        lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} Wheel"])
+        for item in wheel_batches:
+            lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+            for detail in item.get("details") or []:
+                lines.append(_flat_field_line(detail))
 
     position_rows = [
         item
@@ -597,7 +614,7 @@ def _render_user_view_card(
     visible_families = candidate_families
     if projection == "candidate_alert":
         visible_families = candidate_families
-    if not visible_families:
+    if not visible_families and not view.get("wheel_batches"):
         lines.extend(["", "## 策略候选"])
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
@@ -613,13 +630,21 @@ def _render_user_view_card(
                     candidate_heading=candidate_heading,
                 )
             )
-        if candidates:
-            event_lines = _render_candidate_event_card(
-                candidates,
-                compact=projection == "fixed_report",
-            )
-            if event_lines:
-                lines.extend(["", *event_lines])
+    wheel_batches = [
+        item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)
+    ]
+    if wheel_batches:
+        lines.extend(["", "## Wheel"])
+        for item in wheel_batches:
+            lines.extend(["", f"**{_flat_title(item['title'])}**"])
+            lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
+    if candidates:
+        event_lines = _render_candidate_event_card(
+            candidates,
+            compact=projection == "fixed_report",
+        )
+        if event_lines:
+            lines.extend(["", *event_lines])
     for note in view.get("candidate_omissions") or []:
         lines.append(f"补充｜{note}")
 
@@ -913,6 +938,92 @@ def _candidate_views(
                 }
             )
     return out, omissions, selected_by_family
+
+
+def _wheel_batch_views(
+    brief: Mapping[str, Any],
+    *,
+    diff: Mapping[str, Any],
+    delivery_kind: str,
+) -> list[dict[str, Any]]:
+    rows = [
+        dict(item)
+        for item in brief.get("wheel_batches") or []
+        if isinstance(item, Mapping)
+    ]
+    if delivery_kind == "candidate_alert":
+        changed_lots = {
+            str(action.get("position_lot_id") or "").strip()
+            for change in diff.get("changes") or []
+            if isinstance(change, Mapping)
+            and isinstance((action := change.get("action")), Mapping)
+            and _lower(action.get("strategy_family")) == "wheel"
+            and str(action.get("position_lot_id") or "").strip()
+        }
+        rows = [
+            row
+            for row in rows
+            if str(row.get("position_lot_id") or "").strip() in changed_lots
+        ]
+    symbol_counts: dict[str, int] = {}
+    for row in rows:
+        symbol = _upper(row.get("symbol"))
+        symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+    market = _upper(brief.get("market"))
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = _upper(row.get("symbol")) or "未知标的"
+        lot_id = str(row.get("position_lot_id") or "").strip()
+        suffix = f" · 批次 {lot_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
+        shares = max(0, int(row.get("shares_remaining") or 0))
+        contracts = max(0, int(row.get("recommended_contracts") or 0))
+        details = [f"剩余股份：{shares} 股"]
+        if contracts > 0:
+            expiration = str(row.get("expiration") or "").strip()
+            strike = _number(row.get("strike"))
+            contract = _human_contract(
+                expiration=expiration,
+                strike=strike,
+                option_type="call",
+                market=market,
+            )
+            details.append(f"建议：卖出 {contracts} 张 {contract}")
+            premium = _number(row.get("candidate_call_net_premium"))
+            if premium is not None:
+                details.append(f"本轮预计净权利金：{_money(premium, market=market)}")
+            lifecycle_pnl = _number(
+                row.get("projected_lifecycle_net_pnl_if_called")
+            )
+            if lifecycle_pnl is not None:
+                label = (
+                    "最终全部叫走后预计总收益"
+                    if _lower(row.get("projected_lifecycle_pnl_scope"))
+                    == "final_total_if_called"
+                    else "本轮行权后预计累计净收益"
+                )
+                details.append(f"{label}：{_money(lifecycle_pnl, market=market)}")
+        else:
+            details.append(
+                "状态：" + _wheel_reason_text(
+                    row.get("reason_code") or row.get("status")
+                )
+            )
+        out.append({"title": f"{symbol} · Wheel{suffix}", "details": details})
+    return out
+
+
+def _wheel_reason_text(value: Any) -> str:
+    reason = _lower(value)
+    return {
+        "wheel_disabled": "策略已关闭，现有生命周期继续监控",
+        "wheel_call_open": "已有 Wheel Call，等待后续状态",
+        "wheel_call_pending": "已有 Call intent，等待成交或取消",
+        "share_capacity_insufficient": "可覆盖股份不足",
+        "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
+        "no_candidate": "当前没有通过门槛的 Call",
+        "wheel_scan_failed": "Wheel 扫描失败",
+        "data_unavailable": "数据不可用",
+    }.get(reason, reason or "当前等待下一轮评估")
 
 
 def _candidate_metric_details(

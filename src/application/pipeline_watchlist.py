@@ -40,6 +40,7 @@ from src.application.config_validator import validate_resolved_watchlist_item_ru
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
     load_strategy_scan_status_index_v2,
+    publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
 )
 from src.application.opening_candidate_snapshot import (
@@ -61,6 +62,17 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
 )
+from src.application.exchange_rate_loader import build_converter
+from src.application.prepared_option_positions_context import (
+    exchange_rate_scalars_from_option_context,
+)
+from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
+from src.application.wheel.capacity import (
+    build_shared_coverage_facts,
+    finalize_wheel_capacity,
+)
+from src.application.wheel.config import resolve_wheel_config
+from src.application.wheel.scanning import run_wheel_call_scan
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
@@ -179,6 +191,11 @@ def _normalize_candidate_capture_status(
             )
         owner = variant
         variant_value = variant
+    elif mode == "wheel":
+        if variant:
+            raise ValueError(f"unexpected Wheel scan variant: {symbol}:{variant}")
+        owner = "wheel"
+        variant_value = None
     else:
         raise ValueError(
             f"unexpected candidate capture mode: {symbol}:{mode or 'missing'}"
@@ -204,6 +221,7 @@ def _capture_scope_error_label(owner: str) -> str:
         "opening": "opening",
         "sp_lc": "combo yield",
         "cc_lp": "cc_lp",
+        "wheel": "Wheel",
     }[owner]
 
 
@@ -214,6 +232,7 @@ def _index_owner_statuses(
         "opening": [],
         "sp_lc": [],
         "cc_lp": [],
+        "wheel": [],
     }
     for raw in status_index.get("items") or []:
         item = dict(raw)
@@ -303,7 +322,7 @@ def _validate_status_quote_bindings(
     quote_bindings_by_symbol: dict[str, set[tuple[str, str]]] = {}
     for owner, statuses in statuses_by_owner.items():
         for item in statuses:
-            if item["status"] == "completed" and (
+            if owner != "wheel" and item["status"] == "completed" and (
                 not item["quote_snapshot_id"]
                 or not item["quote_receipt_relpath"]
             ):
@@ -1021,21 +1040,181 @@ def run_watchlist_pipeline_default(
         return result
 
     captured_at = datetime.now(timezone.utc)
+    account = str(
+        ((cfg.get("portfolio") or {}).get("account"))
+        if isinstance(cfg.get("portfolio"), dict)
+        else ""
+    ).strip().lower()
+    portfolio_snapshot = captured_runtime_context.get("portfolio")
+    option_snapshot = captured_runtime_context.get("ledger")
+    if not isinstance(portfolio_snapshot, dict):
+        portfolio_snapshot = {}
+    if not isinstance(option_snapshot, dict):
+        option_snapshot = {}
+    status_index_path = Path(report_dir) / "strategy_scan_status_index.v2.json"
+    status_index = load_strategy_scan_status_index_v2(
+        status_index_path,
+        expected_run_id=account_run_id,
+        expected_account=account,
+        expected_account_config_sha256=str(account_config_sha256 or ""),
+    )
+    wheel_capture: dict[str, Any] | None = None
+    wheel_read_model = option_snapshot.get("wheel_read_model")
+    wheel_symbol_filter = _parse_symbols_whitelist(symbols_arg)
+    if isinstance(wheel_read_model, Mapping) and wheel_symbol_filter is not None:
+        wheel_read_model = {
+            **dict(wheel_read_model),
+            "batches": [
+                dict(batch)
+                for batch in wheel_read_model.get("batches") or []
+                if isinstance(batch, Mapping)
+                and normalize_symbol_read(batch.get("symbol")) in wheel_symbol_filter
+            ],
+        }
+    if (
+        isinstance(wheel_read_model, Mapping)
+        and list(wheel_read_model.get("batches") or [])
+        and required_data_snapshot_batch is not None
+    ):
+        try:
+            wheel_policy = resolve_wheel_config(cfg, account)
+            coverage_facts = build_shared_coverage_facts(
+                account=account,
+                portfolio_context=portfolio_snapshot,
+                option_context=option_snapshot,
+                wheel_read_model=wheel_read_model,
+            )
+            usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(
+                option_snapshot
+            )
+            wheel_scan = run_wheel_call_scan(
+                wheel_read_model,
+                wheel_policy,
+                required_data_snapshot_batch,
+                {},
+                {
+                    "exchange_rate_converter": build_converter(
+                        usd_per_cny_exchange_rate=usd_per_cny,
+                        cny_per_hkd_exchange_rate=cny_per_hkd,
+                    )
+                },
+                int(wheel_read_model.get("as_of_ms") or 0),
+            )
+            wheel_capture = finalize_wheel_capacity(
+                account=account,
+                wheel_read_model=wheel_read_model,
+                wheel_scan=wheel_scan,
+                opening_call_candidates=captured_final_candidates["call"],
+                coverage_facts=coverage_facts,
+            )
+        except Exception:
+            active_batches = [
+                dict(batch)
+                for batch in wheel_read_model.get("batches") or []
+                if isinstance(batch, Mapping)
+                and str(batch.get("lifecycle_status") or "") == "active"
+            ]
+            wheel_capture = {
+                "allocations": [],
+                "scope_results": [
+                    {
+                        "scope": "strategy",
+                        "account": account,
+                        "symbol": symbol,
+                        "strategy_family": "wheel",
+                        "strategy_mode": "wheel",
+                        "candidate_owner": "wheel",
+                        "status": "failed",
+                        "reason_code": "wheel_scan_failed",
+                        "candidate_count": 0,
+                    }
+                    for symbol in sorted(
+                        {
+                            str(batch.get("symbol") or "").strip().upper()
+                            for batch in active_batches
+                        }
+                    )
+                ],
+                "batches": [
+                    {
+                        "account": account,
+                        "symbol": str(batch.get("symbol") or "").strip().upper(),
+                        "stock_lot_id": batch.get("stock_lot_id"),
+                        "batch_generation_hash": batch.get("batch_generation_hash"),
+                        "projection_hash": batch.get("projection_hash"),
+                        "shares_remaining": int(batch.get("shares_remaining") or 0),
+                        "phase": batch.get("phase"),
+                        "candidate_status": "failed",
+                        "reason_code": "wheel_scan_failed",
+                        "raw_candidates": [],
+                        "allocation": None,
+                        "granted_contracts": 0,
+                        "final_candidate": None,
+                    }
+                    for batch in active_batches
+                ],
+            }
+        wheel_expected: list[dict[str, str]] = []
+        for scope in wheel_capture["scope_results"]:
+            status = str(scope["status"])
+            reason = str(scope.get("reason_code") or "")
+            market = str(symbol_market(scope["symbol"]) or "").upper()
+            publish_strategy_scan_status(
+                report_dir=report_dir,
+                run_id=account_run_id,
+                account=account,
+                market=market,
+                symbol=str(scope["symbol"]),
+                strategy_family="wheel",
+                status=status,
+                candidate_count=(int(scope["candidate_count"]) if status == "completed" else None),
+                reason=(reason or None),
+            )
+            capture_statuses.append(
+                {
+                    "symbol": scope["symbol"],
+                    "strategy_mode": "wheel",
+                    "status": status,
+                    "reason": reason,
+                }
+            )
+            wheel_expected.append(
+                {
+                    "market": market,
+                    "symbol": str(scope["symbol"]),
+                    "strategy_family": "wheel",
+                    "strategy_mode": "wheel",
+                    "candidate_owner": "wheel",
+                    "account_config_sha256": str(account_config_sha256 or ""),
+                }
+            )
+        existing_expected = [
+            {
+                key: str(item.get(key) or "")
+                for key in (
+                    "market",
+                    "symbol",
+                    "strategy_family",
+                    "strategy_mode",
+                    "candidate_owner",
+                    "account_config_sha256",
+                )
+            }
+            for item in status_index["items"]
+        ]
+        status_index = publish_strategy_scan_status_index_v2(
+            report_dir=report_dir,
+            run_id=account_run_id,
+            account=account,
+            account_config_sha256=str(account_config_sha256 or ""),
+            expected=existing_expected + wheel_expected,
+        )
     expected_scopes_by_owner: dict[str, set[tuple[str, str]]] = {
         "opening": set(),
         "sp_lc": set(),
         "cc_lp": set(),
+        "wheel": set(),
     }
-    status_index = load_strategy_scan_status_index_v2(
-        Path(report_dir) / "strategy_scan_status_index.v2.json",
-        expected_run_id=account_run_id,
-        expected_account=str(
-            ((cfg.get("portfolio") or {}).get("account"))
-            if isinstance(cfg.get("portfolio"), dict)
-            else ""
-        ).strip().lower(),
-        expected_account_config_sha256=str(account_config_sha256 or ""),
-    )
     for item in status_index["items"]:
         owner = str(item["candidate_owner"])
         expected_scopes_by_owner[owner].add(
@@ -1054,11 +1233,6 @@ def run_watchlist_pipeline_default(
         statuses_by_owner=statuses_by_owner,
     )
     normalized_statuses = statuses_by_owner["opening"]
-    account = str(
-        ((cfg.get("portfolio") or {}).get("account"))
-        if isinstance(cfg.get("portfolio"), dict)
-        else ""
-    ).strip().lower()
     policy_hash = strategy_policy_hash(cfg)
     if not any(expected_scopes_by_owner.values()):
         publish_candidate_snapshot_manifest(
@@ -1069,12 +1243,6 @@ def run_watchlist_pipeline_default(
             sealed_at=captured_at,
         )
         return result
-    portfolio_snapshot = captured_runtime_context.get("portfolio")
-    option_snapshot = captured_runtime_context.get("ledger")
-    if not isinstance(portfolio_snapshot, dict):
-        portfolio_snapshot = {}
-    if not isinstance(option_snapshot, dict):
-        option_snapshot = {}
     authority = portfolio_snapshot.get("capacity_authority")
     if not isinstance(authority, dict):
         authority = {}
@@ -1203,6 +1371,22 @@ def run_watchlist_pipeline_default(
             opening_status=_yield_snapshot_status(
                 statuses_by_owner["cc_lp"]
             ),
+            sealed_at=captured_at,
+        )
+    if expected_scopes_by_owner["wheel"]:
+        if wheel_capture is None:
+            raise ValueError("Wheel candidate capture is missing")
+        seal_wheel_candidate_snapshot(
+            base=base,
+            run_id=account_run_id,
+            account=account,
+            market=snapshot_market,
+            account_config_sha256=str(account_config_sha256 or ""),
+            strategy_policy_sha256=policy_hash,
+            dependencies=dependencies,
+            scope_results=wheel_capture["scope_results"],
+            batches=wheel_capture["batches"],
+            capacity_allocations=wheel_capture["allocations"],
             sealed_at=captured_at,
         )
     publish_candidate_snapshot_manifest(
