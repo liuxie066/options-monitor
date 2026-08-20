@@ -66,7 +66,12 @@ def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
         tmp_path,
         _assistant_config(
             portfolio_enabled=True,
-            llm={"enabled": True, "provider": "ollama", "model": "gpt-oss:20b"},
+            llm={
+                "enabled": True,
+                "provider": "ollama",
+                "model": "gpt-oss:20b",
+                "context_window_tokens": 24_000,
+            },
         ),
     )
 
@@ -80,7 +85,14 @@ def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
 
 
 def test_ollama_model_config_does_not_require_api_key() -> None:
-    assert model_api_key_configured({"provider": "ollama", "model": "gpt-oss:20b"}, environ={}) == (True, None)
+    assert model_api_key_configured(
+        {
+            "provider": "ollama",
+            "model": "gpt-oss:20b",
+            "context_window_tokens": 24_000,
+        },
+        environ={},
+    ) == (True, None)
 
 
 def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
@@ -93,6 +105,7 @@ def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
                 "base_url": "http://127.0.0.1:11434/v1",
                 "model": "gpt-oss:20b",
                 "api_key_env": "",
+                "context_window_tokens": 24_000,
             }
         ),
     )
@@ -168,6 +181,7 @@ def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Pat
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
                 "timeout_seconds": 9,
+                "context_window_tokens": 24_000,
                 "max_output_tokens": 777,
             }
         ),
@@ -207,6 +221,7 @@ def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
                 "api_key_env": "DEEPSEEK_API_KEY",
                 "confidence_min": 0.75,
                 "timeout_seconds": 9,
+                "context_window_tokens": 24_000,
                 "max_output_tokens": 777,
             }
         ),
@@ -246,6 +261,7 @@ def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
                 "api_key_env": "MOONSHOT_API_KEY",
                 "confidence_min": 0.75,
                 "timeout_seconds": 9,
+                "context_window_tokens": 24_000,
                 "max_output_tokens": 777,
             }
         ),
@@ -283,6 +299,7 @@ def test_llm_check_reports_ready_kimi_code_endpoint(tmp_path: Path) -> None:
                 "api_key_env": "KIMI_API_KEY",
                 "confidence_min": 0.75,
                 "timeout_seconds": 9,
+                "context_window_tokens": 24_000,
                 "max_output_tokens": 777,
             }
         ),
@@ -318,6 +335,7 @@ def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> 
                 "model": "gpt-5.2",
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
+                "context_window_tokens": 24_000,
             }
         ),
     )

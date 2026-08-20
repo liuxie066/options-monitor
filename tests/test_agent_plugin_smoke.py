@@ -2317,6 +2317,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
                         "base_url": "https://api.deepseek.com",
                         "model": "deepseek-v4-flash",
                         "api_key_env": "DEEPSEEK_API_KEY",
+                        "context_window_tokens": 24_000,
                     },
                 }
             },

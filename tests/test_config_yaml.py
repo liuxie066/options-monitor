@@ -980,10 +980,12 @@ assistant:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+      context_window_tokens: 24000
     openai-default:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
+      context_window_tokens: 24000
 """,
     )
 
@@ -996,10 +998,33 @@ assistant:
     assert assistant["llm"]["base_url"] == "https://api.deepseek.com"
     assert assistant["llm"]["model"] == "deepseek-chat"
     assert assistant["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert assistant["llm"]["context_window_tokens"] == 24000
+    assert "max_attempts" not in assistant["llm"]
     resolved = cfg[RESOLVED_KEY]["assistant_models"]
     assert resolved["active_model"] == "deepseek-default"
     assert resolved["profile_count"] == 2
     assert resolved["resolved_profile"]["provider"] == "deepseek"
+
+
+def test_yaml_assistant_model_profile_requires_declared_context_window(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+assistant:
+  enabled: true
+  copilot:
+    enabled: true
+  active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="context_window_tokens must be an integer"):
+        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
 def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Path) -> None:
@@ -1015,6 +1040,7 @@ assistant:
     local:
       provider: ollama
       model: gpt-oss:20b
+      context_window_tokens: 24000
 """,
     )
 
@@ -1025,6 +1051,7 @@ assistant:
         "base_url": "http://127.0.0.1:11434/v1",
         "model": "gpt-oss:20b",
         "api_key_env": "",
+        "context_window_tokens": 24000,
     }
 
 
@@ -1050,6 +1077,7 @@ assistant:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+      context_window_tokens: 24000
 """,
     )
 
@@ -1196,6 +1224,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["assistant"]["llm"]["base_url"] == "https://api.deepseek.com"
     assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 90
+    assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 24000
     assert assistant_cfg["assistant"]["llm"]["max_output_tokens"] == 2048
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
 
@@ -1645,6 +1674,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
                         "base_url": "https://api.deepseek.com",
                         "model": "deepseek-v4-flash",
                         "api_key_env": "DEEPSEEK_API_KEY",
+                        "context_window_tokens": 24000,
                     },
                 },
                 "inbound": {"feishu_ws": {"ack_reaction": "THUMBSUP"}},
@@ -1708,6 +1738,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-v4-flash",
         "api_key_env": "DEEPSEEK_API_KEY",
+        "context_window_tokens": 24000,
     }
     assert payload["markets"]["us"]["symbols"] == ["NVDA", "PDD"]
     assert "sell_call" not in payload["markets"]["us"]["overrides"]["PDD"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def _base_cfg() -> dict[str, object]:
     return {
@@ -318,6 +320,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
             "model": "gpt-5.2",
             "api_key_env": "OM_LLM_API_KEY",
             "timeout_seconds": 20,
+            "context_window_tokens": 24000,
             "max_output_tokens": 512,
         }
     }
@@ -333,10 +336,42 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
             "model": "deepseek-v4-flash",
             "api_key_env": "DEEPSEEK_API_KEY",
             "timeout_seconds": 20,
+            "context_window_tokens": 24000,
             "max_output_tokens": 512,
         }
     }
     mod.validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("context_window_tokens", "message"),
+    [
+        (None, "context_window_tokens is required"),
+        (4095, "context_window_tokens must be >= 4096"),
+        (2_000_001, "context_window_tokens must be <= 2000000"),
+        (2512, "context_window_tokens must be >= 4096"),
+        (4096, "must exceed max_output_tokens by more than 2000"),
+    ],
+)
+def test_validate_active_copilot_context_window(context_window_tokens, message) -> None:
+    import src.application.config_validator as mod
+
+    llm = {
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "max_output_tokens": 4096 if context_window_tokens == 4096 else 2048,
+    }
+    if context_window_tokens is not None:
+        llm["context_window_tokens"] = context_window_tokens
+    cfg = _base_cfg()
+    cfg["assistant"] = {
+        "enabled": True,
+        "copilot": {"enabled": True},
+        "llm": llm,
+    }
+
+    with pytest.raises(SystemExit, match=message):
+        mod.validate_config(cfg)
 
 
 def test_validate_config_rejects_retired_intake_multiplier_metadata() -> None:

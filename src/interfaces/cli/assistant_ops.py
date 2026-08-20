@@ -119,6 +119,7 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_model_add.add_argument("--api-key-env", default=None)
     assistant_model_add.add_argument("--confidence-min", type=float, default=None)
     assistant_model_add.add_argument("--timeout-seconds", type=int, default=None)
+    assistant_model_add.add_argument("--context-window-tokens", type=int, required=True)
     assistant_model_add.add_argument("--max-output-tokens", type=int, default=None)
     assistant_model_add.add_argument("--replace", action="store_true")
     assistant_model_add.add_argument("--activate", action="store_true")
@@ -198,6 +199,7 @@ def _assistant_model_text(data: dict[str, Any], *, command: str) -> str:
         return "\n".join(
             f"{'*' if item.get('active') else ' '} {item.get('name')} "
             f"{item.get('provider')}/{item.get('model')} "
+            f"context_window_tokens={item.get('context_window_tokens')} "
             f"credential_configured={bool(item.get('api_key_configured'))}"
             for item in rows
         )
@@ -231,7 +233,9 @@ def _llm_text(raw: Any) -> str:
     provider = str(llm.get("provider") or "").strip() or "-"
     model = str(llm.get("model") or "").strip() or "-"
     base_url = str(llm.get("base_url") or "").strip()
-    return f"{provider}/{model}" + (f" base_url={base_url}" if base_url else "")
+    context = llm.get("context_window_tokens")
+    suffix = f" context_window_tokens={context}" if context is not None else ""
+    return f"{provider}/{model}" + (f" base_url={base_url}" if base_url else "") + suffix
 
 
 def _check_assistant_model_profile(
@@ -353,6 +357,7 @@ def handle_assistant_command(
                 api_key_env=args.api_key_env,
                 confidence_min=args.confidence_min,
                 timeout_seconds=args.timeout_seconds,
+                context_window_tokens=args.context_window_tokens,
                 max_output_tokens=args.max_output_tokens,
                 replace=bool(args.replace),
                 activate=bool(args.activate),

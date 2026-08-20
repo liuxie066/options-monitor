@@ -61,6 +61,7 @@
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Copilot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [OM Copilot v2 Design](OM_COPILOT_V2_DESIGN.md)：当前自由问答 Copilot 架构。
+- [Pi Agent Core Integration](PI_AGENT_CORE_INTEGRATION.md)：Pi Agent Core 替换通用 Copilot runtime 的需求、实现合同和发布边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 

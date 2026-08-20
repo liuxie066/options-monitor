@@ -1,17 +1,23 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: revised after PlanReview; implementation has not started; focused
-re-review is required before S1.
+Status: S1-S7 are implemented and validated in source on this unreleased
+development branch. The Assistant channel entry and shared Host call path use
+Pi Agent Core, the legacy Python Agent runtime is removed, and the mixed
+Python/Node release gates are present. No release, deployment, configured-
+provider canary, or production rollback rehearsal has been performed. Deployed
+production remains on its last released runtime until separately authorized
+release and upgrade gates pass.
 
-Last upstream verification: 2026-08-16. The pinned baseline is
-`@earendil-works/pi-agent-core@0.84.2` and
+Last upstream verification: 2026-08-19. The pinned baseline is
+`@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
 `@earendil-works/pi-session-backend-sqlite-node@0.84.2`, which require Node.js
 `>=22.19.0`.
 
-This document is the single planning authority for replacing OM's generic
-Copilot runtime with Pi Agent Core. The current production architecture remains
-documented in [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) until the
-cutover is complete.
+This document is the single planning and implementation authority for replacing
+OM's generic Copilot runtime with Pi Agent Core. The currently deployed
+production architecture remains documented in
+[OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) until a separately
+authorized release and upgrade complete the operational cutover.
 
 ## 1. Product Requirement
 
@@ -73,37 +79,6 @@ The integration does not add:
 - direct model access to mutation tools;
 - in-place recovery of an interrupted Pi Agent loop;
 - production dual-run or automatic fallback to the legacy Engine.
-
-### 1.5 PlanReview feedback disposition
-
-The 2026-08-16 focused review failed the prior draft on six implementability
-gaps. This revision accepts all six and closes them at their existing owners:
-
-| Finding | Closed design decision |
-|---|---|
-| terminal cleanup could overwrite a valid result | a validated terminal is authoritative; cleanup only reaps the child |
-| cancellation raced with admission | one private Host SQLite CAS selects cancel/commit/discard before protocol delivery |
-| abandoned tool workers could grow without bound | one process-wide read-worker slot; no queue and no second worker |
-| forced kill could not release Pi's writer lease | Host lease releases immediately; Pi lease expires and is fenced after its TTL |
-| Session history crossed config scopes | trusted normalized config scope is part of the Session/lease hash |
-| Scene cap impersonated model capability | every active model profile declares a validated safe context window |
-
-The unused V1 `message_delta` protocol surface is deleted because this release
-has no streaming UI consumer. Strict IPC validation, seven development slices,
-the run-local read reuse guard, lockfile install with `--ignore-scripts`, and
-the no-container process boundary remain: the review found concrete value for
-the first three and no evidence that weakening npm isolation or adding a
-container is required for this scope.
-
-The focused re-review found four remaining ownership gaps. This revision closes
-them without adding a second runtime or a generic event framework:
-
-| Finding | Closed design decision |
-|---|---|
-| external cancellation raced with result admission | one private Host SQLite compare-and-set chooses `cancel`, `commit`, or `discard` |
-| tool-worker events raced with lifecycle events | one run-local lock serializes every Host event/cache mutation and gate close |
-| public `config_path` collapsed to the `default` memory scope | the existing resolver supplies a Host-only canonical path and its hash becomes the authority identity |
-| compaction had two commit owners | pre-run compaction is an independent checkpoint; admission governs only the current-turn suffix |
 
 ## 2. Upstream Capability Decision
 
@@ -372,7 +347,10 @@ for transient runs.
   "event_type": "model_turn_completed",
   "data": {
     "stop_reason": "stop",
-    "usage": {"input": 10, "output": 5, "totalTokens": 15}
+    "attempt_count": 1,
+    "model_retry_count": 0,
+    "usage": {"input": 10, "output": 5, "totalTokens": 15},
+    "usage_total": {"input": 10, "output": 5, "totalTokens": 15}
   }
 }
 ```
@@ -386,6 +364,16 @@ This is an OM-owned normalized event contract, not a passthrough of arbitrary
 upstream Pi events. Thinking text, provider payloads, credentials, raw tool
 results, text deltas, and private reasoning are prohibited. V1 has no streaming
 UI consumer, so only completed model turns cross the process boundary.
+
+`model_turn_completed.data` has exactly the five fields shown above.
+`attempt_count` is the non-negative number of actual provider HTTP requests for
+that logical model turn; a deterministic fixture turn uses zero.
+`model_retry_count` is the cumulative sum of
+`max(attempt_count - 1, 0)` across completed provider calls in the run,
+including an independently committed pre-run compaction. `usage` belongs to
+the current assistant message and `usage_total` is the cumulative main-turn
+plus committed-compaction usage. `turn_end.data` remains exactly
+`{stop_reason, usage}`. All numeric fields are finite and non-negative.
 
 #### `tool.call`
 
@@ -594,7 +582,7 @@ bounded, tagged blocks for items 2 and 3. It then loads item 4 into
 system prompt is rebuilt every run and never persisted. Current tool facts and
 pending operations always outrank remembered conversation text.
 
-Use Pi's exported `estimateContextTokens`, `shouldCompact`,
+Use Pi's exported `estimateContextTokens`, `estimateTokens`, `shouldCompact`,
 `prepareCompaction`, and `compact` functions. The adapter decides when to call
 them and persists the returned compaction entry; it must not implement another
 summarization algorithm. OM supplies fixed financial-conversation compaction
@@ -667,8 +655,11 @@ secret-free model description to Node.
 | `kimi-code` | `openai-completions` | OM custom OpenAI-compatible chat completions mapping | `https://api.kimi.com/coding/v1` |
 | `ollama` | `openai-completions` | OpenAI-compatible chat completions without required key | `http://127.0.0.1:11434/v1` |
 
-Preserve `model`, `base_url`, `timeout_seconds`, `context_window_tokens`,
-`max_output_tokens`, and `max_attempts`. Pi's built-in
+Preserve `model`, `base_url`, `timeout_seconds`, `context_window_tokens`, and
+`max_output_tokens`. A directly supplied legacy runtime `max_attempts` remains
+accepted after strict validation from 1 through 3; when absent it remains 2.
+The current authoring model profiles do not expose that internal retry value,
+so S4 adds no new retry CLI or profile field. Pi's built-in
 `kimiCodingProvider()` uses Anthropic Messages at
 `https://api.kimi.com/coding`, which is not OM's current `kimi-code` contract;
 using it would be an unrelated breaking change. Do not load every Pi builtin
@@ -743,15 +734,16 @@ current slice's exit gate passes.
 | S1 | Pi package, JSONL process boundary, actual `Agent` with deterministic fixture stream | focused protocol tests pass without network, tools, or persistent state |
 | S2 | read-only OM tool bridge with deterministic eval fixtures | schema/allowlist/error/cancellation tests pass; no write tool is visible |
 | S3 | sender-and-config-scoped Pi Session, durable turn commit, context loading and compaction | continuity, key/path/user isolation, crash-lease, partial-write, and independent compaction-checkpoint tests pass |
-| S4 | model context capability plus five provider mappings and error/usage normalization | config/CLI migration and all loopback provider contract fixtures pass; live canaries remain a separate release action |
+| S4 | model context capability plus five provider mappings and error/usage normalization, exercised directly through the Pi process boundary without switching Host or local diagnostics | config/CLI migration and all loopback provider contract fixtures pass; the legacy application call path is unchanged and live canaries remain a separate release action |
 | S5 | Host run events, durable cancel/admission CAS, serialized evidence writes, bounded read-only recovery, progress | concurrent winner/event tests and current run-control regressions pass |
 | S6 | trusted key/path scope, `request_control_preview`, and `./om assistant handle` channel cutover | scope isolation, preview/confirm/apply separation, and channel idempotency pass |
-| S7 | packaging, release gates, atomic cutover, legacy runtime deletion | full tests, setup check, release check, rollback rehearsal, and answer-quality acceptance pass |
+| S7 | packaging, release gates, atomic cutover, legacy runtime deletion | source/full tests and deterministic rollback preservation pass; release, configured-provider quality review, and production rehearsal remain separately authorized |
 
 Sections 11 through 17 are the executable specifications for S1 through S7.
 They are one implementation plan, not seven independently released product
-modes. Production remains on the legacy call path until the complete S7 release
-passes the atomic cutover gate.
+modes. S1-S7 were delivered as one unreleased source migration; deployed
+production remains on its last released call path until the separate release
+and controlled-upgrade gates pass.
 
 ## 11. S1 Executable Development Specification
 
@@ -1135,8 +1127,12 @@ Payload validation after the envelope is also closed:
   object `arguments`.
 
 Receiving a second `run.accepted`, a lifecycle event before acceptance, a
-second proposal, two terminal records, a final before admission, or a terminal
-record while a tool callback is outstanding is `PROTOCOL_ERROR`.
+second proposal, two terminal records, an answered final before admission, a
+tool call after proposal/cancellation, or a proposal/answered final/error while
+a tool callback is outstanding is `PROTOCOL_ERROR`. The sole outstanding-tool
+exception is a cancelled final after Python has already sent `run.cancel`; it
+ends the cancelled run while the late worker remains abandoned as specified in
+section 12.3.
 
 An `on_event` or `on_tool_call` exception aborts and reaps the child, then
 returns a fixed `INTERNAL_ERROR` or `TOOL_BRIDGE_ERROR`; an `on_proposed`
@@ -1557,16 +1553,18 @@ Python. The Session receives no Host event or outbox data.
 
 ### 13.5 Compaction policy
 
-Before prompting, Node estimates committed history with
-`estimateContextTokens()`, the effective system prompt with Pi AI's
-`estimateTextTokens()`, and the current user message with `estimateTokens()`.
-It computes:
+Before prompting, Node normally estimates committed history with
+`estimateContextTokens()`. After a compaction, retained assistant usage still
+describes the replaced prefix, so Node sums Pi's `estimateTokens()` across the
+rebuilt context until an assistant committed after that checkpoint supplies
+fresh non-zero provider usage. The effective system prompt and current user
+message also use `estimateTokens()`. It computes:
 
 ```text
 context_window = min(model.contextWindow, limits.max_context_tokens)
-fixed_input_tokens = estimateTextTokens(effective_system_prompt)
+fixed_input_tokens = estimateTokens(effective_system_prompt)
                    + estimateTokens(current_user_message)
-history_tokens = estimateContextTokens(committed_history).tokens
+history_tokens = provider-aware estimate, or structural estimate after compaction
 context_tokens = fixed_input_tokens + history_tokens
 reserve_tokens = model.maxTokens
 usable_history_tokens = context_window - reserve_tokens - fixed_input_tokens
@@ -1583,14 +1581,23 @@ main run. Pi's outer compaction retry is disabled so it cannot multiply OM's
 provider attempt limit. OM's fixed custom instructions are those in section
 6.4.
 
-On success, Node constructs
+An empty or whitespace-only summarizer completion is a failure before Pi can
+compose a split-turn wrapper. Before publishing a successful result, Node
+builds the candidate context from the compaction summary and retained tail and
+uses Pi's structural per-message estimate. This prevents a retained assistant's
+pre-compaction provider usage from describing history that the summary already
+replaced. If the candidate still exceeds
+`context_window - reserve_tokens`, the run returns `SESSION_ERROR` without a
+Session write; it does not run a second compaction loop.
+
+After that preflight, Node constructs
 `{type:"compaction", ...compactResult.value}` and calls
 `Session.appendEntry(compactionEntry, "main")`, then appends
 `Session.appendCustomEntry("om.turn.commit.v1",
-{run_id, kind:"compaction"})`. It reloads through
-`buildSessionContext()` and rechecks the token estimate before prompting. If
-the compacted total still exceeds `context_window - reserve_tokens`, the run
-returns `SESSION_ERROR`; it does not run a second compaction loop.
+{run_id, kind:"compaction"})` and reloads through
+`buildSessionContext()`. Later turns continue with structural estimation until
+an assistant committed after this compaction supplies fresh non-zero provider
+usage; from that point the latest provider usage is authoritative again.
 
 This marker commits only the maintenance rewrite of history that was already
 committed before the current request. It remains valid if the later current
@@ -1648,6 +1655,12 @@ Focused tests use a temporary SQLite file and prove:
 13. forced child termination releases the Host lease but the Pi lease rejects a
     second writer before TTL, permits fenced takeover after TTL, and never
     requires Python to delete the writer row.
+14. empty and whitespace-only compaction completions at both a turn boundary
+    and a split turn write no checkpoint and leave the previous committed
+    branch recoverable;
+15. retained pre-compaction provider usage cannot reject or immediately repeat
+    a successful compaction, while fresh provider usage committed after the
+    checkpoint becomes authoritative for the next threshold decision.
 
 S3 exits when these tests pass repeatedly against the real pinned SQLite
 backend and inspecting the database shows only Pi entries plus the OM commit
@@ -1661,7 +1674,8 @@ S4 replaces OM's hand-written provider clients with Pi AI provider streams
 while keeping provider selection and secret contracts stable. It adds one
 required, operator-declared safe context-window capability to the existing
 model profile. It does not add provider discovery, OAuth login, live model
-catalogs, or a second config file.
+catalogs, or a second config file. S4 proves the selected provider path through
+direct `run_pi_agent()` process tests; it does not switch an application caller.
 
 Modify:
 
@@ -1669,10 +1683,11 @@ Modify:
 agent-runtime/main.ts
 src/infrastructure/pi_agent_process.py
 src/application/copilot/model_config.py
-src/application/copilot/local_harness.py
 src/application/assistant/llm_model_profiles.py
 src/application/config_validator.py
+src/application/config_defaults.py
 src/application/config_yaml.py
+src/application/config_yaml_init.py
 src/interfaces/cli/assistant_ops.py
 configs/system.json
 configs/examples/config.yaml.example
@@ -1680,7 +1695,20 @@ tests/test_pi_agent_process.py
 tests/test_config_yaml.py
 tests/test_validate_config_notifications.py
 tests/test_cli_operator_commands.py
+tests/test_assistant_diagnostics.py
+tests/test_copilot_p1_eval.py
+tests/test_agent_plugin_smoke.py
+tests/test_inbound_control.py
+tests/test_inbound_feishu_ws.py
 ```
+
+`src/application/copilot/local_harness.py`,
+`src/application/copilot/model_client.py`, and
+`src/application/copilot/host.py` are deliberately unchanged in S4. The legacy
+`CopilotModelSettings`, `_resolve_model_runner()`, `ModelRunner`, and
+`run_engine()` remain the application path until S5 switches the shared Host
+call site atomically. S4 must not partially implement that S5 cutover merely to
+exercise a configured provider.
 
 `src/application/llm_provider_registry.py` remains the public provider catalog.
 It changes only if a test exposes a missing existing fact; Pi-specific names do
@@ -1688,8 +1716,10 @@ not enter it.
 
 ### 14.2 Python model normalization and secret handoff
 
-Move the small immutable settings value from the retiring `model_client.py` to
-`model_config.py` and rename it `PiModelSettings`. It contains exactly:
+Add a separate immutable `PiModelSettings` value to `model_config.py`. Do not
+move, rename, or re-export the legacy `CopilotModelSettings` in S4; S5 first
+makes it unreachable and S7 deletes its owner. `PiModelSettings` contains
+exactly:
 
 ```text
 provider, api_kind, model, base_url,
@@ -1697,12 +1727,32 @@ api_key_env, credential_name,
 timeout_seconds, context_window_tokens, max_output_tokens, max_attempts
 ```
 
-`PiModelSettings.from_config(raw)` reuses `require_provider_spec()`, the current
-bounds, default base URLs, and credential names. For OpenAI, an empty OM base
-URL is normalized to `https://api.openai.com/v1` only in the secret-free
+`PiModelSettings.from_config(raw)` reuses `require_provider_spec()`, default
+base URLs, and credential names, but validates rather than clamps. `model` is
+required; `timeout_seconds` defaults to 90 and must be from 1 through 120;
+`max_output_tokens` defaults to 2,048 and must be from 64 through 4,096;
+`max_attempts` defaults to 2 and, when directly supplied by an existing runtime
+config, must be from 1 through 3. These are the current public validator bounds,
+not the broader clamps in the retiring client. For OpenAI, an empty OM base URL
+is normalized to `https://api.openai.com/v1` only in the secret-free
 `run.start.model`; the user-facing config remains unchanged. Python maps the
 registry's `responses` to `openai-responses` and `chat_completions` to
 `openai-completions`. Node accepts only the provider/API pairs in section 8.
+
+`PiModelSettings.process_payload()` returns only `provider`, `api_kind`,
+`model`, `base_url`, `timeout_seconds`, `context_window_tokens`,
+`max_output_tokens`, and `max_attempts`. It never serializes `api_key_env` or
+`credential_name`. S4 uses this method in the direct process contract tests;
+S5 reuses the same method at the Host call site.
+
+S4 removes the temporary S1-S3 eval-only guard from both Python and Node start
+validation. The closed `execution_environment` values become `local`, `eval`,
+and `channel` as specified in section 5.2; `debug` remains a closed fixture
+object only for `eval` and must be `null` otherwise. This enables the direct
+loopback provider contract without switching an application caller. Python and
+Node both enforce the closed provider/API pairs, model field set, numeric
+bounds, context/output safety relation, and HTTP(S) base URL before any
+provider request.
 
 `context_window_tokens` is required for every authoring profile that can become
 active and is copied unchanged into generated `assistant.llm`. It is an
@@ -1714,39 +1764,41 @@ the Scene limit. Repository examples use the existing conservative
 `24_000`-token policy cap.
 
 The migration is explicit: add `assistant.llm.context_window_tokens: 24000` to
-`configs/system.json`, add `context_window_tokens: 24000` to every shipped
-`assistant.models.<profile>` example, include the field in
+`configs/system.json` and its invariant mirror in
+`src/application/config_defaults.py`, add `context_window_tokens: 24000` to
+every shipped `assistant.models.<profile>` example and both canonical starter
+profiles in `config_yaml_init.py`, include the field in
 `LlmModelProfile.llm_config()` and its public non-secret payload, and preserve
 it through `build-assistant` into resolved runtime config. Existing user YAML
 profiles are not silently defaulted: an enabled Copilot profile must be edited
 and rebuilt before setup/preflight passes.
 
+Test-fixture migration is equally narrow: add `context_window_tokens: 24000`
+only to otherwise-valid model objects with a provider and model that reach
+`PiModelSettings`, active assistant validation, diagnostics, runtime status, P1
+evaluation, or an inbound channel gate. Do not add the field to an empty
+`llm:{}` used with an explicitly injected legacy `ModelRunner`, to a disabled
+Copilot fixture, or to a deliberately invalid config whose asserted failure
+precedes model-context validation. Do not relax existing assertions or add a
+test-only default.
+
 `./om assistant model add` gains required
 `--context-window-tokens`; it passes the value directly through
 `add_model_profile_to_config()` and the same validator. `model list/current`
 show the declared value. No provider-specific default table or discovery call
-is added.
+is added. `max_attempts` remains an internal runtime default and is not added
+to `LlmModelProfile`, authoring YAML, or this CLI.
 
 `model_api_key_configured()` validates through `PiModelSettings` instead of
-importing `CopilotModelSettings`. A new private `_resolve_model_api_key()` in
-`model_config.py` reuses `resolve_secret()` and returns the credential only to
-`local_harness.py`. That value is passed to `run_pi_agent()` as
-`OM_PI_MODEL_API_KEY`; it is never inserted into the payload, contract,
-decision trace, event, or exception text. Ollama resolves no user secret.
-
-`local_harness._resolve_model_runner()` becomes `_resolve_pi_model()`. Existing
-precedence remains:
-
-```text
-eval model_turn_json
-or explicit model_config_json
-or assistant_config_path
-or MODEL_REQUIRED
-```
-
-The eval script is converted mechanically to S2 `debug.fixture_turns`. The two
-real configuration sources return `(PiModelSettings, api_key, error)` and do
-not construct a Python model callable.
+importing `CopilotModelSettings`. S4 loopback tests pass a fake credential only
+through the already allowlisted `OM_PI_MODEL_API_KEY` child environment; the
+value never enters `run.start`, Session, events, returned errors, or captured
+test payloads. Ollama resolves no user secret; the Node provider uses only a
+fixed process-local non-secret sentinel required by Pi's OpenAI Completions
+auth contract. That sentinel uses no credential store or persistence and never
+enters `run.start`, Session, events, returned errors, or captured test payloads.
+The private secret-resolution helper and local-harness handoff are added when
+S5 switches that caller, not as unused S4 scaffolding.
 
 ### 14.3 Selected Pi model/provider
 
@@ -1771,7 +1823,27 @@ maxTokens         = model.max_output_tokens
 `reasoning=false` preserves the current product behavior: private reasoning is
 not requested, streamed, stored, or exposed. Image input remains out of scope.
 
-Provider construction is exact:
+Use only these lazy API imports:
+
+```text
+@earendil-works/pi-ai/api/openai-responses.lazy
+@earendil-works/pi-ai/api/openai-completions.lazy
+```
+
+For each run, call `createProvider()` with the selected model and API, then
+register it with a fresh `createModels()` instance. Keyed providers declare
+`auth.apiKey = envApiKeyAuth("OM model API key",
+["OM_PI_MODEL_API_KEY"])`. Pi 0.84.2 rejects an empty `auth:{}` for the OpenAI
+Completions adapter before sending HTTP, so Ollama declares a pinned resolver
+that returns the fixed process-local non-secret sentinel `ollama-local`. It
+requires no user secret and uses no credential store or persistence.
+`createModels()` therefore remains the single auth application point and passes
+the resolved `apiKey` into the selected API options. No builtin catalog, stored
+credential, login flow, or process-wide provider registry is loaded. The
+sentinel is an adapter compatibility value only and never enters `run.start`,
+Session, events, returned errors, or captured test payloads.
+
+The provider mapping is exact:
 
 | OM profile | Pi API implementation | Request options |
 |---|---|---|
@@ -1779,7 +1851,7 @@ Provider construction is exact:
 | `deepseek` | `openAICompletionsApi()` | `temperature: 0`, `samplingParams.thinking={type:"disabled"}` |
 | `kimi` | `openAICompletionsApi()` | omit temperature and thinking |
 | `kimi-code` | `openAICompletionsApi()` | omit temperature and thinking |
-| `ollama` | `openAICompletionsApi()` | `temperature: 0`, internal placeholder key `ollama` |
+| `ollama` | `openAICompletionsApi()` | `temperature: 0`, process-local non-secret sentinel auth |
 
 For non-OpenAI completions mappings, set compatibility overrides
 `supportsStore:false`, `supportsDeveloperRole:false`, and
@@ -1789,30 +1861,44 @@ override. Kimi Code deliberately does not use Pi's built-in
 `kimiCodingProvider()`, whose Anthropic Messages endpoint differs from OM's
 existing API contract.
 
-The one selected provider wraps its Pi API implementation and injects, in both
-`stream` and `streamSimple`, on every provider request:
+One run-local `withOmRequestPolicy()` wrapper covers both `stream` and
+`streamSimple` of the selected Pi API. For every logical provider call it
+preserves the resolved `apiKey` and caller `signal`, then applies:
 
 ```text
-apiKey, signal, timeoutMs,
-maxTokens = model.max_output_tokens,
+timeoutMs = min(model timeout, remaining Scene deadline),
+maxTokens = min(caller maxTokens or model maxTokens, model maxTokens),
 maxRetries = model.max_attempts - 1,
 maxRetryDelayMs bounded by the remaining Scene deadline,
+fetch = one run-local counting fetch,
 temperature and samplingParams from the table
 ```
 
-Pi's OpenAI adapters disable SDK retries and apply this explicit retry count,
-so `max_attempts` remains the total provider-attempt ceiling. The same bounded
-provider wrapper is used by main Agent turns and compaction. Pi's additional
-outer compaction retry is disabled, preventing nested retries from exceeding
-that ceiling. Retry callbacks emit only attempt counts and safe categories,
-never provider error text.
+The caller's smaller `maxTokens` is preserved so Pi compaction can use its
+summary reserve instead of being expanded to the normal answer ceiling. Pi's
+OpenAI adapters disable SDK retries and apply their own interruptible
+`retryProviderRequest()` with the supplied `maxRetries`, so `max_attempts`
+remains the total HTTP-attempt ceiling. Pi exposes no callback or assistant
+field carrying that attempt count. The counting `fetch` increments immediately
+before every delegated HTTP request; because V1 model calls and compaction are
+sequential, one active per-call counter is sufficient. It resets for each
+logical stream, is read when that assistant/compaction completes, and feeds the
+normalized counters in section 5.3. It never records a URL, headers, body, key,
+or provider error text.
+
+The same request-policy wrapper is used by main Agent turns and compaction.
+Pi's additional outer compaction retry remains disabled, preventing nested
+retries from exceeding the configured provider ceiling. A retry exhaustion or
+pre-response failure closes the active counter before returning the safe error.
 
 ### 14.4 Provider response and error normalization
 
 Pi owns native tool-call parsing and streaming. Node counts usage once per
 completed assistant message and reports only non-negative finite token fields.
 `run.final.usage` is the sum of main turns plus committed compaction calls;
-Host events distinguish `usage` for a turn from `usage_total` for the run.
+each `model_turn_completed` carries the per-call request count, cumulative
+retry count, current usage, and cumulative usage defined in section 5.3. Host
+events therefore distinguish `usage` for a turn from `usage_total` for the run.
 Cost and reasoning tokens are not emitted in V1.
 
 Final Pi stop reasons map as follows:
@@ -1820,11 +1906,38 @@ Final Pi stop reasons map as follows:
 | Pi stop reason | OM process outcome |
 |---|---|
 | `stop` | answered when final text is non-empty |
-| `length` | one Pi continuation while budget remains; otherwise the accumulated non-empty text is answered with `termination_reason:length` |
+| `length` | at most one normalized follow-up continuation under the rule below; otherwise accumulated non-empty text is answered with `termination_reason:length` |
 | `toolUse` | normal loop continuation |
 | `aborted` | cancelled only after an accepted Host cancel; otherwise model error |
 | `error` | `MODEL_ERROR` |
 | `deferred` | `MODEL_ERROR`; deferred mode is not enabled |
+
+Pi does not automatically continue a truncated assistant message, and
+`Agent.continue()` rejects an assistant as the last transcript message. S4
+therefore uses the existing `Agent.followUp()` queue, not `Agent.continue()`:
+
+1. `prepareNextTurn()` may schedule a continuation only when the first
+   `length` assistant contains non-empty text and no tool call, no continuation
+   has been used, one assistant-turn slot remains, and the final-answer time
+   reserve has not been reached.
+2. It queues exactly one synthetic user message: `Continue exactly where the
+   previous answer stopped. Do not repeat earlier text. Return only the
+   continuation.` It returns the next-turn context with `tools: []`.
+3. The follow-up consumes the normal iteration and deadline budgets. A second
+   `length` response is not continued again. An error or abort during the
+   follow-up remains an error or accepted cancellation; partial text is not
+   committed after a failed continuation.
+4. Before `validatedTurnSuffix()` and `run.proposed`, one private normalizer
+   recognizes only the exact sequence `original user -> length assistant ->
+   synthetic user -> final assistant`. It removes the synthetic user and
+   replaces both assistants with one canonical assistant whose text is the two
+   text fragments concatenated without a delimiter, whose stop reason and
+   provider identity come from the final assistant, and whose non-negative
+   usage fields are summed.
+5. Per-physical-turn lifecycle events and counters remain visible, but
+   `run.final` and Pi Session receive only the normalized original-user/final-
+   assistant group. The synthetic instruction can never enter durable history
+   or future context.
 
 Use Pi's `isRetryableAssistantError()` only to set the safe retryable Boolean.
 The public message is fixed by category (`model authentication failed`, `model
@@ -1849,14 +1962,51 @@ body:
    next provider request correctly;
 7. timeout, retryable 429/5xx, non-retryable auth failure, malformed stream,
    abort, and retry exhaustion map to the closed safe result;
-8. `max_attempts` is the observed request ceiling and usage is counted once;
-9. missing/invalid `context_window_tokens` fails before spawn; valid values
-   below, equal to, and above the Scene cap produce
-   `min(model.contextWindow, limits.max_context_tokens)` as the effective
-   context budget;
-10. `assistant model add` requires and round-trips the declared capability, and
-    build-assistant preserves it in resolved `assistant.llm`;
-11. captured payloads and emitted events contain no `OM_PI_MODEL_API_KEY` value.
+8. keyed profiles resolve only the fake `OM_PI_MODEL_API_KEY`, Ollama uses only
+   the fixed process-local non-secret sentinel resolver, and no provider loads
+   a builtin catalog or stored login;
+9. the loopback server's request count, each event's `attempt_count`, cumulative
+   `model_retry_count`, and the `max_attempts` ceiling agree for successful,
+   retried, exhausted, and aborted requests;
+10. main-turn and compaction usage are each counted once, compaction uses the
+    same bounded request policy without an outer retry, and
+    `usage_total`/`run.final.usage` include both;
+11. one eligible `length` result performs exactly one tool-free follow-up,
+    joins text without a delimiter, sums usage, and persists no synthetic user;
+    a second `length`, failed continuation, insufficient budget, and resumed
+    Session each follow the rule in section 14.4;
+12. missing/invalid `context_window_tokens` and out-of-range timeout, output,
+    or direct `max_attempts` fail rather than clamp before spawn; valid context
+    values below, equal to, and above the Scene cap produce
+    `min(model.contextWindow, limits.max_context_tokens)` as the effective
+    context budget; local/channel accept only `debug:null`, while eval still
+    requires a closed fixture;
+13. `assistant model add` requires and round-trips the declared capability,
+    model list/current display it, and build-assistant preserves it in resolved
+    `assistant.llm` without adding an author-facing retry field;
+14. captured payloads and emitted events contain no `OM_PI_MODEL_API_KEY`
+    value; and
+15. current legacy local-harness/Host tests remain green and a source/diff
+    guard proves S4 did not replace `_resolve_model_runner()`, `ModelRunner`, or
+    `run_engine()`.
+
+Run the provider contract and every directly affected config consumer in the
+same S4 gate:
+
+```bash
+npm ci --ignore-scripts --prefix agent-runtime
+./.venv/bin/python -m pytest -q \
+  tests/test_pi_agent_process.py \
+  tests/test_config_yaml.py \
+  tests/test_validate_config_notifications.py \
+  tests/test_cli_operator_commands.py \
+  tests/test_assistant_diagnostics.py \
+  tests/test_copilot_p1_eval.py \
+  tests/test_agent_plugin_smoke.py \
+  tests/test_inbound_control.py \
+  tests/test_inbound_feishu_ws.py \
+  tests/test_copilot_phase1.py
+```
 
 Live provider calls are not part of automated S4. One read-only live canary per
 configured production provider is a separate, explicit acceptance action
@@ -1874,20 +2024,25 @@ flow through `run_prepared_contract()` and `run_contract()`.
 Modify:
 
 ```text
+agent-runtime/main.ts
 src/application/copilot/host.py
 src/application/copilot/local_harness.py
+src/application/copilot/model_config.py
 src/application/copilot/host_store.py
-src/application/copilot/event_store.py
 src/interfaces/cli/copilot_ops.py
 src/infrastructure/pi_agent_process.py
+tests/copilot_pi_test_support.py
+tests/test_architecture_guards.py
 tests/test_copilot_phase1.py
 tests/test_copilot_conversation_memory.py
+tests/copilot_eval/test_answer_quality.py
 tests/test_pi_agent_process.py
 ```
 
-No public command changes. `engine.py`, `model_client.py`, and
-`conversation_memory.py` remain present but unreachable until S7 deletes them.
-There is no environment flag or fallback selecting them.
+No public command changed in S5. At that slice boundary, `engine.py`,
+`model_client.py`, and `conversation_memory.py` were unreachable but still
+present; S7 later deleted them. There is no environment flag or fallback
+selecting them.
 
 ### 15.2 `local_harness` and `host.run_contract`
 
@@ -1902,6 +2057,25 @@ opaque session_key
 control preview specs
 resume source and recovered observations
 ```
+
+At this S5 boundary, `local_harness._resolve_model_runner()` becomes
+`_resolve_pi_model()` with the existing precedence:
+
+```text
+eval model_turn_json
+or explicit model_config_json
+or assistant_config_path
+or MODEL_REQUIRED
+```
+
+The eval script is converted mechanically to the existing
+`debug.fixture_turns`. The two configured sources return validated
+`PiModelSettings` rather than a Python callable. A new private
+`_resolve_model_api_key()` in `model_config.py` reuses `resolve_secret()` and
+returns the credential only to `local_harness.py`, which places it in the
+allowlisted child environment as `OM_PI_MODEL_API_KEY`. Ollama returns no
+credential. Neither helper puts a secret in the process payload, contract,
+decision trace, event, Session, or exception text.
 
 `run_contract()` keeps contract validation, `start_run()`, Scene construction,
 tool projection, cancellation checks, result admission, final event, and
@@ -2021,8 +2195,9 @@ then emits `run.final` with `committed:true`. On `run.discard`, it writes no
 current-turn Session entry and emits the same candidate with
 `committed:false`. A pre-run compaction marker from section 13.5 is already an
 independent committed checkpoint and is not rolled back. Python verifies the
-flag matches its durable decision; Host returns the retained admitted result,
-not an untrusted reconstruction.
+final status, text, control request, termination reason, and usage exactly match
+the stored proposal, with only `committed` derived from its durable decision;
+Host returns the retained admitted result, not an untrusted reconstruction.
 
 Runs cancelled before proposal and failed runs do not propose or commit. If the
 protocol write fails after Host claimed `commit`, or the child exits after
@@ -2128,7 +2303,8 @@ lease row; the next normal request may retry after expiry and fenced takeover.
 
 - only failed/interrupted read-only runs within the current attempt ceiling are
   resumable;
-- a run with `session_commit_outcome:"unknown"` is rejected as non-resumable;
+- a run whose durable admission winner is `commit` or `cancel`, or whose event
+  contains `session_commit_outcome:"unknown"`, is rejected as non-resumable;
 - `_successful_observations()` extracts only prior canonical `tool_result`
   events whose compact observation is `ok:true`;
 - observations are bounded, redacted again, and injected as an ephemeral
@@ -2172,9 +2348,29 @@ expectations. Prove:
 11. no import or call from `host.py` or `local_harness.py` reaches `engine`,
    `model_client`, or `conversation_memory`.
 
-S5 exits when focused Copilot/Host tests and the Pi process tests pass. The code
-is not released independently; S6 and S7 complete channel and operational
-acceptance first.
+S5 exited when focused Copilot/Host tests and the Pi process tests passed. The
+code was not released independently; S6 and S7 subsequently completed the
+source channel and operational work.
+
+### 15.9 Implementation record
+
+S5 completed its source cutover on 2026-08-20:
+
+- `host.run_contract()` now has one Pi process path and no Engine fallback;
+- Host owns canonical read-tool execution, serialized run evidence, durable
+  cancel/admission CAS, safe process errors, and bounded successful recovery;
+- Pi owns the generic model/tool loop, continuation, committed compaction, and
+  Session turn persistence;
+- adapter exceptions, late tool completion, a committed-but-unacknowledged
+  Session turn, and a Host restart after durable `commit` or `cancel` all fail
+  closed without replay;
+- the deterministic CLI eval, focused Host suites, real loopback Pi process
+  suite, compatibility suites, architecture guards, dependency install, static
+  checks, and repository guardrails pass.
+
+This implementation record is not a release decision. The later S6 and S7
+records describe the completed source channel cutover, legacy deletion, and
+release gates.
 
 ## 16. S6 Control And Channel Cutover Detailed Design
 
@@ -2192,10 +2388,13 @@ src/application/copilot/contracts.py
 src/application/copilot/service.py
 src/application/copilot/om_chat.scene.json
 src/application/copilot/channel_facade.py
+src/application/copilot/host.py
 src/application/assistant/inbound_service.py
 tests/test_copilot_phase1.py
 tests/test_copilot_conversation_memory.py
 tests/test_inbound_control.py
+tests/test_pi_agent_process.py
+tests/copilot_pi_test_support.py
 ```
 
 `./om assistant handle` remains the product entry. `./om copilot run/eval` stay
@@ -2364,30 +2563,87 @@ S6 exits when the channel and inbound Control suites pass with the real Pi
 process boundary and temporary databases. No production message is sent as
 part of automated acceptance.
 
+### 16.7 Implementation record
+
+S6 completed its source cutover on 2026-08-20:
+
+- `./om assistant handle` now reaches the Pi-backed Host through one strict,
+  sender-and-authority-scoped Session identity; legacy channel history and
+  Control-receipt memory are no longer read or written;
+- explicit config paths are canonicalized before identity derivation, remain
+  Host-only tool scope, and do not enter model-visible context or Pi Session
+  storage as plaintext identity metadata;
+- `request_control_preview` is the only Agent mutation surface, terminates a
+  valid Pi turn without executing Control, and hands the validated request back
+  to the existing deterministic preview/confirm/cancel path;
+- mixed or repeated Control batches are blocked inside Node before any Host tool
+  callback, while Python revalidates every accepted preview and protocol result;
+- the focused channel, inbound Control, and real Pi process gate passes with 340
+  tests; compatibility suites, Ruff, Node syntax, repository guardrails, and
+  diff checks also pass.
+
+This implementation record is not a release decision. The S7 record below
+describes the later packaging, atomic install/rollback checks, and removal of
+the unreachable legacy runtime.
+
 ## 17. S7 Packaging, Atomic Cutover, And Cleanup Detailed Design
 
 ### 17.1 Objective and operational files
 
-S7 makes the mixed Python/Node release installable and rollback-safe, runs the
-full acceptance gate, and removes the now-unreachable generic OM runtime.
+S7 makes the mixed Python/Node release installable and rollback-safe, adds the
+release gates, and removes the now-unreachable generic OM runtime. Its exact
+source ownership is:
 
-Modify only the existing operational surfaces that own these checks:
+Create:
 
 ```text
-scripts/install.sh
-scripts/release_preflight.sh
-src/application/service_upgrade.py
-src/application/setup/check.py
-.github/workflows/guardrails.yml
-.github/workflows/_release-reusable.yml
-tests/test_install_script.py
-tests/test_setup_check.py
-tests/test_service_deploy.py
+scripts/pi_runtime_smoke.sh
 ```
 
-The already-added `agent-runtime/package.json`, lockfile, and `main.ts` are
-included by the existing source archive. No container, bundled executable,
-Node version manager, or package cache service is added.
+Modify:
+
+```text
+.github/workflows/_release-reusable.yml
+.github/workflows/guardrails.yml
+docs/DEPENDENCY_GRAPH.md                 # generated
+docs/dependency_graph.mmd                # generated
+docs/INDEX.md
+docs/PI_AGENT_CORE_INTEGRATION.md
+scripts/install.sh
+scripts/release_preflight.sh
+src/application/copilot/host.py
+src/application/copilot/host_store.py
+src/application/copilot/local_harness.py
+src/application/copilot/om_chat.scene.json
+src/application/copilot/scene.py
+src/application/release_test_plan.py
+src/application/service_upgrade.py
+src/application/setup/check.py
+tests/copilot_eval/test_answer_quality.py
+tests/copilot_pi_test_support.py
+tests/test_architecture_guards.py
+tests/test_copilot_conversation_memory.py
+tests/test_copilot_phase1.py
+tests/test_inbound_control.py
+tests/test_install_script.py
+tests/test_pi_agent_process.py
+tests/test_release_test_plan.py
+tests/test_service_deploy.py
+tests/test_setup_check.py
+```
+
+Delete:
+
+```text
+src/application/copilot/agent.py
+src/application/copilot/conversation_memory.py
+src/application/copilot/engine.py
+src/application/copilot/model_client.py
+```
+
+The already-added `agent-runtime/package.json`, lockfile, and `main.ts` remain
+unchanged in S7 and are included by the existing source archive. No container,
+bundled executable, Node version manager, or package cache service is added.
 
 ### 17.2 Runtime prerequisite and install behavior
 
@@ -2402,13 +2658,22 @@ resolve node and npm from PATH
 -> npm ci --omit=dev --ignore-scripts --prefix agent-runtime
 -> import pi-agent-core, pi-ai, and sqlite-node packages with Node
 -> run the deterministic Pi process smoke
--> only then move target and switch current symlink
+-> validate and stage both CLI wrappers when enabled
+-> only then move the target, publish wrappers, and atomically replace current
 ```
 
-An install failure deletes only the temporary target through the existing trap;
-the current release remains unchanged. Re-running against an already active
-release verifies imports rather than mutating its `node_modules`; `--force`
-recreates it through the normal temporary path.
+The final `current` publication uses a same-directory temporary symlink plus
+Python `os.replace()`, so readers never observe the unlink/create gap produced
+by BSD/macOS `ln -sfn`. Existing wrappers are backed up byte-for-byte; candidate
+CLI validation, wrapper staging/publication, or final-link failure leaves the
+old `current` selection and wrappers unchanged. A fully prepared candidate may
+remain as an inactive release after a final publication failure; it is never
+selected implicitly.
+
+Re-running the active version validates its VERSION and deterministic Pi smoke
+without rerunning npm or mutating `node_modules`. `--force` is rejected before
+mutation for the active target. It may replace an inactive target, but only
+after the temporary candidate passes all Python/Pi preparation and smoke gates.
 
 The installer help and completion message state the Node prerequisite. It does
 not write secrets, create the Session database, start services, or run a live
@@ -2430,6 +2695,11 @@ hash and observed Node version are recorded in `runtime_prepare.pi_runtime` for
 audit. A partial target may remain for diagnosis, but it is never activated;
 the next confirmed upgrade reruns
 `npm ci --omit=dev --ignore-scripts --prefix agent-runtime` from the lockfile.
+Missing/old Node, npm/install/import/smoke failure, and subprocess timeout all
+become the existing structured `RuntimePrepareError`. The failure payload keeps
+the observed Node/npm versions and lock hash available in
+`runtime_prepare.pi_runtime`, and preparation stops before runtime-config commit
+or symlink activation.
 
 `_dependency_hash()` continues to describe only the cached Python virtualenv.
 Mixing the Node lock into that hash would rebuild an unrelated Python cache.
@@ -2444,7 +2714,7 @@ Mixing the Node lock into that hash would rebuild an unrelated Python cache.
 | `install.npm` | npm missing |
 | `install.pi_packages` | locked production package import fails |
 | `copilot.model_context` | active `context_window_tokens` is missing/invalid or is not greater than `max_output_tokens + 2000` |
-| `copilot.pi_session_path` | parent of the derived Host-sibling Session database is missing or not writable |
+| `copilot.pi_session_path` | lexical parent of the derived Host-sibling Session database is missing, unwritable, or an immediate symlink rejected by private storage |
 
 The check does not create the database or install packages. It gives the exact
 remediation (`npm ci --omit=dev --ignore-scripts --prefix agent-runtime`) and
@@ -2454,14 +2724,24 @@ does not query a provider or infer a value from the model name.
 
 `release_preflight.sh`, Guardrails, and reusable Release CI set up Node
 `22.19.0`, run locked production install, execute `tests/test_pi_agent_process.py`
-and the focused Copilot/Control suites, then continue through current Python
-checks. `tests/test_pi_agent_process.py` reads the three package versions and
-the lockfile root package directly and requires exact `0.84.2`; the existing
-release check remains unchanged. No check queries npm or the network.
+plus the focused Copilot, P1 evaluator, Control, operations, release-plan, and
+answer-quality suites, then continue through current Python checks.
+`tests/test_pi_agent_process.py` reads the three package versions and the
+lockfile root package directly and requires exact `0.84.2`; no gate performs
+version discovery with `npm view` or calls a configured model provider. Locked
+`npm ci` may fetch only the package-lock-selected artifacts when they are not
+already cached.
+
+`release_test_plan.py` maps every exact Pi runtime, packaging, workflow,
+diagnostic, test-support, and architecture-guard owner to one `pi_runtime`
+rule. `scripts/release_preflight.sh` also selects the existing
+`service_release` rule, preventing future edits to these gates from receiving a
+fast-only test plan.
 
 The release archive still comes from `git archive`; `node_modules` is never
-published. Release CI proves a clean archive can restore packages solely from
-the lockfile before publishing.
+published. Release CI extracts the archive into runner temporary storage, uses
+the absolute checkout virtualenv Python, restores packages solely from the
+archive lockfile, and runs the shared deterministic smoke before publishing.
 
 ### 17.5 Legacy deletion and guards
 
@@ -2480,9 +2760,11 @@ Remove the now-unused transcript surface at the same time:
   and public exports;
 - `host_store.py`: the two legacy transcript methods, while leaving database
   columns and historical rows untouched;
-- `channel_facade.py`: `record_channel_turn()` and its export;
 - `scene.py` and `om_chat.scene.json`: `conversation_max_messages()` and the
   obsolete `conversation` block.
+
+`channel_facade.py` already had no `record_channel_turn()` caller or export at
+the S7 boundary, so it requires no cleanup diff.
 
 Delete or rewrite tests that assert their private implementation behavior.
 Keep tests for public result, tool, Control, run, cancellation, recovery, and
@@ -2509,26 +2791,37 @@ restore a second Agent loop.
 
 ### 17.6 Pre-release commands and acceptance order
 
-The development release gate is:
+The source gate is:
 
 ```bash
 npm ci --omit=dev --ignore-scripts --prefix agent-runtime
+bash scripts/pi_runtime_smoke.sh --root . --python ./.venv/bin/python
 ./.venv/bin/python -m ruff check .
 ./.venv/bin/python -m pytest -q tests/test_pi_agent_process.py
 ./.venv/bin/python -m pytest -q \
   tests/test_copilot_phase1.py \
   tests/test_copilot_conversation_memory.py \
+  tests/test_copilot_p1_eval.py \
   tests/test_inbound_control.py \
   tests/test_setup_check.py \
   tests/test_cli_operator_commands.py \
   tests/test_install_script.py \
   tests/test_service_deploy.py \
-  tests/test_release_check.py
-./scripts/release_preflight.sh --full --allow-dirty
+  tests/test_release_check.py \
+  tests/test_release_test_plan.py \
+  tests/copilot_eval/test_answer_quality.py
+./.venv/bin/python -m pytest -q
+./.venv/bin/python scripts/generate_dependency_graph.py --check
 git diff --check
 ```
 
-Then, under separate explicit authorization:
+`scripts/release_preflight.sh --full --allow-dirty` is the release-final wrapper
+around the same locked install, smoke, release metadata, dependency graph, and
+full pytest gates. It is expected to reject an unreleased development commit
+layout when release-delta metadata is not yet final; S7 does not weaken or
+bypass that existing release authority.
+
+Then, under separate explicit release/operations authorization:
 
 1. install the candidate in a non-production release directory;
 2. run `om setup check` and deterministic local eval;
@@ -2544,6 +2837,10 @@ Then, under separate explicit authorization:
 8. verify Host run/events/outbox and inbound audit, without sending synthetic
    writes.
 
+Switching the `current` symlink activates the Pi call site and its dependencies
+as one release-level operation; no deployment selects them separately. The
+previous complete release remains intact for rollback.
+
 Release, upgrade, live messages, and production Control remain separate
 authorization boundaries.
 
@@ -2554,48 +2851,67 @@ the existing controlled upgrade/rollback path and restarts only the affected
 service according to its preserved activation state. It does not downgrade or
 delete `pi_sessions.sqlite3`; the old release simply does not read it.
 
-S7 is complete only when:
+S7 source implementation is complete when:
 
 - the full Python suite and all Pi tests pass from a clean locked install;
 - setup, install, release, service-upgrade, and rollback tests pass;
-- `scripts/copilot_p1_eval.py` and the existing answer-quality suite meet their
-  current safety/quality gates with Pi;
+- the P1 evaluator source/unit gate and existing answer-quality suite pass with
+  the deterministic Pi path;
 - public Agent/Control/cancellation/recovery/outbox behavior passes the final
   acceptance matrix;
 - source search proves no legacy runtime caller/fallback remains;
-- a clean release archive can be installed without repository-local state;
-- the previous release remains selectable and its rollback rehearsal passes.
+- the exact final staged or committed tree passes a real `git archive` restore:
+  extraction occurs outside the checkout, Node packages are restored solely
+  from the archived lockfile, and the shared smoke uses an absolute checkout
+  virtualenv Python without an archive-local Python or checked-in
+  `node_modules` dependency;
+- deterministic rollback tests select the previous release and preserve the
+  effective `output_shared/state/pi_sessions.sqlite3` bytes after both dry-run
+  and confirmed rollback.
 
-## 18. Packaging, Cutover, And Rollback
+Full release/cutover acceptance remains pending until separately authorized
+configured-provider P1 reports and human review pass, release metadata and the
+clean archive gate pass in release CI, the candidate is published and upgraded
+through the controlled workflow, and the non-production/production canaries
+and rollback rehearsal above complete. Source completion is not evidence that
+any deployed runtime changed.
 
-Pi introduces a production Node prerequisite. The installer must not install or
-upgrade Node implicitly. Before S7 cutover:
+### 17.8 Implementation record
 
-- setup/update preflight requires `node >=22.19.0` and `npm`;
-- install/update runs
-  `npm ci --omit=dev --ignore-scripts --prefix agent-runtime` inside the target
-  release before switching the `current` symlink;
-- release CI installs the locked Node dependencies and runs the focused Pi
-  tests;
-- runtime verification imports the three pinned packages and confirms the Pi
-  Session path is writable by the service user and the resolved active model
-  has a valid declared context window;
-- failure leaves the previous `current` release and services unchanged.
+S7 completed its source implementation on 2026-08-20:
 
-Cutover is atomic at the release level:
+- the installer now validates Node/npm and the real Pi child, rejects active
+  `--force`, prepares inactive candidates off-path, restores wrapper bytes on
+  publication failure, and publishes `current` with a same-directory
+  `os.replace()`;
+- the single smoke script removes inherited Python/runtime/model/session
+  configuration and proves a real Pi fixture answer without creating Session
+  state or calling a provider;
+- controlled service preparation records Node/npm/lock evidence and maps
+  non-zero exits and timeouts into the existing structured failure before
+  config commit or activation;
+- setup reports the active model context and lexical Host-sibling Pi Session
+  path without writes, including private-storage symlink rejection;
+- release preflight, both workflows, and the release-test planner own the
+  locked npm, Pi process, P1 evaluator, answer-quality, clean-archive, and
+  operations gates;
+- the four legacy Python Agent modules and transcript APIs are deleted while
+  historical SQLite columns/rows and Host Control, cancellation, recovery,
+  metrics, leases, outbox, and channel isolation remain intact;
+- the locked npm install, real Pi smoke, Ruff, shell syntax, generated graph
+  (`609` production modules, `0` cycles), focused suites, full suite
+  (`5428 passed, 10 skipped`), and final aggregate DeepReview pass;
+- the exact final staged tree was restored through `git archive` outside the
+  checkout with no archive-local virtualenv or `node_modules`; locked npm
+  restored `95` packages and the shared real-Pi smoke passed from that archive.
 
-1. deploy a release containing the complete Pi runtime and dependencies;
-2. verify config, Node, package imports, storage, and deterministic tests;
-3. switch the production Copilot call site from legacy Engine to Pi;
-4. verify one controlled read-only local run, then channel behavior;
-5. keep the previous release intact for rollback.
+The release-final preflight was also exercised and stopped at the unchanged
+release-delta metadata authority because this branch has not entered an
+authorized release commit sequence. No VERSION, tag, Release, deployment,
+configured-provider request, live message, production state, or production
+rollback was changed or executed.
 
-There is no runtime fallback. Rollback selects the previous complete release,
-restarts only the affected service through the controlled upgrade workflow, and
-verifies read-only behavior. Pi's new Session database is preserved; the old
-release simply does not read it.
-
-## 19. Final Acceptance Matrix
+## 18. Final Acceptance Matrix
 
 | Area | Required evidence |
 |---|---|
@@ -2614,7 +2930,7 @@ release simply does not read it.
 | Operations | install, upgrade, verification, and release-level rollback are proven |
 | Cleanup | legacy Engine/model/memory modules and their callers are removed; no production fallback remains |
 
-## 20. Decisions That Are Closed
+## 19. Decisions That Are Closed
 
 - Keep Python for OM business and governance; add Node only for Pi runtime.
 - Use JSONL stdio and one child per request in V1.

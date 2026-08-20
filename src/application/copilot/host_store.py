@@ -28,73 +28,6 @@ class CopilotHostStore:
     def __init__(self, path: str | Path) -> None:
         self.path = private_path(path)
 
-    def session_messages(self, session_key: str) -> tuple[dict[str, Any], ...]:
-        self._ensure_schema()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT messages_json FROM copilot_sessions WHERE session_key = ?",
-                (session_key,),
-            ).fetchone()
-        if row is None:
-            return ()
-        try:
-            messages = json.loads(str(row[0] or "[]"))
-        except Exception:
-            return ()
-        return tuple(dict(item) for item in messages if isinstance(item, dict))
-
-    def record_session_turn(
-        self,
-        session_key: str,
-        user_message: str,
-        assistant_message: str,
-        *,
-        max_messages: int,
-        tool_uses: tuple[dict[str, Any], ...] = (),
-        warnings: tuple[str, ...] = (),
-        errors: tuple[str, ...] = (),
-    ) -> None:
-        messages = list(self.session_messages(session_key))
-        messages.extend(
-            (
-                {"role": "user", "content": str(user_message)},
-                {"role": "assistant", "content": str(assistant_message)},
-            )
-        )
-        if max_messages and len(messages) > max_messages:
-            messages = messages[-max_messages:]
-        now = utc_now_iso()
-        turns = list(self.session_turns(session_key))
-        turns.append(
-            {
-                "turn_id": new_id("turn"),
-                "user_text": str(user_message),
-                "assistant_final": str(assistant_message),
-                "tool_uses": [dict(item) for item in tool_uses],
-                "warnings": list(warnings),
-                "errors": list(errors),
-                "created_at": now,
-            }
-        )
-        turns = turns[-100:]
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO copilot_sessions (session_key, messages_json, turns_json, memory_json, updated_at)
-                VALUES (?, ?, ?, '{}', ?)
-                ON CONFLICT(session_key) DO UPDATE SET
-                    messages_json = excluded.messages_json,
-                    turns_json = excluded.turns_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    session_key,
-                    json.dumps(messages, ensure_ascii=False),
-                    json.dumps(turns, ensure_ascii=False, default=str),
-                    now,
-                ),
-            )
-
     def session_turns(self, session_key: str) -> tuple[dict[str, Any], ...]:
         return self._session_json_list(session_key, "turns_json")
 
@@ -236,8 +169,8 @@ class CopilotHostStore:
                 INSERT INTO copilot_runs (
                     run_id, request_id, contract_id, session_key, status, cancel_requested,
                     events_json, started_at, finished_at, response_json, contract_json,
-                    resumed_from, resume_attempts
-                ) VALUES (?, ?, ?, ?, 'running', 0, '[]', ?, NULL, NULL, ?, ?, 0)
+                    resumed_from, resume_attempts, admission_state
+                ) VALUES (?, ?, ?, ?, 'running', 0, '[]', ?, NULL, NULL, ?, ?, 0, 'open')
                 """,
                 (
                     run_id,
@@ -253,6 +186,7 @@ class CopilotHostStore:
     def append_event(self, event: AppEvent) -> None:
         self._ensure_schema()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT events_json FROM copilot_runs WHERE run_id = ?",
                 (event.run_id,),
@@ -304,6 +238,15 @@ class CopilotHostStore:
                     "UPDATE copilot_runs SET metrics_json = ? WHERE run_id = ?",
                     (json.dumps(metrics, ensure_ascii=False, default=str), event.run_id),
                 )
+            elif event.type == "context_compacted":
+                metrics = _json_object(
+                    conn.execute("SELECT metrics_json FROM copilot_runs WHERE run_id = ?", (event.run_id,)).fetchone()
+                )
+                metrics["usage"] = dict(event.payload.get("usage_total") or {})
+                conn.execute(
+                    "UPDATE copilot_runs SET metrics_json = ? WHERE run_id = ?",
+                    (json.dumps(metrics, ensure_ascii=False, default=str), event.run_id),
+                )
             elif event.type == "tool_result":
                 metrics = _json_object(
                     conn.execute("SELECT metrics_json FROM copilot_runs WHERE run_id = ?", (event.run_id,)).fetchone()
@@ -317,10 +260,15 @@ class CopilotHostStore:
     def finish_run(self, result: AppResult) -> None:
         self._ensure_schema()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 UPDATE copilot_runs
-                SET status = ?, finished_at = ?, response_json = ?
+                SET status = ?, finished_at = ?, response_json = ?,
+                    admission_state = CASE
+                        WHEN admission_state = 'open' THEN 'discard'
+                        ELSE admission_state
+                    END
                 WHERE run_id = ?
                 """,
                 (
@@ -343,14 +291,45 @@ class CopilotHostStore:
     def request_cancel(self, run_id: str) -> bool:
         self._ensure_schema()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 """
-                UPDATE copilot_runs SET cancel_requested = 1
-                WHERE run_id = ? AND status IN ('running', 'waiting_model', 'waiting_tool')
+                UPDATE copilot_runs
+                SET cancel_requested = 1, admission_state = 'cancel'
+                WHERE run_id = ?
+                  AND status IN ('running', 'waiting_model', 'waiting_tool')
+                  AND admission_state = 'open'
                 """,
                 (run_id,),
             )
         return bool(cursor.rowcount)
+
+    def claim_admission_decision(self, run_id: str, desired: str) -> str:
+        if desired not in {"commit", "discard"}:
+            raise ValueError("admission decision must be commit or discard")
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, admission_state FROM copilot_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None or str(row[0] or "") not in {
+                "running",
+                "waiting_model",
+                "waiting_tool",
+            }:
+                raise RuntimeError("run unavailable for admission")
+            state = str(row[1] or "")
+            if state == "open":
+                conn.execute(
+                    "UPDATE copilot_runs SET admission_state = ? WHERE run_id = ? AND admission_state = 'open'",
+                    (desired, run_id),
+                )
+                state = desired
+            if state not in {"commit", "discard", "cancel"}:
+                raise RuntimeError("run admission state is invalid")
+            return state
 
     def is_cancel_requested(self, run_id: str) -> bool:
         self._ensure_schema()
@@ -420,6 +399,15 @@ class CopilotHostStore:
                 return None
             if not contract.contract_id or contract.policy.get("read_only") is not True:
                 return None
+            if str(row["admission_state"] or "") in {"commit", "cancel"}:
+                return None
+            if any(
+                isinstance(item, dict)
+                and isinstance(item.get("payload"), dict)
+                and item["payload"].get("session_commit_outcome") == "unknown"
+                for item in events
+            ):
+                return None
             conn.execute(
                 "UPDATE copilot_runs SET resume_attempts = resume_attempts + 1 WHERE run_id = ?",
                 (run_id,),
@@ -433,7 +421,12 @@ class CopilotHostStore:
             cursor = conn.execute(
                 """
                 UPDATE copilot_runs
-                SET status = 'interrupted', finished_at = ?, termination_reason = 'host_restart_or_stale_run'
+                SET status = 'interrupted', finished_at = ?,
+                    termination_reason = 'host_restart_or_stale_run',
+                    admission_state = CASE
+                        WHEN admission_state = 'open' THEN 'discard'
+                        ELSE admission_state
+                    END
                 WHERE status IN ('running', 'waiting_model', 'waiting_tool') AND started_at < ?
                 """,
                 (utc_now_iso(), cutoff),
@@ -675,7 +668,8 @@ class CopilotHostStore:
                     resumed_from TEXT,
                     resume_attempts INTEGER NOT NULL DEFAULT 0,
                     termination_reason TEXT,
-                    metrics_json TEXT NOT NULL DEFAULT '{}'
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    admission_state TEXT NOT NULL DEFAULT 'open'
                 );
                 CREATE TABLE IF NOT EXISTS copilot_reply_outbox (
                     delivery_key TEXT PRIMARY KEY,
@@ -723,6 +717,10 @@ class CopilotHostStore:
             )
             if "metrics_json" not in run_columns:
                 conn.execute("ALTER TABLE copilot_runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'")
+            if "admission_state" not in run_columns:
+                conn.execute(
+                    "ALTER TABLE copilot_runs ADD COLUMN admission_state TEXT NOT NULL DEFAULT 'open'"
+                )
 
 
 def _termination_reason(event: AppEvent) -> str | None:

@@ -142,13 +142,6 @@ def scene_phase_readiness(scene_name: str) -> str:
     return "channel_ready" if scene_name == GENERAL_SCENE else ""
 
 
-def conversation_max_messages() -> int:
-    conversation = load_general_scene().get("conversation")
-    if not isinstance(conversation, dict) or conversation.get("enabled") is not True:
-        return 0
-    return _positive_int(conversation.get("max_messages"), 20)
-
-
 def _context_slots(value: Any) -> tuple[dict[str, str], ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("om_chat scene must declare context slots")
@@ -212,7 +205,6 @@ def _runtime_context(
 __all__ = [
     "GENERAL_SCENE",
     "build_scene_manifest",
-    "conversation_max_messages",
     "load_general_scene",
     "scene_phase_readiness",
     "scene_policy_rejection_reason",
