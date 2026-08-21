@@ -2361,9 +2361,27 @@ def apply_lifecycle_allocation_atomically(
             events=event_rows,
             wheel_start_enabled=wheel_start_enabled,
         )
+        projection_rows = [*correction_void_rows, *event_rows]
+        existing_by_id = _trade_events_by_id(
+            sqlite_repo,
+            [item.event_id for item in projection_rows],
+            conn=conn,
+        )
+        fx_payload = load_cash_fx_payload(sqlite_repo)
+        observed_at_ms = utc_now_ms()
+        projection_rows = [
+            _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
+            if item.event_id in existing_by_id
+            else attach_trade_event_cash_conversions(
+                item,
+                fx_payload=fx_payload,
+                observed_at_ms=observed_at_ms,
+            )
+            for item in projection_rows
+        ]
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
-            [*correction_void_rows, *event_rows],
+            projection_rows,
             conn=conn,
             mode="forced_full",
         )

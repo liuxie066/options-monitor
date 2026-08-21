@@ -481,6 +481,17 @@ def test_manual_correction_is_atomic_void_aware_and_idempotent(
     expire_event_id = str(
         expiry.allocation_plan[0]["canonical_terminal_event_id"]
     )
+    expire_event = next(
+        item
+        for item in repo.list_trade_events()
+        if item.get("event_id") == expire_event_id
+    )
+    expire_cash = expire_event["raw_payload"]["cash_conversions"][
+        "option_trade_cash_gross"
+    ]
+    assert expire_cash["status"] == "observed"
+    assert expire_cash["method"] == "zero_identity"
+    assert expire_cash["amount_cny"] == "0"
     stock_source = "futu:lx:1001:stock-deal-1"
     assert repo.insert_trade_lifecycle_evidence_once(
         {

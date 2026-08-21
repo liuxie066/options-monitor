@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
+from domain.domain.performance.models import EvidenceEnvelope, FXRateFact
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.services import adapt_option_positions_context
 from src.infrastructure.exchange_rates import (
@@ -17,6 +18,7 @@ from src.infrastructure.exchange_rates import (
 )
 from src.application.ledger.api import (
     decision_state_snapshot_from_rows,
+    open_performance_evidence_repository,
     open_position_ledger_from_data_config,
     read_current_decision_projection,
     read_decision_state_rows_many,
@@ -37,7 +39,6 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
-from src.infrastructure.exchange_rates import exchange_rate_observation_status
 from src.application.payload_helpers import required_text
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
@@ -70,6 +71,173 @@ class PreparedOptionPositionsBatch:
     wheel_read_models_by_account: dict[str, dict[str, Any]] = field(
         default_factory=dict
     )
+    fx_evidence_status: str = "not_attempted"
+    fx_evidence_ledger_count: int = 0
+    fx_evidence_inserted_count: int = 0
+    fx_evidence_idempotent_count: int = 0
+    fx_evidence_error_count: int = 0
+
+
+def _fx_evidence_envelope(
+    observation: Mapping[str, Any],
+    *,
+    observation_status: str,
+    captured_at_ms: int,
+) -> EvidenceEnvelope:
+    provider_source = str(observation.get("source") or "").strip()
+    timestamp = str(observation.get("timestamp") or "").strip()
+    rates = observation.get("rates")
+    if not provider_source or not timestamp or not isinstance(rates, Mapping):
+        raise ValueError("FX evidence requires source, timestamp, and rates")
+    effective_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if effective_at.tzinfo is None:
+        effective_at = effective_at.replace(tzinfo=timezone.utc)
+    effective_at_ms = int(effective_at.astimezone(timezone.utc).timestamp() * 1000)
+    if effective_at_ms > int(captured_at_ms):
+        raise ValueError("FX evidence observation timestamp is in the future")
+    required_pairs = ("USDCNY", "HKDCNY")
+    if any(rates.get(pair) in (None, "") for pair in required_pairs):
+        raise ValueError("FX evidence observation is missing a required rate")
+    raw = dict(observation)
+    evidence_source = (
+        "cache_snapshot"
+        if observation_status == "unavailable_stale"
+        else "realtime_snapshot"
+    )
+    quality = {
+        "capture_path": "scheduled_tick",
+        "provider_source": provider_source,
+    }
+    if evidence_source == "cache_snapshot":
+        quality["stale_cache_fallback"] = True
+    facts = tuple(
+        FXRateFact(
+            fact_id=None,
+            base_currency=pair[:3],
+            quote_currency="CNY",
+            rate=rates[pair],
+            rate_kind="spot",
+            effective_at_ms=effective_at_ms,
+            observed_at_ms=int(captured_at_ms),
+            source=evidence_source,
+            source_id=f"{provider_source}:{pair}:{effective_at_ms}",
+            quality=quality,
+            raw=raw,
+        )
+        for pair in required_pairs
+    )
+    return EvidenceEnvelope(fx_rates=facts)
+
+
+def _reuse_existing_fx_facts(
+    envelope: EvidenceEnvelope,
+    existing_rates: tuple[FXRateFact, ...],
+) -> EvidenceEnvelope:
+    existing_by_source = {item.source_identity: item for item in existing_rates}
+    existing_by_observation = {
+        (item.source_id, item.revision): item for item in existing_rates
+    }
+    facts: list[FXRateFact] = []
+    for fact in envelope.fx_rates:
+        existing = existing_by_source.get(fact.source_identity)
+        same_observation = True
+        if existing is None:
+            existing = existing_by_observation.get((fact.source_id, fact.revision))
+            same_observation = existing is not None
+        if existing is None:
+            facts.append(fact)
+            continue
+        incoming_payload = fact.normalized_payload(include_fact_id=False)
+        existing_payload = existing.normalized_payload(include_fact_id=False)
+        incoming_payload.pop("observed_at_ms")
+        existing_payload.pop("observed_at_ms")
+        if same_observation and existing.source_identity != fact.source_identity:
+            for field_name in ("source", "quality"):
+                incoming_payload.pop(field_name)
+                existing_payload.pop(field_name)
+            if incoming_payload != existing_payload:
+                raise ValueError("FX provider observation identity conflict")
+        facts.append(existing if incoming_payload == existing_payload else fact)
+    return EvidenceEnvelope(fx_rates=tuple(facts))
+
+
+def _persist_fx_evidence(
+    *,
+    repos_by_ledger_path: Mapping[Path, Any],
+    observation: Mapping[str, Any] | None,
+    observation_status: str,
+    migrated_at_ms: int,
+    log: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    if observation_status not in {"ready", "unavailable_stale"} or observation is None:
+        return {"status": "source_unavailable"}
+    if not repos_by_ledger_path:
+        return {"status": "no_ledger"}
+    try:
+        envelope = _fx_evidence_envelope(
+            observation,
+            observation_status=observation_status,
+            captured_at_ms=migrated_at_ms,
+        )
+    except Exception as exc:
+        if log is not None:
+            log(f"[WARN] option performance FX evidence invalid: {type(exc).__name__}")
+        return {"status": "error", "error_count": 1}
+
+    inserted = 0
+    idempotent = 0
+    errors = 0
+    for repo in repos_by_ledger_path.values():
+        try:
+            evidence_repo = open_performance_evidence_repository(repo)
+            repo_envelope = _reuse_existing_fx_facts(
+                envelope,
+                evidence_repo.read_all().fx_rates,
+            )
+            try:
+                result = evidence_repo.import_envelope(
+                    repo_envelope,
+                    apply=True,
+                    migrated_at_ms=int(migrated_at_ms),
+                )
+            except Exception:
+                retry_envelope = _reuse_existing_fx_facts(
+                    envelope,
+                    evidence_repo.read_all().fx_rates,
+                )
+                if retry_envelope == repo_envelope:
+                    raise
+                result = evidence_repo.import_envelope(
+                    retry_envelope,
+                    apply=True,
+                    migrated_at_ms=int(migrated_at_ms),
+                )
+            inserted += int(result.inserted_count)
+            idempotent += int(result.idempotent_count)
+        except Exception as exc:
+            errors += 1
+            if log is not None:
+                log(
+                    "[WARN] option performance FX evidence persistence failed: "
+                    f"{type(exc).__name__}"
+                )
+    successes = len(repos_by_ledger_path) - errors
+    status = (
+        "partial"
+        if errors and successes
+        else "error"
+        if errors
+        else "persisted"
+        if inserted
+        else "idempotent"
+    )
+    return {
+        "status": status,
+        "ledger_count": successes,
+        "inserted_count": inserted,
+        "idempotent_count": idempotent,
+        "error_count": errors,
+    }
 
 
 def prepare_option_positions_contexts(
@@ -81,6 +249,7 @@ def prepare_option_positions_contexts(
     account_config_authorities: Mapping[str, AccountRunConfigAuthority],
     run_state_dir: Path,
     log: Callable[[str], None] | None = None,
+    persist_fx_evidence: bool = False,
 ) -> PreparedOptionPositionsBatch:
     """Publish exact account option contexts from coherent ledger/FX facts."""
 
@@ -194,6 +363,17 @@ def prepare_option_positions_contexts(
             "observation": fx_observation,
             "error_type": fx_error_type,
         }
+    )
+    fx_evidence = (
+        _persist_fx_evidence(
+            repos_by_ledger_path=repos_by_ledger_path,
+            observation=fx_observation,
+            observation_status=fx_status,
+            migrated_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            log=log,
+        )
+        if persist_fx_evidence
+        else {"status": "disabled"}
     )
 
     manifests: dict[str, dict[str, Any]] = {}
@@ -386,6 +566,11 @@ def prepare_option_positions_contexts(
         ledger_read_count=ledger_read_count,
         fx_observation_count=1,
         wheel_read_models_by_account=wheel_models_by_account,
+        fx_evidence_status=str(fx_evidence.get("status") or "error"),
+        fx_evidence_ledger_count=int(fx_evidence.get("ledger_count") or 0),
+        fx_evidence_inserted_count=int(fx_evidence.get("inserted_count") or 0),
+        fx_evidence_idempotent_count=int(fx_evidence.get("idempotent_count") or 0),
+        fx_evidence_error_count=int(fx_evidence.get("error_count") or 0),
     )
 
 

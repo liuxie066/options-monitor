@@ -551,6 +551,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     "degraded" if str(message).startswith("[WARN]") else "info",
                     message=str(message),
                 ),
+                persist_fx_evidence=not request.smoke,
             )
         except Exception as exc:
             prepared_options = PreparedOptionPositionsBatch(
@@ -566,6 +567,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 observed_at_utc=datetime.now(timezone.utc).isoformat(),
                 ledger_read_count=0,
                 fx_observation_count=0,
+                fx_evidence_status="error",
+                fx_evidence_error_count=1,
             )
         prepared_option_records_by_account = dict(
             prepared_options.position_records_by_account
@@ -634,6 +637,22 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 "fx_observation_count": prepared_options.fx_observation_count,
             },
         )
+        if prepared_options.fx_evidence_status not in {"not_attempted", "disabled"}:
+            request.runlog.safe_event(
+                "option_performance_fx_evidence",
+                (
+                    "ok"
+                    if prepared_options.fx_evidence_status in {"persisted", "idempotent"}
+                    else "degraded"
+                ),
+                data={
+                    "status": prepared_options.fx_evidence_status,
+                    "ledger_count": prepared_options.fx_evidence_ledger_count,
+                    "inserted_count": prepared_options.fx_evidence_inserted_count,
+                    "idempotent_count": prepared_options.fx_evidence_idempotent_count,
+                    "error_count": prepared_options.fx_evidence_error_count,
+                },
+            )
         if invalid_prepared_option_accounts:
             scanning_accounts = [
                 account

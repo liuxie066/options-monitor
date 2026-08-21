@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 996 (`src`: 531, `domain`: 76, `scripts`: 13, `tests`: 376)
-- Internal import edges: 6662 total, 2868 production/script edges excluding tests
+- Internal import edges: 6671 total, 2868 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|433| domain
+  application -->|434| domain
   application -->|4| domain_services
-  application -->|155| infrastructure
+  application -->|154| infrastructure
   application -->|41| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|2| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|2796| application
+  tests -->|2804| application
   tests -->|452| domain
   tests -->|2| domain_services
-  tests -->|204| infrastructure
+  tests -->|205| infrastructure
   tests -->|246| interfaces
   tests -->|23| scripts
   tests -->|18| storage
@@ -59,9 +59,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 433 |
+| application | domain | 434 |
 | interfaces | application | 160 |
-| application | infrastructure | 155 |
+| application | infrastructure | 154 |
 | application | storage | 41 |
 | scripts | application | 38 |
 | infrastructure | application | 13 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2796 |
+| tests | application | 2804 |
 | tests | domain | 452 |
 | tests | interfaces | 246 |
-| tests | infrastructure | 204 |
+| tests | infrastructure | 205 |
 | tests | scripts | 23 |
 | tests | storage | 18 |
 | tests | domain_services | 2 |
@@ -93,9 +93,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 227 |
+| src.application | domain.domain | 228 |
 | src.interfaces | src.application | 128 |
-| src.application | src.infrastructure | 112 |
+| src.application | src.infrastructure | 111 |
 | src.application.ledger | domain.domain | 60 |
 | src.application.ledger | domain.domain.ledger | 39 |
 | src.application | domain.storage | 32 |

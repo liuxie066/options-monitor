@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Persisted scheduled-tick USD/CNY and HKD/CNY evidence for option-performance conversion and attached event-time cash conversion snapshots to lifecycle terminal events.
+
 ## 1.15.3 - 2026-08-21
 
 ### Bug Fixes
