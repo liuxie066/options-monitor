@@ -2079,8 +2079,6 @@ def render_service_bundle(
                 om,
                 "inbound",
                 "feishu-ws",
-                "--config-key",
-                feishu_ws_config_key_value,
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
             ]
@@ -2122,8 +2120,6 @@ def render_service_bundle(
                 wechat_clawbot_label_value,
                 "--state-dir",
                 str(wechat_clawbot_state_dir),
-                "--config-key",
-                wechat_clawbot_config_key_value,
                 "--config-path",
                 str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
             ]
@@ -2566,8 +2562,6 @@ def render_service_bundle(
                 om,
                 "inbound",
                 "feishu-ws",
-                "--config-key",
-                feishu_ws_config_key_value,
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
             ]
@@ -2607,8 +2601,6 @@ def render_service_bundle(
                 wechat_clawbot_label_value,
                 "--state-dir",
                 str(wechat_clawbot_state_dir),
-                "--config-key",
-                wechat_clawbot_config_key_value,
                 "--config-path",
                 str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
             ]

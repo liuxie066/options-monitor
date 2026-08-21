@@ -171,9 +171,10 @@ def build_feishu_ws_settings(
         if assistant_settings.default_market_scope in {"us", "hk"}
         else None
     )
+    resolved_config_path = _first_text(config_path)
     return FeishuWsSettings(
-        config_key=str(config_key or default_config_key or "").strip().lower() or None,
-        config_path=_first_text(config_path),
+        config_key=str(config_key or (None if resolved_config_path else default_config_key) or "").strip().lower() or None,
+        config_path=resolved_config_path,
         assistant_config_path=_first_text(assistant_config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
         allowed_senders=bot_cfg.default_allowed_senders(),

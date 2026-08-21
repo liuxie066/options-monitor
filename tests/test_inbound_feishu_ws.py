@@ -882,6 +882,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     )
 
     assert settings.reply_enabled is False
+    assert settings.config_key is None
     assert settings.config_path == str(tmp_path / "config.us.json")
     assert settings.assistant_config_path == str(assistant_config_path)
     assert settings.reply_in_thread is True

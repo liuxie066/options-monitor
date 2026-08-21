@@ -159,12 +159,13 @@ def build_wechat_clawbot_serve_settings(
         if assistant_settings.default_market_scope in {"us", "hk"}
         else None
     )
+    resolved_config_path = _first_text(config_path)
     return WechatClawbotServeSettings(
         base=base,
         label=_first_text(label, behavior_cfg.get("label")) or DEFAULT_WECHAT_CLAWBOT_LABEL,
         state_dir=_first_text(state_dir, behavior_cfg.get("state_dir")),
-        config_key=_normalize_config_key(_first_text(config_key, default_config_key)),
-        config_path=_first_text(config_path),
+        config_key=_normalize_config_key(_first_text(config_key, None if resolved_config_path else default_config_key)),
+        config_path=resolved_config_path,
         assistant_config_path=_first_text(assistant_config_path),
         audit_db=_first_text(audit_db),
         allowed_senders=_first_text(allowed_senders, behavior_cfg.get("allowed_senders")),
