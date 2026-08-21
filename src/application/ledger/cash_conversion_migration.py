@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import TradeEvent
 from domain.domain.performance.cash_conversion import (
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    OFFICIAL_CARRY_FORWARD_SOURCES,
     validate_observed_cash_conversion,
 )
 from domain.domain.performance.engine import cash_facts_for_trade_event
@@ -29,9 +32,7 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository, w
 
 
 _MAX_CASH_FX_STALENESS_MS = 24 * 60 * 60 * 1000
-_MAX_CASH_FX_CARRY_FORWARD_MS = 7 * 24 * 60 * 60 * 1000
 _FX_EVIDENCE_TIMEZONE = ZoneInfo("Asia/Shanghai")
-_OFFICIAL_CARRY_FORWARD_SOURCES = frozenset({"pbc_central_parity", "manual_correction"})
 _TRADE_CASH_FACT_KINDS = frozenset(
     {
         "option_trade_cash_gross",
@@ -473,12 +474,12 @@ def _conversion_from_evidence(
         rate_source_id=rate.source_id,
         rate_evidence_fact_id=str(rate.fact_id),
         method=(
-            "historical_business_day_fx_carry_forward"
+            HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
             if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
             else "historical_fx_evidence_backfill"
         ),
         max_rate_distance_ms=(
-            _MAX_CASH_FX_CARRY_FORWARD_MS
+            MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
             if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
             else _MAX_CASH_FX_STALENESS_MS
         ),
@@ -504,7 +505,7 @@ def _select_cash_fx_rate(
         list(fx_rates),
         base_currency=base_currency,
         at_ms=int(at_ms),
-        max_staleness_ms=_MAX_CASH_FX_CARRY_FORWARD_MS,
+        max_staleness_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     )
     rate = carried.fact
     if not isinstance(rate, FXRateFact):
@@ -515,7 +516,7 @@ def _select_cash_fx_rate(
         tz=_FX_EVIDENCE_TIMEZONE,
     ).date().isoformat()
     if (
-        rate.source not in _OFFICIAL_CARRY_FORWARD_SOURCES
+        rate.source not in OFFICIAL_CARRY_FORWARD_SOURCES
         or rate.quality.get("official") is not True
         or not isinstance(carry_dates, (list, tuple))
         or event_date not in {str(item) for item in carry_dates}
