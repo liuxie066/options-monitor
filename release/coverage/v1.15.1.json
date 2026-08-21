@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.1",
+  "base": {
+    "tag": "v1.15.0",
+    "commit": "ae96c82c6a2457fedfb79c1634f41567b193aad0"
+  },
+  "reviewed_head": "25b4682a80a6ee7af0ccb1bef89ef8b141bfbdca",
+  "commits": [
+    {
+      "sha": "f4607fa166e2c9e780bbfeaf51e08d19e6af582e",
+      "subject": "fix(channels): keep one trusted runtime scope"
+    },
+    {
+      "sha": "25b4682a80a6ee7af0ccb1bef89ef8b141bfbdca",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented Feishu and WeChat channel services from passing conflicting runtime scopes, restoring Copilot tool requests after the Pi cutover while preserving explicit config-path authority.",
+      "commits": [
+        "f4607fa166e2c9e780bbfeaf51e08d19e6af582e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "25b4682a80a6ee7af0ccb1bef89ef8b141bfbdca",
+      "reason": "Generated dependency graph refresh only; no user, configuration, runtime, or operational behavior changed."
+    }
+  ]
+}
