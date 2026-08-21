@@ -44,8 +44,14 @@ DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
 DEFAULT_TIMEOUT_SECONDS = 600
 US_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 America/New_York"
 HK_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong"
-AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 09:05:00 Asia/Shanghai"
-AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 5}
+AUTO_CLOSE_SYSTEMD_CALENDARS = {
+    "hk": "*-*-* 09:05:00 Asia/Shanghai",
+    "us": "*-*-* 09:07:00 Asia/Shanghai",
+}
+AUTO_CLOSE_LAUNCHD_CALENDARS = {
+    "hk": {"Hour": 9, "Minute": 5},
+    "us": {"Hour": 9, "Minute": 7},
+}
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
@@ -1539,7 +1545,7 @@ def render_service_bundle(
                 _systemd_timer(
                     description=f"Options Monitor {market.upper()} expired option maintenance timer",
                     unit_name=auto_close_service,
-                    calendar=AUTO_CLOSE_SYSTEMD_CALENDAR,
+                    calendar=AUTO_CLOSE_SYSTEMD_CALENDARS[market],
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_timer}",
                 kind="systemd_timer",
@@ -2308,7 +2314,7 @@ def render_service_bundle(
                     program_args=auto_close_args,
                     log_root=log_root,
                     env_file=env_file_path,
-                    start_calendar_interval=AUTO_CLOSE_LAUNCHD_CALENDAR,
+                    start_calendar_interval=AUTO_CLOSE_LAUNCHD_CALENDARS[market],
                 ),
                 install_path=f"~/Library/LaunchAgents/{auto_label}.plist",
                 kind="launchd_plist",

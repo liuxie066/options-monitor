@@ -189,7 +189,7 @@ def test_render_systemd_bundle_service_hardening() -> None:
         repo_root=repo,
         runtime_root=runtime,
         accounts=["lx"],
-        markets=["us"],
+        markets=["us", "hk"],
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
@@ -197,7 +197,8 @@ def test_render_systemd_bundle_service_hardening() -> None:
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
     verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
     intake = files["systemd/options-monitor-trade-intake.service"]["content"]
-    auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
+    auto_close_us_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
+    auto_close_hk_timer = files["systemd/options-monitor-auto-close-hk.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
     assert "TimeoutStartSec=" not in tick
     assert "TimeoutStartSec=" not in runtime_status
@@ -206,7 +207,8 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "RuntimeMaxSec=" not in "\n".join(item["content"] for item in files.values())
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
-    assert "OnCalendar=*-*-* 09:05:00 Asia/Shanghai" in auto_close_timer
+    assert "OnCalendar=*-*-* 09:07:00 Asia/Shanghai" in auto_close_us_timer
+    assert "OnCalendar=*-*-* 09:05:00 Asia/Shanghai" in auto_close_hk_timer
     assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
     assert "verify-projection --mode auto" in verify
     assert "[Install]\nWantedBy=multi-user.target" not in verify
@@ -1433,7 +1435,7 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     (systemd_root / "options-monitor-auto-close-us.timer").write_text(
         (systemd_root / "options-monitor-auto-close-us.timer")
         .read_text(encoding="utf-8")
-        .replace("OnCalendar=*-*-* 09:05:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
+        .replace("OnCalendar=*-*-* 09:07:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
         encoding="utf-8",
     )
     (systemd_root / "options-monitor-projection-verify.timer").write_text(
@@ -4027,12 +4029,13 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
         repo_root=repo,
         runtime_root=runtime,
         accounts=["lx", "sy"],
-        markets=["hk"],
+        markets=["us", "hk"],
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["launchd/com.options-monitor.tick-hk.plist"]["content"]
-    auto_close = files["launchd/com.options-monitor.auto-close-hk.plist"]["content"]
+    auto_close_hk = files["launchd/com.options-monitor.auto-close-hk.plist"]["content"]
+    auto_close_us = files["launchd/com.options-monitor.auto-close-us.plist"]["content"]
     verify = files["launchd/com.options-monitor.projection-verify.plist"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
@@ -4043,11 +4046,14 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert str(runtime / "logs" / "com.options-monitor.tick-hk.out.log") in tick
     assert "--market" in tick
     assert "hk" in tick
-    assert "<string>com.options-monitor.auto-close-hk</string>" in auto_close
-    assert "<key>Hour</key>" in auto_close
-    assert "<integer>9</integer>" in auto_close
-    assert "<key>Minute</key>" in auto_close
-    assert "<integer>5</integer>" in auto_close
+    assert "<string>com.options-monitor.auto-close-hk</string>" in auto_close_hk
+    assert "<key>Hour</key>" in auto_close_hk
+    assert "<integer>9</integer>" in auto_close_hk
+    assert "<key>Minute</key>" in auto_close_hk
+    assert "<integer>5</integer>" in auto_close_hk
+    assert "<string>com.options-monitor.auto-close-us</string>" in auto_close_us
+    assert "<key>Minute</key>" in auto_close_us
+    assert "<integer>7</integer>" in auto_close_us
     assert "<string>com.options-monitor.projection-verify</string>" in verify
     assert "<key>Hour</key>" in verify
     assert "<integer>9</integer>" in verify
