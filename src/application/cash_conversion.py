@@ -103,6 +103,7 @@ def build_cash_conversion(
     rate_source_id: str | None = None,
     rate_evidence_fact_id: str | None = None,
     method: str | None = None,
+    max_rate_distance_ms: int = MAX_BOOKING_RATE_DISTANCE_MS,
 ) -> dict[str, Any]:
     native_amount = quantize_money(to_decimal(amount, field_name="cash conversion amount"))
     native_currency = normalize_currency(currency)
@@ -132,7 +133,9 @@ def build_cash_conversion(
         if rate is not None and rate_timestamp_ms is None:
             rate = None
             missing_reason = f"{native_currency}CNY booking FX timestamp unavailable"
-        if rate is not None and abs(rate_timestamp_ms - int(effective_at_ms)) > MAX_BOOKING_RATE_DISTANCE_MS:
+        if rate is not None and abs(rate_timestamp_ms - int(effective_at_ms)) > int(
+            max_rate_distance_ms
+        ):
             rate = None
             missing_reason = f"{native_currency}CNY booking FX outside 24h event window"
         amount_cny = quantize_money(native_amount * rate) if rate is not None else None

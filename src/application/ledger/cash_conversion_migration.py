@@ -6,13 +6,20 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import TradeEvent
 from domain.domain.performance.cash_conversion import (
     validate_observed_cash_conversion,
 )
 from domain.domain.performance.engine import cash_facts_for_trade_event
-from domain.domain.performance.models import FXRateFact, normalize_currency, select_fx_rate, to_decimal
+from domain.domain.performance.models import (
+    EvidenceSelection,
+    FXRateFact,
+    normalize_currency,
+    select_fx_rate,
+    to_decimal,
+)
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
     build_cash_conversion,
@@ -22,6 +29,9 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository, w
 
 
 _MAX_CASH_FX_STALENESS_MS = 24 * 60 * 60 * 1000
+_MAX_CASH_FX_CARRY_FORWARD_MS = 7 * 24 * 60 * 60 * 1000
+_FX_EVIDENCE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_OFFICIAL_CARRY_FORWARD_SOURCES = frozenset({"pbc_central_parity", "manual_correction"})
 _TRADE_CASH_FACT_KINDS = frozenset(
     {
         "option_trade_cash_gross",
@@ -423,11 +433,10 @@ def _conversion_from_evidence(
                 else f"identity:{native_currency}"
             ),
         )
-    selected = select_fx_rate(
-        list(fx_rates),
+    selected = _select_cash_fx_rate(
+        fx_rates,
         base_currency=native_currency,
         at_ms=int(effective_at_ms),
-        max_staleness_ms=_MAX_CASH_FX_STALENESS_MS,
     )
     if selected.fact is None:
         pending = build_cash_conversion(
@@ -463,8 +472,56 @@ def _conversion_from_evidence(
         rate_source=rate.source,
         rate_source_id=rate.source_id,
         rate_evidence_fact_id=str(rate.fact_id),
-        method="historical_fx_evidence_backfill",
+        method=(
+            "historical_business_day_fx_carry_forward"
+            if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
+            else "historical_fx_evidence_backfill"
+        ),
+        max_rate_distance_ms=(
+            _MAX_CASH_FX_CARRY_FORWARD_MS
+            if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
+            else _MAX_CASH_FX_STALENESS_MS
+        ),
     )
+
+
+def _select_cash_fx_rate(
+    fx_rates: Sequence[FXRateFact],
+    *,
+    base_currency: str,
+    at_ms: int,
+) -> EvidenceSelection:
+    selected = select_fx_rate(
+        list(fx_rates),
+        base_currency=base_currency,
+        at_ms=int(at_ms),
+        max_staleness_ms=_MAX_CASH_FX_STALENESS_MS,
+    )
+    if selected.status != "stale":
+        return selected
+
+    carried = select_fx_rate(
+        list(fx_rates),
+        base_currency=base_currency,
+        at_ms=int(at_ms),
+        max_staleness_ms=_MAX_CASH_FX_CARRY_FORWARD_MS,
+    )
+    rate = carried.fact
+    if not isinstance(rate, FXRateFact):
+        return selected
+    carry_dates = rate.quality.get("carry_forward_dates")
+    event_date = datetime.fromtimestamp(
+        int(at_ms) / 1000,
+        tz=_FX_EVIDENCE_TIMEZONE,
+    ).date().isoformat()
+    if (
+        rate.source not in _OFFICIAL_CARRY_FORWARD_SOURCES
+        or rate.quality.get("official") is not True
+        or not isinstance(carry_dates, (list, tuple))
+        or event_date not in {str(item) for item in carry_dates}
+    ):
+        return selected
+    return carried
 
 
 def _assigned_conversion_candidates(
@@ -475,11 +532,10 @@ def _assigned_conversion_candidates(
 ) -> dict[str, dict[str, Any]]:
     event_time_ms = int(event.get("trade_time_ms") or event.get("event_time_ms") or 0)
     currency = normalize_currency(event.get("currency"))
-    selected = select_fx_rate(
-        list(fx_rates),
+    selected = _select_cash_fx_rate(
+        fx_rates,
         base_currency=currency,
         at_ms=event_time_ms,
-        max_staleness_ms=_MAX_CASH_FX_STALENESS_MS,
     )
     fx_payload: dict[str, Any] | None = None
     rate: FXRateFact | None = selected.fact if isinstance(selected.fact, FXRateFact) else None
