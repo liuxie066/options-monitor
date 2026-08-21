@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.15.7 - 2026-08-21
+
+### Bug Fixes
+- Staggered HK and US expired-position maintenance to 09:05 and 09:07 Beijing time so the two market jobs no longer start concurrently.
+
 ## 1.15.6 - 2026-08-21
 
 ### Bug Fixes
