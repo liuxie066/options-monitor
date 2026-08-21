@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.15.6 - 2026-08-21
+
+### Bug Fixes
+- Staggered automatic expired-position maintenance away from the HK opening tick and preserved intentionally paused timer activation during unattended upgrades.
+
 ## 1.15.5 - 2026-08-21
 
 ### Bug Fixes
