@@ -1255,7 +1255,7 @@ function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): Agen
   const last = suffix[suffix.length - 1];
   if (
     last.role !== "assistant" ||
-    (last.stopReason !== "stop" && last.stopReason !== "length") ||
+    last.stopReason !== "stop" ||
     last.content.some((item) => item.type === "toolCall")
   ) {
     throw new Error("turn suffix has no final answer");
@@ -1312,8 +1312,12 @@ function normalizeContinuationSuffix(
   startIndex: number
 ): AgentMessage[] {
   const suffix = messages.slice(startIndex);
-  if (suffix.length !== 4) return suffix;
-  const [user, first, synthetic, final] = suffix;
+  if (suffix.length < 4) return suffix;
+  const firstIndex = suffix.length - 3;
+  const user = suffix[0];
+  const first = suffix[firstIndex];
+  const synthetic = suffix[firstIndex + 1];
+  const final = suffix[firstIndex + 2];
   if (
     user.role !== "user" ||
     first.role !== "assistant" ||
@@ -1325,7 +1329,7 @@ function normalizeContinuationSuffix(
     synthetic.content[0].text !== CONTINUATION_PROMPT ||
     final.role !== "assistant" ||
     final.content.some((item) => item.type === "toolCall") ||
-    (final.stopReason !== "stop" && final.stopReason !== "length")
+    final.stopReason !== "stop"
   ) {
     return suffix;
   }
@@ -1334,7 +1338,7 @@ function normalizeContinuationSuffix(
     content: [{ type: "text", text: extractText(first) + extractText(final) }],
     usage: addAssistantUsage(first.usage, final.usage),
   };
-  return [user, merged];
+  return [...suffix.slice(0, firstIndex), merged];
 }
 
 async function persistTurn(
@@ -1726,9 +1730,9 @@ async function run(): Promise<void> {
           message.stopReason === "length" &&
           extractText(message).trim().length > 0 &&
           message.content.every((item) => item.type !== "toolCall") &&
-          newMessages.length === 2 &&
+          newMessages.length >= 2 &&
           newMessages[0].role === "user" &&
-          newMessages[1] === message &&
+          newMessages[newMessages.length - 1] === message &&
           assistantTurns < (limits.max_iterations as number) &&
           remainingMs > (limits.final_answer_reserve_seconds as number) * 1_000;
         if (eligibleContinuation) {
@@ -1844,7 +1848,18 @@ async function run(): Promise<void> {
         );
         return;
       }
-      if (stopReason !== "stop" && stopReason !== "length") {
+      if (stopReason === "length") {
+        finishError(
+          safeError(
+            "BUDGET_EXHAUSTED",
+            "budget",
+            "agent budget exhausted without a final answer",
+            false
+          )
+        );
+        return;
+      }
+      if (stopReason !== "stop") {
         finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
         return;
       }

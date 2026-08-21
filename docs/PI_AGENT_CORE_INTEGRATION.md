@@ -1906,7 +1906,7 @@ Final Pi stop reasons map as follows:
 | Pi stop reason | OM process outcome |
 |---|---|
 | `stop` | answered when final text is non-empty |
-| `length` | at most one normalized follow-up continuation under the rule below; otherwise accumulated non-empty text is answered with `termination_reason:length` |
+| `length` | at most one normalized follow-up continuation under the rule below; otherwise `BUDGET_EXHAUSTED`, with no partial answer admitted |
 | `toolUse` | normal loop continuation |
 | `aborted` | cancelled only after an accepted Host cancel; otherwise model error |
 | `error` | `MODEL_ERROR` |
@@ -1916,7 +1916,7 @@ Pi does not automatically continue a truncated assistant message, and
 `Agent.continue()` rejects an assistant as the last transcript message. S4
 therefore uses the existing `Agent.followUp()` queue, not `Agent.continue()`:
 
-1. `prepareNextTurn()` may schedule a continuation only when the first
+1. `prepareNextTurnWithContext()` may schedule a continuation only when the first
    `length` assistant contains non-empty text and no tool call, no continuation
    has been used, one assistant-turn slot remains, and the final-answer time
    reserve has not been reached.
@@ -1924,20 +1924,20 @@ therefore uses the existing `Agent.followUp()` queue, not `Agent.continue()`:
    previous answer stopped. Do not repeat earlier text. Return only the
    continuation.` It returns the next-turn context with `tools: []`.
 3. The follow-up consumes the normal iteration and deadline budgets. A second
-   `length` response is not continued again. An error or abort during the
-   follow-up remains an error or accepted cancellation; partial text is not
-   committed after a failed continuation.
+   `length` response is not continued again and returns `BUDGET_EXHAUSTED`.
+   An error or abort during the follow-up remains an error or accepted
+   cancellation; partial text is not committed after a failed continuation.
 4. Before `validatedTurnSuffix()` and `run.proposed`, one private normalizer
-   recognizes only the exact sequence `original user -> length assistant ->
-   synthetic user -> final assistant`. It removes the synthetic user and
-   replaces both assistants with one canonical assistant whose text is the two
-   text fragments concatenated without a delimiter, whose stop reason and
-   provider identity come from the final assistant, and whose non-negative
-   usage fields are summed.
+   preserves any preceding validated tool call/result groups and recognizes the
+   terminal sequence `length assistant -> synthetic user -> stop assistant`.
+   It removes the synthetic user and replaces both assistants with one canonical
+   assistant whose text is the two text fragments concatenated without a
+   delimiter, whose provider identity comes from the final assistant, whose
+   stop reason is `stop`, and whose non-negative usage fields are summed.
 5. Per-physical-turn lifecycle events and counters remain visible, but
-   `run.final` and Pi Session receive only the normalized original-user/final-
-   assistant group. The synthetic instruction can never enter durable history
-   or future context.
+   `run.final` and Pi Session receive only the canonical original-user turn,
+   including any preceding tool groups and the merged final assistant. The
+   synthetic instruction can never enter durable history or future context.
 
 Use Pi's `isRetryableAssistantError()` only to set the safe retryable Boolean.
 The public message is fixed by category (`model authentication failed`, `model
