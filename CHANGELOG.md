@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Reused the active release's verified Pi dependencies when the lockfile is unchanged, avoiding redundant npm downloads during routine upgrades while retaining target-release smoke validation.
+
 ## 1.15.2 - 2026-08-21
 
 ### Bug Fixes

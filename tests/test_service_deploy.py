@@ -5331,10 +5331,63 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
         "package_lock_sha256": hashlib.sha256(
             (target / "agent-runtime" / "package-lock.json").read_bytes()
         ).hexdigest(),
+        "install_strategy": "npm_ci",
+        "reused_from": None,
     }
-    assert ["npm", "ci", "--omit=dev", "--ignore-scripts", "--prefix", "agent-runtime"] in calls
+    assert [
+        "npm",
+        "ci",
+        "--omit=dev",
+        "--ignore-scripts",
+        "--prefer-offline",
+        "--no-audit",
+        "--prefix",
+        "agent-runtime",
+    ] in calls
     assert any(command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"] for command in calls)
     assert operations and all("duration_seconds" in item for item in operations)
+
+
+def test_service_upgrade_pi_runtime_reuses_previous_modules_when_lock_matches(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    previous = tmp_path / "previous"
+    target = tmp_path / "target"
+    _write_runtime_target_with_server_deps(previous)
+    _write_runtime_target_with_server_deps(target)
+    previous_module = previous / "agent-runtime" / "node_modules" / "example" / "index.js"
+    previous_module.parent.mkdir(parents=True)
+    previous_module.write_text("module.exports = true;\n", encoding="utf-8")
+    partial_module = target / "agent-runtime" / "node_modules" / "partial" / "index.js"
+    partial_module.parent.mkdir(parents=True)
+    partial_module.write_text("partial\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        pi_runtime = _fake_pi_runtime_prepare(list(command))
+        if pi_runtime is not None:
+            return pi_runtime
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _ensure_release_runtime(
+        target_dir=target,
+        previous_dir=previous,
+        run_cmd=_run_cmd,
+        operations=[],
+    )
+
+    assert out["pi_runtime"]["install_strategy"] == "reuse_previous"
+    assert out["pi_runtime"]["reused_from"] == str(previous / "agent-runtime" / "node_modules")
+    assert (target / "agent-runtime" / "node_modules" / "example" / "index.js").read_text() == (
+        "module.exports = true;\n"
+    )
+    assert not partial_module.exists()
+    assert not any(command[:2] == ["npm", "ci"] for command in calls)
+    assert any(command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"] for command in calls)
 
 
 def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeypatch, tmp_path: Path) -> None:
