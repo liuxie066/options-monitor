@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Serialized expired-position maintenance runs within one runtime root, preventing simultaneous HK/US jobs from competing for SQLite WAL locks and racing shared run pointers.
+
 ## 1.15.1 - 2026-08-21
 
 ### Bug Fixes

@@ -207,8 +207,10 @@ def test_auto_close_expired_main_accepts_explicit_runtime_root(monkeypatch, tmp_
     runtime.mkdir(parents=True)
     cfg_path.write_text("{}", encoding="utf-8")
     calls: list[dict[str, Any]] = []
+    lock_modes: list[int] = []
 
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(mod.fcntl, "flock", lambda _fd, mode: lock_modes.append(mode))
     monkeypatch.setattr(mod, "__file__", str(release / "src" / "application" / "positions" / "auto_close.py"))
     monkeypatch.setattr(
         mod,
@@ -257,6 +259,8 @@ def test_auto_close_expired_main_accepts_explicit_runtime_root(monkeypatch, tmp_
 
     assert rc == 0
     assert calls and calls[0]["base"] == runtime.resolve()
+    assert lock_modes == [mod.fcntl.LOCK_EX]
+    assert (runtime / "locks" / "auto-close-expired.lock").exists()
     assert (runtime / "audit" / "run_logs").is_dir()
     assert (runtime / "output_runs").is_dir()
     assert (runtime / "output_shared" / "state" / "auto_close_expired.json").exists()

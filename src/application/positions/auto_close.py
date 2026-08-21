@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import sys
 from datetime import datetime, timezone
@@ -404,16 +405,21 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[3]
     base = resolve_runtime_root(repo_root=repo_root, runtime_root=args.runtime_root).runtime_root
     config_path = Path(args.config) if args.config else None
-    result = run_auto_close_expired(
-        base=base,
-        config_path=config_path,
-        data_config=args.data_config,
-        accounts=list(args.accounts or []),
-        broker=args.broker,
-        apply_mode=bool(control["write_requested"]),
-        no_send=bool(args.no_send),
-        as_of_ms=_parse_as_of_ms(args.as_of_utc),
-    )
+    # ponytail: one runtime-wide lock; split by ledger only if maintenance throughput ever matters.
+    lock_path = base / "locks" / "auto-close-expired.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        result = run_auto_close_expired(
+            base=base,
+            config_path=config_path,
+            data_config=args.data_config,
+            accounts=list(args.accounts or []),
+            broker=args.broker,
+            apply_mode=bool(control["write_requested"]),
+            no_send=bool(args.no_send),
+            as_of_ms=_parse_as_of_ms(args.as_of_utc),
+        )
     raw_summary = result.get("summary")
     summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
     result = attach_write_contract(
