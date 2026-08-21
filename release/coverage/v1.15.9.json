@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.9",
+  "base": {
+    "tag": "v1.15.8",
+    "commit": "508b4f79bb4ad40ff1d492d2a7a3dbe54eb1aabf"
+  },
+  "reviewed_head": "824db7c7d6eb96ffc2b9f9bbd3370d2164156d38",
+  "commits": [
+    {
+      "sha": "824db7c7d6eb96ffc2b9f9bbd3370d2164156d38",
+      "subject": "fix(performance): validate carried FX provenance"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved validated business-day FX carry-forward conversions during replay so completed historical cash backfills remain idempotent.",
+      "commits": [
+        "824db7c7d6eb96ffc2b9f9bbd3370d2164156d38"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
