@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+## 1.15.10 - 2026-08-22
+
+### Improvements
+- Shortened scheduled Tick task-to-notification latency by deferring non-delivery post-processing until after provider confirmation while preserving run finalization ordering and recording per-stage timing evidence.
+
 ### Bug Fixes
+- Used authoritative OpenD contract terms for dividend-adjusted option positions and failed closed on ambiguous term drift before position reports, lifecycle processing, or Close Advice could consume it.
 - Made the active Assistant model profile the single operator-controlled context budget while preserving and validating the existing Pi startup protocol field.
 
 ## 1.15.9 - 2026-08-21
