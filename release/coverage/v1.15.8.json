@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.8",
+  "base": {
+    "tag": "v1.15.7",
+    "commit": "fcd916e37102f6937e9f084d1354c19a4adcd8f5"
+  },
+  "reviewed_head": "dbd497115bb92635900b1eb8a38536ce112c9c53",
+  "commits": [
+    {
+      "sha": "0513009b0d18ec5eed4e08145080d31b40ba3158",
+      "subject": "ci(release): reuse guardrails for version publishing"
+    },
+    {
+      "sha": "dbd497115bb92635900b1eb8a38536ce112c9c53",
+      "subject": "fix(performance): carry official FX across market closures"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reused successful Guardrails regression results for automatic VERSION-driven releases, removed duplicate local preflight suites, and made `update verify` service-health snapshot timing explicit.",
+      "commits": [
+        "0513009b0d18ec5eed4e08145080d31b40ba3158"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed audited official FX evidence to carry forward across explicitly listed weekend and holiday dates during historical cash-conversion backfills, while preserving the default 24-hour limit and never looking ahead.",
+      "commits": [
+        "dbd497115bb92635900b1eb8a38536ce112c9c53"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
