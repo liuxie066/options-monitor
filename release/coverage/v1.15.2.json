@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.2",
+  "base": {
+    "tag": "v1.15.1",
+    "commit": "f750989c4c5a81ceb9e6f1597c71fd9be01b335a"
+  },
+  "reviewed_head": "392389566522c31666263da71f9a0d1405e4a9b6",
+  "commits": [
+    {
+      "sha": "8c7e719692a9d31a89b8892fa69cca6de7db3bb4",
+      "subject": "fix(positions): serialize expired maintenance runs"
+    },
+    {
+      "sha": "392389566522c31666263da71f9a0d1405e4a9b6",
+      "subject": "fix(notify): preserve pre-wheel brief digests"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved pre-Wheel Daily Brief digests for existing Sell Put, Covered Call, and Combo Yield candidates so historical confirmed deliveries remain valid after Wheel support is enabled.",
+      "commits": [
+        "392389566522c31666263da71f9a0d1405e4a9b6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Serialized expired-position maintenance runs within one runtime root, preventing simultaneous HK/US jobs from competing for SQLite WAL locks and racing shared run pointers.",
+      "commits": [
+        "8c7e719692a9d31a89b8892fa69cca6de7db3bb4"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

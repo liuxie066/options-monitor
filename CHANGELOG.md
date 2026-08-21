@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.15.2 - 2026-08-21
+
 ### Bug Fixes
 - Preserved pre-Wheel Daily Brief digests for existing Sell Put, Covered Call, and Combo Yield candidates so historical confirmed deliveries remain valid after Wheel support is enabled.
 - Serialized expired-position maintenance runs within one runtime root, preventing simultaneous HK/US jobs from competing for SQLite WAL locks and racing shared run pointers.
