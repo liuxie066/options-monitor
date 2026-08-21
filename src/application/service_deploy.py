@@ -44,8 +44,8 @@ DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
 DEFAULT_TIMEOUT_SECONDS = 600
 US_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 America/New_York"
 HK_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong"
-AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 09:00:00 Asia/Shanghai"
-AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 0}
+AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 09:05:00 Asia/Shanghai"
+AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 5}
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
@@ -2044,6 +2044,7 @@ def render_service_bundle(
                 str(runtime),
                 "--auto",
                 "--confirm",
+                "--preserve-activation-state",
             ]
             add(
                 f"systemd/{upgrade_service}",
@@ -2538,6 +2539,7 @@ def render_service_bundle(
                 str(runtime),
                 "--auto",
                 "--confirm",
+                "--preserve-activation-state",
             ]
             add(
                 f"launchd/{upgrade_label}.plist",
