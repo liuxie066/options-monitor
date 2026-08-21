@@ -71,7 +71,9 @@ macOS 从 Keychain 读取；Linux systemd unit 通过选定的逐 unit credentia
 
 调度语义：
 
-- 常规 producer 每 15 分钟执行 `refresh --no-deep`；
+- 常规 producer 每 15 分钟执行 `refresh --no-deep`；quality-monitored account 从交易日
+  `08:30` 到日终窗口每次常规 refresh 都重新读取 OpenD 当前合约条款，避免账本未变但
+  公司行动或遗漏 intake 已改变 broker positions 时沿用旧证据；
 - `recheck-due` 每 1 分钟只比较控制状态哈希和差异到期时间；无变化时不重建
   artifact，也不访问 OpenD；
 - 持仓首次差异保存 `next_recheck_at_utc=+1m`，第二次窗口到 `+5m`；
@@ -79,8 +81,7 @@ macOS 从 Keychain 读取；Linux systemd unit 通过选定的逐 unit credentia
 - 日终分别在所属市场时区周一至周五 `16:30` 执行
   `refresh --day-end-strict`，首次确定性差异立即阻断；
 - 单市场日终刷新保留另一市场最近一次有效数据集，不把未请求市场误删；
-- OpenD 权威查询不是固定分钟轮询，只在 baseline、ledger 变化、差异到期、
-  日终或人工强制时发生。
+- 其余 OpenD 权威查询仍由 baseline、ledger 变化、差异到期、日终或人工强制触发。
 
 systemd renderer 默认不改变现有部署。生产准备时显式加入：
 

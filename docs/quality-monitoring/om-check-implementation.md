@@ -25,7 +25,7 @@
 | `OM-LED-001` | `src/application/quality/ledger_checks.py::build_ledger_datasets` | `test_full_replay_mismatch_blocks_position_consumers` | `option_position_report`、`lifecycle`、`close_advice` |
 | `OM-LED-002` | 同上 | `test_duplicate_broker_identity_with_economic_conflict_is_blocking` | 同上 |
 | `OM-POS-001` | `src/application/quality/position_checks.py::build_position_dataset` | schema-valid service fixture；OpenD completeness 回归 | `option_position_report`、`lifecycle`、`close_advice` |
-| `OM-POS-002` | 同上 | exact-match、transient、5 分钟 persistent 三态回归 | 同上 |
+| `OM-POS-002` | 同上 | 持仓 code lineage 对比当前 snapshot 条款；换仓反例、lifecycle 优先级、Scheduled Tick account/market gate、transient、5 分钟 persistent 回归 | 同上 |
 | `OM-LCY-001` | `src/application/quality/lifecycle_checks.py::build_lifecycle_datasets` | 周末/假日 deadline；11 条 stale 固定回归 | `lifecycle`、`close_advice` |
 | `OM-LCY-002` | 同上 | external adjustment 与 legacy gap 分离回归 | 受影响的 `lifecycle`、`close_advice` |
 | `OM-LCY-003` | 同上 | legacy history 独立 dataset 回归 | 受影响历史报告 |
@@ -37,11 +37,11 @@
 |---|---|---|
 | 原子 artifact | `src/infrastructure/quality/artifact_repository.py` | schema-valid service 发布测试 |
 | 控制状态 | `src/infrastructure/quality/control_state_repository.py` | transient→persistent、首次 deep reconcile 测试 |
-| OpenD 只读快照 | `src/infrastructure/quality/opend_position_adapter.py` | fake adapter 与 position/lifecycle 测试 |
+| OpenD 只读快照 | `src/infrastructure/quality/opend_position_adapter.py` | fake adapter、请求市场隔离与 position/lifecycle 测试 |
 | CLI | `src/interfaces/quality/cli.py` | 复用同一 service/artifact |
 | HTTP | `src/interfaces/quality/http.py` | bearer auth、ETag、`no-store`、只读 artifact 测试 |
 | Agent tool | `src/application/agent_tools/quality.py` | agent contract/plugin smoke 全量回归 |
-| 本地门禁 | `src/application/quality/gate.py` | onboarding 前无效；onboarding 后按 account/market/consumer 阻断；stale fail closed |
+| 本地门禁 | `src/application/quality/gate.py` | onboarding 前无效；onboarding 后按 account/market/consumer 阻断；目标持仓数据集缺失/重复和 stale 均 fail closed |
 
 本地门禁已接入 `option_positions_read`、option performance、持仓物化/报告和 close-advice 读取/生成边界。消费者名称与 payload 中的 `blocked_consumers` 使用同一稳定标识。普通候选扫描不依赖持仓质量，不受无关异常影响。producer 与 gate 都不依赖 Hub 在线；Hub 只消费已发布的 V1 状态。
 

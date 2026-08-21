@@ -71,11 +71,62 @@ def test_gate_is_inactive_before_onboarding(monkeypatch, tmp_path: Path) -> None
 
 def test_gate_blocks_only_matching_account_after_onboarding(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
-    service = _service(tmp_path, _payload(blocked=True))
+    payload = _payload(blocked=True)
+    payload["datasets"].append(
+        {
+            **payload["datasets"][0],
+            "scope": {"account": "sy", "market": "us"},
+            "status": "trusted",
+            "required_evidence_complete": True,
+            "usable_for": ["close_advice"],
+            "blocked_consumers": [],
+            "blocked_by": [],
+            "reason_codes": [],
+        }
+    )
+    service = _service(tmp_path, payload)
     with pytest.raises(QualityGateBlocked) as exc:
         assert_quality_allows("close_advice", account="lx", market="us", service=service)
     assert exc.value.blocked_by == ("OM-POS-002",)
     assert_quality_allows("close_advice", account="sy", market="us", service=service)
+
+
+def test_gate_fails_closed_when_target_position_dataset_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+
+    with pytest.raises(QualityGateBlocked) as exc:
+        assert_quality_allows(
+            "close_advice",
+            account="sy",
+            market="us",
+            service=_service(tmp_path, _payload()),
+        )
+
+    assert exc.value.reason_code == "QUALITY_DATASET_UNAVAILABLE"
+    assert exc.value.blocked_by == ("OM-POS-001",)
+
+
+def test_gate_fails_closed_when_target_position_dataset_is_ambiguous(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    payload = _payload()
+    payload["datasets"].append(dict(payload["datasets"][0]))
+
+    with pytest.raises(QualityGateBlocked) as exc:
+        assert_quality_allows(
+            "close_advice",
+            account="lx",
+            market="us",
+            service=_service(tmp_path, payload),
+        )
+
+    assert exc.value.reason_code == "QUALITY_DATASET_AMBIGUOUS"
+    assert exc.value.blocked_by == ("OM-POS-001",)
 
 
 def test_gate_fails_closed_on_stale_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -84,6 +135,28 @@ def test_gate_fails_closed_on_stale_artifact(monkeypatch, tmp_path: Path) -> Non
     with pytest.raises(QualityGateBlocked) as exc:
         assert_quality_allows("close_advice", service=_service(tmp_path, _payload(observed_at=stale)))
     assert exc.value.reason_code == "QUALITY_STATUS_STALE"
+
+
+def test_gate_fails_closed_on_stale_position_source_inside_fresh_artifact(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "1")
+    payload = _payload()
+    payload["datasets"][0]["freshness"]["observed_at_utc"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+
+    with pytest.raises(QualityGateBlocked) as exc:
+        assert_quality_allows(
+            "close_advice",
+            account="lx",
+            market="us",
+            service=_service(tmp_path, payload),
+        )
+
+    assert exc.value.reason_code == "QUALITY_DATASET_STALE"
+    assert exc.value.blocked_by == ("OM-POS-001",)
 
 
 def test_shadow_lifecycle_summary_never_changes_legacy_gate_authority(

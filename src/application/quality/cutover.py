@@ -24,6 +24,7 @@ QUALITY_CURRENT_CONSUMERS = (
     "agent_tools.materialization:assert_quality_allows",
     "agent_tools.materialization_impl:assert_quality_allows",
     "agent_tools.positions:assert_quality_allows",
+    "application.tick_account_execution:assert_quality_allows",
     "agent_tools.quality:read_published",
     "interfaces.quality.cli:read_published",
     "interfaces.quality.http:read_published",

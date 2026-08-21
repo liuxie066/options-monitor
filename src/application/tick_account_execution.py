@@ -58,6 +58,7 @@ from src.application.ledger.api import (
     open_position_ledger_from_data_config,
     resolve_position_data_config_path,
 )
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from src.application.required_data_snapshot import (
     RequiredDataSnapshotError,
     load_required_data_snapshot_manifest,
@@ -276,6 +277,43 @@ def _build_close_advice_barrier_plan(
         position_records_by_account=records_by_account,
         unavailable_by_account=unavailable,
     )
+    blocked_markets_by_account: dict[str, dict[str, str]] = {}
+    for account, account_plan in sorted((plan.get("accounts") or {}).items()):
+        if not isinstance(account_plan, Mapping):
+            continue
+        markets = sorted(
+            {
+                str(requirement.get("market") or "").strip().upper()
+                for requirement in account_plan.get("requirements") or []
+                if isinstance(requirement, Mapping)
+                and str(requirement.get("planning_status") or "ready") == "ready"
+                and str(requirement.get("market") or "").strip().upper()
+                in {"US", "HK"}
+            }
+        )
+        for market in markets:
+            try:
+                assert_quality_allows(
+                    "close_advice",
+                    account=account,
+                    market=market.lower(),
+                )
+            except QualityGateBlocked as exc:
+                blocked_markets_by_account.setdefault(account, {})[market] = (
+                    f"quality_gate_blocked:{exc.reason_code}"
+                )
+    if blocked_markets_by_account:
+        plan = build_close_advice_required_data_plan(
+            run_id=request.run_id,
+            run_started_at_utc=run_started_at_utc,
+            business_date=expiration_business_today(run_started_at_utc),
+            account_configs=scanning_configs,
+            base_config=request.base_cfg,
+            markets_to_run=request.markets_to_run,
+            position_records_by_account=records_by_account,
+            unavailable_by_account=unavailable,
+            blocked_markets_by_account=blocked_markets_by_account,
+        )
     merged_config, plan = merge_close_advice_requirements_into_prefetch_config(
         candidate_config=candidate_config,
         requirements_plan=plan,

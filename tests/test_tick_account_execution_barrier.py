@@ -370,6 +370,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     prepared_option_calls: list[dict] = []
     prefetch_calls: list[dict] = []
     account_requests = []
+    quality_gate_calls: list[tuple[str, str | None, str | None]] = []
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
     monkeypatch.setattr(
@@ -401,6 +402,13 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         "list_position_lot_snapshots",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("close-advice planning must reuse prepared rows")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "assert_quality_allows",
+        lambda consumer, *, account=None, market=None: quality_gate_calls.append(
+            (consumer, account, market)
         ),
     )
 
@@ -469,6 +477,10 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         requirement["position_lot_id"]
         for requirement in merged_requirements
     } == {"lot-lx", "lot-sy"}
+    assert quality_gate_calls == [
+        ("close_advice", "lx", "us"),
+        ("close_advice", "sy", "us"),
+    ]
     plan_path = (
         request.run_dir
         / "state"
@@ -482,6 +494,210 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         for item in account_requests
     )
     assert outcome.prefetch_invocation_count == 1
+
+
+def test_close_advice_quality_gate_blocks_only_affected_account_market(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.quality.gate import QualityGateBlocked
+
+    request = _request(
+        tmp_path,
+        accounts=["lx", "sy"],
+        workers=1,
+        force=False,
+    )
+    account_config = {
+        "portfolio": {"broker": "富途"},
+        "close_advice": {"enabled": True},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {
+                    "source": "opend",
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                },
+            }
+        ],
+    }
+    records = {
+        account: [
+            {
+                "record_id": f"lot-{account}",
+                "fields": {
+                    "broker": "富途",
+                    "account": account,
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "side": "short",
+                    "option_type": "put",
+                    "contracts_open": 1,
+                    "strike": 100,
+                    "expiration_ymd": "2026-08-28",
+                },
+            }
+        ]
+        for account in ("lx", "sy")
+    }
+    gate_calls: list[tuple[str, str]] = []
+
+    def _quality_gate(
+        _consumer: str,
+        *,
+        account: str | None = None,
+        market: str | None = None,
+    ) -> None:
+        gate_calls.append((str(account), str(market)))
+        if account == "lx":
+            raise QualityGateBlocked(
+                "close_advice",
+                "POSITION_CONTRACT_TERMS_DRIFT",
+                ("OM-POS-002",),
+            )
+
+    monkeypatch.setattr(mod, "assert_quality_allows", _quality_gate)
+    state_dir = request.run_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    merged, plan_path = mod._build_close_advice_barrier_plan(
+        request=request,
+        scanning_configs={
+            "lx": account_config,
+            "sy": account_config,
+        },
+        candidate_config=request.base_cfg,
+        run_state_dir=state_dir,
+        run_started_at_utc=datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
+        position_records_by_account=records,
+    )
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert gate_calls == [("lx", "us"), ("sy", "us")]
+    assert plan["accounts"]["lx"]["status"] == "partial"
+    assert plan["accounts"]["lx"]["requirements"] == []
+    assert plan["accounts"]["lx"]["planning_errors"] == [
+        {
+            "reason": (
+                "quality_gate_blocked:POSITION_CONTRACT_TERMS_DRIFT"
+            ),
+            "position_lot_id": "lot-lx",
+            "quote_key": "NVDA|put|2026-08-28|100.000000",
+        }
+    ]
+    assert plan["accounts"]["sy"]["status"] == "ready"
+    merged_requirements = [
+        requirement
+        for item in merged.get("symbols") or []
+        for requirement in item.get(
+            "_close_advice_position_requirements",
+            [],
+        )
+    ]
+    assert [item["position_lot_id"] for item in merged_requirements] == [
+        "lot-sy"
+    ]
+
+
+def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.quality import gate as quality_gate_module
+    from src.infrastructure.quality.artifact_repository import (
+        QualityArtifactRepository,
+    )
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    account_config = {
+        "portfolio": {"broker": "富途"},
+        "close_advice": {"enabled": True},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {
+                    "source": "opend",
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                },
+            }
+        ],
+    }
+    records = {
+        "lx": [
+            {
+                "record_id": "lot-lx",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "side": "short",
+                    "option_type": "put",
+                    "contracts_open": 1,
+                    "strike": 100,
+                    "expiration_ymd": "2026-08-28",
+                },
+            }
+        ]
+    }
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    artifact_path = tmp_path / "quality" / "status.json"
+    QualityArtifactRepository(artifact_path).write_atomic(
+        {
+            "schema_version": "investment.quality_status.v1",
+            "observed_at_utc": observed_at,
+            "datasets": [
+                {
+                    "dataset_id": "om.option_positions",
+                    "scope": {"account": "sy", "market": "us"},
+                    "freshness": {"observed_at_utc": observed_at},
+                    "usable_for": ["close_advice"],
+                    "blocked_consumers": [],
+                }
+            ],
+        }
+    )
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    monkeypatch.setattr(
+        quality_gate_module,
+        "default_quality_artifact_path",
+        lambda: artifact_path,
+    )
+    state_dir = request.run_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    merged, plan_path = mod._build_close_advice_barrier_plan(
+        request=request,
+        scanning_configs={"lx": account_config},
+        candidate_config=request.base_cfg,
+        run_state_dir=state_dir,
+        run_started_at_utc=datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
+        position_records_by_account=records,
+    )
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["accounts"]["lx"]["status"] == "partial"
+    assert plan["accounts"]["lx"]["requirements"] == []
+    assert plan["accounts"]["lx"]["planning_errors"] == [
+        {
+            "reason": "quality_gate_blocked:QUALITY_DATASET_UNAVAILABLE",
+            "position_lot_id": "lot-lx",
+            "quote_key": "NVDA|put|2026-08-28|100.000000",
+        }
+    ]
+    assert all(
+        not item.get("_close_advice_position_requirements")
+        for item in merged.get("symbols") or []
+    )
 
 
 def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(

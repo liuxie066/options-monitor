@@ -551,6 +551,30 @@ def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(
     ]
 
 
+def test_authoritative_position_terms_refresh_every_fifteen_minutes_in_window() -> None:
+    trading_day = date(2026, 7, 13)
+
+    before_window = OMQualityService._next_authoritative_refresh_due(
+        now=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        market="us",
+        trading_days=[trading_day],
+    )
+    during_window = OMQualityService._next_authoritative_refresh_due(
+        now=datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc),
+        market="us",
+        trading_days=[trading_day],
+    )
+    after_window = OMQualityService._next_authoritative_refresh_due(
+        now=datetime(2026, 7, 13, 22, 0, tzinfo=timezone.utc),
+        market="us",
+        trading_days=[trading_day],
+    )
+
+    assert before_window == datetime(2026, 7, 13, 12, 30, tzinfo=timezone.utc)
+    assert during_window == datetime(2026, 7, 13, 14, 15, tzinfo=timezone.utc)
+    assert after_window == datetime(2026, 7, 14, 12, 30, tzinfo=timezone.utc)
+
+
 def test_single_market_day_end_refresh_preserves_other_market(
     monkeypatch,
     tmp_path: Path,
