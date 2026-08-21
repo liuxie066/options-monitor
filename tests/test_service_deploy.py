@@ -206,7 +206,7 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "RuntimeMaxSec=" not in "\n".join(item["content"] for item in files.values())
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
-    assert "OnCalendar=*-*-* 09:00:00 Asia/Shanghai" in auto_close_timer
+    assert "OnCalendar=*-*-* 09:05:00 Asia/Shanghai" in auto_close_timer
     assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
     assert "verify-projection --mode auto" in verify
     assert "[Install]\nWantedBy=multi-user.target" not in verify
@@ -1433,7 +1433,7 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     (systemd_root / "options-monitor-auto-close-us.timer").write_text(
         (systemd_root / "options-monitor-auto-close-us.timer")
         .read_text(encoding="utf-8")
-        .replace("OnCalendar=*-*-* 09:00:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
+        .replace("OnCalendar=*-*-* 09:05:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
         encoding="utf-8",
     )
     (systemd_root / "options-monitor-projection-verify.timer").write_text(
@@ -2315,7 +2315,7 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
 
     assert str(repo / "om") + " update apply" in service
     assert "--repo-root " + str(repo) in service
-    assert "--auto --confirm" in service
+    assert "--auto --confirm --preserve-activation-state" in service
     assert "OnCalendar=*-*-* 06:10:00 Asia/Shanghai" in timer
     assert profile["auto_upgrade"]["enabled"] is True
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
@@ -4047,7 +4047,7 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert "<key>Hour</key>" in auto_close
     assert "<integer>9</integer>" in auto_close
     assert "<key>Minute</key>" in auto_close
-    assert "<integer>0</integer>" in auto_close
+    assert "<integer>5</integer>" in auto_close
     assert "<string>com.options-monitor.projection-verify</string>" in verify
     assert "<key>Hour</key>" in verify
     assert "<integer>9</integer>" in verify
@@ -4085,6 +4085,7 @@ def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert "<string>com.options-monitor.upgrade</string>" in upgrade
     assert "update" in upgrade
     assert "apply" in upgrade
+    assert "--preserve-activation-state" in upgrade
     assert "<key>Hour</key>" in upgrade
     assert "<integer>6</integer>" in upgrade
     assert "<key>Minute</key>" in upgrade
