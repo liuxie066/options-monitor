@@ -4141,6 +4141,38 @@ def _format_cell(value: Any) -> str:
     return str(value).replace("|", "\\|")
 
 
+def _analysis_catalog_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    selected_views = _requested_views(payload.get("views") or payload.get("view"))
+    model_value_fields = [
+        "view_count",
+        "view_names",
+        "metric_policy",
+        "sql_rules",
+        "query_patterns",
+    ]
+    if len(selected_views) == 1:
+        model_value_fields.extend(
+            ["views", "field_types", "aggregation_policies", "join_policies"]
+        )
+    return {
+        "schema_version": "analysis_catalog.output.v2",
+        # Catalog output is evidence for follow-up planning, not a final answer surface.
+        "source_label": "OM read-only analysis workspace",
+        "primary_rows": "views",
+        "row_count_field": "view_count",
+        "fact_fields": [
+            "view_count",
+            "view_names[]",
+            "metric_policy.primary_profit",
+            "metric_policy.cash_movement",
+            "metric_policy.premium_activity",
+            "sql_rules.allowed_statements[]",
+            "sql_rules.writes_allowed",
+        ],
+        "model_value_fields": model_value_fields,
+    }
+
+
 ANALYSIS_CATALOG_TOOL = build_agent_tool(
     name="analysis_catalog",
     description=(
@@ -4165,22 +4197,8 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
-    output_contract={
-        "schema_version": "analysis_catalog.output.v2",
-        # Catalog output is evidence for follow-up planning, not a final answer surface.
-        "source_label": "OM read-only analysis workspace",
-        "primary_rows": "views",
-        "row_count_field": "view_count",
-        "fact_fields": [
-            "view_count",
-            "view_names[]",
-            "metric_policy.primary_profit",
-            "metric_policy.cash_movement",
-            "metric_policy.premium_activity",
-            "sql_rules.allowed_statements[]",
-            "sql_rules.writes_allowed",
-        ],
-    },
+    output_contract=_analysis_catalog_output_contract({}),
+    output_contract_resolver=_analysis_catalog_output_contract,
     copilot_input_fields=("config_key", "view"),
 )
 

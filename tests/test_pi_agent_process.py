@@ -1417,6 +1417,34 @@ def test_final_answer_must_match_proposed_candidate(tmp_path, field, value):
     assert result["error"]["code"] == "PROTOCOL_ERROR"
 
 
+def test_length_answer_is_rejected_before_admission(tmp_path):
+    proposal = {
+        "status": "answered",
+        "text": "我",
+        "control_request": None,
+        "termination_reason": "length",
+        "usage": {},
+    }
+    entry = _write_fake(
+        tmp_path,
+        _fake_protocol_child([("run.proposed", proposal)]),
+    )
+    proposals = []
+
+    result = run_pi_agent(
+        _start_payload(),
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_proposed=lambda value: proposals.append(value) or "commit",
+        runtime_entry=entry,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+    assert proposals == []
+
+
 @pytest.mark.parametrize("decision", ["commit", "discard"])
 def test_deadline_after_admission_does_not_send_cancel(
     tmp_path, monkeypatch, decision
@@ -3145,19 +3173,15 @@ def test_loopback_host_abort_cancels_inflight_request():
     assert completed[0]["attempt_count"] == 1
 
 
-@pytest.mark.parametrize(
-    ("second_reason", "expected_reason"),
-    [("stop", "stop"), ("length", "length")],
-)
 def test_loopback_length_continuation_is_canonical_and_tool_free(
-    tmp_path, second_reason, expected_reason
+    tmp_path,
 ):
-    database = tmp_path / f"continuation_{second_reason}.sqlite3"
-    session_id = derive_pi_session_id("feishu", second_reason, "group-1", "key:us")
+    database = tmp_path / "continuation_stop.sqlite3"
+    session_id = derive_pi_session_id("feishu", "stop", "group-1", "key:us")
     events: list[dict] = []
     with _loopback_server([
         {"body": _chat_response(text="first", finish_reason="length", usage=(3, 2))},
-        {"body": _chat_response(text="second", finish_reason=second_reason, usage=(4, 3))},
+        {"body": _chat_response(text="second", finish_reason="stop", usage=(4, 3))},
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3168,8 +3192,8 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
         )
         result = run_pi_agent(
             payload,
-            request_id=f"req_continue_{second_reason}",
-            run_id=f"run_continue_{second_reason}",
+            request_id="req_continue_stop",
+            run_id="run_continue_stop",
             timeout_seconds=6,
             on_event=events.append,
             on_proposed=lambda _proposal: "commit",
@@ -3178,7 +3202,7 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
 
     assert result["ok"] is True, result
     assert result["result"]["text"] == "firstsecond"
-    assert result["result"]["termination_reason"] == expected_reason
+    assert result["result"]["termination_reason"] == "stop"
     assert result["result"]["usage"]["totalTokens"] == 12
     assert len(requests) == 2
     assert "tools" in requests[0]["payload"]
@@ -3193,6 +3217,42 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
     assert messages[-1]["content"] == [{"type": "text", "text": "firstsecond"}]
     assert messages[-1]["usage"]["totalTokens"] == 12
     assert CONTINUATION_PROMPT_FOR_TEST not in json.dumps(entries)
+
+
+def test_loopback_length_after_tool_chain_continues_and_commits_canonical_turn(tmp_path):
+    database = tmp_path / "tool_chain_continuation.sqlite3"
+    session_id = derive_pi_session_id("feishu", "tool-chain", "group-1", "key:us")
+    with _loopback_server([
+        {"body": _chat_response(tool_call=True)},
+        {"body": _chat_response(text="first", finish_reason="length", usage=(3, 2))},
+        {"body": _chat_response(text="second", finish_reason="stop", usage=(4, 3))},
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            tools=[_READ_TOOL],
+        )
+        result = run_pi_agent(
+            payload,
+            request_id="req_tool_chain_continue",
+            run_id="run_tool_chain_continue",
+            timeout_seconds=6,
+            on_tool_call=lambda _call: {"ok": True, "status": "healthy"},
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "firstsecond"
+    assert result["result"]["termination_reason"] == "stop"
+    assert len(requests) == 3
+    assert "tools" in requests[1]["payload"]
+    assert requests[2]["payload"].get("tools") in (None, [])
+    assert CONTINUATION_PROMPT_FOR_TEST in json.dumps(requests[2]["payload"])
+    entries = _session_entries(database, session_id)
+    assert CONTINUATION_PROMPT_FOR_TEST not in json.dumps(entries)
+    assert "firstsecond" in json.dumps(entries)
 
 
 def test_loopback_length_not_continued_without_iteration_budget():
@@ -3210,10 +3270,36 @@ def test_loopback_length_not_continued_without_iteration_budget():
             environ=_provider_env(),
         )
 
-    assert result["ok"] is True, result
-    assert result["result"]["text"] == "partial"
-    assert result["result"]["termination_reason"] == "length"
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED"
+    assert "partial" not in json.dumps(result)
     assert len(requests) == 1
+
+
+def test_loopback_repeated_length_fails_closed_without_session_commit(tmp_path):
+    database = tmp_path / "repeated_length.sqlite3"
+    session_id = derive_pi_session_id("feishu", "repeated", "group-1", "key:us")
+    proposals: list[dict] = []
+    with _loopback_server([
+        {"body": _chat_response(text="first", finish_reason="length")},
+        {"body": _chat_response(text="second", finish_reason="length")},
+    ]) as (root, requests):
+        result = run_pi_agent(
+            _provider_payload("deepseek", root, session_id=session_id),
+            request_id="req_repeated_length",
+            run_id="run_repeated_length",
+            timeout_seconds=6,
+            on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert len(requests) == 2
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED"
+    assert "first" not in json.dumps(result)
+    assert "second" not in json.dumps(result)
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
 
 
 def test_loopback_failed_length_continuation_does_not_commit_partial(tmp_path):

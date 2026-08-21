@@ -743,6 +743,52 @@ def test_observation_projection_preserves_source_scope_and_coverage() -> None:
     assert observation["coverage"] == {"broker_settlement": "not_observed"}
 
 
+def test_analysis_catalog_observation_is_bounded_and_payload_aware(monkeypatch) -> None:
+    from src.application.agent_tools import analysis as analysis_module
+    from src.application.agent_tools.analysis import ANALYSIS_CATALOG_TOOL
+
+    monkeypatch.setattr(
+        analysis_module,
+        "load_runtime_config",
+        lambda **_kwargs: ("config.us.json", {}),
+    )
+    monkeypatch.setattr(analysis_module, "mask_path", lambda value: str(value))
+
+    catalog, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call({"config_key": "us"})
+    summary = copilot_tools.compact_observation(
+        "analysis_catalog",
+        {"ok": True, "data": catalog},
+        {"config_key": "us"},
+    )
+
+    assert set(summary["value"]) == {
+        "view_count",
+        "view_names",
+        "metric_policy",
+        "sql_rules",
+        "query_patterns",
+    }
+    assert "views" not in summary["value"]
+    assert len(json.dumps(summary, ensure_ascii=False)) < 16_000
+
+    selected = "option_monthly_performance"
+    detail_catalog, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+        {"config_key": "us", "view": selected}
+    )
+    detail = copilot_tools.compact_observation(
+        "analysis_catalog",
+        {"ok": True, "data": detail_catalog},
+        {"config_key": "us", "view": selected},
+    )
+
+    assert set(detail["value"]["views"]) == {selected}
+    assert set(detail["value"]["field_types"]) == {selected}
+    assert set(detail["value"]["aggregation_policies"]) == {selected}
+    assert set(detail["value"]["join_policies"]) == {selected}
+    assert len(catalog["views"]) > 1
+    assert "anti_patterns" in catalog
+
+
 def test_error_observation_is_structured_and_bounded() -> None:
     observation = copilot_tools.compact_observation(
         "analysis_query",

@@ -690,8 +690,8 @@ def _validate_terminal_payload(payload: dict[str, Any], final: bool) -> None:
     if status == "answered":
         if payload["control_request"] is not None:
             raise ValueError("answered terminal control_request must be null")
-        if reason not in {"stop", "length"}:
-            raise ValueError("answered termination_reason must be stop or length")
+        if reason != "stop":
+            raise ValueError("answered termination_reason must be stop")
     elif status == "control_requested":
         if payload["text"] != "" or reason != "control_preview_requested":
             raise ValueError("control_requested terminal fields are invalid")
