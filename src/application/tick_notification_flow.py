@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -92,6 +93,7 @@ class TickNotificationRequest:
     scheduler_decisions_by_account: dict[str, dict[str, Any]] | None = None
     scheduled_scan_targets_by_account: dict[str, str | None] | None = None
     commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None
+    post_delivery_sidecars_fn: Callable[[], None] | None = None
     delivery_only: bool = False
     trigger_kind: str = "manual"
 
@@ -152,13 +154,28 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         )
         return rc
 
-    daily_brief_prep = _prepare_daily_brief_notification(request)
+    daily_brief_prepare_started = monotonic()
+    try:
+        daily_brief_prep = _prepare_daily_brief_notification(request)
+    finally:
+        _record_tick_latency(
+            request,
+            stage="daily_brief_prepare",
+            started=daily_brief_prepare_started,
+        )
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
     results_count = len(request.results)
 
-    _commit_scan_targets_before_delivery(request)
-    _observe_recommendation_points_best_effort(request)
+    scheduler_target_commit_started = monotonic()
+    try:
+        _commit_scan_targets_before_delivery(request)
+    finally:
+        _record_tick_latency(
+            request,
+            stage="scheduler_target_commit",
+            started=scheduler_target_commit_started,
+        )
 
     if str(request.trigger_kind or "manual").strip().lower() != "scheduled":
         reason = "non_scheduled_ordinary_notification_disabled"
@@ -169,6 +186,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             status="skip",
             extra={"trigger_kind": request.trigger_kind, "provider_attempted": False},
         )
+        _run_post_delivery_sidecars_best_effort(request)
         return finish_success(
             lambda: finalize_no_account_notification(
                 base=request.base,
@@ -205,6 +223,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     if daily_brief_prep.multi_market_delivery_unsupported:
         error_code = "daily_brief_multi_market_delivery_unsupported"
         _record_daily_brief_multi_market_failure(request, daily_brief_prep)
+        _observe_recommendation_points_best_effort(request)
+        _run_post_delivery_sidecars_best_effort(request)
         rc = finalize_no_account_notification(
             base=request.base,
             run_id=request.run_id,
@@ -234,6 +254,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         daily_brief_prep.blocked_error_code
         and not bool(prepared_messages.threshold_met)
     ):
+        _observe_recommendation_points_best_effort(request)
+        _run_post_delivery_sidecars_best_effort(request)
         return finish_retry_blocker(daily_brief_prep.blocked_error_code)
 
     if not bool(prepared_messages.threshold_met):
@@ -271,6 +293,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 no_send=request.no_send,
             ),
         )
+        _observe_recommendation_points_best_effort(request)
+        _run_post_delivery_sidecars_best_effort(request)
         if request.delivery_only:
             request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
         request.audit_helper.guard_mark_success()
@@ -333,6 +357,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         )
     except ValueError as err:
         request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
+        _observe_recommendation_points_best_effort(request)
+        _run_post_delivery_sidecars_best_effort(request)
         raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
     request.audit_helper.audit(
@@ -375,6 +401,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     )
     if str(notify_delivery.get("action") or "") == "skip_quiet_hours":
         if daily_brief_prep.blocked_error_code:
+            _observe_recommendation_points_best_effort(request)
+            _run_post_delivery_sidecars_best_effort(request)
             return finish_retry_blocker(daily_brief_prep.blocked_error_code)
         quiet_window = str(notify_delivery.get("quiet_window") or "")
         request.runlog.safe_event("notify", "skip", message=f"in quiet hours ({quiet_window})")
@@ -399,6 +427,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 conversation_scope=perception_scope,
             ),
         )
+        _observe_recommendation_points_best_effort(request)
+        _run_post_delivery_sidecars_best_effort(request)
         request.audit_helper.guard_mark_success()
         request.complete_tick_idempotency_fn(status="skipped", message="quiet_hours")
         return 0
@@ -430,12 +460,15 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     fallback_attempt_count = 0
     ambiguous_send_count = 0
     duplicate_risk_count = 0
+    provider_delivery_started = monotonic()
     if bool(notify_delivery.get("should_send")):
         assert delivery_batch is not None
         try:
             delivery_adapter = select_notification_delivery_adapter(provider)
         except ValueError as err:
             request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
+            _observe_recommendation_points_best_effort(request)
+            _run_post_delivery_sidecars_best_effort(request)
             raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
         def _send_with_route_notifications(**kwargs: Any) -> Any:
@@ -488,6 +521,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         would_send_accounts = list(account_messages.keys())
         sent_accounts = [] if request.delivery_only else list(would_send_accounts)
         request.runlog.safe_event("notify", "skip", message="no_send mode")
+
+    _record_tick_latency(
+        request,
+        stage="provider_delivery",
+        started=provider_delivery_started,
+    )
+    _observe_recommendation_points_best_effort(request)
+    _run_post_delivery_sidecars_best_effort(request)
 
     _audit_notification_perception(
         request,
@@ -680,6 +721,7 @@ def _observe_recommendation_points_best_effort(
 ) -> None:
     """Capture official scheduled points without changing production control flow."""
 
+    started = monotonic()
     try:
         _observe_recommendation_points(request)
     except Exception as exc:
@@ -690,6 +732,60 @@ def _observe_recommendation_points_best_effort(
             reason_code="official_point_observer_failed",
             message=str(exc),
         )
+    finally:
+        _record_tick_latency(
+            request,
+            stage="recommendation_point_observer",
+            started=started,
+        )
+
+
+def _record_tick_latency(
+    request: TickNotificationRequest,
+    *,
+    stage: str,
+    started: float,
+    data: Mapping[str, Any] | None = None,
+) -> int:
+    duration_ms = max(0, int((monotonic() - started) * 1000))
+    try:
+        request.runlog.safe_event(
+            "tick_latency",
+            "ok",
+            duration_ms=duration_ms,
+            data={"stage": stage, **dict(data or {})},
+        )
+    except Exception:
+        pass
+    return duration_ms
+
+
+def _run_post_delivery_sidecars_best_effort(
+    request: TickNotificationRequest,
+) -> None:
+    callback = request.post_delivery_sidecars_fn
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as exc:
+        request.audit_helper.audit(
+            "observe",
+            "post_delivery_sidecars_failed",
+            run_id=request.run_id,
+            status="degraded",
+            message=str(exc),
+            extra={"exception_type": type(exc).__name__},
+        )
+        try:
+            request.runlog.safe_event(
+                "post_delivery_sidecars",
+                "degraded",
+                message=str(exc),
+                data={"exception_type": type(exc).__name__},
+            )
+        except Exception:
+            pass
 
 
 def _observe_recommendation_points(request: TickNotificationRequest) -> None:

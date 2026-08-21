@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any, Callable, TypeVar
 
 from domain.domain.engine import decide_account_scan_gate
@@ -187,6 +188,17 @@ class TickAccountExecutionRequest:
 
 
 @dataclass(frozen=True)
+class RuntimePortfolioSnapshotShadowTask:
+    account: str
+    account_config_authority: AccountRunConfigAuthority | None
+    prepared_portfolio_manifest_path: Path | None
+    prepared_portfolio_manifest_sha256: str | None
+    prepared_option_manifest_path: Path | None
+    prepared_option_manifest_sha256: str | None
+    required_data_manifest_path: Path | None
+
+
+@dataclass(frozen=True)
 class TickAccountExecutionOutcome:
     results: list[Any]
     account_metrics: list[dict[str, Any]]
@@ -198,6 +210,9 @@ class TickAccountExecutionOutcome:
     snapshot_status: str | None = None
     snapshot_manifest_sha256: str | None = None
     prepared_context_metrics: tuple[dict[str, Any], ...] = ()
+    runtime_portfolio_snapshot_shadow_tasks: tuple[
+        RuntimePortfolioSnapshotShadowTask, ...
+    ] = ()
 
 
 def _build_close_advice_barrier_plan(
@@ -327,6 +342,7 @@ def _build_close_advice_barrier_plan(
 
 
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
+    pre_account_execution_started = monotonic()
     try:
         account_ids = [normalize_account_label(item) for item in request.account_ids]
     except ValueError as exc:
@@ -778,6 +794,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             "start",
             data={"accounts": sorted(scanning_configs)},
         )
+        required_data_prefetch_started = monotonic()
         try:
             if not scanning_configs:
                 raise PreparedPortfolioContextError(
@@ -841,6 +858,9 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             request.runlog.safe_event(
                 "fetch_chain_cache",
                 "ok" if snapshot_status in {"complete", "partial"} else "error",
+                duration_ms=int(
+                    (monotonic() - required_data_prefetch_started) * 1000
+                ),
                 data={
                     "snapshot_status": snapshot_status,
                     "manifest_sha256": manifest_hash,
@@ -868,6 +888,9 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             request.runlog.safe_event(
                 "fetch_chain_cache",
                 "error",
+                duration_ms=int(
+                    (monotonic() - required_data_prefetch_started) * 1000
+                ),
                 message=str(exc),
                 data={"snapshot_status": snapshot_status},
             )
@@ -1135,6 +1158,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     ran_pipeline_accounts: list[str] = []
     results: list[Any] = []
     account_metrics: list[dict[str, Any]] = []
+    _record_tick_latency(
+        request,
+        stage="pre_account_execution",
+        started=pre_account_execution_started,
+    )
+    account_outcomes_started = monotonic()
     if barrier_reason:
         outcomes = _terminal_barrier_outcomes(
             request=request,
@@ -1149,6 +1178,15 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             max_workers=request.account_workers,
             run_account_fn=_run_account,
         )
+    _record_tick_latency(
+        request,
+        stage="account_outcomes",
+        started=account_outcomes_started,
+        data={"account_count": len(account_ids)},
+    )
+    runtime_portfolio_snapshot_shadow_tasks: list[
+        RuntimePortfolioSnapshotShadowTask
+    ] = []
     for outcome in outcomes:
         prefetch_done = bool(
             prefetch_done
@@ -1161,21 +1199,24 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
         if outcome.ran_pipeline:
-            _publish_runtime_portfolio_snapshot_shadow(
-                request=request,
-                account=account,
-                account_config_authority=account_config_authorities.get(account),
-                prepared_portfolio_manifest_path=(prepared_manifest_paths.get(account)),
-                prepared_portfolio_manifest_sha256=(
-                    prepared_manifest_sha256_by_account.get(account)
-                ),
-                prepared_option_manifest_path=(
-                    prepared_option_manifest_paths.get(account)
-                ),
-                prepared_option_manifest_sha256=(
-                    prepared_option_manifest_sha256_by_account.get(account)
-                ),
-                required_data_manifest_path=snapshot_manifest_path,
+            runtime_portfolio_snapshot_shadow_tasks.append(
+                RuntimePortfolioSnapshotShadowTask(
+                    account=account,
+                    account_config_authority=account_config_authorities.get(account),
+                    prepared_portfolio_manifest_path=(
+                        prepared_manifest_paths.get(account)
+                    ),
+                    prepared_portfolio_manifest_sha256=(
+                        prepared_manifest_sha256_by_account.get(account)
+                    ),
+                    prepared_option_manifest_path=(
+                        prepared_option_manifest_paths.get(account)
+                    ),
+                    prepared_option_manifest_sha256=(
+                        prepared_option_manifest_sha256_by_account.get(account)
+                    ),
+                    required_data_manifest_path=snapshot_manifest_path,
+                )
             )
 
     return TickAccountExecutionOutcome(
@@ -1189,7 +1230,61 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         snapshot_status=snapshot_status,
         snapshot_manifest_sha256=snapshot_manifest_sha256,
         prepared_context_metrics=tuple(prepared_context_metrics),
+        runtime_portfolio_snapshot_shadow_tasks=tuple(
+            runtime_portfolio_snapshot_shadow_tasks
+        ),
     )
+
+
+def publish_runtime_portfolio_snapshot_shadows(
+    *,
+    request: TickAccountExecutionRequest,
+    tasks: tuple[RuntimePortfolioSnapshotShadowTask, ...],
+) -> None:
+    """Publish additive runtime snapshots after notification delivery."""
+
+    started = monotonic()
+    for task in tasks:
+        _publish_runtime_portfolio_snapshot_shadow(
+            request=request,
+            account=task.account,
+            account_config_authority=task.account_config_authority,
+            prepared_portfolio_manifest_path=task.prepared_portfolio_manifest_path,
+            prepared_portfolio_manifest_sha256=(
+                task.prepared_portfolio_manifest_sha256
+            ),
+            prepared_option_manifest_path=task.prepared_option_manifest_path,
+            prepared_option_manifest_sha256=(
+                task.prepared_option_manifest_sha256
+            ),
+            required_data_manifest_path=task.required_data_manifest_path,
+        )
+    _record_tick_latency(
+        request,
+        stage="runtime_portfolio_snapshot_shadow",
+        started=started,
+        data={"task_count": len(tasks)},
+    )
+
+
+def _record_tick_latency(
+    request: TickAccountExecutionRequest,
+    *,
+    stage: str,
+    started: float,
+    data: Mapping[str, Any] | None = None,
+) -> int:
+    duration_ms = max(0, int((monotonic() - started) * 1000))
+    try:
+        request.runlog.safe_event(
+            "tick_latency",
+            "ok",
+            duration_ms=duration_ms,
+            data={"stage": stage, **dict(data or {})},
+        )
+    except Exception:
+        pass
+    return duration_ms
 
 
 def _publish_runtime_portfolio_snapshot_shadow(

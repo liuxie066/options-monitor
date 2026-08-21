@@ -88,6 +88,44 @@ def test_run_tick_restores_sys_argv_after_exception(monkeypatch) -> None:
     assert sys.argv == original
 
 
+@pytest.mark.parametrize("notification_error", (False, True))
+def test_post_delivery_sidecars_run_after_notification_flow(
+    monkeypatch,
+    notification_error: bool,
+) -> None:
+    from src.application import multi_account_tick as mod
+
+    order: list[str] = []
+
+    def notify(_request):
+        order.append("notification")
+        if notification_error:
+            raise RuntimeError("notification finalization failed")
+        return 7
+
+    def publish():
+        order.append("runtime_snapshot")
+
+    monkeypatch.setattr(mod, "run_tick_notification_flow", notify)
+
+    if notification_error:
+        with pytest.raises(RuntimeError, match="notification finalization failed"):
+            mod._run_notification_with_post_delivery_fallback(
+                notification_request="notification-request",
+                post_delivery_sidecars_fn=publish,
+            )
+    else:
+        assert (
+            mod._run_notification_with_post_delivery_fallback(
+                notification_request="notification-request",
+                post_delivery_sidecars_fn=publish,
+            )
+            == 7
+        )
+
+    assert order == ["notification", "runtime_snapshot"]
+
+
 def test_current_run_id_is_reexported_from_multi_tick_main() -> None:
     from src.application import multi_account_tick as mod
 
@@ -521,6 +559,10 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
         "lx": "2026-07-21T10:00:00-04:00",
         "sy": None,
     }
+    assert [
+        task.account
+        for task in outcome.runtime_portfolio_snapshot_shadow_tasks
+    ] == ["lx"]
     assert not (tmp_path / "scheduler_state.json").exists()
 
 
