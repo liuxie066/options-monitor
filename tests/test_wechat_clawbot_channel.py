@@ -1356,6 +1356,15 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
     assert settings.keepalive_interval_sec == 60
     assert settings.timeout_sec == 9
 
+    path_scoped = build_wechat_clawbot_serve_settings(
+        base=tmp_path,
+        config_path=str(tmp_path / "config.us.json"),
+        assistant_config_path=str(assistant_config),
+    )
+
+    assert path_scoped.config_key is None
+    assert path_scoped.config_path == str(tmp_path / "config.us.json")
+
     overridden = build_wechat_clawbot_serve_settings(
         base=tmp_path,
         label="cli",

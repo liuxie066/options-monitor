@@ -3687,6 +3687,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
 
     assert str(repo / "om") + " inbound feishu-ws" in service
     assert "--config-path " + str(repo / "config.us.json") in service
+    assert "--config-key" not in service
     assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
@@ -3733,6 +3734,7 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     assert "--label ops" in service
     assert "--state-dir " + str(runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops") in service
     assert "--config-path " + str(repo / "config.us.json") in service
+    assert "--config-key" not in service
     assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--allowed-senders wechat:user_1" in service
@@ -3982,6 +3984,35 @@ def test_render_launchd_bundle_can_reference_environment_file(tmp_path: Path) ->
     assert "<key>OM_ENV_FILE</key>" in intake
     assert bundle["env_file"] == str(env_file)
     assert profile["env_file"] == str(env_file)
+
+
+def test_render_launchd_channel_services_use_one_data_scope(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_feishu_ws=True,
+        include_wechat_clawbot=True,
+        wechat_clawbot_label="ops",
+        wechat_clawbot_allowed_senders="wechat:user_1",
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    channels = (
+        files["launchd/com.options-monitor.feishu-ws.plist"]["content"],
+        files["launchd/com.options-monitor.wechat-clawbot.plist"]["content"],
+    )
+
+    for service in channels:
+        assert "<string>--config-path</string>" in service
+        assert "<string>--config-key</string>" not in service
 
 
 def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> None:
