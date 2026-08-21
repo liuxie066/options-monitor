@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.15.1 - 2026-08-21
+
+### Bug Fixes
+- Prevented Feishu and WeChat channel services from passing conflicting runtime scopes, restoring Copilot tool requests after the Pi cutover while preserving explicit config-path authority.
+
 ## 1.15.0 - 2026-08-21
 
 ### New Features
