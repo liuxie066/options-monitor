@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.6",
+  "base": {
+    "tag": "v1.15.5",
+    "commit": "cee5bb3eff5d565797262e9c1c81aeaec057c43f"
+  },
+  "reviewed_head": "4ad5ed084bf1e95a2c4a6e540ce7285d0e779aa9",
+  "commits": [
+    {
+      "sha": "4ad5ed084bf1e95a2c4a6e540ce7285d0e779aa9",
+      "subject": "fix(service): avoid scheduled SQLite contention"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Staggered automatic expired-position maintenance away from the HK opening tick and preserved intentionally paused timer activation during unattended upgrades.",
+      "commits": [
+        "4ad5ed084bf1e95a2c4a6e540ce7285d0e779aa9"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
