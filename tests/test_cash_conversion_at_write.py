@@ -9,6 +9,8 @@ import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.performance.cash_conversion import (
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     validate_observed_cash_conversion,
 )
 from domain.domain.option_position_lots import OpenPositionCommand
@@ -166,6 +168,55 @@ def test_observed_cash_conversion_rejects_tampered_contract(
     amount_cny, issue = validate_observed_cash_conversion(
         conversion,
         cash_fact_id="option_trade_cash_gross:tamper",
+        native_amount=200,
+        native_currency="USD",
+        effective_at_ms=effective_at_ms,
+    )
+
+    assert amount_cny is None
+    assert issue == reason
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("rate_timestamp", "2026-07-06T02:00:00+00:00", "fx_provenance_invalid"),
+        (
+            "rate_timestamp",
+            "2026-06-27T01:59:59+00:00",
+            "rate_timestamp_outside_booking_window",
+        ),
+        ("rate_evidence_fact_id", None, "fx_provenance_invalid"),
+        ("rate_source", "broker_snapshot", "fx_provenance_invalid"),
+    ],
+)
+def test_historical_business_day_cash_conversion_rejects_invalid_provenance(
+    field: str,
+    value: str | None,
+    reason: str,
+) -> None:
+    effective_at_ms = _ms("2026-07-05T10:00:00")
+    conversion = build_cash_conversion(
+        cash_fact_id="option_trade_cash_gross:carry",
+        amount=200,
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": 7.2},
+            "timestamp": "2026-07-03T01:15:00+00:00",
+        },
+        effective_at_ms=effective_at_ms,
+        observed_at_ms=effective_at_ms + 1_000,
+        rate_source="manual_correction",
+        rate_source_id="manual:carry:2026-07-05",
+        rate_evidence_fact_id="fx-official",
+        method=HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+        max_rate_distance_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    )
+    conversion[field] = value
+
+    amount_cny, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id="option_trade_cash_gross:carry",
         native_amount=200,
         native_currency="USD",
         effective_at_ms=effective_at_ms,

@@ -244,6 +244,16 @@ def test_backfill_carries_explicit_official_rate_across_non_business_day(tmp_pat
         RATE_MS / 1000,
         tz=timezone.utc,
     ).isoformat()
+    replay = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="sy",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS + 1,
+    )
+    assert replay.changed_event_count == 0
+    assert replay.preview_conversion_count == 0
+    assert replay.existing_observed_count == 2
 
 
 def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
@@ -336,3 +346,13 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
         conversions["assigned_stock_sale_cash_gross"]["method"]
         == "historical_business_day_fx_carry_forward"
     )
+    replay = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS + 1,
+    )
+    assert replay.changed_event_count == 0
+    assert replay.preview_conversion_count == 0
+    assert replay.existing_observed_count == 2

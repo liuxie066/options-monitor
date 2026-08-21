@@ -15,7 +15,18 @@ from domain.domain.performance.models import (
 
 
 MAX_BOOKING_RATE_DISTANCE_MS = 24 * 60 * 60 * 1000
-FOREIGN_METHODS = {"booking_fx_snapshot", "historical_fx_evidence_backfill"}
+MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS = 7 * 24 * 60 * 60 * 1000
+HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD = (
+    "historical_business_day_fx_carry_forward"
+)
+OFFICIAL_CARRY_FORWARD_SOURCES = frozenset(
+    {"pbc_central_parity", "manual_correction"}
+)
+FOREIGN_METHODS = {
+    "booking_fx_snapshot",
+    "historical_fx_evidence_backfill",
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+}
 
 
 def cash_conversion_identity(
@@ -143,10 +154,18 @@ def validate_observed_cash_conversion(
         rate_timestamp_ms = _timestamp_ms(conversion.get("rate_timestamp"))
         if rate_timestamp_ms is None:
             return None, "rate_timestamp_invalid"
-        if (
-            abs(rate_timestamp_ms - conversion_effective_at_ms)
-            > MAX_BOOKING_RATE_DISTANCE_MS
+        if method == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD and (
+            rate_timestamp_ms > conversion_effective_at_ms
+            or rate_source not in OFFICIAL_CARRY_FORWARD_SOURCES
+            or not str(conversion.get("rate_evidence_fact_id") or "").strip()
         ):
+            return None, "fx_provenance_invalid"
+        max_rate_distance_ms = (
+            MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
+            if method == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
+            else MAX_BOOKING_RATE_DISTANCE_MS
+        )
+        if abs(rate_timestamp_ms - conversion_effective_at_ms) > max_rate_distance_ms:
             return None, "rate_timestamp_outside_booking_window"
 
     identity = cash_conversion_identity(
@@ -179,7 +198,10 @@ def _timestamp_ms(value: Any) -> int | None:
 
 
 __all__ = [
+    "HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD",
     "MAX_BOOKING_RATE_DISTANCE_MS",
+    "MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS",
+    "OFFICIAL_CARRY_FORWARD_SOURCES",
     "cash_conversion_id",
     "cash_conversion_identity",
     "validate_observed_cash_conversion",
