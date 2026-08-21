@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.7",
+  "base": {
+    "tag": "v1.15.6",
+    "commit": "ddee8207091859ab38e84bc756259351117b73dd"
+  },
+  "reviewed_head": "709671af325dab82b60cf91e019ac3590b271055",
+  "commits": [
+    {
+      "sha": "709671af325dab82b60cf91e019ac3590b271055",
+      "subject": "fix(service): stagger market maintenance timers"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Staggered HK and US expired-position maintenance to 09:05 and 09:07 Beijing time so the two market jobs no longer start concurrently.",
+      "commits": [
+        "709671af325dab82b60cf91e019ac3590b271055"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
