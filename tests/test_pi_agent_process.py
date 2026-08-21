@@ -274,6 +274,8 @@ def _start_payload(**overrides):
         "debug": {"fixture_response": "hello", "delay_ms": 0},
     }
     base.update(overrides)
+    if "model" in overrides and "limits" not in overrides:
+        base["limits"]["max_context_tokens"] = base["model"]["context_window_tokens"]
     return base
 
 
@@ -989,6 +991,7 @@ def test_pi_model_settings_rejects_unsafe_context_output_relation():
         "attempts_high",
         "provider_api_mismatch",
         "invalid_base_url",
+        "mismatched_context_budget",
         "local_debug",
         "channel_debug",
         "eval_without_fixture",
@@ -1012,6 +1015,8 @@ def test_python_and_node_reject_closed_start_contract_before_provider(case):
         )
     elif case == "invalid_base_url":
         payload["model"]["base_url"] = "file:///tmp/provider"
+    elif case == "mismatched_context_budget":
+        payload["limits"]["max_context_tokens"] = 12_000
     elif case in {"local_debug", "channel_debug"}:
         payload["execution_environment"] = case.removesuffix("_debug")
     elif case == "eval_without_fixture":
@@ -1034,25 +1039,38 @@ def test_python_and_node_reject_closed_start_contract_before_provider(case):
     assert "s4-loopback-secret" not in stderr
 
 
-@pytest.mark.parametrize(
-    ("model_context", "scene_context", "message_chars", "expected_ok"),
-    [
-        (8_000, 12_000, 24_000, False),
-        (12_000, 12_000, 24_000, True),
-        (24_000, 12_000, 36_000, False),
-    ],
-)
-def test_effective_context_budget_is_minimum_of_model_and_scene(
-    model_context, scene_context, message_chars, expected_ok
-):
-    payload = _start_payload(user_message="x" * message_chars)
-    payload["model"]["context_window_tokens"] = model_context
-    payload["limits"]["max_context_tokens"] = scene_context
+def test_python_rejects_mismatched_context_budget_before_spawn():
+    payload = _start_payload()
+    payload["limits"]["max_context_tokens"] = 12_000
 
     result = run_pi_agent(
         payload,
-        request_id=f"req_context_{model_context}_{scene_context}",
-        run_id=f"run_context_{model_context}_{scene_context}",
+        request_id="req_mismatched_context",
+        run_id="run_mismatched_context",
+        timeout_seconds=60,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CONFIG_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("model_context", "message_chars", "expected_ok"),
+    [
+        (8_000, 24_000, False),
+        (12_000, 24_000, True),
+        (24_000, 36_000, True),
+    ],
+)
+def test_context_budget_uses_model_profile(model_context, message_chars, expected_ok):
+    payload = _start_payload(user_message="x" * message_chars)
+    payload["model"]["context_window_tokens"] = model_context
+    payload["limits"]["max_context_tokens"] = model_context
+
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_context_{model_context}",
+        run_id=f"run_context_{model_context}",
         timeout_seconds=60,
         on_proposed=lambda _proposal: "commit",
     )
@@ -2310,7 +2328,6 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
             **_start_payload()["model"],
             "context_window_tokens": 8_000,
         },
-        limits={**_start_payload()["limits"], "max_context_tokens": 8_000},
         debug={
             "fixture_response": "uncommitted-after-compaction",
             "delay_ms": 0,
@@ -2398,7 +2415,6 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
                 **_start_payload()["model"],
                 "context_window_tokens": 8_000,
             },
-            limits={**_start_payload()["limits"], "max_context_tokens": 8_000},
             debug={
                 "fixture_response": "recovered-after-compaction",
                 "delay_ms": 0,
@@ -2420,7 +2436,6 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
     old_question = "checkpoint-old-question-" + "q" * 16_000
     old_answer = "checkpoint-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
     assert _run_session(
         database,
         session_id,
@@ -2440,7 +2455,6 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
             session_id=session_id,
             user_message=rejected_question,
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": f"rejected-{decision}-answer",
                 "delay_ms": 0,
@@ -2470,7 +2484,6 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
             session_id=session_id,
             user_message=f"followup-{decision}",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "followup-answer",
                 "delay_ms": 0,
@@ -2489,7 +2502,6 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
     old_question = "tool-old-question-" + "q" * 16_000
     old_answer = "tool-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
     assert _run_session(
         database,
         session_id,
@@ -2508,7 +2520,6 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
         session_id=session_id,
         user_message=current_question,
         model=model,
-        limits=limits,
     )
     payload["debug"].update(
         {
@@ -2565,7 +2576,6 @@ def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
     old_question = "failed-old-question-" + "q" * 16_000
     old_answer = "failed-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
     assert _run_session(
         database,
         session_id,
@@ -2585,7 +2595,6 @@ def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
             session_id=session_id,
             user_message="failed-current-question",
             model=model,
-            limits=limits,
             debug={"fixture_response": "unused", "delay_ms": 0},
         ),
         run_id="failed_compaction",
@@ -2608,7 +2617,6 @@ def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
             session_id=session_id,
             user_message="recovered-current-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "recovered-current-answer",
                 "delay_ms": 0,
@@ -2655,7 +2663,6 @@ def test_blank_compaction_completion_keeps_previous_committed_branch(
         )["ok"]
     before = _session_entries(database, session_id)
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
 
     failed = _run_session(
         database,
@@ -2664,7 +2671,6 @@ def test_blank_compaction_completion_keeps_previous_committed_branch(
             session_id=session_id,
             user_message=f"blank-{shape}-current-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "must-not-run",
                 "delay_ms": 0,
@@ -2724,7 +2730,6 @@ def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path
     )["ok"]
     before = _session_entries(database, session_id)
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
 
     failed = _run_session(
         database,
@@ -2733,7 +2738,6 @@ def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path
             session_id=session_id,
             user_message="oversized-current-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "must-not-run",
                 "delay_ms": 0,
@@ -2790,7 +2794,6 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
     _set_latest_assistant_usage(database, session_id, 7_000)
 
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    limits = {**_start_payload()["limits"], "max_context_tokens": 8_000}
     compacted = _run_session(
         database,
         session_id,
@@ -2798,7 +2801,6 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
             session_id=session_id,
             user_message="provider-usage-current-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "provider-usage-current-answer",
                 "delay_ms": 0,
@@ -2822,7 +2824,6 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
             session_id=session_id,
             user_message="provider-usage-followup-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "provider-usage-followup-answer",
                 "delay_ms": 0,
@@ -2852,7 +2853,6 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
             session_id=session_id,
             user_message="provider-usage-measured-question",
             model=model,
-            limits=limits,
             debug={
                 "fixture_response": "provider-usage-measured-answer",
                 "delay_ms": 0,

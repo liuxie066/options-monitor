@@ -166,6 +166,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert definition["tool_selection"]["optional_names"] == ["portfolio"]
     assert "symbol_config_update" not in manifest.allowed_tools
     assert manifest.limits["max_model_turns"] == definition["runtime"]["max_iterations"]
+    assert "max_context_tokens" not in manifest.limits
+    assert "max_context_chars" not in manifest.limits
     assert manifest.fixed_tool_input == {"config_key": "us"}
     assert len(manifest.provenance["compiled_prompt_sha256"]) == 64
     assert [item["path"] for item in manifest.provenance["fragments"]] == definition["prompt_fragments"]
@@ -1017,6 +1019,9 @@ def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch,
     assert result.status == "answered"
     assert len(captured) == 1
     assert captured[0]["start"]["execution_environment"] == environment
+    assert captured[0]["start"]["limits"]["max_context_tokens"] == (
+        captured[0]["start"]["model"]["context_window_tokens"]
+    )
     assert (captured[0]["start"]["debug"] is not None) is (environment == "eval")
 
 

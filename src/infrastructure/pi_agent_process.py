@@ -391,6 +391,8 @@ def _validate_start_payload(payload: Any) -> None:
     for key in limits_allowed:
         if not _is_pos_int(limits[key]):
             raise ValueError(f"limits.{key} must be a positive integer")
+    if limits["max_context_tokens"] != model["context_window_tokens"]:
+        raise ValueError("limits.max_context_tokens must match model.context_window_tokens")
 
     debug = payload["debug"]
     if execution_environment != "eval":
