@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.5",
+  "base": {
+    "tag": "v1.15.4",
+    "commit": "c4346381f8bd690fbfbe7c9d4307b81d35335c71"
+  },
+  "reviewed_head": "a80393c19380d662174fc4e1d2619e728a5b2f9c",
+  "commits": [
+    {
+      "sha": "a80393c19380d662174fc4e1d2619e728a5b2f9c",
+      "subject": "fix(copilot): prevent truncated replies"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented Copilot from admitting token-truncated partial replies, compacted analysis-catalog observations, and allowed one tool-free continuation after read-only tool chains before failing closed with `BUDGET_EXHAUSTED`.",
+      "commits": [
+        "a80393c19380d662174fc4e1d2619e728a5b2f9c"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
