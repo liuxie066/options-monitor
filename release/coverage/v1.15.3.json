@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.3",
+  "base": {
+    "tag": "v1.15.2",
+    "commit": "332c9f80e11d9d8c4e249673896a4ead02d79a1e"
+  },
+  "reviewed_head": "90b5deb157991a6605b585de72aca3fc6f66ec03",
+  "commits": [
+    {
+      "sha": "8d2dd2cff4d00227dd24d339da71cc9293156baa",
+      "subject": "fix(upgrade): reuse unchanged Pi runtime"
+    },
+    {
+      "sha": "90b5deb157991a6605b585de72aca3fc6f66ec03",
+      "subject": "docs(graph): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Reused the active release's verified Pi dependencies when the lockfile is unchanged, avoiding redundant npm downloads during routine upgrades while retaining target-release smoke validation.",
+      "commits": [
+        "8d2dd2cff4d00227dd24d339da71cc9293156baa"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "90b5deb157991a6605b585de72aca3fc6f66ec03",
+      "reason": "Regenerated the dependency graph after the mapped implementation change; no independent user-facing behavior."
+    }
+  ]
+}
