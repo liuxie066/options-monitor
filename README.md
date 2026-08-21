@@ -4,6 +4,7 @@
 
 - `Sell Put` 与 `Covered Call` 候选筛选；
 - `Combo Yield` 组合候选评估；
+- `Sell Put` 被指派后，继续管理买入的股票并寻找增收与退出机会；
 - 已开期权 lot 的 `Close Advice`；
 - 期权利润、现金活动、持仓与到期生命周期查询；
 - Daily Decision Brief、候选变化提醒和离线策略复盘。
@@ -45,6 +46,7 @@ trade_events -> projection -> position_lots
 | YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
 | Sell Put / Covered Call | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
 | Close Advice | `om close-advice` | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Daily Decision Brief | `om daily-brief` | [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
@@ -56,6 +58,12 @@ trade_events -> projection -> position_lots
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
+
+### 轮转策略
+
+轮转策略用于管理因卖出的 Put 被行权而买入的股票。持有期间，系统筛选“收取期权收入，并在目标价格卖出股票”的候选方案。如果股票没有卖出，下一轮继续筛选；股票全部卖出后，这一轮生命周期结束，不会自动重新开始。
+
+已收到的期权收入会计入总收益，但不用于降低股票的卖出底线。系统还会合并检查所有可能占用持股的期权合约，避免新建议超过实际可用持股。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
 Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
