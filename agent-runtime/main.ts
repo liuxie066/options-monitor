@@ -400,6 +400,9 @@ function validateStart(payload: JsonObject): void {
   for (const key of limitKeys) {
     if (!isPositiveInteger(limits[key])) throw new Error(`limits.${key} must be a positive integer`);
   }
+  if (limits.max_context_tokens !== model.context_window_tokens) {
+    throw new Error("limits.max_context_tokens must match model.context_window_tokens");
+  }
 
   if (payload.execution_environment !== "eval") {
     if (payload.debug !== null) throw new Error("debug must be null outside eval");

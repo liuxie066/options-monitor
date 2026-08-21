@@ -116,8 +116,6 @@ def build_scene_manifest(
             "final_answer_reserve_seconds": _positive_int(
                 runtime.get("final_answer_reserve_seconds"), 45
             ),
-            "max_context_chars": _positive_int(runtime.get("max_context_chars"), 96_000),
-            "max_context_tokens": _positive_int(runtime.get("max_context_tokens"), 24_000),
         },
         output_schema={"type": "text"},
         task_guidance={},

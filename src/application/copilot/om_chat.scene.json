@@ -65,8 +65,6 @@
     "max_tool_calls": 12,
     "max_consecutive_failed_tool_batches": 3,
     "timeout_seconds": 180,
-    "final_answer_reserve_seconds": 45,
-    "max_context_chars": 96000,
-    "max_context_tokens": 24000
+    "final_answer_reserve_seconds": 45
   }
 }

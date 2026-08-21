@@ -281,7 +281,10 @@ def run_contract(
             )
         recovery.extend(fixture_items)
 
-    limits = _process_limits(manifest)
+    limits = _process_limits(
+        manifest,
+        context_window_tokens=model_settings.context_window_tokens,
+    )
     start_payload = {
         "execution_environment": contract.execution_environment,
         "session_id": pi_session_id,
@@ -792,13 +795,17 @@ def _provider_tools(manifest: SceneManifest) -> list[dict[str, Any]]:
     ]
 
 
-def _process_limits(manifest: SceneManifest) -> dict[str, int]:
+def _process_limits(
+    manifest: SceneManifest,
+    *,
+    context_window_tokens: int,
+) -> dict[str, int]:
     values = manifest.limits
     return {
         "timeout_seconds": max(1, int(values.get("timeout_seconds") or 1)),
         "max_iterations": max(1, int(values.get("max_model_turns") or 1)),
         "max_tool_calls": max(1, int(values.get("max_tool_calls") or 1)),
-        "max_context_tokens": max(1, int(values.get("max_context_tokens") or 1)),
+        "max_context_tokens": max(1, int(context_window_tokens)),
         "max_consecutive_failed_tool_batches": max(
             1,
             int(values.get("max_consecutive_failed_tool_batches") or 1),

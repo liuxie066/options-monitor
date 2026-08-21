@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Made the active Assistant model profile the single operator-controlled context budget while preserving and validating the existing Pi startup protocol field.
+
 ## 1.15.9 - 2026-08-21
 
 ### Bug Fixes

@@ -929,7 +929,7 @@ The S1 `run.start` payload is closed and every field is required:
 | `user_message` | non-empty string |
 | `model` | closed object with non-empty string `provider`, `model`, and `base_url`, allowed `api_kind`, plus positive integer `timeout_seconds`, `context_window_tokens`, `max_output_tokens`, and `max_attempts` |
 | `tools` | empty array |
-| `limits` | closed object with positive integer `timeout_seconds`, `max_iterations`, `max_tool_calls`, `max_context_tokens`, `max_consecutive_failed_tool_batches`, and `final_answer_reserve_seconds` |
+| `limits` | closed object with positive integer `timeout_seconds`, `max_iterations`, `max_tool_calls`, derived `max_context_tokens`, `max_consecutive_failed_tool_batches`, and `final_answer_reserve_seconds` |
 | `recovered_observations` | empty array |
 | `debug` | closed object with string `fixture_response` and bounded integer `delay_ms` |
 
@@ -937,6 +937,10 @@ The S1 `run.start` payload is closed and every field is required:
 fixture never uses it. Boolean values are not accepted as integers on either
 side. Strings are not silently trimmed or coerced; callers supply canonical
 values.
+
+`limits.max_context_tokens` preserves the `om-pi-ipc.v1` wire contract but is
+derived from `model.context_window_tokens`; both boundaries require the values
+to match. It is not a second operator or Scene setting.
 
 This validation is deliberately duplicated at the process boundary: Python
 rejects an invalid caller before spawn, while Node refuses an invalid or
@@ -1976,11 +1980,11 @@ body:
     a second `length`, failed continuation, insufficient budget, and resumed
     Session each follow the rule in section 14.4;
 12. missing/invalid `context_window_tokens` and out-of-range timeout, output,
-    or direct `max_attempts` fail rather than clamp before spawn; valid context
-    values below, equal to, and above the Scene cap produce
-    `min(model.contextWindow, limits.max_context_tokens)` as the effective
-    context budget; local/channel accept only `debug:null`, while eval still
-    requires a closed fixture;
+    or direct `max_attempts` fail rather than clamp before spawn;
+    `model.contextWindow` is the sole configured context budget, and the
+    preserved `limits.max_context_tokens` wire field must carry the same value;
+    local/channel accept only `debug:null`, while eval still requires a closed
+    fixture;
 13. `assistant model add` requires and round-trips the declared capability,
     model list/current display it, and build-assistant preserves it in resolved
     `assistant.llm` without adding an author-facing retry field;
@@ -2920,7 +2924,7 @@ rollback was changed or executed.
 | Inspection | runtime/config/job questions use the same Agent and read tools |
 | Control | model can request preview only; confirm/apply/readback remain deterministic |
 | Memory | same sender/conversation/canonical key-or-path scope continues; different scopes or senders cannot share memory, and plaintext paths are absent |
-| Context | effective budget is `min(model capability, Scene cap)`; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
+| Context | effective budget comes only from the active model profile's `context_window_tokens`; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
 | Tools | model-visible list equals the Host projection; no Pi builtin write/shell/file tool exists; one lock preserves every concurrent lifecycle/tool event and metric; abandoned reads cannot exceed one worker or write late Host events |
 | Providers | OpenAI, DeepSeek, Kimi, Kimi Code, and Ollama contract tests pass |
 | Cancellation | two independent Host connections racing cancel against commit/discard accept exactly one durable winner, reflected consistently in CLI, Session, Host result, and outbox |
@@ -2941,8 +2945,8 @@ rollback was changed or executed.
 - Partition Host leases and Pi Sessions by authenticated identity plus trusted
   normalized-key or canonical-path-hash authority scope; pass canonical paths
   only as Host-only fixed tool input.
-- Require an operator-declared safe context window; never guess it from a model
-  name or Scene cap.
+- Require one operator-declared safe context window; never guess it from a model
+  name or duplicate it in Scene limits.
 - Use one process-wide read-worker slot and accept bounded retryable busy after
   forced process/Session failure rather than adding a worker pool or lease
   deletion path.
