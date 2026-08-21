@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.15.5 - 2026-08-21
+
+### Bug Fixes
+- Prevented Copilot from admitting token-truncated partial replies, compacted analysis-catalog observations, and allowed one tool-free continuation after read-only tool chains before failing closed with `BUDGET_EXHAUSTED`.
+
 ## 1.15.4 - 2026-08-21
 
 ### Bug Fixes
