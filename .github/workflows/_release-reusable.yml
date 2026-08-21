@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: ""
+      run_regression_gates:
+        required: false
+        type: boolean
+        default: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -41,11 +45,13 @@ jobs:
           ./.venv/bin/pip install pytest
 
       - name: Prepare Pi runtime
+        if: ${{ inputs.run_regression_gates }}
         run: |
           npm ci --omit=dev --ignore-scripts --prefix agent-runtime
           bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
 
       - name: Pi runtime and Copilot release gate
+        if: ${{ inputs.run_regression_gates }}
         run: |
           ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
           ./.venv/bin/python -m pytest \
@@ -64,6 +70,7 @@ jobs:
           ./om-agent spec > /tmp/om-agent-spec.json
 
       - name: Smoke and plugin tests
+        if: ${{ inputs.run_regression_gates }}
         run: |
           ./.venv/bin/python tests/run_smoke.py
           ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
@@ -71,6 +78,7 @@ jobs:
           ./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab.py
 
       - name: Configuration and control-plane release gate
+        if: ${{ inputs.run_regression_gates }}
         run: |
           ./.venv/bin/python -m pytest \
             tests/test_config_yaml.py \

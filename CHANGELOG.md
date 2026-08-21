@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Reused successful Guardrails regression results for automatic VERSION-driven releases, removed duplicate local preflight suites, and made `update verify` service-health snapshot timing explicit.
+
 ## 1.15.7 - 2026-08-21
 
 ### Bug Fixes

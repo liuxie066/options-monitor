@@ -156,6 +156,8 @@ VERSION="$(cat VERSION)"
 ```
 
 它只读取 git diff 和 `VERSION`，输出 JSON 计划，不执行测试、不写文件。`--mode fast|standard|full` 用来选择预检强度；如果命中 ledger/position/trade 等高风险路径，计划会显式要求完整 pytest。
+开发和 PR 迭代阶段按 advisor 输出跑定向检查；完整 preflight 留到 release commit
+定稿后集中跑一次，避免每次小修改重复扫全量 suite。
 
 常规本地预检先跑统一入口：
 
@@ -219,21 +221,23 @@ VERSION="$(cat VERSION)"
 
 ## 自动发布
 
-合并到 `main` 的版本提交如果修改了顶层 `VERSION`，GitHub Actions 会自动：
+合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会先完成普通
+`main` push 的完整回归门禁；门禁成功后，下游 release job 会自动：
 
 - 读取 `VERSION` 生成 `v<version>` tag
 - 精确匹配对应的日期化版本段落并严格校验新分类
 - 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
-- 运行 smoke / agent plugin 测试
+- 重新校验 release metadata / coverage，并验证最终 source archive 中的 Pi runtime
 - 发布对应 GitHub Release
 
 因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打上同名 tag。
-普通开发提交因为不修改 `VERSION`，不会触发这条发布工作流。
+自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python / Pi
+测试。普通开发提交因为不修改 `VERSION`，不会进入 release job。
 
 如果 VERSION push 已触发发布但门禁失败，应先在 `main` 修复根因并重新完成 release delta
 审阅与发布前检查，再从 GitHub Actions 手动运行 `Release from VERSION`。手动入口使用当前
-`main` 的 `VERSION` 和提交 SHA，仍执行同一套 metadata、coverage、测试、归档和发布步骤；
+`main` 的 `VERSION` 和提交 SHA，并以完整模式重新执行 metadata、coverage、测试、归档和发布步骤；
 不得用它跳过失败门禁或从未审阅的提交补发 tag。
 
 ---
@@ -274,7 +278,7 @@ VERSION="$(cat VERSION)"
   --no-check-latest
 ```
 
-`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和长期 service health；`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。
+`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
 
 升级默认 dry-run：
 

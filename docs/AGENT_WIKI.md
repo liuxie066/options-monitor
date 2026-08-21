@@ -821,7 +821,7 @@ When the user explicitly asks to publish a release, execute the full publication
 7. Commit only `VERSION`, `CHANGELOG.md`, and the coverage manifest as
    `chore: release <version>`.
 8. Push `main`.
-9. Watch the `Release from VERSION` workflow.
+9. Watch the `Guardrails` workflow and its downstream `release` job.
 10. Verify the GitHub Release, remote tag, target commit, and assets.
 
 The coverage gate uses the previous stable tag as the baseline. It requires every commit in the

@@ -2,11 +2,6 @@ name: Release from VERSION
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - VERSION
 
 permissions:
   contents: read
@@ -35,3 +30,4 @@ jobs:
     with:
       tag: ${{ needs.resolve-tag.outputs.tag }}
       target_commitish: ${{ github.sha }}
+      run_regression_gates: true

@@ -345,6 +345,21 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     assert '--python ".venv/bin/python"' not in verify
 
 
+def test_version_release_reuses_successful_guardrails_without_duplicate_regressions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    guardrails = (root / ".github/workflows/guardrails.yml").read_text(encoding="utf-8")
+    reusable = (root / ".github/workflows/_release-reusable.yml").read_text(encoding="utf-8")
+    manual = (root / ".github/workflows/release-from-version.yml").read_text(encoding="utf-8")
+
+    assert "contains(github.event.head_commit.modified, 'VERSION')" in guardrails
+    assert "uses: ./.github/workflows/_release-reusable.yml" in guardrails
+    assert "run_regression_gates: false" in guardrails
+    assert reusable.count("if: ${{ inputs.run_regression_gates }}") == 4
+    assert "default: true" in reusable
+    assert "\n  push:" not in manual
+    assert "run_regression_gates: true" in manual
+
+
 def _run_release_preflight_with_fake_python(
     tmp_path: Path,
     *args: str,
@@ -445,9 +460,7 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
         ),
         (
             "-m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py "
-            "tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py "
-            "tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py "
-            "tests/test_cli_operator_commands.py"
+            "tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py"
         ),
     ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
