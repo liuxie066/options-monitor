@@ -664,9 +664,21 @@ Scheduled Tick runs use one immutable required-data barrier for Close Advice:
   `cache` or `fetched` chain result. Scope and contract-code order are not
   semantic identity; duplicate or mismatched request/type/expiration identities
   remain invalid. A fully observed filtered-empty plan is `success_empty` unless
-  an exact held strike is required. Missing requested snapshots, exact held
-  strikes, and stale/error provider outcomes remain fail-closed. Unexpected
-  snapshot codes are quarantined outside consumer rows and reported as warnings.
+  an exact current held strike is required. When the OM quality cutover is
+  active, OM-POS uses each non-zero OpenD position code as exact lineage to its
+  canonical lot and compares the code's current market snapshot terms. A
+  confirmed strike or multiplier drift blocks its consumers until the canonical
+  lot is explicitly adjusted; Scheduled Tick omits that account/market's old
+  strike from the Close Advice prefetch plan. The gate also requires exactly one
+  current `om.option_positions` dataset for that account/market; missing or
+  ambiguous scope evidence is blocking. OpenD contract-term snapshot calls are
+  filtered to the requested market before batching, so another market's missing
+  terms cannot invalidate a healthy scope. A same-quantity contract with a
+  different broker code remains ordinary divergence, never inferred corporate
+  action. Close Advice does not use fuzzy strike matching. Missing requested snapshots,
+  exact held strikes, and stale/error provider outcomes remain fail-closed.
+  Unexpected snapshot codes are quarantined outside consumer rows and reported
+  as warnings.
   Artifacts without scope evidence retain the legacy strict numeric-boundary
   coverage behavior.
 

@@ -59,6 +59,7 @@ def build_close_advice_required_data_plan(
     markets_to_run: list[str] | None,
     position_records_by_account: Mapping[str, list[dict[str, Any]]],
     unavailable_by_account: Mapping[str, str] | None = None,
+    blocked_markets_by_account: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     run_id_norm = _required_text(run_id, "run_id")
     market_allow = {
@@ -70,6 +71,16 @@ def build_close_advice_required_data_plan(
         normalize_account(account): str(reason or "position_ledger_unavailable")
         for account, reason in (unavailable_by_account or {}).items()
         if normalize_account(account)
+    }
+    blocked_markets = {
+        normalize_account(account): {
+            str(market or "").strip().upper(): str(reason or "").strip()
+            for market, reason in reasons.items()
+            if str(market or "").strip().upper() in {"US", "HK"}
+            and str(reason or "").strip()
+        }
+        for account, reasons in (blocked_markets_by_account or {}).items()
+        if normalize_account(account) and isinstance(reasons, Mapping)
     }
     accounts: dict[str, dict[str, Any]] = {}
     for raw_account in sorted(account_configs):
@@ -181,6 +192,16 @@ def build_close_advice_required_data_plan(
                     expiration_fallback_raw=False,
                 )
             )
+            blocked_reason = blocked_markets.get(account, {}).get(market)
+            if blocked_reason:
+                errors.append(
+                    {
+                        "reason": blocked_reason,
+                        "position_lot_id": lot_id,
+                        "quote_key": quote_key,
+                    }
+                )
+                continue
             requirement: dict[str, Any] = {
                 "position_lot_id": lot_id,
                 "market": market,

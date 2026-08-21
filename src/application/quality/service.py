@@ -79,6 +79,8 @@ _MARKET_TIMEZONES = {
     "us": ZoneInfo("America/New_York"),
     "hk": ZoneInfo("Asia/Hong_Kong"),
 }
+_AUTHORITATIVE_REFRESH_INTERVAL = timedelta(minutes=15)
+_AUTHORITATIVE_REFRESH_START = time(hour=8, minute=30)
 _DAY_END_REFRESH_TIME = time(hour=16, minute=30)
 _DAY_END_GRACE = timedelta(minutes=15)
 
@@ -1159,7 +1161,12 @@ class OMQualityService:
         for trading_day in candidates:
             if trading_day < local_now.date():
                 continue
-            candidate = (
+            window_start = datetime.combine(
+                trading_day,
+                _AUTHORITATIVE_REFRESH_START,
+                tzinfo=zone,
+            )
+            window_end = (
                 datetime.combine(
                     trading_day,
                     _DAY_END_REFRESH_TIME,
@@ -1167,19 +1174,21 @@ class OMQualityService:
                 )
                 + _DAY_END_GRACE
             )
-            if candidate > local_now:
-                return candidate.astimezone(timezone.utc)
+            if local_now < window_start:
+                return window_start.astimezone(timezone.utc)
+            if local_now < window_end:
+                return min(
+                    local_now + _AUTHORITATIVE_REFRESH_INTERVAL,
+                    window_end,
+                ).astimezone(timezone.utc)
         fallback_day = local_now.date()
         for _ in range(8):
             fallback_day += timedelta(days=1)
             if fallback_day.weekday() < 5:
-                return (
-                    datetime.combine(
-                        fallback_day,
-                        _DAY_END_REFRESH_TIME,
-                        tzinfo=zone,
-                    )
-                    + _DAY_END_GRACE
+                return datetime.combine(
+                    fallback_day,
+                    _AUTHORITATIVE_REFRESH_START,
+                    tzinfo=zone,
                 ).astimezone(timezone.utc)
         return now + timedelta(days=1)
 

@@ -258,6 +258,161 @@ def test_opend_multiplier_uses_first_positive_authoritative_field() -> None:
     assert errors == []
 
 
+def test_opend_current_terms_override_option_code_terms() -> None:
+    normalized, errors = normalize_opend_positions(
+        [
+            {
+                "code": "US.NVDA260717P100000",
+                "stock_owner": "US.NVDA",
+                "option_type": "PUT",
+                "strike_time": "2026-07-17",
+                "option_strike_price": 99.5,
+                "qty": -1,
+                "position_side": "SHORT",
+                "options_per_contract": 101,
+            }
+        ],
+        market="us",
+    )
+
+    assert normalized == {"NVDA|put|2026-07-17|99.5|101": -1}
+    assert errors == []
+
+
+def test_position_contract_terms_drift_blocks_consumers_immediately() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    snapshot = _snapshot()
+    snapshot.rows[0].update(
+        {
+            "stock_owner": "US.NVDA",
+            "option_type": "PUT",
+            "strike_time": "2026-07-17",
+            "option_strike_price": 99.5,
+            "options_per_contract": 101,
+        }
+    )
+
+    dataset, state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "untrusted"
+    assert set(dataset["blocked_consumers"]) == {
+        "option_position_report",
+        "lifecycle",
+        "close_advice",
+    }
+    assert convergence["reason_code"] == "POSITION_CONTRACT_TERMS_DRIFT"
+    assert convergence["observed"]["contract_terms_drifts"] == [
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-07-17",
+            "quantity": "-1",
+            "local_contracts": "100@100:-1",
+            "opend_contracts": "99.5@101:-1",
+            "broker_code": "US.NVDA260717P100000",
+            "mapping": "code_lineage",
+        }
+    ]
+    assert state["position_mismatches"]["us:lx"]["kind"] == (
+        "contract_terms_drift"
+    )
+
+
+def test_multi_strike_contract_terms_drift_uses_each_broker_code_lineage() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    second_lot = _local_lot(contracts=2)
+    second_lot["record_id"] = "lot-nvda-110"
+    second_lot["fields"]["strike"] = 110
+    snapshot = _snapshot()
+    snapshot.rows[0].update(
+        {
+            "stock_owner": "US.NVDA",
+            "option_type": "PUT",
+            "strike_time": "2026-07-17",
+            "option_strike_price": 99.5,
+        }
+    )
+    snapshot.rows.append(
+        {
+            "code": "US.NVDA260717P110000",
+            "stock_owner": "US.NVDA",
+            "option_type": "PUT",
+            "strike_time": "2026-07-17",
+            "option_strike_price": 109.5,
+            "qty": 2,
+            "position_side": "SHORT",
+            "options_per_contract": 100,
+            "sec_type": "DRVT",
+        }
+    )
+
+    dataset, _state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[_local_lot(), second_lot],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "untrusted"
+    assert convergence["reason_code"] == "POSITION_CONTRACT_TERMS_DRIFT"
+    assert convergence["observed"]["contract_terms_drifts"] == [
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-07-17",
+            "quantity": "-1",
+            "local_contracts": "100@100:-1",
+            "opend_contracts": "99.5@100:-1",
+            "broker_code": "US.NVDA260717P100000",
+            "mapping": "code_lineage",
+        },
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-07-17",
+            "quantity": "-2",
+            "local_contracts": "110@100:-2",
+            "opend_contracts": "109.5@100:-2",
+            "broker_code": "US.NVDA260717P110000",
+            "mapping": "code_lineage",
+        },
+    ]
+
+
+def test_same_quantity_close_and_open_is_not_classified_as_contract_terms_drift() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    snapshot = _snapshot()
+    snapshot.rows[0]["code"] = "US.NVDA260717P090000"
+
+    dataset, _state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+    )
+
+    assert dataset["status"] == "partial"
+    assert dataset["checks"][1]["reason_code"] == (
+        "POSITION_DIVERGENCE_TRANSIENT"
+    )
+
+
 def _pending_lifecycle_case(*, contracts: int = 1) -> tuple[dict, dict]:
     case = {
         "case_id": "case-nvda",
@@ -307,6 +462,38 @@ def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None
         "expected_lifecycle_pending_count": 1,
     }
     assert state["position_mismatches"] == {}
+
+
+def test_contract_terms_drift_precedes_active_lifecycle_coverage() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    lifecycle_case, read_model = _pending_lifecycle_case()
+    snapshot = _snapshot()
+    snapshot.rows[0].update(
+        {
+            "stock_owner": "US.NVDA",
+            "option_type": "PUT",
+            "strike_time": "2026-07-17",
+            "option_strike_price": 99.5,
+        }
+    )
+
+    dataset, _state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+    )
+
+    assert dataset["status"] == "untrusted"
+    assert dataset["checks"][1]["reason_code"] == (
+        "POSITION_CONTRACT_TERMS_DRIFT"
+    )
+    assert "close_advice" in dataset["blocked_consumers"]
 
 
 def test_position_mismatch_fails_closed_when_coherent_lifecycle_read_is_unavailable() -> None:

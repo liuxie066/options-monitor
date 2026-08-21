@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from domain.domain.symbol_identity import OPTION_CODE_RE
+from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol
+from domain.domain.trade_contract_identity import normalize_contract_expiration
 from src.application.account_config import resolve_futu_account_ids
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.opend_normalize import normalize_opend_option_type
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_utils import market_to_futu_trade_date_market
 from src.infrastructure.futu_gateway import (
@@ -23,6 +25,10 @@ _MARKET_SNAPSHOT_BATCH_SIZE = 200
 
 class OpenDOptionEvidenceError(RuntimeError):
     code = "OPEND_OPTION_MULTIPLIER_EVIDENCE_INCOMPLETE"
+
+
+class OpenDOptionTermsEvidenceError(RuntimeError):
+    code = "OPEND_OPTION_TERMS_EVIDENCE_INCOMPLETE"
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -173,6 +179,10 @@ class OpenDOptionPositionAdapter:
                 refresh_cache=True,
             )
             position_rows = _rows(raw_positions)
+            option_rows = _option_rows_for_market(
+                position_rows,
+                market=market,
+            )
             start = calendar_start or (datetime.now(timezone.utc).date() - timedelta(days=45))
             end = calendar_end or (datetime.now(timezone.utc).date() + timedelta(days=14))
             trade_market = market_to_futu_trade_date_market(market)
@@ -189,8 +199,7 @@ class OpenDOptionPositionAdapter:
                 for parsed in [_parse_trading_day(row)]
                 if parsed is not None
             ]
-            option_rows = [row for row in position_rows if _looks_like_option(row)]
-            option_rows = _enrich_option_multipliers(
+            option_rows = _enrich_option_contract_terms(
                 quote_gateway,
                 option_rows,
             )
@@ -238,6 +247,40 @@ def _looks_like_option(row: dict[str, Any]) -> bool:
     return bool(code and (sec_type in {"DRVT", "OPTION"} or OPTION_CODE_RE.match(code)))
 
 
+def _option_rows_for_market(
+    rows: list[dict[str, Any]],
+    *,
+    market: str,
+) -> list[dict[str, Any]]:
+    market_key = str(market or "").strip().upper()
+    scoped: list[dict[str, Any]] = []
+    ambiguous_nonzero_codes: list[str] = []
+    for row in rows:
+        if not _looks_like_option(row):
+            continue
+        code = str(
+            row.get("code") or row.get("symbol") or row.get("stock_code") or ""
+        ).strip().upper()
+        match = OPTION_CODE_RE.match(code)
+        prefix = code.partition(".")[0] if "." in code else ""
+        code_market = str(match.group("market") or "").upper() if match else (
+            prefix if prefix in {"US", "HK"} else ""
+        )
+        if not code_market:
+            if _position_quantity(row) not in (0.0,):
+                ambiguous_nonzero_codes.append(code or "unknown")
+            continue
+        if code_market != market_key:
+            continue
+        scoped.append(row)
+    if ambiguous_nonzero_codes:
+        raise OpenDOptionTermsEvidenceError(
+            "OpenD option position market identity is unavailable for "
+            f"{len(ambiguous_nonzero_codes)} non-zero option position(s)."
+        )
+    return scoped
+
+
 def _positive_number(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -269,7 +312,7 @@ def _row_multiplier(row: Mapping[str, Any]) -> float | None:
     return None
 
 
-def _enrich_option_multipliers(
+def _enrich_option_contract_terms(
     gateway: Any,
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -280,45 +323,138 @@ def _enrich_option_multipliers(
             .upper()
             for row in rows
             if _position_quantity(row) not in (None, 0.0)
-            and _row_multiplier(row) is None
         }
         - {""}
     )
-    multiplier_by_code: dict[str, float] = {}
+    required_code_set = set(required_codes)
+    snapshot_by_code: dict[str, dict[str, Any]] = {}
     for start in range(0, len(required_codes), _MARKET_SNAPSHOT_BATCH_SIZE):
         batch = required_codes[start : start + _MARKET_SNAPSHOT_BATCH_SIZE]
         snapshot_rows = _rows(gateway.get_snapshot(batch))
         for snapshot_row in snapshot_rows:
             code = str(snapshot_row.get("code") or "").strip().upper()
-            multiplier = _row_multiplier(snapshot_row)
-            if code and multiplier is not None:
-                multiplier_by_code[code] = multiplier
+            if not code or code not in required_code_set:
+                continue
+            if code in snapshot_by_code:
+                raise OpenDOptionTermsEvidenceError(
+                    f"OpenD market snapshot returned duplicate option terms for {code}."
+                )
+            snapshot_by_code[code] = dict(snapshot_row)
 
     enriched: list[dict[str, Any]] = []
-    missing_codes: list[str] = []
+    missing_multiplier_codes: list[str] = []
+    incomplete_terms_codes: list[str] = []
     for row in rows:
         item = dict(row)
         quantity = _position_quantity(item)
-        if quantity in (None, 0.0) or _row_multiplier(item) is not None:
+        if quantity in (None, 0.0):
             enriched.append(item)
             continue
         code = str(
             item.get("code") or item.get("symbol") or item.get("stock_code") or ""
         ).strip().upper()
-        multiplier = multiplier_by_code.get(code)
-        if multiplier is None:
-            missing_codes.append(code or "unknown")
+        snapshot_row = snapshot_by_code.get(code)
+        if snapshot_row is None:
+            incomplete_terms_codes.append(code or "unknown")
             enriched.append(item)
             continue
+
+        multiplier = _snapshot_multiplier(snapshot_row)
+        if multiplier is None:
+            missing_multiplier_codes.append(code or "unknown")
+            enriched.append(item)
+            continue
+        if not _has_complete_current_option_terms(snapshot_row):
+            incomplete_terms_codes.append(code or "unknown")
+            enriched.append(item)
+            continue
+
+        _copy_snapshot_option_terms(item, snapshot_row)
         item["options_per_contract"] = multiplier
         enriched.append(item)
 
-    if missing_codes:
+    if missing_multiplier_codes:
         raise OpenDOptionEvidenceError(
             "OpenD market snapshot did not provide multiplier evidence for "
-            f"{len(missing_codes)} non-zero option position(s)."
+            f"{len(missing_multiplier_codes)} non-zero option position(s)."
+        )
+    if incomplete_terms_codes:
+        raise OpenDOptionTermsEvidenceError(
+            "OpenD market snapshot did not provide complete current terms for "
+            f"{len(incomplete_terms_codes)} non-zero option position(s)."
         )
     return enriched
+
+
+def _copy_snapshot_option_terms(
+    target: dict[str, Any],
+    snapshot: Mapping[str, Any],
+) -> None:
+    aliases = {
+        "stock_owner": ("stock_owner", "owner_code", "underlying"),
+        "option_type": ("option_type",),
+        "strike_time": ("strike_time", "expiration_ymd", "expiration"),
+        "option_strike_price": ("option_strike_price", "strike_price"),
+        "option_contract_size": ("option_contract_size", "contract_size"),
+        "option_contract_multiplier": (
+            "option_contract_multiplier",
+            "contract_multiplier",
+        ),
+        "lot_size": ("lot_size",),
+        "option_valid": ("option_valid",),
+    }
+    for field, candidates in aliases.items():
+        for candidate in candidates:
+            value = snapshot.get(candidate)
+            if value not in (None, ""):
+                target[field] = value
+                break
+    target["option_terms_source"] = "market_snapshot"
+
+
+def _snapshot_multiplier(row: Mapping[str, Any]) -> float | None:
+    values = {
+        value
+        for key in (
+            "option_contract_multiplier",
+            "option_contract_size",
+        )
+        if (value := _positive_number(row.get(key))) is not None
+    }
+    if len(values) == 1:
+        return next(iter(values))
+    if len(values) > 1:
+        return None
+    return _positive_number(row.get("lot_size"))
+
+
+def _has_complete_current_option_terms(row: Mapping[str, Any]) -> bool:
+    if row.get("option_valid") is not True:
+        return False
+    option_type = normalize_opend_option_type(row.get("option_type"))
+    expiration = normalize_contract_expiration(
+        row.get("strike_time")
+        or row.get("expiration_ymd")
+        or row.get("expiration")
+    )
+    strike = _positive_number(
+        row.get("option_strike_price")
+        if row.get("option_strike_price") not in (None, "")
+        else row.get("strike_price")
+    )
+    multiplier = _snapshot_multiplier(row)
+    owner = canonical_symbol(
+        row.get("stock_owner")
+        or row.get("owner_code")
+        or row.get("underlying")
+    )
+    return bool(
+        owner
+        and option_type in {"put", "call"}
+        and expiration
+        and strike is not None
+        and multiplier is not None
+    )
 
 
 def _parse_trading_day(row: dict[str, Any]) -> date | None:

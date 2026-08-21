@@ -113,7 +113,46 @@
 
 ---
 
-### 场景 D：你怀疑投影脏了，但账本本身没问题
+### 场景 D：Futu 当前期权条款与账本不同
+
+分红、拆并股等公司行动可能调整存量合约的 strike、multiplier 或其他交割条款。
+此时 Futu 的期权代码只用于定位合约；当前经济条款必须以该代码对应的 market
+snapshot 为准，不能继续从代码文本反解析 strike。
+
+质量检查先用 broker position code 中的原始合约身份精确关联 canonical lot，再比较
+同一 code 对应 snapshot 的当前 strike / multiplier。只有 code lineage、方向和数量均
+能唯一对应时，才会以 `POSITION_CONTRACT_TERMS_DRIFT` 立即阻断
+`option_position_report`、`lifecycle` 和 `close_advice`。Scheduled Tick 不会把被阻断
+市场的旧 strike 加入 Close Advice 预取计划。目标账户/市场没有唯一、当前的
+`om.option_positions` 数据集时同样 fail closed；其他市场的 snapshot 缺失不会污染该
+市场的判断。
+
+相同标的、方向、到期日和数量本身不能证明公司行动。如果 broker code 不能与原 lot
+精确对应，例如刚平掉旧 strike 又新开相同数量的新 strike，系统只报告普通 position
+divergence，不会建议 `adjust-lot`。系统不会做模糊 strike 匹配，也不会自动改账。
+
+先核对 lot 事件链和券商公司行动通知，确认调整后的 strike、multiplier、到期日、
+方向及交割物。证据不足，或特殊交割物无法由当前 lot 模型表达时，应停止修复并人工
+处理；不能仅凭价格接近就认定是同一合约。
+
+确认当前模型能够完整表达调整条款后，先预览：
+
+```bash
+./om option-positions adjust-lot --record-id <record_id> --strike <adjusted_strike> --multiplier <adjusted_multiplier> --dry-run
+```
+
+核对新增 `adjust` 事件、`position_id` 以及 Put 的 `cash_secured_amount` 或 Call 的
+`underlying_share_locked` 后，再单独授权写入：
+
+```bash
+./om option-positions adjust-lot --record-id <record_id> --strike <adjusted_strike> --multiplier <adjusted_multiplier> --apply --confirm
+```
+
+修复后按第 3 节验证，并在下一次质量刷新中确认 `OM-POS-002` 恢复通过。
+
+---
+
+### 场景 E：你怀疑投影脏了，但账本本身没问题
 
 默认只预览投影差异：
 

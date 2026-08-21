@@ -173,6 +173,11 @@ def assert_quality_allows(
     reasons: set[str] = set()
     account_key = str(account or "").strip().lower()
     market_key = str(market or "").strip().lower()
+    require_scoped_option_positions = bool(
+        consumer == "close_advice" and account_key and market_key
+    )
+    scoped_option_position_count = 0
+    scoped_option_position_declaration_count = 0
     cutover_active = (
         (((payload.get("extensions") or {}).get("quality_hot_path_cutover") or {}).get("status"))
         == "active"
@@ -186,14 +191,72 @@ def assert_quality_allows(
         ):
             continue
         scope = dataset.get("scope") if isinstance(dataset.get("scope"), dict) else {}
+        if (
+            dataset.get("dataset_id") == "om.option_positions"
+            and account_key
+            and market_key
+        ):
+            if (
+                str(scope.get("account") or "").strip().lower() != account_key
+                or str(scope.get("market") or "").strip().lower() != market_key
+            ):
+                continue
+            scoped_option_position_count += 1
         if account_key and scope.get("account") and str(scope.get("account")).lower() != account_key:
             continue
         if market_key and scope.get("market") and str(scope.get("market")).lower() != market_key:
             continue
-        if consumer not in set(str(value) for value in dataset.get("blocked_consumers") or []):
+        blocked_consumers = set(
+            str(value) for value in dataset.get("blocked_consumers") or []
+        )
+        declared_consumers = blocked_consumers | set(
+            str(value) for value in dataset.get("usable_for") or []
+        )
+        if (
+            dataset.get("dataset_id") == "om.option_positions"
+            and consumer in declared_consumers
+            and account_key
+            and market_key
+        ):
+            scoped_option_position_declaration_count += 1
+        if consumer not in declared_consumers:
+            continue
+        if dataset.get("dataset_id") == "om.option_positions":
+            freshness_value = (
+                dataset.get("freshness")
+                if isinstance(dataset.get("freshness"), dict)
+                else {}
+            )
+            source_observed_raw = str(
+                freshness_value.get("observed_at_utc") or ""
+            ).strip()
+            try:
+                source_observed = datetime.fromisoformat(
+                    source_observed_raw.replace("Z", "+00:00")
+                )
+            except ValueError:
+                blockers.add("OM-POS-001")
+                reasons.add("QUALITY_DATASET_TIME_INVALID")
+            else:
+                if (
+                    current - source_observed.astimezone(timezone.utc)
+                ).total_seconds() > max_age_seconds:
+                    blockers.add("OM-POS-001")
+                    reasons.add("QUALITY_DATASET_STALE")
+        if consumer not in blocked_consumers:
             continue
         blockers.update(str(value) for value in dataset.get("blocked_by") or [] if str(value))
         reasons.update(str(value) for value in dataset.get("reason_codes") or [] if str(value))
+    if require_scoped_option_positions:
+        if scoped_option_position_count > 1:
+            blockers.add("OM-POS-001")
+            reasons.add("QUALITY_DATASET_AMBIGUOUS")
+        elif (
+            scoped_option_position_count != 1
+            or scoped_option_position_declaration_count != 1
+        ):
+            blockers.add("OM-POS-001")
+            reasons.add("QUALITY_DATASET_UNAVAILABLE")
     if blockers or reasons:
         raise QualityGateBlocked(
             consumer,

@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import normalize_contract_expiration
+from src.application.opend_normalize import normalize_opend_option_type
 from src.application.quality.model import (
     check_result,
     dataset_status,
@@ -151,24 +152,135 @@ def normalize_opend_positions(
             row.get("position_side") if "position_side" in row else row.get("side"),
             qty=qty,
         )
-        if match is None or qty is None or multiplier is None or side is None:
-            errors.append(f"row-{index}")
-            continue
-        symbol = canonical_symbol(code)
-        strike = _decimal(Decimal(match.group("strike")) / Decimal("1000"))
-        expiration = f"20{match.group('yy')}-{match.group('mm')}-{match.group('dd')}"
-        if not symbol or strike is None:
+        symbol = canonical_symbol(
+            row.get("stock_owner")
+            or row.get("owner_code")
+            or row.get("underlying")
+            or code
+        )
+        option_type = normalize_opend_option_type(row.get("option_type"))
+        if option_type not in {"put", "call"} and match is not None:
+            option_type = "call" if match.group("cp") == "C" else "put"
+        expiration = str(
+            normalize_contract_expiration(
+                row.get("strike_time")
+                or row.get("expiration_ymd")
+                or row.get("expiration")
+            )
+            or ""
+        ).strip()
+        if not expiration and match is not None:
+            expiration = f"20{match.group('yy')}-{match.group('mm')}-{match.group('dd')}"
+        strike = _positive_decimal_from(
+            row,
+            "option_strike_price",
+            "strike_price",
+        )
+        if strike is None and match is not None:
+            strike = _decimal(Decimal(match.group("strike")) / Decimal("1000"))
+        if (
+            qty is None
+            or multiplier is None
+            or side is None
+            or not symbol
+            or option_type not in {"put", "call"}
+            or not expiration
+            or strike is None
+        ):
             errors.append(f"row-{index}")
             continue
         key = _contract_key(
             symbol=symbol,
-            option_type="call" if match.group("cp") == "C" else "put",
+            option_type=option_type,
             expiration=expiration,
             strike=strike,
             multiplier=multiplier,
         )
         quantities[key] += abs(qty) if side == "long" else -abs(qty)
     return {key: value for key, value in quantities.items() if value != 0}, errors
+
+
+def _contract_terms_drifts(
+    *,
+    local: dict[str, Decimal],
+    broker: dict[str, Decimal],
+    broker_rows: list[dict[str, Any]],
+    raw_comparison: dict[str, dict[str, str]],
+) -> list[dict[str, str]]:
+    compared_keys = set(raw_comparison)
+    proposals: list[tuple[str, str, Decimal, str]] = []
+    for row in broker_rows:
+        code = str(
+            row.get("code") or row.get("symbol") or row.get("stock_code") or ""
+        ).strip().upper()
+        code_match = OPTION_CODE_RE.match(code)
+        if code_match is None:
+            continue
+        normalized, errors = normalize_opend_positions([row])
+        if errors or len(normalized) != 1:
+            continue
+        current_key, quantity = next(iter(normalized.items()))
+        if current_key not in compared_keys or broker.get(current_key) != quantity:
+            continue
+        current_parts = current_key.split("|")
+        if len(current_parts) != 5:
+            continue
+        locator_option_type = "call" if code_match.group("cp") == "C" else "put"
+        locator_expiration = (
+            f"20{code_match.group('yy')}-{code_match.group('mm')}-"
+            f"{code_match.group('dd')}"
+        )
+        locator_strike = _decimal(
+            Decimal(code_match.group("strike")) / Decimal("1000")
+        )
+        local_candidates = []
+        for local_key, local_quantity in local.items():
+            parts = local_key.split("|")
+            if (
+                local_key in compared_keys
+                and len(parts) == 5
+                and parts[0] == current_parts[0]
+                and parts[1] == locator_option_type
+                and parts[2] == locator_expiration
+                and _decimal(parts[3]) == locator_strike
+                and local_quantity == quantity
+            ):
+                local_candidates.append(local_key)
+        if len(local_candidates) != 1:
+            continue
+        local_key = local_candidates[0]
+        if local_key != current_key:
+            proposals.append((local_key, current_key, quantity, code))
+
+    drifts: list[dict[str, str]] = []
+    for local_key, current_key, quantity, code in sorted(
+        proposals,
+        key=lambda item: (item[0], item[1], item[3]),
+    ):
+        if (
+            sum(1 for item in proposals if item[0] == local_key) != 1
+            or sum(1 for item in proposals if item[1] == current_key) != 1
+        ):
+            continue
+        local_parts = local_key.split("|")
+        current_parts = current_key.split("|")
+        drifts.append(
+            {
+                "symbol": current_parts[0],
+                "option_type": current_parts[1],
+                "expiration": current_parts[2],
+                "quantity": format(quantity, "f"),
+                "local_contracts": (
+                    f"{local_parts[3]}@{local_parts[4]}:{format(quantity, 'f')}"
+                ),
+                "opend_contracts": (
+                    f"{current_parts[3]}@{current_parts[4]}:{format(quantity, 'f')}"
+                ),
+                "broker_code": code,
+                "mapping": "code_lineage",
+            }
+        )
+    return drifts
 
 
 def _pending_lifecycle_coverage(
@@ -353,6 +465,12 @@ def build_position_dataset(
         for key in sorted(set(local) | set(broker))
         if local.get(key, Decimal(0)) != broker.get(key, Decimal(0))
     }
+    contract_terms_drifts = _contract_terms_drifts(
+        local=local,
+        broker=broker,
+        broker_rows=snapshot.rows,
+        raw_comparison=raw_comparison,
+    )
     lifecycle_coverage, lifecycle_case_ids = _pending_lifecycle_coverage(
         cases=list(lifecycle_cases or []),
         read_models_by_case=dict(lifecycle_read_models_by_case or {}),
@@ -382,7 +500,8 @@ def build_position_dataset(
     opend_fingerprint = sha256_json(
         {key: format(value, "f") for key, value in sorted(broker.items())}
     )
-    mismatch_fingerprint = sha256_json(comparison)
+    classified_comparison = raw_comparison if contract_terms_drifts else comparison
+    mismatch_fingerprint = sha256_json(classified_comparison)
     evidence = evidence_ref(
         kind="option-position-reconciliation",
         observed_at_utc=observed_at_utc,
@@ -391,12 +510,13 @@ def build_position_dataset(
             "local_contract_groups": len(local),
             "opend_contract_groups": len(broker),
             "observed_mismatch_count": len(raw_comparison),
-            "mismatch_count": len(comparison),
+            "mismatch_count": len(classified_comparison),
             "expected_lifecycle_pending_count": len(expected_lifecycle_pending),
             "mismatch_fingerprint": mismatch_fingerprint,
             "normalization_error_count": len(normalization_errors),
             "local_normalization_error_count": len(local_errors),
             "opend_normalization_error_count": len(broker_errors),
+            "contract_terms_drift_count": len(contract_terms_drifts),
         },
         artifact_ref=f"om-evidence:position-reconciliation:{account}",
     )
@@ -442,6 +562,39 @@ def build_position_dataset(
             evidence_refs=[evidence],
         )
         verdict = "unavailable"
+    elif contract_terms_drifts:
+        mismatches[state_key] = {
+            "kind": "contract_terms_drift",
+            "fingerprint": mismatch_fingerprint,
+            "first_seen_at_utc": observed_at_utc,
+            "last_seen_at_utc": observed_at_utc,
+            "next_recheck_at_utc": None,
+            "mismatch_count": len(raw_comparison),
+            "contract_terms_drift_count": len(contract_terms_drifts),
+        }
+        convergence = check_result(
+            check_id="OM-POS-002",
+            status="fail",
+            scope=scope,
+            observed_at_utc=observed_at_utc,
+            reason_code="POSITION_CONTRACT_TERMS_DRIFT",
+            message=(
+                "OpenD current option terms differ from the canonical ledger; "
+                "reconcile the affected lot before position reports, lifecycle, "
+                "or Close Advice consume it."
+            ),
+            observed={
+                "mismatch_count": len(raw_comparison),
+                "contract_terms_drift_count": len(contract_terms_drifts),
+                "contract_terms_drifts": contract_terms_drifts,
+            },
+            expected={
+                "mismatch_count": 0,
+                "contract_terms_drift_count": 0,
+            },
+            evidence_refs=[evidence],
+        )
+        verdict = "untrusted"
     elif expected_lifecycle_pending and not comparison:
         mismatches.pop(state_key, None)
         convergence = check_result(
