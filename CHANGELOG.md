@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.15.9 - 2026-08-21
+
 ### Bug Fixes
 - Preserved validated business-day FX carry-forward conversions during replay so completed historical cash backfills remain idempotent.
 
