@@ -1011,6 +1011,68 @@ def test_v2_delivery_accepts_exact_digest_from_retired_ai_overlay_revision(
     )["available"] is True
 
 
+def test_v2_delivery_accepts_pre_wheel_digest_for_non_wheel_candidate(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import (
+        daily_brief_digest,
+        normalize_daily_decision_brief,
+    )
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        read_daily_decision_brief_delivery_state,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    source = _brief(run_id="run-1", actions=[_action()])
+    source["revision"] = 0
+    pre_wheel = normalize_daily_decision_brief(source)
+    for item in pre_wheel["candidate_index"]:
+        item["representative"].pop("position_lot_id", None)
+    pre_wheel_digest = daily_brief_digest(pre_wheel)
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    prepared = _prepare_fixed(tmp_path, persisted)
+    envelope = prepared["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(
+            envelope["delivery_key"]
+        ),
+        confirmed_at_utc="2026-07-21T14:00:04+00:00",
+    )
+
+    persisted["paths"]["revision"].write_text(
+        json.dumps(source),
+        encoding="utf-8",
+    )
+    delivery_path = prepared["paths"]["delivery"]
+    delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+    day = delivery["days"][MARKET_DATE]
+    day["fixed_reports"][TARGET_1000]["source_digest"] = pre_wheel_digest
+    for alerted in day["alerted_candidates"].values():
+        alerted["brief_digest"] = pre_wheel_digest
+    delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
+
+    read = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )
+    assert read["available"] is True
+    assert read["state"]["days"][MARKET_DATE]["fixed_reports"][TARGET_1000][
+        "source_digest"
+    ] == pre_wheel_digest
+
+
 def test_retry_payload_classifier_blocks_retired_source_text_and_card(
     tmp_path: Path,
 ) -> None:

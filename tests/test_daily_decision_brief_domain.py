@@ -131,6 +131,7 @@ def test_action_identity_ignores_price_rank_and_return_changes() -> None:
 def test_wheel_candidate_identity_is_scoped_to_stock_lot() -> None:
     from domain.domain.daily_decision_brief import (
         build_daily_brief_candidate_identity,
+        normalize_daily_decision_brief,
     )
 
     assert build_daily_brief_candidate_identity(
@@ -147,6 +148,21 @@ def test_wheel_candidate_identity_is_scoped_to_stock_lot() -> None:
             symbol="NVDA",
             strategy_family="wheel",
         )
+
+    action = _action()
+    action.update(
+        {
+            "strategy_family": "wheel",
+            "option_type": "call",
+            "contract_symbol": "NVDA260821C00110000",
+            "position_lot_id": "stock-lot-1",
+        }
+    )
+    candidate = normalize_daily_decision_brief(
+        _brief(revision=0, actions=[action])
+    )["candidate_index"][0]
+    assert candidate["identity"] == "candidate:v1:lx:US:NVDA:wheel:stock-lot-1"
+    assert candidate["representative"]["position_lot_id"] == "stock-lot-1"
 
 
 def test_action_identity_normalizes_case_and_strike_representation() -> None:
