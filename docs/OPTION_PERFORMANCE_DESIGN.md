@@ -153,7 +153,7 @@ recalculate canonical facts.
 
 ## Valuation and FX Evidence
 
-Historical valuation is replayed from append-only `option_performance_evidence.v1` facts. Repository construction and report reads never run DDL. A missing schema returns `not_initialized`; only explicit evidence import/capture apply performs the idempotent v1 migration. Migration and the full evidence batch share one transaction, so any identity, correction, duplicate, or storage conflict rolls back both schema and data changes. Dry-run parses and validates the same envelope without creating or mutating the database.
+Historical valuation is replayed from append-only `option_performance_evidence.v1` facts. Repository construction and report reads never run DDL. A missing schema returns `not_initialized`; explicit evidence import/capture apply and scheduled tick FX capture perform the idempotent v1 migration. Migration and each evidence batch share one transaction, so any identity, correction, duplicate, or storage conflict rolls back both schema and data changes. Dry-run parses and validates the same envelope without creating or mutating the database.
 
 Valuation facts use `OptionInstrumentKey` or `StockInstrumentKey`; FX facts use an exact base/quote pair. Structured SQLite identity columns must decode to the same canonical key as the stored `instrument_key`. Corrections are append-only and must reference an existing or earlier fact of the same identity. Self-reference, missing targets, cross-identity corrections, source-identity conflicts, and correction cycles fail closed.
 
@@ -191,7 +191,7 @@ Period, month, account, and symbol views reduce the same valuation facts. Valuat
 
 Current collection runs only for `partial_current` reports with `refresh_quotes=true`. It deduplicates account-independent option identities, rejects conflicting stored market codes, resolves missing exact codes from only the required expiration chains, and fetches the resulting exact codes in one batched snapshot path. Positive bid/ask midpoint is preferred; positive last price is the explicit fallback. Crossed, zero, ambiguous, or unavailable markets fail closed with diagnostics. Broker timestamps are accepted only when timezone-aware and not in the future; otherwise the injected `now_ms` is used with `timestamp_fallback=true`.
 
-Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for the evidence lifecycle commands.
+Current report FX reuses the exchange-rate adapter with cache writes disabled. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for the evidence lifecycle commands. Non-smoke scheduled tick preparation separately persists the exact provider USD/CNY and HKD/CNY observation once per unique ledger; retries of the same provider timestamp are idempotent, and persistence failures are reported as degraded tick evidence events without blocking monitoring.
 
 ## Sell Put Assigned-Stock Lifecycle
 
@@ -277,6 +277,8 @@ than attributing them to the requested account or treating them as zero.
 - Event-time `cash_conversion.v1` snapshots own direct-cash CNY conversion.
 - Historical direct-cash snapshots can be filled only through the audited,
   dry-run-first `option-performance cash-conversion backfill` entry point.
+- Scheduled tick preparation persists auditable USD/CNY and HKD/CNY evidence
+  without adding writes to report reads.
 - Deterministic valuation evidence, no-write current quote collection,
   assigned-stock lifecycle, continuous-time capital-days and Combo Yield
   attribution are implemented.
