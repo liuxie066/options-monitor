@@ -532,6 +532,7 @@ def _candidate_representative_view(
         field: _json_safe(value.get(field))
         for field in _CANDIDATE_REPRESENTATIVE_FIELDS
         if value.get(field) is not None
+        and (field != "position_lot_id" or strategy_family == "wheel")
     }
     if "capacity" not in out:
         metrics = out.get("metrics")
