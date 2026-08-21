@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.infrastructure.io_utils import (
     utc_now,
@@ -48,6 +48,7 @@ from src.application.multi_tick_audit import MultiTickAuditHelper
 from src.application.tick_guard_flow import TickGuardRequest, run_tick_guard_flow
 from src.application.tick_account_execution import (
     TickAccountExecutionRequest,
+    publish_runtime_portfolio_snapshot_shadows,
     resolve_account_run_max_workers as _resolve_account_run_max_workers,
     resolve_default_account as _resolve_default_account,
     run_tick_account_execution,
@@ -535,37 +536,36 @@ def main(argv: list[str] | None = None) -> int:
 
     account_count = len(account_ids)
     account_workers = _resolve_account_run_max_workers(base_cfg, account_count)
-    account_execution = run_tick_account_execution(
-        TickAccountExecutionRequest(
-            account_ids=account_ids,
-            account_workers=account_workers,
-            base=base,
-            repo_root=repo_root,
-            base_cfg=base_cfg,
-            cfg_path=cfg_path,
-            vpy=vpy,
-            markets_to_run=markets_to_run,
-            scheduler_ms=scheduler_ms,
-            scheduler_view=scheduler_view,
-            notify_decision_by_account=notify_decision_by_account,
-            should_run_global=should_run_global,
-            reason_global=reason_global,
-            run_id=run_id,
-            run_dir=run_dir,
-            shared_required=shared_required,
-            accounts_root=accounts_root,
-            prefetch_done=prefetch_done,
-            force_mode=force_mode,
-            smoke=smoke,
-            no_send=no_send,
-            scan_decision_by_account=scan_decision_by_account,
-            state_path=state_path,
-            scheduler_schedule_key=str(scheduler_schedule_key),
-            runlog=runlog,
-            audit_helper=audit_helper,
-            symbols_arg=symbols_arg,
-        )
+    account_execution_request = TickAccountExecutionRequest(
+        account_ids=account_ids,
+        account_workers=account_workers,
+        base=base,
+        repo_root=repo_root,
+        base_cfg=base_cfg,
+        cfg_path=cfg_path,
+        vpy=vpy,
+        markets_to_run=markets_to_run,
+        scheduler_ms=scheduler_ms,
+        scheduler_view=scheduler_view,
+        notify_decision_by_account=notify_decision_by_account,
+        should_run_global=should_run_global,
+        reason_global=reason_global,
+        run_id=run_id,
+        run_dir=run_dir,
+        shared_required=shared_required,
+        accounts_root=accounts_root,
+        prefetch_done=prefetch_done,
+        force_mode=force_mode,
+        smoke=smoke,
+        no_send=no_send,
+        scan_decision_by_account=scan_decision_by_account,
+        state_path=state_path,
+        scheduler_schedule_key=str(scheduler_schedule_key),
+        runlog=runlog,
+        audit_helper=audit_helper,
+        symbols_arg=symbols_arg,
     )
+    account_execution = run_tick_account_execution(account_execution_request)
     tick_metrics['accounts'].extend(account_execution.account_metrics)
     tick_metrics["required_data_prefetch_invocation_count"] = (
         account_execution.prefetch_invocation_count
@@ -581,34 +581,60 @@ def main(argv: list[str] | None = None) -> int:
     )
     results.extend(account_execution.results)
 
-    return run_tick_notification_flow(
-        TickNotificationRequest(
-            base=base,
-            repo_root=repo_root,
-            cfg_path=cfg_path,
-            state_path=state_path,
-            scheduler_schedule_key=str(scheduler_schedule_key),
-            base_cfg=base_cfg,
-            run_id=run_id,
-            runlog=runlog,
-            results=results,
-            tick_metrics=tick_metrics,
-            no_send=no_send,
-            bj_tz=bj_tz,
-            audit_helper=audit_helper,
-            vpy=vpy,
-            complete_tick_idempotency_fn=complete_tick_idempotency,
-            markets_to_run=markets_to_run,
-            scheduler_markets=scheduler_markets,
-            scheduler_decision=scheduler_decision,
-            ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
-            account_ids=tuple(account_ids),
-            scheduler_decisions_by_account=scheduler_decisions_by_account,
-            scheduled_scan_targets_by_account=account_execution.scheduled_scan_targets_by_account,
-            commit_scan_targets_fn=commit_scan_targets,
-            trigger_kind=trigger_kind,
+    post_delivery_sidecars_finished = False
+
+    def publish_post_delivery_sidecars_once() -> None:
+        nonlocal post_delivery_sidecars_finished
+        if post_delivery_sidecars_finished:
+            return
+        post_delivery_sidecars_finished = True
+        publish_runtime_portfolio_snapshot_shadows(
+            request=account_execution_request,
+            tasks=account_execution.runtime_portfolio_snapshot_shadow_tasks,
         )
+
+    notification_request = TickNotificationRequest(
+        base=base,
+        repo_root=repo_root,
+        cfg_path=cfg_path,
+        state_path=state_path,
+        scheduler_schedule_key=str(scheduler_schedule_key),
+        base_cfg=base_cfg,
+        run_id=run_id,
+        runlog=runlog,
+        results=results,
+        tick_metrics=tick_metrics,
+        no_send=no_send,
+        bj_tz=bj_tz,
+        audit_helper=audit_helper,
+        vpy=vpy,
+        complete_tick_idempotency_fn=complete_tick_idempotency,
+        markets_to_run=markets_to_run,
+        scheduler_markets=scheduler_markets,
+        scheduler_decision=scheduler_decision,
+        ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
+        account_ids=tuple(account_ids),
+        scheduler_decisions_by_account=scheduler_decisions_by_account,
+        scheduled_scan_targets_by_account=account_execution.scheduled_scan_targets_by_account,
+        commit_scan_targets_fn=commit_scan_targets,
+        post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
+        trigger_kind=trigger_kind,
     )
+    return _run_notification_with_post_delivery_fallback(
+        notification_request=notification_request,
+        post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
+    )
+
+
+def _run_notification_with_post_delivery_fallback(
+    *,
+    notification_request: TickNotificationRequest,
+    post_delivery_sidecars_fn: Callable[[], None],
+) -> int:
+    try:
+        return run_tick_notification_flow(notification_request)
+    finally:
+        post_delivery_sidecars_fn()
 
 
 multi_tick_main = main

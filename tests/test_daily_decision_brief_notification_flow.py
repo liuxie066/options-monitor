@@ -776,7 +776,7 @@ def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, t
 
 
 @pytest.mark.parametrize("observer_fails", (False, True))
-def test_recommendation_point_observer_runs_after_commit_before_provider_and_is_best_effort(
+def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
     monkeypatch,
     tmp_path: Path,
     observer_fails: bool,
@@ -800,19 +800,81 @@ def test_recommendation_point_observer_runs_after_commit_before_provider_and_is_
 
     monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
     bundle = _request(tmp_path, run_id=f"observer-{observer_fails}")
+    complete_tick = bundle.request.complete_tick_idempotency_fn
+
+    def complete(**kwargs):
+        order.append("complete")
+        complete_tick(**kwargs)
+
     bundle.request = replace(
         bundle.request,
         commit_scan_targets_fn=lambda _targets: order.append("commit"),
+        post_delivery_sidecars_fn=lambda: order.append("runtime_snapshot"),
+        complete_tick_idempotency_fn=complete,
     )
 
     assert mod.run_tick_notification_flow(bundle.request) == 0
-    assert order == ["commit", "observer", "provider"]
+    assert order == [
+        "commit",
+        "provider",
+        "observer",
+        "runtime_snapshot",
+        "complete",
+    ]
     actions = [event["action"] for event in bundle.request.audit_helper.events]
     assert (
         "recommendation_point_gap"
         if observer_fails
         else "recommendation_point_captured"
     ) in actions
+    latency_stages = [
+        event.get("data", {}).get("stage")
+        for event in bundle.request.runlog.events
+        if event.get("step") == "tick_latency"
+    ]
+    assert latency_stages == [
+        "daily_brief_prepare",
+        "scheduler_target_commit",
+        "provider_delivery",
+        "recommendation_point_observer",
+    ]
+
+
+def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(monkeypatch)
+    order: list[str] = []
+    bundle = _request(tmp_path, run_id="sidecar-degraded")
+    complete_tick = bundle.request.complete_tick_idempotency_fn
+
+    def fail_sidecar() -> None:
+        order.append("sidecar")
+        raise OSError("snapshot unavailable")
+
+    def complete(**kwargs) -> None:
+        order.append("complete")
+        complete_tick(**kwargs)
+
+    bundle.request = replace(
+        bundle.request,
+        post_delivery_sidecars_fn=fail_sidecar,
+        complete_tick_idempotency_fn=complete,
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert order == ["sidecar", "complete"]
+    degraded = [
+        event
+        for event in bundle.request.audit_helper.events
+        if event["action"] == "post_delivery_sidecars_failed"
+    ]
+    assert degraded[0]["status"] == "degraded"
+    assert degraded[0]["extra"] == {"exception_type": "OSError"}
 
 
 @pytest.mark.parametrize(
