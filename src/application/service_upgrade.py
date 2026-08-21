@@ -1627,6 +1627,8 @@ def _ensure_pi_runtime(
     target_dir: Path,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    *,
+    previous_dir: Path | None = None,
 ) -> dict[str, Any]:
     package_lock = target_dir / "agent-runtime" / "package-lock.json"
     smoke_script = target_dir / "scripts" / "pi_runtime_smoke.sh"
@@ -1634,6 +1636,8 @@ def _ensure_pi_runtime(
         "node_version": None,
         "npm_version": None,
         "package_lock_sha256": None,
+        "install_strategy": "npm_ci",
+        "reused_from": None,
     }
     try:
         details["package_lock_sha256"] = hashlib.sha256(package_lock.read_bytes()).hexdigest()
@@ -1661,13 +1665,40 @@ def _ensure_pi_runtime(
             timeout=30,
         )
         details["npm_version"] = str(npm_result.get("stdout") or "").strip() or None
-        _run_required(
-            ["npm", "ci", "--omit=dev", "--ignore-scripts", "--prefix", "agent-runtime"],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=1200,
-        )
+        previous_lock = (previous_dir / "agent-runtime" / "package-lock.json") if previous_dir else None
+        previous_modules = (previous_dir / "agent-runtime" / "node_modules") if previous_dir else None
+        if (
+            previous_lock is not None
+            and previous_modules is not None
+            and previous_lock.is_file()
+            and previous_modules.is_dir()
+            and hashlib.sha256(previous_lock.read_bytes()).hexdigest() == details["package_lock_sha256"]
+        ):
+            target_modules = target_dir / "agent-runtime" / "node_modules"
+            if target_modules.is_symlink():
+                target_modules.unlink()
+            elif target_modules.exists():
+                shutil.rmtree(target_modules)
+            shutil.copytree(previous_modules, target_modules, symlinks=True)
+            details["install_strategy"] = "reuse_previous"
+            details["reused_from"] = str(previous_modules)
+        else:
+            _run_required(
+                [
+                    "npm",
+                    "ci",
+                    "--omit=dev",
+                    "--ignore-scripts",
+                    "--prefer-offline",
+                    "--no-audit",
+                    "--prefix",
+                    "agent-runtime",
+                ],
+                cwd=target_dir,
+                run_cmd=run_cmd,
+                operations=operations,
+                timeout=1200,
+            )
         _run_required(
             [
                 "bash",
@@ -1822,6 +1853,7 @@ def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
 def _ensure_release_runtime(
     *,
     target_dir: Path,
+    previous_dir: Path | None = None,
     cache_root: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
@@ -1970,7 +2002,12 @@ def _ensure_release_runtime(
                 "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
             ]
         )
-        runtime_prepare["pi_runtime"] = _ensure_pi_runtime(target_dir, run_cmd, operations)
+        runtime_prepare["pi_runtime"] = _ensure_pi_runtime(
+            target_dir,
+            run_cmd,
+            operations,
+            previous_dir=previous_dir,
+        )
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
@@ -2555,7 +2592,13 @@ def service_upgrade(
                     "operations": operations,
                 },
             )
-            runtime_prepare = _ensure_release_runtime(target_dir=target_dir, cache_root=cache, run_cmd=run_cmd, operations=operations)
+            runtime_prepare = _ensure_release_runtime(
+                target_dir=target_dir,
+                previous_dir=previous_dir,
+                cache_root=cache,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
             write_upgrade_status(
                 runtime_root=runtime,
                 payload={
