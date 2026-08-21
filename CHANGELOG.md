@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Allowed audited official FX evidence to carry forward across explicitly listed weekend and holiday dates during historical cash-conversion backfills, while preserving the default 24-hour limit and never looking ahead.
+
 ### Improvements
 - Reused successful Guardrails regression results for automatic VERSION-driven releases, removed duplicate local preflight suites, and made `update verify` service-health snapshot timing explicit.
 

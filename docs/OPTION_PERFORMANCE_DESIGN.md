@@ -94,10 +94,17 @@ evidence-preserving migration is run:
 ```
 
 The command defaults to dry-run, consumes only persisted performance FX facts
-at or before each cash event, and enforces the same 24-hour event window.
-`--apply` atomically enriches only missing/pending snapshots, never overwrites
-an observed conversion, and records before/after hashes plus the selected FX
-fact ID in `cash_conversion_backfill_audit`.
+at or before each cash event, and normally enforces the same 24-hour event
+window. A persisted official fact may carry forward for at most seven days only
+when its evidence explicitly lists the event's Asia/Shanghai date in
+`quality.carry_forward_dates`; the conversion retains the fact's original
+publication timestamp and uses
+`method=historical_business_day_fx_carry_forward`. This supports audited
+weekend and holiday handling without accepting an older fact merely because a
+newer business-day fact is missing. `--apply` atomically enriches only
+missing/pending snapshots, never overwrites an observed conversion, and records
+before/after hashes plus the selected FX fact ID in
+`cash_conversion_backfill_audit`.
 
 Premium activity, PnL, and valuation CNY use the separate
 `option_performance_evidence.v1` FX facts. Therefore

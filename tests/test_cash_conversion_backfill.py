@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,11 +19,17 @@ RATE_MS = int(datetime(2026, 7, 3, 9, 15, tzinfo=TZ).timestamp() * 1000)
 MIGRATION_MS = int(datetime(2026, 7, 24, 15, 0, tzinfo=TZ).timestamp() * 1000)
 
 
-def _event(event_id: str, *, account: str = "lx", raw_payload: dict | None = None) -> TradeEvent:
+def _event(
+    event_id: str,
+    *,
+    account: str = "lx",
+    event_time_ms: int = EVENT_MS,
+    raw_payload: dict | None = None,
+) -> TradeEvent:
     return TradeEvent(
         event_id=event_id,
         event_type="open",
-        event_time_ms=EVENT_MS,
+        event_time_ms=event_time_ms,
         contract_key=ContractKey.from_values(
             broker="富途",
             account=account,
@@ -51,6 +57,7 @@ def _import_rate(
     evidence_repo: PerformanceEvidenceSQLiteRepository,
     *,
     effective_at_ms: int = RATE_MS,
+    quality: dict | None = None,
 ) -> str:
     payload = {
         "schema_version": "option_performance_evidence.v1",
@@ -66,7 +73,7 @@ def _import_rate(
                 "source": "pbc_central_parity",
                 "source_id": "pbc:2026-07-03",
                 "revision": 1,
-                "quality": {"backfill": True},
+                "quality": quality or {"backfill": True},
                 "raw": {},
             }
         ],
@@ -194,6 +201,51 @@ def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(
     assert len(sy.unresolved) == 2
 
 
+def test_backfill_carries_explicit_official_rate_across_non_business_day(tmp_path: Path) -> None:
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    holiday_event_ms = int(datetime(2026, 7, 5, 10, 0, tzinfo=TZ).timestamp() * 1000)
+    weekday_event_ms = int(datetime(2026, 7, 6, 10, 0, tzinfo=TZ).timestamp() * 1000)
+    repo.upsert_trade_event(
+        _event("holiday", account="sy", event_time_ms=holiday_event_ms)
+    )
+    repo.upsert_trade_event(
+        _event("unlisted", account="sy", event_time_ms=weekday_event_ms)
+    )
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    _import_rate(
+        evidence_repo,
+        quality={
+            "backfill": True,
+            "official": True,
+            "carry_forward_dates": ["2026-07-05"],
+        },
+    )
+
+    result = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="sy",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS,
+    )
+
+    assert result.migrated_conversion_count == 2
+    assert any(
+        item["cash_fact_id"] == "option_trade_cash_gross:unlisted"
+        for item in result.unresolved
+    )
+    conversion = repo.list_trade_events()[0]["raw_payload"]["cash_conversions"][
+        "option_trade_cash_gross"
+    ]
+    assert conversion["amount_cny"] == "1440"
+    assert conversion["method"] == "historical_business_day_fx_carry_forward"
+    assert conversion["rate_timestamp"] == datetime.fromtimestamp(
+        RATE_MS / 1000,
+        tz=timezone.utc,
+    ).isoformat()
+
+
 def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
     db_path = tmp_path / "option_positions.sqlite3"
     repo = SQLiteOptionPositionsRepository(db_path)
@@ -242,11 +294,12 @@ def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
 def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
     db_path = tmp_path / "option_positions.sqlite3"
     repo = SQLiteOptionPositionsRepository(db_path)
+    holiday_event_ms = int(datetime(2026, 7, 5, 10, 0, tzinfo=TZ).timestamp() * 1000)
     repo.upsert_assigned_stock_event(
         {
             "stock_event_id": "sale-1",
             "event_type": "sale",
-            "trade_time_ms": EVENT_MS,
+            "trade_time_ms": holiday_event_ms,
             "account": "lx",
             "broker": "富途",
             "symbol": "NVDA",
@@ -258,7 +311,14 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
         }
     )
     evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
-    _import_rate(evidence_repo)
+    _import_rate(
+        evidence_repo,
+        quality={
+            "backfill": True,
+            "official": True,
+            "carry_forward_dates": ["2026-07-05"],
+        },
+    )
 
     result = backfill_cash_conversions(
         repo,
@@ -272,3 +332,7 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
     conversions = repo.list_assigned_stock_events()[0]["cash_conversions"]
     assert conversions["assigned_stock_sale_cash_gross"]["amount_cny"] == "75600"
     assert conversions["assigned_stock_sale_fee_cash"]["amount_cny"] == "-7.2"
+    assert (
+        conversions["assigned_stock_sale_cash_gross"]["method"]
+        == "historical_business_day_fx_carry_forward"
+    )
