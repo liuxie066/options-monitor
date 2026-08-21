@@ -12,6 +12,8 @@ permissions:
 jobs:
   guardrails:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -88,3 +90,21 @@ jobs:
             tests/test_inbound_control.py \
             tests/test_setup_check.py \
             tests/test_cli_operator_commands.py
+
+      - name: Resolve VERSION release
+        id: release
+        if: github.event_name == 'push' && contains(github.event.head_commit.modified, 'VERSION')
+        run: |
+          VERSION="$(tr -d '\n' < VERSION)"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: guardrails
+    if: github.event_name == 'push' && needs.guardrails.outputs.release_tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_release-reusable.yml
+    with:
+      tag: ${{ needs.guardrails.outputs.release_tag }}
+      target_commitish: ${{ github.sha }}
+      run_regression_gates: false

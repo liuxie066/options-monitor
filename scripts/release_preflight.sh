@@ -144,16 +144,12 @@ if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
       tests/test_shadow_replay.py \
       tests/test_shadow_replay_candidate_impact.py \
       tests/test_strategy_lab.py
-  run_step "configuration and control-plane focused tests" \
+  run_step "configuration focused tests" \
     "${PYTHON_BIN}" -m pytest \
       tests/test_config_yaml.py \
       tests/test_config_template_inheritance.py \
       tests/test_config_authoring_transaction.py \
-      tests/test_runtime_config_identity.py \
-      tests/test_service_deploy.py \
-      tests/test_inbound_control.py \
-      tests/test_setup_check.py \
-      tests/test_cli_operator_commands.py
+      tests/test_runtime_config_identity.py
 fi
 
 if [[ "${FULL}" -eq 1 ]]; then
