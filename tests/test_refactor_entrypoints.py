@@ -52,7 +52,7 @@ def test_unified_tick_help_works() -> None:
 def test_unified_cli_validate_command_works_with_example_config(example_config_path: Path) -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "config",
@@ -72,7 +72,7 @@ def test_unified_cli_validate_command_works_with_example_config(example_config_p
 def test_agent_interface_spec_outputs_manifest() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.agent.cli",
             "spec",
@@ -90,7 +90,7 @@ def test_agent_interface_spec_outputs_manifest() -> None:
 def test_unified_cli_scan_pipeline_command_exposes_canonical_flags() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "scan-pipeline",
@@ -110,7 +110,7 @@ def test_unified_cli_scan_pipeline_command_exposes_canonical_flags() -> None:
 def test_unified_cli_option_positions_sync_feishu_command_is_removed() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "option-positions",
@@ -129,7 +129,7 @@ def test_unified_cli_option_positions_sync_feishu_command_is_removed() -> None:
 def test_unified_cli_option_positions_management_command_exists_without_legacy_market_alias() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "option-positions",
@@ -148,7 +148,7 @@ def test_unified_cli_option_positions_management_command_exists_without_legacy_m
 def test_unified_cli_option_performance_report_is_the_public_performance_entrypoint() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "option-performance",
@@ -167,7 +167,7 @@ def test_unified_cli_option_performance_report_is_the_public_performance_entrypo
 def test_unified_cli_symbols_command_exists_without_legacy_script_path() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "symbols",
@@ -186,7 +186,7 @@ def test_unified_cli_symbols_command_exists_without_legacy_script_path() -> None
 def test_unified_cli_watchlist_command_is_removed() -> None:
     proc = subprocess.run(
         [
-            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            sys.executable,
             "-m",
             "src.interfaces.cli.main",
             "watchlist",

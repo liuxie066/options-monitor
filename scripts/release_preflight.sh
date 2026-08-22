@@ -21,6 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=python_runtime.sh
 source "${ROOT}/scripts/python_runtime.sh"
 PYTHON_BIN="$(om_select_repo_python "${ROOT}")"
+export OM_PYTHON="${PYTHON_BIN}"
 
 FULL=0
 REQUIRE_CLEAN=0

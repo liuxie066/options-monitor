@@ -8,7 +8,7 @@
 - CLI / script 边界测试：验证命令参数、入口兼容和输出文件契约。
 - Pipeline / multi-account 测试：验证多账户状态隔离、共享 required data、共享 context 切片复用和 per-account notification batching。
 - Schema / guard 测试：验证 DTO、source snapshot、config gate、文档 wording 和 runtime config 跟踪约束。
-- 少量 subprocess 测试：依赖 `.venv/bin/python`，本地缺 venv 时会失败。
+- subprocess 测试继承运行 pytest 的解释器；shell 入口测试继承 `OM_PYTHON`，不要求每个 worktree 自带 `.venv`。
 
 ## 运行方式
 
@@ -20,16 +20,16 @@ python3 -m pytest tests/test_candidate_engine_contract.py tests/test_candidate_e
 python3 -m pytest tests/test_pipeline_context_shared_context.py -q
 ```
 
-运行仓库内置关键回归集：
+运行发布相关关键回归集：
 
 ```bash
-./.venv/bin/python tests/run_tests.py
+OM_PYTHON="/absolute/path/to/python" bash scripts/release_preflight.sh
 ```
 
-运行全部自动发现测试：
+运行完整发布预检（包含全部自动发现测试）：
 
 ```bash
-./.venv/bin/python tests/run_tests.py --all
+OM_PYTHON="/absolute/path/to/python" bash scripts/release_preflight.sh --full
 ```
 
 基础检查：
@@ -42,7 +42,7 @@ git diff --check
 
 ## 本地环境注意事项
 
-- `tests/run_tests.py` 中部分用例会调用 `./.venv/bin/python`。
+- 隔离 worktree 可以通过 `OM_PYTHON` 复用已安装依赖的 Python；只有依赖声明变化时才需要更新该环境。
 - 不要把本地 secrets、真实 token、私钥或个人运行状态提交进测试 fixture。
 
 ## 新增测试规则
