@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import os
 import sys
 
@@ -500,12 +502,10 @@ def test_p1_eval_rejects_incomplete_human_review(tmp_path) -> None:
     path = tmp_path / "reviews.json"
     path.write_text('{"july_income":{"intent_fulfillment":2}}', encoding="utf-8")
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         copilot_p1_eval._load_human_reviews(str(path))
-    except SystemExit as exc:
-        assert "must be 0, 1, or 2" in str(exc)
-    else:
-        raise AssertionError("incomplete review must fail")
+    exc = _caught.value
+    assert "must be 0, 1, or 2" in str(exc)
 
 
 def test_apply_human_reviews_updates_existing_report_without_running_model() -> None:
@@ -539,10 +539,8 @@ def test_apply_human_reviews_requires_exact_case_set() -> None:
     report = {"cases": [{"name": "july_income"}]}
     scores = {dimension: 2 for dimension in copilot_p1_eval._empty_human_review()}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         copilot_p1_eval.apply_human_reviews(report, {"other": scores})
-    except SystemExit as exc:
-        assert "missing=['july_income']" in str(exc)
-        assert "unknown=['other']" in str(exc)
-    else:
-        raise AssertionError("mismatched review cases must fail")
+    exc = _caught.value
+    assert "missing=['july_income']" in str(exc)
+    assert "unknown=['other']" in str(exc)

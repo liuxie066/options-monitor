@@ -66,9 +66,9 @@ def test_watchdog_retry_defaults_to_enabled_but_allows_explicit_disable(
 
 def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     argv_scope,
+    example_config_path,
     fake_runlog_factory,
     monkeypatch,
-    runtime_config_copy,
 ) -> None:
     mt = importlib.import_module("src.application.multi_account_tick")
 
@@ -98,7 +98,7 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
         [
             "om",
             "--config",
-            str(runtime_config_copy),
+            str(example_config_path),
             "--accounts",
             "lx",
             "--market-config",

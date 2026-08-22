@@ -4,67 +4,84 @@ import ast
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _python_text_offenders(
+    roots: list[Path],
+    banned: tuple[str, ...],
+    *,
+    exclude: tuple[Path, ...] = (),
+) -> list[str]:
+    offenders = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if path in exclude:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(fragment in text for fragment in banned):
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+    return offenders
+
+
 def test_option_positions_v2_code_is_physically_retired() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     retired_paths = [
-        repo_root / "domain" / "domain" / "option_position_ledger.py",
-        repo_root / "domain" / "domain" / "option_positions_v2.py",
-        repo_root / "domain" / "storage" / "repositories" / "option_positions_v2_repo.py",
-        repo_root / "src" / "application" / "option_positions_v2_service.py",
-        repo_root / "src" / "application" / "option_positions_service.py",
-        repo_root / "src" / "application" / "option_positions_facade.py",
-        repo_root / "src" / "application" / "option_positions_auto_close.py",
-        repo_root / "src" / "application" / "option_positions_context_builder.py",
-        repo_root / "src" / "application" / "option_positions_feishu_sync.py",
-        repo_root / "src" / "application" / "option_positions_feishu_sync_receipt.py",
-        repo_root / "src" / "application" / "option_positions_inspection.py",
-        repo_root / "src" / "application" / "option_positions_reporting.py",
-        repo_root / "src" / "application" / "option_positions_sync_config.py",
-        repo_root / "src" / "application" / "positions" / "feishu_sync.py",
-        repo_root / "src" / "application" / "positions" / "feishu_sync_receipt.py",
-        repo_root / "src" / "application" / "positions" / "sync_config.py",
-        repo_root / "src" / "application" / "ledger" / "sync_metadata.py",
-        repo_root / "src" / "application" / "position_maintenance.py",
-        repo_root / "src" / "application" / "position_maintenance_receipt.py",
-        repo_root / "tests" / "test_option_positions_legacy_v2.py",
-        repo_root / "tests" / "test_option_positions_service.py",
-        repo_root / "tests" / "test_option_positions_sqlite_service.py",
+        REPO_ROOT / "domain" / "domain" / "option_position_ledger.py",
+        REPO_ROOT / "domain" / "domain" / "option_positions_v2.py",
+        REPO_ROOT / "domain" / "storage" / "repositories" / "option_positions_v2_repo.py",
+        REPO_ROOT / "src" / "application" / "option_positions_v2_service.py",
+        REPO_ROOT / "src" / "application" / "option_positions_service.py",
+        REPO_ROOT / "src" / "application" / "option_positions_facade.py",
+        REPO_ROOT / "src" / "application" / "option_positions_auto_close.py",
+        REPO_ROOT / "src" / "application" / "option_positions_context_builder.py",
+        REPO_ROOT / "src" / "application" / "option_positions_feishu_sync.py",
+        REPO_ROOT / "src" / "application" / "option_positions_feishu_sync_receipt.py",
+        REPO_ROOT / "src" / "application" / "option_positions_inspection.py",
+        REPO_ROOT / "src" / "application" / "option_positions_reporting.py",
+        REPO_ROOT / "src" / "application" / "option_positions_sync_config.py",
+        REPO_ROOT / "src" / "application" / "positions" / "feishu_sync.py",
+        REPO_ROOT / "src" / "application" / "positions" / "feishu_sync_receipt.py",
+        REPO_ROOT / "src" / "application" / "positions" / "sync_config.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "sync_metadata.py",
+        REPO_ROOT / "src" / "application" / "position_maintenance.py",
+        REPO_ROOT / "src" / "application" / "position_maintenance_receipt.py",
+        REPO_ROOT / "tests" / "test_option_positions_legacy_v2.py",
+        REPO_ROOT / "tests" / "test_option_positions_service.py",
+        REPO_ROOT / "tests" / "test_option_positions_sqlite_service.py",
     ]
-    assert [str(path.relative_to(repo_root)) for path in retired_paths if path.exists()] == []
+    assert [str(path.relative_to(REPO_ROOT)) for path in retired_paths if path.exists()] == []
 
 
 def test_legacy_position_trade_test_filenames_are_retired() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     retired_paths = [
-        repo_root / "tests" / "test_option_positions_auto_close.py",
-        repo_root / "tests" / "test_option_positions_context_partial_close.py",
-        repo_root / "tests" / "test_option_positions_feishu_sync_receipt.py",
-        repo_root / "tests" / "test_option_positions_reporting.py",
-        repo_root / "tests" / "test_positions_feishu_sync.py",
-        repo_root / "tests" / "test_positions_feishu_sync_receipt.py",
-        repo_root / "tests" / "test_position_maintenance.py",
-        repo_root / "tests" / "test_position_maintenance_receipt.py",
-        repo_root / "tests" / "test_position_workflows_auto_sync.py",
-        repo_root / "tests" / "test_positions_workflows_auto_sync.py",
-        repo_root / "tests" / "test_sync_option_positions_to_feishu.py",
-        repo_root / "tests" / "test_auto_trade_intake_audit.py",
-        repo_root / "tests" / "test_auto_trade_intake_cli.py",
-        repo_root / "tests" / "test_futu_trade_detail_lookup.py",
-        repo_root / "tests" / "test_trade_account_mapping.py",
-        repo_root / "tests" / "test_trade_event_normalizer.py",
-        repo_root / "tests" / "test_trade_intake_receipt.py",
-        repo_root / "tests" / "test_trade_intake_resolver_close.py",
-        repo_root / "tests" / "test_trade_intake_resolver_open.py",
-        repo_root / "tests" / "test_trade_intake_state.py",
-        repo_root / "tests" / "test_trade_intent.py",
-        repo_root / "tests" / "test_trade_push_listener.py",
+        REPO_ROOT / "tests" / "test_option_positions_auto_close.py",
+        REPO_ROOT / "tests" / "test_option_positions_context_partial_close.py",
+        REPO_ROOT / "tests" / "test_option_positions_feishu_sync_receipt.py",
+        REPO_ROOT / "tests" / "test_option_positions_reporting.py",
+        REPO_ROOT / "tests" / "test_positions_feishu_sync.py",
+        REPO_ROOT / "tests" / "test_positions_feishu_sync_receipt.py",
+        REPO_ROOT / "tests" / "test_position_maintenance.py",
+        REPO_ROOT / "tests" / "test_position_maintenance_receipt.py",
+        REPO_ROOT / "tests" / "test_position_workflows_auto_sync.py",
+        REPO_ROOT / "tests" / "test_positions_workflows_auto_sync.py",
+        REPO_ROOT / "tests" / "test_sync_option_positions_to_feishu.py",
+        REPO_ROOT / "tests" / "test_auto_trade_intake_audit.py",
+        REPO_ROOT / "tests" / "test_auto_trade_intake_cli.py",
+        REPO_ROOT / "tests" / "test_futu_trade_detail_lookup.py",
+        REPO_ROOT / "tests" / "test_trade_account_mapping.py",
+        REPO_ROOT / "tests" / "test_trade_event_normalizer.py",
+        REPO_ROOT / "tests" / "test_trade_intake_receipt.py",
+        REPO_ROOT / "tests" / "test_trade_intake_resolver_close.py",
+        REPO_ROOT / "tests" / "test_trade_intake_resolver_open.py",
+        REPO_ROOT / "tests" / "test_trade_intake_state.py",
+        REPO_ROOT / "tests" / "test_trade_intent.py",
+        REPO_ROOT / "tests" / "test_trade_push_listener.py",
     ]
-    assert [str(path.relative_to(repo_root)) for path in retired_paths if path.exists()] == []
+    assert [str(path.relative_to(REPO_ROOT)) for path in retired_paths if path.exists()] == []
 
 
 def test_option_positions_v2_imports_do_not_return_to_runtime_code() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "domain", repo_root / "src"]
+    roots = [REPO_ROOT / "domain", REPO_ROOT / "src"]
     banned = (
         "domain.domain.option_positions_v2",
         "option_positions_v2_service",
@@ -72,18 +89,11 @@ def test_option_positions_v2_imports_do_not_return_to_runtime_code() -> None:
         "load_option_positions_v2_records",
         "refresh_option_positions_v2_state",
     )
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in banned):
-                offenders.append(str(path.relative_to(repo_root)))
-    assert offenders == []
+    assert _python_text_offenders(roots, banned) == []
 
 
 def test_legacy_option_position_lots_is_compatibility_reexport() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    legacy_path = repo_root / "domain" / "domain" / "option_position_lots.py"
+    legacy_path = REPO_ROOT / "domain" / "domain" / "option_position_lots.py"
     text = legacy_path.read_text(encoding="utf-8")
 
     assert "from domain.domain.ledger.position_fields import *" in text
@@ -93,47 +103,32 @@ def test_legacy_option_position_lots_is_compatibility_reexport() -> None:
 
 
 def test_core_position_trade_runtime_imports_ledger_position_fields() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     roots = [
-        repo_root / "src" / "application" / "ledger",
-        repo_root / "src" / "application" / "positions",
-        repo_root / "src" / "application" / "trades",
-        repo_root / "src" / "interfaces" / "cli",
+        REPO_ROOT / "src" / "application" / "ledger",
+        REPO_ROOT / "src" / "application" / "positions",
+        REPO_ROOT / "src" / "application" / "trades",
+        REPO_ROOT / "src" / "interfaces" / "cli",
     ]
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if "domain.domain.option_position_lots" in text:
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert (repo_root / "domain" / "domain" / "ledger" / "position_fields.py").exists()
-    assert offenders == []
+    assert (REPO_ROOT / "domain" / "domain" / "ledger" / "position_fields.py").exists()
+    assert _python_text_offenders(roots, ("domain.domain.option_position_lots",)) == []
 
 
 def test_runtime_code_does_not_import_legacy_position_lots_reexport() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src", repo_root / "domain" / "domain"]
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            if path == repo_root / "domain" / "domain" / "option_position_lots.py":
-                continue
-            text = path.read_text(encoding="utf-8")
-            if "from domain.domain.option_position_lots import" in text:
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert offenders == []
+    roots = [REPO_ROOT / "src", REPO_ROOT / "domain" / "domain"]
+    assert _python_text_offenders(
+        roots,
+        ("from domain.domain.option_position_lots import",),
+        exclude=(REPO_ROOT / "domain" / "domain" / "option_position_lots.py",),
+    ) == []
 
 
 def test_ledger_write_paths_use_position_field_contract_builders() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     checked = [
-        repo_root / "src" / "application" / "ledger" / "commands.py",
-        repo_root / "src" / "application" / "ledger" / "manual_trades.py",
-        repo_root / "src" / "application" / "ledger" / "maintenance.py",
-        repo_root / "src" / "application" / "ledger" / "preflight.py",
-        repo_root / "src" / "application" / "ledger" / "publisher.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "commands.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "manual_trades.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "maintenance.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "preflight.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "publisher.py",
     ]
     banned_imports = {
         "build_open_fields",
@@ -151,15 +146,14 @@ def test_ledger_write_paths_use_position_field_contract_builders() -> None:
                 continue
             for alias in node.names:
                 if alias.name in banned_imports:
-                    offenders.append(f"{path.relative_to(repo_root)}:{alias.name}")
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{alias.name}")
 
     assert offenders == []
 
 
 def test_position_lot_projection_uses_position_patch_decoder() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    lots_text = (repo_root / "domain" / "domain" / "ledger" / "lots.py").read_text(encoding="utf-8")
-    fields_text = (repo_root / "domain" / "domain" / "ledger" / "position_fields.py").read_text(encoding="utf-8")
+    lots_text = (REPO_ROOT / "domain" / "domain" / "ledger" / "lots.py").read_text(encoding="utf-8")
+    fields_text = (REPO_ROOT / "domain" / "domain" / "ledger" / "position_fields.py").read_text(encoding="utf-8")
 
     assert "def decode_position_lot_patch(" in fields_text
     assert "decode_position_lot_patch(event.raw_payload.get(\"patch\"))" in lots_text
@@ -167,11 +161,10 @@ def test_position_lot_projection_uses_position_patch_decoder() -> None:
 
 
 def test_position_lot_sync_metadata_is_retired() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
-    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
+    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
-    assert not (repo_root / "src" / "application" / "ledger" / "sync_metadata.py").exists()
+    assert not (REPO_ROOT / "src" / "application" / "ledger" / "sync_metadata.py").exists()
     assert "PositionLotSyncMetadataPatch" not in repository_text
     assert "PositionLotSyncMetadataPatch" not in commands_text
     assert "def update_position_lot_sync_metadata(" not in repository_text
@@ -180,11 +173,10 @@ def test_position_lot_sync_metadata_is_retired() -> None:
 
 
 def test_position_lot_projection_write_path_uses_explicit_record_contract() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    record_text = (repo_root / "src" / "application" / "ledger" / "position_records.py").read_text(encoding="utf-8")
-    publisher_text = (repo_root / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
-    repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
-    writer_text = (repo_root / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
+    record_text = (REPO_ROOT / "src" / "application" / "ledger" / "position_records.py").read_text(encoding="utf-8")
+    publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
+    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    writer_text = (REPO_ROOT / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
 
     assert "class PositionLotRecord" in record_text
     assert "lots: list[PositionLotRecord]" in publisher_text
@@ -195,16 +187,8 @@ def test_position_lot_projection_write_path_uses_explicit_record_contract() -> N
 
 
 def test_runtime_code_does_not_import_legacy_option_position_ledger() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src", repo_root / "scripts"]
-    forbidden = "domain.domain.option_position_ledger"
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if forbidden in text:
-                offenders.append(str(path.relative_to(repo_root)))
-    assert offenders == []
+    roots = [REPO_ROOT / "src", REPO_ROOT / "scripts"]
+    assert _python_text_offenders(roots, ("domain.domain.option_position_ledger",)) == []
 
 
 def test_option_positions_v2_is_not_exported_from_lazy_packages() -> None:
@@ -216,50 +200,36 @@ def test_option_positions_v2_is_not_exported_from_lazy_packages() -> None:
 
 
 def test_default_position_read_paths_do_not_fallback_to_legacy_records() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     checked = [
-        repo_root / "src" / "application" / "ledger" / "read_model.py",
-        repo_root / "src" / "application" / "positions" / "workflows.py",
-        repo_root / "src" / "application" / "trades" / "resolver.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "read_model.py",
+        REPO_ROOT / "src" / "application" / "positions" / "workflows.py",
+        REPO_ROOT / "src" / "application" / "trades" / "resolver.py",
     ]
     offenders: list[str] = []
     for path in checked:
         text = path.read_text(encoding="utf-8")
         if "list_records(page_size=500)" in text or 'getattr(repo, "list_records"' in text:
-            offenders.append(str(path.relative_to(repo_root)))
+            offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == []
 
 
 def test_runtime_code_uses_ledger_read_model_instead_of_option_positions_facade() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src" / "application", repo_root / "src" / "interfaces", repo_root / "scripts"]
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            if path.name == "option_positions_facade.py":
-                continue
-            text = path.read_text(encoding="utf-8")
-            if "option_positions_facade import" in text or "import src.application.option_positions_facade" in text:
-                offenders.append(str(path.relative_to(repo_root)))
-    assert offenders == []
+    roots = [REPO_ROOT / "src" / "application", REPO_ROOT / "src" / "interfaces", REPO_ROOT / "scripts"]
+    assert _python_text_offenders(
+        roots,
+        ("option_positions_facade import", "import src.application.option_positions_facade"),
+        exclude=(REPO_ROOT / "src" / "application" / "option_positions_facade.py",),
+    ) == []
 
 
 def test_runtime_code_routes_position_service_through_ledger_service() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src" / "application", repo_root / "src" / "interfaces", repo_root / "scripts"]
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if "src.application.option_positions_service" in text:
-                offenders.append(str(path.relative_to(repo_root)))
-    assert offenders == []
+    roots = [REPO_ROOT / "src" / "application", REPO_ROOT / "src" / "interfaces", REPO_ROOT / "scripts"]
+    assert _python_text_offenders(roots, ("src.application.option_positions_service",)) == []
 
 
 def test_ledger_preflight_has_dedicated_owner() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    preflight_path = repo_root / "src" / "application" / "ledger" / "preflight.py"
-    service_path = repo_root / "src" / "application" / "ledger" / "service.py"
+    preflight_path = REPO_ROOT / "src" / "application" / "ledger" / "preflight.py"
+    service_path = REPO_ROOT / "src" / "application" / "ledger" / "service.py"
 
     assert preflight_path.exists()
     assert not service_path.exists()
@@ -270,11 +240,10 @@ def test_ledger_preflight_has_dedicated_owner() -> None:
 
 
 def test_manual_ledger_command_results_use_explicit_contracts() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    preflight_text = (repo_root / "src" / "application" / "ledger" / "preflight.py").read_text(encoding="utf-8")
-    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    service_path = repo_root / "src" / "application" / "ledger" / "service.py"
+    results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
+    preflight_text = (REPO_ROOT / "src" / "application" / "ledger" / "preflight.py").read_text(encoding="utf-8")
+    commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
+    service_path = REPO_ROOT / "src" / "application" / "ledger" / "service.py"
 
     assert "class LedgerPreflightResult" in results_text
     assert "class LedgerWriteResult" in results_text
@@ -293,13 +262,12 @@ def test_manual_ledger_command_results_use_explicit_contracts() -> None:
 
 
 def test_auto_close_maintenance_results_use_explicit_contracts() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    maintenance_text = (repo_root / "src" / "application" / "ledger" / "maintenance.py").read_text(
+    results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
+    maintenance_text = (REPO_ROOT / "src" / "application" / "ledger" / "maintenance.py").read_text(
         encoding="utf-8"
     )
-    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    position_maintenance_text = (repo_root / "src" / "application" / "positions" / "maintenance.py").read_text(
+    commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
+    position_maintenance_text = (REPO_ROOT / "src" / "application" / "positions" / "maintenance.py").read_text(
         encoding="utf-8"
     )
 
@@ -316,11 +284,10 @@ def test_auto_close_maintenance_results_use_explicit_contracts() -> None:
 
 
 def test_broker_trade_operations_use_explicit_contracts() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    workflows_text = (repo_root / "src" / "application" / "trades" / "workflows.py").read_text(encoding="utf-8")
-    resolver_text = (repo_root / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
+    results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
+    commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
+    workflows_text = (REPO_ROOT / "src" / "application" / "trades" / "workflows.py").read_text(encoding="utf-8")
+    resolver_text = (REPO_ROOT / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
 
     assert "class BrokerTradeOpenPreviewResult" in results_text
     assert "class BrokerTradeOperation" in results_text
@@ -334,12 +301,11 @@ def test_broker_trade_operations_use_explicit_contracts() -> None:
 
 
 def test_trade_event_interventions_use_explicit_preview_contracts() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    interventions_text = (repo_root / "src" / "application" / "ledger" / "interventions.py").read_text(
+    results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
+    interventions_text = (REPO_ROOT / "src" / "application" / "ledger" / "interventions.py").read_text(
         encoding="utf-8"
     )
-    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
+    commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
     assert "class TradeEventInterventionPreview" in results_text
     assert "preview: TradeEventInterventionPreview | dict[str, Any]" in results_text
@@ -350,10 +316,9 @@ def test_trade_event_interventions_use_explicit_preview_contracts() -> None:
 
 
 def test_close_lot_resolver_has_single_application_owner() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    resolver_path = repo_root / "src" / "application" / "ledger" / "lot_resolver.py"
-    position_workflows_text = (repo_root / "src" / "application" / "positions" / "workflows.py").read_text(encoding="utf-8")
-    trade_intake_text = (repo_root / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
+    resolver_path = REPO_ROOT / "src" / "application" / "ledger" / "lot_resolver.py"
+    position_workflows_text = (REPO_ROOT / "src" / "application" / "positions" / "workflows.py").read_text(encoding="utf-8")
+    trade_intake_text = (REPO_ROOT / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
 
     assert resolver_path.exists()
     assert "src.application.ledger.api" in position_workflows_text
@@ -365,10 +330,9 @@ def test_close_lot_resolver_has_single_application_owner() -> None:
 
 
 def test_trade_and_position_workflows_have_separate_application_owners() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    position_workflows_text = (repo_root / "src" / "application" / "positions" / "workflows.py").read_text(encoding="utf-8")
-    trade_intake_text = (repo_root / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
-    trade_workflows_text = (repo_root / "src" / "application" / "trades" / "workflows.py").read_text(encoding="utf-8")
+    position_workflows_text = (REPO_ROOT / "src" / "application" / "positions" / "workflows.py").read_text(encoding="utf-8")
+    trade_intake_text = (REPO_ROOT / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
+    trade_workflows_text = (REPO_ROOT / "src" / "application" / "trades" / "workflows.py").read_text(encoding="utf-8")
 
     assert "from src.application.trades.workflows import" in trade_intake_text
     assert "from src.application.positions.workflows import" not in trade_intake_text
@@ -388,8 +352,7 @@ def test_trade_and_position_workflows_have_separate_application_owners() -> None
 
 
 def test_position_maintenance_lives_under_positions_namespace() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src", repo_root / "scripts"]
+    roots = [REPO_ROOT / "src", REPO_ROOT / "scripts"]
     banned_imports = (
         "src.application.option_positions_auto_close",
         "src.application.position_maintenance",
@@ -397,22 +360,14 @@ def test_position_maintenance_lives_under_positions_namespace() -> None:
         "from src.application import option_positions_auto_close",
         "from src.application import position_maintenance",
     )
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in banned_imports):
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert (repo_root / "src" / "application" / "positions" / "auto_close.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "maintenance.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "maintenance_receipt.py").exists()
-    assert offenders == []
+    assert (REPO_ROOT / "src" / "application" / "positions" / "auto_close.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "positions" / "maintenance.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "positions" / "maintenance_receipt.py").exists()
+    assert _python_text_offenders(roots, banned_imports) == []
 
 
 def test_position_feishu_sync_is_fully_retired() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src", repo_root / "scripts"]
+    roots = [REPO_ROOT / "src", REPO_ROOT / "scripts"]
     banned_imports = (
         "src.application.option_positions_feishu_sync",
         "src.application.option_positions_feishu_sync_receipt",
@@ -422,58 +377,42 @@ def test_position_feishu_sync_is_fully_retired() -> None:
         "src.application.positions.sync_config",
         "src.application.ledger.sync_metadata",
     )
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in banned_imports):
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert not (repo_root / "src" / "application" / "positions" / "feishu_sync.py").exists()
-    assert not (repo_root / "src" / "application" / "positions" / "feishu_sync_receipt.py").exists()
-    assert not (repo_root / "src" / "application" / "positions" / "sync_config.py").exists()
-    assert offenders == []
+    assert not (REPO_ROOT / "src" / "application" / "positions" / "feishu_sync.py").exists()
+    assert not (REPO_ROOT / "src" / "application" / "positions" / "feishu_sync_receipt.py").exists()
+    assert not (REPO_ROOT / "src" / "application" / "positions" / "sync_config.py").exists()
+    assert _python_text_offenders(roots, banned_imports) == []
 
 
 def test_position_read_reporting_lives_under_positions_namespace() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    roots = [repo_root / "src", repo_root / "scripts"]
+    roots = [REPO_ROOT / "src", REPO_ROOT / "scripts"]
     banned_imports = (
         "src.application.option_positions_context_builder",
         "src.application.option_positions_inspection",
         "src.application.option_positions_reporting",
     )
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in banned_imports):
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert (repo_root / "src" / "application" / "positions" / "context_builder.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "inspection.py").exists()
-    assert not (repo_root / "src" / "application" / "positions" / "reporting.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "assigned_stock_view.py").exists()
-    assert offenders == []
+    assert (REPO_ROOT / "src" / "application" / "positions" / "context_builder.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "positions" / "inspection.py").exists()
+    assert not (REPO_ROOT / "src" / "application" / "positions" / "reporting.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "positions" / "assigned_stock_view.py").exists()
+    assert _python_text_offenders(roots, banned_imports) == []
 
 
 def test_trade_intake_lives_under_trades_namespace() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     retired_paths = [
-        repo_root / "src" / "application" / "auto_trade_intake.py",
-        repo_root / "src" / "application" / "futu_trade_detail_lookup.py",
-        repo_root / "src" / "application" / "trade_account_mapping.py",
-        repo_root / "src" / "application" / "trade_event_normalizer.py",
-        repo_root / "src" / "application" / "trade_intake.py",
-        repo_root / "src" / "application" / "trade_intake_receipt.py",
-        repo_root / "src" / "application" / "trade_intake_resolver.py",
-        repo_root / "src" / "application" / "trade_intake_state.py",
-        repo_root / "src" / "application" / "trade_intent.py",
-        repo_root / "src" / "application" / "trade_push_listener.py",
+        REPO_ROOT / "src" / "application" / "auto_trade_intake.py",
+        REPO_ROOT / "src" / "application" / "futu_trade_detail_lookup.py",
+        REPO_ROOT / "src" / "application" / "trade_account_mapping.py",
+        REPO_ROOT / "src" / "application" / "trade_event_normalizer.py",
+        REPO_ROOT / "src" / "application" / "trade_intake.py",
+        REPO_ROOT / "src" / "application" / "trade_intake_receipt.py",
+        REPO_ROOT / "src" / "application" / "trade_intake_resolver.py",
+        REPO_ROOT / "src" / "application" / "trade_intake_state.py",
+        REPO_ROOT / "src" / "application" / "trade_intent.py",
+        REPO_ROOT / "src" / "application" / "trade_push_listener.py",
     ]
-    assert [str(path.relative_to(repo_root)) for path in retired_paths if path.exists()] == []
+    assert [str(path.relative_to(REPO_ROOT)) for path in retired_paths if path.exists()] == []
 
-    roots = [repo_root / "src", repo_root / "scripts"]
+    roots = [REPO_ROOT / "src", REPO_ROOT / "scripts"]
     banned_imports = (
         "src.application.auto_trade_intake",
         "src.application.futu_trade_detail_lookup",
@@ -486,22 +425,14 @@ def test_trade_intake_lives_under_trades_namespace() -> None:
         "src.application.trade_intent",
         "src.application.trade_push_listener",
     )
-    offenders: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if any(item in text for item in banned_imports):
-                offenders.append(str(path.relative_to(repo_root)))
-
-    assert (repo_root / "src" / "application" / "trades" / "auto_intake.py").exists()
-    assert (repo_root / "src" / "application" / "trades" / "resolver.py").exists()
-    assert (repo_root / "src" / "application" / "trades" / "normalizer.py").exists()
-    assert offenders == []
+    assert (REPO_ROOT / "src" / "application" / "trades" / "auto_intake.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "trades" / "resolver.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "trades" / "normalizer.py").exists()
+    assert _python_text_offenders(roots, banned_imports) == []
 
 
 def test_repository_config_and_guards_live_under_ledger_repository() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
     moved_defs = (
         "class SQLiteOptionPositionsRepository",
         "def option_positions_bootstrap_from_feishu_enabled(",
@@ -514,8 +445,7 @@ def test_repository_config_and_guards_live_under_ledger_repository() -> None:
 
 
 def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    bootstrap_text = (repo_root / "src" / "application" / "ledger" / "bootstrap.py").read_text(encoding="utf-8")
+    bootstrap_text = (REPO_ROOT / "src" / "application" / "ledger" / "bootstrap.py").read_text(encoding="utf-8")
     moved_defs = (
         "def _normalize_bootstrap_records(",
         "def _bootstrap_trade_events(",
@@ -527,9 +457,8 @@ def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
 
 
 def test_event_write_projection_lives_under_ledger_writer() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    writer_text = (repo_root / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
+    results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
+    writer_text = (REPO_ROOT / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
     moved_defs = (
         "def projection_diagnostics_summary(",
         "def rebuild_position_lots_from_trade_events(",
@@ -545,10 +474,9 @@ def test_event_write_projection_lives_under_ledger_writer() -> None:
 
 
 def test_trade_event_codec_has_dedicated_storage_boundary() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    codec_text = (repo_root / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
-    repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
-    publisher_text = (repo_root / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
+    codec_text = (REPO_ROOT / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
+    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
 
     assert "def encode_trade_event_for_storage(" in codec_text
     assert "def import_stored_trade_events(" in codec_text
@@ -557,8 +485,7 @@ def test_trade_event_codec_has_dedicated_storage_boundary() -> None:
 
 
 def test_position_target_matching_lives_under_ledger_targets() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    targets_text = (repo_root / "src" / "application" / "ledger" / "targets.py").read_text(encoding="utf-8")
+    targets_text = (REPO_ROOT / "src" / "application" / "ledger" / "targets.py").read_text(encoding="utf-8")
     moved_defs = (
         "def assert_position_lot_target_matches_current_state(",
     )
@@ -566,8 +493,7 @@ def test_position_target_matching_lives_under_ledger_targets() -> None:
 
 
 def test_auto_close_maintenance_lives_under_ledger_maintenance() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    maintenance_text = (repo_root / "src" / "application" / "ledger" / "maintenance.py").read_text(encoding="utf-8")
+    maintenance_text = (REPO_ROOT / "src" / "application" / "ledger" / "maintenance.py").read_text(encoding="utf-8")
     moved_defs = (
         "def persist_expire_auto_close_event(",
         "def build_expired_close_decisions(",
@@ -577,8 +503,7 @@ def test_auto_close_maintenance_lives_under_ledger_maintenance() -> None:
 
 
 def test_manual_trade_writes_live_under_ledger_manual_trades() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    manual_text = (repo_root / "src" / "application" / "ledger" / "manual_trades.py").read_text(encoding="utf-8")
+    manual_text = (REPO_ROOT / "src" / "application" / "ledger" / "manual_trades.py").read_text(encoding="utf-8")
     moved_defs = (
         "def _manual_open_event_id(",
         "def _manual_close_event_id(",
@@ -591,8 +516,7 @@ def test_manual_trade_writes_live_under_ledger_manual_trades() -> None:
 
 
 def test_trade_event_interventions_live_under_ledger_interventions() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    interventions_text = (repo_root / "src" / "application" / "ledger" / "interventions.py").read_text(encoding="utf-8")
+    interventions_text = (REPO_ROOT / "src" / "application" / "ledger" / "interventions.py").read_text(encoding="utf-8")
     moved_defs = (
         "def persist_manual_void_event(",
         "def build_manual_void_preview(",
@@ -603,10 +527,9 @@ def test_trade_event_interventions_live_under_ledger_interventions() -> None:
 
 
 def test_position_and_trade_modules_depend_on_ledger_public_api_only() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     roots = [
-        repo_root / "src" / "application" / "positions",
-        repo_root / "src" / "application" / "trades",
+        REPO_ROOT / "src" / "application" / "positions",
+        REPO_ROOT / "src" / "application" / "trades",
     ]
     offenders: list[str] = []
     for root in roots:
@@ -620,22 +543,21 @@ def test_position_and_trade_modules_depend_on_ledger_public_api_only() -> None:
                     continue
                 if "src.application.ledger.api" in stripped:
                     continue
-                offenders.append(f"{path.relative_to(repo_root)}:{lineno}:{stripped}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}:{stripped}")
 
     assert offenders == []
 
 
 def test_non_ledger_runtime_depends_on_ledger_public_api_only() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     roots = [
-        repo_root / "src" / "application",
-        repo_root / "src" / "interfaces",
-        repo_root / "scripts",
+        REPO_ROOT / "src" / "application",
+        REPO_ROOT / "src" / "interfaces",
+        REPO_ROOT / "scripts",
     ]
     offenders: list[str] = []
     for root in roots:
         for path in root.rglob("*.py"):
-            if repo_root / "src" / "application" / "ledger" in path.parents:
+            if REPO_ROOT / "src" / "application" / "ledger" in path.parents:
                 continue
             for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
                 stripped = line.strip()
@@ -646,14 +568,13 @@ def test_non_ledger_runtime_depends_on_ledger_public_api_only() -> None:
                     continue
                 if "src.application.ledger.api" in stripped:
                     continue
-                offenders.append(f"{path.relative_to(repo_root)}:{lineno}:{stripped}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}:{stripped}")
 
     assert offenders == []
 
 
 def test_ledger_public_api_does_not_import_workflow_modules_at_module_load() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    api_path = repo_root / "src" / "application" / "ledger" / "api.py"
+    api_path = REPO_ROOT / "src" / "application" / "ledger" / "api.py"
     tree = ast.parse(api_path.read_text(encoding="utf-8"))
     offenders: list[str] = []
     for node in tree.body:
@@ -669,8 +590,7 @@ def test_ledger_public_api_does_not_import_workflow_modules_at_module_load() -> 
 
 
 def test_ledger_public_api_is_thin_command_query_facade() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    api_path = repo_root / "src" / "application" / "ledger" / "api.py"
+    api_path = REPO_ROOT / "src" / "application" / "ledger" / "api.py"
     tree = ast.parse(api_path.read_text(encoding="utf-8"))
     executable_defs = [
         node.name
@@ -678,14 +598,13 @@ def test_ledger_public_api_is_thin_command_query_facade() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     ]
 
-    assert (repo_root / "src" / "application" / "ledger" / "commands.py").exists()
-    assert (repo_root / "src" / "application" / "ledger" / "queries.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").exists()
+    assert (REPO_ROOT / "src" / "application" / "ledger" / "queries.py").exists()
     assert executable_defs == []
 
 
 def test_position_risk_context_uses_typed_ledger_view() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    context_text = (repo_root / "src" / "application" / "positions" / "context_builder.py").read_text(
+    context_text = (REPO_ROOT / "src" / "application" / "positions" / "context_builder.py").read_text(
         encoding="utf-8"
     )
 
@@ -696,9 +615,8 @@ def test_position_risk_context_uses_typed_ledger_view() -> None:
 
 
 def test_core_workflows_use_semantic_ledger_api_names() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    checked_paths = sorted((repo_root / "src" / "application" / "positions").glob("*.py"))
-    checked_paths.extend(sorted((repo_root / "src" / "application" / "trades").glob("*.py")))
+    checked_paths = sorted((REPO_ROOT / "src" / "application" / "positions").glob("*.py"))
+    checked_paths.extend(sorted((REPO_ROOT / "src" / "application" / "trades").glob("*.py")))
     banned_exact = {
         "LotCloseSelector",
         "auto_close_expired_positions",
@@ -737,14 +655,13 @@ def test_core_workflows_use_semantic_ledger_api_names() -> None:
             for alias in node.names:
                 name = alias.name
                 if name in banned_exact or name.startswith(banned_prefixes):
-                    offenders.append(f"{path.relative_to(repo_root)}:{name}")
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{name}")
 
     assert offenders == []
 
 
 def test_ledger_public_api_exports_semantic_surface_only() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    api_path = repo_root / "src" / "application" / "ledger" / "api.py"
+    api_path = REPO_ROOT / "src" / "application" / "ledger" / "api.py"
     tree = ast.parse(api_path.read_text(encoding="utf-8"))
     exported: set[str] = set()
     for node in tree.body:
@@ -788,9 +705,8 @@ def test_ledger_public_api_exports_semantic_surface_only() -> None:
 
 
 def test_trade_event_projection_mainline_has_no_legacy_passthrough() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    codec_text = (repo_root / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
-    publisher_text = (repo_root / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
+    codec_text = (REPO_ROOT / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
+    publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
 
     assert "legacy_trade_event_to_ledger_event" not in codec_text
     assert "_encode_legacy_bootstrap_passthrough" not in codec_text
@@ -799,10 +715,9 @@ def test_trade_event_projection_mainline_has_no_legacy_passthrough() -> None:
 
 
 def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
     checked = [
-        repo_root / "src" / "application" / "trades" / "lifecycle.py",
-        repo_root / "src" / "application" / "ledger" / "lifecycle.py",
+        REPO_ROOT / "src" / "application" / "trades" / "lifecycle.py",
+        REPO_ROOT / "src" / "application" / "ledger" / "lifecycle.py",
     ]
     banned_fragments = (
         ".update_record(",
@@ -815,9 +730,9 @@ def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None
         text = path.read_text(encoding="utf-8")
         for fragment in banned_fragments:
             if fragment in text:
-                offenders.append(f"{path.relative_to(repo_root)}:{fragment}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{fragment}")
 
-    ledger_lifecycle_text = (repo_root / "src" / "application" / "ledger" / "lifecycle.py").read_text(
+    ledger_lifecycle_text = (REPO_ROOT / "src" / "application" / "ledger" / "lifecycle.py").read_text(
         encoding="utf-8"
     )
     assert "persist_trade_event_objects_atomically(" in ledger_lifecycle_text

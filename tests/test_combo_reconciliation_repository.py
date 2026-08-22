@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.combo_reconciliation import match_post_trade_combo_pairs
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -111,9 +113,7 @@ def test_inference_repository_rejects_identity_drift(tmp_path) -> None:
 
     drifted = {**proposal, "call_record_id": "different-call"}
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         repo.upsert_combo_pair_inference(drifted)
-    except ValueError as exc:
-        assert "identity conflict" in str(exc)
-    else:
-        raise AssertionError("identity drift must fail")
+    exc = _caught.value
+    assert "identity conflict" in str(exc)

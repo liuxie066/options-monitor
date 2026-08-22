@@ -79,7 +79,7 @@ def test_support_bundle_skips_healthcheck_by_default(tmp_path: Path, example_con
         calls.append((name, payload))
         return {"tool_name": name, "ok": True, "data": {"summary": {"ok": True}}, "warnings": []}
 
-    out = collect_support_bundle(
+    collect_support_bundle(
         repo_root=Path(__file__).resolve().parents[1],
         config_path=example_config_path,
         include_local_env_file=False,

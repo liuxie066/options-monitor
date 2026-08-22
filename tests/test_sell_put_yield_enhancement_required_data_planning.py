@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
-import sys
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monkeypatch, tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import urllib.error
 
 import pytest
 
+from conftest import portfolio_sync_receipt as _sync_receipt
 from src.infrastructure.portfolio_management_client import (
     API_VERSION,
     PortfolioManagementClient,
@@ -30,28 +31,6 @@ class _Response:
     def read(self, _size: int) -> bytes:
         return self._body
 
-
-def _sync_receipt(account: str = "lx") -> dict:
-    return {
-        "success": True,
-        "status": "written",
-        "account": account,
-        "broker": "futu",
-        "dry_run": False,
-        "source": "futu-openapi",
-        "source_snapshot_id": f"snapshot-{account}",
-        "sync_run_id": f"sync-{account}",
-        "receipt_persisted": True,
-        "partial_write_possible": False,
-        "stages": {
-            name: {
-                "status": "succeeded",
-                "partial_write_possible": False,
-            }
-            for name in ("positions", "securities_cash", "fund_mmf")
-        },
-        "positions": [],
-    }
 
 
 def _valuation_receipt(accounts=None) -> dict:

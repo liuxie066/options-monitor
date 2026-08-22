@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 
@@ -79,7 +81,7 @@ def test_main_uses_intermediate_objects_in_critical_path() -> None:
 def test_snapshot_schema_error_has_stable_error_code() -> None:
     from domain.domain import SchemaValidationError, SnapshotDTO
 
-    try:
+    with pytest.raises(SchemaValidationError) as _caught:
         SnapshotDTO.from_payload(
             {
                 "schema_kind": "snapshot_dto",
@@ -89,15 +91,14 @@ def test_snapshot_schema_error_has_stable_error_code() -> None:
                 "payload": [],
             }
         )
-        assert False, "expected SchemaValidationError"
-    except SchemaValidationError as e:
-        assert "E_SNAPSHOT_PAYLOAD_INVALID" in str(e)
+    e = _caught.value
+    assert "E_SNAPSHOT_PAYLOAD_INVALID" in str(e)
 
 
 def test_decision_schema_error_has_stable_error_code_for_bool_field() -> None:
     from domain.domain import Decision, SchemaValidationError
 
-    try:
+    with pytest.raises(SchemaValidationError) as _caught:
         Decision.from_payload(
             {
                 "schema_kind": "decision",
@@ -108,15 +109,14 @@ def test_decision_schema_error_has_stable_error_code_for_bool_field() -> None:
                 "reason": "bad",
             }
         )
-        assert False, "expected SchemaValidationError"
-    except SchemaValidationError as e:
-        assert "E_DECISION_SHOULD_RUN_INVALID" in str(e)
+    e = _caught.value
+    assert "E_DECISION_SHOULD_RUN_INVALID" in str(e)
 
 
 def test_delivery_plan_schema_error_has_stable_error_code_for_message_type() -> None:
     from domain.domain import DeliveryPlan, SchemaValidationError
 
-    try:
+    with pytest.raises(SchemaValidationError) as _caught:
         DeliveryPlan.from_payload(
             {
                 "schema_kind": "delivery_plan",
@@ -127,6 +127,5 @@ def test_delivery_plan_schema_error_has_stable_error_code_for_message_type() -> 
                 "should_send": True,
             }
         )
-        assert False, "expected SchemaValidationError"
-    except SchemaValidationError as e:
-        assert "E_DELIVERY_ACCOUNT_MESSAGE_INVALID" in str(e)
+    e = _caught.value
+    assert "E_DELIVERY_ACCOUNT_MESSAGE_INVALID" in str(e)

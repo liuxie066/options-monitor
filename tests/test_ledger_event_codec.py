@@ -47,12 +47,10 @@ def test_event_codec_rejects_legacy_trade_event_payloads() -> None:
         raw_payload={"deal_id": "deal-open-1"},
     )
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         encode_trade_event_for_storage(legacy.to_legacy_dict())
-    except ValueError as exc:
-        assert "non_canonical_trade_event_schema" in str(exc)
-    else:
-        raise AssertionError("expected legacy payload rejection")
+    exc = _caught.value
+    assert "non_canonical_trade_event_schema" in str(exc)
 
 
 def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_path: Path) -> None:

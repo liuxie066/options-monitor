@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
-from domain.domain.engine import (
-    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
-)
+from candidate_evidence_helpers import earnings_evidence
 
 
 def _risk_context(*, nav: float = 1_000_000.0, nvda_stock: float = 50_000.0, nvda_short_put: float = 50_000.0):
@@ -23,37 +19,7 @@ def _risk_context(*, nav: float = 1_000_000.0, nvda_stock: float = 50_000.0, nvd
 
 
 def _earnings_evidence(*, event_date: str | None = None) -> dict:
-    event = None
-    if event_date is not None:
-        days_before_expiration = (
-            date.fromisoformat("2026-06-19") - date.fromisoformat(event_date)
-        ).days
-        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
-        event = {
-            "earnings_date": event_date,
-            "days_before_expiration": days_before_expiration,
-            "classification": "blocking" if blocking else "nonblocking",
-            "blocking": blocking,
-        }
-    events = [] if event is None else [event]
-    blocking_events = [item for item in events if item["blocking"]]
-    nonblocking_events = [item for item in events if not item["blocking"]]
-    return {
-        "earnings_evidence_status": "ready",
-        "earnings_reason_code": None,
-        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
-        "earnings_market_date": "2026-05-20",
-        "earnings_hard_window_start": "2026-06-13",
-        "earnings_hard_window_end": "2026-06-19",
-        "earnings_hard_coverage_status": "complete",
-        "earnings_soft_coverage_status": "complete",
-        "earnings_has_event": bool(events),
-        "earnings_blocking_has_event": bool(blocking_events),
-        "earnings_events": events,
-        "earnings_blocking_events": blocking_events,
-        "earnings_nonblocking_events": nonblocking_events,
-    }
+    return earnings_evidence(expiration="2026-06-19", market_date="2026-05-20", event_date=event_date)
 
 
 def _candidate(**overrides):

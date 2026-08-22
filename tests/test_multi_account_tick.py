@@ -79,11 +79,10 @@ def test_run_tick_restores_sys_argv_after_exception(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "multi_tick_main", fake_main)
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         mod.run_tick(["--no-send"])
-        raise AssertionError("expected runtime error")
-    except RuntimeError as exc:
-        assert str(exc) == "boom"
+    exc = _caught.value
+    assert str(exc) == "boom"
 
     assert sys.argv == original
 
@@ -413,11 +412,10 @@ def test_default_account_must_be_active_account() -> None:
     assert mod._resolve_default_account(None, ["lx", "sy"]) == "lx"
     assert mod._resolve_default_account("SY", ["lx", "sy"]) == "sy"
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod._resolve_default_account("other", ["lx", "sy"])
-        raise AssertionError("expected config error")
-    except SystemExit as exc:
-        assert "--default-account must be one of active accounts" in str(exc)
+    exc = _caught.value
+    assert "--default-account must be one of active accounts" in str(exc)
 
 
 def test_mark_scheduler_accounts_records_exact_target_and_completion(tmp_path) -> None:

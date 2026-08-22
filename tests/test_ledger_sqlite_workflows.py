@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,8 +19,6 @@ from src.application.ledger.store_resolution import ledger_store_write_guard, re
 import src.application.ledger.writer as ledger_writer
 
 BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def _write_data_config(
@@ -2861,7 +2858,7 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
         ]
     )
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         repo.replace_position_lots(
             [
                 PositionLotRecord(
@@ -2894,9 +2891,8 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
                 ),
             ]
         )
-        raise AssertionError("expected replace_position_lots to reject incomplete option lots")
-    except ValueError as exc:
-        assert "missing expiration, strike" in str(exc)
+    exc = _caught.value
+    assert "missing expiration, strike" in str(exc)
 
     lots = repo.list_position_lots()
     record_ids = {row["record_id"] for row in lots}

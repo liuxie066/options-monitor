@@ -665,7 +665,7 @@ def test_runtime_scopes_control_reads_to_current_candidates(
 ) -> None:
     import src.application.trades.lifecycle_runtime as mod
 
-    counts = _patch_due_planner(
+    _patch_due_planner(
         monkeypatch,
         candidates=[_candidate("provider-1")],
     )

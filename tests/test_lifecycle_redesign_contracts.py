@@ -1964,11 +1964,13 @@ def test_lifecycle_delivery_status_separates_case_and_outbox_states(
         payload={"account": "lx", "case_id": case_id},
     )
     assert repo.insert_trade_lifecycle_notification_once(intent)
+    outbox = repo.get_trade_lifecycle_notification(intent["outbox_id"])
+    assert outbox is not None
 
     status = _lifecycle_delivery_status(
         repo,
         account="lx",
-        now_ms=observed_at_ms + 1_000,
+        now_ms=max(observed_at_ms + 1_000, int(outbox["created_at_ms"])),
     )
     assert status["schema_version"] == (
         "trade_lifecycle_delivery_status.v2"

@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+from conftest import portfolio_sync_receipt as _sync_receipt
 from src.application.trades.intake import process_trade_payload
 from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
 from src.infrastructure.portfolio_holdings_sync_client import (
@@ -30,28 +31,6 @@ def _context(
         "apply_changes": apply_changes,
     }
 
-
-def _sync_receipt(account: str = "lx") -> dict:
-    return {
-        "success": True,
-        "status": "written",
-        "account": account,
-        "broker": "futu",
-        "dry_run": False,
-        "source": "futu-openapi",
-        "source_snapshot_id": f"snapshot-{account}",
-        "sync_run_id": f"sync-{account}",
-        "receipt_persisted": True,
-        "partial_write_possible": False,
-        "stages": {
-            name: {
-                "status": "succeeded",
-                "partial_write_possible": False,
-            }
-            for name in ("positions", "securities_cash", "fund_mmf")
-        },
-        "positions": [],
-    }
 
 
 def test_option_deal_never_calls_portfolio_sync(tmp_path: Path) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from datetime import time
 from pathlib import Path
 
@@ -95,11 +97,10 @@ def test_notification_channel_helpers_accept_wechat_clawbot() -> None:
     assert is_supported_notification_channel("wechat_clawbot") is True
     assert is_openclaw_notification_channel("wechat_clawbot") is False
     assert resolve_openclaw_transport_channel("wechat_clawbot") == "wechat_clawbot"
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_openclaw_transport_channel("openclaw-weixin")
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "OpenClaw notification routing has been removed" in str(exc)
+    exc = _caught.value
+    assert "OpenClaw notification routing has been removed" in str(exc)
     assert is_supported_notification_channel("sms") is False
 
 
@@ -138,17 +139,15 @@ def test_resolve_notification_route_rejects_removed_openclaw_values() -> None:
         {'notifications': {'transport_channel': 'openclaw-weixin', 'target': 'wechat:ops'}},
     ]
     for config in cases:
-        try:
+        with pytest.raises(ValueError) as _caught:
             resolve_notification_route_from_config(config=config)
-            raise AssertionError("expected ValueError")
-        except ValueError as exc:
-            assert "OpenClaw notification routing has been removed" in str(exc)
-
-    try:
-        resolve_notification_route_from_config(config={'notifications': {'target': 'wechat:ops'}}, cli_channel='openclaw-weixin')
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
+        exc = _caught.value
         assert "OpenClaw notification routing has been removed" in str(exc)
+
+    with pytest.raises(ValueError) as _caught:
+        resolve_notification_route_from_config(config={'notifications': {'target': 'wechat:ops'}}, cli_channel='openclaw-weixin')
+    exc = _caught.value
+    assert "OpenClaw notification routing has been removed" in str(exc)
 
 
 def test_resolve_scheduler_state_path_supports_legacy_state_override() -> None:

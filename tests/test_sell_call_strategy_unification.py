@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pandas as pd
 
@@ -12,166 +10,157 @@ from conftest import phase2_opening_row
 _SCAN_NOW = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
 
 
-def _add_repo_to_syspath() -> Path:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
-    return base
-
-
-def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank() -> None:
-    _add_repo_to_syspath()
+def test_scan_sell_call_calculates_without_applying_strategy_filter_or_rank(tmp_path: Path) -> None:
     from src.application.scan_sell_call import run_sell_call_scan
 
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        parsed = root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
+    td = tmp_path
+    root = Path(td)
+    parsed = root / "parsed"
+    parsed.mkdir(parents=True, exist_ok=True)
 
-        pd.DataFrame(
-            [phase2_opening_row(row) for row in [
-                    # pass; same annualized return as B, lower strike-upside tie-break
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "A",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 115.0,
-                    "spot": 100.0,
-                    "bid": 1.4,
-                    "ask": 1.6,
-                    "last_price": 1.5,
-                    "mid": 1.5,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.25,
-                },
-                # pass; if_exercised_total_return must not affect rank
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "B",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 120.0,
-                    "spot": 100.0,
-                    "bid": 1.4,
-                    "ask": 1.6,
-                    "last_price": 1.5,
-                    "mid": 1.5,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.22,
-                },
-                # fail annualized
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "C",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 130.0,
-                    "spot": 100.0,
-                    "bid": 0.15,
-                    "ask": 0.25,
-                    "last_price": 0.2,
-                    "mid": 0.2,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.10,
-                },
-                # fail net income
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "D",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 101.0,
-                    "spot": 100.0,
-                    "bid": 0.35,
-                    "ask": 0.45,
-                    "last_price": 0.4,
-                    "mid": 0.4,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.45,
-                },
-                # fail if-exercised total return versus avg_cost
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "F",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 95.0,
-                    "spot": 100.0,
-                    "bid": 1.4,
-                    "ask": 1.6,
-                    "last_price": 1.5,
-                    "mid": 1.5,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.65,
-                },
-                # fail liquidity open-interest
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "E",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 125.0,
-                    "spot": 100.0,
-                    "bid": 0.5,
-                    "ask": 1.5,
-                    "last_price": 1.0,
-                    "mid": 1.0,
-                    "open_interest": 5,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.2,
-                },
-            ]]
-        ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+    pd.DataFrame(
+        [phase2_opening_row(row) for row in [
+                # pass; same annualized return as B, lower strike-upside tie-break
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "A",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 115.0,
+                "spot": 100.0,
+                "bid": 1.4,
+                "ask": 1.6,
+                "last_price": 1.5,
+                "mid": 1.5,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.25,
+            },
+            # pass; if_exercised_total_return must not affect rank
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "B",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 120.0,
+                "spot": 100.0,
+                "bid": 1.4,
+                "ask": 1.6,
+                "last_price": 1.5,
+                "mid": 1.5,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.22,
+            },
+            # fail annualized
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "C",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 130.0,
+                "spot": 100.0,
+                "bid": 0.15,
+                "ask": 0.25,
+                "last_price": 0.2,
+                "mid": 0.2,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.10,
+            },
+            # fail net income
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "D",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 101.0,
+                "spot": 100.0,
+                "bid": 0.35,
+                "ask": 0.45,
+                "last_price": 0.4,
+                "mid": 0.4,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.45,
+            },
+            # fail if-exercised total return versus avg_cost
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "F",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 95.0,
+                "spot": 100.0,
+                "bid": 1.4,
+                "ask": 1.6,
+                "last_price": 1.5,
+                "mid": 1.5,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.65,
+            },
+            # fail liquidity open-interest
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "E",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 125.0,
+                "spot": 100.0,
+                "bid": 0.5,
+                "ask": 1.5,
+                "last_price": 1.0,
+                "mid": 1.0,
+                "open_interest": 5,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.2,
+            },
+        ]]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
-        out = run_sell_call_scan(
-            symbols=["AAPL"],
-            input_root=root,
-            avg_cost=100.0,
-            shares=100,
-            min_annualized_net_return=0.10,
-            min_net_income=100,
-            min_open_interest=10,
-            quote_freshness_now_utc=_SCAN_NOW,
-        )
+    out = run_sell_call_scan(
+        symbols=["AAPL"],
+        input_root=root,
+        avg_cost=100.0,
+        shares=100,
+        min_annualized_net_return=0.10,
+        min_net_income=100,
+        min_open_interest=10,
+        quote_freshness_now_utc=_SCAN_NOW,
+    )
 
-        assert list(out["contract_symbol"]) == ["A", "B", "C", "D", "F", "E"]
-        assert out["period_net_premium_return"].notna().all()
-        assert list(root.glob("*candidates*.csv")) == []
-        assert list(root.glob("*reject_log*.csv")) == []
+    assert list(out["contract_symbol"]) == ["A", "B", "C", "D", "F", "E"]
+    assert out["period_net_premium_return"].notna().all()
+    assert list(root.glob("*candidates*.csv")) == []
+    assert list(root.glob("*reject_log*.csv")) == []
 
 
 def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Path) -> None:
-    _add_repo_to_syspath()
     from src.application.scan_sell_call import run_sell_call_scan
 
     parsed = tmp_path / "parsed"
@@ -216,99 +205,97 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
     assert int(out.iloc[0]["covered_contracts_available"]) == 1
 
 
-def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy() -> None:
-    _add_repo_to_syspath()
+def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy(tmp_path: Path) -> None:
     from src.application.scan_sell_call import run_sell_call_scan
 
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        parsed = root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
+    td = tmp_path
+    root = Path(td)
+    parsed = root / "parsed"
+    parsed.mkdir(parents=True, exist_ok=True)
 
-        pd.DataFrame(
-            [phase2_opening_row(row) for row in [
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "BELOW_COST",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 99.0,
-                    "spot": 100.0,
-                    "bid": 3.9,
-                    "ask": 4.1,
-                    "last_price": 4.0,
-                    "mid": 4.0,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.55,
-                },
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "AT_COST",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 100.0,
-                    "spot": 100.0,
-                    "bid": 3.9,
-                    "ask": 4.1,
-                    "last_price": 4.0,
-                    "mid": 4.0,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.50,
-                },
-                {
-                    "symbol": "AAPL",
-                    "option_type": "call",
-                    "expiration": "2026-05-15",
-                    "dte": 30,
-                    "contract_symbol": "AT_COST_MULTIPLIER",
-                    "multiplier": 100,
-                    "currency": "USD",
-                    "strike": 102.0,
-                    "spot": 100.0,
-                    "bid": 3.9,
-                    "ask": 4.1,
-                    "last_price": 4.0,
-                    "mid": 4.0,
-                    "open_interest": 200,
-                    "volume": 50,
-                    "implied_volatility": 0.30,
-                    "delta": 0.45,
-                },
-            ]]
-        ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+    pd.DataFrame(
+        [phase2_opening_row(row) for row in [
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "BELOW_COST",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 99.0,
+                "spot": 100.0,
+                "bid": 3.9,
+                "ask": 4.1,
+                "last_price": 4.0,
+                "mid": 4.0,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.55,
+            },
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "AT_COST",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 100.0,
+                "spot": 100.0,
+                "bid": 3.9,
+                "ask": 4.1,
+                "last_price": 4.0,
+                "mid": 4.0,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.50,
+            },
+            {
+                "symbol": "AAPL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "AT_COST_MULTIPLIER",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 102.0,
+                "spot": 100.0,
+                "bid": 3.9,
+                "ask": 4.1,
+                "last_price": 4.0,
+                "mid": 4.0,
+                "open_interest": 200,
+                "volume": 50,
+                "implied_volatility": 0.30,
+                "delta": 0.45,
+            },
+        ]]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
-        out = run_sell_call_scan(
-            symbols=["AAPL"],
-            input_root=root,
-            avg_cost=100.0,
-            shares=100,
-            min_strike_cost_multiplier=1.02,
-            min_annualized_net_return=0.10,
-            min_net_income=100,
-            min_open_interest=10,
-            quote_freshness_now_utc=_SCAN_NOW,
-        )
+    out = run_sell_call_scan(
+        symbols=["AAPL"],
+        input_root=root,
+        avg_cost=100.0,
+        shares=100,
+        min_strike_cost_multiplier=1.02,
+        min_annualized_net_return=0.10,
+        min_net_income=100,
+        min_open_interest=10,
+        quote_freshness_now_utc=_SCAN_NOW,
+    )
 
-        assert list(out["contract_symbol"]) == [
-            "BELOW_COST",
-            "AT_COST",
-            "AT_COST_MULTIPLIER",
-        ]
-        assert float(out["strike"].min()) == 99.0
+    assert list(out["contract_symbol"]) == [
+        "BELOW_COST",
+        "AT_COST",
+        "AT_COST_MULTIPLIER",
+    ]
+    assert float(out["strike"].min()) == 99.0
 
 
 def test_sell_call_risk_bands_are_stable() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_risk_bands import classify_sell_call_risk
 
     aggressive = classify_sell_call_risk(0.02)
@@ -321,7 +308,6 @@ def test_sell_call_risk_bands_are_stable() -> None:
 
 
 def test_sell_call_rank_order_is_consistent_with_strategy() -> None:
-    _add_repo_to_syspath()
     from domain.domain.engine import rank_candidate_rows
 
     df = pd.DataFrame(

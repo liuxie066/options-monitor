@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import importlib
 from pathlib import Path
 from typing import Any, cast
@@ -266,12 +268,10 @@ def test_cli_exits_nonzero_when_fetch_payload_reports_error(monkeypatch) -> None
     monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
     monkeypatch.setattr("sys.argv", ["prog", "--symbols", "NVDA", "--quiet"])
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.main()
-    except SystemExit as exc:
-        assert exc.code == 1
-    else:
-        raise AssertionError("expected CLI to exit nonzero for error payload")
+    exc = _caught.value
+    assert exc.code == 1
 
     assert saved == ["NVDA"]
 
@@ -297,12 +297,10 @@ def test_cli_processes_all_symbols_before_nonzero_exit(monkeypatch) -> None:
     monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
     monkeypatch.setattr("sys.argv", ["prog", "--symbols", "NVDA", "AMD", "--quiet"])
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.main()
-    except SystemExit as exc:
-        assert exc.code == 1
-    else:
-        raise AssertionError("expected CLI to exit nonzero when any symbol fails")
+    exc = _caught.value
+    assert exc.code == 1
 
     assert fetched == ["NVDA", "AMD"]
     assert saved == ["NVDA", "AMD"]

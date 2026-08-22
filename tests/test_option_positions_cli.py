@@ -14,9 +14,6 @@ import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 import src.application.ledger.writer as ledger_writer
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_projection_migration_inventory_uses_read_only_store_path(

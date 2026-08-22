@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 import pytest
 
+from candidate_evidence_helpers import earnings_evidence
 from domain.domain.engine import (
     CandidateCalculationError,
-    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
     calculate_opening_candidate_metrics,
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
@@ -16,37 +15,7 @@ from domain.domain.engine import (
 
 
 def _earnings_evidence(*, event_date: str | None = None) -> dict:
-    event = None
-    if event_date is not None:
-        days_before_expiration = (
-            date.fromisoformat("2026-09-18") - date.fromisoformat(event_date)
-        ).days
-        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
-        event = {
-            "earnings_date": event_date,
-            "days_before_expiration": days_before_expiration,
-            "classification": "blocking" if blocking else "nonblocking",
-            "blocking": blocking,
-        }
-    events = [] if event is None else [event]
-    blocking_events = [item for item in events if item["blocking"]]
-    nonblocking_events = [item for item in events if not item["blocking"]]
-    return {
-        "earnings_evidence_status": "ready",
-        "earnings_reason_code": None,
-        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
-        "earnings_market_date": "2026-08-06",
-        "earnings_hard_window_start": "2026-09-12",
-        "earnings_hard_window_end": "2026-09-18",
-        "earnings_hard_coverage_status": "complete",
-        "earnings_soft_coverage_status": "complete",
-        "earnings_has_event": bool(events),
-        "earnings_blocking_has_event": bool(blocking_events),
-        "earnings_events": events,
-        "earnings_blocking_events": blocking_events,
-        "earnings_nonblocking_events": nonblocking_events,
-    }
+    return earnings_evidence(expiration="2026-09-18", market_date="2026-08-06", event_date=event_date)
 
 
 def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # type: ignore[no-untyped-def]
@@ -132,12 +101,10 @@ def test_covered_call_uses_current_market_value_and_same_hk_formula_contract() -
 
 def test_candidate_calculation_never_defaults_multiplier_or_legacy_rv() -> None:
     row = _opening_row(multiplier=None, term_matched_rv=None, realized_volatility_estimate=0.20)
-    try:
+    with pytest.raises(CandidateCalculationError) as _caught:
         calculate_opening_candidate_metrics(row, mode="put")
-    except CandidateCalculationError as exc:
-        assert exc.reason == "multiplier_missing_or_invalid"
-    else:
-        raise AssertionError("missing multiplier must fail closed")
+    exc = _caught.value
+    assert exc.reason == "multiplier_missing_or_invalid"
 
 
 def test_candidate_calculation_rejects_unavailable_term_matched_rv() -> None:
@@ -156,16 +123,14 @@ def test_candidate_calculation_rejects_unavailable_term_matched_rv() -> None:
 
 
 def test_candidate_calculation_fails_only_the_contract_when_fee_schedule_is_unavailable() -> None:
-    try:
+    with pytest.raises(CandidateCalculationError) as _caught:
         calculate_opening_candidate_metrics(
             _opening_row(currency="CNY"),
             mode="put",
         )
-    except CandidateCalculationError as exc:
-        assert exc.reason == "option_fee_estimate_unavailable"
-        assert exc.metric_value == "CNY"
-    else:
-        raise AssertionError("unsupported candidate fee schedule must fail closed")
+    exc = _caught.value
+    assert exc.reason == "option_fee_estimate_unavailable"
+    assert exc.metric_value == "CNY"
 
 
 def test_scan_adapters_use_the_same_canonical_calculation() -> None:

@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
@@ -130,14 +126,3 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
         pc.state_repo.append_source_snapshot_event = old_append  # type: ignore[assignment]
-
-
-def main() -> None:
-    test_load_portfolio_context_rejects_invalid_cached_contract()
-    test_load_option_positions_context_rejects_invalid_cached_contract()
-    test_load_context_persists_source_snapshots_for_valid_cached_contracts()
-    print("OK (pipeline-context-contract)")
-
-
-if __name__ == "__main__":
-    main()

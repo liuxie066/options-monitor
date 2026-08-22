@@ -111,10 +111,7 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
     tick_timer = files["systemd/options-monitor-tick-us.timer"]["content"]
     intake = files["systemd/options-monitor-trade-intake.service"]["content"]
-    auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
-    verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
-    profile = json.loads(files["service.profile.json"]["content"])
 
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in tick
     assert "User=" not in tick
@@ -2942,7 +2939,7 @@ markets:
         encoding="utf-8",
     )
 
-    try:
+    with pytest.raises(AgentToolError) as _caught:
         render_service_bundle(
             target="systemd",
             repo_root=repo,
@@ -2953,9 +2950,8 @@ markets:
             strategy_lab_recorder_source="opend",
             strategy_lab_recorder_account="lx",
         )
-        raise AssertionError("expected AgentToolError")
-    except AgentToolError as exc:
-        assert "account_settings.lx.futu.port must be an integer" in str(exc)
+    exc = _caught.value
+    assert "account_settings.lx.futu.port must be an integer" in str(exc)
 
 
 @pytest.mark.parametrize(
@@ -5529,15 +5525,13 @@ def test_service_upgrade_runtime_prepare_removes_temp_venv_on_install_failure(mo
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="install failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    try:
+    with pytest.raises(RuntimePrepareError) as _caught:
         _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
-    except RuntimePrepareError as exc:
-        assert "install failed" in str(exc)
-        assert "duration_seconds" in exc.runtime_prepare
-        assert not Path(exc.runtime_prepare["shared_venv_build_path"]).exists()
-        assert not Path(exc.runtime_prepare["shared_venv_path"]).exists()
-    else:  # pragma: no cover - defensive assertion branch
-        raise AssertionError("expected RuntimePrepareError")
+    exc = _caught.value
+    assert "install failed" in str(exc)
+    assert "duration_seconds" in exc.runtime_prepare
+    assert not Path(exc.runtime_prepare["shared_venv_build_path"]).exists()
+    assert not Path(exc.runtime_prepare["shared_venv_path"]).exists()
 
 
 def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monkeypatch, tmp_path: Path) -> None:
@@ -5557,14 +5551,12 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    try:
+    with pytest.raises(RuntimePrepareError) as _caught:
         _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
-    except RuntimePrepareError as exc:
-        assert exc.runtime_prepare["installer"] == "uv"
-        assert exc.runtime_prepare["fallback"] is False
-        assert "uv failed" in str(exc.runtime_prepare["uv_error"])
-    else:  # pragma: no cover - defensive assertion branch
-        raise AssertionError("expected RuntimePrepareError")
+    exc = _caught.value
+    assert exc.runtime_prepare["installer"] == "uv"
+    assert exc.runtime_prepare["fallback"] is False
+    assert "uv failed" in str(exc.runtime_prepare["uv_error"])
 
     assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
 
@@ -5740,12 +5732,10 @@ def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="Failed to restart: Access denied\n")
 
-    try:
+    with pytest.raises(ServiceRestartError) as _caught:
         _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
-    except ServiceRestartError as exc:
-        remediation = exc.remediation
-    else:  # pragma: no cover - defensive assertion branch
-        raise AssertionError("expected ServiceRestartError")
+    exc = _caught.value
+    remediation = exc.remediation
 
     assert operations[-1]["returncode"] == 1
     assert "manual_restart: sudo systemctl restart options-monitor-trade-intake.service" in remediation

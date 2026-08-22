@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sys
+import pytest
+
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 
@@ -11,13 +11,6 @@ from domain.domain.fee_calc import (
     FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
     calc_futu_hk_terminal_fee,
 )
-
-
-def _add_repo_to_syspath() -> Path:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
-    return base
 
 
 def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignore[no-untyped-def]
@@ -54,7 +47,6 @@ def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignor
 
 
 def test_calc_futu_hk_option_fee_applies_minimum_commission_and_system_fee() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_hk_option_fee
 
     # 交易金额 1 * 100 * 1 = 100，佣金 0.2 = 最低 3.0，另加平台费 15 和系统费 3
@@ -64,7 +56,6 @@ def test_calc_futu_hk_option_fee_applies_minimum_commission_and_system_fee() -> 
 
 
 def test_calc_futu_hk_option_fee_scales_system_fee_by_contracts() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_hk_option_fee
 
     # 交易金额 2 * 100 * 3 = 600，佣金 1.2 -> 最低 3.0，平台费 15，系统费 9
@@ -74,7 +65,6 @@ def test_calc_futu_hk_option_fee_scales_system_fee_by_contracts() -> None:
 
 
 def test_calc_futu_hk_option_fee_waives_tariff_at_exact_one_cent() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_hk_option_fee
 
     out = calc_futu_hk_option_fee(0.01, contracts=3, multiplier=100, is_sell=True)
@@ -83,7 +73,6 @@ def test_calc_futu_hk_option_fee_waives_tariff_at_exact_one_cent() -> None:
 
 
 def test_calc_futu_us_option_fee_uses_standard_commission_and_sell_regulatory_fees() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(0.5, contracts=2, multiplier=100, is_sell=True)
@@ -92,7 +81,6 @@ def test_calc_futu_us_option_fee_uses_standard_commission_and_sell_regulatory_fe
 
 
 def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_fees() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(0.05, contracts=1, multiplier=100, is_sell=False)
@@ -101,7 +89,6 @@ def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_
 
 
 def test_calc_futu_us_option_fee_caps_occ_fee_per_order() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(1.0, contracts=3000, multiplier=100, is_sell=False)
@@ -110,19 +97,15 @@ def test_calc_futu_us_option_fee_caps_occ_fee_per_order() -> None:
 
 
 def test_calc_futu_option_fee_requires_positive_multiplier() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_option_fee
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         calc_futu_option_fee("USD", 1.0, contracts=1, multiplier=0, is_sell=True)
-    except ValueError as exc:
-        assert "multiplier" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "multiplier" in str(exc)
 
 
 def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_option_fee
 
     out = calc_futu_option_fee("港币", 1.0, contracts=1, multiplier=100, is_sell=True)
@@ -131,20 +114,16 @@ def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
 
 
 def test_calc_futu_option_fee_rejects_missing_or_unsupported_currency() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_option_fee
 
     for currency in (None, "", "CNY", "EUR"):
-        try:
+        with pytest.raises(ValueError) as _caught:
             calc_futu_option_fee(currency, 1.0, contracts=1, multiplier=100, is_sell=True)
-        except ValueError as exc:
-            assert "USD or HKD" in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError for currency={currency!r}")
+        exc = _caught.value
+        assert "USD or HKD" in str(exc)
 
 
 def test_extract_actual_fees_prefers_explicit_total_then_components() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import extract_actual_fees
 
     total = extract_actual_fees({"total_fee": 3.5, "commission": 2.0, "platform_fee": 1.0})
@@ -172,7 +151,6 @@ def test_extract_actual_fees_prefers_explicit_total_then_components() -> None:
 
 
 def test_calc_futu_us_stock_fee_includes_sell_only_regulatory_fees() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_us_stock_fee
 
     sell = calc_futu_us_stock_fee(105.0, shares=100, is_sell=True)
@@ -183,7 +161,6 @@ def test_calc_futu_us_stock_fee_includes_sell_only_regulatory_fees() -> None:
 
 
 def test_calc_futu_hk_stock_fee_rounds_stamp_duty_up() -> None:
-    _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_hk_stock_fee
 
     out = calc_futu_hk_stock_fee(10.01, shares=100, is_sell=True)
@@ -192,7 +169,6 @@ def test_calc_futu_hk_stock_fee_rounds_stamp_duty_up() -> None:
 
 
 def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
-    _add_repo_to_syspath()
     from types import SimpleNamespace
 
     from src.application.ledger.writer import _trade_event_from_normalized_deal
@@ -230,7 +206,6 @@ def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
 
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     from datetime import datetime, timezone
-    _add_repo_to_syspath()
     from src.application.scan_sell_put import compute_metrics
 
     row = pd.Series(
@@ -254,7 +229,6 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
 
 
 def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
-    _add_repo_to_syspath()
     from src.application.scan_sell_call import compute_metrics
 
     row = pd.Series(

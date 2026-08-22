@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,8 +9,6 @@ import pandas as pd
 import pytest
 
 BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 _TEST_EVIDENCE_COMPLETED_AT = datetime.now(timezone.utc).replace(microsecond=0)
@@ -850,7 +847,7 @@ def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp
             }
 
         mod.execute_required_data_opend = _fake_execute_required_data_opend  # type: ignore[assignment]
-        try:
+        with pytest.raises(RuntimeError) as _caught:
             mod.ensure_required_data(
                 py="python3",
                 base=BASE,
@@ -866,10 +863,8 @@ def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp
                 fetch_host="127.0.0.1",
                 fetch_port=11111,
             )
-        except RuntimeError as exc:
-            assert "snapshot rate limited" in str(exc)
-        else:
-            raise AssertionError("expected required_data fetch error to propagate")
+        exc = _caught.value
+        assert "snapshot rate limited" in str(exc)
     finally:
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
 
@@ -2206,26 +2201,3 @@ def test_tcom_concurrent_plan_construction_is_account_invariant(
     assert plan_semantics[0] == plan_semantics[1]
     assert plan_semantics[0]["side_plans"][0]["min_strike"] == 34.456
     assert plan_semantics[0]["side_plans"][0]["max_strike"] == 43.07
-
-
-def main() -> None:
-    from tempfile import TemporaryDirectory
-
-    test_ensure_required_data_uses_read_model_error_to_force_refetch()
-    test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies()
-    test_ensure_required_data_treats_futu_source_as_opend_path()
-    test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path()
-    with TemporaryDirectory() as td:
-        test_ensure_required_data_records_error_when_fetch_payload_reports_error(Path(td))
-    test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(Path("."))
-    test_fetch_required_data_opend_forwards_side_strike_windows(Path("."))
-    test_build_fetch_request_from_spec_applies_opend_fetch_config()
-    test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests()
-    test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
-    test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cache_has_only_puts()
-    test_ensure_required_data_refetches_when_bounds_are_split_across_expirations()
-    print("OK (pipeline-fetch-read-model-boundary)")
-
-
-if __name__ == "__main__":
-    main()

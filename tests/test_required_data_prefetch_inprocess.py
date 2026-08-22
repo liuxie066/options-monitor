@@ -1093,7 +1093,7 @@ def test_strategy_prefetch_kwargs_fetches_combo_call_with_underwriting_rv() -> N
 
 
 def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         strategy_prefetch_kwargs(
             {
                 "symbol": "NVDA",
@@ -1103,9 +1103,8 @@ def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() 
             },
             enabled=True,
         )
-        raise AssertionError("expected unresolved strategy config failure")
-    except ValueError as exc:
-        assert "apply templates/profiles" in str(exc)
+    exc = _caught.value
+    assert "apply templates/profiles" in str(exc)
 
 
 def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_underwriting() -> None:

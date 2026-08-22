@@ -32,7 +32,6 @@ def _render_legacy(changes: str, alerts: str, *, account_label: str) -> str:
 
 
 def test_notify_symbols_markdown_put_layout() -> None:
-    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -66,7 +65,6 @@ def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
 
 
 def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> None:
-    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -85,7 +83,6 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
 
 
 def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
-    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -106,7 +103,6 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 
 
 def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> None:
-    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -157,7 +153,6 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
 def test_notify_symbols_markdown_put_chain_shows_event_risk() -> None:
     from domain.domain import normalize_processor_row
     from src.application.alert_engine import build_alert_text
-    from src.application.notify_symbols import build_notification
 
     summary_row = normalize_processor_row(
         {
@@ -305,7 +300,6 @@ def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None
 
 
 def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
-    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -569,7 +563,6 @@ def test_alert_engine_missing_numeric_fields_do_not_abort_alert_build() -> None:
 
 
 def test_build_notification_keeps_per_strategy_capacity() -> None:
-    from src.application.notify_symbols import build_notification
 
     put_lines = [
         (

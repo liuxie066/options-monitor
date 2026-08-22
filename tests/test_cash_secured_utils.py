@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-import sys
 import unittest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 from domain.domain.cash_secured_utils import (
     cash_secured_symbol_by_ccy,
@@ -83,7 +78,3 @@ class TestCashSecuredUtils(unittest.TestCase):
 
         self.assertEqual(by_ccy, {'NVDA': {'CNY': 100.0, 'HKD': 200.0}})
         self.assertEqual(total_by_ccy, {'CNY': 100.0, 'HKD': 200.0})
-
-
-if __name__ == '__main__':
-    unittest.main()

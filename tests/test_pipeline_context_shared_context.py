@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def _portfolio_ctx(account: str, *, usd_cash: float, shares: int) -> dict:
@@ -42,7 +37,7 @@ def _option_ctx(account: str, *, locked: int) -> dict:
     }
 
 
-def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
+def test_build_pipeline_context_resolves_portfolio_source_by_account(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     captured: dict[str, object] = {}
@@ -62,30 +57,30 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
         pc.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (None, None)  # type: ignore[assignment]
 
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = pc.build_pipeline_context(
-                py="python",
-                base=root,
-                cfg={
-                    "portfolio": {
-                        "data_config": "x.json",
-                        "broker": "富途",
-                        "account": "sy",
-                        "source": "auto",
-                        "source_by_account": {"sy": "holdings"},
-                    }
-                },
-                report_dir=(root / "reports").resolve(),
-                portfolio_timeout_sec=1,
-                runtime={},
-                is_scheduled=True,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=lambda _msg: None,
-                no_context=False,
-                want_scan=True,
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = pc.build_pipeline_context(
+            py="python",
+            base=root,
+            cfg={
+                "portfolio": {
+                    "data_config": "x.json",
+                    "broker": "富途",
+                    "account": "sy",
+                    "source": "auto",
+                    "source_by_account": {"sy": "holdings"},
+                }
+            },
+            report_dir=(root / "reports").resolve(),
+            portfolio_timeout_sec=1,
+            runtime={},
+            is_scheduled=True,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=lambda _msg: None,
+            no_context=False,
+            want_scan=True,
+        )
         assert portfolio_ctx == {"portfolio_source_name": "holdings"}
         assert option_ctx is None
         assert usd_per_cny_exchange_rate is None
@@ -97,7 +92,7 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_underwriting() -> None:
+def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_underwriting(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_load_portfolio_context = pc.load_portfolio_context
@@ -115,26 +110,26 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_und
         pc.load_global_option_positions_risk_context = _unexpected_global_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
 
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, _ = pc.build_pipeline_context(
-                py="python",
-                base=root,
-                cfg={
-                    "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
-                    "templates": {"put_base": {"sell_put": {"strategy": "insurance_underwriting"}}},
-                    "symbols": [{"symbol": "NVDA", "use": ["put_base"]}],
-                },
-                report_dir=(root / "reports").resolve(),
-                portfolio_timeout_sec=1,
-                runtime={},
-                is_scheduled=True,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=lambda _msg: None,
-                no_context=False,
-                want_scan=True,
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, _ = pc.build_pipeline_context(
+            py="python",
+            base=root,
+            cfg={
+                "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
+                "templates": {"put_base": {"sell_put": {"strategy": "insurance_underwriting"}}},
+                "symbols": [{"symbol": "NVDA", "use": ["put_base"]}],
+            },
+            report_dir=(root / "reports").resolve(),
+            portfolio_timeout_sec=1,
+            runtime={},
+            is_scheduled=True,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=lambda _msg: None,
+            no_context=False,
+            want_scan=True,
+        )
 
         assert portfolio_ctx is not None
         assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
@@ -148,7 +143,7 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_und
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_covered_call_underwriting() -> None:
+def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_covered_call_underwriting(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_load_portfolio_context = pc.load_portfolio_context
@@ -166,26 +161,26 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_cov
         pc.load_global_option_positions_risk_context = _unexpected_global_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
 
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, _ = pc.build_pipeline_context(
-                py="python",
-                base=root,
-                cfg={
-                    "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
-                    "templates": {"call_base": {"sell_call": {"strategy": "insurance_underwriting"}}},
-                    "symbols": [{"symbol": "NVDA", "use": ["call_base"]}],
-                },
-                report_dir=(root / "reports").resolve(),
-                portfolio_timeout_sec=1,
-                runtime={},
-                is_scheduled=True,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=lambda _msg: None,
-                no_context=False,
-                want_scan=True,
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, _ = pc.build_pipeline_context(
+            py="python",
+            base=root,
+            cfg={
+                "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
+                "templates": {"call_base": {"sell_call": {"strategy": "insurance_underwriting"}}},
+                "symbols": [{"symbol": "NVDA", "use": ["call_base"]}],
+            },
+            report_dir=(root / "reports").resolve(),
+            portfolio_timeout_sec=1,
+            runtime={},
+            is_scheduled=True,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=lambda _msg: None,
+            no_context=False,
+            want_scan=True,
+        )
 
         assert portfolio_ctx is not None
         assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
@@ -199,7 +194,7 @@ def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_cov
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
+def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
@@ -263,49 +258,49 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         pc.build_shared_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option)  # type: ignore[assignment]
         pc.build_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option["all_accounts"])  # type: ignore[assignment]
         logs: list[str] = []
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            shared_dir = (root / "shared").resolve()
-            p1 = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=3600,
-                state_dir=(root / "acct_lx_state").resolve(),
-                shared_state_dir=shared_dir,
-                log=logs.append,
-            )
-            p2 = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="sy",
-                ttl_sec=3600,
-                state_dir=(root / "acct_sy_state").resolve(),
-                shared_state_dir=shared_dir,
-                log=logs.append,
-            )
-            o1, r1 = pc.load_option_positions_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=3600,
-                state_dir=(root / "acct_lx_state").resolve(),
-                shared_state_dir=shared_dir,
-                log=logs.append,
-            )
-            o2, r2 = pc.load_option_positions_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="sy",
-                ttl_sec=3600,
-                state_dir=(root / "acct_sy_state").resolve(),
-                shared_state_dir=shared_dir,
-                log=logs.append,
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        shared_dir = (root / "shared").resolve()
+        p1 = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=3600,
+            state_dir=(root / "acct_lx_state").resolve(),
+            shared_state_dir=shared_dir,
+            log=logs.append,
+        )
+        p2 = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="sy",
+            ttl_sec=3600,
+            state_dir=(root / "acct_sy_state").resolve(),
+            shared_state_dir=shared_dir,
+            log=logs.append,
+        )
+        o1, r1 = pc.load_option_positions_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=3600,
+            state_dir=(root / "acct_lx_state").resolve(),
+            shared_state_dir=shared_dir,
+            log=logs.append,
+        )
+        o2, r2 = pc.load_option_positions_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="sy",
+            ttl_sec=3600,
+            state_dir=(root / "acct_sy_state").resolve(),
+            shared_state_dir=shared_dir,
+            log=logs.append,
+        )
         assert counts["portfolio"] == 1
         assert counts["option"] == 1
         assert p1 and p2
@@ -411,6 +406,7 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
 
 def test_option_context_rejects_foreign_account_cache_before_adapter(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     import src.application.pipeline_context as pc
 
@@ -437,18 +433,18 @@ def test_option_context_rejects_foreign_account_cache_before_adapter(
     )
     logs: list[str] = []
 
-    with TemporaryDirectory() as td:
-        root = Path(td).resolve()
-        context, refreshed = pc.load_option_positions_context(
-            base=root,
-            data_config="portfolio.runtime.json",
-            market="富途",
-            account="sy",
-            ttl_sec=3600,
-            state_dir=root / "account-state",
-            shared_state_dir=root / "run-state",
-            log=logs.append,
-        )
+    td = tmp_path
+    root = Path(td).resolve()
+    context, refreshed = pc.load_option_positions_context(
+        base=root,
+        data_config="portfolio.runtime.json",
+        market="富途",
+        account="sy",
+        ttl_sec=3600,
+        state_dir=root / "account-state",
+        shared_state_dir=root / "run-state",
+        log=logs.append,
+    )
 
     assert context is None
     assert refreshed is False
@@ -537,7 +533,7 @@ def test_load_holdings_records_does_not_fallback_on_permission_error(monkeypatch
         fpc.bitable_list_records = old_list  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
+def test_load_portfolio_context_auto_prefers_futu_when_available(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_fetch = pc.fetch_futu_portfolio_context
@@ -552,20 +548,20 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
         }
 
         logs: list[str] = []
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=0,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
-                portfolio_source="auto",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=0,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+            portfolio_source="auto",
+        )
         assert out is not None
         assert out["portfolio_source_name"] == "futu"
         assert out["context_source"] == "futu_direct"
@@ -574,7 +570,7 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() -> None:
+def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -606,20 +602,20 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
         }
 
         logs: list[str] = []
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=3600,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
-                portfolio_source="auto",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=3600,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+            portfolio_source="auto",
+        )
         assert out is not None
         assert out["portfolio_source_name"] == "futu"
         assert out["context_source"] == "futu_direct"
@@ -630,7 +626,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable() -> None:
+def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
@@ -661,20 +657,20 @@ def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailabl
         }
 
         logs: list[str] = []
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=0,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
-                portfolio_source="auto",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=0,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+            portfolio_source="auto",
+        )
         assert out is not None
         assert out["portfolio_source_name"] == "holdings"
         assert out["context_source"] == "shared_refresh"
@@ -684,7 +680,7 @@ def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailabl
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail() -> None:
+def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -709,20 +705,20 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
 
         logs: list[str] = []
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="lx",
-                ttl_sec=3600,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
-                portfolio_source="auto",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="lx",
+            ttl_sec=3600,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+            portfolio_source="auto",
+        )
         assert out is not None
         assert out["portfolio_source_name"] == "holdings"
         assert out["context_source"] == "account_cache"
@@ -734,7 +730,7 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_account() -> None:
+def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_account(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -769,20 +765,20 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
             "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
             "portfolio": {"source_by_account": {"sy": "holdings"}},
         }
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="sy",
-                ttl_sec=3600,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config=runtime_cfg,
-                portfolio_source="holdings",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="sy",
+            ttl_sec=3600,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config=runtime_cfg,
+            portfolio_source="holdings",
+        )
         assert out is not None
         assert out["filters"]["account"] == "sy"
         assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
@@ -794,7 +790,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account() -> None:
+def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
@@ -830,20 +826,20 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
             "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
             "portfolio": {"source_by_account": {"sy": "holdings"}},
         }
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="sy",
-                ttl_sec=3600,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config=runtime_cfg,
-                portfolio_source="holdings",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="sy",
+            ttl_sec=3600,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config=runtime_cfg,
+            portfolio_source="holdings",
+        )
         assert out is not None
         assert out["filters"]["account"] == "sy"
         assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
@@ -856,7 +852,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdings_alias_exists() -> None:
+def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdings_alias_exists(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -894,20 +890,20 @@ def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdi
             "account_settings": {"user1": {"type": "futu", "holdings_account": "lx"}},
             "portfolio": {"source": "auto", "base_currency": "CNY", "source_by_account": {"user1": "auto"}},
         }
-        with TemporaryDirectory() as td:
-            root = Path(td).resolve()
-            out = pc.load_portfolio_context(
-                base=root,
-                data_config="x.json",
-                market="富途",
-                account="user1",
-                ttl_sec=3600,
-                state_dir=(root / "state").resolve(),
-                shared_state_dir=(root / "shared").resolve(),
-                log=logs.append,
-                runtime_config=runtime_cfg,
-                portfolio_source="auto",
-            )
+        td = tmp_path
+        root = Path(td).resolve()
+        out = pc.load_portfolio_context(
+            base=root,
+            data_config="x.json",
+            market="富途",
+            account="user1",
+            ttl_sec=3600,
+            state_dir=(root / "state").resolve(),
+            shared_state_dir=(root / "shared").resolve(),
+            log=logs.append,
+            runtime_config=runtime_cfg,
+            portfolio_source="auto",
+        )
         assert out is not None
         assert out["portfolio_source_name"] == "futu"
         assert out["filters"]["account"] == "user1"
@@ -919,13 +915,3 @@ def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdi
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-
-
-def main() -> None:
-    test_shared_context_reuses_fetch_calls_across_accounts()
-    test_shared_slice_matches_legacy_key_fields()
-    print("OK (pipeline-context-shared)")
-
-
-if __name__ == "__main__":
-    main()

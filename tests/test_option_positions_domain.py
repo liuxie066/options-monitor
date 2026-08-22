@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -306,12 +308,10 @@ def test_build_open_fields_enforces_core_write_rules() -> None:
         (command.__class__(**{**command.__dict__, "multiplier": 0}), "multiplier must be > 0"),
     )
     for bad_command, expected in invalid_cases:
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_fields(bad_command)
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_open_fields_enforces_risk_field_write_rules() -> None:
@@ -355,12 +355,10 @@ def test_build_open_fields_enforces_risk_field_write_rules() -> None:
         ),
     )
     for bad_command, expected in invalid_cases:
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_fields(bad_command)
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_open_fields_requires_option_strike_and_expiration() -> None:
@@ -406,12 +404,10 @@ def test_build_open_fields_requires_option_strike_and_expiration() -> None:
             "put option requires expiration_ymd",
         ),
     ):
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_fields(command)
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_decimal_premium() -> None:
@@ -445,12 +441,10 @@ def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_d
         (command.__class__(**{**command.__dict__, "multiplier": None}), "call option requires multiplier"),
     )
     for bad_command, expected in invalid_cases:
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_fields(bad_command)
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_open_fields_accepts_float_transport_noise_without_relaxing_price_precision() -> None:
@@ -476,12 +470,10 @@ def test_build_open_fields_accepts_float_transport_noise_without_relaxing_price_
 
     for precise_value in (1.2345, "1.2345", 5e-324):
         bad_command = command.__class__(**{**command.__dict__, "premium_per_share": precise_value})
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_fields(bad_command)
-        except ValueError as exc:
-            assert "premium_per_share supports at most 3 decimal places" in str(exc)
-        else:
-            raise AssertionError("expected genuine four-decimal price to remain invalid")
+        exc = _caught.value
+        assert "premium_per_share supports at most 3 decimal places" in str(exc)
 
     assert normalize_trade_price(1e100) == 1e100
 
@@ -511,16 +503,14 @@ def test_build_buy_to_close_patch_rejects_invalid_close_price_precision_when_pro
         (-1, "close_price must be > 0"),
         (1.2345, "close_price supports at most 3 decimal places"),
     ):
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_buy_to_close_patch(
                 {"contracts": 3, "contracts_open": 3, "contracts_closed": 0, "status": "open"},
                 contracts_to_close=1,
                 close_price=close_price,
             )
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_close_patch_contract_matches_legacy_dict_api() -> None:
@@ -562,15 +552,13 @@ def test_build_buy_to_close_patch_supports_full_close() -> None:
 
 
 def test_build_buy_to_close_patch_rejects_over_close() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         build_buy_to_close_patch(
             {"contracts": 1, "contracts_open": 1, "status": "open"},
             contracts_to_close=2,
         )
-    except ValueError as exc:
-        assert "exceeds open contracts" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "exceeds open contracts" in str(exc)
 
 
 def test_build_expire_auto_close_patch_closes_open_contracts() -> None:
@@ -740,7 +728,7 @@ def test_build_open_adjustment_patch_updates_strategy_metadata() -> None:
 
 
 def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         build_open_adjustment_patch(
             {
                 "symbol": "NVDA",
@@ -756,10 +744,8 @@ def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:
             },
             contracts=1,
         )
-    except ValueError as exc:
-        assert "contracts must be >= contracts_closed" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "contracts must be >= contracts_closed" in str(exc)
 
 
 def test_build_open_adjustment_patch_enforces_core_write_rules() -> None:
@@ -786,12 +772,10 @@ def test_build_open_adjustment_patch_enforces_core_write_rules() -> None:
         ({"premium_per_share": 1.2345}, "premium_per_share supports at most 3 decimal places"),
     )
     for kwargs, expected in invalid_cases:
-        try:
+        with pytest.raises(ValueError) as _caught:
             build_open_adjustment_patch(fields, **kwargs)
-        except ValueError as exc:
-            assert expected in str(exc)
-        else:
-            raise AssertionError(f"expected ValueError: {expected}")
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_build_open_adjustment_patch_recalculates_risk_fields() -> None:

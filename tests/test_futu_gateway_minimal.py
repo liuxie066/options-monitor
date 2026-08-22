@@ -8,11 +8,6 @@ import pytest
 
 
 def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_futu_gateway
 
@@ -140,11 +135,6 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> Non
 
 
 def test_get_trading_days_normalizes_market_label() -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_futu_gateway
 
@@ -179,13 +169,8 @@ def test_get_trading_days_normalizes_market_label() -> None:
 
 
 def test_get_trading_days_rejects_unknown_market() -> None:
-    import sys
-
     import pytest
 
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_futu_gateway
 
@@ -282,11 +267,6 @@ def test_exact_expiration_option_terms_force_refresh_and_fail_closed() -> None:
 
 
 def test_gateway_error_mapping_need_2fa() -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_futu_gateway, FutuGatewayNeed2FAError
 
@@ -315,11 +295,6 @@ def test_gateway_error_mapping_need_2fa() -> None:
         raise AssertionError("expected FutuGatewayNeed2FAError")
 
 def test_build_ready_gateway_ensures_quote_ready() -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_ready_futu_gateway
 
@@ -355,11 +330,6 @@ def test_build_ready_gateway_ensures_quote_ready() -> None:
 
 
 def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import FutuGatewayTransientError, retry_futu_gateway_call
 
@@ -380,11 +350,6 @@ def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
 
 
 def test_gateway_request_history_kline_returns_page_key() -> None:
-    import sys
-
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     from src.infrastructure.futu_gateway import build_futu_gateway
 
@@ -950,18 +915,16 @@ def test_futu_api_client_earnings_calendar_fails_with_stable_capability_reason()
 
     client = _FutuAPIClient(FakeBackend(), is_option_chain_cache_enabled=False)
 
-    try:
+    with pytest.raises(FutuGatewayCapabilityUnavailableError) as _caught:
         client.get_earnings_calendar(
             market="US",
             begin_date="2026-08-06",
             end_date="2026-08-06",
         )
-    except FutuGatewayCapabilityUnavailableError as exc:
-        assert exc.code == "CAPABILITY_UNAVAILABLE"
-        assert exc.reason_code == "opend_earnings_calendar_unsupported"
-        assert exc.capability == "get_earnings_calendar"
-    else:
-        raise AssertionError("expected FutuGatewayCapabilityUnavailableError")
+    exc = _caught.value
+    assert exc.code == "CAPABILITY_UNAVAILABLE"
+    assert exc.reason_code == "opend_earnings_calendar_unsupported"
+    assert exc.capability == "get_earnings_calendar"
 
 
 def test_inspect_futu_sdk_earnings_calendar_capability_requires_version_and_method(tmp_path: Path) -> None:
@@ -1161,18 +1124,16 @@ def test_broker_readiness_requires_every_identity_in_requested_environment() -> 
         def _rows(value):
             return list(value)
 
-    try:
+    with pytest.raises(FutuGatewayError) as _caught:
         build_ready_futu_broker_gateway(
             expected_account_ids=["1001", "1002"],
             trd_env="REAL",
             backend_cls=Backend,
             client_cls=Client,
         )
-    except FutuGatewayError as exc:
-        assert "1002" not in str(exc)
-        assert "****" in str(exc)
-    else:
-        raise AssertionError("expected broker identity readiness failure")
+    exc = _caught.value
+    assert "1002" not in str(exc)
+    assert "****" in str(exc)
 
 
 def test_broker_readiness_rejects_missing_explicit_global_state_facts() -> None:
@@ -1208,17 +1169,15 @@ def test_broker_readiness_rejects_missing_explicit_global_state_facts() -> None:
         def _rows(value):
             return list(value)
 
-    try:
+    with pytest.raises(FutuGatewayError) as _caught:
         build_ready_futu_broker_gateway(
             expected_account_ids=["1001"],
             trd_env="REAL",
             backend_cls=Backend,
             client_cls=Client,
         )
-    except FutuGatewayError as exc:
-        assert "not READY" in str(exc)
-    else:
-        raise AssertionError("missing readiness facts must fail closed")
+    exc = _caught.value
+    assert "not READY" in str(exc)
 
 
 def test_default_backend_quote_readiness_does_not_construct_trade_context(monkeypatch) -> None:

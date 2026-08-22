@@ -35,6 +35,43 @@ CONFIG_HASH = "a" * 64
 POLICY_HASH = "b" * 64
 
 
+def earnings_evidence(
+    *, expiration: str, market_date: str, event_date: str | None = None
+) -> dict[str, Any]:
+    expiration_day = date.fromisoformat(expiration)
+    events = []
+    if event_date is not None:
+        days_before_expiration = (expiration_day - date.fromisoformat(event_date)).days
+        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
+        events.append(
+            {
+                "earnings_date": event_date,
+                "days_before_expiration": days_before_expiration,
+                "classification": "blocking" if blocking else "nonblocking",
+                "blocking": blocking,
+            }
+        )
+    blocking_events = [event for event in events if event["blocking"]]
+    return {
+        "earnings_evidence_status": "ready",
+        "earnings_reason_code": None,
+        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "earnings_market_date": market_date,
+        "earnings_hard_window_start": (
+            expiration_day - timedelta(days=EARNINGS_NEAR_EXPIRY_WINDOW_DAYS)
+        ).isoformat(),
+        "earnings_hard_window_end": expiration,
+        "earnings_hard_coverage_status": "complete",
+        "earnings_soft_coverage_status": "complete",
+        "earnings_has_event": bool(events),
+        "earnings_blocking_has_event": bool(blocking_events),
+        "earnings_events": events,
+        "earnings_blocking_events": blocking_events,
+        "earnings_nonblocking_events": [event for event in events if not event["blocking"]],
+    }
+
+
 def top1_hk_schedule_fixture() -> dict[str, Any]:
     return {
         "enabled": True,

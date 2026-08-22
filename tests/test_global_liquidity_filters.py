@@ -1,23 +1,12 @@
 from __future__ import annotations
 
-import json
-import sys
-from pathlib import Path
-
-import pandas as pd
-
-from conftest import phase2_opening_row
 
 
-def _add_repo_to_syspath() -> Path:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
-    return base
 
+
+import pytest
 
 def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -42,14 +31,13 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'AAPL.sell_put' in msg
-        assert 'min_iv' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'AAPL.sell_put' in msg
+    assert 'min_iv' in msg
 
     cfg['symbols'][0]['sell_put'].pop('min_iv')
     cfg['symbols'][0]['sell_call'] = {
@@ -59,18 +47,16 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
         'min_strike': 120,
         'max_delta': 0.35,
     }
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'AAPL.sell_call' in msg
-        assert 'max_delta' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'AAPL.sell_call' in msg
+    assert 'max_delta' in msg
 
 
 def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -101,19 +87,17 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'templates.put_base.sell_put' in msg
-        assert 'only min_open_interest, min_volume, max_spread_ratio are allowed' in msg
-        assert 'min_iv' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'templates.put_base.sell_put' in msg
+    assert 'only min_open_interest, min_volume, max_spread_ratio are allowed' in msg
+    assert 'min_iv' in msg
 
 
 def test_validate_config_rejects_candidate_score_weights() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -163,15 +147,13 @@ def test_validate_config_rejects_candidate_score_weights() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'score_weights has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'score_weights has been removed from opening config' in str(e)
 
 
 def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -205,7 +187,6 @@ def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config
     validate_config(cfg)
 
 def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -227,15 +208,13 @@ def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.put_base.sell_put.strategy=short_vol is no longer supported' in str(e)
+    e = _caught.value
+    assert 'templates.put_base.sell_put.strategy=short_vol is no longer supported' in str(e)
 
 
 def test_validate_config_rejects_underwriting_score_weights() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -262,15 +241,13 @@ def test_validate_config_rejects_underwriting_score_weights() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.put_base.sell_put.score_weights has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'templates.put_base.sell_put.score_weights has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_opening_concentration_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -297,15 +274,13 @@ def test_validate_config_rejects_opening_concentration_config() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.put_base.sell_put.concentration has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'templates.put_base.sell_put.concentration has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_sell_put_short_vol_opening_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -333,15 +308,13 @@ def test_validate_config_rejects_sell_put_short_vol_opening_config() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.put_base.sell_put.short_vol has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'templates.put_base.sell_put.short_vol has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_sell_call_short_vol_opening_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -369,15 +342,13 @@ def test_validate_config_rejects_sell_call_short_vol_opening_config() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_sell_call_short_vol_opening_config_even_when_legacy_budget_key() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -405,15 +376,13 @@ def test_validate_config_rejects_sell_call_short_vol_opening_config_even_when_le
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
+    e = _caught.value
+    assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_return_first_opening_strategy() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -443,16 +412,14 @@ def test_validate_config_rejects_return_first_opening_strategy() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert 'templates.put_base.sell_put.strategy=return_first is no longer supported' in msg
+    e = _caught.value
+    msg = str(e)
+    assert 'templates.put_base.sell_put.strategy=return_first is no longer supported' in msg
 
 
 def test_validate_config_rejects_removed_sell_put_min_otm_pct() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -479,25 +446,22 @@ def test_validate_config_rejects_removed_sell_put_min_otm_pct() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert 'templates.put_base.sell_put has removed OTM fields: min_otm_pct' in msg
+    e = _caught.value
+    msg = str(e)
+    assert 'templates.put_base.sell_put has removed OTM fields: min_otm_pct' in msg
 
     del cfg['templates']['put_base']['sell_put']['min_otm_pct']
     cfg['symbols'][0]['sell_put']['min_otm_pct'] = 0.05
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert 'AAPL.sell_put has removed OTM fields: min_otm_pct' in msg
+    e = _caught.value
+    msg = str(e)
+    assert 'AAPL.sell_put has removed OTM fields: min_otm_pct' in msg
 
 
 def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -521,17 +485,15 @@ def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templa
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert 'templates.call_base.sell_call' in msg
-        assert 'removed legacy fetch planning keys' in msg
+    e = _caught.value
+    msg = str(e)
+    assert 'templates.call_base.sell_call' in msg
+    assert 'removed legacy fetch planning keys' in msg
 
 
 def test_validate_config_rejects_fees_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -555,17 +517,15 @@ def test_validate_config_rejects_fees_config() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'fees is no longer supported' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'fees is no longer supported' in msg
 
 
 def test_validate_config_rejects_invalid_close_advice_config() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -593,17 +553,15 @@ def test_validate_config_rejects_invalid_close_advice_config() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'close_advice.quote_source' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'close_advice.quote_source' in msg
 
 
 def test_validate_config_rejects_close_advice_strategy_mode() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -611,19 +569,17 @@ def test_validate_config_rejects_close_advice_strategy_mode() -> None:
         'symbols': [{'symbol': 'AAPL', 'sell_put': {'enabled': False}, 'sell_call': {'enabled': False}}],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'close_advice.strategy is not supported' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'close_advice.strategy is not supported' in msg
 
 
 def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
     import pytest
 
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -660,7 +616,6 @@ def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
 
 
 def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -673,17 +628,15 @@ def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'combo_yield is isolated from sell_put.strategy' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'combo_yield is isolated from sell_put.strategy' in msg
 
 
 def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -700,17 +653,15 @@ def test_validate_config_rejects_decimal_close_advice_max_items_per_account() ->
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'close_advice.max_items_per_account must be an integer' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'close_advice.max_items_per_account must be an integer' in msg
 
 
 def test_validate_config_ignores_removed_close_advice_threshold_keys(capsys) -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -737,7 +688,6 @@ def test_validate_config_ignores_removed_close_advice_threshold_keys(capsys) -> 
 
 
 def test_validate_config_rejects_removed_position_advice_authority() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -751,15 +701,13 @@ def test_validate_config_rejects_removed_position_advice_authority() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as exc:
-        assert 'there is no Position Advice v2 authority' in str(exc)
+    exc = _caught.value
+    assert 'there is no Position Advice v2 authority' in str(exc)
 
 
 def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -777,20 +725,18 @@ def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        msg = str(e)
-        assert '[CONFIG_ERROR]' in msg
-        assert 'runtime.opend_rate_limits.market_snapshots is not supported' in msg
-        assert 'market_snapshot' in msg
-        assert 'option_chain' in msg
-        assert 'option_expiration' in msg
+    e = _caught.value
+    msg = str(e)
+    assert '[CONFIG_ERROR]' in msg
+    assert 'runtime.opend_rate_limits.market_snapshots is not supported' in msg
+    assert 'market_snapshot' in msg
+    assert 'option_chain' in msg
+    assert 'option_expiration' in msg
 
 
 def test_validate_config_accepts_supported_opend_rate_limit_endpoints() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -813,7 +759,6 @@ def test_validate_config_accepts_supported_opend_rate_limit_endpoints() -> None:
 
 
 def test_validate_config_accepts_external_holdings_account_settings() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -854,7 +799,6 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
 
 
 def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_call_fields() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -873,11 +817,10 @@ def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_c
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'min_strike must be > 0' in str(e)
+    e = _caught.value
+    assert 'min_strike must be > 0' in str(e)
 
     cfg['symbols'][0]['sell_put']['min_strike'] = 360
     cfg['symbols'][0]['sell_call'] = {
@@ -886,15 +829,13 @@ def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_c
         'max_dte': 45,
         'target_otm_pct_min': 0.05,
     }
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError('expected config validation failure')
-    except SystemExit as e:
-        assert 'removed legacy fetch planning keys' in str(e)
+    e = _caught.value
+    assert 'removed legacy fetch planning keys' in str(e)
 
 
 def test_validate_config_allows_single_near_bound_modes() -> None:
-    _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
     cfg = {

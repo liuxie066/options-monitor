@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import sys
+import pytest
+
 import importlib.util
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 from domain.domain.canonical_schema import (
     normalize_processor_row,
@@ -222,7 +221,7 @@ def test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code() -> None
 
 
 def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         adapt_opend_tool_payload(
             {
                 "schema_kind": "bad_kind",
@@ -234,22 +233,5 @@ def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
                 "source": "opend",
             }
         )
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "schema_kind must be tool_execution" in str(e)
-
-
-def main() -> None:
-    test_normalize_processor_row_requires_symbol_and_strategy()
-    test_normalize_processor_row_keeps_summary_fields_with_defaults()
-    test_normalize_processor_row_preserves_put_alert_fields()
-    test_source_snapshot_validates_and_normalizes()
-    test_normalize_processor_rows_requires_list_contract()
-    test_three_source_adapters_produce_unified_dto()
-    test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code()
-    test_opend_adapter_rejects_non_tool_execution_schema()
-    print("OK (canonical-schema-adapters)")
-
-
-if __name__ == "__main__":
-    main()
+    e = _caught.value
+    assert "schema_kind must be tool_execution" in str(e)

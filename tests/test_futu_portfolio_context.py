@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 FAKE_FUTU_ACC_ID_LX_PRIMARY = "123456789012345678"
 FAKE_FUTU_ACC_ID_LX_SECONDARY = "123456789012345679"

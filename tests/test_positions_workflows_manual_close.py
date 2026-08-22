@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_manual_open_record_id_prefers_explicit_record_id_before_event_id_guess() -> None:
