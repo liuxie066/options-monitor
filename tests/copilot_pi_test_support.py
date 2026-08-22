@@ -148,6 +148,26 @@ def fake_pi_agent(model_runner: ModelRunner):
             control_request: dict | None = None,
             termination_reason: str = "stop",
         ):
+            if (
+                status == "answered"
+                and start_payload.get("execution_environment") != "eval"
+                and any(tool.get("name") == "submit_answer" for tool in tools)
+            ):
+                admitted = on_tool_call(
+                    {
+                        "call_id": "fake_submit_answer",
+                        "tool_name": "submit_answer",
+                        "arguments": {
+                            "mode": "conceptual",
+                            "status": "complete",
+                            "answer_markdown": text,
+                            "claims": [],
+                        },
+                    }
+                )
+                approved = admitted.get("approved_answer") if isinstance(admitted, dict) else None
+                if isinstance(approved, dict) and isinstance(approved.get("text"), str):
+                    text = approved["text"]
             on_event({"event_type": "agent_end", "data": {}})
             proposal = {
                 "status": status,

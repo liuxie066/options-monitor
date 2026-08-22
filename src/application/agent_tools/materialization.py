@@ -156,6 +156,7 @@ def _get_close_advice_tool(
 
 _CASH_HEADROOM_OUTPUT_CONTRACT = {
     "schema_version": "query_cash_headroom.output.v1",
+    "evidence_type": "point", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM cash headroom query",
     "result_shape": "scalar",
     "fact_fields": [
@@ -165,8 +166,35 @@ _CASH_HEADROOM_OUTPUT_CONTRACT = {
         "cash_free_total_cny",
         "cash_secured_total_by_ccy",
         "cash_secured_usage_reliable",
+        "cash_available_by_currency",
+        "cash_balance_reliable",
+        "cash_balance_unavailable_by_row",
+        "cny_conversion_complete",
+        "cny_conversion_missing_rates",
     ],
-    "missing_data_fields": ["cash_secured_unavailable_by_symbol", "cash_secured_unavailable_reason"],
+    "model_value_fields": [
+        "account",
+        "cash_secured_used_cny",
+        "cash_available_total_cny",
+        "cash_free_total_cny",
+        "cash_secured_total_by_ccy",
+        "cash_secured_usage_reliable",
+        "cash_available_by_currency",
+        "cash_balance_reliable",
+        "cash_balance_unavailable_by_row",
+        "exchange_rates",
+        "cny_conversion_complete",
+        "cny_conversion_missing_rates",
+        "cash_secured_unavailable_by_symbol",
+        "cash_secured_unavailable_reason",
+    ],
+    "missing_data_fields": [
+        "cash_secured_unavailable_by_symbol",
+        "cash_secured_unavailable_reason",
+        "cash_balance_reliable",
+        "cash_balance_unavailable_by_row",
+        "cny_conversion_missing_rates",
+    ],
 }
 
 SCAN_OPPORTUNITIES_TOOL = build_agent_tool(
@@ -192,6 +220,7 @@ SCAN_OPPORTUNITIES_TOOL = build_agent_tool(
 
 QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
     name="query_cash_headroom",
+    catalog_summary="读取账户现金头寸与可用空间。",
     description="Return sell-put cash usage and available/free cash summary.",
     requires=("runtime_config", "sqlite_data_config", "opend"),
     capabilities=("cash_query", "read_only"),

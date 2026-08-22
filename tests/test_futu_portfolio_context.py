@@ -598,6 +598,26 @@ def test_build_futu_portfolio_context_ignores_legacy_balance_aliases_and_cash() 
     assert out["cash_by_currency"] == {}
     assert out["cash_components_by_currency"] == {}
     assert out["cash_source"] == "empty"
+    assert out["cash_balance_reliable"] is False
+    assert out["cash_balance_unavailable_by_row"] == {
+        "balance_snapshot": "supported_cash_field_missing"
+    }
+
+
+def test_build_futu_portfolio_context_rejects_empty_balance_snapshot() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[],
+        account="lx",
+    )
+
+    assert out["cash_by_currency"] == {}
+    assert out["cash_balance_reliable"] is False
+    assert out["cash_balance_unavailable_by_row"] == {
+        "balance_snapshot": "balance_rows_empty"
+    }
 
 
 def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_legacy_cash() -> None:
@@ -611,6 +631,12 @@ def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_leg
                 "fund_assets": 567440.6,
                 "hk_cash": 0,
                 "us_cash": -0.01,
+                "cn_cash": "N/A",
+                "jp_cash": "N/A",
+                "sg_cash": "N/A",
+                "au_cash": "N/A",
+                "ca_cash": "N/A",
+                "my_cash": "N/A",
                 "hkd_net_cash_power": 76587.61,
                 "usd_net_cash_power": 59021.91,
             },
@@ -626,6 +652,35 @@ def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_leg
     }
     assert out["cash_power_by_currency"] == {"HKD": 76587.61, "USD": 59021.91}
     assert out["cash_source"] == "futu_cash_like_assets"
+    assert out["cash_balance_reliable"] is True
+    assert out["cash_balance_unavailable_by_row"] == {}
+
+
+def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[{
+            "currency": "CNY",
+            "fund_assets": "N/A",
+            "hk_cash": "N/A",
+            "us_cash": "N/A",
+            "cn_cash": "N/A",
+            "jp_cash": "N/A",
+            "sg_cash": "N/A",
+            "au_cash": "N/A",
+            "ca_cash": "N/A",
+            "my_cash": "N/A",
+        }],
+        position_rows=[],
+        account="lx",
+    )
+
+    assert out["cash_by_currency"] == {}
+    assert out["cash_balance_reliable"] is False
+    assert out["cash_balance_unavailable_by_row"] == {
+        "balance_snapshot": "supported_cash_field_missing"
+    }
 
 
 def test_build_futu_portfolio_context_dedups_balance_rows_by_acc_env_currency() -> None:

@@ -365,11 +365,23 @@ def test_unknown_session_commit_is_private_safe_and_not_resumable(monkeypatch, t
     store = CopilotHostStore(tmp_path / "copilot.sqlite3")
     secret = "provider-secret-that-must-not-escape"
 
-    def exits_after_commit(_start, *, on_proposed, **_kwargs):
+    def exits_after_commit(_start, *, on_tool_call, on_proposed, **_kwargs):
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_unknown_commit",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "complete",
+                    "answer_markdown": "结论：运行正常。",
+                    "claims": [],
+                },
+            }
+        )
         decision = on_proposed(
             {
                 "status": "answered",
-                "text": "结论：运行正常。",
+                "text": admitted["approved_answer"]["text"],
                 "control_request": None,
                 "termination_reason": "stop",
                 "usage": {},
@@ -446,11 +458,23 @@ def test_cancel_winner_overrides_concurrent_process_failure(monkeypatch, tmp_pat
 def test_cancelled_final_cannot_overwrite_a_committed_admission(monkeypatch, tmp_path) -> None:
     store = CopilotHostStore(tmp_path / "copilot.sqlite3")
 
-    def contradictory_child(_start, *, on_proposed, **_kwargs):
+    def contradictory_child(_start, *, on_tool_call, on_proposed, **_kwargs):
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_cancel_conflict",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "complete",
+                    "answer_markdown": "结论：运行正常。",
+                    "claims": [],
+                },
+            }
+        )
         decision = on_proposed(
             {
                 "status": "answered",
-                "text": "结论：运行正常。",
+                "text": admitted["approved_answer"]["text"],
                 "control_request": None,
                 "termination_reason": "stop",
                 "usage": {},

@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from src.application.copilot.contracts import ExecutionContract, SceneManifest
+from src.application.agent_tool_registry import (
+    build_catalog_snapshot,
+    build_compact_catalog,
+    catalog_material_hash,
+)
 from src.application.copilot.tools import available_read_tools
+from src.application.copilot import tools as copilot_tools
 from src.application.payload_helpers import positive_int_or as _positive_int
 from src.application.payload_helpers import text_sha256 as _sha256
 
@@ -73,6 +79,7 @@ def build_scene_manifest(
     run_id: str,
     *,
     enabled_optional_toolsets: frozenset[str] = frozenset(),
+    tool_loading_mode: str = "eager",
 ) -> SceneManifest:
     if contract.scene_name != GENERAL_SCENE:
         raise ValueError(f"unsupported Copilot scene: {contract.scene_name}")
@@ -87,6 +94,15 @@ def build_scene_manifest(
         str(item)
         for item in selection["names"]
         if str(item) not in optional_toolsets or str(item) in enabled_optional_toolsets
+    )
+    if tool_loading_mode not in {"eager", "directory"}:
+        raise ValueError("tool_loading_mode must be eager or directory")
+    allowed_tools = list(available_read_tools(selected_toolsets))
+    descriptions = copilot_tools.tool_descriptions(allowed_tools)
+    catalog, snapshot = _catalog_material(
+        allowed_tools,
+        descriptions=descriptions,
+        tool_loading_mode=tool_loading_mode,
     )
     history = contract.input.get("messages")
     messages = [dict(item) for item in history if isinstance(item, dict)] if isinstance(history, list) else []
@@ -105,7 +121,7 @@ def build_scene_manifest(
             *([{"role": "system", "content": runtime_context}] if runtime_context else []),
             *messages,
         ],
-        allowed_tools=list(available_read_tools(selected_toolsets)),
+        allowed_tools=allowed_tools,
         limits={
             "max_model_turns": _positive_int(runtime.get("max_iterations"), 16),
             "max_tool_calls": _positive_int(runtime.get("max_tool_calls"), 12),
@@ -124,7 +140,34 @@ def build_scene_manifest(
         selected_toolsets=selected_toolsets,
         fixed_tool_input=fixed_tool_input,
         provenance=dict(definition["prompt_provenance"]),
+        tool_loading_mode=tool_loading_mode,
+        tool_catalog=catalog,
+        tool_descriptions=descriptions,
+        catalog_snapshot=snapshot,
+        catalog_hash=catalog_material_hash(catalog, snapshot),
     )
+
+
+def _catalog_material(
+    allowed_tools: list[str],
+    *,
+    descriptions: list[dict[str, Any]],
+    tool_loading_mode: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    try:
+        catalog = build_compact_catalog(allowed_tools)
+        snapshot = build_catalog_snapshot(
+            allowed_tools,
+            visible_descriptions=descriptions,
+        )
+        return catalog, snapshot
+    except ValueError:
+        if tool_loading_mode == "directory":
+            raise
+    # Eager mode does not use the directory to select or activate tools.  Keep
+    # its compatibility path free of a second metadata source; the full eager
+    # schemas in ``descriptions`` remain authoritative for model execution.
+    return [], []
 
 
 def scene_policy_rejection_reason(contract: ExecutionContract) -> str | None:

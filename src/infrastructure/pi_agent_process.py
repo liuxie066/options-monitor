@@ -52,12 +52,13 @@ _NODE_ERROR_CODES = frozenset(
         "SESSION_ERROR",
         "TOOL_BRIDGE_ERROR",
         "BUDGET_EXHAUSTED",
+        "ANSWER_ADMISSION_FAILED",
         "INTERNAL_ERROR",
     }
 )
 
 _NODE_ERROR_STAGES = frozenset(
-    {"protocol", "config", "model", "session", "tool", "budget", "runtime"}
+    {"protocol", "config", "model", "session", "tool", "budget", "runtime", "answer"}
 )
 
 _EVENT_TYPES = frozenset(
@@ -66,6 +67,9 @@ _EVENT_TYPES = frozenset(
         "turn_start",
         "model_turn_completed",
         "context_compaction_committed",
+        "context_budget_checked",
+        "catalog_loaded",
+        "answer_admission",
         "forced_final_activated",
         "turn_end",
         "agent_end",
@@ -238,12 +242,32 @@ def _tool_result_payload(
     tool_name: str,
     callback_result: dict[str, Any],
 ) -> dict[str, Any]:
+    observation = (
+        callback_result.get("observation")
+        if tool_name in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer"}
+        else callback_result
+    )
     payload = {
         "call_id": call_id,
         "tool_name": tool_name,
-        "observation": callback_result,
+        "observation": observation,
     }
-    if tool_name != _CONTROL_PREVIEW_TOOL:
+    if tool_name not in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer"}:
+        return payload
+    if tool_name == "tool_directory":
+        if set(callback_result) not in ({"observation"}, {"observation", "tool_activation"}):
+            raise ValueError("directory callback result is invalid")
+        if "tool_activation" in callback_result:
+            activation = callback_result["tool_activation"]
+            if not isinstance(activation, dict):
+                raise ValueError("tool activation must be an object")
+            payload["tool_activation"] = activation
+        return payload
+    if tool_name == "submit_answer":
+        if set(callback_result) not in ({"observation"}, {"observation", "approved_answer"}):
+            raise ValueError("answer callback result is invalid")
+        if "approved_answer" in callback_result:
+            payload["approved_answer"] = callback_result["approved_answer"]
         return payload
     if set(callback_result) != {"observation", "control_request"}:
         raise ValueError("control preview callback result is invalid")
@@ -299,6 +323,10 @@ def _validate_start_payload(payload: Any) -> None:
         "user_message",
         "model",
         "tools",
+        "tool_loading_mode",
+        "tool_catalog",
+        "catalog_hash",
+        "catalog_snapshot",
         "limits",
         "recovered_observations",
         "debug",
@@ -332,6 +360,93 @@ def _validate_start_payload(payload: Any) -> None:
             raise ValueError("runtime_context must hold closed system messages")
 
     _validate_tools(payload["tools"])
+    if payload["tool_loading_mode"] not in {"eager", "directory"}:
+        raise ValueError("tool_loading_mode is not allowed")
+    if not isinstance(payload["tool_catalog"], list):
+        raise ValueError("tool_catalog must be an array")
+    for item in payload["tool_catalog"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "toolset", "purpose", "access", "evidence_type"}
+            or not _is_nonempty_str(item.get("name"))
+            or not _is_nonempty_str(item.get("toolset"))
+            or not _is_nonempty_str(item.get("purpose"))
+            or item.get("access") != "read"
+            or item.get("evidence_type")
+            not in {"point", "collection", "aggregate", "diagnostic", "mixed"}
+        ):
+            raise ValueError("tool_catalog entry is not closed")
+    if not _is_nonempty_str(payload["catalog_hash"]):
+        raise ValueError("catalog_hash must be non-empty")
+    snapshot = payload["catalog_snapshot"]
+    if not isinstance(snapshot, list) or any(
+        not isinstance(item, dict)
+        or set(item) != {"name", "toolset", "description", "input_schema", "output_contract", "access", "purpose", "evidence_type"}
+        or not _is_nonempty_str(item.get("name"))
+        or not _is_nonempty_str(item.get("toolset"))
+        or not _is_nonempty_str(item.get("description"))
+        or not _is_nonempty_str(item.get("purpose"))
+        or not isinstance(item.get("input_schema"), dict)
+        or not isinstance(item.get("output_contract"), dict)
+        or item.get("access") != "read"
+        or item.get("evidence_type")
+        not in {"point", "collection", "aggregate", "diagnostic", "mixed"}
+        for item in snapshot
+    ):
+        raise ValueError("catalog_snapshot is not closed")
+    catalog_names = [str(item["name"]) for item in payload["tool_catalog"]]
+    snapshot_names = [str(item["name"]) for item in snapshot]
+    if (
+        len(set(catalog_names)) != len(catalog_names)
+        or catalog_names != sorted(catalog_names)
+        or snapshot_names != sorted(snapshot_names)
+        or snapshot_names != catalog_names
+    ):
+        raise ValueError("catalog and snapshot names are inconsistent")
+    compact_projection = {
+        str(item["name"]): (item["toolset"], item["purpose"], item["access"], item["evidence_type"])
+        for item in payload["tool_catalog"]
+    }
+    if any(
+        compact_projection.get(str(item["name"]))
+        != (item["toolset"], item["purpose"], item["access"], item["evidence_type"])
+        for item in snapshot
+    ):
+        raise ValueError("catalog is not the exact snapshot projection")
+    tools_by_name = {str(item["name"]): item for item in payload["tools"]}
+    tool_names = set(tools_by_name)
+    internal_names = {"tool_directory", "submit_answer", "request_control_preview"}
+    if set(catalog_names) & internal_names:
+        raise ValueError("catalog cannot contain internal tools")
+    if "submit_answer" not in tool_names:
+        raise ValueError("submit_answer must be resident")
+    if payload["tool_loading_mode"] == "directory":
+        if not catalog_names:
+            raise ValueError("directory catalog and snapshot must be non-empty")
+        if "tool_directory" not in tool_names or not tool_names.issubset(internal_names):
+            raise ValueError("directory initial tools must be resident")
+    elif "tool_directory" in tool_names:
+        raise ValueError("eager initial tools cannot include tool_directory")
+    elif catalog_names and tool_names - internal_names != set(catalog_names):
+        raise ValueError("eager initial tools must exactly match the catalog")
+    snapshot_by_name = {str(item["name"]): item for item in snapshot}
+    for name in set(catalog_names) & tool_names:
+        tool = tools_by_name[name]
+        frozen = snapshot_by_name[name]
+        if (
+            tool.get("description") != frozen.get("description")
+            or tool.get("input_schema") != frozen.get("input_schema")
+        ):
+            raise ValueError("initial tool schema differs from frozen catalog")
+    material = {
+        "authorized_names": sorted(str(item["name"]) for item in payload["tool_catalog"]),
+        "catalog": payload["tool_catalog"],
+        "snapshot": snapshot,
+    }
+    material_json = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    expected_catalog_hash = "sha256:" + hashlib.sha256(material_json.encode("utf-8")).hexdigest()
+    if payload["catalog_hash"] != expected_catalog_hash:
+        raise ValueError("catalog_hash does not match frozen catalog material")
     recovered = payload["recovered_observations"]
     if not isinstance(recovered, list) or any(
         not isinstance(observation, dict) for observation in recovered
@@ -382,7 +497,6 @@ def _validate_start_payload(payload: Any) -> None:
         "timeout_seconds",
         "max_iterations",
         "max_tool_calls",
-        "max_context_tokens",
         "max_consecutive_failed_tool_batches",
         "final_answer_reserve_seconds",
     }
@@ -391,8 +505,6 @@ def _validate_start_payload(payload: Any) -> None:
     for key in limits_allowed:
         if not _is_pos_int(limits[key]):
             raise ValueError(f"limits.{key} must be a positive integer")
-    if limits["max_context_tokens"] != model["context_window_tokens"]:
-        raise ValueError("limits.max_context_tokens must match model.context_window_tokens")
 
     debug = payload["debug"]
     if execution_environment != "eval":
@@ -642,6 +754,42 @@ def _validate_agent_event(payload: dict[str, Any]) -> None:
         if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
             raise ValueError("compaction_count must be a positive integer")
         _validate_usage(data["usage_total"])
+    elif event_type == "context_budget_checked":
+        if set(data) != {
+            "estimated_input_tokens",
+            "effective_capacity_tokens",
+            "decision",
+            "compaction_target",
+        }:
+            raise ValueError("context budget event data shape is invalid")
+        for key in ("estimated_input_tokens", "effective_capacity_tokens"):
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"context budget {key} must be a non-negative integer")
+        if data["decision"] not in {"admit", "warn_70", "blocked_75"}:
+            raise ValueError("context budget decision is not allowed")
+        if data["compaction_target"] != "50_percent":
+            raise ValueError("context budget compaction target is not allowed")
+    elif event_type == "catalog_loaded":
+        if set(data) != {"catalog_hash", "tool_count", "description_chars", "estimated_tokens"}:
+            raise ValueError("catalog event data shape is invalid")
+        if not _is_nonempty_str(data["catalog_hash"]):
+            raise ValueError("catalog hash must be non-empty")
+        for key in ("tool_count", "description_chars", "estimated_tokens"):
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"catalog {key} must be a non-negative integer")
+    elif event_type == "answer_admission":
+        if set(data) != {"status", "evidence_count", "repair_count", "banner_present"}:
+            raise ValueError("answer event data shape is invalid")
+        if data["status"] not in {"complete", "partial", "needs_narrowing", "insufficient_evidence"}:
+            raise ValueError("answer status is not allowed")
+        for key in ("evidence_count", "repair_count"):
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"answer {key} must be a non-negative integer")
+        if not isinstance(data["banner_present"], bool):
+            raise ValueError("answer banner_present must be a boolean")
     elif event_type == "turn_end":
         if set(data) != {"stop_reason", "usage"}:
             raise ValueError("turn event data shape is invalid")
@@ -753,7 +901,10 @@ def run_pi_agent(
     except ValueError as exc:
         return _safe_failure("CONFIG_ERROR", "config", str(exc), False)
 
-    allowed_tool_names = frozenset(tool["name"] for tool in start_payload["tools"])
+    allowed_tool_names = set(tool["name"] for tool in start_payload["tools"])
+    catalog_tool_names = frozenset(
+        str(item["name"]) for item in start_payload["tool_catalog"]
+    )
 
     if start_payload["limits"]["timeout_seconds"] != timeout_seconds:
         return _safe_failure(
@@ -1143,6 +1294,15 @@ def run_pi_agent(
                     py_seq += 1
                     process.stdin.write(line_out)
                     process.stdin.flush()
+                    if tool_name == "tool_directory" and isinstance(observation, dict):
+                        activation = observation.get("tool_activation")
+                        if isinstance(activation, dict) and isinstance(activation.get("tools"), list):
+                            active_names = {
+                                item.get("name") for item in activation["tools"]
+                                if isinstance(item, dict) and isinstance(item.get("name"), str)
+                            }
+                            allowed_tool_names.difference_update(catalog_tool_names)
+                            allowed_tool_names.update(active_names)
                 except ValueError:
                     _stop_child(process)
                     return _safe_failure(

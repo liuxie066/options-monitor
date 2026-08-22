@@ -15,6 +15,7 @@ from domain.domain.cash_secured_utils import (
     read_cash_secured_total_cny,
 )
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
+from src.application.config_defaults import DEFAULT_CONFIG
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
@@ -24,6 +25,11 @@ from src.application.positions.context_builder import build_context as build_opt
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.ledger.api import list_position_lot_snapshots, open_position_ledger
 from src.application.portfolio_context_service import load_account_portfolio_context
+
+
+_DEFAULT_PORTFOLIO_CONTEXT_TTL_SEC = int(
+    DEFAULT_CONFIG["defaults"]["runtime"]["portfolio_context_ttl_sec"]
+)
 
 
 def load_json(path: Path) -> dict:
@@ -100,6 +106,135 @@ def _cash_secured_unavailable_reason(option_ctx: dict | None) -> tuple[dict[str,
     return normalized, ";".join(f"{sym}:{reason}" for sym, reason in sorted(normalized.items()))
 
 
+def _parse_observed_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _cash_freshness(
+    portfolio: Mapping[str, Any],
+    exchange_rate_payload: Mapping[str, Any],
+    *,
+    cash_balance_reliable: bool,
+    cny_conversion_complete: bool,
+    exchange_rate_observation_required: bool,
+    portfolio_max_age_sec: int,
+) -> tuple[str, dict[str, Any]]:
+    observed_now = datetime.now(timezone.utc)
+    cash_observation_declared = any(
+        key in portfolio
+        for key in (
+            "cash_source_observed_at",
+            "cash_source_observation_status",
+        )
+    )
+    portfolio_as_of = _parse_observed_at(
+        portfolio.get("cash_source_observed_at")
+        if cash_observation_declared
+        else portfolio.get("source_observed_at")
+    )
+    exchange_rate_as_of = _parse_observed_at(exchange_rate_payload.get("timestamp"))
+    context_source = str(portfolio.get("context_source") or "").strip().lower()
+    source_status = str(
+        (
+            portfolio.get("cash_source_observation_status")
+            if cash_observation_declared
+            else portfolio.get("source_observation_status")
+        )
+        or ""
+    ).strip().lower()
+    reason_codes: list[str] = []
+    source_is_trusted = source_status == "trusted" or (
+        context_source == "futu_direct" and not source_status
+    )
+    if portfolio_as_of is None:
+        status = "unknown"
+        reason_codes.append("PORTFOLIO_OBSERVATION_MISSING")
+    elif portfolio_as_of > observed_now:
+        status = "unknown"
+        reason_codes.append("PORTFOLIO_OBSERVATION_IN_FUTURE")
+    elif context_source == "account_cache":
+        status = "stale"
+        reason_codes.append("PORTFOLIO_ACCOUNT_CACHE_FALLBACK")
+    elif source_status == "stale":
+        status = "stale"
+        reason_codes.append("PORTFOLIO_SOURCE_STALE")
+    elif not source_is_trusted:
+        status = "unknown"
+        reason_codes.append("PORTFOLIO_SOURCE_NOT_TRUSTED")
+    elif (
+        portfolio_max_age_sec <= 0
+        or (observed_now - portfolio_as_of).total_seconds() > portfolio_max_age_sec
+    ):
+        status = "stale"
+        reason_codes.append("PORTFOLIO_OBSERVATION_STALE")
+    else:
+        status = "fresh"
+    source_times = [portfolio_as_of] if portfolio_as_of is not None else []
+    if exchange_rate_observation_required:
+        if exchange_rate_as_of is None:
+            status = "unknown"
+            reason_codes.append("EXCHANGE_RATE_OBSERVATION_MISSING")
+        else:
+            source_times.append(exchange_rate_as_of)
+    if not cny_conversion_complete:
+        status = "unknown"
+        reason_codes.append("CNY_CONVERSION_INCOMPLETE")
+    if not cash_balance_reliable:
+        status = "unknown"
+        reason_codes.append("CASH_BALANCE_UNRELIABLE")
+    as_of = min(source_times) if source_times else None
+    observed_at = observed_now.isoformat()
+    return observed_at, {
+        "status": status,
+        **({"as_of": as_of.isoformat()} if as_of is not None else {}),
+        "kind": "source_snapshot" if as_of is not None else "source_unknown",
+        **({"reason_codes": reason_codes} if reason_codes else {}),
+    }
+
+
+def _required_cny_rates(*balances: Mapping[str, Any]) -> set[str]:
+    required: set[str] = set()
+    for balance in balances:
+        for raw_currency, raw_amount in balance.items():
+            try:
+                amount = float(raw_amount)
+            except (TypeError, ValueError):
+                continue
+            if not amount:
+                continue
+            currency = str(raw_currency or "").strip().upper()
+            if currency in {"CNY", "RMB"}:
+                continue
+            if currency == "USD":
+                required.add("USDCNY")
+            elif currency == "HKD":
+                required.add("HKDCNY")
+            else:
+                required.add(f"UNSUPPORTED:{currency or 'UNKNOWN'}")
+    return required
+
+
+def _portfolio_context_ttl_sec(runtime_cfg: Mapping[str, Any]) -> int:
+    runtime = runtime_cfg.get("runtime")
+    configured = (
+        runtime.get("portfolio_context_ttl_sec", _DEFAULT_PORTFOLIO_CONTEXT_TTL_SEC)
+        if isinstance(runtime, Mapping)
+        else _DEFAULT_PORTFOLIO_CONTEXT_TTL_SEC
+    )
+    try:
+        return max(0, int(configured))
+    except (TypeError, ValueError):
+        return _DEFAULT_PORTFOLIO_CONTEXT_TTL_SEC
+
+
 def query_sell_put_cash(
     *,
     config: str | Path | None = None,
@@ -167,6 +302,17 @@ def query_sell_put_cash(
     )
 
     cash_by_ccy = portfolio.get('cash_by_currency') or {}
+    cash_balance_unavailable_by_row = (
+        portfolio.get("cash_balance_unavailable_by_row")
+        if isinstance(portfolio.get("cash_balance_unavailable_by_row"), dict)
+        else {}
+    )
+    declared_cash_balance_reliable = portfolio.get("cash_balance_reliable")
+    cash_balance_reliable = (
+        declared_cash_balance_reliable
+        if isinstance(declared_cash_balance_reliable, bool)
+        else not cash_balance_unavailable_by_row
+    )
     cash_components_by_ccy = portfolio.get('cash_components_by_currency') or {}
     cash_power_by_ccy = portfolio.get('cash_power_by_currency') or {}
     cash_source = str(portfolio.get('cash_source') or '').strip() or None
@@ -232,11 +378,38 @@ def query_sell_put_cash(
     if cash_avail_total_cny is not None and cash_secured_total_cny is not None:
         cash_free_total_cny = cash_avail_total_cny - cash_secured_total_cny
 
+    required_cny_rates = _required_cny_rates(cash_by_ccy, total_by_ccy_norm)
+    available_cny_rates = {
+        name
+        for name, value in {
+            "USDCNY": usdcny_exchange_rate,
+            "HKDCNY": cny_per_hkd_exchange_rate,
+        }.items()
+        if value is not None
+    }
+    missing_cny_rates = sorted(required_cny_rates - available_cny_rates)
+    if not cash_balance_reliable:
+        cash_avail_total_cny = None
+        cash_free_total_cny = None
+    observed_at, freshness = _cash_freshness(
+        portfolio,
+        exchange_rate_payload,
+        cash_balance_reliable=cash_balance_reliable,
+        cny_conversion_complete=not missing_cny_rates,
+        exchange_rate_observation_required=bool(
+            required_cny_rates & {"USDCNY", "HKDCNY"}
+        ),
+        portfolio_max_age_sec=_portfolio_context_ttl_sec(runtime_cfg),
+    )
     payload = {
-        'as_of_utc': datetime.now(timezone.utc).isoformat(),
+        'as_of_utc': observed_at,
+        'freshness': freshness,
         'market': market,
         'account': account,
         'portfolio_source_name': portfolio_source_name,
+        'cash_available_by_currency': cash_by_ccy,
+        'cash_balance_reliable': cash_balance_reliable,
+        'cash_balance_unavailable_by_row': cash_balance_unavailable_by_row,
         'cash_available_usd': cash_avail_usd,
         'cash_secured_used_usd': cash_secured_total_usd,
         'cash_free_usd': cash_free_usd,
@@ -251,6 +424,8 @@ def query_sell_put_cash(
         'cash_power_total_cny': cash_power_total_cny,
         'cash_power_source': cash_power_source,
         'exchange_rates': {'USDCNY': usdcny_exchange_rate, 'HKDCNY': cny_per_hkd_exchange_rate},
+        'cny_conversion_complete': not missing_cny_rates,
+        'cny_conversion_missing_rates': missing_cny_rates,
         'cash_secured_total_by_ccy': (total_by_ccy_norm if cash_secured_reliable else {}),
         'cash_secured_known_total_by_ccy': total_by_ccy_norm,
         'cash_secured_by_symbol_by_ccy': norm_by_ccy,

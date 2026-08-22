@@ -34,6 +34,9 @@ class AgentTool:
     input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
     output_contract: dict[str, Any] = field(default_factory=dict)
     output_contract_resolver: OutputContractResolver | None = field(default=None, repr=False, compare=False)
+    # One-line, model-facing purpose used by the canonical Copilot catalog.
+    # This is metadata on the existing definition, not a second registry.
+    catalog_summary: str = ""
     copilot_input_fields: tuple[str, ...] = ()
     copilot_input_schema: dict[str, Any] = field(default_factory=dict)
     copilot_input_normalizer: CopilotInputNormalizer | None = field(default=None, repr=False, compare=False)
@@ -98,6 +101,12 @@ class AgentTool:
                 return deepcopy(resolved)
         return deepcopy(self.output_contract)
 
+    def copilot_evidence_type(self) -> str:
+        value = self.output_contract.get("evidence_type")
+        if value not in {"point", "collection", "aggregate", "diagnostic", "mixed"}:
+            raise ValueError(f"invalid or missing evidence_type: {self.name}")
+        return str(value)
+
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
         output_contract = deepcopy(self.output_contract)
@@ -119,6 +128,8 @@ class AgentTool:
             "safe_default_input": dict(self.safe_default_input),
             "examples": deepcopy(list(self.examples)),
             "output_contract": output_contract,
+            "catalog_summary": self.catalog_summary,
+            "evidence_type": self.copilot_evidence_type() if self.is_pure_read() else "mixed",
         }
 
 
@@ -153,6 +164,7 @@ def build_agent_tool(
     input_validator: InputValidator | None = None,
     output_contract: dict[str, Any] | None = None,
     output_contract_resolver: OutputContractResolver | None = None,
+    catalog_summary: str = "",
     copilot_input_fields: tuple[str, ...] = (),
     copilot_input_schema: dict[str, Any] | None = None,
     copilot_input_normalizer: CopilotInputNormalizer | None = None,
@@ -163,6 +175,7 @@ def build_agent_tool(
         side_effects = ()
         risk_level = "read_only"
         requires_confirm = False
+    normalized_output_contract = deepcopy(output_contract or {})
     return AgentTool(
         name=name,
         read_only=bool(read_only),
@@ -180,8 +193,9 @@ def build_agent_tool(
         examples=examples,
         write_request_predicate=write_request_predicate,
         input_validator=input_validator,
-        output_contract=deepcopy(output_contract or {}),
+        output_contract=normalized_output_contract,
         output_contract_resolver=output_contract_resolver,
+        catalog_summary=str(catalog_summary or "").strip(),
         copilot_input_fields=tuple(copilot_input_fields),
         copilot_input_schema=deepcopy(copilot_input_schema or {}),
         copilot_input_normalizer=copilot_input_normalizer,

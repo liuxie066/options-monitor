@@ -258,10 +258,12 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     spec = build_spec()
     tools = {str(item.get("name")): item for item in spec.get("tools", [])}
 
-    assert tools["option_positions_read"]["output_contract"] == {
-        "schema_version": "option_positions_read.output",
-        "payload_dependent": True,
-    }
+    output_contract = tools["option_positions_read"]["output_contract"]
+    assert output_contract["schema_version"] == "option_positions_read.output"
+    assert output_contract["payload_dependent"] is True
+    assert output_contract["evidence_type"] == "collection"
+    assert output_contract["bounded_projection"] == "contract_fields"
+    assert output_contract["pagination"] == {"mode": "none"}
     assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"
     assert "canonical_symbol" in tools["symbol_resolve"]["output_contract"]["fact_fields"]
     assert "strategies" in tools["symbol_config_read"]["output_contract"]["model_preview_fields"]

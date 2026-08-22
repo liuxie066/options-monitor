@@ -19,6 +19,11 @@ from src.application.runtime_paths import resolve_runtime_root
 _MARKETS = ("US", "HK")
 _MARKET_LABELS = {"US": "美股", "HK": "港股"}
 _OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "daily_decision_brief_read.output.v1",
     "source_label": "OM local daily_decision_brief.v1 successful current state",
     "result_shape": "single_brief_or_aggregate_sections",
@@ -351,6 +356,7 @@ def _daily_brief_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
 
 DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
     name="daily_decision_brief_read",
+    catalog_summary="读取指定账户的每日决策简报。",
     description=(
         "Read the latest successful option-monitor snapshot, a trading day, or an exact revision. "
         "Use for queries such as 期权监控, 最新期权报告, 港股期权, 美股期权, or lx/sy 期权. "

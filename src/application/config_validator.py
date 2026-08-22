@@ -165,6 +165,7 @@ ASSISTANT_CONFIG_KEYS = {
     'models',
 }
 COPILOT_TOOLSET_KEYS = {'portfolio'}
+COPILOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -456,11 +457,15 @@ def _validate_assistant_config(cfg: dict) -> None:
         copilot = {}
     if not isinstance(copilot, dict):
         die('assistant.copilot must be an object')
-    unsupported_copilot = sorted(str(key) for key in copilot if key not in {'enabled', 'toolsets'})
+    unsupported_copilot = sorted(str(key) for key in copilot if key not in COPILOT_CONFIG_KEYS)
     if unsupported_copilot:
         die(f'assistant.copilot contains unsupported keys: {", ".join(unsupported_copilot)}')
     if 'enabled' in copilot and copilot.get('enabled') is not None and not isinstance(copilot.get('enabled'), bool):
         die('assistant.copilot.enabled must be a boolean')
+    if 'tool_loading_mode' in copilot:
+        mode = str(copilot.get('tool_loading_mode') or '').strip().lower()
+        if mode not in {'eager', 'directory'}:
+            die('assistant.copilot.tool_loading_mode must be one of: eager, directory')
     toolsets = copilot.get('toolsets')
     if toolsets is None:
         toolsets = {}

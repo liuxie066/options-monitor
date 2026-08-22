@@ -9,6 +9,7 @@
 
 import process from "node:process";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   Agent,
   SessionError,
@@ -18,9 +19,7 @@ import {
   createCompactionSummaryMessage,
   estimateContextTokens,
   estimateTokens,
-  getLastAssistantUsage,
   prepareCompaction,
-  shouldCompact,
   uuidv7,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -72,6 +71,8 @@ const OLLAMA_LOCAL_API_KEY = "ollama-local";
 const CONTROL_PREVIEW_TOOL = "request_control_preview";
 const CONTINUATION_PROMPT =
   "Continue exactly where the previous answer stopped. Do not repeat earlier text. Return only the continuation.";
+const ANSWER_REPAIR_PROMPT =
+  "Your previous final answer did not pass the evidence admission protocol. This is the one permitted repair turn. Call submit_answer as the sole tool call with the exact closed schema; do not return plain prose.";
 const PROVIDER_API_KINDS: Record<string, Api> = {
   openai: "openai-responses",
   deepseek: "openai-completions",
@@ -93,6 +94,7 @@ const ALLOWED_ERROR_CODES = new Set([
   "SESSION_ERROR",
   "TOOL_BRIDGE_ERROR",
   "BUDGET_EXHAUSTED",
+  "ANSWER_ADMISSION_FAILED",
   "INTERNAL_ERROR",
 ]);
 const ALLOWED_ERROR_STAGES = new Set([
@@ -103,6 +105,7 @@ const ALLOWED_ERROR_STAGES = new Set([
   "tool",
   "budget",
   "runtime",
+  "answer",
 ]);
 
 type JsonObject = Record<string, unknown>;
@@ -132,11 +135,14 @@ interface PendingTool {
   reject: (error: Error) => void;
   signal?: AbortSignal;
   abortListener?: () => void;
+  arguments: JsonObject;
 }
 
 interface ToolBridgeResult {
   observation: JsonObject;
   controlRequest: JsonObject | null;
+  toolActivation?: JsonObject;
+  approvedAnswer?: JsonObject;
 }
 
 interface SessionState {
@@ -282,6 +288,10 @@ function validateStart(payload: JsonObject): void {
     "user_message",
     "model",
     "tools",
+    "tool_loading_mode",
+    "tool_catalog",
+    "catalog_hash",
+    "catalog_snapshot",
     "limits",
     "recovered_observations",
     "debug",
@@ -328,6 +338,73 @@ function validateStart(payload: JsonObject): void {
       throw new Error("tool definition is invalid");
     }
     toolNames.add(tool.name);
+  }
+  if (payload.tool_loading_mode !== "eager" && payload.tool_loading_mode !== "directory") {
+    throw new Error("tool_loading_mode is not allowed");
+  }
+  if (!Array.isArray(payload.tool_catalog) || !isNonEmptyString(payload.catalog_hash)) {
+    throw new Error("tool catalog is invalid");
+  }
+  for (const entry of payload.tool_catalog) {
+    if (!isRecord(entry) || !exactKeys(entry, ["name", "toolset", "purpose", "access", "evidence_type"]) ||
+      !isNonEmptyString(entry.name) || !isNonEmptyString(entry.toolset) ||
+      !isNonEmptyString(entry.purpose) || entry.access !== "read" ||
+      !["point", "collection", "aggregate", "diagnostic", "mixed"].includes(entry.evidence_type as string)) {
+      throw new Error("tool catalog entry is invalid");
+    }
+  }
+  // Host performs the authoritative deterministic hash check; Runtime still
+  // rejects an obviously malformed hash without retaining any catalog state.
+  if (!/^sha256:[0-9a-f]{64}$/.test(payload.catalog_hash as string)) {
+    throw new Error("catalog_hash is invalid");
+  }
+  if (!Array.isArray(payload.catalog_snapshot) || payload.catalog_snapshot.some((item) =>
+    !isRecord(item) || !exactKeys(item, ["name", "toolset", "description", "input_schema", "output_contract", "access", "purpose", "evidence_type"]) || item.access !== "read"
+  )) throw new Error("catalog snapshot is invalid");
+  const catalogMaterial = {
+    authorized_names: (payload.tool_catalog as JsonObject[]).map((item) => item.name as string).sort(),
+    catalog: payload.tool_catalog,
+    snapshot: payload.catalog_snapshot,
+  };
+  const catalogHash = `sha256:${createHash("sha256").update(stableJson(catalogMaterial)).digest("hex")}`;
+  if (payload.catalog_hash !== catalogHash) throw new Error("catalog hash does not match frozen material");
+  const catalogNames = (payload.tool_catalog as JsonObject[]).map((item) => String(item.name));
+  const snapshotNames = (payload.catalog_snapshot as JsonObject[]).map((item) => String(item.name));
+  if (new Set(catalogNames).size !== catalogNames.length ||
+    new Set(snapshotNames).size !== snapshotNames.length ||
+    snapshotNames.join("\u0000") !== [...snapshotNames].sort().join("\u0000") ||
+    stableJson([...catalogNames].sort()) !== stableJson([...snapshotNames].sort())) {
+    throw new Error("catalog and snapshot names are inconsistent");
+  }
+  const compactByName = new Map((payload.tool_catalog as JsonObject[]).map((item) => [String(item.name), item]));
+  for (const row of payload.catalog_snapshot as JsonObject[]) {
+    const compact = compactByName.get(String(row.name));
+    if (!compact || stableJson({
+      name: compact.name,
+      toolset: compact.toolset,
+      purpose: compact.purpose,
+      access: compact.access,
+      evidence_type: compact.evidence_type,
+    }) !== stableJson({
+      name: row.name,
+      toolset: row.toolset,
+      purpose: row.purpose,
+      access: row.access,
+      evidence_type: row.evidence_type,
+    })) throw new Error("catalog is not the exact snapshot projection");
+  }
+  const initialNames = new Set((payload.tools as JsonObject[]).map((item) => String(item.name)));
+  const residentNames = new Set(["tool_directory", "submit_answer", CONTROL_PREVIEW_TOOL]);
+  if (payload.tool_loading_mode === "directory" &&
+    (catalogNames.length === 0 ||
+      [...initialNames].some((name) => !residentNames.has(name)) ||
+      !initialNames.has("tool_directory") || !initialNames.has("submit_answer"))) {
+    throw new Error("directory initial tools must be resident");
+  }
+  if (payload.tool_loading_mode === "eager" &&
+    (catalogNames.some((name) => !initialNames.has(name)) ||
+      !initialNames.has("submit_answer") || initialNames.has("tool_directory"))) {
+    throw new Error("eager initial tools are invalid");
   }
   if (!Array.isArray(payload.recovered_observations)) {
     throw new Error("recovered_observations must be an array");
@@ -392,16 +469,12 @@ function validateStart(payload: JsonObject): void {
     "timeout_seconds",
     "max_iterations",
     "max_tool_calls",
-    "max_context_tokens",
     "max_consecutive_failed_tool_batches",
     "final_answer_reserve_seconds",
   ];
   if (!exactKeys(limits, limitKeys)) throw new Error("limits fields are not closed");
   for (const key of limitKeys) {
     if (!isPositiveInteger(limits[key])) throw new Error(`limits.${key} must be a positive integer`);
-  }
-  if (limits.max_context_tokens !== model.context_window_tokens) {
-    throw new Error("limits.max_context_tokens must match model.context_window_tokens");
   }
 
   if (payload.execution_environment !== "eval") {
@@ -621,7 +694,8 @@ function withOmRequestPolicy(
   start: JsonObject,
   model: Model<Api>,
   metrics: RunMetrics,
-  remainingSceneMs: () => number
+  remainingSceneMs: () => number,
+  emitRun?: (type: string, payload: JsonObject) => void,
 ): ProviderStreams {
   const raw = start.model as JsonObject;
   const modelTimeoutMs = (raw.timeout_seconds as number) * 1_000;
@@ -656,15 +730,33 @@ function withOmRequestPolicy(
     return fixed as T;
   };
 
+  const enforceInputGate = (context: Context): void => {
+    const estimated = estimateProviderInputTokens(context.systemPrompt, "", context.messages, context.tools);
+    const capacity = model.contextWindow - model.maxTokens;
+    const ratio = capacity > 0 ? estimated / capacity : 1;
+    const decision = ratio > 0.75 ? "blocked_75" : ratio >= 0.70 ? "warn_70" : "admit";
+    emitRun?.("agent.event", {
+      event_type: "context_budget_checked",
+      data: {
+        estimated_input_tokens: estimated,
+        effective_capacity_tokens: Math.max(0, capacity),
+        decision,
+        compaction_target: "50_percent",
+      },
+    });
+    if (estimated > capacity * 0.75) {
+      throw new SafeRunFailure(safeError("BUDGET_EXHAUSTED", "budget", "provider input exceeds 75% gate", false));
+    }
+  };
   return {
-    stream: (selected, context, options) =>
-      api.stream(selected, context, requestOptions(options)),
-    streamSimple: (selected, context, options) =>
-      api.streamSimple(
-        selected,
-        context,
-        requestOptions(options as SimpleStreamOptions) as SimpleStreamOptions
-      ),
+    stream: (selected, context, options) => {
+      enforceInputGate(context);
+      return api.stream(selected, context, requestOptions(options));
+    },
+    streamSimple: (selected, context, options) => {
+      enforceInputGate(context);
+      return api.streamSimple(selected, context, requestOptions(options as SimpleStreamOptions) as SimpleStreamOptions);
+    },
   };
 }
 
@@ -672,12 +764,13 @@ function createProviderModels(
   start: JsonObject,
   model: Model<Api>,
   metrics: RunMetrics,
-  remainingSceneMs: () => number
+  remainingSceneMs: () => number,
+  emitRun?: (type: string, payload: JsonObject) => void,
 ): Models {
   const baseApi = model.api === "openai-responses"
     ? openAIResponsesApi()
     : openAICompletionsApi();
-  const api = withOmRequestPolicy(baseApi, start, model, metrics, remainingSceneMs);
+  const api = withOmRequestPolicy(baseApi, start, model, metrics, remainingSceneMs, emitRun);
   const apiKey = model.provider === "ollama"
     ? {
         name: "Ollama local",
@@ -765,7 +858,8 @@ function fixtureContextHasResults(context: Context, calls: FixtureToolCall[]): b
     const details = message.details;
     if (!isRecord(details) || !isRecord(details.observation)) return true;
     return (
-      exactKeys(details, ["observation"]) &&
+      (exactKeys(details, ["observation"]) ||
+        (exactKeys(details, ["observation", "toolActivation"]) && isRecord(details.toolActivation))) &&
       message.content.length === 1 &&
       message.content[0].type === "text" &&
       message.content[0].text === stableJson(details.observation) &&
@@ -880,14 +974,44 @@ function createToolBridge(
   onFailure: (message: string) => void
 ): {
   tools: AgentTool[];
+  residentTools: AgentTool[];
+  activateTools: (activation: JsonObject) => AgentTool[];
   acceptResult: (payload: JsonObject) => void;
   cancelPending: () => void;
   rejectPending: () => void;
   hasPending: () => boolean;
   controlRequest: () => JsonObject | null;
+  approvedAnswer: () => JsonObject | null;
+  requiresAdmission: () => boolean;
+  approvedEvidenceCount: () => number;
+  approvedBannerPresent: () => boolean;
+  answerRepairCount: () => number;
+  protocolRepairCount: () => number;
+  protocolRepairTool: () => string | null;
+  beginProtocolRepair: (toolName: string) => boolean;
+  beginAnswerRepair: () => boolean;
 } {
   let pending: PendingTool | null = null;
   let controlRequest: JsonObject | null = null;
+  let approvedAnswer: JsonObject | null = null;
+  let approvedEvidenceIds = new Set<string>();
+  let approvedBannerPresent = false;
+  let answerRepairCount = 0;
+  let protocolRepairCount = 0;
+  let protocolRepairTool: string | null = null;
+  let activationChanges = 0;
+  let activeBusinessNames = new Set<string>();
+
+  const beginProtocolRepair = (toolName: string): boolean => {
+    protocolRepairTool = toolName;
+    protocolRepairCount += 1;
+    return protocolRepairCount <= 1;
+  };
+  const beginAnswerRepair = (): boolean => {
+    if (answerRepairCount >= 1) return false;
+    answerRepairCount += 1;
+    return true;
+  };
 
   const settlePending = (error?: Error): void => {
     const current = pending;
@@ -899,7 +1023,7 @@ function createToolBridge(
     if (error) current.reject(error);
   };
 
-  const tools = (start.tools as JsonObject[]).map((spec): AgentTool => ({
+  const makeTool = (spec: JsonObject): AgentTool => ({
     name: spec.name as string,
     label: spec.name as string,
     description: spec.description as string,
@@ -924,6 +1048,7 @@ function createToolBridge(
           reject,
           signal,
           abortListener,
+          arguments: params as JsonObject,
         };
         signal?.addEventListener("abort", abortListener, { once: true });
         try {
@@ -941,23 +1066,69 @@ function createToolBridge(
       });
       return {
         content: [{ type: "text", text: stableJson(result.observation) }],
-        details: { observation: result.observation },
-        terminate: result.controlRequest !== null,
+        details: {
+          observation: result.observation,
+          ...(result.toolActivation ? { toolActivation: result.toolActivation } : {}),
+          ...(result.approvedAnswer ? { approvedAnswer: result.approvedAnswer } : {}),
+        },
+        terminate: result.controlRequest !== null || result.approvedAnswer !== undefined,
       };
     },
-  }));
+  });
+  const tools = (start.tools as JsonObject[]).map(makeTool);
 
   return {
     tools,
+    residentTools: tools.filter((tool) =>
+      tool.name === "tool_directory" ||
+      tool.name === "submit_answer" ||
+      tool.name === CONTROL_PREVIEW_TOOL
+    ),
+    activateTools(activation) {
+      if (!Array.isArray(activation.tools)) throw new Error("tool activation tools are invalid");
+      if (activation.catalog_hash !== start.catalog_hash) throw new Error("tool activation catalog hash mismatch");
+      const schemas = activation.tools as JsonObject[];
+      const names = schemas.map((item) => String(item.name || ""));
+      if (names.length > 6 || new Set(names).size !== names.length) throw new Error("tool activation set is invalid");
+      const authorized = new Set((start.tool_catalog as JsonObject[]).map((item) => String(item.name)));
+      if (names.some((name) => !authorized.has(name))) throw new Error("tool activation name is not authorized");
+      const toolsets = new Set(names.map((name) => String((start.tool_catalog as JsonObject[]).find((item) => item.name === name)?.toolset || "")));
+      if (toolsets.size > 2) throw new Error("tool activation toolset budget exhausted");
+      const frozen = new Map((start.catalog_snapshot as JsonObject[]).map((item) => [String(item.name), item]));
+      for (const schema of schemas) {
+        const expected = frozen.get(String(schema.name));
+        if (!expected || schema.description !== expected.description || stableJson(schema.input_schema) !== stableJson(expected.input_schema)) {
+          throw new Error("tool activation schema differs from frozen catalog");
+        }
+      }
+      const schemaJson = stableJson(schemas);
+      const expectedSchemaHash = `sha256:${createHash("sha256").update(schemaJson).digest("hex")}`;
+      if (activation.schema_hash !== expectedSchemaHash) throw new Error("tool activation schema hash mismatch");
+      const next = new Set(names);
+      const activatedTools = activation.tools.map((item) => {
+        if (!isRecord(item)) throw new Error("tool activation schema is invalid");
+        return makeTool(item);
+      });
+      if (stableJson([...next].sort()) !== stableJson([...activeBusinessNames].sort())) {
+        if (activationChanges >= 2) throw new Error("tool activation change budget exhausted");
+        activationChanges += 1;
+        activeBusinessNames = next;
+      }
+      return activatedTools;
+    },
     acceptResult(result) {
       const hasControlRequest = Object.hasOwn(result, "control_request");
+      const hasActivation = Object.hasOwn(result, "tool_activation");
+      const hasApproved = Object.hasOwn(result, "approved_answer");
+      if ((hasControlRequest ? 1 : 0) + (hasActivation ? 1 : 0) + (hasApproved ? 1 : 0) > 1) {
+        throw new Error("private tool result fields are mutually exclusive");
+      }
+      const expectedKeys = ["call_id", "tool_name", "observation"];
+      if (hasControlRequest) expectedKeys.push("control_request");
+      if (hasActivation) expectedKeys.push("tool_activation");
+      if (hasApproved) expectedKeys.push("approved_answer");
       if (
-        !exactKeys(
-          result,
-          hasControlRequest
-            ? ["call_id", "tool_name", "observation", "control_request"]
-            : ["call_id", "tool_name", "observation"]
-        ) ||
+        !exactKeys(result, expectedKeys) ||
         !isNonEmptyString(result.call_id) ||
         !isNonEmptyString(result.tool_name) ||
         !isRecord(result.observation) ||
@@ -966,6 +1137,57 @@ function createToolBridge(
         result.tool_name !== pending.toolName
       ) {
         throw new Error("tool result mismatch");
+      }
+      if (hasActivation && pending?.toolName !== "tool_directory") throw new Error("unexpected tool activation");
+      if (hasApproved && pending?.toolName !== "submit_answer") throw new Error("unexpected approved answer");
+      if (hasActivation && (result.observation.ok !== true || result.observation.status !== "activated")) {
+        throw new Error("tool activation result is not accepted");
+      }
+      if (hasActivation) {
+        const requestedNames = pending?.arguments.tool_names;
+        const activationPayload = result.tool_activation as JsonObject;
+        const selectedNames = activationPayload.tools;
+        if (activationPayload.catalog_hash !== pending?.arguments.catalog_hash ||
+          !Array.isArray(requestedNames) || !Array.isArray(selectedNames) ||
+          stableJson([...requestedNames].map(String).sort()) !==
+            stableJson(selectedNames.map((item) => String((item as JsonObject).name)).sort())) {
+          throw new Error("tool activation does not match directory selection");
+        }
+      }
+      if (hasApproved && (result.observation.ok !== true || result.observation.status !== "answer_accepted")) {
+        throw new Error("approved answer result is not accepted");
+      }
+      if (pending?.toolName === "submit_answer" && result.observation.ok === false) {
+        answerRepairCount += 1;
+        if (answerRepairCount > 1) throw new Error("ANSWER_ADMISSION_FAILED");
+      }
+      if (pending?.toolName === "tool_directory" && result.observation.ok === false) {
+        if (!beginProtocolRepair(pending.toolName)) throw new Error("PROTOCOL_ERROR");
+      }
+      if (hasActivation && (!isRecord(result.tool_activation) ||
+        !exactKeys(result.tool_activation, ["catalog_hash", "schema_hash", "tools"]))) {
+        throw new Error("tool activation payload is invalid");
+      }
+      if (hasApproved && (!isRecord(result.approved_answer) ||
+        !exactKeys(result.approved_answer, ["status", "text", "text_sha256"]) ||
+        !isNonEmptyString(result.approved_answer.text) ||
+        !isNonEmptyString(result.approved_answer.text_sha256))) {
+        throw new Error("approved answer payload is invalid");
+      }
+      if (hasApproved) {
+        approvedEvidenceIds = new Set<string>();
+        const claims = pending.arguments.claims;
+        if (Array.isArray(claims)) {
+          for (const claim of claims) {
+            if (!isRecord(claim) || !Array.isArray(claim.observation_ids)) continue;
+            for (const observationId of claim.observation_ids) {
+              if (isNonEmptyString(observationId)) approvedEvidenceIds.add(observationId);
+            }
+          }
+        }
+        const proposedText = pending.arguments.answer_markdown;
+        approvedBannerPresent = isNonEmptyString(proposedText) &&
+          result.approved_answer.text !== proposedText;
       }
       if (
         hasControlRequest &&
@@ -990,9 +1212,12 @@ function createToolBridge(
         current.signal.removeEventListener("abort", current.abortListener);
       }
       if (hasControlRequest) controlRequest = result.control_request as JsonObject;
+      if (hasApproved) approvedAnswer = result.approved_answer as JsonObject;
       current.resolve({
         observation: result.observation,
         controlRequest: hasControlRequest ? controlRequest : null,
+        ...(hasActivation ? { toolActivation: result.tool_activation as JsonObject } : {}),
+        ...(hasApproved ? { approvedAnswer: result.approved_answer as JsonObject } : {}),
       });
     },
     cancelPending() {
@@ -1003,15 +1228,30 @@ function createToolBridge(
     },
     hasPending: () => pending !== null,
     controlRequest: () => controlRequest,
+    approvedAnswer: () => approvedAnswer,
+    requiresAdmission: () => tools.some((tool) => tool.name === "submit_answer"),
+    approvedEvidenceCount: () => approvedEvidenceIds.size,
+    approvedBannerPresent: () => approvedBannerPresent,
+    answerRepairCount: () => answerRepairCount,
+    protocolRepairCount: () => protocolRepairCount,
+    protocolRepairTool: () => protocolRepairTool,
+    beginProtocolRepair,
+    beginAnswerRepair,
   };
 }
 
 function effectiveSystemPrompt(
   systemPrompt: string,
   runtimeContext: JsonObject[],
-  recoveredObservations: JsonObject[]
+  recoveredObservations: JsonObject[],
+  toolLoadingMode: string,
+  toolCatalog: JsonObject[],
+  catalogHash: string,
 ): string {
   const parts = [systemPrompt];
+  if (toolLoadingMode === "directory") {
+    parts.push(`<om-tool-catalog catalog_hash="${catalogHash}">\n${stableJson(toolCatalog)}\n</om-tool-catalog>`);
+  }
   if (runtimeContext.length > 0) {
     parts.push(
       `<om-runtime-context>\n${runtimeContext.map((item) => item.content as string).join("\n\n")}\n</om-runtime-context>`
@@ -1112,27 +1352,67 @@ function mapSessionFailure(error: unknown): JsonObject {
   );
 }
 
-function textTokenEstimate(text: string): number {
-  return estimateTokens({
-    role: "user",
-    content: [{ type: "text", text }],
-    timestamp: 0,
-  });
-}
-
-function estimateStructuralContextTokens(messages: AgentMessage[]): number {
-  return messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
-}
-
-function estimateSessionContextTokens(state: SessionState): number {
-  const compactionIndex = state.entries.findLastIndex((entry) => entry.type === "compaction");
-  if (
-    compactionIndex < 0 ||
-    getLastAssistantUsage(state.entries.slice(compactionIndex + 1)) !== undefined
-  ) {
-    return estimateContextTokens(state.messages).tokens;
+function estimateProviderInputTokens(
+  systemPrompt: string,
+  userMessage: string,
+  messages: AgentMessage[] = [],
+  tools: unknown[] = [],
+): number {
+  // Provider usage embedded in Pi's retainedTail described the pre-compaction
+  // context, so it is no longer valid after a compaction summary is inserted.
+  // Keep the messages themselves, but make Pi structurally estimate those old
+  // assistant messages until a genuinely post-compaction provider response is
+  // present.
+  let latestCompactionTimestamp: number | null = null;
+  for (const message of messages) {
+    if (message.role === "compactionSummary") {
+      latestCompactionTimestamp = message.timestamp;
+    }
   }
-  return estimateStructuralContextTokens(state.messages);
+  const estimatedMessages = latestCompactionTimestamp === null
+    ? messages
+    : messages.map((message) =>
+        message.role === "assistant" && message.timestamp <= latestCompactionTimestamp
+          ? { ...message, usage: emptyUsage() }
+          : message
+      );
+  const fixed = [systemPrompt, userMessage].join("\n");
+  const fixedEstimate = estimateTokens({ role: "user", content: [{ type: "text", text: fixed }], timestamp: 0 });
+  const contextEstimate = estimatedMessages.length
+    ? estimateContextTokens(estimatedMessages)
+    : { usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
+  const unreportedMessages = contextEstimate.lastUsageIndex === null
+    ? estimatedMessages
+    : estimatedMessages.slice(contextEstimate.lastUsageIndex + 1);
+  // Provider usage is authoritative for the reported prefix. Apply the
+  // Chinese/serialization safety margin only to input the provider has not
+  // reported yet: current fixed input, active schemas, and trailing messages.
+  const serialized = `${fixed}\n${stableJson(unreportedMessages)}\n${stableJson(tools)}`;
+  const nonAscii = [...serialized].filter((char) => char.charCodeAt(0) > 0x7f).length;
+  const ascii = serialized.length - nonAscii;
+  const conservativeUnreported = Math.ceil(
+    Math.max(fixedEstimate + contextEstimate.trailingTokens, ascii / 4 + nonAscii) * 1.10
+  );
+  return contextEstimate.usageTokens + conservativeUnreported;
+}
+
+function rejectEmptyCompactionCompletions(models: Models): Models {
+  return new Proxy(models, {
+    get(target, property) {
+      if (property !== "completeSimple") return Reflect.get(target, property, target);
+      return async (...args: Parameters<Models["completeSimple"]>) => {
+        const response = await target.completeSimple(...args);
+        if (
+          response.stopReason !== "error" &&
+          response.stopReason !== "aborted" &&
+          extractText(response).trim().length === 0
+        ) {
+          return { ...response, stopReason: "error", errorMessage: "empty compaction summary" };
+        }
+        return response;
+      };
+    },
+  });
 }
 
 async function prepareSessionState(
@@ -1144,41 +1424,68 @@ async function prepareSessionState(
   metrics: RunMetrics,
   systemPrompt: string,
   signal: AbortSignal,
-  runId: string
+  runId: string,
+  tools: AgentTool[],
 ): Promise<SessionState> {
-  const limits = start.limits as JsonObject;
-  const contextWindow = Math.min(
-    model.contextWindow,
-    limits.max_context_tokens as number
-  );
+  const contextWindow = model.contextWindow;
+  // S8 policy is expressed against effective input capacity, after reserving
+  // the provider's declared output budget. The 50% value is a target only;
+  // 75% is the admission gate, never a post-compaction failure threshold.
   const reserveTokens = model.maxTokens;
-  const fixedInputTokens = textTokenEstimate(systemPrompt) +
-    textTokenEstimate(start.user_message as string);
-  const usableHistoryTokens = contextWindow - reserveTokens - fixedInputTokens;
-  if (usableHistoryTokens <= 2_000) {
-    throw new SafeRunFailure(
-      safeError("CONFIG_ERROR", "config", "configured context budget is too small", false)
-    );
-  }
+  const effectiveCapacity = contextWindow - reserveTokens;
+  const fixedInputTokens = estimateProviderInputTokens(systemPrompt, start.user_message as string, [], tools);
+  // Pi may use up to 80% of reserveTokens for the history summary. Reserve
+  // that space before asking Pi which recent suffix to retain; otherwise a
+  // valid summary plus the requested suffix can immediately exceed the 50%
+  // post-compaction target.
+  const summaryReserveTokens = Math.min(
+    Math.floor(0.8 * reserveTokens),
+    model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+  );
 
   const settings = {
     enabled: true,
     reserveTokens,
-    keepRecentTokens: Math.max(2_000, Math.floor(usableHistoryTokens / 2)),
+    // The retained suffix and fixed prompt share the 50% post-compaction
+    // budget.  Passing the fixed prompt to Pi's compaction primitive avoids
+    // producing a summary that immediately violates the S8 boundary.
+    keepRecentTokens: Math.max(
+      256,
+      Math.floor(
+        (Math.floor(effectiveCapacity * 0.50) - fixedInputTokens - summaryReserveTokens) /
+          1.10,
+      ),
+    ),
   };
-  const historyTokens = estimateSessionContextTokens(state);
-  const contextTokens = fixedInputTokens + historyTokens;
-  if (!shouldCompact(contextTokens, contextWindow, settings)) return state;
+  const contextTokens = estimateProviderInputTokens(
+    systemPrompt,
+    start.user_message as string,
+    state.messages,
+    tools,
+  );
+  if (effectiveCapacity <= 0) {
+    throw new SafeRunFailure(safeError("CONFIG_ERROR", "config", "configured context budget is too small", false));
+  }
+  const trigger = effectiveCapacity * 0.70;
+  if (contextTokens < trigger) return state;
   if (!session) {
+    if (contextTokens > effectiveCapacity * 0.75) {
+      throw new SafeRunFailure(safeError("BUDGET_EXHAUSTED", "budget", "provider input exceeds 75% gate", false));
+    }
     throw new SafeRunFailure(
-      safeError("CONFIG_ERROR", "config", "input exceeds configured context budget", false)
+      safeError("BUDGET_EXHAUSTED", "budget", "provider input has no safe compactable prefix", false)
     );
   }
 
   const preparation = prepareCompaction(state.entries, settings);
-  if (!preparation.ok || preparation.value === undefined) {
+  if (!preparation.ok) {
     throw new SafeRunFailure(
       safeError("SESSION_ERROR", "session", "session context compaction failed", false)
+    );
+  }
+  if (preparation.value === undefined) {
+    throw new SafeRunFailure(
+      safeError("BUDGET_EXHAUSTED", "budget", "provider input has no safe compactable prefix", false)
     );
   }
   const metricsStart = metrics.beginCompaction();
@@ -1186,7 +1493,7 @@ async function prepareSessionState(
   try {
     result = await compact(
       preparation.value,
-      models,
+      rejectEmptyCompactionCompletions(models),
       model,
       COMPACTION_INSTRUCTIONS,
       signal,
@@ -1201,7 +1508,7 @@ async function prepareSessionState(
     metricsStart,
     result.ok && result.value ? result.value.usage : {}
   );
-  if (!result.ok || signal.aborted) {
+  if (!result.ok || signal.aborted || result.value.summary.trim().length === 0) {
     throw new SafeRunFailure(
       safeError("SESSION_ERROR", "session", "session context compaction failed", false)
     );
@@ -1215,10 +1522,15 @@ async function prepareSessionState(
     ),
     ...result.value.retainedTail,
   ];
-  const compactedTokens = fixedInputTokens + estimateStructuralContextTokens(compactedMessages);
-  if (compactedTokens > contextWindow - reserveTokens) {
+  const compactedTokens = estimateProviderInputTokens(
+    systemPrompt,
+    start.user_message as string,
+    compactedMessages,
+    tools,
+  );
+  if (compactedTokens > effectiveCapacity * 0.50) {
     throw new SafeRunFailure(
-      safeError("SESSION_ERROR", "session", "compacted context exceeds configured budget", false)
+      safeError("BUDGET_EXHAUSTED", "budget", "compacted context exceeds input budget", false)
     );
   }
 
@@ -1264,6 +1576,84 @@ function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): Agen
     throw new Error("turn suffix has no final answer");
   }
   return suffix;
+}
+
+function normalizeAcceptedAnswerSuffix(
+  messages: AgentMessage[], startIndex: number, acceptedAssistant: AssistantMessage,
+): AgentMessage[] {
+  const rawSuffix = messages.slice(startIndex);
+  const suffix: AgentMessage[] = [];
+  for (let index = 0; index < rawSuffix.length;) {
+    const first = rawSuffix[index];
+    const synthetic = rawSuffix[index + 1];
+    const continuation = rawSuffix[index + 2];
+    if (
+      first?.role === "assistant" &&
+      first.stopReason === "length" &&
+      first.content.every((item) => item.type !== "toolCall") &&
+      synthetic?.role === "user" &&
+      synthetic.content.length === 1 &&
+      synthetic.content[0].type === "text" &&
+      synthetic.content[0].text === CONTINUATION_PROMPT &&
+      continuation?.role === "assistant"
+    ) {
+      // The Host-approved answer is the only durable answer. Collapse a plain
+      // continuation so later repair detection sees one assistant message; if
+      // the continuation directly calls submit_answer, omit the partial prose
+      // and let the approved candidate replace the complete sequence below.
+      if (continuation.content.every((item) => item.type !== "toolCall")) {
+        suffix.push({
+          ...continuation,
+          content: [{ type: "text", text: extractText(first) + extractText(continuation) }],
+          usage: addAssistantUsage(first.usage, continuation.usage),
+        });
+      } else {
+        suffix.push(continuation);
+      }
+      index += 3;
+      continue;
+    }
+    suffix.push(first);
+    index += 1;
+  }
+  if (!suffix.length || suffix[0].role !== "user") throw new Error("accepted turn has no user message");
+  const normalized: AgentMessage[] = [suffix[0]];
+  let index = 1;
+  while (index < suffix.length) {
+    const assistant = suffix[index];
+    if (assistant.role === "user" && assistant.content?.[0]?.type === "text" &&
+      assistant.content[0].text === ANSWER_REPAIR_PROMPT) {
+      index += 1;
+      continue;
+    }
+    if (assistant.role !== "assistant") throw new Error("accepted turn group is incomplete");
+    index += 1;
+    const calls = assistant.content.filter((item) => item.type === "toolCall");
+    const nextMessage = suffix[index];
+    if (calls.length === 0 && nextMessage?.role === "user" &&
+      nextMessage.content?.[0]?.type === "text" &&
+      nextMessage.content[0].text === ANSWER_REPAIR_PROMPT) {
+      continue;
+    }
+    // Protocol tools are required to be sole-call. If a model mixes one into
+    // a business batch, the whole assistant/result group is protocol noise:
+    // the bridge blocks every call in that batch, so there is no successful
+    // business evidence to preserve.
+    const protocolGroup = calls.some((call) =>
+      call.name === "tool_directory" || call.name === "submit_answer" || call.name === CONTROL_PREVIEW_TOOL
+    );
+    const group: AgentMessage[] = [assistant];
+    for (const call of calls) {
+      const result = suffix[index];
+      if (!result || result.role !== "toolResult" || result.toolCallId !== call.id || result.toolName !== call.name) {
+        throw new Error("accepted turn tool group is incomplete");
+      }
+      group.push(result); index += 1;
+    }
+    if (!protocolGroup) normalized.push(...group);
+  }
+  normalized.push(acceptedAssistant);
+  return validatedTurnSuffix(normalized, 0);
 }
 
 function validatedControlTurnSuffix(
@@ -1515,12 +1905,25 @@ async function run(): Promise<void> {
       runtime_version: "0.84.2",
       session_id: sessionId,
     });
+    const catalogEntries = payload.tool_catalog as JsonObject[];
+    emitRun("agent.event", {
+      event_type: "catalog_loaded",
+      data: {
+        catalog_hash: payload.catalog_hash as string,
+        tool_count: catalogEntries.length,
+        description_chars: catalogEntries.reduce((n, item) => n + String(item.purpose || "").length, 0),
+        estimated_tokens: estimateProviderInputTokens("", "", [], catalogEntries),
+      },
+    });
 
     const model = modelFromStart(payload);
     const systemPrompt = effectiveSystemPrompt(
       payload.system_prompt as string,
       payload.runtime_context as JsonObject[],
-      payload.recovered_observations as JsonObject[]
+      payload.recovered_observations as JsonObject[],
+      payload.tool_loading_mode as string,
+      payload.tool_catalog as JsonObject[],
+      payload.catalog_hash as string,
     );
     const limits = payload.limits as JsonObject;
     const startedAt = performance.now();
@@ -1530,7 +1933,7 @@ async function run(): Promise<void> {
     const metrics = new RunMetrics();
     const providerModels = payload.execution_environment === "eval"
       ? createFixtureModels(payload)
-      : createProviderModels(payload, model, metrics, remainingSceneMs);
+      : createProviderModels(payload, model, metrics, remainingSceneMs, emitRun);
     const streamFn = payload.execution_environment === "eval"
       ? createFixtureStream(payload)
       : providerModels.streamSimple.bind(providerModels);
@@ -1540,6 +1943,7 @@ async function run(): Promise<void> {
     let forcedFinalAtTurn: number | null = null;
     let continuationUsed = false;
     let bridgeFailure: JsonObject | null = null;
+    let runtimeFailure: JsonObject | null = null;
     let agent: Agent | undefined;
 
     const inbound = {
@@ -1639,8 +2043,30 @@ async function run(): Promise<void> {
           resolveAction(envelope.type);
         }
         if (!inbound.terminal) throw new Error("stdin closed before terminal");
-      } catch {
-        failInbound();
+      } catch (error) {
+        if (error instanceof Error && error.message === "ANSWER_ADMISSION_FAILED") {
+          inbound.error = safeError("ANSWER_ADMISSION_FAILED", "answer", "answer admission failed", false);
+          bridge.rejectPending();
+          resolveAction(null);
+          runAbort.abort();
+          agent?.abort();
+        } else if (error instanceof Error && error.message === "PROTOCOL_ERROR") {
+          inbound.error = safeError("PROTOCOL_ERROR", "protocol", "protocol repair failed", false);
+          bridge.rejectPending();
+          resolveAction(null);
+          runAbort.abort();
+          agent?.abort();
+        } else {
+          if (error instanceof Error && error.message.startsWith("tool activation")) {
+            inbound.error = safeError("PROTOCOL_ERROR", "protocol", error.message, false);
+            bridge.rejectPending();
+            resolveAction(null);
+            runAbort.abort();
+            agent?.abort();
+          } else {
+            failInbound();
+          }
+        }
       }
     };
     void pumpInbound();
@@ -1658,7 +2084,8 @@ async function run(): Promise<void> {
         metrics,
         systemPrompt,
         runAbort.signal,
-        identity.runId
+        identity.runId,
+        bridge.tools,
       );
     } catch (error) {
       if (inbound.error) finishError(inbound.error);
@@ -1701,6 +2128,13 @@ async function run(): Promise<void> {
       beforeToolCall: async ({ assistantMessage, toolCall }) => {
         const calls = assistantMessage.content.filter((item) => item.type === "toolCall");
         const controlCalls = calls.filter((item) => item.name === CONTROL_PREVIEW_TOOL);
+        const protocolCalls = calls.filter((item) => item.name === "tool_directory" || item.name === "submit_answer");
+        if (protocolCalls.length > 0 && (calls.length !== 1 || protocolCalls.length !== 1)) {
+          return { block: true, reason: stableJson({
+            tool_name: toolCall.name, ok: false, status: "failed", error: "INVALID_ACTION",
+            code: "INVALID_ACTION", message: "protocol tool must be the only call in its batch", retryable: false,
+          }) };
+        }
         if (controlCalls.length > 0 && (calls.length !== 1 || controlCalls.length !== 1)) {
           return {
             block: true,
@@ -1726,6 +2160,33 @@ async function run(): Promise<void> {
           : undefined;
       },
       prepareNextTurnWithContext: ({ context, message, newMessages, toolResults }) => {
+        const activationResult = toolResults.find((result) => {
+          const details = result.details;
+          return isRecord(details) && isRecord(details.toolActivation);
+        });
+        if (activationResult) {
+          const details = activationResult.details as JsonObject;
+          const activation = details.toolActivation as JsonObject;
+          try {
+            const activeTools = [
+              ...bridge.residentTools,
+              ...bridge.activateTools(activation),
+            ];
+            return { context: { ...context, tools: activeTools } };
+          } catch {
+            // The Host already accepted this private activation. A frozen
+            // schema/hash mismatch or Pi apply failure is therefore terminal,
+            // not another model-repair opportunity.
+            runtimeFailure = safeError(
+              "PROTOCOL_ERROR",
+              "protocol",
+              "private tool activation failed",
+              false,
+            );
+            runAbort.abort();
+            throw new Error("PROTOCOL_ERROR");
+          }
+        }
         const remainingMs = remainingSceneMs();
         const eligibleContinuation =
           !continuationUsed &&
@@ -1745,7 +2206,7 @@ async function run(): Promise<void> {
             content: [{ type: "text", text: CONTINUATION_PROMPT }],
             timestamp: Date.now(),
           });
-          return { context: { ...context, tools: [] } };
+          return { context: { ...context, tools: bridge.residentTools } };
         }
         if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
         const exhausted =
@@ -1769,7 +2230,7 @@ async function run(): Promise<void> {
                   : "time_reserve",
           },
         });
-        return { context: { ...context, tools: [] } };
+        return { context: { ...context, tools: bridge.residentTools } };
       },
       shouldStopAfterTurn: () =>
         forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
@@ -1784,6 +2245,30 @@ async function run(): Promise<void> {
         consecutiveFailedToolBatches = event.toolResults.every((result) => result.isError)
           ? consecutiveFailedToolBatches + 1
           : 0;
+        const calls = event.message.role === "assistant"
+          ? event.message.content.filter((item) => item.type === "toolCall")
+          : [];
+        const immediateProtocolCalls = calls.filter((call) => {
+          const result = event.toolResults.find((item) => item.toolCallId === call.id);
+          return result?.isError === true &&
+            (!isRecord(result.details) || !isRecord(result.details.observation)) &&
+            (call.name === "tool_directory" || call.name === "submit_answer" || call.name === CONTROL_PREVIEW_TOOL);
+        });
+        if (immediateProtocolCalls.length > 0 && runtimeFailure === null) {
+          const directoryOrControl = immediateProtocolCalls.find((call) =>
+            call.name === "tool_directory" || call.name === CONTROL_PREVIEW_TOOL
+          );
+          const repairAllowed = directoryOrControl
+            ? bridge.beginProtocolRepair(directoryOrControl.name)
+            : bridge.beginAnswerRepair();
+          if (!repairAllowed) {
+            runtimeFailure = directoryOrControl
+              ? safeError("PROTOCOL_ERROR", "protocol", "protocol repair failed", false)
+              : safeError("ANSWER_ADMISSION_FAILED", "answer", "answer admission failed", false);
+            runAbort.abort();
+            agent?.abort();
+          }
+        }
       }
       const normalized = normalizeAgentEvent(event, metrics);
       if (normalized) emitRun("agent.event", normalized);
@@ -1791,14 +2276,20 @@ async function run(): Promise<void> {
 
     const suffixStart = agent.state.messages.length;
     let promptFailed = false;
+    let promptFailure: unknown = null;
     try {
       await agent.prompt(payload.user_message as string);
-    } catch {
+    } catch (error) {
       promptFailed = true;
+      promptFailure = error;
     }
 
     if (inbound.error) {
       finishError(inbound.error);
+      return;
+    }
+    if (runtimeFailure) {
+      finishError(runtimeFailure);
       return;
     }
     if (bridgeFailure) {
@@ -1810,11 +2301,21 @@ async function run(): Promise<void> {
       return;
     }
     if (promptFailed) {
-      finishError(safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
+      if (promptFailure instanceof Error && promptFailure.message === "PROTOCOL_ERROR") {
+        finishError(safeError("PROTOCOL_ERROR", "protocol", "protocol repair failed", false));
+        return;
+      }
+      if (promptFailure instanceof Error && promptFailure.message === "ANSWER_ADMISSION_FAILED") {
+        finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "answer admission failed", false));
+        return;
+      }
+      finishError(forcedFinalAtTurn !== null
+        ? safeError("BUDGET_EXHAUSTED", "budget", "agent budget exhausted without a final answer", false)
+        : safeError("INTERNAL_ERROR", "runtime", "agent prompt failed", false));
       return;
     }
 
-    const finalMessage = lastAssistant(agent);
+    let finalMessage = lastAssistant(agent);
     if (!finalMessage) {
       finishError(safeError("INTERNAL_ERROR", "runtime", "no assistant message", false));
       return;
@@ -1826,7 +2327,62 @@ async function run(): Promise<void> {
     let terminationReason: string;
     let turnSuffix: AgentMessage[];
     controlRequest = bridge.controlRequest();
-    if (controlRequest !== null) {
+    let approvedAnswer = bridge.approvedAnswer();
+    const evalOnlyPlainFinal = payload.execution_environment === "eval" &&
+      isRecord(payload.debug) &&
+      (typeof payload.debug.fixture_response === "string" ||
+        (Array.isArray(payload.debug.forbidden_history) &&
+          payload.debug.forbidden_history.includes("__eval_only_plain_final__")));
+    if (approvedAnswer === null && bridge.requiresAdmission() && !evalOnlyPlainFinal && finalMessage &&
+      finalMessage.stopReason === "stop" && bridge.answerRepairCount() === 0) {
+      if (!bridge.beginAnswerRepair()) {
+        finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "answer repair budget exhausted", false));
+        return;
+      }
+      try {
+        await agent.prompt(ANSWER_REPAIR_PROMPT);
+        finalMessage = lastAssistant(agent);
+        approvedAnswer = bridge.approvedAnswer();
+      } catch {
+        finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "answer repair failed", false));
+        return;
+      }
+    }
+    if (approvedAnswer !== null) {
+      if (!isNonEmptyString(approvedAnswer.text) || !isNonEmptyString(approvedAnswer.text_sha256)) {
+        finishError(safeError("PROTOCOL_ERROR", "protocol", "approved answer is invalid", false));
+        return;
+      }
+      const approvedHash = `sha256:${createHash("sha256").update(approvedAnswer.text as string).digest("hex")}`;
+      if (approvedAnswer.text_sha256 !== approvedHash) {
+        finishError(safeError("PROTOCOL_ERROR", "protocol", "approved answer hash mismatch", false));
+        return;
+      }
+      emitRun("agent.event", {
+        event_type: "answer_admission",
+        data: {
+          status: String(approvedAnswer.status || "complete"),
+          evidence_count: bridge.approvedEvidenceCount(),
+          repair_count: bridge.answerRepairCount(),
+          banner_present: bridge.approvedBannerPresent(),
+        },
+      });
+      status = "answered";
+      text = approvedAnswer.text as string;
+      terminationReason = "stop";
+      const acceptedAssistant: AssistantMessage = {
+        ...finalMessage,
+        content: [{ type: "text", text }],
+        stopReason: "stop",
+      };
+      try {
+        turnSuffix = normalizeAcceptedAnswerSuffix(agent.state.messages, suffixStart, acceptedAssistant);
+      } catch {
+        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid accepted answer turn", false));
+        return;
+      }
+    }
+    else if (approvedAnswer === null && controlRequest !== null) {
       status = "control_requested";
       text = "";
       terminationReason = "control_preview_requested";
@@ -1836,48 +2392,34 @@ async function run(): Promise<void> {
         finishError(safeError("INTERNAL_ERROR", "runtime", "invalid control turn", false));
         return;
       }
-    } else {
+    } else if (approvedAnswer === null && bridge.requiresAdmission() && finalMessage.stopReason === "stop" &&
+      !((payload.execution_environment === "eval") && isRecord(payload.debug) &&
+        (typeof payload.debug.fixture_response === "string" ||
+          (Array.isArray(payload.debug.forbidden_history) &&
+            payload.debug.forbidden_history.includes("__eval_only_plain_final__"))))) {
+      // S8 does not admit an ordinary final text. Answers must pass the Host
+      // evidence admission path via submit_answer; this also prevents a
+      // model from bypassing coverage banners with prose.
+      finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "final answer must be submitted through submit_answer", false));
+      return;
+    } else if (approvedAnswer === null) {
       const stopReason = finalMessage.stopReason;
-      const forcedFinalCompleted =
-        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn;
-      if (forcedFinalCompleted && extractText(finalMessage).trim() === "") {
-        finishError(
-          safeError(
-            "BUDGET_EXHAUSTED",
-            "budget",
-            "agent budget exhausted without a final answer",
-            false
-          )
-        );
-        return;
-      }
-      if (stopReason === "length") {
-        finishError(
-          safeError(
-            "BUDGET_EXHAUSTED",
-            "budget",
-            "agent budget exhausted without a final answer",
-            false
-          )
-        );
-        return;
-      }
       if (stopReason !== "stop") {
-        finishError(safeModelFailure(finalMessage, metrics.lastCompleted));
+        finishError(
+          assistantTurns >= (limits.max_iterations as number) ||
+            (stopReason === "length" && continuationUsed)
+            ? safeError("BUDGET_EXHAUSTED", "budget", "agent budget exhausted without a final answer", false)
+            : safeModelFailure(finalMessage, metrics.lastCompleted)
+        );
         return;
       }
       status = "answered";
-      try {
-        turnSuffix = normalizeContinuationSuffix(agent.state.messages, suffixStart);
-        turnSuffix = validatedTurnSuffix(turnSuffix, 0);
-      } catch {
-        finishError(safeError("INTERNAL_ERROR", "runtime", "invalid completed turn", false));
-        return;
-      }
+      turnSuffix = normalizeContinuationSuffix(agent.state.messages, suffixStart);
+      turnSuffix = validatedTurnSuffix(turnSuffix, 0);
       const canonicalFinal = turnSuffix[turnSuffix.length - 1] as AssistantMessage;
       text = extractText(canonicalFinal);
       terminationReason = canonicalFinal.stopReason;
-      if (text === "") {
+      if (!text.trim()) {
         finishError(safeError("MODEL_ERROR", "model", "model response was invalid", false));
         return;
       }

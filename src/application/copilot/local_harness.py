@@ -12,7 +12,7 @@ from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_config import (
     PiModelSettings,
     _resolve_model_api_key,
-    load_assistant_copilot_toolsets,
+    load_assistant_copilot_settings,
     load_assistant_llm_config,
 )
 from src.application.llm_provider_registry import provider_requires_api_key
@@ -95,9 +95,9 @@ def run_prepared_contract(
 ) -> AppResult:
     implicit_model_turn = model_turn_json is not None and not str(assistant_config_path or "").strip()
     if implicit_model_turn:
-        enabled_optional_toolsets, settings_error = frozenset(), None
+        enabled_optional_toolsets, tool_loading_mode, settings_error = frozenset(), "eager", None
     else:
-        enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
+        enabled_optional_toolsets, tool_loading_mode, settings_error = load_assistant_copilot_settings(
             config_path=assistant_config_path,
             require_config=bool(str(assistant_config_path or "").strip()),
         )
@@ -161,6 +161,7 @@ def run_prepared_contract(
         resumed_from=resumed_from,
         recovered_observations=recovered_observations,
         enabled_optional_toolsets=enabled_optional_toolsets,
+        tool_loading_mode=tool_loading_mode,
     )
 
 

@@ -10,6 +10,8 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition, pure_read_toolsets
 from src.application.agent_tools import portfolio
+from src.application.copilot import tools as copilot_tools
+from src.application.copilot.result_admission import admit_submit_answer
 
 
 class _Response:
@@ -139,6 +141,138 @@ def test_portfolio_query_marks_business_data_unavailable_without_pm_freshness(mo
     assert data["freshness"]["trust_status"] == "unavailable"
     assert data["freshness"]["reason_codes"] == ["PM_FRESHNESS_EVIDENCE_MISSING"]
     assert warnings == ["PM freshness evidence is missing; data is unavailable"]
+
+
+def test_portfolio_query_collection_contract_projects_real_rows(monkeypatch) -> None:
+    data, warnings, _, _ = _call(
+        {"view": "accounts", "include_default": False},
+        monkeypatch,
+        {
+            "success": True,
+            "accounts": ["lx", "sy"],
+            "count": 2,
+            "freshness": {
+                "status": "fresh",
+                "trust_status": "trusted",
+                "observed_at_utc": "2026-08-22T09:30:00Z",
+                "dataset_ids": ["pm.account_mapping"],
+                "reason_codes": [],
+            },
+            "retrieved_at_utc": "2026-08-22T09:30:00Z",
+        },
+    )
+
+    observation = copilot_tools.compact_observation(
+        "portfolio_query",
+        {"ok": True, "data": data, "warnings": warnings},
+        {"view": "accounts", "include_default": False},
+    )
+
+    assert observation["value"]["accounts"] == ["lx", "sy"]
+    assert observation["coverage"]["status"] == "complete"
+    assert observation["coverage"]["complete_for"] == "requested_page"
+    assert observation["coverage"]["included_count"] == 2
+    assert observation["freshness"] == {
+        "status": "fresh",
+        "as_of": "2026-08-22T09:30:00Z",
+        "trust_status": "trusted",
+    }
+
+
+def test_portfolio_query_untrusted_freshness_cannot_support_current_fact(monkeypatch) -> None:
+    data, warnings, _, _ = _call(
+        {"view": "accounts", "include_default": False},
+        monkeypatch,
+        {
+            "success": True,
+            "accounts": ["lx"],
+            "count": 1,
+            "freshness": {
+                "status": "fresh",
+                "trust_status": "untrusted",
+                "observed_at_utc": "2026-08-22T09:30:00Z",
+                "dataset_ids": ["pm.account_mapping"],
+                "reason_codes": ["QUALITY_GATE_FAILED"],
+            },
+            "retrieved_at_utc": "2026-08-22T09:30:00Z",
+        },
+    )
+    observation = copilot_tools.compact_observation(
+        "portfolio_query",
+        {"ok": True, "data": data, "warnings": warnings},
+        {"view": "accounts", "include_default": False},
+    )
+
+    assert data["freshness"]["status"] == "unknown"
+    assert observation["freshness"] == {
+        "status": "unknown",
+        "as_of": "2026-08-22T09:30:00Z",
+        "trust_status": "untrusted",
+        "reason_codes": ["QUALITY_GATE_FAILED"],
+    }
+    assert warnings == [
+        "PM freshness evidence is not trusted; current data is unavailable"
+    ]
+    rejected = admit_submit_answer(
+        {
+            "mode": "evidence",
+            "status": "complete",
+            "answer_markdown": "当前账户为 lx。",
+            "claims": [{
+                "text": "当前账户为 lx",
+                "kind": "current_fact",
+                "observation_ids": ["obv_pm_untrusted"],
+                "required_scope": "requested_page",
+            }],
+        },
+        {
+            "obv_pm_untrusted": {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": observation["status"],
+                "coverage": observation["coverage"],
+                "freshness": observation["freshness"],
+            }
+        },
+    )
+    assert rejected["observation"]["reason"] == "claim_freshness_not_supported"
+
+
+def test_portfolio_query_grouped_holdings_declares_closed_collection_coverage(monkeypatch) -> None:
+    freshness = {
+        "status": "fresh",
+        "trust_status": "trusted",
+        "observed_at_utc": "2026-08-22T09:30:00Z",
+        "dataset_ids": ["pm.holdings_quantity"],
+        "reason_codes": [],
+    }
+    data, warnings, _, _ = _call(
+        {"view": "holdings", "account": "lx", "group_by_market": True},
+        monkeypatch,
+        {
+            "success": True,
+            "count": 2,
+            "by_market": {"US": [{"code": "NVDA"}], "HK": [{"code": "0700.HK"}]},
+            "freshness": freshness,
+            "retrieved_at_utc": "2026-08-22T09:30:00Z",
+        },
+    )
+
+    observation = copilot_tools.compact_observation(
+        "portfolio_query",
+        {"ok": True, "data": data, "warnings": warnings},
+        {"view": "holdings", "account": "lx", "group_by_market": True},
+    )
+
+    assert observation["coverage"] == {
+        "status": "complete",
+        "complete_for": "full_query",
+        "included_count": 2,
+        "total_count": 2,
+        "omitted_count": 0,
+        "has_more": False,
+        "scope": {"view": "holdings", "account": "lx"},
+    }
 
 
 @pytest.mark.parametrize(

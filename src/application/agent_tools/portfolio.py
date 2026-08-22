@@ -141,6 +141,29 @@ def _portfolio_query(payload: dict[str, Any]):
 
     freshness, warning = _validate_pm_freshness(response.get("freshness"))
     data["freshness"] = freshness
+    if view == "holdings" and bool(payload.get("group_by_market", False)):
+        by_market = data.get("by_market")
+        groups = by_market if isinstance(by_market, dict) else {}
+        included_count = sum(
+            len(rows)
+            for rows in groups.values()
+            if isinstance(rows, list)
+        )
+        declared_count = data.get("count")
+        total_count = (
+            declared_count
+            if isinstance(declared_count, int) and not isinstance(declared_count, bool)
+            else included_count
+        )
+        complete = included_count == total_count
+        data["coverage"] = {
+            "status": "complete" if complete else "partial",
+            "complete_for": "full_query" if complete else "requested_page",
+            "included_count": included_count,
+            "total_count": total_count,
+            "omitted_count": max(0, total_count - included_count),
+            "has_more": not complete,
+        }
     return data, ([warning] if warning else []), {}
 
 
@@ -159,7 +182,11 @@ def _validate_pm_freshness(value: Any) -> tuple[dict[str, Any], str | None]:
         or not isinstance(reason_codes, list)
     ):
         return _unavailable_pm_freshness(), "PM freshness evidence is invalid; data is unavailable"
-    return dict(value), None
+    normalized = dict(value)
+    if status == "fresh" and trust_status != "trusted":
+        normalized["status"] = "unknown"
+        return normalized, "PM freshness evidence is not trusted; current data is unavailable"
+    return normalized, None
 
 
 def _unavailable_pm_freshness() -> dict[str, Any]:
@@ -169,6 +196,107 @@ def _unavailable_pm_freshness() -> dict[str, Any]:
         "observed_at_utc": None,
         "dataset_ids": [],
         "reason_codes": ["PM_FRESHNESS_EVIDENCE_MISSING"],
+    }
+
+
+_PORTFOLIO_COLLECTION_VIEWS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "accounts": ("accounts", ("success", "accounts", "count", "retrieved_at_utc")),
+    "overview": (
+        "items",
+        (
+            "success",
+            "status",
+            "accounts",
+            "account_count",
+            "successful_count",
+            "failed_count",
+            "summary",
+            "items",
+            "retrieved_at_utc",
+        ),
+    ),
+    "cash": ("items", ("success", "by_currency", "items", "count", "retrieved_at_utc")),
+    "nav": ("history", ("success", "latest", "history", "retrieved_at_utc")),
+}
+
+
+def _portfolio_query_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    view = str(payload.get("view") or "health").strip()
+    base: dict[str, Any] = {
+        "schema_version": "portfolio_query.output.v1",
+        "bounded_projection": "contract_fields",
+        "freshness": "source_declared",
+        "pagination": {"mode": "none"},
+        "source_label": "portfolio-management loopback API",
+        "freshness_fields": [
+            "freshness.status",
+            "freshness.trust_status",
+            "freshness.observed_at_utc",
+            "freshness.dataset_ids",
+            "freshness.reason_codes",
+        ],
+    }
+    collection = _PORTFOLIO_COLLECTION_VIEWS.get(view)
+    if view == "holdings" and not bool(payload.get("group_by_market", False)):
+        collection = (
+            "holdings",
+            ("success", "count", "holdings", "retrieved_at_utc"),
+        )
+    elif view == "holdings":
+        return {
+            **base,
+            "evidence_type": "collection",
+            "coverage": "source_declared",
+            "fact_fields": ["success", "count", "by_market", "retrieved_at_utc"],
+            "model_value_fields": ["success", "count", "by_market", "retrieved_at_utc"],
+        }
+    elif view == "distribution":
+        primary_rows = "by_asset" if bool(payload.get("by_asset", False)) else "by_type"
+        collection = (
+            primary_rows,
+            (
+                "success",
+                "total_value",
+                "total_quantity",
+                "accounts",
+                primary_rows,
+                "retrieved_at_utc",
+            ),
+        )
+    if collection is not None:
+        primary_rows, model_fields = collection
+        return {
+            **base,
+            "evidence_type": "collection",
+            "coverage": "primary_rows",
+            "primary_rows": primary_rows,
+            "fact_fields": list(model_fields),
+            "model_value_fields": list(model_fields),
+        }
+    point_fields: tuple[str, ...] = ()
+    if view == "full_report":
+        point_fields = (
+            "success",
+            "generated_at",
+            "overview",
+            "nav",
+            "returns",
+            "top_holdings",
+            "distribution",
+            "retrieved_at_utc",
+        )
+    return {
+        **base,
+        "evidence_type": "point",
+        "coverage": "point",
+        **(
+            {
+                "fact_fields": list(point_fields),
+                "model_value_fields": list(point_fields),
+            }
+            if point_fields
+            else {}
+        ),
     }
 
 
@@ -372,6 +500,7 @@ def _portfolio_assignment_scenario(payload: dict[str, Any]):
 
 PORTFOLIO_QUERY_TOOL = build_agent_tool(
     name="portfolio_query",
+    catalog_summary="通过权威接口读取组合账户与资产数据。",
     description="Read portfolio-management account, holdings, cash, NAV, distribution, or report data through its same-host loopback HTTP API.",
     requires=("portfolio-management loopback HTTP API",),
     capabilities=("portfolio_read", "cross_product_read", "read_only"),
@@ -405,7 +534,12 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
         {"input": {"view": "holdings", "account": "lx", "include_price": True}},
     ),
     output_contract={
-        "fact_fields": ["success", "source", "scope", "freshness"],
+        "schema_version": "portfolio_query.output.v1",
+        "evidence_type": "mixed",
+        "bounded_projection": "contract_fields",
+        "coverage": "unknown",
+        "freshness": "source_declared",
+        "pagination": {"mode": "none"},
         "freshness_fields": [
             "freshness.status",
             "freshness.trust_status",
@@ -413,8 +547,8 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
             "freshness.dataset_ids",
             "freshness.reason_codes",
         ],
-        "notes": ["Portfolio payload fields vary by selected view and are preserved at the top level."],
     },
+    output_contract_resolver=_portfolio_query_output_contract,
     copilot_input_fields=(
         "view",
         "account",
@@ -432,9 +566,10 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
     ),
 )
 
-def _bridge_tool(*, name: str, description: str, handler, schema_version: str, evidence_field: str) -> AgentTool:
+def _bridge_tool(*, name: str, description: str, handler, schema_version: str, evidence_field: str, catalog_summary: str) -> AgentTool:
     return build_agent_tool(
         name=name,
+        catalog_summary=catalog_summary,
         description=description,
         requires=("portfolio-management loopback HTTP API", "runtime_config", "sqlite_data_config"),
         capabilities=("portfolio_read", name, "cross_product_read", "read_only"),
@@ -459,6 +594,11 @@ def _bridge_tool(*, name: str, description: str, handler, schema_version: str, e
         input_validator=_validate_bridge_input,
         examples=({"input": {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx", "sy"]}},),
         output_contract={
+            "evidence_type": "collection",
+            "bounded_projection": "contract_fields",
+            "coverage": "primary_rows",
+            "freshness": "source_declared",
+            "pagination": {"mode": "none"},
             "schema_version": schema_version,
             "source_label": "portfolio-management facts + option_performance_report",
             "primary_rows": "accounts",
@@ -488,6 +628,7 @@ PORTFOLIO_PNL_BRIDGE_TOOL = _bridge_tool(
     handler=_portfolio_pnl_bridge,
     schema_version="portfolio.pnl_bridge.v1",
     evidence_field="accounts[].option_pnl_evidence",
+    catalog_summary="读取组合期间损益桥接及期权分解。",
 )
 
 PORTFOLIO_CASH_BRIDGE_TOOL = _bridge_tool(
@@ -499,10 +640,12 @@ PORTFOLIO_CASH_BRIDGE_TOOL = _bridge_tool(
     handler=_portfolio_cash_bridge,
     schema_version="portfolio.cash_bridge.v1",
     evidence_field="accounts[].option_cash_evidence",
+    catalog_summary="读取组合现金余额桥接及期权现金变动。",
 )
 
 PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
     name="portfolio_assignment_scenario",
+    catalog_summary="读取组合归属情景与现金影响。",
     description=(
         "Project the current CNY asset distribution and funding coverage if every open short put and "
         "short call in the selected accounts were physically assigned. MMF is cash; long options are "
@@ -541,6 +684,11 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
     examples=({"input": {"accounts": ["lx", "sy"]}},),
     output_contract={
         "schema_version": "portfolio.assignment_scenario.v1",
+        "evidence_type": "collection",
+        "bounded_projection": "contract_fields",
+        "coverage": "primary_rows",
+        "freshness": "source_declared",
+        "pagination": {"mode": "none"},
         "source_label": "portfolio-management valuation evidence + OM SQLite position_lots",
         "primary_rows": "assignments",
         "fact_fields": [

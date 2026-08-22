@@ -27,6 +27,7 @@ from src.infrastructure.futu_gateway import (
 
 _OPERATION_TIMELINE_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "operation_timeline.output.v1",
+    "evidence_type": "collection", "bounded_projection": "contract_fields", "coverage": "primary_rows", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM inbound operation and command audit stores",
     "primary_rows": "timelines",
     "row_count_field": "timeline_count",
@@ -48,6 +49,7 @@ _OPERATION_TIMELINE_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "healthcheck.output.v1",
+    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "primary_rows", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM 本地健康检查",
     "primary_rows": "checks",
     "fact_fields": [
@@ -68,6 +70,7 @@ _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_status.output.v1",
+    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM 本地 runtime_status",
     "result_shape": "scalar",
     "fact_fields": [
@@ -331,6 +334,7 @@ def _status_safe_operation_timeline(
 
 HEALTHCHECK_TOOL = build_agent_tool(
     name="healthcheck",
+    catalog_summary="检查运行依赖、配置与服务就绪状态。",
     description=(
         "Run dependency and configuration readiness checks. Use for broad readiness diagnosis; use runtime_status "
         "for the latest operational snapshot and runtime_logs only after a failing component is identified."
@@ -359,6 +363,7 @@ HEALTHCHECK_TOOL = build_agent_tool(
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
     name="runtime_status",
+    catalog_summary="读取当前运行健康状态与关键运行摘要。",
     description=(
         "Summarize current overall runtime health from existing artifacts. Use first for current status questions; "
         "use runtime_runs for historical run selection and runtime_logs for bounded, content-free log metadata."
@@ -411,6 +416,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
 
 OPERATION_TIMELINE_TOOL = build_agent_tool(
     name="operation_timeline",
+    catalog_summary="读取指定运行操作的时间线与阶段结果。",
     description=(
         "Read existing inbound audit and pending operation stores to reconstruct recent operator operation "
         "timelines without mutating ledger, channel, or tick state."

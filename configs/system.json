@@ -128,6 +128,7 @@
       "context_window_messages": 8,
       "copilot": {
         "enabled": false,
+        "tool_loading_mode": "eager",
         "toolsets": {
           "portfolio": false
         }

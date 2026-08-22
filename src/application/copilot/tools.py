@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 from typing import Any
 
@@ -13,6 +14,7 @@ from src.application.tool_execution import execute_tool
 MAX_SUMMARY_CHARS = 600
 MAX_PREVIEW_ITEMS = 20
 MAX_PREVIEW_DEPTH = 4
+MAX_OBSERVATION_TOKENS = 4_000
 
 _COPILOT_HIDDEN_INPUT_NAMES = frozenset({"data_config"})
 _COPILOT_HIDDEN_INPUT_SUFFIXES = ("_path", "_paths", "_dir", "_root")
@@ -148,7 +150,7 @@ def compact_observation(
     if not ok or error:
         safe_error = _safe_error(error)
         code = str((safe_error or {}).get("code") or "TOOL_ERROR")
-        return redact_value({
+        failed_observation = redact_value({
             "tool_name": tool_name,
             "ok": False,
             "status": "failed",
@@ -164,6 +166,9 @@ def compact_observation(
             **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
             **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
         })
+        if conservative_json_tokens(failed_observation) <= MAX_OBSERVATION_TOKENS:
+            return failed_observation
+        return bounded_failed_observation(failed_observation, tool_name=tool_name)
     model_missing_fields = output_contract.get("model_missing_data_fields")
     has_model_missing_surface = bool(model_missing_fields) and any(
         _values_at_path(data, str(path).split("."))
@@ -174,24 +179,159 @@ def compact_observation(
         model_missing_fields if has_model_missing_surface else output_contract.get("missing_data_fields"),
         missing_only=True,
     )
-    freshness = _freshness(data, output_contract)
     row_count = _row_count(data, output_contract)
     scope = _scope(data)
-    coverage = _coverage(data)
-    return redact_value({
+    value = _model_value(data, output_contract)
+    coverage = _coverage_envelope(
+        data,
+        value,
+        output_contract,
+        payload=payload or {},
+    )
+    freshness = _freshness_envelope(data, output_contract)
+    coverage_status = str(coverage.get("status") or "unknown")
+    observation_status = (
+        "partial"
+        if missing_data or warnings or coverage_status != "complete"
+        else ("not_found" if row_count == 0 else "complete")
+    )
+    observation = redact_value({
         "tool_name": tool_name,
         "ok": True,
-        "status": "partial" if missing_data or warnings else ("not_found" if row_count == 0 else "complete"),
+        "status": observation_status,
         "summary": _summary(tool_name, data, None, output_contract),
-        "value": _model_value(data, output_contract),
+        "value": value,
         "source": _source(data, output_contract),
         **({"scope": scope} if scope else {}),
-        **({"coverage": coverage} if coverage else {}),
-        **({"freshness": freshness} if freshness else {}),
+        "coverage": coverage,
+        "freshness": freshness,
+        **({"as_of": freshness["as_of"]} if freshness.get("as_of") else {}),
         **({"missing_data": missing_data} if missing_data else {}),
         **({"warnings": warnings} if warnings else {}),
         "result_contract": _compact_output_contract(output_contract),
     })
+    if _contains_projection_truncation(value) or conservative_json_tokens(observation) > MAX_OBSERVATION_TOKENS:
+        observation = bounded_narrowing_observation(observation)
+    return observation
+
+
+def conservative_json_tokens(value: Any) -> int:
+    """Estimate serialized JSON without undercounting Chinese text.
+
+    This is the shared Python-side evidence projection estimate.  Final
+    provider-input admission remains owned by the Node Runtime and Pi's
+    estimator.
+    """
+
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    non_ascii = sum(ord(char) > 0x7F for char in serialized)
+    ascii_count = len(serialized) - non_ascii
+    return math.ceil((ascii_count / 4 + non_ascii) * 1.10)
+
+
+def bounded_narrowing_observation(
+    observation: dict[str, Any],
+    *,
+    tool_name: str | None = None,
+    message: str = "结果超过单次证据预算，请缩小账户、时间、标的或结果范围后重试。",
+    warning: str = "bounded_projection_requires_narrowing",
+    minimal: bool = False,
+) -> dict[str, Any]:
+    coverage = observation.get("coverage")
+    bounded_coverage = dict(coverage) if isinstance(coverage, dict) else {}
+    bounded_coverage.update({"status": "partial", "needs_narrowing": True})
+    warnings = [
+        str(item)
+        for item in observation.get("warnings") or ()
+        if isinstance(item, str) and item
+    ]
+    if warning not in warnings:
+        warnings.append(warning)
+    bounded = {
+        key: value
+        for key, value in {
+            "tool_name": tool_name or observation.get("tool_name"),
+            "ok": True,
+            "status": "needs_narrowing",
+            "summary": observation.get("summary"),
+            "value": {"message": message},
+            "source": observation.get("source"),
+            "scope": observation.get("scope"),
+            "coverage": bounded_coverage,
+            "freshness": observation.get("freshness"),
+            "as_of": observation.get("as_of"),
+            "missing_data": observation.get("missing_data"),
+            "warnings": warnings[:8],
+            "result_contract": observation.get("result_contract"),
+            "ref": observation.get("ref"),
+            "argument_hash": observation.get("argument_hash"),
+            "output_contract_version": observation.get("output_contract_version"),
+        }.items()
+        if value not in (None, {}, [])
+    }
+    if not minimal and conservative_json_tokens(bounded) <= MAX_OBSERVATION_TOKENS:
+        return bounded
+    scope = (
+        bounded_coverage.get("scope")
+        if isinstance(bounded_coverage.get("scope"), dict)
+        else observation.get("scope")
+    )
+    bounded_scope = (
+        scope
+        if isinstance(scope, dict) and conservative_json_tokens(scope) <= 256
+        else None
+    )
+    return {
+        "tool_name": tool_name or observation.get("tool_name"),
+        "ok": True,
+        "status": "needs_narrowing",
+        "summary": _clip(observation.get("summary"), MAX_SUMMARY_CHARS),
+        "value": {"message": message},
+        "coverage": {
+            "status": "partial",
+            "complete_for": "point",
+            "needs_narrowing": True,
+            **({"scope": bounded_scope} if bounded_scope is not None else {}),
+        },
+        "freshness": {"status": "unknown"},
+        "warnings": [warning],
+        **({"ref": observation["ref"]} if observation.get("ref") else {}),
+        **(
+            {"argument_hash": observation["argument_hash"]}
+            if observation.get("argument_hash")
+            else {}
+        ),
+        **(
+            {"output_contract_version": observation["output_contract_version"]}
+            if observation.get("output_contract_version")
+            else {}
+        ),
+    }
+
+
+def bounded_failed_observation(
+    observation: dict[str, Any],
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    code = str(observation.get("code") or observation.get("error") or "TOOL_ERROR")[:120]
+    return {
+        "tool_name": tool_name or observation.get("tool_name"),
+        "ok": False,
+        "status": "failed",
+        "error": code,
+        "code": code,
+        "message": _clip(observation.get("message") or "tool failed", MAX_SUMMARY_CHARS),
+        "retryable": bool(observation.get("retryable", False)),
+        "details": {"truncated": True},
+        **({"ref": observation["ref"]} if observation.get("ref") else {}),
+    }
 
 
 def _copilot_input_schema(definition) -> dict[str, Any]:
@@ -276,17 +416,253 @@ def _scope(data: dict[str, Any]) -> dict[str, Any]:
     return _preview(value) if isinstance(value, dict) else {}
 
 
-def _coverage(data: dict[str, Any]) -> dict[str, Any]:
-    value = data.get("coverage") if isinstance(data.get("coverage"), dict) else data.get("evidence_scope")
-    return _preview(value) if isinstance(value, dict) else {}
+def _coverage_envelope(
+    data: dict[str, Any],
+    projected_value: dict[str, Any],
+    output_contract: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    policy = str(output_contract.get("coverage") or "unknown")
+    declared = data.get("coverage")
+    scope = _scope(data) or _request_scope(payload)
+    if policy == "source_declared" and isinstance(declared, dict):
+        normalized = _normalize_declared_coverage(
+            declared,
+            require_included_count=(
+                str(output_contract.get("evidence_type") or "") == "collection"
+            ),
+        )
+        if normalized is not None:
+            if scope and not normalized.get("scope"):
+                normalized["scope"] = scope
+            return normalized
+    if policy == "point":
+        return {
+            "status": "complete",
+            "complete_for": "point",
+            **({"scope": scope} if scope else {}),
+        }
+    if policy == "primary_rows":
+        primary = str(output_contract.get("primary_rows") or "").strip()
+        source_rows = data.get(primary) if primary else None
+        projected_rows = projected_value.get(primary) if primary else None
+        if isinstance(source_rows, list) and isinstance(projected_rows, list):
+            included_count = sum(
+                not (isinstance(item, dict) and set(item) == {"_truncated_items"})
+                for item in projected_rows
+            )
+            projection_omitted = max(0, len(source_rows) - included_count)
+            coverage = {
+                "status": "partial" if projection_omitted else "complete",
+                "complete_for": "requested_page",
+                "included_count": included_count,
+                "total_count": None,
+                "omitted_count": projection_omitted or None,
+                **({"scope": scope} if scope else {}),
+            }
+            if projection_omitted:
+                coverage["has_more"] = True
+            return coverage
+        if isinstance(source_rows, list):
+            # The contract deliberately projected scalar/aggregate fields but
+            # not the collection itself.  It can support point claims only.
+            return {
+                "status": "complete",
+                "complete_for": "point",
+                "included_count": 0,
+                "total_count": None,
+                "omitted_count": len(source_rows),
+                **({"scope": scope} if scope else {}),
+            }
+    return {
+        "status": "unknown",
+        "complete_for": "point",
+        **({"scope": scope} if scope else {}),
+    }
 
 
-def _freshness(data: dict[str, Any], output_contract: dict[str, Any]) -> Any:
-    values = _contract_values(data, output_contract.get("freshness_fields"))
-    if values:
-        return values
-    value = data.get("freshness")
-    return _preview(value) if isinstance(value, (dict, list)) and value else {}
+def _normalize_declared_coverage(
+    value: dict[str, Any],
+    *,
+    require_included_count: bool,
+) -> dict[str, Any] | None:
+    status = str(value.get("status") or "").strip().lower()
+    complete_for = str(value.get("complete_for") or "").strip().lower()
+    if status not in {"complete", "partial", "unknown"}:
+        return None
+    if complete_for not in {"point", "requested_page", "full_query"}:
+        return None
+    normalized: dict[str, Any] = {
+        "status": status,
+        "complete_for": complete_for,
+    }
+    for key in ("included_count", "total_count", "omitted_count"):
+        raw = value.get(key)
+        if raw is None:
+            normalized[key] = None
+        elif isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+            normalized[key] = raw
+        else:
+            return None
+    if require_included_count and normalized.get("included_count") is None:
+        return None
+    has_more = value.get("has_more")
+    if "has_more" in value and has_more is not None and not isinstance(has_more, bool):
+        return None
+    if isinstance(has_more, bool):
+        normalized["has_more"] = has_more
+    included_count = normalized.get("included_count")
+    total_count = normalized.get("total_count")
+    omitted_count = normalized.get("omitted_count")
+    if total_count is not None:
+        if included_count is not None and included_count > total_count:
+            return None
+        if omitted_count is not None and omitted_count > total_count:
+            return None
+        if (
+            included_count is not None
+            and omitted_count is not None
+            and included_count + omitted_count != total_count
+        ):
+            return None
+    if (
+        complete_for == "full_query"
+        and status == "complete"
+        and (
+            included_count is None
+            or total_count is None
+            or omitted_count is None
+            or included_count != total_count
+            or omitted_count != 0
+            or has_more is True
+        )
+    ):
+        return None
+    if isinstance(value.get("scope"), dict):
+        normalized["scope"] = _preview(value["scope"])
+    if _is_iso_timestamp(value.get("as_of")):
+        normalized["as_of"] = str(value["as_of"])
+    return normalized
+
+
+def _freshness_envelope(
+    data: dict[str, Any],
+    output_contract: dict[str, Any],
+) -> dict[str, Any]:
+    policy = str(output_contract.get("freshness") or "unknown")
+    if policy == "not_applicable":
+        return {"status": "not_applicable"}
+    if policy != "source_declared":
+        return {"status": "unknown"}
+
+    declared = data.get("freshness")
+    if isinstance(declared, dict):
+        raw_status = str(declared.get("status") or declared.get("kind") or "").strip().lower()
+        status = raw_status if raw_status in {
+            "current",
+            "fresh",
+            "historical",
+            "stale",
+            "not_applicable",
+            "unknown",
+        } else "unknown"
+        as_of = _first_timestamp(declared)
+        trust_status = str(declared.get("trust_status") or "").strip().lower()
+        reason_codes = [
+            _clip(item, 120)
+            for item in (declared.get("reason_codes") or [])
+            if isinstance(item, (str, int, float, bool)) and str(item).strip()
+        ][:8]
+        return {
+            "status": status,
+            **({"as_of": as_of} if as_of else {}),
+            **({"trust_status": trust_status} if trust_status else {}),
+            **({"reason_codes": reason_codes} if reason_codes else {}),
+        }
+
+    declared_values = _contract_values(data, output_contract.get("freshness_fields"))
+    as_of = _first_timestamp(declared_values)
+    if declared_values and as_of:
+        return {"status": "historical", "as_of": as_of}
+    return {
+        "status": "unknown",
+        **({"as_of": as_of} if as_of else {}),
+    }
+
+
+def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "account",
+        "action",
+        "config_key",
+        "end_date",
+        "limit",
+        "market",
+        "month",
+        "period",
+        "run_id",
+        "start_date",
+        "status",
+        "symbol",
+        "year",
+    }
+    return _preview({key: value for key, value in payload.items() if key in allowed})
+
+
+def _first_timestamp(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value if _is_iso_timestamp(value) else None
+    if isinstance(value, dict):
+        preferred = (
+            "as_of",
+            "observed_at_utc",
+            "observed_at",
+            "checked_at",
+            "latest_event_at_utc",
+            "latest_mtime_utc",
+            "mtime_utc",
+            "requested_end_date",
+            "end_date",
+            "query_time_utc",
+            "retrieved_at_utc",
+        )
+        for key in preferred:
+            candidate = value.get(key)
+            found = _first_timestamp(candidate)
+            if found:
+                return found
+        for candidate in value.values():
+            found = _first_timestamp(candidate)
+            if found:
+                return found
+    if isinstance(value, list):
+        for candidate in value:
+            found = _first_timestamp(candidate)
+            if found:
+                return found
+    return None
+
+
+def _is_iso_timestamp(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-"
+
+
+def _contains_projection_truncation(value: Any) -> bool:
+    if isinstance(value, dict):
+        if (
+            "_truncated_keys" in value
+            or "_truncated_items" in value
+            or "_truncated_value" in value
+        ):
+            return True
+        return any(_contains_projection_truncation(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_projection_truncation(item) for item in value)
+    return False
 
 
 def _agent_description(description: str, output_contract: dict[str, Any]) -> str:
@@ -308,6 +684,11 @@ def _compact_output_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
         key: value
         for key, value in {
             "schema_version": output_contract.get("schema_version"),
+            "evidence_type": output_contract.get("evidence_type"),
+            "bounded_projection": output_contract.get("bounded_projection"),
+            "coverage": output_contract.get("coverage"),
+            "freshness": output_contract.get("freshness"),
+            "pagination": deepcopy(output_contract.get("pagination")),
             "primary_rows": output_contract.get("primary_rows"),
             "row_count_field": output_contract.get("row_count_field"),
             "fact_fields": list(output_contract.get("fact_fields") or ())[:16],
@@ -339,8 +720,7 @@ def _field_priorities(output_contract: dict[str, Any]) -> dict[str, list[str]]:
 
 def _model_value(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
     fields = output_contract.get("model_value_fields")
-    presentation_required = "presentation" in (fields or ())
-    if fields and (not presentation_required or isinstance(data.get("presentation"), dict)):
+    if fields:
         return _contract_values(data, fields, preview_max_depth=6)
     return _preview(data, priorities=_field_priorities(output_contract))
 
@@ -356,7 +736,12 @@ def _preview(
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if depth >= max_depth:
-        return _clip(json.dumps(value, ensure_ascii=False, default=str), 320)
+        serialized = " ".join(
+            json.dumps(value, ensure_ascii=False, default=str).split()
+        )
+        if len(serialized) <= 320:
+            return serialized
+        return {"_truncated_value": _clip(serialized, 320)}
     if isinstance(value, dict):
         preferred = list((priorities or {}).get(path, ()))
         keys = [key for key in preferred if key in value]
@@ -469,7 +854,7 @@ def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
     details = error.get("details")
     if isinstance(details, dict):
         safe_details = {
-            key: _preview(value)
+            key: _bounded_error_detail(value)
             for key, value in details.items()
             if key in {"allowed_views", "unknown_views", "first_keyword", "mode", "schema_errors", "tool_name"}
         }
@@ -484,6 +869,33 @@ def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
         else safe["code"] in {"INPUT_ERROR", "READ_ERROR", "INTERNAL_ERROR", "TOOL_ERROR"}
     )
     return safe
+
+
+def _bounded_error_detail(value: Any, *, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return _clip(value, 240)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if depth >= 3:
+        return _clip(json.dumps(value, ensure_ascii=False, default=str), 240)
+    if isinstance(value, dict):
+        keys = list(value)[:8]
+        bounded = {
+            str(key): _bounded_error_detail(value[key], depth=depth + 1)
+            for key in keys
+        }
+        if len(value) > len(keys):
+            bounded["_truncated_keys"] = len(value) - len(keys)
+        return bounded
+    if isinstance(value, list):
+        items = [
+            _bounded_error_detail(item, depth=depth + 1)
+            for item in value[:8]
+        ]
+        if len(value) > len(items):
+            items.append({"_truncated_items": len(value) - len(items)})
+        return items
+    return _clip(value, 240)
 
 
 def _tool_error(tool_name: str, code: str, message: str) -> dict[str, Any]:
@@ -505,8 +917,11 @@ def _clip(value: Any, limit: int) -> str:
 
 __all__ = [
     "available_read_tools",
+    "bounded_failed_observation",
+    "bounded_narrowing_observation",
     "build_tool_payload",
     "call_read_tool",
     "compact_observation",
+    "conservative_json_tokens",
     "tool_descriptions",
 ]

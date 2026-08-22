@@ -1135,6 +1135,7 @@ assistant:
 
     assert cfg["assistant"]["copilot"] == {
         "enabled": True,
+        "tool_loading_mode": "eager",
         "toolsets": {"portfolio": False},
     }
     assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [

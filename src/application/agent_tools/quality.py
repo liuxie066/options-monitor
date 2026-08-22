@@ -63,6 +63,7 @@ def _quality_status_tool(
 
 QUALITY_STATUS_TOOL = build_agent_tool(
     name="quality_status",
+    catalog_summary="读取数据质量门禁与新鲜度状态。",
     description="Read the latest schema-validated OM runtime and data-quality artifact without refreshing OpenD or writing state.",
     requires=("published_quality_artifact",),
     capabilities=("runtime_quality", "data_quality", "read_only"),
@@ -77,6 +78,11 @@ QUALITY_STATUS_TOOL = build_agent_tool(
     examples=({"input": {}}, {"input": {"account": "lx", "market": "us"}}),
     output_contract={
         "schema_version": "investment.quality_status.v1",
+        "evidence_type": "collection",
+        "bounded_projection": "contract_fields",
+        "coverage": "primary_rows",
+        "freshness": "source_declared",
+        "pagination": {"mode": "none"},
         "source_label": "OM published quality artifact",
         "primary_rows": "datasets",
         "freshness_fields": ["observed_at_utc", "datasets[].as_of_utc"],

@@ -44,6 +44,11 @@ def _normalize_candidate_filter_copilot_input(payload: Mapping[str, Any]) -> dic
 
 _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_filter_explain.output.v1",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "functions",
     "row_count_field": "trace_count",
@@ -82,6 +87,11 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_rank_explain.output.v1",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "ranked",
     "row_count_field": "row_count",
@@ -144,6 +154,7 @@ def _candidate_filter_explain_tool(
 
 CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_rank_explain",
+    catalog_summary="解释候选机会的排序依据与证据。",
     description=(
         "Explain the recorded order in a terminal manifest-bound account opening-candidate snapshot. The tool never re-ranks rows."
     ),
@@ -173,6 +184,7 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
 
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
+    catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
         "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
         "With run_selector=latest_notification it resolves the run that produced the most recent notification actually delivered "

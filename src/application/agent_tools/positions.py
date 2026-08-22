@@ -39,6 +39,11 @@ from src.application.wheel.capacity import load_shared_coverage_fact
 
 
 _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "option_performance_report.output.v1",
     "source_label": "OM 本地账本 + 显式估值/汇率证据",
     "primary_rows": "rows",
@@ -102,6 +107,11 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "option_positions_read.list_output.v1",
     "source_label": "OM 本地 SQLite position_lots",
     "primary_rows": "rows",
@@ -134,6 +144,11 @@ _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "option_positions_read.assigned_stock_output.v2",
     "source_label": "OM 本地 SQLite assigned_stock_events + trade_events",
     "primary_rows": "rows",
@@ -501,6 +516,7 @@ def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> d
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
+    catalog_summary="读取期权表现汇总与收益分解。",
     description=(
         "Primary read-only option performance report. Separates premium activity, cash movement, realized PnL, "
         "period total PnL, assigned-stock lifecycle, and capital efficiency. Supports MTD, YTD, natural month, "
@@ -583,6 +599,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     name="option_positions_read",
+    catalog_summary="读取授权账户的期权持仓。",
     description=(
         "Read local option position lots, trade events, lot history, assigned-stock lots, or projection "
         "inspection state. For current exposure use action=list and status=open; preserve account and currency. "
@@ -636,7 +653,15 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "action": "list", "query": {"account": "lx", "status": "open"}}},
         {"input": {"config_key": "us", "action": "history", "record_id": "rec_xxx"}},
     ),
-    output_contract={"schema_version": "option_positions_read.output", "payload_dependent": True},
+    output_contract={
+        "schema_version": "option_positions_read.output",
+        "payload_dependent": True,
+        "evidence_type": "collection",
+        "bounded_projection": "contract_fields",
+        "coverage": "primary_rows",
+        "freshness": "source_declared",
+        "pagination": {"mode": "none"},
+    },
     output_contract_resolver=_option_positions_output_contract,
     copilot_input_fields=(
         "config_key", "action", "broker", "account", "status", "query", "limit",

@@ -47,6 +47,12 @@ def check_assistant_llm(
 
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
+    checks.append({
+        "name": "assistant_copilot_tool_loading_mode",
+        "status": "ok",
+        "message": f"assistant Copilot tool loading mode is {runtime_settings.copilot.tool_loading_mode}",
+        "mode": runtime_settings.copilot.tool_loading_mode,
+    })
     checks.extend(_config_checks(settings, secret_provider=provider))
     live_probe = _live_probe_check(
         live=bool(live),
