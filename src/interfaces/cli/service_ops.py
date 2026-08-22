@@ -14,8 +14,19 @@ from src.application.service_deploy import (
     service_status_from_profile,
     write_service_bundle,
 )
-from src.application.service_drift import migrate_service_credentials, service_drift
-from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check, service_upgrade_verify
+from src.application.service_drift import (
+    SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+    migrate_service_credentials,
+    service_drift,
+)
+from src.application.service_upgrade import (
+    ServiceTransitionError,
+    capture_preserved_timer_activation_states,
+    service_rollback,
+    service_upgrade,
+    service_upgrade_check,
+    service_upgrade_verify,
+)
 from src.application.write_contract import attach_write_contract
 
 
@@ -167,6 +178,11 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_drift_cmd.add_argument("--profile-path", default=None)
     service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing/changed units and profile, then reload affected timers")
     service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
+    service_drift_cmd.add_argument(
+        "--preserve-activation-state",
+        action="store_true",
+        help="preserve pre-existing inactive, disabled, or masked systemd timers",
+    )
     service_credential_migrate = service_sub.add_parser(
         "credentials-migrate",
         help="migrate deprecated shared secret env delivery to per-unit systemd credentials",
@@ -323,6 +339,7 @@ def handle_service_update_command(
     service_status_from_profile_fn: Callable[..., dict[str, Any]] = service_status_from_profile,
     write_service_bundle_fn: Callable[..., list[str]] = write_service_bundle,
     service_drift_fn: Callable[..., dict[str, Any]] = service_drift,
+    capture_preserved_timer_activation_states_fn: Callable[..., dict[str, dict[str, str]]] = capture_preserved_timer_activation_states,
     migrate_service_credentials_fn: Callable[..., dict[str, Any]] = migrate_service_credentials,
     service_cleanup_fn: Callable[..., dict[str, Any]] = service_cleanup,
     service_upgrade_check_fn: Callable[..., dict[str, Any]] = service_upgrade_check,
@@ -396,12 +413,43 @@ def handle_service_update_command(
 
     if args.command == "service" and args.service_command == "drift":
         confirmed = _confirmed(args)
-        data = service_drift_fn(
-            repo_root=args.repo_root or repo_base_fn(),
-            runtime_root=args.runtime_root,
-            profile_path=args.profile_path,
-            confirm=confirmed,
-        )
+        repo_root = args.repo_root or repo_base_fn()
+        drift_kwargs: dict[str, Any] = {
+            "repo_root": repo_root,
+            "runtime_root": args.runtime_root,
+            "profile_path": args.profile_path,
+            "confirm": confirmed,
+        }
+        if bool(getattr(args, "preserve_activation_state", False)):
+            profile_path = Path(
+                args.profile_path
+                or Path(args.runtime_root).expanduser() / "service.profile.json"
+            ).expanduser()
+            profile = load_service_profile_fn(profile_path)
+            try:
+                preserved_activation_states = (
+                    capture_preserved_timer_activation_states_fn(
+                        repo_root=Path(repo_root).expanduser(),
+                        runtime_root=Path(args.runtime_root).expanduser(),
+                        profile=profile,
+                    )
+                )
+            except ServiceTransitionError as exc:
+                raise AgentToolError(
+                    code="DEPENDENCY_MISSING",
+                    message=str(exc),
+                    details={
+                        "status": exc.status,
+                        "remediation": exc.remediation,
+                    },
+                ) from exc
+            drift_kwargs.update(
+                profile_path=profile_path,
+                profile=profile,
+                activation_policy=SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+                preserved_activation_states=preserved_activation_states,
+            )
+        data = service_drift_fn(**drift_kwargs)
         data = _service_write_contract(
             data,
             confirmed=confirmed,

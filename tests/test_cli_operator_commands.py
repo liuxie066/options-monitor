@@ -1693,6 +1693,146 @@ def test_init_runtime_command_is_removed(capsys) -> None:
     assert "invalid choice" in capsys.readouterr().err
 
 
+def test_service_drift_preserves_timer_state_only_when_requested(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    profile = {"service_provider": "systemd"}
+    snapshot = {
+        "options-monitor-tick-us.timer": {
+            "activation_state": "disabled",
+            "active_state": "inactive",
+        }
+    }
+    drift_calls: list[dict] = []
+    capture_calls: list[dict] = []
+    load_calls: list[Path] = []
+
+    def _load(path):
+        load_calls.append(Path(path))
+        return profile
+
+    def _capture(**kwargs):
+        capture_calls.append(kwargs)
+        return snapshot
+
+    def _drift(**kwargs):
+        drift_calls.append(kwargs)
+        return {"summary": {"ok": True}, "changed": False}
+
+    monkeypatch.setattr(cli, "load_service_profile", _load)
+    monkeypatch.setattr(cli, "capture_preserved_timer_activation_states", _capture)
+    monkeypatch.setattr(cli, "service_drift", _drift)
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    assert cli.main([
+        "service",
+        "drift",
+        "--repo-root",
+        str(repo),
+        "--runtime-root",
+        str(runtime),
+    ]) == 0
+    assert _read_json_output(capsys)["tool_name"] == "service.drift"
+    assert drift_calls[0] == {
+        "repo_root": str(repo),
+        "runtime_root": str(runtime),
+        "profile_path": None,
+        "confirm": False,
+    }
+    assert capture_calls == []
+    assert load_calls == []
+
+    assert cli.main([
+        "service",
+        "drift",
+        "--repo-root",
+        str(repo),
+        "--runtime-root",
+        str(runtime),
+        "--preserve-activation-state",
+    ]) == 0
+    payload = _read_json_output(capsys)
+    assert payload["tool_name"] == "service.drift"
+    expected_profile_path = runtime / "service.profile.json"
+    assert load_calls == [expected_profile_path]
+    assert capture_calls == [{
+        "repo_root": repo,
+        "runtime_root": runtime,
+        "profile": profile,
+    }]
+    assert drift_calls[1]["profile_path"] == expected_profile_path
+    assert drift_calls[1]["profile"] is profile
+    assert drift_calls[1]["activation_policy"] == "preserve-existing"
+    assert drift_calls[1]["preserved_activation_states"] == snapshot
+
+
+def test_service_drift_preserve_fails_before_confirmed_reconcile(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    import src.interfaces.cli.main as cli
+    import src.application.service_upgrade as service_upgrade_module
+
+    target = "options-monitor-tick-hk.timer"
+    monkeypatch.setattr(
+        cli,
+        "load_service_profile",
+        lambda _path: {"service_provider": "systemd"},
+    )
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "service_drift",
+        lambda **_kwargs: {
+            "checked": True,
+            "supported": True,
+            "expected_services": [target],
+            "installed_units": [target],
+            "activation_states": {target: "unknown"},
+            "active_states": {target: "active"},
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "service_drift",
+        lambda **_kwargs: pytest.fail("reconcile must not run without a snapshot"),
+    )
+
+    rc = cli.main([
+        "service",
+        "drift",
+        "--repo-root",
+        str(tmp_path / "current"),
+        "--runtime-root",
+        str(tmp_path / "runtime"),
+        "--preserve-activation-state",
+        "--confirm",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "code": "DEPENDENCY_MISSING",
+        "message": (
+            "could not determine whether managed timers were active before the "
+            f"release switch: {target}"
+        ),
+        "details": {
+            "status": "service_activation_snapshot_failed",
+            "remediation": [
+                "manual_check_timer_state: "
+                f"systemctl is-enabled {target}; systemctl is-active {target}"
+            ],
+        },
+    }
+
+
 def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 

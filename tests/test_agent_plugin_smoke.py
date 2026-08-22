@@ -1268,13 +1268,57 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     assert not state_path.exists()
 
 
+def test_trade_event_cursor_key_uses_fixed_domain_derivation() -> None:
+    from src.application.agent_tools.operations_impl import (
+        _derive_trade_event_cursor_key,
+    )
+
+    derived = _derive_trade_event_cursor_key("test-inbound-key")
+    assert derived == (
+        "335828dbfea78ace5d7f1d0f04b8e195"
+        "6e459c6f8e4c43085015a7b32b301c03"
+    )
+    assert derived != "test-inbound-key"
+
+
+def test_trade_event_pagination_stops_before_ledger_when_secret_backend_fails(
+    monkeypatch,
+) -> None:
+    import src.application.agent_tools.operations_impl as operations_impl
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.secret_store import SecretBackendUnavailable
+
+    def _raise_secret_error(_logical_name):
+        raise SecretBackendUnavailable("secret backend unavailable")
+
+    monkeypatch.setattr(operations_impl, "resolve_secret", _raise_secret_error)
+    monkeypatch.setattr(
+        operations_impl,
+        "trade_event_page",
+        lambda *_args, **_kwargs: pytest.fail("ledger query must not run"),
+    )
+
+    with pytest.raises(AgentToolError) as exc_info:
+        operations_impl._events_action(
+            object(),
+            {"account": "lx"},
+            market="us",
+            authorized_accounts=["lx"],
+            normalize_broker=str,
+            normalize_account=str,
+        )
+
+    assert exc_info.value.code == "DEPENDENCY_MISSING"
+    assert exc_info.value.message == "inbound.operation_hmac_key could not be resolved"
+
+
 def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
     from src.application.ledger.commands import record_manual_assignment
     from src.application.positions.assigned_stock_quotes import AssignedStockQuoteRefreshResult
     from src.application.secret_store import (
-        COPILOT_CURSOR_HMAC_KEY,
+        INBOUND_OPERATION_HMAC_KEY,
         use_secret_provider,
     )
     from src.infrastructure.secret_store.memory import InMemorySecretProvider
@@ -1356,7 +1400,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
         },
     )
     with use_secret_provider(
-        InMemorySecretProvider({COPILOT_CURSOR_HMAC_KEY: "test-cursor-key"})
+        InMemorySecretProvider({INBOUND_OPERATION_HMAC_KEY: "test-inbound-key"})
     ):
         events = run_tool(
             "option_positions_read",
@@ -1381,6 +1425,22 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
                 "config_path": str(cfg_path),
                 "action": "events",
                 "query": {"account": "user1"},
+            },
+        )
+        paged_first = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "action": "events",
+                "limit": 1,
+            },
+        )
+        paged_second = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "cursor": paged_first["data"]["next_cursor"],
+                "limit": 1,
             },
         )
     with use_secret_provider(InMemorySecretProvider({})):
@@ -1466,6 +1526,15 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     )
     assert missing_cursor_key["ok"] is False
     assert missing_cursor_key["error"]["code"] == "DEPENDENCY_MISSING"
+    assert "inbound.operation_hmac_key" in missing_cursor_key["error"]["message"]
+    assert paged_first["ok"] is True
+    assert paged_first["data"]["has_more"] is True
+    assert paged_second["ok"] is True
+    assert paged_second["data"]["snapshot_exhausted"] is True
+    assert {
+        paged_first["data"]["rows"][0]["event_id"],
+        paged_second["data"]["rows"][0]["event_id"],
+    } == {row["event_id"] for row in repo.list_trade_events()}
     assert len(repo.list_trade_events()) == 2
     assert {row["account"] for row in events["data"]["rows"]} == {"user1"}
     assert events["data"]["rows"][0]["symbol"] == "NVDA"

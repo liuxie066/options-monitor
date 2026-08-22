@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
 from src.application.secret_store import (
-    COPILOT_CURSOR_HMAC_KEY,
+    INBOUND_OPERATION_HMAC_KEY,
     SecretError,
     resolve_secret,
 )
@@ -24,6 +26,17 @@ from src.application.trade_time_format import add_trade_time_beijing
 from src.application.payload_helpers import as_dict as _dict
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.wheel.read_model import build_wheel_read_model
+
+
+_TRADE_EVENT_CURSOR_KEY_DOMAIN = b"options-monitor/copilot/trade-event-cursor/v1"
+
+
+def _derive_trade_event_cursor_key(master_key: str) -> str:
+    return hmac.new(
+        master_key.encode("utf-8"),
+        _TRADE_EVENT_CURSOR_KEY_DOMAIN,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:
@@ -397,17 +410,18 @@ def _events_action(
     if payload.get("broker") not in (None, ""):
         canonical_payload["broker"] = normalize_broker(payload.get("broker"))
     try:
-        key = resolve_secret(COPILOT_CURSOR_HMAC_KEY)
+        master_key = resolve_secret(INBOUND_OPERATION_HMAC_KEY)
     except SecretError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
-            message="copilot.cursor_hmac_key could not be resolved",
+            message="inbound.operation_hmac_key could not be resolved",
         ) from exc
-    if not key:
+    if not master_key:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
-            message="copilot.cursor_hmac_key is required for events pagination",
+            message="inbound.operation_hmac_key is required for events pagination",
         )
+    cursor_key = _derive_trade_event_cursor_key(master_key)
     try:
         page = trade_event_page(
             repo,
@@ -415,7 +429,7 @@ def _events_action(
             account=account,
             market=market,
             authorized_accounts=authorized_accounts,
-            cursor_key=key,
+            cursor_key=cursor_key,
             admit_query=admit_query,
         )
     except TradeEventPaginationError as exc:

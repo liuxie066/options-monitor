@@ -89,6 +89,7 @@ from src.interfaces.cli.scheduler_ops import (
 from src.interfaces.cli.secret_ops import add_secret_commands, run_store_command
 from src.interfaces.cli.service_ops import (
     add_service_update_commands,
+    capture_preserved_timer_activation_states,
     handle_service_update_command,
     load_service_profile,
     render_service_bundle,
@@ -347,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
                 service_status_from_profile_fn=service_status_from_profile,
                 write_service_bundle_fn=write_service_bundle,
                 service_drift_fn=service_drift,
+                capture_preserved_timer_activation_states_fn=capture_preserved_timer_activation_states,
                 service_cleanup_fn=service_cleanup,
                 service_upgrade_check_fn=service_upgrade_check,
                 service_upgrade_verify_fn=service_upgrade_verify,

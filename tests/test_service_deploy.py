@@ -452,10 +452,8 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         f"om-llm-deepseek-api-key:{store}/om-llm-deepseek-api-key"
         in assistant
     )
-    assert (
-        f"om-copilot-cursor-hmac-key:{store}/om-copilot-cursor-hmac-key"
-        in assistant
-    )
+    assert "om-inbound-operation-hmac-key" in assistant
+    assert "om-copilot-cursor-hmac-key" not in assistant
 
 
 def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: Path) -> None:
@@ -2198,6 +2196,175 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
     assert ["systemctl", "start", target] not in calls
     assert ["systemctl", "restart", target] not in calls
     assert ["systemctl", "unmask", target] not in calls
+
+
+def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_timers(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import (
+        SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+        service_drift,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    store = tmp_path / "credstore.encrypted"
+    config_yaml = tmp_path / "config.yaml"
+    repo.mkdir()
+    runtime.mkdir()
+    config_yaml.write_text(
+        "accounts:\n"
+        "  lx:\n"
+        "    type: futu\n"
+        "    futu:\n"
+        "      account_id: REAL_12345678\n"
+        "      host: 127.0.0.1\n"
+        "      port: 11111\n"
+        "markets:\n"
+        "  hk:\n"
+        "    accounts: [lx]\n"
+        "    symbols: [0700.HK]\n"
+        "assistant:\n"
+        "  enabled: true\n"
+        "  copilot:\n"
+        "    enabled: true\n"
+        "  active_model: deepseek-default\n"
+        "  models:\n"
+        "    deepseek-default:\n"
+        "      provider: deepseek\n"
+        "      model: deepseek-chat\n"
+        "      context_window_tokens: 128000\n"
+        "      api_key_env: DEEPSEEK_API_KEY\n",
+        encoding="utf-8",
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+        config_yaml=config_yaml,
+        env_file=runtime / "options-monitor.env",
+        include_feishu_ws=True,
+        include_wechat_clawbot=True,
+        wechat_clawbot_allowed_senders="wechat:test-user",
+        include_secret_credentials=True,
+        secret_credential_store_root=store,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="local",
+        include_strategy_lab_top1=True,
+        strategy_lab_top1_advance_interval_seconds=300,
+        strategy_lab_top1_timeout_start_sec=120,
+        use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    old_profile = json.loads(files["service.profile.json"]["content"])
+    inbound_services = (
+        "options-monitor-feishu-ws.service",
+        "options-monitor-wechat-clawbot.service",
+    )
+    for service_name in inbound_services:
+        old_profile["secret_credentials"]["service_credentials"][service_name].append(
+            "copilot.cursor_hmac_key"
+        )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(old_profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    expected_changed_files: list[str] = []
+    for item in bundle["files"]:
+        if item.get("kind") not in {"systemd_dropin", "systemd_secret_dropin"}:
+            continue
+        install_path = Path(str(item["install_path"]))
+        target_path = systemd_root / install_path.relative_to("/etc/systemd/system")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        content = str(item["content"])
+        if install_path.parent.name in inbound_services:
+            content += (
+                "LoadCredentialEncrypted=om-copilot-cursor-hmac-key:"
+                f"{store}/om-copilot-cursor-hmac-key\n"
+            )
+            expected_changed_files.append(str(install_path))
+        target_path.write_text(content, encoding="utf-8")
+
+    paused_timers = {
+        "options-monitor-strategy-lab-sample.timer",
+        "options-monitor-strategy-lab-top1-advance.timer",
+    }
+    snapshot = {
+        name: {"activation_state": "disabled", "active_state": "inactive"}
+        for name in paused_timers
+    }
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        name = command[-1]
+        if command[-2] == "is-enabled":
+            state = "disabled" if name in paused_timers else "enabled"
+            return subprocess.CompletedProcess(command, 0, stdout=f"{state}\n", stderr="")
+        if command[-2] == "is-active":
+            state = "inactive" if name in paused_timers else "active"
+            return subprocess.CompletedProcess(
+                command,
+                3 if state == "inactive" else 0,
+                stdout=f"{state}\n",
+                stderr="",
+            )
+        if "show" in command and "--property=Result" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    drift_kwargs = {
+        "repo_root": repo,
+        "runtime_root": runtime,
+        "systemd_unit_root": systemd_root,
+        "activation_policy": SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+        "preserved_activation_states": snapshot,
+        "run_cmd": _run_cmd,
+    }
+    before = service_drift(**drift_kwargs)
+    assert before["mismatched_managed_files"] == sorted(expected_changed_files)
+    assert before["profile_content_changed"] is True
+    assert before["preserved_activation_units"] == sorted(paused_timers)
+    assert before["activation_preservation_conflicts"] == []
+
+    applied = service_drift(**drift_kwargs, confirm=True)
+    assert applied["apply_errors"] == []
+    assert applied["applied"]["written_units"] == []
+    assert applied["applied"]["written_managed_files"] == sorted(
+        expected_changed_files
+    )
+    assert applied["applied"]["profile_written"] is True
+    assert applied["applied"]["enabled_timers"] == []
+    assert applied["applied"]["restarted_timers"] == []
+    assert applied["activation_preservation_conflicts"] == []
+    assert applied["mismatched_managed_files"] == []
+    assert applied["profile_content_changed"] is False
+    for name in paused_timers:
+        assert ["systemctl", "enable", "--now", name] not in calls
+        assert ["systemctl", "start", name] not in calls
+        assert ["systemctl", "restart", name] not in calls
+        assert ["systemctl", "unmask", name] not in calls
+
+    refreshed_profile = json.loads(
+        (runtime / "service.profile.json").read_text(encoding="utf-8")
+    )
+    assert all(
+        "copilot.cursor_hmac_key"
+        not in refreshed_profile["secret_credentials"]["service_credentials"][name]
+        for name in inbound_services
+    )
+    final = service_drift(**drift_kwargs)
+    assert final["mismatched_managed_files"] == []
+    assert final["profile_content_changed"] is False
+    assert final["activation_drift_units"] == []
+    assert final["preserved_activation_units"] == sorted(paused_timers)
 
 
 def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp_path: Path) -> None:
@@ -4234,13 +4401,13 @@ def test_upgrade_activation_snapshot_captures_only_preexisting_paused_timers(
             "active_states": {
                 "options-monitor-tick-hk.timer": "inactive",
                 "options-monitor-tick-us.timer": "active",
-                "options-monitor-quality-refresh.timer": "unknown",
+                "options-monitor-quality-refresh.timer": "active",
             },
         }
 
     monkeypatch.setattr(service_upgrade_module, "service_drift", _service_drift)
 
-    snapshot = service_upgrade_module._capture_preserved_timer_activation_states(
+    snapshot = service_upgrade_module.capture_preserved_timer_activation_states(
         repo_root=tmp_path / "current",
         runtime_root=tmp_path / "runtime",
         profile={"service_provider": "systemd"},
@@ -4250,6 +4417,7 @@ def test_upgrade_activation_snapshot_captures_only_preexisting_paused_timers(
     assert snapshot == {
         "options-monitor-quality-refresh.timer": {
             "activation_state": "disabled",
+            "active_state": "active",
         },
         "options-monitor-tick-hk.timer": {
             "activation_state": "enabled",
@@ -4259,9 +4427,15 @@ def test_upgrade_activation_snapshot_captures_only_preexisting_paused_timers(
     assert observed_calls[0]["confirm"] is False
 
 
+@pytest.mark.parametrize(
+    ("activation_state", "active_state"),
+    [("enabled", "unknown"), ("unknown", "active")],
+)
 def test_upgrade_activation_snapshot_fails_closed_when_timer_state_is_unknown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    activation_state: str,
+    active_state: str,
 ) -> None:
     import src.application.service_upgrade as service_upgrade_module
 
@@ -4274,8 +4448,8 @@ def test_upgrade_activation_snapshot_fails_closed_when_timer_state_is_unknown(
             "supported": True,
             "expected_services": [target],
             "installed_units": [target],
-            "activation_states": {target: "enabled"},
-            "active_states": {target: "unknown"},
+            "activation_states": {target: activation_state},
+            "active_states": {target: active_state},
         },
     )
 
@@ -4283,7 +4457,7 @@ def test_upgrade_activation_snapshot_fails_closed_when_timer_state_is_unknown(
         service_upgrade_module.ServiceTransitionError,
         match="could not determine whether managed timers were active",
     ) as exc_info:
-        service_upgrade_module._capture_preserved_timer_activation_states(
+        service_upgrade_module.capture_preserved_timer_activation_states(
             repo_root=tmp_path / "current",
             runtime_root=tmp_path / "runtime",
             profile={"service_provider": "systemd"},

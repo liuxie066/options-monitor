@@ -13,9 +13,8 @@ YAML、JSON、JSONL、命令参数、日志、support bundle 或聊天记录。
 | `llm.kimi.api_key` | Kimi Code | `KIMI_API_KEY` |
 | `feishu.holdings.app_secret` | Feishu holdings app | `OM_FEISHU_APP_SECRET` |
 | `feishu.bot.app_secret` | Feishu bot / long connection | `OM_FEISHU_BOT_APP_SECRET` |
-| `inbound.operation_hmac_key` | inbound 写操作完整性 | `OM_INBOUND_OPERATION_HMAC_KEY` |
+| `inbound.operation_hmac_key` | inbound 写操作完整性及分页游标子密钥来源 | `OM_INBOUND_OPERATION_HMAC_KEY` |
 | `quality.read_token` | `/quality/status` 读取认证 | `OM_QUALITY_READ_TOKEN` |
-| `copilot.cursor_hmac_key` | Copilot 无状态分页游标完整性 | `OM_COPILOT_CURSOR_HMAC_KEY` |
 
 App ID、用户 open ID、table ID、路径、URL、model 名和 feature flag 不是秘密，继续作为普通配置。
 Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret 只有在出现真实消费方时才加入固定注册表。
@@ -48,10 +47,12 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 逻辑名、后端、是否改变和可能受影响的服务；不会自动重启服务。
 非交互 stdin、命令参数和管道输入都会被拒绝。
 
-启用 Copilot keyset 分页前，必须通过一次性 root bootstrap 单独 provision
-`copilot.cursor_hmac_key`，例如 `sudo ./om secrets set copilot.cursor_hmac_key`。setup、升级和发布
-不会生成、读取或轮换它；同一环境跨 release 保持同一值。显式轮换会让尚未过期的旧游标
-立即失效，用户需要重新发起查询。
+`option_positions_read action=events` 不注册或配置独立游标密钥。运行时适配层使用
+HMAC-SHA256 和固定域 `options-monitor/copilot/trade-event-cursor/v1`，从
+`inbound.operation_hmac_key` 派生只用于交易事件游标的子密钥；主密钥和子密钥都不会进入
+Node、模型、日志或游标内容。缺少 inbound 密钥时分页明确失败。轮换 inbound 密钥会让尚未
+过期的旧游标立即失效，用户需要重新发起查询。已退役的
+`OM_COPILOT_CURSOR_HMAC_KEY` 仍在 systemd `UnsetEnvironment` 清理列表中，但不再是可配置凭据。
 
 macOS provider 会在私有控制终端中等待 `security` 的两次原生密码提示，再把已确认值从
 进程内存写入；值不会进入子进程 argv、stdout、stderr 或临时文件。写入成功仍需用脱敏

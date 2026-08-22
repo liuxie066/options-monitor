@@ -937,12 +937,12 @@ def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[st
     return out
 
 
-def _capture_preserved_timer_activation_states(
+def capture_preserved_timer_activation_states(
     *,
     repo_root: Path,
     runtime_root: Path,
     profile: dict[str, Any],
-    run_cmd: Callable[..., Any],
+    run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, dict[str, str]]:
     observed = service_drift(
         repo_root=repo_root,
@@ -995,11 +995,15 @@ def _capture_preserved_timer_activation_states(
     for name in sorted(timer_names):
         activation_state = str(activation_states.get(name) or "").strip().lower()
         active_state = str(active_states.get(name) or "").strip().lower()
+        if (
+            activation_state in {"", "unknown"}
+            or active_state in {"", "unknown"}
+        ):
+            unknown_timer_states.append(name)
+            continue
         paused_by_activation = activation_state in {"disabled", "masked"}
         paused_by_activity = active_state == "inactive"
         if not paused_by_activation and not paused_by_activity:
-            if active_state in {"", "unknown"}:
-                unknown_timer_states.append(name)
             continue
         snapshot[str(name)] = {
             key: value
@@ -2638,7 +2642,7 @@ def service_upgrade(
             )
             if preserve_activation_state and pre_upgrade_profile:
                 preserved_activation_states = (
-                    _capture_preserved_timer_activation_states(
+                    capture_preserved_timer_activation_states(
                         repo_root=repo_link,
                         runtime_root=runtime,
                         profile=pre_upgrade_profile,
@@ -2976,7 +2980,7 @@ def service_rollback(
             )
             if preserve_activation_state and previous_profile:
                 preserved_activation_states = (
-                    _capture_preserved_timer_activation_states(
+                    capture_preserved_timer_activation_states(
                         repo_root=repo_link,
                         runtime_root=runtime,
                         profile=previous_profile,
