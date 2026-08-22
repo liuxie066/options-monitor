@@ -437,6 +437,13 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
 
 
+def test_release_preflight_exports_selected_python_to_nested_entrypoints() -> None:
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "scripts" / "release_preflight.sh").read_text(encoding="utf-8")
+
+    assert 'export OM_PYTHON="${PYTHON_BIN}"' in text
+
+
 def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> None:
     proc, commands = _run_release_preflight_with_fake_python(tmp_path)
 
