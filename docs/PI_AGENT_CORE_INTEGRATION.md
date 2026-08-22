@@ -3393,16 +3393,15 @@ The cursor is stateless and HMAC-signed. No cursor database or raw-row cache is
 added. The Pi Session may retain the opaque cursor needed for continuation;
 audit stores only its hash.
 
-Cursor signing uses one dedicated secret resolved through the existing secret
-provider, `OM_COPILOT_CURSOR_HMAC_KEY`. It is not the inbound-operation signing
-key and never enters Node/model context. An operator provisions it once through
-the existing root-owned secret CLI before enabling Copilot. Setup, release, and
-upgrade paths neither generate nor read it; only the inbound services that run
-Copilot receive it through the existing per-unit credential binding. All
-processes in one environment use the same value across releases. S8 does not
-add a keyring or transparent rotation: explicitly changing the key invalidates
-outstanding cursors, and the user must start a new query. An `events` request
-fails closed and explicitly when its runtime consumer cannot resolve the key.
+Cursor signing uses a domain-separated child key derived by the Python tool
+adapter from the existing `inbound.operation_hmac_key`. The derivation is
+HMAC-SHA256 with the fixed byte label
+`options-monitor/copilot/trade-event-cursor/v1`; the resulting child key is
+passed to the canonical ledger facade. Neither key enters Node/model context.
+S8 adds no credential, keyring, transparent rotation, or upgrader secret
+workflow. Rotating the inbound master key invalidates outstanding cursors, and
+the user must start a new query. An `events` request fails closed and explicitly
+when its runtime consumer cannot resolve the inbound key.
 
 Cursor TTL belongs to each canonical output contract. Expired, invalid,
 wrong-signature, wrong-tool, wrong-query, or wrong-authority cursors fail
@@ -3907,7 +3906,7 @@ ambiguous, eager remains available.
 | `src/application/agent_tools/operations_impl.py` and `positions.py` | keep the existing `option_positions_read(action=events)` entry; expose the events-only cursor/count inputs and output contract; call only the public ledger facade and never load all events |
 | `src/application/copilot/pi_agent_process.py` | serialize the revised closed `run.start` and private activation/admission fields without exposing secrets |
 | `agent-runtime/main.ts` | render dynamic catalog context, own internal tools, atomically replace schemas, enforce budgets/compaction, terminate approved answers, and normalize Session turns |
-| `src/application/secret_store/registry.py` and `service_deploy.py` | register the dedicated cursor HMAC key and bind it only to enabled inbound Copilot services; provisioning is a one-time root bootstrap and setup/upgrade do not consume the key |
+| `src/application/agent_tools/operations_impl.py`, `secret_store/registry.py`, and `service_deploy.py` | derive the cursor child key from the existing inbound HMAC secret; keep the retired cursor env name unset without registering or binding a second credential |
 
 No new business router, result store, cursor database, or output-contract
 registry is permitted by this design.
@@ -3924,7 +3923,7 @@ registry is permitted by this design.
 | Projection | every allowlisted output contract reports coverage/freshness; `total_count`/`omitted_count` may be null but then cannot support a complete/full-query claim |
 | Pagination | a temporary canonical-ledger fixture proves 5 -> 5 and 10 -> 20 -> 10 non-overlap, same-time tie ordering, exact end-of-snapshot behavior, explicit totals, and variable limits within one boundary; inserts with newer or late historical business times after the first page remain excluded; mutable/non-proven collections expose no continuation cursor and return bounded evidence or `needs_narrowing`; expired, mismatched, or compacted-away cursors never refresh implicitly |
 | Pagination scale | CI query-plan fixtures prove account/market/effect filters, snapshot fence, stable order, and keyset execute at the SQLite owner without full-collection deserialization or a temporary sort; a non-default one-million-row local benchmark proves per-page memory is bounded by page size and later-page cost does not grow linearly with cursor depth |
-| Cursor secret | the secret registry and service render bind the dedicated key only to enabled inbound Copilot consumers; a missing runtime key makes `events` fail explicitly; the same key survives process/release restart, never appears in Node/model/metrics or upgrader state, and an intentional key change deterministically invalidates old cursors |
+| Cursor secret | an inbound-only runtime fixture pages successfully with the fixed domain derivation; no dedicated cursor credential is registered or bound; a missing inbound key makes `events` fail explicitly; neither master nor child key appears in Node/model/metrics or upgrader state, and an intentional inbound-key change deterministically invalidates old cursors |
 | Evidence scope | observation IDs are globally unique and valid only in the current external request; pre-run committed-prefix compaction cannot grant old IDs current authority; old-page follow-up re-calls the canonical tool |
 | Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, plain-final bypass, one Runtime-owned repair across bypass/rejection, second-failure safe error with no commit, cancel/propose race, and exact approved-text/hash comparison pass |
 | Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, <=50 percent target, failed compact rollback, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
@@ -3976,10 +3975,10 @@ completion must never become an admitted answer.
   deterministic path.
 - Guarantee evidence structure and declared scope, not semantic truth for
   arbitrary prose.
-- Use one dedicated cursor HMAC key through the existing secret boundary; do
-  not add keyrings, transparent rotation, a cursor store, or upgrader ownership.
-  Provision it once for runtime consumers; an intentional key change invalidates
-  outstanding cursors.
+- Derive one domain-separated cursor child key from the existing inbound HMAC
+  secret at the Python tool adapter; do not add another credential, keyring,
+  transparent rotation, cursor store, or upgrader ownership. An intentional
+  inbound-key change invalidates outstanding cursors.
 - Freeze trade-event membership, filters, and order rather than every evidence
   byte: reject deletes and query-critical updates, allow controlled non-query
   enrichment, and do not add a global mutation revision.

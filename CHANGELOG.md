@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Restored Copilot trade-event pagination by deriving its signing key from the existing inbound HMAC secret and removing the unused dedicated credential, with fail-closed paused-timer preservation during target service reconciliation.
+
 ## 1.15.11 - 2026-08-23
 
 ### Improvements

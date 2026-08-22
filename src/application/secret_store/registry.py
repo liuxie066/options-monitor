@@ -11,7 +11,8 @@ FEISHU_HOLDINGS_APP_SECRET = "feishu.holdings.app_secret"
 FEISHU_BOT_APP_SECRET = "feishu.bot.app_secret"
 INBOUND_OPERATION_HMAC_KEY = "inbound.operation_hmac_key"
 QUALITY_READ_TOKEN = "quality.read_token"
-COPILOT_CURSOR_HMAC_KEY = "copilot.cursor_hmac_key"
+
+_RETIRED_LEGACY_SECRET_ENV_NAMES = frozenset({"OM_COPILOT_CURSOR_HMAC_KEY"})
 
 
 @dataclass(frozen=True)
@@ -101,16 +102,6 @@ _SPECS = (
         "quality status HTTP authentication",
         ("options-monitor-quality-http.service",),
     ),
-    CredentialSpec(
-        COPILOT_CURSOR_HMAC_KEY,
-        "om-copilot-cursor-hmac-key",
-        ("OM_COPILOT_CURSOR_HMAC_KEY",),
-        "stateless Copilot pagination cursor integrity",
-        (
-            "options-monitor-feishu-ws.service",
-            "options-monitor-wechat-clawbot.service",
-        ),
-    ),
 )
 
 CREDENTIAL_SPECS = {spec.logical_name: spec for spec in _SPECS}
@@ -132,7 +123,9 @@ def require_credential_spec(logical_name: str) -> CredentialSpec:
 
 
 def legacy_secret_env_names() -> frozenset[str]:
-    return frozenset(name for spec in _SPECS for name in spec.legacy_env_names)
+    return frozenset(name for spec in _SPECS for name in spec.legacy_env_names).union(
+        _RETIRED_LEGACY_SECRET_ENV_NAMES
+    )
 
 
 __all__ = [
@@ -146,7 +139,6 @@ __all__ = [
     "LLM_KIMI_API_KEY",
     "LLM_MOONSHOT_API_KEY",
     "QUALITY_READ_TOKEN",
-    "COPILOT_CURSOR_HMAC_KEY",
     "credential_spec",
     "credential_specs",
     "legacy_secret_env_names",

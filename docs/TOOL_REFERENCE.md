@@ -245,6 +245,9 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
   即使业务时间更早，也不会进入该 cursor 流。
 - `include_total=true` 才计算冻结成员集合的 `total_count`。cursor 有效期为 30 分钟；过期、
   签名错误、权限或筛选条件变化都会明确失败，不会自动从头查询。
+- cursor 签名子密钥由运行服务从既有 `inbound.operation_hmac_key` 做固定域派生，不需要
+  单独配置游标密钥；缺少 inbound 密钥时返回 `DEPENDENCY_MISSING`。轮换该主密钥会使
+  尚未过期的 cursor 失效。
 - `snapshot_exhausted=true` 表示当前冻结集合已读完。过期后重新查询会建立新集合，因此可能
   与旧查询已经返回的记录重叠。
 

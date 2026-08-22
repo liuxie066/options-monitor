@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1000 (`src`: 532, `domain`: 76, `scripts`: 13, `tests`: 379)
-- Internal import edges: 6705 total, 2880 production/script edges excluding tests
+- Internal import edges: 6715 total, 2880 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,11 +46,11 @@ flowchart LR
   scripts -->|2| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|2826| application
+  tests -->|2834| application
   tests -->|451| domain
   tests -->|2| domain_services
   tests -->|206| infrastructure
-  tests -->|246| interfaces
+  tests -->|248| interfaces
   tests -->|23| scripts
   tests -->|18| storage
 ```
@@ -79,9 +79,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2826 |
+| tests | application | 2834 |
 | tests | domain | 451 |
-| tests | interfaces | 246 |
+| tests | interfaces | 248 |
 | tests | infrastructure | 206 |
 | tests | scripts | 23 |
 | tests | storage | 18 |

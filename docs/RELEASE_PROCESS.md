@@ -314,6 +314,19 @@ VERSION="$(cat VERSION)"
   --confirm
 ```
 
+独立执行 drift reconcile 时可使用同一保活语义：
+
+```bash
+./om service drift \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --preserve-activation-state \
+  --confirm
+```
+
+该参数会在任何写入前读取 profile 并快照已管理 timer；状态未知时 fail closed。未传参数时，
+`service drift` 继续使用严格的 `ensure-active` 默认策略。
+
 存量主机如果仍使用 `/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service`，首次升级到包含 repository-owned credential 资产的 release 后，必须用新 release 显式执行一次 `service drift` dry-run 和 `--confirm`。原因是升级进程由旧 release 启动，无法在同一次切换中可靠使用尚未加载的新 reconcile 逻辑。收编后 profile 会保留 `feishu_agent_credential` opt-in，后续手动升级、自动升级和回滚都按同一契约 reconcile。在旧 release 回滚窗口结束前保留 `/usr/lib` legacy unit，不由 drift 自动删除。
 
 当 profile 已收编 Feishu Agent credential 时，升级后 Feishu WS 健康检查会在 `sudo` 进程内显式合并 profile 的基础 `env_file` 和 `feishu_agent_credential.runtime_env_file`。命令行只传文件路径，不传或输出明文凭据；这避免 `sudo` 清理父进程环境后出现假性 `missing Feishu app credentials`。
