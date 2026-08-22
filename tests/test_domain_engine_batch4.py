@@ -3,190 +3,45 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _legacy_plan(
-    *,
-    error_code: str,
-    degraded: bool,
-    message_text: str,
-    detail_text: str,
-    host,
-    port,
-) -> dict[str, object]:
-    code = str(error_code or 'OPEND_API_ERROR')
-    if code == 'OPEND_NEEDS_PHONE_VERIFY':
-        action = {
-            'action': 'pause_phone_verify',
-            'terminal': True,
-            'fallback_used': False,
-        }
-        return {
-            **action,
-            'alert_message_text': str(message_text or '') + '（已暂停：等待你在飞书确认后再继续）',
-            'alert_detail': (f'{host}:{port} {detail_text}' if host is not None and port is not None else str(detail_text or '')),
-            'should_mark_phone_verify_pending': True,
-            'should_write_account_last_run': False,
-            'should_continue': False,
-        }
-    if bool(degraded):
-        action = {
-            'action': 'degrade_continue',
-            'terminal': False,
-            'fallback_used': True,
-        }
-        return {
-            **action,
-            'alert_message_text': str(message_text or ''),
-            'alert_detail': (f'{host}:{port} {detail_text}' if host is not None and port is not None else str(detail_text or '')),
-            'should_mark_phone_verify_pending': False,
-            'should_write_account_last_run': True,
-            'should_continue': True,
-        }
-    action = {
-        'action': 'abort',
-        'terminal': True,
-        'fallback_used': False,
-    }
-    return {
-        **action,
-        'alert_message_text': str(message_text or ''),
-        'alert_detail': (f'{host}:{port} {detail_text}' if host is not None and port is not None else str(detail_text or '')),
-        'should_mark_phone_verify_pending': False,
-        'should_write_account_last_run': True,
-        'should_continue': False,
-    }
-
-
 def test_build_opend_unhealthy_execution_plan_matches_legacy_branching() -> None:
     from domain.domain.engine import build_opend_unhealthy_execution_plan
 
-    for error_code in ('OPEND_NEEDS_PHONE_VERIFY', 'OPEND_API_ERROR'):
-        for degraded in (False, True):
-            for host, port in ((None, None), ('127.0.0.1', 11111)):
-                expected = _legacy_plan(
-                    error_code=error_code,
-                    degraded=degraded,
-                    message_text='msg',
-                    detail_text='detail',
-                    host=host,
-                    port=port,
-                )
-                actual = build_opend_unhealthy_execution_plan(
-                    error_code=error_code,
-                    degraded=degraded,
-                    message_text='msg',
-                    detail_text='detail',
-                    host=host,
-                    port=port,
-                )
-                assert actual == expected
+    cases = (
+        ('OPEND_NEEDS_PHONE_VERIFY', False, 'pause_phone_verify', True, False, True, False, False),
+        ('OPEND_NEEDS_PHONE_VERIFY', True, 'pause_phone_verify', True, False, True, False, False),
+        ('OPEND_API_ERROR', False, 'abort', True, False, False, True, False),
+        ('OPEND_API_ERROR', True, 'degrade_continue', False, True, False, True, True),
+    )
+    for error_code, degraded, action, terminal, fallback, pending, write_last_run, should_continue in cases:
+        for host, port, detail in ((None, None, 'detail'), ('127.0.0.1', 11111, '127.0.0.1:11111 detail')):
+            actual = build_opend_unhealthy_execution_plan(
+                error_code=error_code,
+                degraded=degraded,
+                message_text='msg',
+                detail_text='detail',
+                host=host,
+                port=port,
+            )
+            assert actual == {
+                'action': action,
+                'terminal': terminal,
+                'fallback_used': fallback,
+                'alert_message_text': (
+                    'msg（已暂停：等待你在飞书确认后再继续）'
+                    if pending
+                    else 'msg'
+                ),
+                'alert_detail': detail,
+                'should_mark_phone_verify_pending': pending,
+                'should_write_account_last_run': write_last_run,
+                'should_continue': should_continue,
+            }
 
 
 def test_main_uses_opend_unhealthy_execution_plan_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'src' / 'application' / 'tick_guard_flow.py').read_text(encoding='utf-8')
     assert 'build_opend_unhealthy_execution_plan' in src
-
-
-def _legacy_trading_day_guard_decision(
-    *,
-    markets_to_run: list[str],
-    guard_markets: list[str],
-    check_fn,
-) -> dict[str, object]:
-    guard_results: list[dict[str, object]] = []
-    for gm in guard_markets:
-        is_td, gm_used = check_fn(gm)
-        guard_results.append({'market': gm_used, 'is_trading_day': is_td})
-
-    false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
-    true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
-
-    if false_markets:
-        if markets_to_run:
-            narrowed = [m for m in markets_to_run if m not in set(false_markets)]
-            if not narrowed:
-                return {
-                    'guard_results': guard_results,
-                    'markets_to_run': [],
-                    'should_skip': True,
-                    'skip_message': f"non-trading day: {','.join(false_markets)}",
-                }
-            return {
-                'guard_results': guard_results,
-                'markets_to_run': narrowed,
-                'should_skip': False,
-                'skip_message': '',
-            }
-        if true_markets:
-            return {
-                'guard_results': guard_results,
-                'markets_to_run': sorted({m for m in true_markets if m in ('HK', 'US', 'CN')}),
-                'should_skip': False,
-                'skip_message': '',
-            }
-        return {
-            'guard_results': guard_results,
-            'markets_to_run': [],
-            'should_skip': True,
-            'skip_message': f"non-trading day: {','.join(false_markets)}",
-        }
-
-    return {
-        'guard_results': guard_results,
-        'markets_to_run': list(markets_to_run or []),
-        'should_skip': False,
-        'skip_message': '',
-    }
-
-
-def _legacy_notify_dispatch_gate(
-    *,
-    dispatch_decision: dict[str, object],
-    dnd_decision: dict[str, object] | None = None,
-) -> dict[str, object]:
-    dispatch = dispatch_decision or {}
-    dnd = dnd_decision or {}
-    reason = str(dispatch.get('reason') or '')
-    config_error = dispatch.get('config_error')
-    should_send = bool(dispatch.get('should_send'))
-    effective_target = dispatch.get('effective_target')
-    quiet_window = str(dnd.get('quiet_window') or '')
-
-    if reason == 'quiet_hours':
-        return {
-            'action': 'skip_quiet_hours',
-            'reason': reason,
-            'should_send': False,
-            'effective_target': effective_target,
-            'config_error': None,
-            'quiet_window': quiet_window,
-        }
-    if config_error:
-        return {
-            'action': 'config_error',
-            'reason': reason,
-            'should_send': False,
-            'effective_target': effective_target,
-            'config_error': config_error,
-            'quiet_window': quiet_window,
-        }
-    if should_send:
-        return {
-            'action': 'send',
-            'reason': reason,
-            'should_send': True,
-            'effective_target': effective_target,
-            'config_error': None,
-            'quiet_window': quiet_window,
-        }
-    return {
-        'action': 'skip',
-        'reason': reason,
-        'should_send': False,
-        'effective_target': effective_target,
-        'config_error': None,
-        'quiet_window': quiet_window,
-    }
 
 
 def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
@@ -201,18 +56,22 @@ def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
         }
         return table[gm]
 
-    expected = _legacy_trading_day_guard_decision(
-        markets_to_run=['US', 'HK'],
-        guard_markets=['US', 'HK', 'CN'],
-        check_fn=_check,
-    )
     actual = decide_trading_day_guard(
         markets_to_run=['US', 'HK'],
         guard_markets=['US', 'HK', 'CN'],
         check_trading_day_for_market=_check,
         reduce_guard_fn=reduce_trading_day_guard,
     )
-    assert actual == expected
+    assert actual == {
+        'guard_results': [
+            {'market': 'US', 'is_trading_day': False},
+            {'market': 'HK', 'is_trading_day': True},
+            {'market': 'CN', 'is_trading_day': None},
+        ],
+        'markets_to_run': ['HK'],
+        'should_skip': False,
+        'skip_message': '',
+    }
 
 
 def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
@@ -227,6 +86,7 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
                 'reason': 'quiet_hours',
             },
             {'quiet_window': '23:00-06:00'},
+            'skip_quiet_hours',
         ),
         (
             {
@@ -236,6 +96,7 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
                 'reason': 'config_error',
             },
             {'quiet_window': ''},
+            'config_error',
         ),
         (
             {
@@ -245,6 +106,7 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
                 'reason': 'send',
             },
             {'quiet_window': ''},
+            'send',
         ),
         (
             {
@@ -254,19 +116,23 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
                 'reason': 'no_send',
             },
             {'quiet_window': ''},
+            'skip',
         ),
     ]
 
-    for dispatch_decision, dnd_decision in cases:
-        expected = _legacy_notify_dispatch_gate(
-            dispatch_decision=dispatch_decision,
-            dnd_decision=dnd_decision,
-        )
+    for dispatch_decision, dnd_decision, action in cases:
         actual = decide_notify_dispatch_gate(
             dispatch_decision=dispatch_decision,
             dnd_decision=dnd_decision,
         )
-        assert actual == expected
+        assert actual == {
+            'action': action,
+            'reason': dispatch_decision['reason'],
+            'should_send': action == 'send',
+            'effective_target': dispatch_decision['effective_target'],
+            'config_error': dispatch_decision['config_error'] if action == 'config_error' else None,
+            'quiet_window': dnd_decision['quiet_window'],
+        }
 
 
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:

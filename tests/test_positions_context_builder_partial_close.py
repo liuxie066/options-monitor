@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-import sys
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 from domain.domain.expiration_dates import expiration_business_today
 from src.application.ledger.api import RiskPositionView, position_lot_risk_view, position_lot_snapshot
@@ -685,12 +680,10 @@ def test_list_open_short_assignment_rows_propagates_repository_failure() -> None
         def list_position_lots(self) -> list[dict[str, Any]]:
             raise RuntimeError("ledger unavailable")
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         list_open_short_assignment_rows(_Repo(), accounts=["lx"])
-    except RuntimeError as exc:
-        assert str(exc) == "ledger unavailable"
-    else:
-        raise AssertionError("strict assignment read must fail closed")
+    exc = _caught.value
+    assert str(exc) == "ledger unavailable"
 
 
 def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:

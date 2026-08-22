@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -113,12 +115,11 @@ def test_daily_brief_cli_rejects_negative_revision(tmp_path: Path) -> None:
         revision=-1,
         json=True,
     )
-    try:
+    with pytest.raises(AgentToolError) as _caught:
         daily_brief_ops.handle_daily_brief_command(args, repo_base_fn=lambda: tmp_path)
-        raise AssertionError("expected AgentToolError")
-    except AgentToolError as exc:
-        assert exc.code == "INPUT_ERROR"
-        assert "revision must be non-negative" in str(exc)
+    exc = _caught.value
+    assert exc.code == "INPUT_ERROR"
+    assert "revision must be non-negative" in str(exc)
 
 
 def test_daily_brief_main_renders_input_errors_without_traceback(capsys) -> None:

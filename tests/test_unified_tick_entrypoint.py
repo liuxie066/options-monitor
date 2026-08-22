@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,7 +134,7 @@ def test_legacy_tick_script_entrypoints_are_removed() -> None:
     assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
 
 
-def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
+def test_market_session_and_opend_alert_use_single_source_of_truth(tmp_path: Path) -> None:
     from domain.domain import select_markets_to_run
     from src.application.multi_tick.opend_guard import should_send_opend_alert
 
@@ -162,12 +163,12 @@ def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
     direct_out = select_markets_to_run(now_utc, cfg, "auto")
     assert direct_out == []
 
-    with TemporaryDirectory() as td:
-        base = Path(td)
-        direct_first = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
-        direct_second = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
-        assert direct_first is True
-        assert direct_second is False
+    td = tmp_path
+    base = Path(td)
+    direct_first = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
+    direct_second = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
+    assert direct_first is True
+    assert direct_second is False
 
 
 def test_multi_tick_main_enforces_canonical_runtime_config_without_derived_gate() -> None:
@@ -195,112 +196,109 @@ def test_multi_account_tick_current_run_id_accessor_is_public() -> None:
 def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
     from domain.domain import ensure_runtime_canonical_config
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         ensure_runtime_canonical_config("config.market_us.json", "us")
-        raise AssertionError("expected canonical config guard failure")
-    except SystemExit as e:
-        assert "runtime config must be canonical" in str(e)
+    e = _caught.value
+    assert "runtime config must be canonical" in str(e)
 
 
-def test_ensure_runtime_canonical_config_requires_sibling_external_when_present() -> None:
+def test_ensure_runtime_canonical_config_requires_sibling_external_when_present(tmp_path: Path) -> None:
     from domain.domain import ensure_runtime_canonical_config
 
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        repo = root / "options-monitor-prod"
-        repo.mkdir()
-        local_cfg = repo / "config.hk.json"
-        local_cfg.write_text("{}", encoding="utf-8")
+    td = tmp_path
+    root = Path(td)
+    repo = root / "options-monitor-prod"
+    repo.mkdir()
+    local_cfg = repo / "config.hk.json"
+    local_cfg.write_text("{}", encoding="utf-8")
 
-        canonical_dir = root / "options-monitor-config"
-        canonical_dir.mkdir()
-        canonical_cfg = canonical_dir / "config.hk.json"
-        canonical_cfg.write_text("{}", encoding="utf-8")
+    canonical_dir = root / "options-monitor-config"
+    canonical_dir.mkdir()
+    canonical_cfg = canonical_dir / "config.hk.json"
+    canonical_cfg.write_text("{}", encoding="utf-8")
 
-        try:
-            ensure_runtime_canonical_config(
-                local_cfg,
-                "hk",
-                repo_base=repo,
-                require_sibling_external=True,
-            )
-            raise AssertionError("expected sibling canonical config guard failure")
-        except SystemExit as e:
-            assert "must use sibling canonical config when present" in str(e)
-            assert str(local_cfg.resolve()) in str(e)
-            assert str(canonical_cfg.resolve()) in str(e)
-
-        out = ensure_runtime_canonical_config(
-            canonical_cfg,
-            "hk",
-            repo_base=repo,
-            require_sibling_external=True,
-        )
-        assert out["is_sibling_canonical"] is True
-
-
-def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_external_exists() -> None:
-    from domain.domain import ensure_runtime_canonical_config
-
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        repo = root / "options-monitor-prod"
-        repo.mkdir()
-        local_cfg = repo / "config.hk.json"
-        local_cfg.write_text("{}", encoding="utf-8")
-
-        out = ensure_runtime_canonical_config(
+    with pytest.raises(SystemExit) as _caught:
+        ensure_runtime_canonical_config(
             local_cfg,
             "hk",
             repo_base=repo,
             require_sibling_external=True,
         )
-        assert out["resolved_path"] == str(local_cfg.resolve())
-        assert out["sibling_canonical_exists"] is False
+    e = _caught.value
+    assert "must use sibling canonical config when present" in str(e)
+    assert str(local_cfg.resolve()) in str(e)
+    assert str(canonical_cfg.resolve()) in str(e)
+
+    out = ensure_runtime_canonical_config(
+        canonical_cfg,
+        "hk",
+        repo_base=repo,
+        require_sibling_external=True,
+    )
+    assert out["is_sibling_canonical"] is True
 
 
-def test_ensure_runtime_schedule_matches_market_rejects_hk_config_with_us_schedule() -> None:
+def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_external_exists(tmp_path: Path) -> None:
+    from domain.domain import ensure_runtime_canonical_config
+
+    td = tmp_path
+    root = Path(td)
+    repo = root / "options-monitor-prod"
+    repo.mkdir()
+    local_cfg = repo / "config.hk.json"
+    local_cfg.write_text("{}", encoding="utf-8")
+
+    out = ensure_runtime_canonical_config(
+        local_cfg,
+        "hk",
+        repo_base=repo,
+        require_sibling_external=True,
+    )
+    assert out["resolved_path"] == str(local_cfg.resolve())
+    assert out["sibling_canonical_exists"] is False
+
+
+def test_ensure_runtime_schedule_matches_market_rejects_hk_config_with_us_schedule(tmp_path: Path) -> None:
     from domain.domain import ensure_runtime_schedule_matches_market
 
-    with TemporaryDirectory() as td:
-        cfg = Path(td) / "config.hk.json"
-        runtime_config = {
-            "schedule": {
-                "enabled": True,
-                "timezone": "America/New_York",
-                "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
-            }
+    td = tmp_path
+    cfg = Path(td) / "config.hk.json"
+    runtime_config = {
+        "schedule": {
+            "enabled": True,
+            "timezone": "America/New_York",
+            "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
         }
+    }
 
-        try:
-            ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="hk")
-            raise AssertionError("expected schedule market guard failure")
-        except SystemExit as e:
-            msg = str(e)
-            assert "runtime schedule timezone does not match market" in msg
-            assert "market: hk" in msg
-            assert "expected: Asia/Hong_Kong" in msg
-            assert "got: America/New_York" in msg
+    with pytest.raises(SystemExit) as _caught:
+        ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="hk")
+    e = _caught.value
+    msg = str(e)
+    assert "runtime schedule timezone does not match market" in msg
+    assert "market: hk" in msg
+    assert "expected: Asia/Hong_Kong" in msg
+    assert "got: America/New_York" in msg
 
 
-def test_ensure_runtime_schedule_matches_market_accepts_hk_day_schedule() -> None:
+def test_ensure_runtime_schedule_matches_market_accepts_hk_day_schedule(tmp_path: Path) -> None:
     from domain.domain import ensure_runtime_schedule_matches_market
 
-    with TemporaryDirectory() as td:
-        cfg = Path(td) / "config.hk.json"
-        runtime_config = {
-            "schedule": {
-                "enabled": True,
-                "timezone": "Asia/Hong_Kong",
-                "run_window": {
-                    "start": "09:30",
-                    "end": "16:00",
-                    "breaks": [{"start": "12:00", "end": "13:00"}],
-                },
-            }
+    td = tmp_path
+    cfg = Path(td) / "config.hk.json"
+    runtime_config = {
+        "schedule": {
+            "enabled": True,
+            "timezone": "Asia/Hong_Kong",
+            "run_window": {
+                "start": "09:30",
+                "end": "16:00",
+                "breaks": [{"start": "12:00", "end": "13:00"}],
+            },
         }
+    }
 
-        out = ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="auto")
+    out = ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="auto")
 
     assert out == {
         "market": "hk",

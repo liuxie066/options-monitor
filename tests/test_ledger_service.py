@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +9,6 @@ from domain.domain.ledger import ContractKey, TradeEvent
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def _position_fields(

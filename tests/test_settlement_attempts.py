@@ -990,7 +990,7 @@ def test_legacy_completion_rejects_post_start_invocation_states(
     tmp_path: Path,
 ) -> None:
     started_path = tmp_path / "started.sqlite3"
-    started = _reserve_started(started_path)
+    _reserve_started(started_path)
     with pytest.raises(
         SettlementAttemptClaimOwnershipLost,
         match="requires exact audit reconciliation",

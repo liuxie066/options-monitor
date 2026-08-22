@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 import os
 import sqlite3
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,6 @@ from src.application.close_advice_report_manifest import (
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
@@ -1669,7 +1668,6 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
 
 
 def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2029,7 +2027,6 @@ def test_runtime_status_public_projection_omits_private_runtime_payloads(tmp_pat
 
 
 def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2147,7 +2144,6 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
 
 
 def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2182,7 +2178,6 @@ def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
 
 
 def test_runtime_status_reports_config_authority_for_legacy_runtime_config(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2758,7 +2753,7 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
         calls.append(kwargs)
         raise RuntimeError("stop after config-scope capture")
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         runtime_status_tool(
             {"profile_path": str(profile_path)},
             load_runtime_config=_load_runtime_config,
@@ -2768,10 +2763,8 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
             repo_base=lambda: tmp_path,
             mask_path=lambda path: str(path),
         )
-    except RuntimeError as exc:
-        assert str(exc) == "stop after config-scope capture"
-    else:
-        raise AssertionError("expected load_runtime_config sentinel")
+    exc = _caught.value
+    assert str(exc) == "stop after config-scope capture"
 
     assert calls == [{"config_key": None, "config_path": None, "require_identity": False}]
 
@@ -2801,7 +2794,7 @@ def test_runtime_status_service_profile_resolves_config_key_to_profile_config_pa
         calls.append(kwargs)
         raise RuntimeError("stop after config-scope capture")
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         runtime_status_tool(
             {"profile_path": str(profile_path), "config_key": "hk"},
             load_runtime_config=_load_runtime_config,
@@ -2811,10 +2804,8 @@ def test_runtime_status_service_profile_resolves_config_key_to_profile_config_pa
             repo_base=lambda: tmp_path,
             mask_path=lambda path: str(path),
         )
-    except RuntimeError as exc:
-        assert str(exc) == "stop after config-scope capture"
-    else:
-        raise AssertionError("expected load_runtime_config sentinel")
+    exc = _caught.value
+    assert str(exc) == "stop after config-scope capture"
 
     assert calls == [{"config_key": "hk", "config_path": str(hk_path), "require_identity": False}]
 
@@ -2938,7 +2929,6 @@ def test_runtime_status_keeps_newer_failed_upgrade_as_runtime_failure(tmp_path: 
 
 
 def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3043,7 +3033,6 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
 
 
 def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3105,7 +3094,6 @@ def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path
 
 
 def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3152,7 +3140,6 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
 
 
 def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3201,7 +3188,6 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
 def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_counts(
     tmp_path: Path,
 ) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3262,7 +3248,6 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
 
 
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")

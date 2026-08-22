@@ -3,128 +3,58 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _legacy_opend_unhealthy_action(error_code: str, degraded: bool) -> dict[str, object]:
-    code = str(error_code or 'OPEND_API_ERROR')
-    if code == 'OPEND_NEEDS_PHONE_VERIFY':
-        return {
-            'action': 'pause_phone_verify',
-            'terminal': True,
-            'fallback_used': False,
-        }
-    if degraded:
-        return {
-            'action': 'degrade_continue',
-            'terminal': False,
-            'fallback_used': True,
-        }
-    return {
-        'action': 'abort',
-        'terminal': True,
-        'fallback_used': False,
-    }
-
-
-def _legacy_account_scan_gate(
-    *,
-    should_run: bool,
-    markets_to_run: list[str],
-    symbols: list[object],
-    reason: str,
-) -> dict[str, object]:
-    if not should_run:
-        return {
-            'run_pipeline': False,
-            'ran_scan': False,
-            'meaningful': False,
-            'result_reason': reason,
-        }
-    if markets_to_run and (not symbols):
-        return {
-            'run_pipeline': False,
-            'ran_scan': False,
-            'meaningful': False,
-            'result_reason': f'{reason} | 本时段无对应市场标的',
-        }
-    return {
-        'run_pipeline': True,
-        'ran_scan': True,
-        'meaningful': None,
-        'result_reason': reason,
-    }
-
-
-def _legacy_pipeline_execution_result(returncode: int) -> dict[str, object]:
-    if int(returncode) == 0:
-        return {
-            'ok': True,
-            'ran_scan': True,
-            'meaningful': None,
-            'reason': '',
-        }
-    return {
-        'ok': False,
-        'ran_scan': True,
-        'meaningful': False,
-        'reason': 'pipeline failed',
-    }
-
-
 def test_decide_opend_unhealthy_action_matches_legacy_branching() -> None:
     from domain.domain.engine import decide_opend_unhealthy_action
 
-    for error_code in ('OPEND_NEEDS_PHONE_VERIFY', 'OPEND_API_ERROR'):
-        for degraded in (False, True):
-            expected = _legacy_opend_unhealthy_action(error_code, degraded)
-            actual = decide_opend_unhealthy_action(error_code=error_code, degraded=degraded)
-            assert actual == expected
+    cases = (
+        ('OPEND_NEEDS_PHONE_VERIFY', False, 'pause_phone_verify', True, False),
+        ('OPEND_NEEDS_PHONE_VERIFY', True, 'pause_phone_verify', True, False),
+        ('OPEND_API_ERROR', False, 'abort', True, False),
+        ('OPEND_API_ERROR', True, 'degrade_continue', False, True),
+    )
+    for error_code, degraded, action, terminal, fallback_used in cases:
+        assert decide_opend_unhealthy_action(error_code=error_code, degraded=degraded) == {
+            'action': action,
+            'terminal': terminal,
+            'fallback_used': fallback_used,
+        }
 
 
 def test_decide_account_scan_gate_matches_legacy_branching() -> None:
     from domain.domain.engine import decide_account_scan_gate
 
-    cases = [
-        {
-            'should_run': False,
-            'markets_to_run': ['US'],
-            'symbols': [{'symbol': 'AAPL'}],
-            'reason': 'interval_not_due',
-        },
-        {
-            'should_run': True,
-            'markets_to_run': ['US'],
-            'symbols': [],
-            'reason': 'ok',
-        },
-        {
-            'should_run': True,
-            'markets_to_run': [],
-            'symbols': [],
-            'reason': 'ok',
-        },
-    ]
-
-    for case in cases:
-        expected = _legacy_account_scan_gate(
-            should_run=bool(case['should_run']),
-            markets_to_run=list(case['markets_to_run']),
-            symbols=list(case['symbols']),
-            reason=str(case['reason']),
-        )
-        actual = decide_account_scan_gate(
-            should_run=bool(case['should_run']),
-            has_symbols=((not list(case['markets_to_run'])) or bool(list(case['symbols']))),
-            reason=str(case['reason']),
-        )
-        assert actual == expected
+    cases = (
+        (False, True, 'interval_not_due', False, False, False, 'interval_not_due'),
+        (True, False, 'ok', False, False, False, 'ok | 本时段无对应市场标的'),
+        (True, True, 'ok', True, True, None, 'ok'),
+    )
+    for should_run, has_symbols, reason, run_pipeline, ran_scan, meaningful, result_reason in cases:
+        assert decide_account_scan_gate(
+            should_run=should_run,
+            has_symbols=has_symbols,
+            reason=reason,
+        ) == {
+            'run_pipeline': run_pipeline,
+            'ran_scan': ran_scan,
+            'meaningful': meaningful,
+            'result_reason': result_reason,
+        }
 
 
 def test_decide_pipeline_execution_result_matches_legacy_branching() -> None:
     from domain.domain.engine import decide_pipeline_execution_result
 
-    for returncode in (0, 1, 2):
-        expected = _legacy_pipeline_execution_result(returncode)
-        actual = decide_pipeline_execution_result(returncode=returncode)
-        assert actual == expected
+    for returncode, ok, meaningful, reason in (
+        (0, True, None, ''),
+        (1, False, False, 'pipeline failed'),
+        (2, False, False, 'pipeline failed'),
+    ):
+        assert decide_pipeline_execution_result(returncode=returncode) == {
+            'ok': ok,
+            'ran_scan': True,
+            'meaningful': meaningful,
+            'reason': reason,
+        }
 
 
 def test_main_uses_engine_decision_entrypoints_batch3() -> None:

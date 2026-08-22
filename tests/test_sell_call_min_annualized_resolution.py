@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import subprocess
 import sys
 from pathlib import Path
@@ -9,13 +11,7 @@ BASE = Path(__file__).resolve().parents[1]
 VPY = Path(sys.executable)
 
 
-def _add_repo_to_syspath() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
-
-
 def test_symbol_sell_call_min_overrides_template() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 
     symbol_cfg = {
@@ -29,7 +25,6 @@ def test_symbol_sell_call_min_overrides_template() -> None:
 
 
 def test_template_sell_call_min_overrides_default() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 
     symbol_cfg = {
@@ -43,7 +38,6 @@ def test_template_sell_call_min_overrides_default() -> None:
 
 
 def test_none_sell_call_min_uses_default() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_config import (
         DEFAULT_MIN_ANNUALIZED_NET_PREMIUM_RETURN,
         resolve_min_annualized_net_premium_return,
@@ -63,7 +57,6 @@ def test_none_sell_call_min_uses_default() -> None:
 
 
 def test_legacy_sell_call_field_still_works() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 
     symbol_cfg = {
@@ -75,7 +68,6 @@ def test_legacy_sell_call_field_still_works() -> None:
 
 
 def test_invalid_sell_call_min_raises() -> None:
-    _add_repo_to_syspath()
     from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 
     symbol_cfg = {
@@ -83,12 +75,10 @@ def test_invalid_sell_call_min_raises() -> None:
         'sell_call': {'min_annualized_net_premium_return': 1.2},
     }
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_min_annualized_net_premium_return(symbol_cfg=symbol_cfg, profiles={})
-    except ValueError as e:
-        assert 'within [0, 1]' in str(e)
-    else:
-        raise AssertionError('expected ValueError for invalid min_annualized_net_premium_return')
+    e = _caught.value
+    assert 'within [0, 1]' in str(e)
 
 
 def test_scan_sell_call_requires_min_annualized_arg() -> None:
@@ -142,7 +132,6 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
 
 
 def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None:
-    _add_repo_to_syspath()
 
     import src.application.sell_call_steps as steps
     import pandas as pd
@@ -179,7 +168,6 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
 
 
 def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: Path) -> None:
-    _add_repo_to_syspath()
 
     import src.application.sell_call_steps as steps
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
@@ -214,7 +202,6 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: P
 def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
     tmp_path: Path,
 ) -> None:
-    _add_repo_to_syspath()
 
     import src.application.sell_call_steps as steps
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

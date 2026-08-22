@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 import urllib.error
 
+from conftest import portfolio_sync_receipt as _sync_receipt
 from src.infrastructure.portfolio_holdings_sync_client import (
     PortfolioHoldingsSyncError,
     PortfolioHoldingsSyncUnknownError,
@@ -25,28 +28,6 @@ class _Response:
     def read(self, _size: int) -> bytes:
         return self._body
 
-
-def _sync_receipt(account: str = "lx") -> dict:
-    return {
-        "success": True,
-        "status": "written",
-        "account": account,
-        "broker": "futu",
-        "dry_run": False,
-        "source": "futu-openapi",
-        "source_snapshot_id": f"snapshot-{account}",
-        "sync_run_id": f"sync-{account}",
-        "receipt_persisted": True,
-        "partial_write_possible": False,
-        "stages": {
-            name: {
-                "status": "succeeded",
-                "partial_write_possible": False,
-            }
-            for name in ("positions", "securities_cash", "fund_mmf")
-        },
-        "positions": [],
-    }
 
 
 def test_sync_portfolio_holdings_posts_fail_closed_absolute_sync() -> None:
@@ -81,12 +62,10 @@ def test_sync_portfolio_holdings_posts_fail_closed_absolute_sync() -> None:
 
 
 def test_portfolio_service_url_must_be_loopback() -> None:
-    try:
+    with pytest.raises(PortfolioHoldingsSyncError) as _caught:
         resolve_portfolio_service_origin("https://portfolio.example.com")
-    except PortfolioHoldingsSyncError as exc:
-        assert "loopback" in str(exc)
-    else:
-        raise AssertionError("expected PortfolioHoldingsSyncError")
+    exc = _caught.value
+    assert "loopback" in str(exc)
 
 
 def test_sync_portfolio_holdings_rejects_success_false() -> None:
@@ -94,16 +73,14 @@ def test_sync_portfolio_holdings_rejects_success_false() -> None:
         assert timeout == 5.0
         return _Response({"success": False, "error": "invalid average_cost"})
 
-    try:
+    with pytest.raises(PortfolioHoldingsSyncError) as _caught:
         sync_portfolio_holdings(
             "lx",
             timeout_sec=5,
             urlopen_fn=_urlopen,
         )
-    except PortfolioHoldingsSyncError as exc:
-        assert "invalid average_cost" in str(exc)
-    else:
-        raise AssertionError("expected PortfolioHoldingsSyncError")
+    exc = _caught.value
+    assert "invalid average_cost" in str(exc)
 
 
 def test_sync_portfolio_holdings_requires_explicit_success_confirmation() -> None:
@@ -111,29 +88,25 @@ def test_sync_portfolio_holdings_requires_explicit_success_confirmation() -> Non
         assert timeout == 5.0
         return _Response({"status": "written"})
 
-    try:
+    with pytest.raises(PortfolioHoldingsSyncError) as _caught:
         sync_portfolio_holdings(
             "lx",
             timeout_sec=5,
             urlopen_fn=_urlopen,
         )
-    except PortfolioHoldingsSyncError as exc:
-        assert "missing required fields" in str(exc)
-    else:
-        raise AssertionError("expected PortfolioHoldingsSyncError")
+    exc = _caught.value
+    assert "missing required fields" in str(exc)
 
 
 def test_transport_failure_is_reported_as_unknown_not_safe_to_retry() -> None:
     def _urlopen(request, *, timeout):
         raise urllib.error.URLError("response lost")
 
-    try:
+    with pytest.raises(PortfolioHoldingsSyncUnknownError) as _caught:
         sync_portfolio_holdings(
             "lx",
             timeout_sec=5,
             urlopen_fn=_urlopen,
         )
-    except PortfolioHoldingsSyncUnknownError as exc:
-        assert "response lost" in str(exc)
-    else:
-        raise AssertionError("expected PortfolioHoldingsSyncUnknownError")
+    exc = _caught.value
+    assert "response lost" in str(exc)

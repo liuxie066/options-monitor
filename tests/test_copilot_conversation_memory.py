@@ -5,16 +5,13 @@ import sqlite3
 import threading
 from argparse import Namespace
 
-import pytest
 
-from src.application.copilot import channel_facade, local_harness, tools as copilot_tools
+from src.application.copilot import channel_facade, tools as copilot_tools
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, new_id
 from tests.copilot_pi_test_support import (
     _TEST_MODEL,
-    ModelRequest,
     ModelTurn,
     ToolCall,
-    fake_pi_agent,
     run_contract,
 )
 from src.application.copilot.host_store import CopilotHostStore

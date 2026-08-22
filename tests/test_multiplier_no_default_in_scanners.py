@@ -6,14 +6,9 @@ Requirement:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 
 def test_sell_put_metrics_requires_multiplier() -> None:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     import pandas as pd
     from src.application.scan_sell_put import compute_metrics
@@ -30,9 +25,6 @@ def test_sell_put_metrics_requires_multiplier() -> None:
 
 
 def test_sell_call_metrics_requires_multiplier() -> None:
-    base = Path(__file__).resolve().parents[1]
-    if str(base) not in sys.path:
-        sys.path.insert(0, str(base))
 
     import pandas as pd
     from src.application.scan_sell_call import compute_metrics

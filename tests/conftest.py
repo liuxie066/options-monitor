@@ -82,13 +82,6 @@ def example_config_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def runtime_config_copy(tmp_path, example_config_path: Path) -> Path:
-    cfg_path = (tmp_path / "config.us.json").resolve()
-    cfg_path.write_text(example_config_path.read_text(encoding="utf-8"), encoding="utf-8")
-    return cfg_path
-
-
-@pytest.fixture
 def argv_scope(monkeypatch) -> Callable[[list[str]], None]:
     def _apply(argv: list[str]) -> None:
         monkeypatch.setattr(sys, "argv", list(argv))
@@ -105,6 +98,26 @@ class FakeRunLogger:
         rec = {"step": step, "status": status}
         rec.update(kwargs)
         self.events.append(rec)
+
+
+def portfolio_sync_receipt(account: str = "lx") -> dict[str, Any]:
+    return {
+        "success": True,
+        "status": "written",
+        "account": account,
+        "broker": "futu",
+        "dry_run": False,
+        "source": "futu-openapi",
+        "source_snapshot_id": f"snapshot-{account}",
+        "sync_run_id": f"sync-{account}",
+        "receipt_persisted": True,
+        "partial_write_possible": False,
+        "stages": {
+            name: {"status": "succeeded", "partial_write_possible": False}
+            for name in ("positions", "securities_cash", "fund_mmf")
+        },
+        "positions": [],
+    }
 
 
 @pytest.fixture

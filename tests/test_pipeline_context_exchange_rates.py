@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 
 def test_load_exchange_rates_fetches_latest_when_cache_missing(monkeypatch, tmp_path: Path) -> None:
@@ -100,11 +99,10 @@ def test_fetch_opend_exchange_rate_observation_uses_market_fetch(
     monkeypatch,
 ) -> None:
     from src.application import exchange_rate_loader as loader
-    from src.infrastructure import exchange_rates
     from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
     monkeypatch.setattr(
-        exchange_rates,
+        loader,
         "fetch_market_exchange_rates",
         lambda: {
             "rates": {"USDCNY": 7.21, "HKDCNY": 0.92},

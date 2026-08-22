@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_watchlist_pipeline_validates_processor_rows_before_aggregation() -> None:
@@ -124,13 +120,3 @@ def test_watchlist_pipeline_rejects_non_list_processor_rows_contract() -> None:
         assert row["schema_version"] == "3.0"
     assert all(r.get("schema_kind") == "processor_output" for r in out)
     assert all(r.get("schema_version") == "3.0" for r in out)
-
-
-def main() -> None:
-    test_watchlist_pipeline_validates_processor_rows_before_aggregation()
-    test_watchlist_pipeline_rejects_non_list_processor_rows_contract()
-    print("OK (pipeline-processor-contract)")
-
-
-if __name__ == "__main__":
-    main()

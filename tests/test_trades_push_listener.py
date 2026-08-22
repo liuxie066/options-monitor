@@ -129,13 +129,11 @@ def test_trade_push_listener_health_raises_terminal_phone_verification(monkeypat
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
     listener.start()
 
-    try:
+    with pytest.raises(TradeIntakeAuthRequired) as _caught:
         listener.check_health()
-    except TradeIntakeAuthRequired as exc:
-        assert exc.error_code == "OPEND_NEEDS_PHONE_VERIFY"
-        assert "需要手机验证码" in exc.detail
-    else:
-        raise AssertionError("expected TradeIntakeAuthRequired")
+    exc = _caught.value
+    assert exc.error_code == "OPEND_NEEDS_PHONE_VERIFY"
+    assert "需要手机验证码" in exc.detail
 
 
 def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> None:
@@ -166,12 +164,10 @@ def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> N
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
     listener.start()
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         listener.check_health()
-    except RuntimeError as exc:
-        assert "OPEND_API_ERROR" in str(exc)
-    else:
-        raise AssertionError("expected retryable RuntimeError")
+    exc = _caught.value
+    assert "OPEND_API_ERROR" in str(exc)
 
 
 def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) -> None:
@@ -200,11 +196,9 @@ def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) 
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
 
     try:
-        listener.start()
-    except TradeIntakeAuthRequired as exc:
-        assert exc.error_code == "OPEND_NEEDS_PHONE_VERIFY"
-    else:
-        raise AssertionError("expected terminal auth while constructor is blocked")
+        with pytest.raises(TradeIntakeAuthRequired) as caught:
+            listener.start()
+        assert caught.value.error_code == "OPEND_NEEDS_PHONE_VERIFY"
     finally:
         release_constructor.set()
 
@@ -263,12 +257,10 @@ def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> N
     handlers_before = list(sdk_logger.handlers)
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
 
-    try:
+    with pytest.raises(RuntimeError) as _caught:
         listener.start()
-    except RuntimeError as exc:
-        assert "failed to initialize" in str(exc)
-    else:
-        raise AssertionError("expected retryable constructor failure")
+    exc = _caught.value
+    assert "failed to initialize" in str(exc)
 
     assert list(sdk_logger.handlers) == handlers_before
 
@@ -278,6 +270,11 @@ def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(OpenSecTradeContext=object, TradeDealHandlerBase=object),
+    )
 
     listener = OpenDTradePushListener(host="127.0.0.9", port=11119, on_deal=lambda payload: None)
     with pytest.raises(FutuGatewayUnreachableError):

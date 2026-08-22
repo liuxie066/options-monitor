@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -115,11 +117,10 @@ def test_read_view_reports_unavailable_and_revision_requires_date(tmp_path: Path
     assert str(tmp_path) not in str(unavailable)
     assert "不可用" in unavailable["rendered_markdown"]
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         read_daily_brief_view(base=tmp_path, account="lx", market="US", revision=0)
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "market_trading_date is required" in str(exc)
+    exc = _caught.value
+    assert "market_trading_date is required" in str(exc)
 
 
 def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tmp_path: Path) -> None:
@@ -167,11 +168,10 @@ def test_agent_tool_rejects_invalid_revision_contract() -> None:
         {"account": "lx", "market": "US", "date": "2026-07-19", "revision": "1"},
     )
     for payload in invalid_payloads:
-        try:
+        with pytest.raises(AgentToolError) as _caught:
             DAILY_DECISION_BRIEF_READ_TOOL.call(payload)
-            raise AssertionError(f"expected INPUT_ERROR for {payload!r}")
-        except AgentToolError as exc:
-            assert exc.code == "INPUT_ERROR"
+        exc = _caught.value
+        assert exc.code == "INPUT_ERROR"
 
 
 def test_agent_tool_manifest_declares_side_effect_free_read() -> None:

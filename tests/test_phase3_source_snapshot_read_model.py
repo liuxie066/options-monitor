@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_state_repo_source_snapshot_events_and_current_models() -> None:
@@ -67,12 +64,3 @@ def test_state_repo_source_snapshot_events_and_current_models() -> None:
         assert p.exists()
         d = json.loads(p.read_text(encoding="utf-8"))
         assert d["source_name"] == src
-
-
-def main() -> None:
-    test_state_repo_source_snapshot_events_and_current_models()
-    print("OK (phase3-source-snapshot-read-model)")
-
-
-if __name__ == "__main__":
-    main()

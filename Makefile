@@ -5,10 +5,9 @@ endif
 PYTHON := $(SELECTED_PYTHON)
 
 test:
-	$(PYTHON) tests/run_tests.py
+	$(PYTHON) -m pytest
 
-test-all:
-	$(PYTHON) tests/run_tests.py --all
+test-all: test
 
 smoke:
 	$(PYTHON) tests/run_smoke.py

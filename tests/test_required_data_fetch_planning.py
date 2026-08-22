@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 @pytest.fixture(autouse=True)
@@ -539,7 +535,7 @@ def test_fetch_plan_rejects_unexpanded_template_strategy_config(monkeypatch, tmp
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
     monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         mod.build_required_data_fetch_plan(
             base=tmp_path,
             required_data_dir=tmp_path,
@@ -557,9 +553,8 @@ def test_fetch_plan_rejects_unexpanded_template_strategy_config(monkeypatch, tmp
             fetch_host="127.0.0.1",
             fetch_port=11111,
         )
-        raise AssertionError("expected unresolved strategy config failure")
-    except ValueError as exc:
-        assert "apply templates/profiles" in str(exc)
+    exc = _caught.value
+    assert "apply templates/profiles" in str(exc)
 
 
 def test_sell_call_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:

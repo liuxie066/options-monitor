@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 from domain.domain.error_policy import (
     ERR_2FA_REQUIRED,
@@ -34,14 +29,3 @@ def test_upstream_unavailable_classification() -> None:
     assert out["error_code"] == ERR_UPSTREAM_UNAVAILABLE
     assert out["category"] == "upstream_unavailable"
     assert out["retryable"] is True
-
-
-def main() -> None:
-    test_timeout_classification()
-    test_two_factor_classification()
-    test_upstream_unavailable_classification()
-    print("OK (error-policy)")
-
-
-if __name__ == "__main__":
-    main()

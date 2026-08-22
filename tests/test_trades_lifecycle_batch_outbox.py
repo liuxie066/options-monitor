@@ -808,7 +808,7 @@ def test_terminal_completion_rolls_back_when_member_cardinality_changes(
             (row["outbox_id"],),
         )
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         complete_notification_batch_attempt(
             repo,
             batch_id=batch["batch_id"],
@@ -816,10 +816,8 @@ def test_terminal_completion_rolls_back_when_member_cardinality_changes(
             outcome="confirmed",
             now_ms=current + 1,
         )
-    except ValueError as exc:
-        assert "member mismatch" in str(exc)
-    else:
-        raise AssertionError("expected atomic member mismatch failure")
+    exc = _caught.value
+    assert "member mismatch" in str(exc)
     assert repo.get_trade_lifecycle_notification_batch(
         batch["batch_id"]
     )["status"] == "send_started"

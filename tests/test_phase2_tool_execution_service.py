@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_subprocess_boundary_wrappers() -> None:
@@ -76,51 +71,51 @@ def test_subprocess_boundary_wrappers() -> None:
     assert "message_id is missing" in unconfirmed["message"]
 
 
-def test_state_repo_idempotency_and_audit_helpers() -> None:
+def test_state_repo_idempotency_and_audit_helpers(tmp_path: Path) -> None:
     from domain.storage.repositories import state_repo
 
-    with TemporaryDirectory() as td:
-        base = Path(td)
-        started_at = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
-        finished_at = started_at + timedelta(seconds=1)
-        r1 = state_repo.put_idempotency_success(
-            base,
-            scope="required_data_prefetch",
-            key="k1",
-            payload={"tool_name": "required_data_prefetch", "status": "fetched"},
-        )
-        assert r1["created"] is True
-        r2 = state_repo.put_idempotency_success(
-            base,
-            scope="required_data_prefetch",
-            key="k1",
-            payload={"tool_name": "required_data_prefetch", "status": "fetched"},
-        )
-        assert r2["created"] is False
+    td = tmp_path
+    base = Path(td)
+    started_at = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
+    finished_at = started_at + timedelta(seconds=1)
+    r1 = state_repo.put_idempotency_success(
+        base,
+        scope="required_data_prefetch",
+        key="k1",
+        payload={"tool_name": "required_data_prefetch", "status": "fetched"},
+    )
+    assert r1["created"] is True
+    r2 = state_repo.put_idempotency_success(
+        base,
+        scope="required_data_prefetch",
+        key="k1",
+        payload={"tool_name": "required_data_prefetch", "status": "fetched"},
+    )
+    assert r2["created"] is False
 
-        state_repo.append_tool_execution_audit(
-            base,
-            {
-                "schema_kind": "tool_execution",
-                "schema_version": "1.0",
-                "tool_name": "required_data_prefetch",
-                "symbol": "AAPL",
-                "source": "yahoo",
-                "limit_exp": 8,
-                "idempotency_key": "k1",
-                "status": "fetched",
-                "ok": True,
-                "message": "fetched",
-                "returncode": 0,
-                "started_at_utc": started_at.isoformat(),
-                "finished_at_utc": finished_at.isoformat(),
-            },
-        )
-        audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
-        assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
+    state_repo.append_tool_execution_audit(
+        base,
+        {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
+            "tool_name": "required_data_prefetch",
+            "symbol": "AAPL",
+            "source": "yahoo",
+            "limit_exp": 8,
+            "idempotency_key": "k1",
+            "status": "fetched",
+            "ok": True,
+            "message": "fetched",
+            "returncode": 0,
+            "started_at_utc": started_at.isoformat(),
+            "finished_at_utc": finished_at.isoformat(),
+        },
+    )
+    audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
+    assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_tool_execution_service_idempotency_and_audit() -> None:
+def test_tool_execution_service_idempotency_and_audit(tmp_path: Path) -> None:
     from domain.services import ToolExecutionIntent, ToolExecutionService
 
     class _Proc:
@@ -134,30 +129,30 @@ def test_tool_execution_service_idempotency_and_audit() -> None:
         calls.append(cmd)
         return _Proc()
 
-    with TemporaryDirectory() as td:
-        base = Path(td)
-        svc = ToolExecutionService(base=base, runner=_runner)
-        intent = ToolExecutionIntent(
-            tool_name="required_data_prefetch",
-            symbol="AAPL",
-            source="yahoo",
-            limit_exp=8,
-            cmd=["python", "fake.py"],
-            cwd=base,
-            idempotency_scope="required_data_prefetch",
-        )
-        p1 = svc.execute(intent)
-        p2 = svc.execute(intent)
+    td = tmp_path
+    base = Path(td)
+    svc = ToolExecutionService(base=base, runner=_runner)
+    intent = ToolExecutionIntent(
+        tool_name="required_data_prefetch",
+        symbol="AAPL",
+        source="yahoo",
+        limit_exp=8,
+        cmd=["python", "fake.py"],
+        cwd=base,
+        idempotency_scope="required_data_prefetch",
+    )
+    p1 = svc.execute(intent)
+    p2 = svc.execute(intent)
 
-        assert p1["status"] == "fetched"
-        assert p2["status"] == "skipped"
-        assert len(calls) == 1
+    assert p1["status"] == "fetched"
+    assert p2["status"] == "skipped"
+    assert len(calls) == 1
 
-        audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
-        assert len(audit_path.read_text(encoding="utf-8").splitlines()) >= 2
+    audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
+    assert len(audit_path.read_text(encoding="utf-8").splitlines()) >= 2
 
 
-def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency() -> None:
+def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency(tmp_path: Path) -> None:
     from domain.services import ToolExecutionIntent, ToolExecutionService
 
     class _Proc:
@@ -171,44 +166,32 @@ def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency() -
         calls.append(cmd)
         return _Proc()
 
-    with TemporaryDirectory() as td:
-        base = Path(td)
-        svc = ToolExecutionService(base=base, runner=_runner)
-        base_intent = ToolExecutionIntent(
-            tool_name="required_data_prefetch",
-            symbol="AAPL",
-            source="yahoo",
-            limit_exp=8,
-            cmd=["python", "fake.py"],
-            cwd=base,
-            idempotency_scope="required_data_prefetch",
-        )
-        forced_intent = ToolExecutionIntent(
-            tool_name="required_data_prefetch",
-            symbol="AAPL",
-            source="yahoo",
-            limit_exp=8,
-            cmd=["python", "fake.py"],
-            cwd=base,
-            idempotency_scope="required_data_prefetch",
-            force_refresh=True,
-        )
+    td = tmp_path
+    base = Path(td)
+    svc = ToolExecutionService(base=base, runner=_runner)
+    base_intent = ToolExecutionIntent(
+        tool_name="required_data_prefetch",
+        symbol="AAPL",
+        source="yahoo",
+        limit_exp=8,
+        cmd=["python", "fake.py"],
+        cwd=base,
+        idempotency_scope="required_data_prefetch",
+    )
+    forced_intent = ToolExecutionIntent(
+        tool_name="required_data_prefetch",
+        symbol="AAPL",
+        source="yahoo",
+        limit_exp=8,
+        cmd=["python", "fake.py"],
+        cwd=base,
+        idempotency_scope="required_data_prefetch",
+        force_refresh=True,
+    )
 
-        p1 = svc.execute(base_intent)
-        p2 = svc.execute(forced_intent)
+    p1 = svc.execute(base_intent)
+    p2 = svc.execute(forced_intent)
 
-        assert p1["status"] == "fetched"
-        assert p2["status"] == "fetched"
-        assert len(calls) == 2
-
-
-def main() -> None:
-    test_subprocess_boundary_wrappers()
-    test_state_repo_idempotency_and_audit_helpers()
-    test_tool_execution_service_idempotency_and_audit()
-    test_tool_execution_service_force_refresh_bypasses_persisted_idempotency()
-    print("OK (phase2 tool execution service)")
-
-
-if __name__ == "__main__":
-    main()
+    assert p1["status"] == "fetched"
+    assert p2["status"] == "fetched"
+    assert len(calls) == 2

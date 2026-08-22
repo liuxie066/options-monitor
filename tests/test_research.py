@@ -1420,7 +1420,7 @@ def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
-    try:
+    with pytest.raises(AgentToolError) as _caught:
         research_tool(
             {
                 "config_path": str(tmp_path / "config.us.json"),
@@ -1437,10 +1437,8 @@ def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
             runtime_status_tool_fn=_runtime_status,
             **_tool_kwargs(tmp_path),
         )
-    except AgentToolError as exc:
-        assert exc.code == "INPUT_ERROR"
-    else:
-        raise AssertionError("expected AgentToolError")
+    exc = _caught.value
+    assert exc.code == "INPUT_ERROR"
 
 
 def test_research_collect_write_outputs_requires_confirm(tmp_path: Path) -> None:

@@ -34,8 +34,6 @@ def test_stage4_domain_files_without_argparse_or_main() -> None:
 
 
 def test_scan_scheduler_domain_and_cli() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
 
     from src.application.scan_scheduler import run_scheduler
 
@@ -86,8 +84,6 @@ def test_scan_scheduler_domain_and_cli() -> None:
 
 
 def test_query_sell_put_cash_domain_minimal() -> None:
-    if str(BASE) not in sys.path:
-        sys.path.insert(0, str(BASE))
 
     import src.application.cash_headroom_query as m
 

@@ -5,13 +5,9 @@ Now http_json is centralized and raises typed exceptions instead of returning er
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+import pytest
 
 
 def _make_http_error(status: int, body: str | bytes | None):
@@ -37,11 +33,10 @@ def test_http_json_404_non_json_body_raises_permanent_error() -> None:
     fake_error = _make_http_error(404, "Not Found")
 
     with patch("urllib.request.urlopen", side_effect=fake_error):
-        try:
+        with pytest.raises(fb.FeishuPermanentError) as _caught:
             fb.http_json("GET", "https://example.com/notfound", retry_max_attempts=1)
-            assert False, "should raise"
-        except fb.FeishuPermanentError as e:
-            assert "http=404" in str(e) or "404" in str(e)
+        e = _caught.value
+        assert "http=404" in str(e) or "404" in str(e)
 
 
 def test_http_json_500_json_body_raises_transient_error() -> None:
@@ -51,11 +46,10 @@ def test_http_json_500_json_body_raises_transient_error() -> None:
     fake_error = _make_http_error(500, json.dumps(payload))
 
     with patch("urllib.request.urlopen", side_effect=fake_error):
-        try:
+        with pytest.raises(fb.FeishuTransientError) as _caught:
             fb.http_json("POST", "https://example.com/fail", retry_max_attempts=1)
-            assert False, "should raise"
-        except fb.FeishuTransientError as e:
-            assert "http=500" in str(e) or "500" in str(e)
+        e = _caught.value
+        assert "http=500" in str(e) or "500" in str(e)
 
 
 def test_http_json_urlerror_raises_transient_error() -> None:
@@ -63,11 +57,10 @@ def test_http_json_urlerror_raises_transient_error() -> None:
     import urllib.error
 
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("network unreachable")):
-        try:
+        with pytest.raises(fb.FeishuTransientError) as _caught:
             fb.http_json("GET", "https://example.com/unreachable", retry_max_attempts=1)
-            assert False, "should raise"
-        except fb.FeishuTransientError as e:
-            assert "network" in str(e).lower() or "URLError" in str(e)
+        e = _caught.value
+        assert "network" in str(e).lower() or "URLError" in str(e)
 
 
 def test_http_json_socket_timeout_raises_transient_error() -> None:
@@ -75,16 +68,7 @@ def test_http_json_socket_timeout_raises_transient_error() -> None:
     import socket
 
     with patch("urllib.request.urlopen", side_effect=socket.timeout("read timed out")):
-        try:
+        with pytest.raises(fb.FeishuTransientError) as _caught:
             fb.http_json("GET", "https://example.com/timeout", retry_max_attempts=1)
-            assert False, "should raise"
-        except fb.FeishuTransientError as e:
-            assert "timed out" in str(e)
-
-
-if __name__ == "__main__":
-    test_http_json_404_non_json_body_raises_permanent_error()
-    test_http_json_500_json_body_raises_transient_error()
-    test_http_json_urlerror_raises_transient_error()
-    test_http_json_socket_timeout_raises_transient_error()
-    print("OK (4 tests)")
+        e = _caught.value
+        assert "timed out" in str(e)

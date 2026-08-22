@@ -36,11 +36,10 @@ def test_validate_config_rejects_empty_notification_target() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "wechat_clawbot", "target": ""}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
+    exc = _caught.value
+    assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
 
 
 def test_validate_config_rejects_non_string_notification_target() -> None:
@@ -49,11 +48,10 @@ def test_validate_config_rejects_non_string_notification_target() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "wechat_clawbot", "target": ["ou_x"]}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "notifications.target must be a string when configured" in str(exc)
+    exc = _caught.value
+    assert "notifications.target must be a string when configured" in str(exc)
 
 
 def test_validate_config_rejects_openclaw_notification_route() -> None:
@@ -62,11 +60,10 @@ def test_validate_config_rejects_openclaw_notification_route() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": "clawbot:test-room"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "OpenClaw notification routing has been removed" in str(exc)
+    exc = _caught.value
+    assert "OpenClaw notification routing has been removed" in str(exc)
 
 
 def test_validate_config_rejects_retired_agent_config() -> None:
@@ -75,11 +72,10 @@ def test_validate_config_rejects_retired_agent_config() -> None:
     cfg = _base_cfg()
     cfg["agent"] = {"runtime": {"enabled": "yes"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.* config is retired; use assistant.*" in str(exc)
+    exc = _caught.value
+    assert "agent.* config is retired; use assistant.*" in str(exc)
 
 
 def test_validate_config_rejects_invalid_assistant_context_window() -> None:
@@ -88,20 +84,18 @@ def test_validate_config_rejects_invalid_assistant_context_window() -> None:
     cfg = _base_cfg()
     cfg["assistant"] = {"context_window_messages": "many"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.context_window_messages must be an integer" in str(exc)
+    exc = _caught.value
+    assert "assistant.context_window_messages must be an integer" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"context_window_messages": 21}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.context_window_messages must be <= 20" in str(exc)
+    exc = _caught.value
+    assert "assistant.context_window_messages must be <= 20" in str(exc)
 
 
 def test_validate_config_rejects_assistant_mode() -> None:
@@ -110,11 +104,10 @@ def test_validate_config_rejects_assistant_mode() -> None:
     cfg = _base_cfg()
     cfg["assistant"] = {"mode": "disabled"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant has unsupported keys: mode" in str(exc)
+    exc = _caught.value
+    assert "assistant has unsupported keys: mode" in str(exc)
 
 
 def test_validate_config_rejects_non_object_assistant() -> None:
@@ -123,11 +116,10 @@ def test_validate_config_rejects_non_object_assistant() -> None:
     cfg = _base_cfg()
     cfg["assistant"] = False
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant must be an object" in str(exc)
+    exc = _caught.value
+    assert "assistant must be an object" in str(exc)
 
 
 def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
@@ -136,20 +128,18 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"enabled": True}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.enabled is retired; use assistant.copilot.enabled" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.enabled is retired; use assistant.copilot.enabled" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": ["openai"]}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.provider must be a string" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.provider must be a string" in str(exc)
 
 
 def test_validate_config_accepts_known_boolean_copilot_toolsets() -> None:
@@ -175,91 +165,81 @@ def test_validate_config_rejects_invalid_copilot_toolsets() -> None:
     for toolsets, expected in cases:
         cfg = _base_cfg()
         cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": toolsets}}
-        try:
+        with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
-            raise AssertionError("expected SystemExit")
-        except SystemExit as exc:
-            assert expected in str(exc)
+        exc = _caught.value
+        assert expected in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": ["portfolio"]}}
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.copilot.toolsets must be an object" in str(exc)
+    exc = _caught.value
+    assert "assistant.copilot.toolsets must be an object" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.base_url must be a string" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.base_url must be a string" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"base_url": "llm.example/v1"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.base_url must start with http:// or https:// when set" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.base_url must start with http:// or https:// when set" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"confidence_min": 1.5}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.confidence_min must be between 0 and 1" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.confidence_min must be between 0 and 1" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"timeout_seconds": "slow"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.timeout_seconds must be an integer" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.timeout_seconds must be an integer" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"timeout_seconds": 121}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.timeout_seconds must be <= 120" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.timeout_seconds must be <= 120" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"max_output_tokens": 63}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.max_output_tokens must be >= 64" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.max_output_tokens must be >= 64" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"max_output_tokens": 4097}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.max_output_tokens must be <= 4096" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.max_output_tokens must be <= 4096" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": "anthropic"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.llm.provider must be one of: openai, deepseek, kimi" in str(exc)
+    exc = _caught.value
+    assert "assistant.llm.provider must be one of: openai, deepseek, kimi" in str(exc)
 
 
 def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_config() -> None:
@@ -268,47 +248,42 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
     cfg = _base_cfg()
     cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant has unsupported keys: mode" in str(exc)
+    exc = _caught.value
+    assert "assistant has unsupported keys: mode" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"mode": "deterministic"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant has unsupported keys: mode" in str(exc)
+    exc = _caught.value
+    assert "assistant has unsupported keys: mode" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"enabled": "yes"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant.enabled must be a boolean" in str(exc)
+    exc = _caught.value
+    assert "assistant.enabled must be a boolean" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"planner": "enabled"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant has unsupported keys: planner" in str(exc)
+    exc = _caught.value
+    assert "assistant has unsupported keys: planner" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"planner": {"enabled": "yes"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "assistant has unsupported keys: planner" in str(exc)
+    exc = _caught.value
+    assert "assistant has unsupported keys: planner" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {
@@ -380,11 +355,10 @@ def test_validate_config_rejects_retired_intake_multiplier_metadata() -> None:
     cfg = _base_cfg()
     cfg["intake"] = {"symbol_aliases": {"中海油": "0883.HK"}, "multiplier_by_symbol": {"0883.HK": 1000}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "intake.multiplier_by_symbol is retired" in str(exc)
+    exc = _caught.value
+    assert "intake.multiplier_by_symbol is retired" in str(exc)
 
 
 def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets() -> None:
@@ -411,11 +385,10 @@ def test_validate_config_rejects_feishu_app_config_target() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "feishu_app", "target": "ou_xxx"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "OM_FEISHU_BOT_USER_OPEN_ID" in str(exc)
+    exc = _caught.value
+    assert "OM_FEISHU_BOT_USER_OPEN_ID" in str(exc)
 
 
 def test_validate_config_rejects_empty_wechat_clawbot_target() -> None:
@@ -424,11 +397,10 @@ def test_validate_config_rejects_empty_wechat_clawbot_target() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "wechat_clawbot", "target": ""}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
+    exc = _caught.value
+    assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
 
 
 def test_validate_config_rejects_unsupported_notification_channel() -> None:
@@ -437,11 +409,10 @@ def test_validate_config_rejects_unsupported_notification_channel() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "sms", "target": "user:test"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "notifications.provider must be one of: wechat_clawbot, feishu_app" in str(exc)
+    exc = _caught.value
+    assert "notifications.provider must be one of: wechat_clawbot, feishu_app" in str(exc)
 
 
 def test_validate_config_rejects_removed_openclaw_channel_with_wechat_provider() -> None:
@@ -450,12 +421,11 @@ def test_validate_config_rejects_removed_openclaw_channel_with_wechat_provider()
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "wechat_clawbot", "channel": "openclaw-weixin", "target": "wechat:ops"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "OpenClaw notification routing has been removed" in str(exc)
-        assert "provider=wechat_clawbot" in str(exc)
+    exc = _caught.value
+    assert "OpenClaw notification routing has been removed" in str(exc)
+    assert "provider=wechat_clawbot" in str(exc)
 
 
 def test_validate_config_rejects_removed_openclaw_transport_channel() -> None:
@@ -464,11 +434,10 @@ def test_validate_config_rejects_removed_openclaw_transport_channel() -> None:
     cfg = _base_cfg()
     cfg["notifications"] = {"transport_channel": "openclaw-weixin", "target": "wechat:ops"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "OpenClaw notification routing has been removed" in str(exc)
+    exc = _caught.value
+    assert "OpenClaw notification routing has been removed" in str(exc)
 
 
 def test_validate_config_rejects_non_boolean_trade_intake_enabled() -> None:
@@ -477,11 +446,10 @@ def test_validate_config_rejects_non_boolean_trade_intake_enabled() -> None:
     cfg = _base_cfg()
     cfg["trade_intake"] = {"enabled": "false"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "trade_intake.enabled must be a boolean" in str(exc)
+    exc = _caught.value
+    assert "trade_intake.enabled must be a boolean" in str(exc)
 
 
 def test_validate_config_rejects_non_boolean_account_trade_intake_enabled() -> None:
@@ -490,11 +458,10 @@ def test_validate_config_rejects_non_boolean_account_trade_intake_enabled() -> N
     cfg = _base_cfg()
     cfg["account_settings"]["user1"]["trade_intake_enabled"] = "false"
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "account_settings.user1.trade_intake_enabled must be a boolean" in str(exc)
+    exc = _caught.value
+    assert "account_settings.user1.trade_intake_enabled must be a boolean" in str(exc)
 
 
 def test_validate_config_rejects_futu_account_without_account_id() -> None:
@@ -503,11 +470,10 @@ def test_validate_config_rejects_futu_account_without_account_id() -> None:
     cfg = _base_cfg()
     cfg["account_settings"]["user1"]["futu"] = {}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "account_settings.user1.futu.account_id must be a non-empty string" in str(exc)
+    exc = _caught.value
+    assert "account_settings.user1.futu.account_id must be a non-empty string" in str(exc)
 
 
 def test_validate_config_requires_host_port_for_multiple_futu_accounts() -> None:
@@ -520,11 +486,10 @@ def test_validate_config_requires_host_port_for_multiple_futu_accounts() -> None
         "futu": {"account_id": "REAL_87654321", "host": "127.0.0.1", "port": 11112},
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "account_settings.user1.futu.host must be set when multiple futu accounts are configured" in str(exc)
+    exc = _caught.value
+    assert "account_settings.user1.futu.host must be set when multiple futu accounts are configured" in str(exc)
 
 
 def test_validate_config_rejects_lossy_or_out_of_range_futu_ports() -> None:
@@ -541,11 +506,10 @@ def test_validate_config_rejects_lossy_or_out_of_range_futu_ports() -> None:
         cfg = _base_cfg()
         cfg["account_settings"]["user1"]["futu"]["port"] = value
 
-        try:
+        with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
-            raise AssertionError("expected SystemExit")
-        except SystemExit as exc:
-            assert expected in str(exc)
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_validate_config_rejects_unknown_futu_trade_environments() -> None:
@@ -571,11 +535,10 @@ def test_validate_config_rejects_unknown_futu_trade_environments() -> None:
     for expected, mutate in cases:
         cfg = _base_cfg()
         mutate(cfg)
-        try:
+        with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
-            raise AssertionError("expected SystemExit")
-        except SystemExit as exc:
-            assert expected in str(exc)
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_validate_config_accepts_option_positions_auto_close_enabled_boolean() -> None:
@@ -598,11 +561,10 @@ def test_validate_config_rejects_non_boolean_option_positions_auto_close_enabled
     cfg = _base_cfg()
     cfg["option_positions"] = {"auto_close": {"enabled": "no"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "option_positions.auto_close.enabled must be a boolean" in str(exc)
+    exc = _caught.value
+    assert "option_positions.auto_close.enabled must be a boolean" in str(exc)
 
 
 def test_validate_config_rejects_non_boolean_option_positions_auto_close_receipt() -> None:
@@ -611,11 +573,10 @@ def test_validate_config_rejects_non_boolean_option_positions_auto_close_receipt
     cfg = _base_cfg()
     cfg["option_positions"] = {"auto_close": {"receipt": {"enabled": "yes"}}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "option_positions.auto_close.receipt.enabled must be a boolean" in str(exc)
+    exc = _caught.value
+    assert "option_positions.auto_close.receipt.enabled must be a boolean" in str(exc)
 
 
 def test_validate_config_rejects_option_positions_feishu_sync_config() -> None:
@@ -624,11 +585,10 @@ def test_validate_config_rejects_option_positions_feishu_sync_config() -> None:
     cfg = _base_cfg()
     cfg["option_positions"] = {"sync_to_feishu": {"enabled": True}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "option_positions.sync_to_feishu has been removed" in str(exc)
+    exc = _caught.value
+    assert "option_positions.sync_to_feishu has been removed" in str(exc)
 
 
 def test_validate_config_rejects_inline_secret_material() -> None:
@@ -637,11 +597,10 @@ def test_validate_config_rejects_inline_secret_material() -> None:
     cfg = _base_cfg()
     cfg["feishu"] = {"app_secret": "secret_in_json"}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "must not contain inline secret material" in str(exc)
+    exc = _caught.value
+    assert "must not contain inline secret material" in str(exc)
 
 
 def test_validate_config_rejects_retired_feishu_callback_keys() -> None:
@@ -650,11 +609,10 @@ def test_validate_config_rejects_retired_feishu_callback_keys() -> None:
     cfg = _base_cfg()
     cfg["inbound"] = {"feishu": {"verification_token_env": "OM_OLD_TOKEN"}}
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "feishu.bot.app_secret logical credential" in str(exc)
+    exc = _caught.value
+    assert "feishu.bot.app_secret logical credential" in str(exc)
 
 
 def test_validate_config_accepts_default_off_daily_brief() -> None:
@@ -685,11 +643,10 @@ def test_validate_config_rejects_invalid_daily_brief_contract() -> None:
     ):
         cfg = _base_cfg()
         cfg["notifications"] = {"daily_brief": daily_brief}
-        try:
+        with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
-            raise AssertionError("expected SystemExit")
-        except SystemExit as exc:
-            assert expected in str(exc)
+        exc = _caught.value
+        assert expected in str(exc)
 
 
 def test_daily_brief_defaults_and_examples_remove_deprecated_enabled_switch() -> None:
@@ -731,8 +688,7 @@ def test_notification_render_style_rejects_unknown_or_wrong_type() -> None:
     for value in ("typo", 1, None):
         cfg = _base_cfg()
         cfg["notifications"] = {"render_style": value}
-        try:
+        with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
-            raise AssertionError("expected SystemExit")
-        except SystemExit as exc:
-            assert "notifications.render_style must be one of: compact, legacy" in str(exc)
+        exc = _caught.value
+        assert "notifications.render_style must be one of: compact, legacy" in str(exc)

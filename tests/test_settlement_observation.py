@@ -31,7 +31,6 @@ from src.application.ledger.api import (
     attach_settlement_semantics,
     build_lifecycle_attempt_audit_envelope,
     lifecycle_case_coherent_facts,
-    record_lifecycle_attempt_audit_atomically,
     record_lifecycle_allocation,
     record_lifecycle_evidence_issue,
     settlement_evidence_id,

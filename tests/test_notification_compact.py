@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
 def test_build_notification_block_compact_sell_put() -> None:

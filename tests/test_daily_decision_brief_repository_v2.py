@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -381,7 +380,7 @@ def test_pending_fixed_failure_can_upgrade_but_confirmed_failure_cannot(
     artifact.parent.mkdir(parents=True)
     artifact.write_text('{"reason":"pipeline_failed"}\n', encoding="utf-8")
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    failure = prepare_daily_decision_brief_delivery(
+    prepare_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
         market="US",
@@ -575,7 +574,6 @@ def test_delivery_identity_validator_returns_persisted_kind_and_status(
 def test_ambiguous_envelope_is_frozen_and_tampered_hash_fails_closed(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import (
         DailyDecisionBriefStateError,
-        prepare_daily_decision_brief_delivery,
         read_daily_decision_brief_delivery_state,
     )
 

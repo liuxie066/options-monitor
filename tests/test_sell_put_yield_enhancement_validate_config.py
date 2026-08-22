@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_validate_config_accepts_minimal_sell_put_combo_yield_symbol() -> None:
@@ -77,12 +72,11 @@ def test_validate_config_rejects_removed_combo_yield_funding_mode_fields() -> No
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield" in str(exc)
-        assert "funding_mode" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield" in str(exc)
+    assert "funding_mode" in str(exc)
 
 
 def test_validate_config_rejects_removed_combo_yield_cost_ratio_fields() -> None:
@@ -108,12 +102,11 @@ def test_validate_config_rejects_removed_combo_yield_cost_ratio_fields() -> None
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield" in str(exc)
-        assert "max_call_cost_to_put_credit" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield" in str(exc)
+    assert "max_call_cost_to_put_credit" in str(exc)
 
 
 def test_validate_config_rejects_removed_combo_yield_optimizer_field() -> None:
@@ -138,11 +131,10 @@ def test_validate_config_rejects_removed_combo_yield_optimizer_field() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield has removed optimizer fields" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield has removed optimizer fields" in str(exc)
 
 
 def test_validate_config_rejects_invalid_combo_yield_objective() -> None:
@@ -167,11 +159,10 @@ def test_validate_config_rejects_invalid_combo_yield_objective() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield.objective" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield.objective" in str(exc)
 
 
 def test_validate_config_rejects_removed_combo_yield_scenario_fields() -> None:
@@ -196,11 +187,10 @@ def test_validate_config_rejects_removed_combo_yield_scenario_fields() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield has removed scenario fields: min_upside_lift_to_call_cost" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield has removed scenario fields: min_upside_lift_to_call_cost" in str(exc)
 
 
 def test_validate_config_rejects_invalid_combo_yield_net_credit_annualized() -> None:
@@ -226,11 +216,10 @@ def test_validate_config_rejects_invalid_combo_yield_net_credit_annualized() -> 
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield.min_net_credit_annualized" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield.min_net_credit_annualized" in str(exc)
 
 
 def test_validate_config_rejects_combo_yield_net_credit_retention_outside_unit_interval() -> None:
@@ -249,11 +238,10 @@ def test_validate_config_rejects_combo_yield_net_credit_retention_outside_unit_i
             ],
         }
 
-        try:
+        with pytest.raises(SystemExit) as _caught:
             validate_config(cfg)
-            raise AssertionError("expected config validation failure")
-        except SystemExit as exc:
-            assert "NVDA.combo_yield.min_net_credit_retention" in str(exc)
+        exc = _caught.value
+        assert "NVDA.combo_yield.min_net_credit_retention" in str(exc)
 
 
 def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> None:
@@ -277,11 +265,10 @@ def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> N
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "templates.put_base.combo_yield.call.min_strike" in str(exc)
+    exc = _caught.value
+    assert "templates.put_base.combo_yield.call.min_strike" in str(exc)
 
 
 def test_validate_config_rejects_removed_staggered_expiry_gap_fields() -> None:
@@ -304,11 +291,10 @@ def test_validate_config_rejects_removed_staggered_expiry_gap_fields() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "has removed staggered-expiry gap fields" in str(exc)
+    exc = _caught.value
+    assert "has removed staggered-expiry gap fields" in str(exc)
 
 
 def test_validate_config_rejects_absolute_call_dte_for_combo_yield() -> None:
@@ -330,11 +316,10 @@ def test_validate_config_rejects_absolute_call_dte_for_combo_yield() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "unsupported absolute DTE fields" in str(exc)
+    exc = _caught.value
+    assert "unsupported absolute DTE fields" in str(exc)
 
 
 def test_validate_config_rejects_removed_template_combo_yield_call_otm_bounds() -> None:
@@ -358,11 +343,10 @@ def test_validate_config_rejects_removed_template_combo_yield_call_otm_bounds() 
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "templates.put_base.combo_yield.call has removed OTM fields: min_otm_pct, max_otm_pct" in str(exc)
+    exc = _caught.value
+    assert "templates.put_base.combo_yield.call has removed OTM fields: min_otm_pct, max_otm_pct" in str(exc)
 
 
 def test_validate_config_rejects_nested_sell_put_combo_yield_template_path() -> None:
@@ -386,11 +370,10 @@ def test_validate_config_rejects_nested_sell_put_combo_yield_template_path() -> 
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "templates.put_base.sell_put.combo_yield has been removed" in str(exc)
+    exc = _caught.value
+    assert "templates.put_base.sell_put.combo_yield has been removed" in str(exc)
 
 
 def test_validate_config_rejects_nested_sell_put_combo_yield_symbol_path() -> None:
@@ -412,11 +395,10 @@ def test_validate_config_rejects_nested_sell_put_combo_yield_symbol_path() -> No
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.sell_put.combo_yield has been removed" in str(exc)
+    exc = _caught.value
+    assert "NVDA.sell_put.combo_yield has been removed" in str(exc)
 
 
 def test_validate_config_rejects_legacy_rebound_combo_template_path() -> None:
@@ -438,11 +420,10 @@ def test_validate_config_rejects_legacy_rebound_combo_template_path() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "templates.rebound_base.rebound_combo has been removed" in str(exc)
+    exc = _caught.value
+    assert "templates.rebound_base.rebound_combo has been removed" in str(exc)
 
 
 def test_validate_config_rejects_legacy_rebound_combo_symbol_path() -> None:
@@ -460,11 +441,10 @@ def test_validate_config_rejects_legacy_rebound_combo_symbol_path() -> None:
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.rebound_combo has been removed" in str(exc)
+    exc = _caught.value
+    assert "NVDA.rebound_combo has been removed" in str(exc)
 
 
 def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> None:
@@ -485,11 +465,10 @@ def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> No
         ],
     }
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
-        raise AssertionError("expected config validation failure")
-    except SystemExit as exc:
-        assert "NVDA.combo_yield has removed target-price fields" in str(exc)
+    exc = _caught.value
+    assert "NVDA.combo_yield has removed target-price fields" in str(exc)
 
 
 @pytest.mark.parametrize(

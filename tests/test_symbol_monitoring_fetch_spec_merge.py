@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-BASE = Path(__file__).resolve().parents[1]
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 
 def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypatch, tmp_path: Path) -> None:

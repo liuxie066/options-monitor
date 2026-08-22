@@ -37,12 +37,10 @@ def test_resolve_futu_account_mapping_rejects_unknown_internal_account() -> None
         "trade_intake": {"account_mapping": {"futu": {"REAL_1": "sy"}}},
     }
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_futu_account_mapping(cfg)
-    except ValueError as exc:
-        assert "not a futu account" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "not a futu account" in str(exc)
 
 
 def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> None:
@@ -54,12 +52,10 @@ def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> Non
         "trade_intake": {"account_mapping": {"futu": {"REAL_1": "ext1"}}},
     }
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_futu_account_mapping(cfg)
-    except ValueError as exc:
-        assert "not a futu account" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "not a futu account" in str(exc)
 
 
 def test_resolve_trade_intake_config_uses_defaults() -> None:
@@ -160,12 +156,10 @@ def test_resolve_trade_intake_config_rejects_invalid_settlement_config(
 def test_resolve_trade_intake_config_rejects_non_boolean_enabled() -> None:
     cfg = {"accounts": ["lx"], "trade_intake": {"enabled": "false"}}
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_trade_intake_config(cfg)
-    except ValueError as exc:
-        assert "trade_intake.enabled must be a boolean" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "trade_intake.enabled must be a boolean" in str(exc)
 
 
 def test_resolve_trade_intake_config_accepts_backfill_overrides() -> None:
@@ -194,23 +188,19 @@ def test_resolve_trade_intake_config_accepts_backfill_overrides() -> None:
 def test_resolve_trade_intake_config_rejects_non_boolean_receipt_flag() -> None:
     cfg = {"accounts": ["lx"], "trade_intake": {"receipt": {"enabled": "yes"}}}
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_trade_intake_config(cfg)
-    except ValueError as exc:
-        assert "trade_intake.receipt.enabled must be a boolean" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "trade_intake.receipt.enabled must be a boolean" in str(exc)
 
 
 def test_resolve_trade_intake_config_rejects_invalid_backfill_flag() -> None:
     cfg = {"accounts": ["lx"], "trade_intake": {"backfill": {"enabled": "yes"}}}
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_trade_intake_config(cfg)
-    except ValueError as exc:
-        assert "trade_intake.backfill.enabled must be a boolean" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "trade_intake.backfill.enabled must be a boolean" in str(exc)
 
 
 def test_resolve_trade_intake_config_accepts_holdings_sync_overrides() -> None:
@@ -253,12 +243,10 @@ def test_resolve_trade_intake_config_rejects_invalid_holdings_sync() -> None:
         },
     }
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         resolve_trade_intake_config(cfg)
-    except ValueError as exc:
-        assert "holdings_sync.queue_capacity must be > 0" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
+    exc = _caught.value
+    assert "holdings_sync.queue_capacity must be > 0" in str(exc)
 
 
 def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() -> None:

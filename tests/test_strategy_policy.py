@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.strategy_policy import (
     INSURANCE_UNDERWRITING_PROFILE,
     SELL_CALL_FAMILY,
@@ -158,14 +160,13 @@ def test_sell_call_strategy_semantics_matrix() -> None:
 
 
 def test_strategy_semantics_for_side_config_rejects_legacy_opening_profile() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         strategy_semantics_for_side_config(
             family=SELL_PUT_FAMILY,
             side_cfg={"strategy": "yield_first"},
         )
-        raise AssertionError("expected legacy opening profile rejection")
-    except ValueError as exc:
-        assert "only supports insurance_underwriting" in str(exc)
+    exc = _caught.value
+    assert "only supports insurance_underwriting" in str(exc)
 
 
 def test_strategy_semantics_for_side_config_defaults_to_underwriting() -> None:
@@ -204,7 +205,7 @@ def test_yield_enhancement_mode_helpers_are_policy_owned() -> None:
 
 
 def test_strategy_config_resolution_guard_rejects_unexpanded_template_symbol() -> None:
-    try:
+    with pytest.raises(ValueError) as _caught:
         assert_strategy_config_resolved(
             {
                 "symbol": "NVDA",
@@ -212,10 +213,9 @@ def test_strategy_config_resolution_guard_rejects_unexpanded_template_symbol() -
                 "sell_put": {"enabled": True},
             }
         )
-        raise AssertionError("expected unresolved strategy config failure")
-    except ValueError as exc:
-        assert "apply templates/profiles" in str(exc)
-        assert "sell_put" in str(exc)
+    exc = _caught.value
+    assert "apply templates/profiles" in str(exc)
+    assert "sell_put" in str(exc)
 
 
 def test_strategy_config_resolution_guard_accepts_expanded_template_symbol() -> None:

@@ -14,6 +14,8 @@ import json
 import threading
 from unittest.mock import patch
 
+import pytest
+
 
 def _make_http_error(status: int, body: str | bytes | None):
     import urllib.error
@@ -343,11 +345,10 @@ def test_get_tenant_access_token_ack_fails_fast_when_refresh_lock_busy() -> None
     fb._token_lock.acquire()
     try:
         with patch.object(fb, "http_json") as http_mock:
-            try:
+            with pytest.raises(fb.FeishuTransientError) as _caught:
                 fb.get_tenant_access_token("app", "secret", lock_timeout=0.0)
-                assert False, "should fail fast"
-            except fb.FeishuTransientError as exc:
-                assert exc.response["error_type"] == "token_lock_timeout"
+            exc = _caught.value
+            assert exc.response["error_type"] == "token_lock_timeout"
             http_mock.assert_not_called()
     finally:
         fb._token_lock.release()

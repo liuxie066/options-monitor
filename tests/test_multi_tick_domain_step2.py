@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
 def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> None:

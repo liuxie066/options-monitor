@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
 
 import pytest
 
+from candidate_evidence_helpers import earnings_evidence
 from domain.domain.engine import (
     CANDIDATE_STAGE_ORDER,
-    EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-    EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
     SELL_PUT_RANKING_CONTRACT_VERSION,
     SELL_PUT_RANKING_PROFILES,
     build_candidate_reject,
@@ -19,38 +17,7 @@ from domain.domain.engine import (
 
 
 def _earnings_evidence(*, event_date: str | None = None) -> dict:
-    event = None
-    if event_date is not None:
-        days_before_expiration = (
-            date.fromisoformat("2026-09-18")
-            - date.fromisoformat(event_date)
-        ).days
-        blocking = days_before_expiration <= EARNINGS_NEAR_EXPIRY_WINDOW_DAYS
-        event = {
-            "earnings_date": event_date,
-            "days_before_expiration": days_before_expiration,
-            "classification": "blocking" if blocking else "nonblocking",
-            "blocking": blocking,
-        }
-    events = [] if event is None else [event]
-    blocking_events = [item for item in events if item["blocking"]]
-    nonblocking_events = [item for item in events if not item["blocking"]]
-    return {
-        "earnings_evidence_status": "ready",
-        "earnings_reason_code": None,
-        "earnings_policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
-        "earnings_window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
-        "earnings_market_date": "2026-08-06",
-        "earnings_hard_window_start": "2026-09-12",
-        "earnings_hard_window_end": "2026-09-18",
-        "earnings_hard_coverage_status": "complete",
-        "earnings_soft_coverage_status": "complete",
-        "earnings_has_event": bool(events),
-        "earnings_blocking_has_event": bool(blocking_events),
-        "earnings_events": events,
-        "earnings_blocking_events": blocking_events,
-        "earnings_nonblocking_events": nonblocking_events,
-    }
+    return earnings_evidence(expiration="2026-09-18", market_date="2026-08-06", event_date=event_date)
 
 
 def _policy_row(*, mode: str = "put", **overrides):  # type: ignore[no-untyped-def]

@@ -4778,10 +4778,8 @@ def test_inbound_cli_feishu_ws_check_merges_credential_env_file(tmp_path: Path, 
 def test_inbound_cli_feishu_ws_rejects_secret_override_flags(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    try:
+    with pytest.raises(SystemExit) as _caught:
         cli.main(["inbound", "feishu-ws", "--app-id", "app_1", "--check"])
-    except SystemExit as exc:
-        assert int(exc.code or 0) == 2
-    else:
-        raise AssertionError("expected argparse to reject --app-id")
+    exc = _caught.value
+    assert int(exc.code or 0) == 2
     _ = capsys.readouterr()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -58,12 +60,10 @@ def test_update_local_version_apply_writes_version(tmp_path: Path) -> None:
 def test_update_local_version_rejects_downgrade_by_default(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "1.0.0")
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         update_local_version(base_dir=base, target_version="0.9.9", apply=True)
-    except ValueError as exc:
-        assert "lower than current VERSION" in str(exc)
-    else:
-        raise AssertionError("expected downgrade rejection")
+    exc = _caught.value
+    assert "lower than current VERSION" in str(exc)
 
     assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
 

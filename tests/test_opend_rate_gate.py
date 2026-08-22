@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import importlib
 from pathlib import Path
 import json
@@ -74,12 +76,10 @@ def test_opend_rate_gate_times_out_when_budget_exceeded() -> None:
     gate = OpenDRateGate(max_calls=1, window_sec=10.0, max_wait_sec=0.5, label="timeout")
 
     gate.acquire()
-    try:
+    with pytest.raises(TimeoutError) as _caught:
         gate.acquire()
-    except TimeoutError as exc:
-        assert "rate limit wait budget exceeded" in str(exc)
-    else:  # pragma: no cover - failure path
-        raise AssertionError("expected TimeoutError")
+    exc = _caught.value
+    assert "rate limit wait budget exceeded" in str(exc)
 
 
 def test_opend_rate_gate_merges_external_state_file(tmp_path: Path) -> None:
@@ -172,13 +172,11 @@ def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path)
     waited = limiter.acquire()
     assert waited >= 0.0
 
-    try:
+    with pytest.raises(Exception) as _caught:
         limiter.acquire()
-    except Exception as exc:
-        assert exc.__class__.__name__ == "OptionChainRateLimitExceeded"
-        assert "rate limit wait budget exceeded" in str(exc)
-    else:  # pragma: no cover - failure path
-        raise AssertionError("expected OptionChainRateLimitExceeded")
+    exc = _caught.value
+    assert exc.__class__.__name__ == "OptionChainRateLimitExceeded"
+    assert "rate limit wait budget exceeded" in str(exc)
 
 
 def test_file_rate_limiter_records_server_rate_limit_cooldown(tmp_path: Path) -> None:

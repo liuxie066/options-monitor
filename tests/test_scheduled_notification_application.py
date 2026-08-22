@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 

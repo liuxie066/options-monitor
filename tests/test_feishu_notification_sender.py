@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import hashlib
 import json
 from pathlib import Path
@@ -587,22 +589,20 @@ def test_send_wechat_clawbot_message_accepts_empty_success_response(tmp_path: Pa
 def test_select_notification_delivery_adapter_rejects_openclaw_provider() -> None:
     from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         select_notification_delivery_adapter("openclaw")
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "unsupported notification provider" in str(exc)
-        assert "wechat_clawbot" in str(exc)
+    exc = _caught.value
+    assert "unsupported notification provider" in str(exc)
+    assert "wechat_clawbot" in str(exc)
 
 
 def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None:
     from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
-    try:
+    with pytest.raises(ValueError) as _caught:
         select_notification_delivery_adapter("sms")
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "unsupported notification provider" in str(exc)
+    exc = _caught.value
+    assert "unsupported notification provider" in str(exc)
 
 
 

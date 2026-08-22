@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 
+import pytest
+
 def _base_cfg() -> dict:
     # Minimal valid runtime config skeleton; mirrors test_validate_config_notifications._base_cfg.
     return {
@@ -68,11 +70,10 @@ def test_validator_rejects_negative_threshold() -> None:
 
     cfg = _base_cfg()
     cfg["alert_policy"] = {"sell_put": {"high_annual": -0.1}}
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "alert_policy.sell_put.high_annual must be >= 0" in str(exc)
+    exc = _caught.value
+    assert "alert_policy.sell_put.high_annual must be >= 0" in str(exc)
 
 
 def test_validator_rejects_unknown_subkey() -> None:
@@ -80,11 +81,10 @@ def test_validator_rejects_unknown_subkey() -> None:
 
     cfg = _base_cfg()
     cfg["alert_policy"] = {"sell_call": {"bogus_key": 0.1}}
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "alert_policy.sell_call.bogus_key" in str(exc)
+    exc = _caught.value
+    assert "alert_policy.sell_call.bogus_key" in str(exc)
 
 
 def test_validator_rejects_non_dict_subsection() -> None:
@@ -92,11 +92,10 @@ def test_validator_rejects_non_dict_subsection() -> None:
 
     cfg = _base_cfg()
     cfg["alert_policy"] = {"sell_put": [0.1, 0.2]}
-    try:
+    with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "alert_policy.sell_put must be an object" in str(exc)
+    exc = _caught.value
+    assert "alert_policy.sell_put must be an object" in str(exc)
 
 
 def test_validator_accepts_nested_alert_policy() -> None:
