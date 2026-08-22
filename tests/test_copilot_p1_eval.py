@@ -471,6 +471,7 @@ def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -
     assert payload["runtime_version"]
     assert payload["model"]["provider"] == "openai"
     assert payload["model"]["model"] == "gpt-test"
+    assert "api_key_env" not in payload["model"]
     assert payload["answer_quality_pass"] is None
     assert payload["cases"][0]["tool_metrics"]["tool_call_count"] == 1
     assert payload["cases"][0]["evidence_pass"] is True
