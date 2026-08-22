@@ -11,6 +11,11 @@ from src.application.agent_tool_config import resolve_output_root
 
 _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "close_advice_read.output.v1",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "source_label": "OM 本地 Close Advice 报告",
     "primary_rows": "rows",
     "row_count_field": "returned_count",
@@ -60,6 +65,7 @@ def _close_advice_read_tool(
 
 CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     name="close_advice_read",
+    catalog_summary="读取已生成的平仓建议与依据。",
     description=(
         "Read and filter the latest existing close-advice report without refreshing market data or writing reports. "
         "Treat the returned run/source timestamp as the data freshness boundary."

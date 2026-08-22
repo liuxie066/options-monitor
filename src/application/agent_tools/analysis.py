@@ -944,6 +944,11 @@ _OPERATION_SOURCE_VIEWS: set[str] = {"upgrade_operation_status"}
 
 _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "analysis_query.output.v2",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "source_label": "OM read-only analysis workspace",
     "primary_rows": "rows",
     "row_count_field": "row_count",
@@ -1016,6 +1021,11 @@ def _analysis_catalog_tool(
         "schema_version": "analysis.catalog.v2",
         "source_label": "OM read-only analysis workspace",
         "views": specs,
+        "selected_view_schema": (
+            _model_view_schema(next(iter(specs)), next(iter(specs.values())))
+            if len(specs) == 1
+            else None
+        ),
         "view_count": len(specs),
         "view_names": sorted(specs),
         "field_types": _catalog_field_types(specs),
@@ -1078,6 +1088,36 @@ def _catalog_join_policies(specs: dict[str, dict[str, Any]]) -> dict[str, dict[s
             "primary_keys": [str(item) for item in spec.get("primary_keys") or ()],
         }
         for view_name, spec in specs.items()
+    }
+
+
+def _model_view_schema(view_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    raw_semantics = spec.get("field_semantics")
+    semantics: dict[Any, Any] = raw_semantics if isinstance(raw_semantics, dict) else {}
+    fields: dict[str, dict[str, str]] = {}
+    for raw_field in spec.get("fields") or ():
+        field = str(raw_field)
+        meta = semantics.get(field)
+        field_meta = meta if isinstance(meta, dict) else {}
+        fields[field] = {
+            "type": str(field_meta.get("type") or "text"),
+            "aggregation": str(field_meta.get("aggregation") or "none"),
+        }
+    field_items = list(fields.items())
+    return {
+        "name": view_name,
+        "description": str(spec.get("description") or ""),
+        "row_grain": str(spec.get("row_grain") or ""),
+        "field_groups": [
+            {"fields": dict(field_items[index : index + 20])}
+            for index in range(0, len(field_items), 20)
+        ],
+        "primary_keys": [str(item) for item in spec.get("primary_keys") or ()],
+        "safe_join_keys": [str(item) for item in spec.get("safe_join_keys") or ()],
+        "source_tools": [str(item) for item in spec.get("source_tools") or ()],
+        "semantic_source": str(spec.get("semantic_source") or ""),
+        "freshness": str(spec.get("freshness") or ""),
+        "recommended_filters": [str(item) for item in spec.get("recommended_filters") or ()],
     }
 
 
@@ -4151,14 +4191,23 @@ def _analysis_catalog_output_contract(payload: dict[str, Any]) -> dict[str, Any]
         "query_patterns",
     ]
     if len(selected_views) == 1:
-        model_value_fields.extend(
-            ["views", "field_types", "aggregation_policies", "join_policies"]
-        )
+        model_value_fields = [
+            "selected_view_schema",
+            "metric_policy",
+            "sql_rules.allowed_statements[]",
+            "sql_rules.writes_allowed",
+            "sql_rules.max_limit",
+        ]
     return {
         "schema_version": "analysis_catalog.output.v2",
+        "evidence_type": "point" if len(selected_views) == 1 else "collection",
+        "bounded_projection": "contract_fields",
+        "coverage": "point" if len(selected_views) == 1 else "primary_rows",
+        "freshness": "not_applicable",
+        "pagination": {"mode": "none"},
         # Catalog output is evidence for follow-up planning, not a final answer surface.
         "source_label": "OM read-only analysis workspace",
-        "primary_rows": "views",
+        "primary_rows": "view_names",
         "row_count_field": "view_count",
         "fact_fields": [
             "view_count",
@@ -4175,6 +4224,7 @@ def _analysis_catalog_output_contract(payload: dict[str, Any]) -> dict[str, Any]
 
 ANALYSIS_CATALOG_TOOL = build_agent_tool(
     name="analysis_catalog",
+    catalog_summary="读取可用分析视图与字段目录。",
     description=(
         "List the read-only analysis views, their fields, metric roles, source semantics, and allowed SQL rules. "
         "For profit use option PnL views, for cash use option_cash_components, and for premium use "
@@ -4204,6 +4254,7 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
 
 ANALYSIS_QUERY_TOOL = build_agent_tool(
     name="analysis_query",
+    catalog_summary="查询授权分析视图并返回边界化证据。",
     description=(
         "Run a SELECT-only query against whitelisted in-memory OM analysis views for comparisons, "
         "rankings, trends, breakdowns, and other open-ended analytical questions. Supply either "

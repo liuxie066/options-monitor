@@ -60,6 +60,7 @@ assistant:
   context_window_messages: 8
   copilot:
     enabled: true
+    tool_loading_mode: eager
     toolsets:
       portfolio: false
   active_model: deepseek-default

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
@@ -27,6 +28,27 @@ TENCENT_EXCHANGE_RATE_SOURCE = "tencent_quote"
 SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
 
 _REQUIRED_RATES = ("USDCNY", "HKDCNY")
+
+
+def _observation_rates_are_valid(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    present = False
+    for key in _REQUIRED_RATES:
+        if key not in value:
+            continue
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            return False
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or not (0 < number < 1000):
+            return False
+        present = True
+    return present
+
 
 # 腾讯主源：单次请求取 USDCNY + HKDCNY，`~` 分隔，字段 [3] 为现价。
 _TENCENT_URL = "https://qt.gtimg.cn/q=whUSDCNY,whHKDCNY"
@@ -160,7 +182,7 @@ def exchange_rate_observation_status(
     }:
         return "unavailable"
     rates = value.get("rates")
-    if not isinstance(rates, Mapping) or not rates:
+    if not _observation_rates_are_valid(rates):
         return "unavailable"
     if _payload_timestamp(value) is None:
         return "unavailable_stale"
@@ -200,7 +222,7 @@ def get_cached_exchange_rates(
     if _payload_timestamp(obj) is None:
         return None
     rates = obj.get("rates")
-    if not isinstance(rates, Mapping) or not rates:
+    if not _observation_rates_are_valid(rates):
         return None
     if not _is_cache_fresh(obj, max_age_hours=max_age_hours):
         return None
@@ -334,8 +356,8 @@ def save_exchange_rate_observation(
         path.parent.mkdir(parents=True, exist_ok=True)
         value = dict(payload)
         rates = value.get("rates")
-        if not isinstance(rates, dict) or not rates:
-            raise ValueError("exchange-rate payload rates are required")
+        if not _observation_rates_are_valid(rates):
+            raise ValueError("exchange-rate payload rates are invalid")
         if _payload_timestamp(value) is None:
             raise ValueError("exchange-rate payload timestamp is required")
         if str(value.get("source") or "").strip() not in {
@@ -373,7 +395,17 @@ def get_exchange_rates_or_fetch_latest(
     if observation is None:
         # Fall back to a stale cache rather than fabricating a number.
         stale = _read_cache(cache_path)
-        if stale is not None and isinstance(stale.get("rates"), Mapping) and stale.get("rates"):
+        if (
+            stale is not None
+            and _observation_rates_are_valid(stale.get("rates"))
+            and _payload_timestamp(stale) is not None
+            and str(stale.get("source") or "").strip()
+            in {
+                OPEND_EXCHANGE_RATE_SOURCE,
+                TENCENT_EXCHANGE_RATE_SOURCE,
+                SINA_EXCHANGE_RATE_SOURCE,
+            }
+        ):
             _warn(log, f"[WARN] market FX unavailable; using stale cache {Path(cache_path).resolve()}")
             return stale
         _warn(log, f"[WARN] market FX unavailable and no cache: {Path(cache_path).resolve()}")

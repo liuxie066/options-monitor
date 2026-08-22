@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
@@ -115,6 +115,8 @@ def close_advice_read_tool(
             "truncated": len(returned) < len(matched),
         },
         "freshness": {
+            "status": "historical",
+            "as_of": _sources_as_of(sources),
             "kind": "report_snapshot",
             "run_ids": sorted({str(source.run_id) for source in sources if source.run_id}),
         },
@@ -152,6 +154,7 @@ class _Source:
         self.run_id = run_id
         self.account = account
         self.csv_bytes: bytes | None = None
+        self.generated_at_utc: str | None = None
 
 
 def _query_from_payload(payload: dict[str, Any]) -> PositionQuery:
@@ -463,7 +466,25 @@ def _validate_source_manifest(
     validation = snapshot["validation"]
     if validation.get("ok"):
         source.csv_bytes = snapshot["csv_bytes"]
+        source.generated_at_utc = str(validation.get("generated_at_utc") or "").strip() or None
     return validation
+
+
+def _sources_as_of(sources: list[_Source]) -> str:
+    observed: list[datetime] = []
+    for source in sources:
+        raw = str(source.generated_at_utc or "").strip()
+        if raw:
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                observed.append(parsed.astimezone(timezone.utc))
+                continue
+            except ValueError:
+                pass
+        observed.append(datetime.fromtimestamp(source.path.stat().st_mtime, tz=timezone.utc))
+    return min(observed).isoformat()
 
 
 def _invalid_report_error(

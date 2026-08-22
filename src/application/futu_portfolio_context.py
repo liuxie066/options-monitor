@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -142,9 +143,10 @@ def _pick(row: Mapping[str, Any], *keys: str) -> Any:
 
 def _to_float(value: Any) -> float | None:
     try:
-        if value in (None, "", "-"):
+        if isinstance(value, bool) or value in (None, "", "-"):
             return None
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except Exception:
         return None
 
@@ -235,7 +237,7 @@ def _extract_cash_components(
     row: Mapping[str, Any],
     *,
     base_currency: str,
-) -> tuple[list[tuple[str, str, float]], str]:
+) -> tuple[list[tuple[str, str, float]], str, dict[str, str]]:
     """Return cash-like components from a Futu accinfo row.
 
     OpenD still exposes legacy aggregate ``cash``, but that value is ambiguous
@@ -247,19 +249,36 @@ def _extract_cash_components(
         fallback=base_currency,
     )
     components: list[tuple[str, str, float]] = []
+    unavailable: dict[str, str] = {}
 
-    fund_value = _to_float(_pick(row, *_FUTU_FUND_ASSET_FIELDS))
-    if fund_value is not None:
-        components.append((row_currency, "fund_assets", fund_value))
+    def append_first_present(
+        currency: str,
+        source_fields: tuple[str, ...],
+    ) -> None:
+        for field in source_fields:
+            if field not in row:
+                continue
+            raw_value = row.get(field)
+            if raw_value is None or (
+                isinstance(raw_value, str)
+                and raw_value.strip().upper() in {"", "-", "N/A"}
+            ):
+                continue
+            value = _to_float(raw_value)
+            if value is None:
+                unavailable[field] = "value_invalid"
+            else:
+                components.append((currency, field, value))
+            return
+
+    append_first_present(row_currency, _FUTU_FUND_ASSET_FIELDS)
 
     for currency, fields in _FUTU_CASH_FIELDS_BY_CCY.items():
-        value = _to_float(_pick(row, *fields))
-        if value is not None:
-            components.append((currency, fields[0], value))
+        append_first_present(currency, fields)
 
     if components:
-        return components, "futu_cash_like_assets"
-    return [], "empty"
+        return components, "futu_cash_like_assets", unavailable
+    return [], "empty", unavailable
 
 
 def _extract_net_cash_power(row: Mapping[str, Any]) -> dict[str, float]:
@@ -449,14 +468,22 @@ def build_futu_portfolio_context(
     cash_by_currency: dict[str, float] = {}
     cash_components_by_currency: dict[str, dict[str, float]] = {}
     cash_power_by_currency: dict[str, float] = {}
+    cash_balance_unavailable_by_row: dict[str, str] = {}
     cash_source_kinds: set[str] = set()
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
     stock_cost_basis: dict[str, dict[str, float | int]] = {}
     stock_sellability: dict[str, dict[str, int | bool]] = {}
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
-    for row in _dedup_balance_rows(balance_rows):
-        components, source_kind = _extract_cash_components(row, base_currency=base_ccy)
+    deduped_balance_rows = _dedup_balance_rows(balance_rows)
+    for row_index, row in enumerate(deduped_balance_rows, start=1):
+        components, source_kind, unavailable = _extract_cash_components(
+            row, base_currency=base_ccy
+        )
+        for field, reason in unavailable.items():
+            cash_balance_unavailable_by_row[
+                f"balance_row_{row_index}.{field}"
+            ] = reason
         if source_kind != "empty":
             cash_source_kinds.add(source_kind)
         for currency, source, amount in components:
@@ -470,6 +497,13 @@ def build_futu_portfolio_context(
 
         for currency, amount in _extract_net_cash_power(row).items():
             cash_power_by_currency[currency] = cash_power_by_currency.get(currency, 0.0) + amount
+
+    if not cash_source_kinds and not cash_balance_unavailable_by_row:
+        cash_balance_unavailable_by_row["balance_snapshot"] = (
+            "balance_rows_empty"
+            if not deduped_balance_rows
+            else "supported_cash_field_missing"
+        )
 
     for row in position_rows:
         if not _is_long_position(row):
@@ -625,6 +659,8 @@ def build_futu_portfolio_context(
         "capacity_identity_hash": capacity_identity_hash,
         "filters": {"broker": str(market), "account": account},
         "cash_by_currency": cash_by_currency,
+        "cash_balance_reliable": not cash_balance_unavailable_by_row,
+        "cash_balance_unavailable_by_row": cash_balance_unavailable_by_row,
         "cash_components_by_currency": cash_components_by_currency,
         "cash_capacity_by_currency": cash_capacity_by_currency,
         "cash_source": (

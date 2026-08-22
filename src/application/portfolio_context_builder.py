@@ -5,6 +5,7 @@ from pathlib import Path
 
 import argparse
 import json
+import math
 from datetime import datetime, timezone
 
 from src.infrastructure.feishu_bitable import (
@@ -194,14 +195,18 @@ def build_context(
     stocks_by_symbol: dict[str, dict] = {}
     stock_cost_basis: dict[str, dict[str, float | int]] = {}
     cash_by_currency: dict[str, float] = {}
+    cash_balance_unavailable_by_row: dict[str, str] = {}
+    cash_selected_records: list[dict] = []
+    cash_row_count = 0
 
-    for f in selected:
+    for selected_index, f in enumerate(selected):
         asset_type = _as_text(f.get("asset_type")).strip()
         asset_class = _as_text(f.get("asset_class")).strip()
         asset_id = _as_text(f.get("asset_id")).strip()
         asset_name = _as_text(f.get("asset_name")).strip()
         currency = normalize_currency(_as_text(f.get("currency"))) or None
-        qty = safe_float(f.get("quantity"))
+        raw_qty = f.get("quantity")
+        qty = safe_float(raw_qty)
         avg_cost = safe_float(f.get("avg_cost"))
 
         # Be tolerant: some rows may miss asset_type (data entry). Infer cash rows.
@@ -216,8 +221,17 @@ def build_context(
             inferred_cash = True
 
         if inferred_cash:
+            cash_selected_records.append(selected_records[selected_index])
+            cash_row_count += 1
+            row_key = f"cash_row_{cash_row_count}"
             # holdings 表里 cash 的 quantity 可能是字符串；currency 是单选，值为 'USD'/'CNY'/...
-            if currency and qty is not None:
+            if not currency:
+                cash_balance_unavailable_by_row[row_key] = "currency_missing"
+            elif isinstance(raw_qty, bool) or qty is None or not math.isfinite(qty):
+                cash_balance_unavailable_by_row[row_key] = (
+                    f"{currency}:quantity_invalid"
+                )
+            else:
                 ccy_u = normalize_currency(currency)
                 cash_by_currency[ccy_u] = cash_by_currency.get(ccy_u, 0.0) + qty
             continue
@@ -276,10 +290,19 @@ def build_context(
         if not existing.get("currency") and currency:
             existing["currency"] = currency
 
+    if cash_row_count == 0:
+        cash_balance_unavailable_by_row["cash_snapshot"] = "cash_rows_missing"
+
     retrieved_at = datetime.now(timezone.utc).isoformat()
     observed_at, observation_status, observation_basis = (
         _portfolio_source_observation(
             records=selected_records,
+            source_observed_at=source_observed_at,
+        )
+    )
+    cash_observed_at, cash_observation_status, cash_observation_basis = (
+        _portfolio_source_observation(
+            records=cash_selected_records,
             source_observed_at=source_observed_at,
         )
     )
@@ -301,6 +324,11 @@ def build_context(
         "source_account_identifiers": identifiers,
         "filters": {"broker": broker_norm, "account": account_norm},
         "cash_by_currency": cash_by_currency,
+        "cash_balance_reliable": not cash_balance_unavailable_by_row,
+        "cash_balance_unavailable_by_row": cash_balance_unavailable_by_row,
+        "cash_source_observed_at": cash_observed_at,
+        "cash_source_observation_status": cash_observation_status,
+        "cash_source_observation_basis": cash_observation_basis,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(selected),
         "portfolio_source_name": str(portfolio_source_name or "holdings"),

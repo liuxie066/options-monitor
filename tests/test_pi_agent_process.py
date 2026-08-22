@@ -60,16 +60,25 @@ def _chat_response(
     finish_reason: str = "stop",
     usage: tuple[int, int] = (3, 2),
     tool_call: bool = False,
+    tool_name: str | None = None,
+    tool_arguments: dict | None = None,
+    call_id: str = "call_1",
 ) -> bytes:
     delta: dict = {"role": "assistant"}
     if text:
         delta["content"] = text
-    if tool_call:
+    if tool_call or tool_name is not None:
         delta["tool_calls"] = [{
             "index": 0,
-            "id": "call_1",
+            "id": call_id,
             "type": "function",
-            "function": {"name": "runtime_status", "arguments": "{\"index\":1}"},
+            "function": {
+                "name": tool_name or "runtime_status",
+                "arguments": json.dumps(
+                    tool_arguments if tool_arguments is not None else {"index": 1},
+                    separators=(",", ":"),
+                ),
+            },
         }]
     return _sse([
         {
@@ -100,21 +109,28 @@ def _responses_response(
     status: str = "completed",
     usage: tuple[int, int] = (3, 2),
     tool_call: bool = False,
+    tool_name: str | None = None,
+    tool_arguments: dict | None = None,
+    call_id: str = "call_1",
 ) -> bytes:
-    if tool_call:
+    if tool_call or tool_name is not None:
+        arguments = json.dumps(
+            tool_arguments if tool_arguments is not None else {"index": 1},
+            separators=(",", ":"),
+        )
         item = {
             "type": "function_call",
             "id": "fc_1",
-            "call_id": "call_1",
-            "name": "runtime_status",
-            "arguments": "{\"index\":1}",
+            "call_id": call_id,
+            "name": tool_name or "runtime_status",
+            "arguments": arguments,
         }
         events = [
             {"type": "response.output_item.added", "output_index": 0, "item": item},
             {
                 "type": "response.function_call_arguments.delta",
                 "output_index": 0,
-                "delta": "{\"index\":1}",
+                "delta": arguments,
             },
             {"type": "response.output_item.done", "output_index": 0, "item": item},
         ]
@@ -210,10 +226,10 @@ def _loopback_server(responses: list[dict]):
 
 def _provider_payload(provider: str, base_url: str, **overrides) -> dict:
     api_kind = "openai-responses" if provider == "openai" else "openai-completions"
-    payload = _start_payload(
-        execution_environment="local",
-        debug=None,
-        model={
+    settings = {
+        "execution_environment": "local",
+        "debug": None,
+        "model": {
             "provider": provider,
             "api_kind": api_kind,
             "model": "om-test",
@@ -223,14 +239,14 @@ def _provider_payload(provider: str, base_url: str, **overrides) -> dict:
             "max_output_tokens": 512,
             "max_attempts": 2,
         },
-        limits={
+        "limits": {
             **_start_payload()["limits"],
             "timeout_seconds": 6,
             "final_answer_reserve_seconds": 1,
         },
-    )
-    payload.update(overrides)
-    return payload
+    }
+    settings.update(overrides)
+    return _start_payload(**settings)
 
 
 def _provider_env(*, keyed: bool = True, database: Path | None = None) -> dict[str, str]:
@@ -262,20 +278,73 @@ def _start_payload(**overrides):
             "max_attempts": 2,
         },
         "tools": [],
+        "tool_loading_mode": "eager",
         "limits": {
             "timeout_seconds": 60,
             "max_iterations": 16,
             "max_tool_calls": 12,
-            "max_context_tokens": 24000,
             "max_consecutive_failed_tool_batches": 2,
             "final_answer_reserve_seconds": 20,
         },
         "recovered_observations": [],
-        "debug": {"fixture_response": "hello", "delay_ms": 0},
+        "debug": {
+            "fixture_response": "hello",
+            "delay_ms": 0,
+            "forbidden_history": ["__eval_only_plain_final__"],
+        },
     }
     base.update(overrides)
-    if "model" in overrides and "limits" not in overrides:
-        base["limits"]["max_context_tokens"] = base["model"]["context_window_tokens"]
+    configured_tools = list(base.get("tools") or [])
+    configured_names = {str(tool.get("name")) for tool in configured_tools if isinstance(tool, dict)}
+    if base.get("tool_loading_mode") == "eager" and "submit_answer" not in configured_names:
+        configured_tools.append(_SUBMIT_TOOL)
+    if base.get("tool_loading_mode") == "directory":
+        if "tool_directory" not in configured_names:
+            configured_tools.insert(0, _DIRECTORY_TOOL)
+        if "submit_answer" not in configured_names:
+            configured_tools.append(_SUBMIT_TOOL)
+    base["tools"] = configured_tools
+    catalog_tools = base.get("catalog_tools", base["tools"])
+    catalog = [
+        {
+            "name": str(tool["name"]),
+            "toolset": "test",
+            "purpose": str(tool.get("description") or "test tool")[:240],
+            "access": "read",
+            "evidence_type": "mixed",
+        }
+        for tool in catalog_tools
+        if isinstance(tool, dict) and tool.get("name") not in {
+            "submit_answer", "tool_directory", "request_control_preview"
+        }
+    ]
+    base["tool_catalog"] = catalog
+    purpose_by_name = {str(item["name"]): str(item["purpose"]) for item in catalog}
+    base["catalog_snapshot"] = [
+        {
+            "name": str(tool["name"]),
+            "toolset": "test",
+            "description": str(tool.get("description") or "test tool"),
+            "input_schema": dict(tool.get("input_schema") or {}),
+            "output_contract": {},
+            "access": "read",
+            "purpose": purpose_by_name[str(tool["name"])],
+            "evidence_type": "mixed",
+        }
+        for tool in catalog_tools
+        if isinstance(tool, dict) and tool.get("name") not in {
+            "submit_answer", "tool_directory", "request_control_preview"
+        }
+    ]
+    if "catalog_snapshot" in overrides:
+        base["catalog_snapshot"] = overrides["catalog_snapshot"]
+    material = {
+        "authorized_names": sorted(str(item["name"]) for item in base["tool_catalog"]),
+        "catalog": base["tool_catalog"],
+        "snapshot": base["catalog_snapshot"],
+    }
+    base["catalog_hash"] = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    base.pop("catalog_tools", None)
     return base
 
 
@@ -295,6 +364,22 @@ _READ_TOOL = {
     },
 }
 
+_SUBMIT_TOOL = {
+    "name": "submit_answer",
+    "description": "Submit an admitted answer",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["conceptual", "evidence"]},
+            "status": {"type": "string", "enum": ["complete", "partial", "needs_narrowing", "insufficient_evidence"]},
+            "answer_markdown": {"type": "string"},
+            "claims": {"type": "array"},
+        },
+        "required": ["mode", "status", "answer_markdown", "claims"],
+        "additionalProperties": False,
+    },
+}
+
 _CONTROL_TOOL = {
     "name": "request_control_preview",
     "description": "Request a deterministic control preview",
@@ -309,13 +394,720 @@ _CONTROL_TOOL = {
     },
 }
 
+_DIRECTORY_TOOL = {
+    "name": "tool_directory",
+    "description": "Activate an exact bounded business tool set",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "catalog_hash": {"type": "string"},
+            "tool_names": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["catalog_hash", "tool_names"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _submit_arguments(answer: str) -> dict:
+    return {
+        "mode": "conceptual",
+        "status": "complete",
+        "answer_markdown": answer,
+        "claims": [],
+    }
+
+
+def _directory_turn(call_id: str, *tool_names: str) -> dict:
+    return {
+        "tool_calls": [{
+            "call_id": call_id,
+            "tool_name": "tool_directory",
+            "arguments": {
+                "catalog_hash": "sha256:placeholder",
+                "tool_names": list(tool_names),
+            },
+        }]
+    }
+
+
+def _directory_payload(
+    business_tools: list[dict],
+    fixture_turns: list[dict],
+    *,
+    session_id: str | None = None,
+) -> dict:
+    snapshot = sorted(
+        [
+            {
+                "name": tool["name"],
+                "toolset": "test",
+                "description": tool["description"],
+                "input_schema": tool["input_schema"],
+                "output_contract": {},
+                "access": "read",
+                "purpose": tool["description"],
+                "evidence_type": "mixed",
+            }
+            for tool in business_tools
+        ],
+        key=lambda item: item["name"],
+    )
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_DIRECTORY_TOOL, _SUBMIT_TOOL],
+        catalog_tools=business_tools,
+        catalog_snapshot=snapshot,
+        tool_loading_mode="directory",
+        debug={"fixture_turns": fixture_turns, "delay_ms": 0},
+    )
+    for turn in fixture_turns:
+        calls = turn.get("tool_calls") if isinstance(turn, dict) else None
+        if isinstance(calls, list):
+            for call in calls:
+                if isinstance(call, dict) and call.get("tool_name") == "tool_directory":
+                    call["arguments"]["catalog_hash"] = payload["catalog_hash"]
+    return payload
+
+
+def _tool_activation(payload: dict, tools: list[dict], *, schema_hash: str | None = None) -> dict:
+    encoded = json.dumps(tools, separators=(",", ":"), sort_keys=True).encode()
+    return {
+        "observation": {"ok": True, "status": "activated"},
+        "tool_activation": {
+            "catalog_hash": payload["catalog_hash"],
+            "schema_hash": schema_hash
+            or "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            "tools": tools,
+        },
+    }
+
+
+def _approved_provider_tool_result(call: dict) -> dict:
+    if call["tool_name"] != "submit_answer":
+        return {"ok": True, "status": "healthy"}
+    answer = call["arguments"]["answer_markdown"]
+    return {
+        "observation": {"ok": True, "status": "answer_accepted"},
+        "approved_answer": {
+            "status": "complete",
+            "text": answer,
+            "text_sha256": "sha256:" + hashlib.sha256(answer.encode()).hexdigest(),
+        },
+    }
+
 
 def _tool_payload(turns, **overrides):
     return _start_payload(
         tools=[_READ_TOOL],
-        debug={"fixture_turns": turns, "delay_ms": 0},
+        debug={
+            "fixture_turns": turns,
+            "delay_ms": 0,
+            "forbidden_history": ["__eval_only_plain_final__"],
+        },
         **overrides,
     )
+
+
+def test_s8_directory_activation_sole_call_and_resident_tools_contract():
+    payload = _start_payload(tools=[_READ_TOOL])
+    assert payload["tool_loading_mode"] in {"eager", "directory"}
+    assert {item["name"] for item in payload["catalog_snapshot"]} == {"runtime_status"}
+
+
+@pytest.mark.parametrize(
+    ("tool_loading_mode", "expected_ok"),
+    [("eager", True), ("directory", False)],
+)
+def test_s8_empty_catalog_metadata_is_only_valid_for_eager_tools(
+    tool_loading_mode, expected_ok
+):
+    initial_tools = (
+        [_READ_TOOL]
+        if tool_loading_mode == "eager"
+        else [_DIRECTORY_TOOL, _SUBMIT_TOOL]
+    )
+    payload = _start_payload(
+        tools=initial_tools,
+        tool_loading_mode=tool_loading_mode,
+        debug={
+            "fixture_turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "read_eager_fallback",
+                            "tool_name": "runtime_status",
+                            "arguments": {},
+                        }
+                    ]
+                },
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_eager_fallback",
+                            "tool_name": "submit_answer",
+                            "arguments": _submit_arguments("eager fallback works"),
+                        }
+                    ]
+                },
+            ],
+            "delay_ms": 0,
+        },
+    )
+    payload["tool_catalog"] = []
+    payload["catalog_snapshot"] = []
+    material = {"authorized_names": [], "catalog": [], "snapshot": []}
+    payload["catalog_hash"] = "sha256:" + hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    calls = []
+
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_s8_empty_catalog_{tool_loading_mode}",
+        run_id=f"run_s8_empty_catalog_{tool_loading_mode}",
+        timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call)
+        or _approved_provider_tool_result(call),
+        on_proposed=lambda _proposal: "commit",
+    )
+
+    assert result["ok"] is expected_ok, result
+    if expected_ok:
+        assert [call["tool_name"] for call in calls] == [
+            "runtime_status",
+            "submit_answer",
+        ]
+        assert result["result"]["text"] == "eager fallback works"
+    else:
+        assert result["error"]["code"] == "CONFIG_ERROR"
+        assert calls == []
+        returncode, stderr = _node_start_rejection(payload)
+        assert returncode == 2
+        assert stderr.startswith("diagnostic: ")
+
+
+def test_s8_directory_activation_real_runtime_keeps_resident_and_runs_business_tool():
+    business = dict(_READ_TOOL)
+    payload = _directory_payload(
+        [business],
+        [
+            _directory_turn("dir_1", "runtime_status"),
+            {"tool_calls": [{"call_id": "read_1", "tool_name": "runtime_status", "arguments": {}}]},
+            {"tool_calls": [{"call_id": "answer_1", "tool_name": "submit_answer", "arguments": {
+                "mode": "evidence", "status": "complete", "answer_markdown": "ok",
+                "claims": [{"text": "ok", "kind": "fact", "observation_ids": [], "required_scope": "none"}],
+            }}]},
+        ],
+    )
+    calls = []
+
+    def callback(call):
+        calls.append(call["tool_name"])
+        if call["tool_name"] == "tool_directory":
+            return _tool_activation(payload, [business])
+        if call["tool_name"] == "runtime_status":
+            return {"observation": {"ok": True, "status": "read", "coverage": "runtime", "freshness": "now"}}
+        return {"observation": {"ok": True, "status": "answer_accepted"}, "approved_answer": {
+            "status": "complete", "text": "ok", "text_sha256": "sha256:" + hashlib.sha256(b"ok").hexdigest(),
+        }}
+    events = []
+    result = run_pi_agent(payload, request_id="req_s8_directory", run_id="run_s8_directory", timeout_seconds=60,
+                          on_tool_call=callback, on_event=events.append, on_proposed=lambda _: "commit")
+    assert result["ok"] is True, {"result": result, "calls": calls, "events": events}
+    assert calls == ["tool_directory", "runtime_status", "submit_answer"]
+    assert result["result"]["text"] == "ok"
+
+
+def test_s8_rejected_directory_selection_gets_one_protocol_repair(tmp_path):
+    database = tmp_path / "directory_protocol_repair.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "directory-repair", "group-1", "key:us"
+    )
+    business = dict(_READ_TOOL)
+    payload = _directory_payload(
+        [business],
+        [
+            _directory_turn("dir_rejected", "runtime_status"),
+            _directory_turn("dir_repaired", "runtime_status"),
+            {"tool_calls": [{
+                "call_id": "read_after_repair",
+                "tool_name": "runtime_status",
+                "arguments": {},
+            }]},
+            {"tool_calls": [{
+                "call_id": "answer_after_repair",
+                "tool_name": "submit_answer",
+                "arguments": _submit_arguments("repaired"),
+            }]},
+        ],
+        session_id=session_id,
+    )
+    calls = []
+    events = []
+
+    def callback(call):
+        calls.append(call["tool_name"])
+        if calls == ["tool_directory"]:
+            return {
+                "observation": {
+                    "ok": False,
+                    "status": "failed",
+                    "error": "INVALID_ACTION",
+                }
+            }
+        if call["tool_name"] == "tool_directory":
+            return _tool_activation(payload, [business])
+        if call["tool_name"] == "runtime_status":
+            return {"observation": {"ok": True, "status": "read"}}
+        return _approved_provider_tool_result(call)
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="run_s8_directory_repair",
+        on_tool_call=callback,
+        on_event=events.append,
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "repaired"
+    assert calls == [
+        "tool_directory",
+        "tool_directory",
+        "runtime_status",
+        "submit_answer",
+    ]
+    completed = [
+        event["data"]
+        for event in events
+        if event["event_type"] == "model_turn_completed"
+    ]
+    assert len(completed) == 4
+    assert all(event["stop_reason"] == "toolUse" for event in completed)
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    assert [message["role"] for message in messages] == [
+        "user",
+        "assistant",
+        "toolResult",
+        "assistant",
+    ]
+    assert messages[1]["content"][0]["name"] == "runtime_status"
+    assert messages[2]["toolName"] == "runtime_status"
+    assert messages[-1]["content"] == [{"type": "text", "text": "repaired"}]
+    assert "errorMessage" not in messages[-1]
+
+
+def test_s8_answer_admission_metric_uses_submit_claims_and_actual_banner():
+    payload = _start_payload(
+        tools=[_SUBMIT_TOOL],
+        debug={
+            "fixture_turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_metric",
+                            "tool_name": "submit_answer",
+                            "arguments": {
+                                "mode": "evidence",
+                                "status": "partial",
+                                "answer_markdown": "partial answer",
+                                "claims": [
+                                    {
+                                        "text": "fact one",
+                                        "kind": "current_fact",
+                                        "observation_ids": ["obv_1", "obv_2"],
+                                        "required_scope": "point",
+                                    },
+                                    {
+                                        "text": "fact two",
+                                        "kind": "derived_fact",
+                                        "observation_ids": ["obv_2"],
+                                        "required_scope": "point",
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ],
+            "delay_ms": 0,
+        },
+    )
+    approved_text = "partial answer\n\n> 部分数据。"
+    events = []
+    result = run_pi_agent(
+        payload,
+        request_id="req_s8_answer_metric",
+        run_id="run_s8_answer_metric",
+        timeout_seconds=60,
+        on_tool_call=lambda _call: {
+            "observation": {"ok": True, "status": "answer_accepted"},
+            "approved_answer": {
+                "status": "partial",
+                "text": approved_text,
+                "text_sha256": "sha256:"
+                + hashlib.sha256(approved_text.encode()).hexdigest(),
+            },
+        },
+        on_event=events.append,
+        on_proposed=lambda _proposal: "commit",
+    )
+
+    metric = next(
+        event["data"]
+        for event in events
+        if event["event_type"] == "answer_admission"
+    )
+    assert result["ok"] is True, result
+    assert metric == {
+        "status": "partial",
+        "evidence_count": 2,
+        "repair_count": 0,
+        "banner_present": True,
+    }
+
+
+def test_s8_private_activation_validation_failure_is_terminal():
+    business = dict(_READ_TOOL)
+    payload = _directory_payload(
+        [business],
+        [_directory_turn("dir_bad_private", "runtime_status"), {"text": "must not repair"}],
+    )
+    calls = []
+    result = run_pi_agent(
+        payload,
+        request_id="req_s8_bad_private_activation",
+        run_id="run_s8_bad_private_activation",
+        timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call)
+        or _tool_activation(payload, [business], schema_hash="sha256:invalid"),
+        on_proposed=lambda _proposal: "commit",
+    )
+
+    assert [call["tool_name"] for call in calls] == ["tool_directory"]
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+
+
+def test_s8_third_successful_activation_change_is_terminal():
+    first = dict(_READ_TOOL)
+    second = {
+        "name": "config_validate",
+        "description": "Validate runtime config",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    }
+    business_by_name = {item["name"]: item for item in (first, second)}
+    selections = ["runtime_status", "config_validate", "runtime_status"]
+    payload = _directory_payload(
+        [second, first],
+        [
+            _directory_turn(f"dir_change_{index}", name)
+            for index, name in enumerate(selections, start=1)
+        ],
+    )
+    calls = []
+
+    def activate(call):
+        calls.append(call)
+        schemas = [business_by_name[name] for name in call["arguments"]["tool_names"]]
+        return _tool_activation(payload, schemas)
+
+    result = run_pi_agent(
+        payload,
+        request_id="req_s8_activation_budget",
+        run_id="run_s8_activation_budget",
+        timeout_seconds=60,
+        on_tool_call=activate,
+        on_proposed=lambda _proposal: "commit",
+    )
+
+    assert [call["arguments"]["tool_names"] for call in calls] == [
+        ["runtime_status"],
+        ["config_validate"],
+        ["runtime_status"],
+    ]
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PROTOCOL_ERROR"
+
+
+def test_s8_frozen_catalog_material_tamper_is_fail_closed():
+    for field in ("purpose", "toolset", "evidence_type", "description", "input_schema", "output_contract", "access"):
+        row = dict(_READ_TOOL)
+        payload = _start_payload(tools=[row])
+        payload["catalog_snapshot"][0][field] = ({"tampered": True} if field in {"input_schema", "output_contract"} else "tampered")
+        result = run_pi_agent(payload, request_id=f"req_s8_tamper_{field}", run_id=f"run_s8_tamper_{field}", timeout_seconds=60,
+                              on_tool_call=lambda _call: {"observation": {"ok": True}}, on_proposed=lambda _: "commit")
+        assert result["ok"] is False
+        assert result["error"]["code"] == "CONFIG_ERROR"
+
+
+def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
+    from src.application.copilot.host import _submit_answer_description
+
+    schema = _submit_answer_description()["input_schema"]
+    assert set(schema["required"]) == {"mode", "status", "answer_markdown", "claims"}
+    assert "observation_refs" not in schema["properties"]
+
+
+def test_s8_answer_admission_and_activation_names_are_explicit():
+    payload = _start_payload(tools=[_READ_TOOL])
+    assert "submit_answer" in {item["name"] for item in payload["tools"]}
+    assert all(item["pagination"].get("mode") == "none" for item in payload["catalog_snapshot"] if "pagination" in item)
+
+
+def test_s8_plain_final_uses_one_repair_then_accepted_terminal():
+    payload = _start_payload(
+        tools=[_SUBMIT_TOOL],
+        debug={"fixture_turns": [
+            {"text": "plain bypass"},
+            {"tool_calls": [{"call_id": "answer_1", "tool_name": "submit_answer", "arguments": {
+                "mode": "conceptual", "status": "complete", "answer_markdown": "repaired", "claims": []
+            }}]},
+        ], "delay_ms": 0},
+    )
+    calls = []
+    result = run_pi_agent(payload, request_id="req_s8_repair", run_id="run_s8_repair", timeout_seconds=60,
+                          on_tool_call=lambda call: calls.append(call) or {
+                              "observation": {"ok": True, "status": "answer_accepted"},
+                              "approved_answer": {"status": "complete", "text": "repaired", "text_sha256": "sha256:" + hashlib.sha256(b"repaired").hexdigest()},
+                          }, on_proposed=lambda _: "commit")
+    assert result["ok"] is True, result
+    assert [call["tool_name"] for call in calls] == ["submit_answer"]
+    assert result["result"]["text"] == "repaired"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected_code"),
+    [
+        ("submit_answer", "ANSWER_ADMISSION_FAILED"),
+        ("tool_directory", "PROTOCOL_ERROR"),
+    ],
+)
+def test_s8_second_schema_invalid_protocol_call_is_terminal(tool_name, expected_code):
+    invalid_arguments = (
+        {"mode": "conceptual", "status": "complete", "answer_markdown": "missing claims"}
+        if tool_name == "submit_answer"
+        else {"catalog_hash": "sha256:missing-tool-names"}
+    )
+    tools = [_SUBMIT_TOOL] if tool_name == "submit_answer" else [_DIRECTORY_TOOL, _SUBMIT_TOOL]
+    payload = _start_payload(
+        tools=tools,
+        catalog_tools=[_READ_TOOL] if tool_name == "tool_directory" else tools,
+        tool_loading_mode="directory" if tool_name == "tool_directory" else "eager",
+        debug={
+            "fixture_turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": f"{tool_name}_{index}",
+                            "tool_name": tool_name,
+                            "arguments": invalid_arguments,
+                        }
+                    ]
+                }
+                for index in (1, 2)
+            ]
+            + [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_must_not_run",
+                            "tool_name": "submit_answer",
+                            "arguments": _submit_arguments("must not run"),
+                        }
+                    ]
+                }
+            ],
+            "delay_ms": 0,
+        },
+    )
+    callbacks = []
+    proposed = []
+
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_s8_invalid_{tool_name}",
+        run_id=f"run_s8_invalid_{tool_name}",
+        timeout_seconds=60,
+        on_tool_call=lambda call: callbacks.append(call) or {"observation": {"ok": True}},
+        on_proposed=lambda proposal: proposed.append(proposal) or "commit",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == expected_code
+    assert callbacks == []
+    assert proposed == []
+
+
+def test_s8_session_omits_mixed_protocol_batch_and_persists_answer_once(tmp_path):
+    database = tmp_path / "mixed_protocol.sqlite3"
+    session_id = derive_pi_session_id("feishu", "mixed-protocol", "group-1", "key:us")
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_READ_TOOL, _SUBMIT_TOOL],
+        debug={
+            "fixture_turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_mixed",
+                            "tool_name": "submit_answer",
+                            "arguments": {
+                                "mode": "conceptual",
+                                "status": "complete",
+                                "answer_markdown": "blocked",
+                                "claims": [],
+                            },
+                        },
+                        {
+                            "call_id": "read_mixed",
+                            "tool_name": "runtime_status",
+                            "arguments": {},
+                        },
+                    ]
+                },
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_repaired",
+                            "tool_name": "submit_answer",
+                            "arguments": {
+                                "mode": "conceptual",
+                                "status": "complete",
+                                "answer_markdown": "accepted once",
+                                "claims": [],
+                            },
+                        }
+                    ]
+                },
+            ],
+            "delay_ms": 0,
+        },
+    )
+    calls = []
+    answer = "accepted once"
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="mixed_protocol",
+        on_tool_call=lambda call: calls.append(call)
+        or {
+            "observation": {"ok": True, "status": "answer_accepted"},
+            "approved_answer": {
+                "status": "complete",
+                "text": answer,
+                "text_sha256": "sha256:" + hashlib.sha256(answer.encode()).hexdigest(),
+            },
+        },
+    )
+
+    assert result["ok"] is True, result
+    assert [call["tool_name"] for call in calls] == ["submit_answer"]
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["content"] == [{"type": "text", "text": answer}]
+    assert "INVALID_ACTION" not in json.dumps(messages)
+    assert json.dumps(messages).count(answer) == 1
+
+
+def test_s8_session_retains_complete_business_group_before_admitted_answer(tmp_path):
+    database = tmp_path / "business_group.sqlite3"
+    session_id = derive_pi_session_id("feishu", "business-group", "group-1", "key:us")
+    answer = "business evidence retained"
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_READ_TOOL, _SUBMIT_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(call_id="read_valid"),
+                {
+                    "tool_calls": [
+                        {
+                            "call_id": "answer_valid",
+                            "tool_name": "submit_answer",
+                            "arguments": {
+                                "mode": "evidence",
+                                "status": "complete",
+                                "answer_markdown": answer,
+                                "claims": [],
+                            },
+                        }
+                    ]
+                },
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    def callback(call):
+        if call["tool_name"] == "runtime_status":
+            return {"observation": {"ok": True, "status": "read"}}
+        return {
+            "observation": {"ok": True, "status": "answer_accepted"},
+            "approved_answer": {
+                "status": "complete",
+                "text": answer,
+                "text_sha256": "sha256:" + hashlib.sha256(answer.encode()).hexdigest(),
+            },
+        }
+
+    result = _run_session(
+        database,
+        session_id,
+        payload,
+        run_id="business_group",
+        on_tool_call=callback,
+    )
+
+    assert result["ok"] is True, result
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    assert [message["role"] for message in messages] == [
+        "user",
+        "assistant",
+        "toolResult",
+        "assistant",
+    ]
+    assert messages[1]["content"][0]["name"] == "runtime_status"
+    assert messages[2]["toolName"] == "runtime_status"
+    assert messages[-1]["content"] == [{"type": "text", "text": answer}]
+
+
+def test_s8_second_plain_final_fails_closed_without_proposal():
+    payload = _start_payload(
+        tools=[_SUBMIT_TOOL],
+        debug={"fixture_turns": [{"text": "plain one"}, {"text": "plain two"}], "delay_ms": 0},
+    )
+    proposed = []
+    result = run_pi_agent(payload, request_id="req_s8_second", run_id="run_s8_second", timeout_seconds=60,
+                          on_tool_call=lambda call: {"observation": {"ok": False, "status": "rejected"}},
+                          on_proposed=lambda value: proposed.append(value) or "commit")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ANSWER_ADMISSION_FAILED"
+    assert proposed == []
 
 
 def _tool_turn(
@@ -716,6 +1508,7 @@ def test_commit_and_discard():
         },
     }
     assert [e["event_type"] for e in events] == [
+        "catalog_loaded",
         "agent_start",
         "turn_start",
         "model_turn_completed",
@@ -854,7 +1647,6 @@ def test_timeout(tmp_path):
             "timeout_seconds": 1,
             "max_iterations": 16,
             "max_tool_calls": 12,
-            "max_context_tokens": 24000,
             "max_consecutive_failed_tool_batches": 2,
             "final_answer_reserve_seconds": 20,
         },
@@ -1016,7 +1808,7 @@ def test_python_and_node_reject_closed_start_contract_before_provider(case):
     elif case == "invalid_base_url":
         payload["model"]["base_url"] = "file:///tmp/provider"
     elif case == "mismatched_context_budget":
-        payload["limits"]["max_context_tokens"] = 12_000
+        payload["limits"]["unexpected"] = 24_000
     elif case in {"local_debug", "channel_debug"}:
         payload["execution_environment"] = case.removesuffix("_debug")
     elif case == "eval_without_fixture":
@@ -1039,19 +1831,9 @@ def test_python_and_node_reject_closed_start_contract_before_provider(case):
     assert "s4-loopback-secret" not in stderr
 
 
-def test_python_rejects_mismatched_context_budget_before_spawn():
+def test_python_uses_model_context_as_single_authority():
     payload = _start_payload()
-    payload["limits"]["max_context_tokens"] = 12_000
-
-    result = run_pi_agent(
-        payload,
-        request_id="req_mismatched_context",
-        run_id="run_mismatched_context",
-        timeout_seconds=60,
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert "max_context_tokens" not in payload["limits"]
 
 
 @pytest.mark.parametrize(
@@ -1065,7 +1847,6 @@ def test_python_rejects_mismatched_context_budget_before_spawn():
 def test_context_budget_uses_model_profile(model_context, message_chars, expected_ok):
     payload = _start_payload(user_message="x" * message_chars)
     payload["model"]["context_window_tokens"] = model_context
-    payload["limits"]["max_context_tokens"] = model_context
 
     result = run_pi_agent(
         payload,
@@ -1078,11 +1859,69 @@ def test_context_budget_uses_model_profile(model_context, message_chars, expecte
     assert result["ok"] is expected_ok, result
     if not expected_ok:
         assert result["error"] == {
-            "code": "CONFIG_ERROR",
-            "stage": "config",
-            "message": "configured context budget is too small",
+            "code": "BUDGET_EXHAUSTED",
+            "stage": "budget",
+            "message": "provider input exceeds 75% gate",
             "retryable": False,
         }
+
+
+def test_persistent_empty_session_without_compactable_prefix_is_budget_failure(tmp_path):
+    database = tmp_path / "empty_session_budget.sqlite3"
+    session_id = derive_pi_session_id("feishu", "empty-budget", "group-1", "key:us")
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+
+    result = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="x" * 16_000,
+            model=model,
+            debug={
+                "fixture_response": "must-not-run",
+                "compaction_response": "must-not-run",
+                "delay_ms": 0,
+            },
+        ),
+        run_id="empty_session_budget",
+    )
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "BUDGET_EXHAUSTED",
+            "stage": "budget",
+            "message": "provider input has no safe compactable prefix",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == []
+
+
+def test_ephemeral_request_at_compaction_watermark_without_prefix_is_budget_failure():
+    model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+
+    result = run_pi_agent(
+        _start_payload(
+            user_message="x" * 15_000,
+            model=model,
+            debug={"fixture_response": "must-not-run", "delay_ms": 0},
+        ),
+        request_id="req_ephemeral_compaction_watermark",
+        run_id="run_ephemeral_compaction_watermark",
+        timeout_seconds=60,
+    )
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "BUDGET_EXHAUSTED",
+            "stage": "budget",
+            "message": "provider input has no safe compactable prefix",
+            "retryable": False,
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -2248,6 +3087,40 @@ def test_only_admitted_turn_messages_are_persisted(tmp_path):
         assert forbidden not in persisted
 
 
+def _seed_compactable_history(
+    database, session_id, *, label, retained_question_chars=4_500
+):
+    summarized_question = f"{label}-summarized-question-" + "q" * 16_000
+    summarized_answer = f"{label}-summarized-answer-" + "a" * 200
+    retained_question = (
+        f"{label}-retained-question-" + "r" * retained_question_chars
+    )
+    retained_answer = f"{label}-retained-answer-" + "b" * 400
+    for index, (question, answer) in enumerate(
+        (
+            (summarized_question, summarized_answer),
+            (retained_question, retained_answer),
+        )
+    ):
+        result = _run_session(
+            database,
+            session_id,
+            _start_payload(
+                session_id=session_id,
+                user_message=question,
+                debug={"fixture_response": answer, "delay_ms": 0},
+            ),
+            run_id=f"{label}_seed_{index}",
+        )
+        assert result["ok"] is True, result
+    return {
+        "summarized_question": summarized_question,
+        "summarized_answer": summarized_answer,
+        "retained_question": retained_question,
+        "retained_answer": retained_answer,
+    }
+
+
 def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
     cases = []
     for appended_messages in range(1, 5):
@@ -2307,18 +3180,9 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
     compact_session = derive_pi_session_id(
         "feishu", "compaction-crash", "group-1", "key:us"
     )
-    old_question = "old-question-" + "q" * 16_000
-    old_answer = "old-answer-" + "a" * 16_000
-    assert _run_session(
-        compact_database,
-        compact_session,
-        _start_payload(
-            session_id=compact_session,
-            user_message=old_question,
-            debug={"fixture_response": old_answer, "delay_ms": 0},
-        ),
-        run_id="compact_seed",
-    )["ok"]
+    compact_history = _seed_compactable_history(
+        compact_database, compact_session, label="compact_crash"
+    )
     compact_before = _session_entries(compact_database, compact_session)
     crash_question = "crashed-after-compaction"
     crash_payload = _start_payload(
@@ -2418,8 +3282,16 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
             debug={
                 "fixture_response": "recovered-after-compaction",
                 "delay_ms": 0,
-                "expected_history": ["compact-crash-summary", old_answer],
-                "forbidden_history": [old_question, crash_question],
+                "expected_history": [
+                    "compact-crash-summary",
+                    compact_history["retained_question"],
+                    compact_history["retained_answer"],
+                ],
+                "forbidden_history": [
+                    compact_history["summarized_question"],
+                    compact_history["summarized_answer"],
+                    crash_question,
+                ],
             },
         ),
         run_id="compact_recovered",
@@ -2433,19 +3305,10 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
     session_id = derive_pi_session_id(
         "feishu", f"sender-{decision}", "group-1", "key:us"
     )
-    old_question = "checkpoint-old-question-" + "q" * 16_000
-    old_answer = "checkpoint-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    assert _run_session(
-        database,
-        session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message=old_question,
-            debug={"fixture_response": old_answer, "delay_ms": 0},
-        ),
-        run_id=f"seed_{decision}",
-    )["ok"]
+    history = _seed_compactable_history(
+        database, session_id, label=f"checkpoint_{decision}"
+    )
     before = _session_entries(database, session_id)
     rejected_question = f"rejected-{decision}-question"
     rejected = _run_session(
@@ -2459,8 +3322,15 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
                 "fixture_response": f"rejected-{decision}-answer",
                 "delay_ms": 0,
                 "compaction_response": f"summary-{decision}",
-                "expected_history": [f"summary-{decision}", old_answer],
-                "forbidden_history": [old_question],
+                "expected_history": [
+                    f"summary-{decision}",
+                    history["retained_question"],
+                    history["retained_answer"],
+                ],
+                "forbidden_history": [
+                    history["summarized_question"],
+                    history["summarized_answer"],
+                ],
             },
         ),
         decision=decision,
@@ -2487,8 +3357,16 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
             debug={
                 "fixture_response": "followup-answer",
                 "delay_ms": 0,
-                "expected_history": [f"summary-{decision}", old_answer],
-                "forbidden_history": [old_question, rejected_question],
+                "expected_history": [
+                    f"summary-{decision}",
+                    history["retained_question"],
+                    history["retained_answer"],
+                ],
+                "forbidden_history": [
+                    history["summarized_question"],
+                    history["summarized_answer"],
+                    rejected_question,
+                ],
             },
         ),
         run_id=f"followup_{decision}",
@@ -2499,19 +3377,8 @@ def test_compaction_checkpoint_survives_current_turn_rejection(tmp_path, decisio
 def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
     database = tmp_path / "compaction_tool.sqlite3"
     session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
-    old_question = "tool-old-question-" + "q" * 16_000
-    old_answer = "tool-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    assert _run_session(
-        database,
-        session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message=old_question,
-            debug={"fixture_response": old_answer, "delay_ms": 0},
-        ),
-        run_id="tool_seed",
-    )["ok"]
+    history = _seed_compactable_history(database, session_id, label="tool")
     before = _session_entries(database, session_id)
     current_question = "current-tool-question"
     observation = {"ok": True, "value": "current-tool-observation"}
@@ -2524,8 +3391,16 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
     payload["debug"].update(
         {
             "compaction_response": "tool-compaction-summary",
-            "expected_history": ["tool-compaction-summary", old_answer],
-            "forbidden_history": [old_question],
+            "expected_history": [
+                "tool-compaction-summary",
+                history["retained_question"],
+                history["retained_answer"],
+            ],
+            "forbidden_history": [
+                "__eval_only_plain_final__",
+                history["summarized_question"],
+                history["summarized_answer"],
+            ],
         }
     )
     result = _run_session(
@@ -2549,7 +3424,9 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
     ]
     compaction = appended[0]["payload"]
     assert "tool-compaction-summary" in compaction["summary"]
-    assert old_answer in json.dumps(compaction["retainedTail"], ensure_ascii=False)
+    assert history["retained_answer"] in json.dumps(
+        compaction["retainedTail"], ensure_ascii=False
+    )
     assert compaction["tokensBefore"] > 0
     assert isinstance(compaction["usage"], dict)
     assert appended[1]["payload"]["data"]["kind"] == "compaction"
@@ -2573,19 +3450,8 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
 def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
     database = tmp_path / "failed_compaction.sqlite3"
     session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
-    old_question = "failed-old-question-" + "q" * 16_000
-    old_answer = "failed-old-answer-" + "a" * 16_000
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
-    assert _run_session(
-        database,
-        session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message=old_question,
-            debug={"fixture_response": old_answer, "delay_ms": 0},
-        ),
-        run_id="failed_seed",
-    )["ok"]
+    history = _seed_compactable_history(database, session_id, label="failed")
     before = _session_entries(database, session_id)
 
     failed = _run_session(
@@ -2621,8 +3487,16 @@ def test_failed_compaction_keeps_previous_committed_branch(tmp_path):
                 "fixture_response": "recovered-current-answer",
                 "delay_ms": 0,
                 "compaction_response": "recovered-summary",
-                "expected_history": ["recovered-summary", old_answer],
-                "forbidden_history": [old_question, "failed-current-question"],
+                "expected_history": [
+                    "recovered-summary",
+                    history["retained_question"],
+                    history["retained_answer"],
+                ],
+                "forbidden_history": [
+                    history["summarized_question"],
+                    history["summarized_answer"],
+                    "failed-current-question",
+                ],
             },
         ),
         run_id="recovered_compaction",
@@ -2750,9 +3624,9 @@ def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path
     assert failed == {
         "ok": False,
         "error": {
-            "code": "SESSION_ERROR",
-            "stage": "session",
-            "message": "compacted context exceeds configured budget",
+                "code": "BUDGET_EXHAUSTED",
+                "stage": "budget",
+                "message": "compacted context exceeds input budget",
             "retryable": False,
         },
     }
@@ -2779,18 +3653,9 @@ def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path
 def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
     database = tmp_path / "provider_usage_compaction.sqlite3"
     session_id = derive_pi_session_id("feishu", "provider-usage", "group-1", "key:us")
-    old_question = "provider-usage-question-" + "q" * 16_000
-    old_answer = "provider-usage-answer-" + "a" * 16_000
-    assert _run_session(
-        database,
-        session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message=old_question,
-            debug={"fixture_response": old_answer, "delay_ms": 0},
-        ),
-        run_id="provider_usage_seed",
-    )["ok"]
+    history = _seed_compactable_history(
+        database, session_id, label="provider_usage"
+    )
     _set_latest_assistant_usage(database, session_id, 7_000)
 
     model = {**_start_payload()["model"], "context_window_tokens": 8_000}
@@ -2805,8 +3670,15 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
                 "fixture_response": "provider-usage-current-answer",
                 "delay_ms": 0,
                 "compaction_response": "provider-usage-summary",
-                "expected_history": ["provider-usage-summary", old_answer],
-                "forbidden_history": [old_question],
+                "expected_history": [
+                    "provider-usage-summary",
+                    history["retained_question"],
+                    history["retained_answer"],
+                ],
+                "forbidden_history": [
+                    history["summarized_question"],
+                    history["summarized_answer"],
+                ],
             },
         ),
         run_id="provider_usage_compacted",
@@ -2829,11 +3701,15 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
                 "delay_ms": 0,
                 "expected_history": [
                     "provider-usage-summary",
-                    old_answer,
+                    history["retained_question"],
+                    history["retained_answer"],
                     "provider-usage-current-question",
                     "provider-usage-current-answer",
                 ],
-                "forbidden_history": [old_question],
+                "forbidden_history": [
+                    history["summarized_question"],
+                    history["summarized_answer"],
+                ],
             },
         ),
         run_id="provider_usage_followup",
@@ -2867,6 +3743,48 @@ def test_compaction_uses_structural_tokens_after_provider_usage(tmp_path):
         entry["type"] == "compaction"
         for entry in _session_entries(database, session_id)
     ) == compaction_count + 1
+
+
+def test_provider_usage_prefix_is_not_reestimated_from_chinese_history(tmp_path):
+    database = tmp_path / "provider_usage_chinese.sqlite3"
+    session_id = derive_pi_session_id("feishu", "provider-usage-chinese", "group-1", "key:us")
+    seed_model = {**_start_payload()["model"], "context_window_tokens": 128_000}
+    seed = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="历史问题" + "问" * 20_000,
+            model=seed_model,
+            debug={"fixture_response": "历史回答" + "答" * 20_000, "delay_ms": 0},
+        ),
+        run_id="provider_usage_chinese_seed",
+    )
+    assert seed["ok"] is True, seed
+    _set_latest_assistant_usage(database, session_id, 1_000)
+    before = _session_entries(database, session_id)
+    constrained_model = {**_start_payload()["model"], "context_window_tokens": 8_000}
+
+    followup = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="简短追问",
+            model=constrained_model,
+            debug={
+                "fixture_response": "简短回答",
+                "delay_ms": 0,
+                "expected_history": ["历史问题", "历史回答"],
+            },
+        ),
+        run_id="provider_usage_chinese_followup",
+    )
+
+    assert followup["ok"] is True, followup
+    after = _session_entries(database, session_id)
+    assert sum(entry["type"] == "compaction" for entry in after) == 0
+    assert after[: len(before)] == before
 
 
 def test_session_storage_errors_are_safe(tmp_path):
@@ -2938,7 +3856,14 @@ def test_loopback_provider_request_and_tool_round_trip(provider, base_suffix, ex
     events: list[dict] = []
     with _loopback_server([
         {"body": responder(tool_call=True)},
-        {"body": responder(text="provider answer", usage=(4, 3))},
+        {
+            "body": responder(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("provider answer"),
+                call_id="answer_1",
+                usage=(4, 3),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             provider,
@@ -2951,7 +3876,7 @@ def test_loopback_provider_request_and_tool_round_trip(provider, base_suffix, ex
             run_id=f"run_{provider}",
             timeout_seconds=6,
             on_event=events.append,
-            on_tool_call=lambda _call: {"ok": True, "status": "healthy"},
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(keyed=provider != "ollama"),
         )
@@ -3011,7 +3936,14 @@ def test_loopback_retry_success_and_attempt_counters():
             "content_type": "application/json",
             "headers": {"Retry-After": "0"},
         },
-        {"body": _chat_response(text="retried", usage=(5, 4))},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("retried"),
+                call_id="answer_retry",
+                usage=(5, 4),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload("deepseek", root)
         payload["model"]["max_attempts"] = 3
@@ -3021,6 +3953,7 @@ def test_loopback_retry_success_and_attempt_counters():
             run_id="run_retry",
             timeout_seconds=6,
             on_event=events.append,
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(),
         )
@@ -3182,6 +4115,14 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
     with _loopback_server([
         {"body": _chat_response(text="first", finish_reason="length", usage=(3, 2))},
         {"body": _chat_response(text="second", finish_reason="stop", usage=(4, 3))},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("firstsecond"),
+                call_id="answer_continue",
+                usage=(2, 1),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3196,6 +4137,7 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
             run_id="run_continue_stop",
             timeout_seconds=6,
             on_event=events.append,
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(database=database),
         )
@@ -3203,19 +4145,21 @@ def test_loopback_length_continuation_is_canonical_and_tool_free(
     assert result["ok"] is True, result
     assert result["result"]["text"] == "firstsecond"
     assert result["result"]["termination_reason"] == "stop"
-    assert result["result"]["usage"]["totalTokens"] == 12
-    assert len(requests) == 2
+    assert result["result"]["usage"]["totalTokens"] == 15
+    assert len(requests) == 3
     assert "tools" in requests[0]["payload"]
-    assert "tools" not in requests[1]["payload"]
+    assert {tool["function"]["name"] for tool in requests[1]["payload"]["tools"]} == {
+        "submit_answer"
+    }
     assert CONTINUATION_PROMPT_FOR_TEST in json.dumps(requests[1]["payload"])
     completed = [event["data"] for event in events if event["event_type"] == "model_turn_completed"]
-    assert [item["attempt_count"] for item in completed] == [1, 1]
-    assert [item["usage_total"]["totalTokens"] for item in completed] == [5, 12]
+    assert [item["attempt_count"] for item in completed] == [1, 1, 1]
+    assert [item["usage_total"]["totalTokens"] for item in completed] == [5, 12, 15]
     entries = _session_entries(database, session_id)
     messages = [entry["payload"]["message"] for entry in entries if entry["type"] == "message"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[-1]["content"] == [{"type": "text", "text": "firstsecond"}]
-    assert messages[-1]["usage"]["totalTokens"] == 12
+    assert messages[-1]["usage"]["totalTokens"] == 3
     assert CONTINUATION_PROMPT_FOR_TEST not in json.dumps(entries)
 
 
@@ -3226,6 +4170,14 @@ def test_loopback_length_after_tool_chain_continues_and_commits_canonical_turn(t
         {"body": _chat_response(tool_call=True)},
         {"body": _chat_response(text="first", finish_reason="length", usage=(3, 2))},
         {"body": _chat_response(text="second", finish_reason="stop", usage=(4, 3))},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("firstsecond"),
+                call_id="answer_tool_continue",
+                usage=(2, 1),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3238,7 +4190,7 @@ def test_loopback_length_after_tool_chain_continues_and_commits_canonical_turn(t
             request_id="req_tool_chain_continue",
             run_id="run_tool_chain_continue",
             timeout_seconds=6,
-            on_tool_call=lambda _call: {"ok": True, "status": "healthy"},
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(database=database),
         )
@@ -3246,9 +4198,11 @@ def test_loopback_length_after_tool_chain_continues_and_commits_canonical_turn(t
     assert result["ok"] is True, result
     assert result["result"]["text"] == "firstsecond"
     assert result["result"]["termination_reason"] == "stop"
-    assert len(requests) == 3
+    assert len(requests) == 4
     assert "tools" in requests[1]["payload"]
-    assert requests[2]["payload"].get("tools") in (None, [])
+    assert {tool["function"]["name"] for tool in requests[2]["payload"]["tools"]} == {
+        "submit_answer"
+    }
     assert CONTINUATION_PROMPT_FOR_TEST in json.dumps(requests[2]["payload"])
     entries = _session_entries(database, session_id)
     assert CONTINUATION_PROMPT_FOR_TEST not in json.dumps(entries)
@@ -3349,6 +4303,13 @@ def test_loopback_resumed_session_continuation_uses_only_canonical_history(tmp_p
     with _loopback_server([
         {"body": _chat_response(text="left", finish_reason="length")},
         {"body": _chat_response(text="right", finish_reason="stop")},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("leftright"),
+                call_id="answer_resumed",
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3361,6 +4322,7 @@ def test_loopback_resumed_session_continuation_uses_only_canonical_history(tmp_p
             request_id="req_resumed_continue",
             run_id="run_resumed_continue",
             timeout_seconds=6,
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(database=database),
         )
@@ -3378,20 +4340,60 @@ def test_loopback_resumed_session_continuation_uses_only_canonical_history(tmp_p
     assert CONTINUATION_PROMPT_FOR_TEST not in encoded
 
 
+@pytest.mark.parametrize("provider", ["deepseek", "openai"])
+def test_loopback_empty_compaction_summary_fails_before_session_write(tmp_path, provider):
+    database = tmp_path / f"empty_provider_compaction_{provider}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"empty-provider-compaction-{provider}", "group-1", "key:us"
+    )
+    _seed_compactable_history(
+        database,
+        session_id,
+        label=f"empty_provider_compaction_{provider}",
+        retained_question_chars=12_000,
+    )
+    before = _session_entries(database, session_id)
+    responder = _responses_response if provider == "openai" else _chat_response
+
+    with _loopback_server([{"body": responder(text="", usage=(7, 0))}]) as (root, requests):
+        payload = _provider_payload(
+            provider,
+            root,
+            session_id=session_id,
+            user_message="current question",
+        )
+        payload["model"]["context_window_tokens"] = 8_000
+        result = run_pi_agent(
+            payload,
+            request_id=f"req_empty_provider_compaction_{provider}",
+            run_id=f"run_empty_provider_compaction_{provider}",
+            timeout_seconds=6,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert len(requests) == 1
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "SESSION_ERROR",
+            "stage": "session",
+            "message": "session context compaction failed",
+            "retryable": False,
+        },
+    }
+    assert _session_entries(database, session_id) == before
+
+
 def test_loopback_compaction_shares_policy_and_counts_usage_once(tmp_path):
     database = tmp_path / "provider_compaction.sqlite3"
     session_id = derive_pi_session_id("feishu", "provider-compaction", "group-1", "key:us")
-    seeded = _run_session(
+    _seed_compactable_history(
         database,
         session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message="old question " + "q" * 16_000,
-            debug={"fixture_response": "old answer " + "a" * 16_000, "delay_ms": 0},
-        ),
-        run_id="seed_provider_compaction",
+        label="provider_compaction",
+        retained_question_chars=12_000,
     )
-    assert seeded["ok"] is True
     events: list[dict] = []
     with _loopback_server([
         {
@@ -3401,7 +4403,14 @@ def test_loopback_compaction_shares_policy_and_counts_usage_once(tmp_path):
             "headers": {"Retry-After": "0"},
         },
         {"body": _chat_response(text="compact summary", usage=(7, 3))},
-        {"body": _chat_response(text="current answer", usage=(5, 4))},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("current answer"),
+                call_id="answer_compacted",
+                usage=(5, 4),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3410,13 +4419,13 @@ def test_loopback_compaction_shares_policy_and_counts_usage_once(tmp_path):
             user_message="current question",
         )
         payload["model"]["context_window_tokens"] = 8_000
-        payload["limits"]["max_context_tokens"] = 8_000
         result = run_pi_agent(
             payload,
             request_id="req_provider_compaction",
             run_id="run_provider_compaction",
             timeout_seconds=6,
             on_event=events.append,
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(database=database),
         )
@@ -3446,9 +4455,9 @@ def test_loopback_split_compaction_drains_counters_before_retried_main(tmp_path)
     for index, (question, answer) in enumerate(
         [
             ("older question", "older answer"),
-            (
-                "latest question " + "q" * 16_000,
-                "latest answer " + "a" * 16_000,
+                (
+                    "latest question " + "q" * 16_000,
+                    "latest answer " + "a" * 19_000,
             ),
         ]
     ):
@@ -3474,7 +4483,14 @@ def test_loopback_split_compaction_drains_counters_before_retried_main(tmp_path)
             "content_type": "application/json",
             "headers": {"Retry-After": "0"},
         },
-        {"body": _chat_response(text="current answer", usage=(5, 4))},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("current answer"),
+                call_id="answer_split_compacted",
+                usage=(5, 4),
+            )
+        },
     ]) as (root, requests):
         payload = _provider_payload(
             "deepseek",
@@ -3482,14 +4498,14 @@ def test_loopback_split_compaction_drains_counters_before_retried_main(tmp_path)
             session_id=session_id,
             user_message="current question",
         )
-        payload["model"]["context_window_tokens"] = 8_000
-        payload["limits"]["max_context_tokens"] = 8_000
+        payload["model"]["context_window_tokens"] = 12_000
         result = run_pi_agent(
             payload,
             request_id="req_split_provider_compaction",
             run_id="run_split_provider_compaction",
             timeout_seconds=6,
             on_event=events.append,
+            on_tool_call=_approved_provider_tool_result,
             on_proposed=lambda _proposal: "commit",
             environ=_provider_env(database=database),
         )
@@ -3531,20 +4547,12 @@ def test_loopback_cancelled_main_keeps_committed_compaction_usage(tmp_path):
     session_id = derive_pi_session_id(
         "feishu", "cancel-after-provider-compaction", "group-1", "key:us"
     )
-    seeded = _run_session(
+    _seed_compactable_history(
         database,
         session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message="old question " + "q" * 16_000,
-            debug={
-                "fixture_response": "old answer " + "a" * 16_000,
-                "delay_ms": 0,
-            },
-        ),
-        run_id="seed_cancel_after_provider_compaction",
+        label="cancel_after_provider_compaction",
+        retained_question_chars=12_000,
     )
-    assert seeded["ok"] is True, seeded
 
     main_started = threading.Event()
     events: list[dict] = []
@@ -3563,7 +4571,6 @@ def test_loopback_cancelled_main_keeps_committed_compaction_usage(tmp_path):
             user_message="current question",
         )
         payload["model"]["context_window_tokens"] = 8_000
-        payload["limits"]["max_context_tokens"] = 8_000
         result = run_pi_agent(
             payload,
             request_id="req_cancel_after_provider_compaction",
@@ -3611,20 +4618,12 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
     session_id = derive_pi_session_id(
         "feishu", "cancel-during-provider-compaction", "group-1", "key:us"
     )
-    seeded = _run_session(
+    _seed_compactable_history(
         database,
         session_id,
-        _start_payload(
-            session_id=session_id,
-            user_message="old question " + "q" * 16_000,
-            debug={
-                "fixture_response": "old answer " + "a" * 16_000,
-                "delay_ms": 0,
-            },
-        ),
-        run_id="seed_cancel_during_provider_compaction",
+        label="cancel_during_provider_compaction",
+        retained_question_chars=12_000,
     )
-    assert seeded["ok"] is True, seeded
 
     compaction_started = threading.Event()
     events: list[dict] = []
@@ -3642,7 +4641,6 @@ def test_loopback_cancelled_uncommitted_compaction_publishes_no_usage(tmp_path):
             user_message="current question",
         )
         payload["model"]["context_window_tokens"] = 8_000
-        payload["limits"]["max_context_tokens"] = 8_000
         result = run_pi_agent(
             payload,
             request_id="req_cancel_during_provider_compaction",
@@ -3760,6 +4758,7 @@ def test_control_preview_batch_violation_blocks_every_call_in_node(tmp_path, bat
                 {"text": "已改为一次只请求一个预览。"},
             ],
             "delay_ms": 0,
+            "forbidden_history": ["__eval_only_plain_final__"],
         },
     )
 
@@ -3796,6 +4795,7 @@ def test_invalid_control_preview_observation_is_recoverable(tmp_path):
                 {"text": "请明确一个受支持的预览操作。"},
             ],
             "delay_ms": 0,
+            "forbidden_history": ["__eval_only_plain_final__"],
         },
     )
 

@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
@@ -166,6 +168,35 @@ def test_exchange_rate_cache_rejects_non_opend_source(tmp_path: Path) -> None:
         get_cached_exchange_rates(cache_path=cache_path, max_age_hours=24)
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_rate",
+    [-7.0, float("nan"), float("inf"), "bad", True, False],
+)
+def test_exchange_rate_boundaries_reject_invalid_present_rate(
+    tmp_path: Path, invalid_rate: object
+) -> None:
+    from src.infrastructure.exchange_rates import (
+        exchange_rate_observation_status,
+        get_cached_exchange_rates,
+        save_exchange_rate_observation,
+    )
+
+    payload = {
+        "rates": {"USDCNY": invalid_rate},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "opend_account_funds_conversion",
+    }
+    cache_path = tmp_path / "rate_cache.json"
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert exchange_rate_observation_status(payload, max_age_hours=24) == "unavailable"
+    assert get_cached_exchange_rates(cache_path=cache_path, max_age_hours=24) is None
+
+    saved_path = tmp_path / "saved_rate_cache.json"
+    save_exchange_rate_observation(saved_path, payload, log=lambda _message: None)
+    assert not saved_path.exists()
 
 
 def test_get_usd_per_cny_uses_shared_state_cache(tmp_path: Path, monkeypatch) -> None:

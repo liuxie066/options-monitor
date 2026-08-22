@@ -21,7 +21,7 @@ from src.application.copilot.contracts import AppResult, ExecutionContract, Scen
 from src.application.copilot.event_store import CopilotEventLog
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_config import PiModelSettings
-from src.application.copilot.result_admission import admit_result_with_decision
+from src.application.copilot.result_admission import admit_result_with_decision, admit_submit_answer
 from src.application.copilot.scene import build_scene_manifest, scene_policy_rejection_reason
 from src.application.research.redaction import redact_value
 from src.infrastructure.pi_agent_process import (
@@ -112,6 +112,7 @@ def run_contract(
     resumed_from: str | None = None,
     recovered_observations: tuple[dict[str, Any], ...] = (),
     enabled_optional_toolsets: frozenset[str] = frozenset(),
+    tool_loading_mode: str = "eager",
 ) -> AppResult:
     run_id = new_id("run")
     if host_store is not None:
@@ -211,14 +212,15 @@ def run_contract(
         else ()
     )
     try:
-        scene_manifest = (
-            build_scene_manifest(
-                contract,
-                run_id,
-                enabled_optional_toolsets=enabled_optional_toolsets,
-            )
-            if enabled_optional_toolsets
-            else build_scene_manifest(contract, run_id)
+        # Tool loading is a canonical assistant.copilot setting.  The
+        # prepared contract carries the already validated value; environment
+        # variables are deliberately not a second authority.
+        configured_mode = str(tool_loading_mode or "eager").strip().lower()
+        scene_manifest = build_scene_manifest(
+            contract,
+            run_id,
+            enabled_optional_toolsets=enabled_optional_toolsets,
+            tool_loading_mode=configured_mode,
         )
         manifest = _manifest_with_tool_descriptions(
             scene_manifest,
@@ -283,8 +285,9 @@ def run_contract(
 
     limits = _process_limits(
         manifest,
-        context_window_tokens=model_settings.context_window_tokens,
     )
+    tool_loading_mode = manifest.tool_loading_mode
+    catalog_snapshot = deepcopy(manifest.catalog_snapshot)
     start_payload = {
         "execution_environment": contract.execution_environment,
         "session_id": pi_session_id,
@@ -293,18 +296,25 @@ def run_contract(
         "user_message": user_message,
         "model": _effective_model_payload(model_settings, limits["timeout_seconds"]),
         "tools": _provider_tools(manifest),
+        "tool_loading_mode": tool_loading_mode,
+        "tool_catalog": deepcopy(manifest.tool_catalog),
+        "catalog_hash": manifest.catalog_hash,
+        "catalog_snapshot": catalog_snapshot,
         "limits": limits,
         "recovered_observations": _bounded_recovered_observations(tuple(recovery)),
         "debug": deepcopy(debug) if debug is not None else None,
     }
 
-    tool_cache: dict[str, dict[str, Any]] = {}
     observation_count = 0
+    evidence_registry: dict[str, dict[str, Any]] = {}
+    active_evidence_tokens = 0
     turn_count = 0
     latest_usage: dict[str, Any] = {}
     latest_retry_count = 0
     retained_result: AppResult | None = None
     retained_decision: str | None = None
+    approved_answer_text: str | None = None
+    approved_answer_hash: str | None = None
     local_admission_state = "open"
 
     def cancellation_requested() -> bool:
@@ -359,6 +369,36 @@ def run_contract(
                 "agent_budget_fallback",
                 {"reason": str(data.get("reason") or "")},
             )
+        elif event_type == "context_budget_checked":
+            record_event(
+                "context_budget_checked",
+                {
+                    "estimated_input_tokens": int(data.get("estimated_input_tokens") or 0),
+                    "effective_capacity_tokens": int(data.get("effective_capacity_tokens") or 0),
+                    "decision": str(data.get("decision") or ""),
+                    "compaction_target": str(data.get("compaction_target") or ""),
+                },
+            )
+        elif event_type == "catalog_loaded":
+            record_event(
+                "catalog_loaded",
+                {
+                    "catalog_hash": str(data.get("catalog_hash") or ""),
+                    "tool_count": int(data.get("tool_count") or 0),
+                    "description_chars": int(data.get("description_chars") or 0),
+                    "estimated_tokens": int(data.get("estimated_tokens") or 0),
+                },
+            )
+        elif event_type == "answer_admission":
+            record_event(
+                "answer_admission",
+                {
+                    "status": str(data.get("status") or ""),
+                    "evidence_count": int(data.get("evidence_count") or 0),
+                    "repair_count": int(data.get("repair_count") or 0),
+                    "banner_present": data.get("banner_present") is True,
+                },
+            )
         elif event_type == "agent_end":
             record_event(
                 "agent_terminated",
@@ -371,10 +411,156 @@ def run_contract(
             )
 
     def on_tool_call(call: dict[str, Any]) -> dict[str, Any]:
-        nonlocal observation_count
+        nonlocal observation_count, active_evidence_tokens
         tool_name = str(call.get("tool_name") or "")
         call_id = str(call.get("call_id") or "")
         arguments = dict(call.get("arguments") or {})
+
+        def unavailable(code: str, message: str) -> dict[str, Any]:
+            observation = _tool_error(tool_name, code, message)
+            if tool_name in {"tool_directory", "submit_answer"}:
+                return {"observation": observation}
+            if tool_name == CONTROL_PREVIEW_TOOL:
+                return {"observation": observation, "control_request": None}
+            return observation
+
+        if cancellation_requested():
+            return unavailable("CANCELLED", "run cancelled before tool execution")
+        with run_lock:
+            if not tool_events_open or finalized:
+                return unavailable("CANCELLED", "run is no longer active")
+
+        if tool_name == "tool_directory":
+            requested_hash = str(arguments.get("catalog_hash") or "")
+            names = arguments.get("tool_names")
+            selected = [str(item) for item in names] if isinstance(names, list) else []
+            catalog_by_name = {str(item["name"]): item for item in manifest.tool_catalog}
+            selected_toolsets = {str(catalog_by_name[name]["toolset"]) for name in selected if name in catalog_by_name}
+            event_log.record(
+                "tool_call",
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": tool_name,
+                    "catalog_hash": requested_hash,
+                    "selected_tool_names": selected,
+                    "selected_toolsets": sorted(selected_toolsets),
+                },
+            )
+            valid = (
+                requested_hash == manifest.catalog_hash
+                and bool(selected)
+                and len(selected) == len(set(selected))
+                and all(name in catalog_by_name for name in selected)
+                and len(selected) <= 6
+                and len(selected_toolsets) <= 2
+            )
+            if not valid:
+                observation = _tool_error(
+                    tool_name,
+                    "POLICY_ERROR",
+                    "tool selection is not authorized",
+                )
+                event_log.record(
+                    "tool_result",
+                    {
+                        **observation,
+                        "tool_call_id": call_id,
+                        "selected_tool_names": selected,
+                        "selected_toolsets": sorted(selected_toolsets),
+                    },
+                )
+                return {"observation": observation}
+            frozen_by_name = {
+                str(item.get("name")): item for item in manifest.catalog_snapshot
+            }
+            schema_items = []
+            for name in selected:
+                frozen = frozen_by_name.get(name)
+                if frozen is None or name not in manifest.allowed_tools:
+                    return {"observation": _tool_error(tool_name, "POLICY_ERROR", "tool selection is not authorized")}
+                schema_items.append({
+                    "name": name,
+                    "description": frozen["description"],
+                    "input_schema": frozen["input_schema"],
+                })
+            schema_json = json.dumps(schema_items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            schema_hash = "sha256:" + hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
+            event_log.record(
+                "tool_result",
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": tool_name,
+                    "ok": True,
+                    "status": "activated",
+                    "catalog_hash": manifest.catalog_hash,
+                    "schema_hash": schema_hash,
+                    "selected_tool_names": selected,
+                    "selected_toolsets": sorted(selected_toolsets),
+                },
+            )
+            return {
+                "observation": {"ok": True, "status": "activated", "active_tool_names": selected},
+                "tool_activation": {
+                    "catalog_hash": manifest.catalog_hash,
+                    "schema_hash": schema_hash,
+                    "tools": schema_items,
+                },
+            }
+
+        if tool_name == "submit_answer":
+            claims = arguments.get("claims")
+            referenced_ids: set[str] = set()
+            if isinstance(claims, list):
+                for claim in claims:
+                    claim_ids = claim.get("observation_ids") if isinstance(claim, dict) else None
+                    if isinstance(claim_ids, list):
+                        referenced_ids.update(
+                            item for item in claim_ids if isinstance(item, str)
+                        )
+            observation_ids = sorted(referenced_ids)
+            event_log.record(
+                "tool_call",
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": tool_name,
+                    "mode": str(arguments.get("mode") or ""),
+                    "status": str(arguments.get("status") or ""),
+                    "referenced_observation_ids": observation_ids,
+                },
+            )
+            admitted_answer = admit_submit_answer(arguments, evidence_registry)
+            approved = admitted_answer.get("approved_answer")
+            if isinstance(approved, dict):
+                nonlocal approved_answer_text, approved_answer_hash
+                approved_answer_text = str(approved.get("text") or "")
+                approved_answer_hash = str(approved.get("text_sha256") or "")
+            observation = admitted_answer.get("observation")
+            rejection_reason = (
+                str(observation.get("reason") or "")
+                if isinstance(observation, dict)
+                else "invalid_result"
+            )
+            event_log.record(
+                "tool_result",
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": tool_name,
+                    "ok": bool(isinstance(observation, dict) and observation.get("ok") is True),
+                    "status": str(
+                        observation.get("status")
+                        if isinstance(observation, dict)
+                        else "failed"
+                    ),
+                    "referenced_observation_ids": observation_ids,
+                    **({"reason": rejection_reason} if rejection_reason else {}),
+                    **(
+                        {"approved_answer_hash": approved_answer_hash}
+                        if approved_answer_hash
+                        else {}
+                    ),
+                },
+            )
+            return admitted_answer
 
         def bridge_observation(observation: dict[str, Any]) -> dict[str, Any]:
             if tool_name == CONTROL_PREVIEW_TOOL:
@@ -386,10 +572,13 @@ def run_contract(
             observation_count += 1
             observation = {
                 **_tool_error(tool_name, code, message),
-                "ref": f"obs_{observation_count}",
-                "tool_call_id": call_id,
+                "ref": new_id("obv"),
             }
-            event_log.record("tool_result", observation, observation["ref"])
+            event_log.record(
+                "tool_result",
+                {**observation, "tool_call_id": call_id},
+                observation["ref"],
+            )
             return observation
 
         if cancellation_requested():
@@ -425,15 +614,16 @@ def run_contract(
                     }
                 observation_count += 1
                 observation = {"ok": True, "status": "preview_requested"}
+                ref = new_id("obv")
                 event_log.record(
                     "tool_result",
                     {
                         **observation,
-                        "ref": f"obs_{observation_count}",
+                        "ref": ref,
                         "tool_name": tool_name,
                         "tool_call_id": call_id,
                     },
-                    f"obs_{observation_count}",
+                    ref,
                 )
                 return {
                     "observation": observation,
@@ -454,29 +644,6 @@ def run_contract(
             )
             if payload_error or payload is None:
                 return reject("INPUT_ERROR", "tool input could not be prepared")
-            signature = json.dumps(
-                [tool_name, payload],
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            )
-            previous = tool_cache.get(signature)
-            if previous is not None:
-                reused = deepcopy(previous)
-                reused["tool_call_id"] = call_id
-                reused["reused"] = True
-                reused["reused_from_ref"] = previous.get("ref")
-                event_log.record(
-                    "tool_result_reused",
-                    {
-                        "tool_call_id": call_id,
-                        "tool_name": tool_name,
-                        "reused_from_ref": previous.get("ref"),
-                    },
-                    str(previous.get("ref") or "") or None,
-                )
-                return reused
             event_log.record(
                 "tool_call",
                 {
@@ -512,25 +679,120 @@ def run_contract(
             )
         if cancellation_requested():
             return _tool_error(tool_name, "CANCELLED", "run cancelled during tool execution")
+        # Failed reads are visible diagnostics but never become evidence.
+        if not isinstance(observation, dict) or observation.get("ok") is not True:
+            failed_observation = redact_value(
+                dict(observation)
+                if isinstance(observation, dict)
+                else _tool_error(
+                    tool_name,
+                    "OBSERVATION_ERROR",
+                    "tool result could not be normalized",
+                )
+            )
+            with run_lock:
+                if tool_events_open and not finalized:
+                    observation_count += 1
+                    failed_observation.setdefault("ref", new_id("obv"))
+                    failed_observation.setdefault("tool_name", tool_name)
+                    if (
+                        copilot_tools.conservative_json_tokens(failed_observation)
+                        > copilot_tools.MAX_OBSERVATION_TOKENS
+                    ):
+                        failed_observation = copilot_tools.bounded_failed_observation(
+                            failed_observation,
+                            tool_name=tool_name,
+                        )
+                    event_log.record(
+                        "tool_result",
+                        {
+                            **failed_observation,
+                            "tool_call_id": call_id,
+                            "tool_input": redact_value(payload),
+                        },
+                        str(failed_observation.get("ref") or "") or None,
+                    )
+            return failed_observation
         with run_lock:
             if not tool_events_open or finalized:
                 return _tool_error(tool_name, "CANCELLED", "run is no longer active")
             observation_count += 1
             observation = redact_value(dict(observation))
-            observation.setdefault("ref", f"obs_{observation_count}")
+            observation.setdefault("ref", new_id("obv"))
             observation.setdefault("tool_name", tool_name)
-            observation["tool_call_id"] = call_id
+            definition = get_tool_definition(tool_name)
+            contract_payload = definition.resolve_output_contract(payload) if definition is not None else {}
+            observation["argument_hash"] = "sha256:" + hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            observation["output_contract_version"] = str(contract_payload.get("schema_version") or "unknown")
+            evidence_tokens = copilot_tools.conservative_json_tokens(observation)
+            if active_evidence_tokens + evidence_tokens > 20_000:
+                observation = copilot_tools.bounded_narrowing_observation(
+                    observation,
+                    tool_name=tool_name,
+                    message="当前请求的活动证据已达上限，请缩小账户、时间、标的或结果范围后重试。",
+                    warning="active evidence budget exceeded",
+                    minimal=True,
+                )
+            elif evidence_tokens > copilot_tools.MAX_OBSERVATION_TOKENS:
+                observation = copilot_tools.bounded_narrowing_observation(
+                    observation,
+                    tool_name=tool_name,
+                    message="结果超过单次证据预算，请缩小账户、时间、标的或结果范围后重试。",
+                    warning="bounded projection requires narrowing",
+                    minimal=True,
+                )
+            observation["content_hash"] = _observation_content_hash(observation)
+            if (
+                copilot_tools.conservative_json_tokens(observation)
+                > copilot_tools.MAX_OBSERVATION_TOKENS
+            ):
+                observation = copilot_tools.bounded_narrowing_observation(
+                    observation,
+                    tool_name=tool_name,
+                    message="结果超过单次证据预算，请缩小账户、时间、标的或结果范围后重试。",
+                    warning="bounded projection requires narrowing",
+                    minimal=True,
+                )
+                observation["content_hash"] = _observation_content_hash(observation)
+            evidence_tokens = copilot_tools.conservative_json_tokens(observation)
             event_log.record(
                 "tool_result",
-                {**observation, "tool_input": redact_value(payload)},
+                {
+                    **observation,
+                    "tool_call_id": call_id,
+                    "tool_input": redact_value(payload),
+                },
                 str(observation.get("ref") or "") or None,
             )
-            if observation.get("ok") is True:
-                tool_cache[signature] = deepcopy(observation)
+            # The small fail-closed narrowing observation remains admissible as
+            # a diagnostic judgment.  Only its discarded full projection is
+            # excluded from the active-evidence token counter.
+            evidence_registry[str(observation.get("ref"))] = {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": str(observation.get("status") or "unknown"),
+                "coverage": observation.get("coverage", "unknown"),
+                "freshness": observation.get("freshness", "unknown"),
+                "as_of": observation.get("as_of"),
+                "scope": observation.get("scope", "point"),
+                "tool_name": observation.get("tool_name"),
+                "argument_hash": observation.get("argument_hash"),
+                "output_contract_version": observation.get("output_contract_version"),
+                "content_hash": observation.get("content_hash"),
+            }
+            active_evidence_tokens += evidence_tokens
             return observation
 
     def on_proposed(proposal: dict[str, Any]) -> str:
         nonlocal local_admission_state, retained_decision, retained_result
+        if approved_answer_text is not None:
+            proposed_text = str(proposal.get("text") or "")
+            proposed_hash = "sha256:" + hashlib.sha256(proposed_text.encode("utf-8")).hexdigest()
+            if proposed_text != approved_answer_text or proposed_hash != approved_answer_hash:
+                record_event("result_rejected", {"reason": "approved_answer_mismatch"})
+                return "discard"
         with run_lock:
             candidate_events = list(event_log.events)
         candidate = AppResult(
@@ -549,8 +811,24 @@ def run_contract(
             ok=True,
         )
         try:
-            admitted = admit_result_with_decision(candidate)
-            desired = "discard" if admitted.rejection_reason else "commit"
+            if (
+                candidate.status == "answered"
+                and approved_answer_text is None
+                and contract.execution_environment != "eval"
+            ):
+                rejection_reason = "answer_not_approved"
+                admitted_result = replace(
+                    candidate,
+                    status="failed",
+                    user_response="Copilot 结果未通过结构或安全校验。",
+                    error={"code": "RESULT_REJECTED", "reason": rejection_reason},
+                    ok=False,
+                )
+            else:
+                admitted = admit_result_with_decision(candidate)
+                rejection_reason = admitted.rejection_reason
+                admitted_result = admitted.result
+            desired = "discard" if rejection_reason else "commit"
             if host_store is not None:
                 winner = host_store.claim_admission_decision(run_id, desired)
             else:
@@ -565,15 +843,15 @@ def run_contract(
             if winner not in {"commit", "discard"}:
                 raise RuntimeError("invalid admission winner")
             retained_decision = winner
-            retained_result = admitted.result if winner == desired else _failed_result(
+            retained_result = admitted_result if winner == desired else _failed_result(
                 contract,
                 run_id,
                 event_log,
                 code="INTERNAL_ERROR",
                 response="Copilot 结果准入状态不一致。",
             )
-            if admitted.rejection_reason:
-                record_event("result_rejected", {"reason": admitted.rejection_reason})
+            if rejection_reason:
+                record_event("result_rejected", {"reason": rejection_reason})
             return winner
         except Exception:
             failed = _failed_result(
@@ -708,10 +986,21 @@ def _manifest_with_tool_descriptions(
     *,
     control_preview_specs: tuple[dict[str, Any], ...] = (),
 ) -> SceneManifest:
-    descriptions = copilot_tools.tool_descriptions(
-        manifest.allowed_tools,
-        static_payloads=manifest.tool_static_payloads,
-    )
+    # Scene preparation already froze the model-visible business projection.
+    # Reusing it here keeps the activation schema and catalog hash on one
+    # canonical projection instead of re-reading the live registry.
+    descriptions = [
+        dict(item)
+        for item in manifest.tool_descriptions
+        if str(item.get("name") or "") in set(manifest.allowed_tools)
+    ]
+    if manifest.tool_loading_mode == "directory":
+        descriptions = [
+            _tool_directory_description(),
+            _submit_answer_description(),
+        ]
+    else:
+        descriptions.append(_submit_answer_description())
     if control_preview_specs:
         descriptions.append(control_preview_tool_description(control_preview_specs))
     provider_tools = [
@@ -742,6 +1031,12 @@ def _manifest_with_tool_descriptions(
 
 def _scene_prepared_payload(manifest: SceneManifest) -> dict[str, Any]:
     provenance = manifest.provenance
+    catalog_json = json.dumps(
+        manifest.tool_catalog,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return {
         "scene": manifest.scene_name,
         "scene_version": manifest.scene_version,
@@ -750,6 +1045,13 @@ def _scene_prepared_payload(manifest: SceneManifest) -> dict[str, Any]:
         "selected_toolsets": list(manifest.selected_toolsets),
         "tool_count": int(provenance.get("tool_count") or 0),
         "tool_schema_sha256": str(provenance.get("tool_schema_sha256") or ""),
+        "tool_loading_mode": manifest.tool_loading_mode,
+        "catalog_hash": manifest.catalog_hash,
+        "catalog_entry_count": len(manifest.tool_catalog),
+        "catalog_characters": len(catalog_json),
+        "catalog_token_estimate": copilot_tools.conservative_json_tokens(
+            manifest.tool_catalog
+        ),
     }
 
 
@@ -795,17 +1097,62 @@ def _provider_tools(manifest: SceneManifest) -> list[dict[str, Any]]:
     ]
 
 
+def _tool_directory_description() -> dict[str, Any]:
+    return {
+        "name": "tool_directory",
+        "description": "激活当前请求所需的授权业务工具集合。只能选择目录中名称，最多两个工具集和六个工具。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "catalog_hash": {"type": "string"},
+                "tool_names": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6},
+            },
+            "required": ["catalog_hash", "tool_names"],
+            "additionalProperties": False,
+        },
+        "catalog_summary": "激活授权业务工具",
+    }
+
+
+def _submit_answer_description() -> dict[str, Any]:
+    return {
+        "name": "submit_answer",
+        "description": "提交经过证据范围和新鲜度校验的结构化最终答案。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["conceptual", "evidence"]},
+                "status": {"type": "string", "enum": ["complete", "partial", "needs_narrowing", "insufficient_evidence"]},
+                "answer_markdown": {"type": "string", "minLength": 1, "maxLength": 12000},
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "minLength": 1},
+                            "kind": {"type": "string", "enum": ["current_fact", "historical_fact", "derived_fact", "judgment"]},
+                            "observation_ids": {"type": "array", "items": {"type": "string"}},
+                            "required_scope": {"type": "string", "enum": ["point", "requested_page", "full_query"]},
+                        },
+                        "required": ["text", "kind", "observation_ids", "required_scope"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["mode", "status", "answer_markdown", "claims"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _process_limits(
     manifest: SceneManifest,
-    *,
-    context_window_tokens: int,
 ) -> dict[str, int]:
     values = manifest.limits
     return {
         "timeout_seconds": max(1, int(values.get("timeout_seconds") or 1)),
         "max_iterations": max(1, int(values.get("max_model_turns") or 1)),
         "max_tool_calls": max(1, int(values.get("max_tool_calls") or 1)),
-        "max_context_tokens": max(1, int(context_window_tokens)),
         "max_consecutive_failed_tool_batches": max(
             1,
             int(values.get("max_consecutive_failed_tool_batches") or 1),
@@ -890,6 +1237,37 @@ def _bounded_recovered_observations(
             break
     bounded.reverse()
     return bounded
+
+
+def _observation_content_hash(observation: dict[str, Any]) -> str:
+    hash_projection = {
+        key: observation[key]
+        for key in (
+            "tool_name",
+            "ok",
+            "status",
+            "summary",
+            "value",
+            "source",
+            "scope",
+            "coverage",
+            "freshness",
+            "as_of",
+            "missing_data",
+            "warnings",
+            "result_contract",
+        )
+        if key in observation
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            hash_projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _tool_error(tool_name: str, code: str, message: str) -> dict[str, Any]:

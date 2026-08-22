@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -27,6 +28,7 @@ from src.application.yield_enhancement_config import resolve_yield_enhancement_c
 
 _CONFIG_VALIDATE_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "config_validate.output.v1",
+    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "primary_rows", "freshness": "not_applicable", "pagination": {"mode": "none"},
     "source_label": "OM runtime config validator",
     "primary_rows": "warnings",
     "fact_fields": [
@@ -41,8 +43,8 @@ _CONFIG_VALIDATE_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "symbol_config_read.output.v1",
+    "evidence_type": "point", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM runtime symbol config",
-    "primary_rows": "strategies",
     "fact_fields": [
         "symbol",
         "canonical_symbol",
@@ -54,6 +56,7 @@ _SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
         "value",
         "strategy_config",
         "strategies",
+        "freshness",
     ],
     "model_preview_fields": [
         "symbol",
@@ -67,11 +70,13 @@ _SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
         "value",
         "strategy_config",
         "strategies",
+        "freshness",
     ],
 }
 
 _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "symbol_resolve.output.v1",
+    "evidence_type": "point", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "not_applicable", "pagination": {"mode": "none"},
     "source_label": "OM symbol identity resolver",
     "result_shape": "scalar",
     "fact_fields": [
@@ -103,6 +108,7 @@ _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _SCHEDULER_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "scheduler_status.output.v1",
+    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM scheduler config and local scheduler state",
     "result_shape": "scalar",
     "fact_fields": [
@@ -275,6 +281,11 @@ def _symbol_config_read_tool(
         "calibration": calibration.public_payload(),
         "config_path": mask_path(config_path),
         "found": False,
+        "freshness": {
+            "status": "fresh",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "kind": "runtime_config_read",
+        },
     }
     if entry is None:
         return {
@@ -388,6 +399,7 @@ def _manage_symbols_write_requested(payload: dict[str, Any]) -> bool:
 
 CONFIG_VALIDATE_TOOL = build_agent_tool(
     name="config_validate",
+    catalog_summary="校验市场运行配置并返回诊断结果。",
     description="Validate runtime config only, without OpenD checks or pipeline execution.",
     requires=("runtime_config",),
     capabilities=("config_validate", "read_only"),
@@ -406,6 +418,7 @@ CONFIG_VALIDATE_TOOL = build_agent_tool(
 
 SCHEDULER_STATUS_TOOL = build_agent_tool(
     name="scheduler_status",
+    catalog_summary="读取调度器与任务激活状态。",
     description="Return scheduler decision and existing scheduler state without marking scan/notify state or running pipelines.",
     requires=("runtime_config",),
     capabilities=("scheduler_status", "read_only"),
@@ -428,6 +441,7 @@ SCHEDULER_STATUS_TOOL = build_agent_tool(
 
 SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
     name="symbol_config_read",
+    catalog_summary="读取标的配置与账户覆盖设置。",
     description="Read the current monitored-symbol strategy config for a symbol, strategy, or field.",
     requires=("runtime_config",),
     capabilities=("symbol_config_read", "config_read", "read_only"),
@@ -456,6 +470,7 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
 
 SYMBOL_RESOLVE_TOOL = build_agent_tool(
     name="symbol_resolve",
+    catalog_summary="解析并规范化市场标的身份。",
     description="Resolve a user-provided symbol, Chinese name, alias, or Futu code to canonical OM symbol identity.",
     requires=("symbol_identity",),
     capabilities=("symbol_resolve", "symbol_identity", "read_only"),

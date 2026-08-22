@@ -14,12 +14,14 @@ DEFAULT_LLM_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
 CONFIGURABLE_COPILOT_TOOLSETS = frozenset({"portfolio"})
+COPILOT_TOOL_LOADING_MODES = frozenset({"eager", "directory"})
 
 
 @dataclass(frozen=True)
 class CopilotSettings:
     enabled: bool = False
     toolsets: frozenset[str] = frozenset()
+    tool_loading_mode: str = "eager"
 
     def public_payload(self) -> dict[str, Any]:
         return {
@@ -28,6 +30,7 @@ class CopilotSettings:
                 name: name in self.toolsets
                 for name in sorted(CONFIGURABLE_COPILOT_TOOLSETS)
             },
+            "tool_loading_mode": self.tool_loading_mode,
         }
 
 
@@ -81,6 +84,7 @@ class AssistantSettings:
                 for name in CONFIGURABLE_COPILOT_TOOLSETS
                 if _bool(copilot_toolsets.get(name), default=False)
             ),
+            tool_loading_mode=_tool_loading_mode(copilot_cfg.get("tool_loading_mode")),
         )
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
@@ -131,6 +135,11 @@ def _market_scope(value: Any) -> str:
     if text in {"us", "hk", "all"}:
         return text
     return DEFAULT_MARKET_SCOPE
+
+
+def _tool_loading_mode(value: Any) -> str:
+    mode = str(value or "eager").strip().lower()
+    return mode if mode in COPILOT_TOOL_LOADING_MODES else "eager"
 
 
 def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSettings:

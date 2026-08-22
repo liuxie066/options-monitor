@@ -16,6 +16,11 @@ from src.application.version_check import update_local_version
 
 
 _VERSION_CHECK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "diagnostic",
+    "bounded_projection": "contract_fields",
+    "coverage": "point",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "version_check.output.v1",
     "source_label": "local VERSION and remote git release tags",
     "result_shape": "scalar",
@@ -87,6 +92,11 @@ _VERSION_UPDATE_OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "runtime_runs.output.v1",
     "source_label": "OM 本地 output_runs",
     "primary_rows": "runs",
@@ -108,6 +118,11 @@ _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "runtime_logs.output.v2",
     "source_label": "OM 本地 runtime logs",
     "primary_rows": "files",
@@ -306,6 +321,7 @@ def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replac
 
 VERSION_CHECK_TOOL = build_agent_tool(
     name="version_check",
+    catalog_summary="读取当前版本与可用版本信息。",
     description="Check local VERSION against git release tags without running any monitor workflow.",
     requires=("git_remote",),
     capabilities=("version_check", "read_only"),
@@ -362,6 +378,7 @@ VERSION_UPDATE_TOOL = build_agent_tool(
 
 RUNTIME_RUNS_TOOL = build_agent_tool(
     name="runtime_runs",
+    catalog_summary="读取历史运行记录及其状态。",
     description=(
         "List historical runtime run snapshots or inspect one run. Use after runtime_status when a specific run "
         "must be selected; this does not contain detailed service log lines."
@@ -389,6 +406,7 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
     name="runtime_logs",
+    catalog_summary="读取指定运行的受限日志元数据。",
     description=(
         "Read bounded, content-free audit or service log metadata for a known runtime failure. Use after "
         "runtime_status or runtime_runs identifies the relevant component or run."

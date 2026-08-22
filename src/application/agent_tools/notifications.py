@@ -8,6 +8,11 @@ from src.application.notify_symbols import build_notification
 
 
 _PREVIEW_NOTIFICATION_OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "diagnostic",
+    "bounded_projection": "contract_fields",
+    "coverage": "point",
+    "freshness": "not_applicable",
+    "pagination": {"mode": "none"},
     "schema_version": "preview_notification.output.v1",
     "source_label": "OM notification formatter",
     "result_shape": "scalar",
@@ -37,6 +42,7 @@ def _preview_notification_tool(
 
 PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
     name="preview_notification",
+    catalog_summary="生成只读通知内容预览，不执行投递。",
     description="Build final notification text from alerts/changes without sending it.",
     requires=("alerts_or_changes_input",),
     capabilities=("notification_preview", "read_only"),

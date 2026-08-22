@@ -784,6 +784,8 @@ def option_positions_read_tool(
     data.setdefault(
         "freshness",
         {
+            "status": "fresh",
+            "as_of": datetime.now(timezone.utc).isoformat(),
             "kind": "ledger_snapshot",
             **(
                 {"quote_refresh": data.get("quote_refresh")}

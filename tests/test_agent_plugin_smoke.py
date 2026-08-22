@@ -1358,7 +1358,18 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     }
     assert listed["data"]["coverage"] == listed["data"]["evidence_scope"]
     assert listed["data"]["scope"]["action"] == "list"
-    assert listed["data"]["freshness"] == {"kind": "ledger_snapshot"}
+    assert listed["data"]["freshness"]["status"] == "fresh"
+    assert listed["data"]["freshness"]["kind"] == "ledger_snapshot"
+    assert "+00:00" in listed["data"]["freshness"]["as_of"]
+    from src.application.copilot import tools as copilot_tools
+
+    listed_observation = copilot_tools.compact_observation(
+        "option_positions_read",
+        listed,
+        {"config_path": str(cfg_path), "action": "list", "account": "user1"},
+    )
+    assert listed_observation["freshness"]["status"] == "fresh"
+    assert "+00:00" in listed_observation["freshness"]["as_of"]
     assert listed["data"]["row_count"] == 1
     assert listed["data"]["rows"][0]["record_id"] == record_id
     assert listed["data"]["rows"][0]["expiration_state"] == "expired"
@@ -3649,6 +3660,23 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     assert out["data"]["row_count"] == 1
     assert out["data"]["matched_count"] == 1
     assert out["data"]["source"]["run_id"] == "run-1"
+    assert out["data"]["freshness"]["status"] == "historical"
+    assert out["data"]["freshness"]["kind"] == "report_snapshot"
+    assert "+00:00" in out["data"]["freshness"]["as_of"]
+    from src.application.copilot import tools as copilot_tools
+
+    close_observation = copilot_tools.compact_observation(
+        "close_advice_read",
+        out,
+        {
+            "config_path": str(cfg_path),
+            "runs_root": str(tmp_path / "output_runs"),
+            "run_id": "run-1",
+            "query": {"symbol": "9992.HK", "option_type": "call", "side": "short", "status": "open"},
+        },
+    )
+    assert close_observation["freshness"]["status"] == "historical"
+    assert "+00:00" in close_observation["freshness"]["as_of"]
     row = out["data"]["rows"][0]
     assert row["position_lot_id"] == "lot-9992-call-1"
     assert row["symbol"] == "9992.HK"
@@ -5151,7 +5179,46 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
     assert out["data"]["strategy"] == "sell_put"
     assert out["data"]["path"] == "sell_put.max_strike"
     assert out["data"]["value"] == 145
+    assert out["data"]["freshness"]["status"] == "fresh"
+    assert "+00:00" in out["data"]["freshness"]["as_of"]
     assert out["meta"]["config_path"].endswith("config.hk.json")
+
+    from src.application.copilot import tools as copilot_tools
+    from src.application.copilot.result_admission import admit_submit_answer
+
+    observation = copilot_tools.compact_observation(
+        "symbol_config_read",
+        out,
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+    )
+    assert observation["coverage"]["status"] == "complete"
+    assert observation["coverage"]["complete_for"] == "point"
+    assert observation["freshness"]["status"] == "fresh"
+    admitted = admit_submit_answer(
+        {
+            "mode": "evidence",
+            "status": "complete",
+            "answer_markdown": "当前最大行权价是 145。",
+            "claims": [
+                {
+                    "text": "当前最大行权价是 145",
+                    "kind": "current_fact",
+                    "observation_ids": ["obv_symbol"],
+                    "required_scope": "point",
+                }
+            ],
+        },
+        {
+            "obv_symbol": {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": observation["status"],
+                "coverage": observation["coverage"],
+                "freshness": observation["freshness"],
+            }
+        },
+    )
+    assert admitted["observation"] == {"ok": True, "status": "answer_accepted"}
 
     missing = run_tool(
         "symbol_config_read",

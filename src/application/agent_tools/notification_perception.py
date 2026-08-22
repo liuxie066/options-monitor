@@ -11,6 +11,11 @@ from src.application.runtime_paths import resolve_runtime_root
 
 
 _OUTPUT_CONTRACT: dict[str, Any] = {
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "primary_rows",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
     "schema_version": "notification_perception_read.output.v1",
     "source_label": "OM tick audit assistant_perception events",
     "primary_rows": "events",
@@ -113,6 +118,7 @@ def _notification_perception_input_validator(payload: dict[str, Any]) -> None:
 
 NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
     name="notification_perception_read",
+    catalog_summary="读取通知感知与确认状态。",
     description=(
         "Read notification decision and delivery evidence from tick audit artifacts. Use to explain whether a "
         "notification threshold was met, skipped, attempted, or confirmed; this tool never sends a notification."

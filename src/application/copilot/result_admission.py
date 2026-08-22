@@ -1,10 +1,285 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from src.application.copilot.contracts import AppResult
+
+
+_SUBMIT_KEYS = {"mode", "status", "answer_markdown", "claims"}
+_CLAIM_KEYS = {"text", "kind", "observation_ids", "required_scope"}
+_ANSWER_STATUSES = {
+    "complete",
+    "partial",
+    "needs_narrowing",
+    "insufficient_evidence",
+}
+_CLAIM_KINDS = {"current_fact", "historical_fact", "derived_fact", "judgment"}
+_SCOPE_RANK = {"point": 0, "requested_page": 1, "full_query": 2}
+_MAX_ANSWER_CHARS = 12_000
+
+
+def admit_submit_answer(
+    arguments: dict[str, Any],
+    evidence_registry: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate the closed S8 final-answer protocol against request evidence."""
+
+    if not isinstance(arguments, dict) or set(arguments) != _SUBMIT_KEYS:
+        return _answer_rejection("answer_schema_invalid", code="INPUT_ERROR")
+    mode = arguments.get("mode")
+    status = arguments.get("status")
+    text = arguments.get("answer_markdown")
+    claims = arguments.get("claims")
+    if (
+        mode not in {"conceptual", "evidence"}
+        or status not in _ANSWER_STATUSES
+        or not isinstance(text, str)
+        or not text.strip()
+        or len(text) > _MAX_ANSWER_CHARS
+        or not isinstance(claims, list)
+    ):
+        return _answer_rejection("answer_schema_invalid", code="INPUT_ERROR")
+    if output_contract_rejection_reason(text) is not None:
+        return _answer_rejection("answer_markdown_invalid", code="INPUT_ERROR")
+    if (mode == "conceptual" and claims) or (mode == "evidence" and not claims):
+        return _answer_rejection("answer_mode_inconsistent")
+
+    referenced: dict[str, dict[str, Any]] = {}
+    for claim in claims:
+        rejection = _validate_claim(
+            claim,
+            answer_status=str(status),
+            evidence_registry=evidence_registry,
+            referenced=referenced,
+        )
+        if rejection is not None:
+            return rejection
+
+    if status == "complete" and any(
+        _evidence_is_incomplete(evidence) for evidence in referenced.values()
+    ):
+        return _answer_rejection("answer_status_overstates_evidence")
+    if any(
+        evidence.get("observation_status") == "needs_narrowing"
+        for evidence in referenced.values()
+    ) and status != "needs_narrowing":
+        return _answer_rejection("narrowing_status_required")
+
+    banner = _forced_banner(str(status), referenced)
+    approved_text = text + banner
+    if (
+        len(approved_text) > _MAX_ANSWER_CHARS
+        or output_contract_rejection_reason(approved_text) is not None
+    ):
+        return _answer_rejection("approved_answer_invalid", code="INPUT_ERROR")
+    return {
+        "observation": {"ok": True, "status": "answer_accepted"},
+        "approved_answer": {
+            "status": status,
+            "text": approved_text,
+            "text_sha256": _text_sha256(approved_text),
+        },
+    }
+
+
+def _validate_claim(
+    claim: Any,
+    *,
+    answer_status: str,
+    evidence_registry: dict[str, dict[str, Any]],
+    referenced: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(claim, dict) or set(claim) != _CLAIM_KEYS:
+        return _answer_rejection("claim_schema_invalid", code="INPUT_ERROR")
+    text = claim.get("text")
+    kind = claim.get("kind")
+    required_scope = claim.get("required_scope")
+    observation_ids = claim.get("observation_ids")
+    if (
+        not isinstance(text, str)
+        or not text.strip()
+        or kind not in _CLAIM_KINDS
+        or required_scope not in _SCOPE_RANK
+        or not isinstance(observation_ids, list)
+        or not observation_ids
+        or any(not isinstance(item, str) or not item.strip() for item in observation_ids)
+        or len(set(observation_ids)) != len(observation_ids)
+    ):
+        return _answer_rejection("claim_schema_invalid", code="INPUT_ERROR")
+
+    for observation_id in observation_ids:
+        evidence = evidence_registry.get(observation_id)
+        if evidence is None:
+            return _answer_rejection("observation_outside_request")
+        if evidence.get("ok") is not True or evidence.get("authorized_read") is not True:
+            return _answer_rejection("observation_not_authoritative")
+        coverage = evidence.get("coverage")
+        if not isinstance(coverage, dict):
+            return _answer_rejection("coverage_unknown")
+        coverage_status = str(coverage.get("status") or "unknown")
+        complete_for = str(coverage.get("complete_for") or "")
+        diagnostic_gap = (
+            kind == "judgment"
+            and answer_status in {"partial", "needs_narrowing", "insufficient_evidence"}
+            and coverage_status in {"partial", "unknown"}
+        )
+        if not diagnostic_gap and (
+            coverage_status != "complete"
+            or _SCOPE_RANK.get(complete_for, -1) < _SCOPE_RANK[str(required_scope)]
+        ):
+            return _answer_rejection("claim_scope_not_covered")
+        if diagnostic_gap and required_scope != "point":
+            return _answer_rejection("diagnostic_claim_must_be_point_scoped")
+        if not _freshness_supports(str(kind), evidence.get("freshness")):
+            return _answer_rejection("claim_freshness_not_supported")
+        referenced[observation_id] = evidence
+    return None
+
+
+def _freshness_supports(kind: str, raw: Any) -> bool:
+    freshness = raw if isinstance(raw, dict) else {}
+    status = str(freshness.get("status") or "unknown")
+    as_of = freshness.get("as_of")
+    if kind == "current_fact":
+        return status in {"current", "fresh"} and _valid_as_of(as_of)
+    if status in {"unknown", "stale"}:
+        return kind == "judgment"
+    if status == "not_applicable":
+        return True
+    return status in {"current", "fresh", "historical"} and _valid_as_of(as_of)
+
+
+def _valid_as_of(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _evidence_is_incomplete(evidence: dict[str, Any]) -> bool:
+    coverage = evidence.get("coverage")
+    freshness = evidence.get("freshness")
+    return (
+        not isinstance(coverage, dict)
+        or coverage.get("status") != "complete"
+        or evidence.get("observation_status") in {"partial", "needs_narrowing"}
+        or not isinstance(freshness, dict)
+        or freshness.get("status") in {None, "unknown", "stale"}
+    )
+
+
+def _forced_banner(
+    status: str,
+    referenced: dict[str, dict[str, Any]],
+) -> str:
+    coverage_by_key: dict[str, dict[str, Any]] = {}
+    for evidence in referenced.values():
+        coverage = evidence.get("coverage")
+        if not isinstance(coverage, dict):
+            continue
+        key = json.dumps(coverage, ensure_ascii=False, sort_keys=True, default=str)
+        coverage_by_key.setdefault(key, coverage)
+    coverages = list(coverage_by_key.values())
+    scopes = sorted(
+        {
+            json.dumps(coverage["scope"], ensure_ascii=False, sort_keys=True)
+            for coverage in coverages
+            if isinstance(coverage.get("scope"), dict) and coverage["scope"]
+        }
+    )
+    scope_text = "；".join(scopes) if scopes else "当前请求"
+    unknown = any(coverage.get("status") == "unknown" for coverage in coverages)
+    freshness_gap = any(
+        not isinstance(evidence.get("freshness"), dict)
+        or evidence["freshness"].get("status") in {None, "unknown", "stale"}
+        for evidence in referenced.values()
+    )
+    as_of_values = sorted(
+        {
+            str(evidence["freshness"]["as_of"])
+            for evidence in referenced.values()
+            if isinstance(evidence.get("freshness"), dict)
+            and _valid_as_of(evidence["freshness"].get("as_of"))
+        }
+    )
+    banners: list[str] = []
+    if status == "complete" and as_of_values:
+        banners.append(f"> 数据时间：{', '.join(as_of_values)}。")
+    elif status == "partial":
+        if len(coverages) <= 1:
+            coverage = coverages[0] if coverages else {}
+            banners.append(
+                "> 部分数据："
+                + _coverage_banner_detail(coverage, default_scope=scope_text)
+                + "。"
+            )
+        else:
+            banners.extend(
+                f"> 部分数据（证据 {index}）：{_coverage_banner_detail(coverage)}。"
+                for index, coverage in enumerate(coverages, start=1)
+            )
+    elif status == "needs_narrowing":
+        banners.append(
+            "> 需要缩小范围：请指定账户、时间、标的或结果范围后重新查询。"
+        )
+    elif status == "insufficient_evidence":
+        banners.append(
+            f"> 证据不足：当前证据范围为 {scope_text}，不能支持完整结论。"
+        )
+    if unknown:
+        banners.append("> 完整性未知：现有证据不能支持穷尽性结论。")
+    if freshness_gap:
+        banners.append("> 时效性不足：部分证据缺少有效数据时间或已经过期。")
+    return "" if not banners else "\n\n" + "\n".join(banners)
+
+
+def _coverage_banner_detail(
+    coverage: dict[str, Any],
+    *,
+    default_scope: str = "当前请求",
+) -> str:
+    included = _coverage_count(coverage.get("included_count"))
+    total = _coverage_count(coverage.get("total_count"))
+    omitted = _coverage_count(coverage.get("omitted_count"))
+    scope = coverage.get("scope")
+    scope_text = (
+        json.dumps(scope, ensure_ascii=False, sort_keys=True)
+        if isinstance(scope, dict) and scope
+        else default_scope
+    )
+    included_text = (
+        f"已纳入 {included} 条" if isinstance(included, int) else "已纳入条数未知"
+    )
+    return f"{included_text}，总数 {total}，遗漏 {omitted}，范围 {scope_text}"
+
+
+def _coverage_count(value: Any) -> int | str:
+    return value if isinstance(value, int) and not isinstance(value, bool) else "未知"
+
+
+def _answer_rejection(reason: str, *, code: str = "POLICY_ERROR") -> dict[str, Any]:
+    return {
+        "observation": {
+            "ok": False,
+            "status": "rejected",
+            "code": code,
+            "reason": reason,
+            "message": "最终答案未通过证据准入，请按结构化原因修正后重试。",
+            "retryable": True,
+        }
+    }
+
+
+def _text_sha256(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 VALID_STATUSES = {
