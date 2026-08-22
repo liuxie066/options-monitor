@@ -111,7 +111,9 @@ from src.application.ledger.queries import (
     summarize_position_lot_shadow_status,
     trade_event_economic_allocations,
     trade_event_log,
+    trade_event_page,
     trade_event_projection_preview,
+    TradeEventPaginationError,
 )
 from src.application.ledger.store_resolution import (
     LEDGER_DB_RELATIVE_PATH,
@@ -421,6 +423,8 @@ __all__ = [
     "trade_event_economic_allocations",
     "trade_event_application_payload",
     "trade_event_log",
+    "trade_event_page",
+    "TradeEventPaginationError",
     "trade_event_projection_preview",
     "valid_void_target_event_id",
     "validate_account_lifecycle_resolution",

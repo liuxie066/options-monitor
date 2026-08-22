@@ -3,14 +3,26 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Mapping, cast
+
+from src.application.secret_store import (
+    COPILOT_CURSOR_HMAC_KEY,
+    SecretError,
+    resolve_secret,
+)
 
 from src.application.account_config import resolve_configured_accounts
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.ledger.api import assigned_stock_event_log, ledger_store_payload
+from src.application.ledger.api import (
+    TradeEventPaginationError,
+    assigned_stock_event_log,
+    ledger_store_payload,
+    trade_event_page,
+)
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trade_time_format import add_trade_time_beijing
 from src.application.payload_helpers import as_dict as _dict
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.wheel.read_model import build_wheel_read_model
 
 
@@ -58,6 +70,52 @@ def _scalar_text(value: Any, *, default: str = "") -> str:
 def _optional_text(value: Any) -> str | None:
     text = _scalar_text(value)
     return text or None
+
+
+def normalize_option_positions_read_input(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the public action rules before defaults or quality checks."""
+
+    normalized = dict(payload)
+    events_only_fields = {"cursor", "include_total", "position_effect"}
+    has_events_only_input = any(name in normalized for name in events_only_fields)
+    explicit_action = _scalar_text(normalized.get("action")).lower()
+    if has_events_only_input:
+        if explicit_action and explicit_action != "events":
+            raise ValueError(
+                "cursor, include_total, and position_effect require action=events"
+            )
+        normalized["action"] = "events"
+        explicit_action = "events"
+    if explicit_action == "events":
+        allowed_fields = {
+            "config_key",
+            "config_path",
+            "data_config",
+            "action",
+            "broker",
+            "account",
+            "limit",
+            "cursor",
+            "include_total",
+            "position_effect",
+            "symbol",
+            "option_type",
+            "strike",
+            "exp",
+            "expiration_ymd",
+        }
+        unsupported = sorted(set(normalized) - allowed_fields)
+        if unsupported:
+            raise ValueError(
+                "unsupported fields for action=events: " + ", ".join(unsupported)
+            )
+    if explicit_action == "events" and "limit" in normalized:
+        limit = normalized["limit"]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise ValueError("events limit must be between 1 and 20")
+    return normalized
 
 
 def _bool_flag(value: Any) -> bool:
@@ -328,62 +386,68 @@ def _events_action(
     repo: Any,
     payload: dict[str, Any],
     *,
+    market: str,
+    authorized_accounts: list[str],
     normalize_broker: Callable[[Any], str],
     normalize_account: Callable[[Any], str],
+    admit_query: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    if not callable(list_trade_events):
-        raise AgentToolError(code="DEPENDENCY_MISSING", message="option positions repository does not expose trade events")
-
-    broker = _optional_text(payload.get("broker"))
-    broker = normalize_broker(broker) if broker else None
-    account_text = _optional_text(payload.get("account"))
-    account = normalize_account(account_text) if account_text else None
-    symbol = _optional_text(payload.get("symbol"))
-    symbol = symbol.upper() if symbol else None
-    option_type = _optional_text(payload.get("option_type"))
-    option_type = option_type.lower() if option_type else None
-    strike = _optional_float(payload.get("strike"))
-    expiration_ymd = _optional_text(payload.get("exp") or payload.get("expiration_ymd"))
-    limit = _as_int(payload.get("limit"), default=50)
-
-    raw_events = list_trade_events()
-    trade_events = raw_events if isinstance(raw_events, list) else []
-    rows: list[dict[str, Any]] = []
-    for event in reversed(trade_events):
-        if not isinstance(event, dict):
-            continue
-        event_broker = normalize_broker(event.get("broker"))
-        event_account = normalize_account(event.get("account")) if event.get("account") else None
-        if broker and event_broker != broker:
-            continue
-        if account and event_account != account:
-            continue
-        if symbol and str(event.get("symbol") or "").strip().upper() != symbol:
-            continue
-        if option_type and str(event.get("option_type") or "").strip().lower() != option_type:
-            continue
-        if strike is not None:
-            current_strike = _optional_float(event.get("strike"))
-            if current_strike is None or abs(current_strike - strike) >= 1e-9:
-                continue
-        if expiration_ymd and str(event.get("expiration_ymd") or "").strip() != expiration_ymd:
-            continue
-        rows.append(_event_row(event, normalize_broker=normalize_broker, normalize_account=normalize_account))
-        if len(rows) >= limit:
-            break
+    account = normalize_account(payload["account"]) if payload.get("account") else None
+    canonical_payload = dict(payload)
+    if payload.get("broker") not in (None, ""):
+        canonical_payload["broker"] = normalize_broker(payload.get("broker"))
+    try:
+        key = resolve_secret(COPILOT_CURSOR_HMAC_KEY)
+    except SecretError as exc:
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="copilot.cursor_hmac_key could not be resolved",
+        ) from exc
+    if not key:
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="copilot.cursor_hmac_key is required for events pagination",
+        )
+    try:
+        page = trade_event_page(
+            repo,
+            payload=canonical_payload,
+            account=account,
+            market=market,
+            authorized_accounts=authorized_accounts,
+            cursor_key=key,
+            admit_query=admit_query,
+        )
+    except TradeEventPaginationError as exc:
+        error_code = {
+            "needs_narrowing": "NEEDS_NARROWING",
+            "cursor_expired": "CURSOR_EXPIRED",
+            "cursor_authority_mismatch": "CURSOR_SCOPE_MISMATCH",
+            "cursor_query_mismatch": "CURSOR_SCOPE_MISMATCH",
+            "pagination_unavailable": "DEPENDENCY_MISSING",
+        }.get(exc.code, "INPUT_ERROR")
+        hints = {
+            "NEEDS_NARROWING": "Add filters or request no more than 20 events.",
+            "CURSOR_EXPIRED": "Start a new events query; new results may overlap.",
+            "CURSOR_SCOPE_MISMATCH": "Reuse the cursor without changing its signed filters or authority scope.",
+            "DEPENDENCY_MISSING": "Run the controlled option-position projection migration before paging events.",
+        }
+        raise AgentToolError(
+            code=error_code,
+            message=str(exc),
+            hint=hints.get(error_code),
+            details={"retryable": False},
+        ) from exc
     return {
-        "rows": rows,
-        "row_count": len(rows),
-        "filters": {
-            "broker": broker,
-            "account": account,
-            "symbol": symbol,
-            "option_type": option_type,
-            "strike": strike,
-            "expiration_ymd": expiration_ymd,
-            "limit": limit,
-        },
+        **page,
+        "rows": [
+            _event_row(
+                row,
+                normalize_broker=normalize_broker,
+                normalize_account=normalize_account,
+            )
+            for row in page["rows"]
+        ],
     }
 
 
@@ -621,7 +685,12 @@ def option_positions_read_tool(
     inspect_projection_state: Callable[..., dict[str, Any]],
     repo_base: Callable[[], Path],
     mask_path: Callable[[Any], str],
+    admit_event_query: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    try:
+        payload = normalize_option_positions_read_input(payload)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     action = _scalar_text(payload.get("action"), default="list").lower()
     if action not in {"list", "events", "history", "inspect", "assigned-stock"}:
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported option_positions_read action: {action}")
@@ -728,7 +797,29 @@ def option_positions_read_tool(
             },
         }
     elif action == "events":
-        event_data = _events_action(repo, payload, normalize_broker=normalize_broker, normalize_account=normalize_account)
+        market = infer_runtime_config_market(
+            config_key=str(payload.get("config_key") or "").strip() or None,
+            config_path=config_path,
+            config=cfg,
+        )
+        if market not in {"us", "hk"}:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="option_positions_read market could not be inferred",
+            )
+        try:
+            authorized_accounts = resolve_configured_accounts(cfg)
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        event_data = _events_action(
+            repo,
+            payload,
+            market=market,
+            authorized_accounts=authorized_accounts,
+            normalize_broker=normalize_broker,
+            normalize_account=normalize_account,
+            admit_query=admit_event_query,
+        )
         data = {"action": action, **event_data}
     elif action == "assigned-stock":
         data = _assigned_stock_action(
@@ -781,19 +872,29 @@ def option_positions_read_tool(
     data.setdefault("scope", {"action": action, **(data.get("filters") if isinstance(data.get("filters"), dict) else {})})
     if isinstance(data.get("evidence_scope"), dict):
         data.setdefault("coverage", dict(data["evidence_scope"]))
-    data.setdefault(
-        "freshness",
-        {
-            "status": "fresh",
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "kind": "ledger_snapshot",
-            **(
-                {"quote_refresh": data.get("quote_refresh")}
-                if isinstance(data.get("quote_refresh"), dict)
-                else {}
-            ),
-        },
-    )
+    if action == "events":
+        data.setdefault(
+            "freshness",
+            {
+                "status": "historical",
+                "as_of": data.get("as_of"),
+                "kind": "ledger_snapshot",
+            },
+        )
+    else:
+        data.setdefault(
+            "freshness",
+            {
+                "status": "fresh",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "kind": "ledger_snapshot",
+                **(
+                    {"quote_refresh": data.get("quote_refresh")}
+                    if isinstance(data.get("quote_refresh"), dict)
+                    else {}
+                ),
+            },
+        )
     return data, warnings, {
         "config_path": mask_path(config_path),
         "data_config": mask_path(data_config_path),

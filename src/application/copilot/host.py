@@ -643,14 +643,19 @@ def run_contract(
                 fixed_input=manifest.fixed_tool_input,
             )
             if payload_error or payload is None:
-                return reject("INPUT_ERROR", "tool input could not be prepared")
+                return reject(
+                    "INPUT_ERROR",
+                    payload_error or "tool input could not be prepared",
+                )
             event_log.record(
                 "tool_call",
-                {
-                    "tool_call_id": call_id,
-                    "tool_name": tool_name,
-                    "tool_input": redact_value(payload),
-                },
+                copilot_tools.audit_tool_event_payload(
+                    {
+                        "tool_call_id": call_id,
+                        "tool_name": tool_name,
+                        "tool_input": payload,
+                    }
+                ),
             )
 
         try:
@@ -705,11 +710,13 @@ def run_contract(
                         )
                     event_log.record(
                         "tool_result",
-                        {
-                            **failed_observation,
-                            "tool_call_id": call_id,
-                            "tool_input": redact_value(payload),
-                        },
+                        copilot_tools.audit_tool_event_payload(
+                            {
+                                **failed_observation,
+                                "tool_call_id": call_id,
+                                "tool_input": payload,
+                            }
+                        ),
                         str(failed_observation.get("ref") or "") or None,
                     )
             return failed_observation
@@ -717,7 +724,7 @@ def run_contract(
             if not tool_events_open or finalized:
                 return _tool_error(tool_name, "CANCELLED", "run is no longer active")
             observation_count += 1
-            observation = redact_value(dict(observation))
+            observation = copilot_tools.redact_model_observation(dict(observation))
             observation.setdefault("ref", new_id("obv"))
             observation.setdefault("tool_name", tool_name)
             definition = get_tool_definition(tool_name)
@@ -759,11 +766,13 @@ def run_contract(
             evidence_tokens = copilot_tools.conservative_json_tokens(observation)
             event_log.record(
                 "tool_result",
-                {
-                    **observation,
-                    "tool_call_id": call_id,
-                    "tool_input": redact_value(payload),
-                },
+                copilot_tools.audit_tool_event_payload(
+                    {
+                        **observation,
+                        "tool_call_id": call_id,
+                        "tool_input": payload,
+                    }
+                ),
                 str(observation.get("ref") or "") or None,
             )
             # The small fail-closed narrowing observation remains admissible as

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import tracemalloc
 
 import pytest
@@ -601,10 +602,20 @@ def test_unclassified_append_invalidates_all_checkpoints(tmp_path: Path) -> None
     payload = _event("future", "future_event", 2_000, contracts=0, price=0).to_dict()
     with repo._connect() as conn:  # type: ignore[attr-defined]
         conn.execute(
+            "UPDATE trade_event_ingest_sequence SET last_value = last_value + 1 "
+            "WHERE singleton_id = 1"
+        )
+        ingest_seq = int(
+            conn.execute(
+                "SELECT last_value FROM trade_event_ingest_sequence WHERE singleton_id = 1"
+            ).fetchone()[0]
+        )
+        conn.execute(
             """
             INSERT INTO trade_events (
-              event_id, account, event_json, trade_time_ms, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              event_id, account, event_json, trade_time_ms, created_at_ms,
+              updated_at_ms, ingest_seq, market, position_effect
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "future",
@@ -613,6 +624,9 @@ def test_unclassified_append_invalidates_all_checkpoints(tmp_path: Path) -> None
                 2_000,
                 2_000,
                 2_000,
+                ingest_seq,
+                "US",
+                "future_event",
             ),
         )
         conn.commit()
@@ -1072,7 +1086,9 @@ def test_failure_after_each_lot_dml_class_rolls_back(
     assert repo.read_position_projection_source_state() == before_source
 
 
-def test_metadata_update_does_not_invalidate_but_event_update_delete_do(tmp_path: Path) -> None:
+def test_metadata_update_and_enrichment_invalidate_as_before_but_delete_is_rejected(
+    tmp_path: Path,
+) -> None:
     repo = _repo(tmp_path)
     run_position_projection_forced_full(
         repo,
@@ -1104,11 +1120,10 @@ def test_metadata_update_does_not_invalidate_but_event_update_delete_do(tmp_path
     assert recovered.mode_used == "full"
     new_id = str(recovered.checkpoint_id)
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("DELETE FROM trade_events WHERE event_id='open'")
-        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
+            conn.execute("DELETE FROM trade_events WHERE event_id='open'")
     rows = {str(row["checkpoint_id"]): row for row in _checkpoint_rows(repo)}
-    assert rows[new_id]["trust_status"] == "invalid"
-    assert rows[new_id]["invalidation_reason"] == "event_delete"
+    assert rows[new_id]["trust_status"] == "trusted"
 
 
 def test_idempotent_retry_writes_nothing(tmp_path: Path) -> None:

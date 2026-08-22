@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from copy import deepcopy
@@ -195,7 +196,7 @@ def compact_observation(
         if missing_data or warnings or coverage_status != "complete"
         else ("not_found" if row_count == 0 else "complete")
     )
-    observation = redact_value({
+    observation = redact_model_observation({
         "tool_name": tool_name,
         "ok": True,
         "status": observation_status,
@@ -332,6 +333,54 @@ def bounded_failed_observation(
         "details": {"truncated": True},
         **({"ref": observation["ref"]} if observation.get("ref") else {}),
     }
+
+
+def redact_model_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    """Redact model data while preserving an opaque keyset continuation token."""
+
+    original = deepcopy(observation)
+    redacted = redact_value(original)
+    contract = original.get("result_contract")
+    pagination = contract.get("pagination") if isinstance(contract, dict) else None
+    if not isinstance(pagination, dict) or pagination.get("mode") != "keyset":
+        return redacted
+    original_value = original.get("value")
+    redacted_value = redacted.get("value")
+    if not isinstance(original_value, dict) or not isinstance(redacted_value, dict):
+        return redacted
+    next_cursor = original_value.get("next_cursor")
+    if isinstance(next_cursor, str) and next_cursor:
+        redacted_value["next_cursor"] = next_cursor
+    return redacted
+
+
+def audit_tool_event_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Build a redacted audit projection with opaque cursors replaced by hashes."""
+
+    redacted = redact_value(deepcopy(value))
+    return _replace_cursor_values_with_hashes(value, redacted)
+
+
+def _replace_cursor_values_with_hashes(original: Any, redacted: Any) -> Any:
+    if isinstance(original, dict) and isinstance(redacted, dict):
+        for key, original_value in original.items():
+            if key in {"cursor", "next_cursor"} and isinstance(original_value, str):
+                redacted[key] = {
+                    "sha256": hashlib.sha256(original_value.encode("utf-8")).hexdigest()
+                }
+                continue
+            if key in redacted:
+                redacted[key] = _replace_cursor_values_with_hashes(
+                    original_value,
+                    redacted[key],
+                )
+        return redacted
+    if isinstance(original, list) and isinstance(redacted, list):
+        return [
+            _replace_cursor_values_with_hashes(original_item, redacted_item)
+            for original_item, redacted_item in zip(original, redacted, strict=False)
+        ]
+    return redacted
 
 
 def _copilot_input_schema(definition) -> dict[str, Any]:
@@ -856,7 +905,17 @@ def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
         safe_details = {
             key: _bounded_error_detail(value)
             for key, value in details.items()
-            if key in {"allowed_views", "unknown_views", "first_keyword", "mode", "schema_errors", "tool_name"}
+            if key in {
+                "allowed_views",
+                "unknown_views",
+                "first_keyword",
+                "mode",
+                "schema_errors",
+                "tool_name",
+                "consumer",
+                "reason_code",
+                "blocked_by",
+            }
         }
         if safe_details:
             safe["details"] = safe_details
@@ -923,5 +982,7 @@ __all__ = [
     "call_read_tool",
     "compact_observation",
     "conservative_json_tokens",
+    "redact_model_observation",
+    "audit_tool_event_payload",
     "tool_descriptions",
 ]

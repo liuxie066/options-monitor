@@ -1479,26 +1479,10 @@ def _file_sha256(path: Path) -> str:
 
 
 def _insert_phase_3a_events(repo: Any, events: Sequence[dict[str, Any]]) -> None:
-    now_ms = 1_900_000_000_000
-    rows = [
-        (
-            str(event["event_id"]),
-            str((event.get("contract_key") or {}).get("account") or ""),
-            json.dumps(event, ensure_ascii=False, sort_keys=True),
-            int(event["event_time_ms"]),
-            now_ms,
-            now_ms,
-        )
-        for event in events
-    ]
     conn = repo._connect()
     try:
-        conn.executemany(
-            "INSERT INTO trade_events "
-            "(event_id,account,event_json,trade_time_ms,created_at_ms,updated_at_ms) "
-            "VALUES (?,?,?,?,?,?)",
-            rows,
-        )
+        for event in events:
+            repo.upsert_trade_event(event, conn=conn)
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
@@ -2580,23 +2564,8 @@ def _temporary_writer(events: Sequence[dict[str, Any]]) -> Iterator[dict[str, An
         db_path = Path(repo.db_path)
         keeper = repo._connect()
         try:
-            now_ms = 1_800_000_000_000
-            rows = [
-                (
-                    str(event["event_id"]),
-                    json.dumps(event, ensure_ascii=False, sort_keys=True),
-                    int(event["event_time_ms"]),
-                    now_ms,
-                    now_ms,
-                )
-                for event in events
-            ]
-            keeper.executemany(
-                "INSERT INTO trade_events "
-                "(event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms) "
-                "VALUES (?, ?, ?, ?, ?)",
-                rows,
-            )
+            for event in events:
+                repo.upsert_trade_event(event, conn=keeper)
             keeper.commit()
             keeper.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             before = _sqlite_sizes(db_path)

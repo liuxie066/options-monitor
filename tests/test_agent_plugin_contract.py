@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 
 
@@ -120,6 +122,16 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "refresh_quotes" in option_positions_read["input_schema"]
     assert "opend_host" in option_positions_read["input_schema"]
     assert "opend_port" in option_positions_read["input_schema"]
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tool_registry import get_tool_definition
+
+    definition = get_tool_definition("option_positions_read")
+    assert definition is not None
+    definition.validate_input({"action": "list", "limit": 500})
+    with pytest.raises(AgentToolError, match="events limit must be between 1 and 20"):
+        definition.validate_input({"action": "events", "limit": 21})
+    with pytest.raises(AgentToolError, match="require action=events"):
+        definition.validate_input({"action": "list", "cursor": "opaque"})
     config_validate = next(item for item in spec["tools"] if item["name"] == "config_validate")
     assert config_validate["risk_level"] == "read_only"
     scheduler_status = next(item for item in spec["tools"] if item["name"] == "scheduler_status")
@@ -288,6 +300,20 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     positions_contract = positions.resolve_output_contract({"action": "list"})
     assert positions_contract["stable_order"] == "expiration_asc_missing_last"
     assert "rows[].contracts_open" in positions_contract["fact_fields"]
+
+    events_contract = positions.resolve_output_contract({"action": "events"})
+    assert events_contract["schema_version"] == (
+        "option_positions_read.events_output.v1"
+    )
+    assert events_contract["evidence_type"] == "collection"
+    assert events_contract["row_count_field"] == "returned_count"
+    assert events_contract["stable_order"] == "trade_time_ms_desc,event_id_desc"
+    assert events_contract["pagination"] == {
+        "mode": "keyset",
+        "cursor_ttl_seconds": 1800,
+        "snapshot_boundary": "ingest_seq",
+        "order": ["trade_time_ms DESC", "event_id DESC"],
+    }
 
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
     assert assigned_stock_contract["schema_version"] == "option_positions_read.assigned_stock_output.v2"

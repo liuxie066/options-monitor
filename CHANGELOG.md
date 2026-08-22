@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Improvements
-- Bounded Copilot context growth with directory-based Pi tool activation, compact evidence projections, explicit freshness metadata, and Host-admitted answers.
+- Bounded Copilot context growth with directory-based Pi tool activation, compact evidence projections, snapshot-stable cursor pagination for trade events, explicit freshness metadata, and Host-admitted answers.
 
 ## 1.15.10 - 2026-08-22
 

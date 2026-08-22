@@ -10,7 +10,9 @@
       "id": "ledger_event_reads",
       "kind": "call",
       "symbols": [
-        "list_trade_events"
+        "list_trade_events",
+        "list_trade_events_page",
+        "trade_event_page"
       ],
       "classifiers": [
         {
@@ -330,6 +332,12 @@
       "locator": "list_trade_events",
       "owner": "ledger_projection_writer",
       "reason": "canonical full-replay reader"
+    },
+    {
+      "path": "src/application/ledger/repository.py",
+      "locator": "list_trade_events_page",
+      "owner": "ledger",
+      "reason": "canonical bounded keyset trade-event reader"
     },
     {
       "path": "src/application/ledger/position_projection_publication.py",

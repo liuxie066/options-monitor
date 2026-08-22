@@ -27,7 +27,7 @@ from src.infrastructure.secret_store.systemd_credentials import (
 
 def test_registry_has_unique_fixed_names_and_credential_ids() -> None:
     specs = credential_specs()
-    assert len(specs) == 8
+    assert len(specs) == 9
     assert len({item.logical_name for item in specs}) == len(specs)
     assert len({item.systemd_credential_id for item in specs}) == len(specs)
     assert all(item.systemd_credential_id.startswith("om-") for item in specs)

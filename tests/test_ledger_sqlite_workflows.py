@@ -457,6 +457,8 @@ def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: 
         raw_payload={"deal_id": "deal-open-legacy"},
     )
     with legacy_repo._connect() as conn:  # type: ignore[attr-defined]
+        for trigger_name in ledger_repository.TRADE_EVENT_PAGINATION_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trade_events (

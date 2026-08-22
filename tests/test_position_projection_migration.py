@@ -10,6 +10,7 @@ import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger import position_projection_migration as module
+from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
 _REAL_SOURCE_COMMIT = module._source_commit
@@ -202,6 +203,24 @@ def test_apply_failure_rolls_back_schema_backfill_and_projection(tmp_path: Path)
         ).fetchone() is None
 
 
+def test_apply_fails_closed_on_stored_event_account_conflict(
+    tmp_path: Path,
+) -> None:
+    path = _legacy_store(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE trade_events ADD COLUMN account TEXT")
+        conn.execute("UPDATE trade_events SET account = 'sy'")
+    inventory = module.build_position_projection_migration_inventory(path)
+
+    with pytest.raises(ValueError, match="account conflicts with JSON"):
+        module.apply_position_projection_migration(path, inventory)
+
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(trade_events)")}
+        assert "ingest_seq" not in columns
+        assert conn.execute("SELECT account FROM trade_events").fetchone()[0] == "sy"
+
+
 def test_verify_detects_lot_drift(tmp_path: Path) -> None:
     path = _legacy_store(tmp_path)
     _apply(path)
@@ -319,22 +338,8 @@ def test_activation_rejects_stale_generation_binding(tmp_path: Path) -> None:
     shadow = module.verify_position_projection_migration(path, shadow=True)
     acceptance = _acceptance(shadow)
     event = _event("open-2", event_time_ms=2_000)
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            """
-            INSERT INTO trade_events (
-              event_id,account,event_json,trade_time_ms,created_at_ms,updated_at_ms
-            ) VALUES (?,?,?,?,?,?)
-            """,
-            (
-                event["event_id"],
-                "lx",
-                json.dumps(event, ensure_ascii=False, sort_keys=True),
-                event["event_time_ms"],
-                2,
-                2,
-            ),
-        )
+    repo = SQLiteOptionPositionsRepository(path)
+    assert repo.upsert_trade_event(event) is True
 
     with pytest.raises(ValueError, match="verification|stale"):
         module.activate_position_projection_checkpoints(
