@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 1.15.11 - 2026-08-23
+
 ### Improvements
 - Bounded Copilot context growth with directory-based Pi tool activation, compact evidence projections, snapshot-stable cursor pagination for trade events, explicit freshness metadata, and Host-admitted answers.
+
+### Bug Fixes
+- Removed the API-key environment variable name from Copilot evaluation metadata so reports no longer expose credential lookup configuration.
 
 ## 1.15.10 - 2026-08-22
 
