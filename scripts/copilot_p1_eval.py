@@ -550,7 +550,6 @@ def _model_metadata(assistant_config: str) -> dict[str, Any]:
         "provider": str(raw.get("provider") or ""),
         "model": str(raw.get("model") or ""),
         "base_url_configured": bool(str(raw.get("base_url") or "").strip()),
-        "api_key_env": str(raw.get("api_key_env") or ""),
         "timeout_seconds": raw.get("timeout_seconds"),
     }
 
