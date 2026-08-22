@@ -1,0 +1,50 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.11",
+  "base": {
+    "tag": "v1.15.10",
+    "commit": "42668733cdf896dee7a1546351c0d87016aa088a"
+  },
+  "reviewed_head": "66f060e357d6ddc08ffc06fcbc7c42424b67fa6b",
+  "commits": [
+    {
+      "sha": "bd9bc1c6f80032f1a925decfc7166bcde21b0702",
+      "subject": "feat(copilot): bound Pi tool context"
+    },
+    {
+      "sha": "764d309b7a35917443495ffca49d91b88005afb7",
+      "subject": "test(repo): simplify pytest suite"
+    },
+    {
+      "sha": "3b779293ca45e1f79648362f24e1084a212127e5",
+      "subject": "fix(security): omit API key env from eval metadata"
+    },
+    {
+      "sha": "66f060e357d6ddc08ffc06fcbc7c42424b67fa6b",
+      "subject": "feat(copilot): add stable trade event pagination"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Bounded Copilot context growth with directory-based Pi tool activation, compact evidence projections, snapshot-stable cursor pagination for trade events, explicit freshness metadata, and Host-admitted answers.",
+      "commits": [
+        "bd9bc1c6f80032f1a925decfc7166bcde21b0702",
+        "66f060e357d6ddc08ffc06fcbc7c42424b67fa6b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Removed the API-key environment variable name from Copilot evaluation metadata so reports no longer expose credential lookup configuration.",
+      "commits": [
+        "3b779293ca45e1f79648362f24e1084a212127e5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "764d309b7a35917443495ffca49d91b88005afb7",
+      "reason": "Simplified pytest collection and fixtures without changing runtime, public, configuration, or operator behavior."
+    }
+  ]
+}
