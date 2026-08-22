@@ -15,6 +15,7 @@ YAML、JSON、JSONL、命令参数、日志、support bundle 或聊天记录。
 | `feishu.bot.app_secret` | Feishu bot / long connection | `OM_FEISHU_BOT_APP_SECRET` |
 | `inbound.operation_hmac_key` | inbound 写操作完整性 | `OM_INBOUND_OPERATION_HMAC_KEY` |
 | `quality.read_token` | `/quality/status` 读取认证 | `OM_QUALITY_READ_TOKEN` |
+| `copilot.cursor_hmac_key` | Copilot 无状态分页游标完整性 | `OM_COPILOT_CURSOR_HMAC_KEY` |
 
 App ID、用户 open ID、table ID、路径、URL、model 名和 feature flag 不是秘密，继续作为普通配置。
 Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret 只有在出现真实消费方时才加入固定注册表。
@@ -47,6 +48,11 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 逻辑名、后端、是否改变和可能受影响的服务；不会自动重启服务。
 非交互 stdin、命令参数和管道输入都会被拒绝。
 
+启用 Copilot keyset 分页前，必须通过一次性 root bootstrap 单独 provision
+`copilot.cursor_hmac_key`，例如 `sudo ./om secrets set copilot.cursor_hmac_key`。setup、升级和发布
+不会生成、读取或轮换它；同一环境跨 release 保持同一值。显式轮换会让尚未过期的旧游标
+立即失效，用户需要重新发起查询。
+
 macOS provider 会在私有控制终端中等待 `security` 的两次原生密码提示，再把已确认值从
 进程内存写入；值不会进入子进程 argv、stdout、stderr 或临时文件。写入成功仍需用脱敏
 `status` 和实际消费方回读验证，不能只信 `security` 的退出码。
@@ -70,6 +76,8 @@ root 授权运行，例如先确认目标，再执行 `sudo ./om secrets set <lo
 默认 `--secret-credential-delivery load-credential-encrypted`，为各消费 unit 生成
 `LoadCredentialEncrypted=` 绑定。每个 drop-in 只包含该 unit 固定注册表中需要的
 credential ID。它不会创建、读取或修改 `/etc/credstore.encrypted` 中的文件，也不会安装 drop-in。
+启用 Copilot 时，cursor credential 只绑定给实际运行 Copilot 的 inbound service；升级 unit
+不会读取该密钥。
 两种安全交付 drop-in 都会用 `UnsetEnvironment=` 从进程环境中移除固定注册表里的旧 secret env 名；
 普通 env-file 仍可保留非秘密配置。
 安装、daemon-reload、服务重启和健康验证仍属于独立的部署授权边界。

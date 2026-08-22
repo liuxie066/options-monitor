@@ -105,6 +105,21 @@ trade_events -> deterministic projection -> position_lots
 
 具体子命令以 `./om option-positions --help`、`./om trade-events --help` 和 `./om-agent spec` 为准。
 
+### 稳定事件分页
+
+Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade_events`。SQLite 为每个
+事件分配单调且不复用的 `ingest_seq`；首次查询记录最大序号，后续页使用
+`trade_time_ms DESC, event_id DESC` 的 keyset cursor，并始终限制在该序号边界内。因此新增事件
+不会插入正在进行的结果流，分页条数可以在 1–20 之间变化，也不会导致已返回成员重复。
+
+这个 snapshot 冻结的是成员集合、筛选字段和排序字段，不是整行 JSON 的历史版本。事件成员
+不可删除，`ingest_seq`、事件身份、交易时间、账户、市场、position effect 和合约筛选字段不可
+修改；价格等不参与查询的补充字段仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续
+由 Python canonical codec 负责，SQLite 不实现第二套领域 JSON 校验器。
+
+旧库只声明新增列，不在普通启动时扫描回填。必须通过受控 position-projection migration 分批
+填充分页投影并发布索引与约束；完成前 `action=events` 明确返回 pagination unavailable。
+
 ## 到期与交割生命周期
 
 到期短仓不能仅凭“过了 expiry”自动写成 worthless：

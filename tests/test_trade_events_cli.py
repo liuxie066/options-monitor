@@ -85,6 +85,10 @@ def _insert_invalid_legacy_void_event(
         "raw_payload": {"void_target_event_id": target_event_id},
     }
     with sqlite3.connect(str(repo.db_path)) as conn:
+        # This fixture deliberately represents a row written before the
+        # pagination schema and its canonical write guards existed.
+        for trigger_name in ledger_repository.TRADE_EVENT_PAGINATION_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
         conn.execute(
             """
             INSERT INTO trade_events (event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms)

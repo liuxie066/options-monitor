@@ -34,6 +34,8 @@ from src.application.ledger.publisher import (
 from src.application.ledger.repository import (
     POSITION_LOTS_COLUMN_CLASSIFICATION,
     POSITION_PROJECTION_SCHEMA,
+    TRADE_EVENT_PAGINATION_INDEXES,
+    TRADE_EVENT_PAGINATION_TRIGGERS,
     TRADE_EVENTS_COLUMN_CLASSIFICATION,
     SQLiteOptionPositionsRepository,
     _ensure_position_projection_schema,
@@ -58,6 +60,7 @@ REQUIRED_INDEXES = (
     "idx_trade_events_account_time",
     "idx_position_lots_account_expiration",
     "idx_position_lots_account_record",
+    *TRADE_EVENT_PAGINATION_INDEXES,
 )
 REQUIRED_TRIGGERS = (
     "trg_trade_events_account_insert_guard",
@@ -72,6 +75,7 @@ REQUIRED_TRIGGERS = (
     "trg_position_lots_generation_update_same",
     "trg_position_lots_generation_update_old",
     "trg_position_lots_generation_update_new",
+    *TRADE_EVENT_PAGINATION_TRIGGERS,
 )
 
 
@@ -519,6 +523,7 @@ def apply_position_projection_migration(
         _ensure_position_projection_schema(conn)
         _fail(failure_hook, "after_schema")
         account_updates = repo.backfill_position_projection_accounts(conn=conn)
+        pagination_updates = repo.backfill_trade_event_pagination(conn=conn)
         scalar_updates = repo.backfill_position_lot_contract_columns(conn=conn)
         _fail(failure_hook, "after_backfill")
         index_wall_start = time.perf_counter_ns()
@@ -542,7 +547,9 @@ def apply_position_projection_migration(
             ),
         )
         if not runtime.publication.heads_trusted or not runtime.checkpoint_written:
-            raise RuntimeError("migration full oracle did not publish trusted heads and checkpoint")
+            raise RuntimeError(
+                "migration full oracle did not publish trusted heads and checkpoint"
+            )
         repo.set_position_projection_checkpoint_mode("disabled", conn=conn)
         if len(repo.list_position_projection_checkpoints(conn=conn)) > 3:
             raise RuntimeError("migration checkpoint retention exceeds K=3")
@@ -563,6 +570,7 @@ def apply_position_projection_migration(
         "store_identity": _store_identity(path),
         "source_manifest_hash": supplied["manifest_hash"],
         "accounts_backfilled": account_updates,
+        "trade_event_pagination_rows_backfilled": int(pagination_updates),
         "contract_scalars_backfilled": int(scalar_updates),
         "indexes_created": list(indexes_created),
         "index_timing": index_timing,

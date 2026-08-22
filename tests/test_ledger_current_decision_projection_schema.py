@@ -119,8 +119,10 @@ def test_phase3b_schema_upgrade_is_additive_idempotent_and_does_not_backfill(
 
     repo = SQLiteOptionPositionsRepository(db_path)
     initialization_sql = tuple(startup_sql)
+    # The trade-event pagination schema owns a separate, explicit one-time
+    # backfill. This contract remains scoped to the phase-3b current-decision
+    # tables and the other historical owners below.
     history_tables = (
-        "trade_events",
         "position_lots",
         "assigned_stock_events",
         "trade_lifecycle_cases",

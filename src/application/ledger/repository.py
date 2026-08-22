@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import effective_expiration, now_ms
 from domain.domain.ledger.position_fingerprint import (
     ordered_position_lots_fingerprint,
 )
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import normalize_wheel_event
 from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
 from src.application.ledger.lifecycle_attempt_audit import (
@@ -62,6 +63,9 @@ TRADE_EVENTS_COLUMN_CLASSIFICATION = {
     "account": "projection-affecting",
     "event_json": "projection-affecting",
     "trade_time_ms": "projection-affecting",
+    "ingest_seq": "integrity/snapshot",
+    "market": "projection-affecting",
+    "position_effect": "projection-affecting",
     "created_at_ms": "metadata-only",
     "updated_at_ms": "metadata-only",
 }
@@ -106,6 +110,7 @@ class OptionPositionsReadRepo(Protocol):
 
 class OptionPositionsEventReadRepo(OptionPositionsReadRepo, Protocol):
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]: ...
+    def list_trade_events_page(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 class OptionPositionsEventWriteRepo(OptionPositionsEventReadRepo, Protocol):
@@ -288,6 +293,515 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+TRADE_EVENT_PAGINATION_INDEXES = (
+    "idx_trade_events_pagination_missing",
+    "idx_trade_events_ingest_seq",
+    "idx_trade_events_market_keyset",
+    "idx_trade_events_market_effect_keyset",
+    "idx_trade_events_account_market_keyset",
+    "idx_trade_events_account_market_effect_keyset",
+)
+
+TRADE_EVENT_PAGINATION_TRIGGERS = (
+    "trg_trade_events_ingest_seq_immutable",
+    "trg_trade_events_query_projection_immutable",
+    "trg_trade_events_pagination_projection_insert_guard",
+    "trg_trade_events_pagination_projection_update_guard",
+    "trg_trade_events_delete_immutable",
+)
+
+_TRADE_EVENT_PAGINATION_MISSING = """
+    ingest_seq IS NULL
+    OR typeof(ingest_seq) != 'integer' OR ingest_seq < 1
+    OR typeof(trade_time_ms) != 'integer'
+    OR market IS NULL OR market NOT IN ('US', 'HK')
+    OR position_effect IS NULL OR trim(position_effect) = ''
+       OR position_effect != lower(trim(position_effect))
+    OR account IS NULL OR trim(account) = ''
+       OR account != trim(account) OR account != lower(account)
+"""
+
+
+class TradeEventPaginationUnavailable(RuntimeError):
+    """The controlled legacy projection migration has not completed."""
+
+
+def _trade_event_pagination_projections(
+    event_json: Any,
+) -> tuple[str, int, str, str, str]:
+    try:
+        payload = json.loads(str(event_json or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("trade event JSON is invalid during pagination migration") from exc
+    encoded = encode_trade_event_for_storage(payload)
+    if encoded.event is None:
+        raise ValueError(
+            f"trade event cannot be projected: event_id={encoded.event_id}"
+        )
+    account = str(encoded.event.contract_key.account or "").strip()
+    if not account or account != account.lower():
+        raise ValueError(
+            f"trade event account cannot be projected: event_id={encoded.event_id}"
+        )
+    market = symbol_market(encoded.event.contract_key.underlying_symbol)
+    if market not in {"US", "HK"}:
+        raise ValueError(
+            f"trade event market cannot be derived: event_id={encoded.event_id}"
+        )
+    application_payload = trade_event_application_payload(encoded.payload)
+    position_effect = str(application_payload.get("position_effect") or "").strip().lower()
+    if not position_effect:
+        raise ValueError(
+            f"trade event position effect cannot be derived: event_id={encoded.event_id}"
+        )
+    return (
+        str(encoded.event_id),
+        int(encoded.event_time_ms),
+        account,
+        market,
+        position_effect,
+    )
+
+
+def _trade_event_query_projections(event_json: Any) -> tuple[str, str, str]:
+    _event_id, _trade_time_ms, account, market, position_effect = (
+        _trade_event_pagination_projections(event_json)
+    )
+    return account, market, position_effect
+
+
+def _trade_event_pagination_missing_row(
+    conn: sqlite3.Connection,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT event_id FROM trade_events WHERE {_TRADE_EVENT_PAGINATION_MISSING} LIMIT 1"
+    ).fetchone()
+
+
+def _trade_event_pagination_schema_ready(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT type, name
+        FROM sqlite_master
+        WHERE name IN ({})
+        """.format(
+            ", ".join(
+                "?"
+                for _ in (
+                    *TRADE_EVENT_PAGINATION_INDEXES,
+                    *TRADE_EVENT_PAGINATION_TRIGGERS,
+                )
+            )
+        ),
+        (*TRADE_EVENT_PAGINATION_INDEXES, *TRADE_EVENT_PAGINATION_TRIGGERS),
+    ).fetchall()
+    present = {(str(row["type"]), str(row["name"])) for row in rows}
+    required = {
+        *(('index', name) for name in TRADE_EVENT_PAGINATION_INDEXES),
+        *(('trigger', name) for name in TRADE_EVENT_PAGINATION_TRIGGERS),
+    }
+    return required.issubset(present) and _trade_event_pagination_missing_row(conn) is None
+
+
+def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
+    missing = _trade_event_pagination_missing_row(conn)
+    if missing is not None:
+        raise ValueError(
+            "trade event pagination migration is incomplete: "
+            f"event_id={missing['event_id']}"
+        )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_trade_events_pagination_missing
+        ON trade_events(event_id)
+        WHERE {_TRADE_EVENT_PAGINATION_MISSING}
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_ingest_seq "
+        "ON trade_events(ingest_seq)"
+    )
+    for index_name, columns in (
+        (
+            "idx_trade_events_market_keyset",
+            "market, trade_time_ms DESC, event_id DESC, ingest_seq",
+        ),
+        (
+            "idx_trade_events_market_effect_keyset",
+            "market, position_effect, trade_time_ms DESC, event_id DESC, ingest_seq",
+        ),
+        (
+            "idx_trade_events_account_market_keyset",
+            "account, market, trade_time_ms DESC, event_id DESC, ingest_seq",
+        ),
+        (
+            "idx_trade_events_account_market_effect_keyset",
+            "account, market, position_effect, trade_time_ms DESC, event_id DESC, ingest_seq",
+        ),
+    ):
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON trade_events({columns})"
+        )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_ingest_seq_immutable
+        BEFORE UPDATE OF ingest_seq ON trade_events
+        WHEN NEW.ingest_seq IS NOT OLD.ingest_seq
+        BEGIN
+          SELECT RAISE(ABORT, 'trade event ingest_seq is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_query_projection_immutable
+        BEFORE UPDATE OF event_id, account, event_json, trade_time_ms,
+          market, position_effect ON trade_events
+        WHEN OLD.ingest_seq IS NOT NULL AND (
+          NEW.event_id IS NOT OLD.event_id
+          OR NEW.account IS NOT OLD.account
+          OR NEW.trade_time_ms IS NOT OLD.trade_time_ms
+          OR NEW.market IS NOT OLD.market
+          OR NEW.position_effect IS NOT OLD.position_effect
+          OR json_extract(NEW.event_json, '$.event_id')
+             IS NOT json_extract(OLD.event_json, '$.event_id')
+          OR json_extract(NEW.event_json, '$.event_time_ms')
+             IS NOT json_extract(OLD.event_json, '$.event_time_ms')
+          OR json_extract(NEW.event_json, '$.event_type')
+             IS NOT json_extract(OLD.event_json, '$.event_type')
+          OR json_extract(NEW.event_json, '$.contract_key.account')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.account')
+          OR json_extract(NEW.event_json, '$.contract_key.broker')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.broker')
+          OR json_extract(NEW.event_json, '$.contract_key.underlying_symbol')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.underlying_symbol')
+          OR json_extract(NEW.event_json, '$.contract_key.option_type')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.option_type')
+          OR json_extract(NEW.event_json, '$.contract_key.strike')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.strike')
+          OR json_extract(NEW.event_json, '$.contract_key.expiration_ymd')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.expiration_ymd')
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'trade event query projection is immutable');
+        END
+        """
+    )
+    projection_guard = """
+      SELECT CASE
+        WHEN json_valid(NEW.event_json) != 1
+          OR json_type(NEW.event_json) IS NOT 'object'
+          THEN RAISE(ABORT, 'trade event JSON is invalid')
+        WHEN NEW.ingest_seq IS NULL OR typeof(NEW.ingest_seq) != 'integer'
+          OR NEW.ingest_seq < 1
+          OR typeof(NEW.trade_time_ms) != 'integer'
+          OR typeof(NEW.account) != 'text'
+          OR NEW.account = '' OR NEW.account != lower(trim(NEW.account))
+          OR typeof(NEW.market) != 'text' OR NEW.market NOT IN ('US', 'HK')
+          OR typeof(NEW.position_effect) != 'text'
+          OR NEW.position_effect = ''
+          OR NEW.position_effect != lower(trim(NEW.position_effect))
+          THEN RAISE(ABORT, 'trade event pagination projection is incomplete')
+        WHEN json_type(NEW.event_json, '$.event_id') IS NOT 'text'
+          OR json_type(NEW.event_json, '$.event_time_ms') IS NOT 'integer'
+          OR json_type(NEW.event_json, '$.event_type') IS NOT 'text'
+          OR json_type(NEW.event_json, '$.contract_key') IS NOT 'object'
+          OR json_type(NEW.event_json, '$.contract_key.account') IS NOT 'text'
+          OR json_type(NEW.event_json, '$.contract_key.broker') IS NOT 'text'
+          OR json_type(
+            NEW.event_json, '$.contract_key.underlying_symbol'
+          ) IS NOT 'text'
+          OR json_type(NEW.event_json, '$.contract_key.option_type') IS NOT 'text'
+          OR json_type(NEW.event_json, '$.contract_key.strike')
+             NOT IN ('integer', 'real')
+          OR json_type(
+            NEW.event_json, '$.contract_key.expiration_ymd'
+          ) IS NOT 'text'
+          THEN RAISE(ABORT, 'trade event pagination query fields are incomplete')
+        WHEN CAST(json_extract(NEW.event_json, '$.event_id') AS TEXT)
+          IS NOT NEW.event_id
+          OR CAST(json_extract(NEW.event_json, '$.event_time_ms') AS INTEGER)
+             IS NOT NEW.trade_time_ms
+          THEN RAISE(ABORT, 'trade event identity projection conflicts')
+        WHEN CAST(json_extract(
+          NEW.event_json, '$.contract_key.account'
+        ) AS TEXT) IS NOT NEW.account
+          THEN RAISE(ABORT, 'trade event account projection conflicts')
+        WHEN NEW.market != CASE
+          WHEN upper(trim(CAST(json_extract(
+            NEW.event_json, '$.contract_key.underlying_symbol'
+          ) AS TEXT))) LIKE '%.HK' THEN 'HK'
+          ELSE 'US'
+        END
+          THEN RAISE(ABORT, 'trade event market projection conflicts')
+        WHEN NEW.position_effect != CASE
+          WHEN lower(trim(CAST(json_extract(
+            NEW.event_json, '$.event_type'
+          ) AS TEXT))) IN ('close', 'expire_close', 'assignment', 'exercise')
+            THEN 'close'
+          ELSE lower(trim(CAST(json_extract(
+            NEW.event_json, '$.event_type'
+          ) AS TEXT)))
+          END
+          THEN RAISE(ABORT, 'trade event position-effect projection conflicts')
+      END;
+    """
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_pagination_projection_insert_guard
+        BEFORE INSERT ON trade_events
+        BEGIN
+          {projection_guard}
+          SELECT CASE
+            WHEN EXISTS (
+              SELECT 1 FROM trade_events WHERE event_id = NEW.event_id
+            )
+              THEN RAISE(ABORT, 'trade event replacement is not allowed')
+            WHEN NEW.ingest_seq IS NOT (
+              SELECT last_value
+              FROM trade_event_ingest_sequence
+              WHERE singleton_id = 1
+            )
+              THEN RAISE(ABORT, 'trade event ingest_seq was not allocated')
+          END;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_pagination_projection_update_guard
+        BEFORE UPDATE OF event_id, event_json, trade_time_ms, ingest_seq,
+          account, market, position_effect ON trade_events
+        BEGIN
+          {projection_guard}
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_trade_events_delete_immutable
+        BEFORE DELETE ON trade_events
+        BEGIN
+          SELECT RAISE(ABORT, 'trade event membership is immutable');
+        END
+        """
+    )
+
+
+def _backfill_trade_event_pagination_schema(conn: sqlite3.Connection) -> int:
+    invalid_created_at = conn.execute(
+        """
+        SELECT event_id
+        FROM trade_events
+        WHERE typeof(created_at_ms) != 'integer'
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_created_at is not None:
+        raise ValueError(
+            "trade event created_at_ms must be an integer for pagination migration: "
+            f"event_id={invalid_created_at['event_id']}"
+        )
+    invalid_trade_time = conn.execute(
+        """
+        SELECT event_id
+        FROM trade_events
+        WHERE typeof(trade_time_ms) != 'integer'
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_trade_time is not None:
+        raise ValueError(
+            "trade event trade_time_ms must be an integer for pagination migration: "
+            f"event_id={invalid_trade_time['event_id']}"
+        )
+    invalid_sequence = conn.execute(
+        """
+        SELECT event_id
+        FROM trade_events
+        WHERE ingest_seq IS NOT NULL
+          AND (typeof(ingest_seq) != 'integer' OR ingest_seq < 1)
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_sequence is not None:
+        raise ValueError(
+            "trade event ingest sequence is invalid: "
+            f"event_id={invalid_sequence['event_id']}"
+        )
+    duplicate_sequence = conn.execute(
+        """
+        SELECT ingest_seq
+        FROM trade_events
+        WHERE ingest_seq IS NOT NULL
+        GROUP BY ingest_seq
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate_sequence is not None:
+        raise ValueError(
+            "trade event ingest sequence is not unique: "
+            f"ingest_seq={duplicate_sequence['ingest_seq']}"
+        )
+
+    max_row = conn.execute(
+        "SELECT COALESCE(MAX(ingest_seq), 0) AS max_seq FROM trade_events"
+    ).fetchone()
+    counter_row = conn.execute(
+        "SELECT last_value FROM trade_event_ingest_sequence WHERE singleton_id = 1"
+    ).fetchone()
+    next_sequence = max(
+        int(max_row["max_seq"] if max_row is not None else 0),
+        int(counter_row["last_value"] if counter_row is not None else 0),
+    )
+    for trigger_name in (
+        "trg_trade_events_ingest_seq_immutable",
+        "trg_trade_events_query_projection_immutable",
+        "trg_trade_events_pagination_projection_insert_guard",
+        "trg_trade_events_pagination_projection_update_guard",
+        "trg_trade_events_delete_immutable",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_events_pagination_backfill "
+        "ON trade_events(created_at_ms, event_id)"
+    )
+    updated = 0
+    last_created_at_ms: int | None = None
+    last_event_id: str | None = None
+    try:
+        while True:
+            if last_created_at_ms is None:
+                rows = conn.execute(
+                    """
+                    SELECT event_id, account, event_json, trade_time_ms,
+                           created_at_ms, ingest_seq, market, position_effect
+                    FROM trade_events
+                    ORDER BY created_at_ms ASC, event_id ASC
+                    LIMIT 1000
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT event_id, account, event_json, trade_time_ms,
+                           created_at_ms, ingest_seq, market, position_effect
+                    FROM trade_events
+                    WHERE (created_at_ms, event_id) > (?, ?)
+                    ORDER BY created_at_ms ASC, event_id ASC
+                    LIMIT 1000
+                    """,
+                    (last_created_at_ms, last_event_id),
+                ).fetchall()
+            if not rows:
+                break
+            values: list[tuple[str, int, str, str, str]] = []
+            for row in rows:
+                (
+                    canonical_event_id,
+                    canonical_trade_time_ms,
+                    account,
+                    market,
+                    position_effect,
+                ) = _trade_event_pagination_projections(row["event_json"])
+                event_id = str(row["event_id"])
+                if canonical_event_id != event_id:
+                    raise ValueError(
+                        f"trade event id conflicts with JSON: event_id={event_id}"
+                    )
+                if canonical_trade_time_ms != row["trade_time_ms"]:
+                    raise ValueError(
+                        f"trade event time conflicts with JSON: event_id={event_id}"
+                    )
+                raw_account = str(row["account"] or "")
+                stored_account = raw_account.strip()
+                if stored_account and stored_account != account:
+                    raise ValueError(
+                        f"trade event account conflicts with JSON: event_id={event_id}"
+                    )
+                raw_market = str(row["market"] or "")
+                stored_market = raw_market.strip().upper()
+                if stored_market and stored_market != market:
+                    raise ValueError(
+                        f"trade event market projection conflicts: event_id={event_id}"
+                    )
+                raw_effect = str(row["position_effect"] or "")
+                stored_effect = raw_effect.strip().lower()
+                if stored_effect and stored_effect != position_effect:
+                    raise ValueError(
+                        "trade event position-effect projection conflicts: "
+                        f"event_id={event_id}"
+                    )
+                ingest_seq = row["ingest_seq"]
+                row_is_missing = (
+                    ingest_seq is None
+                    or raw_account != account
+                    or raw_market != market
+                    or raw_effect != position_effect
+                )
+                if ingest_seq is None:
+                    next_sequence += 1
+                    ingest_seq = next_sequence
+                if row_is_missing:
+                    values.append(
+                        (account, int(ingest_seq), market, position_effect, event_id)
+                    )
+                last_created_at_ms = int(row["created_at_ms"])
+                last_event_id = event_id
+            if values:
+                conn.executemany(
+                    """
+                    UPDATE trade_events
+                    SET account = ?, ingest_seq = ?, market = ?, position_effect = ?
+                    WHERE event_id = ?
+                    """,
+                    values,
+                )
+                updated += len(values)
+    finally:
+        conn.execute("DROP INDEX IF EXISTS idx_trade_events_pagination_backfill")
+
+    conn.execute(
+        """
+        INSERT INTO trade_event_ingest_sequence (singleton_id, last_value)
+        VALUES (1, ?)
+        ON CONFLICT(singleton_id) DO UPDATE SET
+          last_value = MAX(last_value, excluded.last_value)
+        """,
+        (next_sequence,),
+    )
+    _publish_trade_event_pagination_schema(conn)
+    return updated
+
+
+def _ensure_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
+    """Declare pagination schema; non-empty legacy stores require controlled migration."""
+
+    _add_column_if_missing(conn, "trade_events", "ingest_seq", "INTEGER")
+    _add_column_if_missing(conn, "trade_events", "market", "TEXT")
+    _add_column_if_missing(conn, "trade_events", "position_effect", "TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_event_ingest_sequence (
+          singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+          last_value INTEGER NOT NULL CHECK(last_value >= 0)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO trade_event_ingest_sequence (singleton_id, last_value)
+        VALUES (1, 0)
+        """
+    )
+    if _trade_event_pagination_schema_ready(conn):
+        return
+    has_rows = conn.execute("SELECT 1 FROM trade_events LIMIT 1").fetchone()
+    if has_rows is None:
+        _publish_trade_event_pagination_schema(conn)
 
 
 def _create_index_if_table_empty(
@@ -604,6 +1118,7 @@ def _create_current_decision_case_scope_guards(
 def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "trade_events", "account", "TEXT")
     _add_column_if_missing(conn, "position_lots", "account", "TEXT")
+    _ensure_trade_event_pagination_schema(conn)
 
     _create_index_if_table_empty(
         conn,
@@ -2063,7 +2578,10 @@ class SQLiteOptionPositionsRepository:
                   event_json TEXT NOT NULL,
                   trade_time_ms INTEGER NOT NULL,
                   created_at_ms INTEGER NOT NULL,
-                  updated_at_ms INTEGER NOT NULL
+                  updated_at_ms INTEGER NOT NULL,
+                  ingest_seq INTEGER,
+                  market TEXT,
+                  position_effect TEXT
                 )
                 """
             )
@@ -2624,6 +3142,16 @@ class SQLiteOptionPositionsRepository:
             "position_lots_updated": len(lot_updates),
         }
 
+    def backfill_trade_event_pagination(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        """Run the controlled bounded-memory pagination backfill."""
+
+        with self._optional_conn(conn, commit=True) as active_conn:
+            return _backfill_trade_event_pagination_schema(active_conn)
+
     def build_position_projection_indexes(
         self,
         *,
@@ -2672,10 +3200,17 @@ class SQLiteOptionPositionsRepository:
 
     def upsert_trade_event(self, event: Any, *, conn: sqlite3.Connection | None = None) -> bool:
         encoded = encode_trade_event_for_storage(event)
+        account, market, position_effect = _trade_event_query_projections(
+            encoded.event_json
+        )
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
             existing = active_conn.execute(
-                "SELECT event_json FROM trade_events WHERE event_id = ?",
+                """
+                SELECT account, event_json, ingest_seq, market, position_effect
+                FROM trade_events
+                WHERE event_id = ?
+                """,
                 (encoded.event_id,),
             ).fetchone()
             if existing is not None:
@@ -2686,23 +3221,54 @@ class SQLiteOptionPositionsRepository:
                 existing_encoded = encode_trade_event_for_storage(existing_payload)
                 if existing_encoded.event_json != encoded.event_json:
                     raise ValueError(f"trade event conflict for event_id={encoded.event_id}")
+                if (
+                    str(existing["account"] or "").strip() != account
+                    or existing["ingest_seq"] is None
+                    or str(existing["market"] or "").strip().upper() != market
+                    or str(existing["position_effect"] or "").strip().lower()
+                    != position_effect
+                ):
+                    raise ValueError(
+                        "existing trade event pagination projection is incomplete: "
+                        f"event_id={encoded.event_id}"
+                    )
                 return False
+            active_conn.execute(
+                """
+                UPDATE trade_event_ingest_sequence
+                SET last_value = last_value + 1
+                WHERE singleton_id = 1
+                """
+            )
+            sequence_row = active_conn.execute(
+                """
+                SELECT last_value
+                FROM trade_event_ingest_sequence
+                WHERE singleton_id = 1
+                """
+            ).fetchone()
+            if sequence_row is None:
+                raise RuntimeError("trade event ingest sequence allocator is unavailable")
             active_conn.execute(
                 """
                 INSERT INTO trade_events (
                   event_id, account, event_json, trade_time_ms,
-                  created_at_ms, updated_at_ms
+                  created_at_ms, updated_at_ms, ingest_seq, market,
+                  position_effect
                 ) VALUES (
-                  ?, ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     encoded.event_id,
-                    str(encoded.event.contract_key.account),
+                    account,
                     encoded.event_json,
                     encoded.event_time_ms,
                     ts,
                     ts,
+                    int(sequence_row["last_value"]),
+                    market,
+                    position_effect,
                 ),
             )
         return True
@@ -2722,6 +3288,152 @@ class SQLiteOptionPositionsRepository:
             if isinstance(item, dict):
                 out.append(trade_event_application_payload(item))
         return out
+
+    def list_trade_events_page(
+        self,
+        *,
+        limit: int = 10,
+        snapshot_max_ingest_seq: int | None = None,
+        last_trade_time_ms: int | None = None,
+        last_event_id: str | None = None,
+        account: str | None = None,
+        broker: str | None = None,
+        symbol: str | None = None,
+        option_type: str | None = None,
+        strike: float | None = None,
+        expiration_ymd: str | None = None,
+        market: str | None = None,
+        position_effect: str | None = None,
+        authorized_accounts: Sequence[str] = (),
+        include_total: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        page_limit = int(limit)
+        if not 1 <= page_limit <= 20:
+            raise ValueError("events limit must be between 1 and 20")
+        normalized_market = str(market or "").strip().upper()
+        if normalized_market not in {"US", "HK"}:
+            raise ValueError("events market must be US or HK")
+        if (last_trade_time_ms is None) != (last_event_id is None):
+            raise ValueError("events keyset boundary must be complete")
+        if snapshot_max_ingest_seq is not None and int(snapshot_max_ingest_seq) < 0:
+            raise ValueError("events snapshot boundary must be non-negative")
+        authority_accounts = tuple(
+            sorted(
+                {
+                    str(item or "").strip().lower()
+                    for item in authorized_accounts
+                    if str(item or "").strip()
+                }
+            )
+        )
+        if not authority_accounts:
+            raise ValueError("events authority account scope is required")
+        normalized_account = str(account or "").strip().lower() or None
+        if normalized_account and normalized_account not in authority_accounts:
+            raise ValueError("events account is outside the authority scope")
+
+        owned = conn is None
+        with self._optional_conn(conn) as active_conn:
+            if owned:
+                active_conn.execute("BEGIN DEFERRED")
+            elif not active_conn.in_transaction:
+                raise ValueError(
+                    "events page connection must already own a transaction"
+                )
+            if not _trade_event_pagination_schema_ready(active_conn):
+                raise TradeEventPaginationUnavailable(
+                    "trade event pagination migration is required"
+                )
+            fence = snapshot_max_ingest_seq
+            if fence is None:
+                row = active_conn.execute(
+                    "SELECT COALESCE(MAX(ingest_seq), 0) AS max_seq FROM trade_events"
+                ).fetchone()
+                fence = int(row["max_seq"] if row is not None else 0)
+
+            base_clauses = ["ingest_seq <= ?", "market = ?"]
+            base_params: list[Any] = [int(fence), normalized_market]
+            if normalized_account:
+                base_clauses.append("account = ?")
+                base_params.append(normalized_account)
+            else:
+                placeholders = ", ".join("?" for _ in authority_accounts)
+                base_clauses.append(f"account IN ({placeholders})")
+                base_params.extend(authority_accounts)
+            if position_effect:
+                base_clauses.append("position_effect = ?")
+                base_params.append(str(position_effect).strip().lower())
+            if broker:
+                base_clauses.append(
+                    "json_extract(event_json, '$.contract_key.broker') = ?"
+                )
+                base_params.append(str(broker))
+            if symbol:
+                base_clauses.append(
+                    "json_extract(event_json, '$.contract_key.underlying_symbol') = ?"
+                )
+                base_params.append(str(symbol).strip().upper())
+            if option_type:
+                base_clauses.append(
+                    "json_extract(event_json, '$.contract_key.option_type') = ?"
+                )
+                base_params.append(str(option_type).strip().lower())
+            if expiration_ymd:
+                base_clauses.append(
+                    "json_extract(event_json, '$.contract_key.expiration_ymd') = ?"
+                )
+                base_params.append(str(expiration_ymd).strip())
+            if strike is not None:
+                base_clauses.append(
+                    "ABS(CAST(json_extract(event_json, '$.contract_key.strike') AS REAL) - ?) < 1e-9"
+                )
+                base_params.append(float(strike))
+
+            page_clauses = list(base_clauses)
+            page_params = list(base_params)
+            if last_trade_time_ms is not None and last_event_id is not None:
+                page_clauses.append(
+                    "(trade_time_ms, event_id) < (?, ?)"
+                )
+                page_params.extend(
+                    [int(last_trade_time_ms), str(last_event_id)]
+                )
+            page_where = " AND ".join(page_clauses)
+            rows = active_conn.execute(
+                f"""
+                SELECT event_id, event_json, trade_time_ms
+                FROM trade_events
+                WHERE {page_where}
+                ORDER BY trade_time_ms DESC, event_id DESC
+                LIMIT ?
+                """,
+                (*page_params, page_limit + 1),
+            ).fetchall()
+
+            total = None
+            if include_total:
+                base_where = " AND ".join(base_clauses)
+                count_row = active_conn.execute(
+                    f"SELECT COUNT(*) AS row_count FROM trade_events WHERE {base_where}",
+                    base_params,
+                ).fetchone()
+                total = int(count_row["row_count"] if count_row is not None else 0)
+
+        page = rows[:page_limit]
+        return {
+            "rows": [
+                trade_event_application_payload(json.loads(str(row["event_json"])))
+                for row in page
+            ],
+            "snapshot_max_ingest_seq": int(fence),
+            "has_more": len(rows) > page_limit,
+            "total_count": total,
+            "last_trade_time_ms": (
+                int(page[-1]["trade_time_ms"]) if page else None
+            ),
+            "last_event_id": str(page[-1]["event_id"]) if page else None,
+        }
 
     def list_position_projection_event_rows(
         self,
@@ -7786,9 +8498,15 @@ def require_option_positions_read_repo(repo: Any) -> OptionPositionsReadRepo:
     raise TypeError("option_positions repo does not satisfy read repository interface")
 
 
-def require_option_positions_event_read_repo(repo: Any) -> OptionPositionsEventReadRepo:
+def require_option_positions_event_read_repo(
+    repo: Any,
+    *,
+    require_page: bool = False,
+) -> OptionPositionsEventReadRepo:
     candidate = require_option_positions_read_repo(repo)
-    if callable(getattr(candidate, "list_trade_events", None)):
+    if callable(getattr(candidate, "list_trade_events", None)) and (
+        not require_page or callable(getattr(candidate, "list_trade_events_page", None))
+    ):
         return cast(OptionPositionsEventReadRepo, candidate)
     raise TypeError("option_positions repo does not satisfy event read repository interface")
 

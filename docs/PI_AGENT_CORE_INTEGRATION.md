@@ -13,6 +13,13 @@ Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-session-backend-sqlite-node@0.84.2`, which require Node.js
 `>=22.19.0`.
 
+Post-cutover S8 status: the context-bounded tool-loading and evidence-admission
+design in section 20 is approved and implemented in source. It has not been
+released, deployed, or enabled. Sections 1 through 19 continue to describe the
+implemented S1-S7 source contract and its pending operational cutover; section
+20 describes the next contract delta and must not be used as evidence of
+current runtime behavior.
+
 This document is the single planning and implementation authority for replacing
 OM's generic Copilot runtime with Pi Agent Core. The currently deployed
 production architecture remains documented in
@@ -929,7 +936,7 @@ The S1 `run.start` payload is closed and every field is required:
 | `user_message` | non-empty string |
 | `model` | closed object with non-empty string `provider`, `model`, and `base_url`, allowed `api_kind`, plus positive integer `timeout_seconds`, `context_window_tokens`, `max_output_tokens`, and `max_attempts` |
 | `tools` | empty array |
-| `limits` | closed object with positive integer `timeout_seconds`, `max_iterations`, `max_tool_calls`, derived `max_context_tokens`, `max_consecutive_failed_tool_batches`, and `final_answer_reserve_seconds` |
+| `limits` | closed object with positive integer `timeout_seconds`, `max_iterations`, `max_tool_calls`, `max_context_tokens`, `max_consecutive_failed_tool_batches`, and `final_answer_reserve_seconds` |
 | `recovered_observations` | empty array |
 | `debug` | closed object with string `fixture_response` and bounded integer `delay_ms` |
 
@@ -937,10 +944,6 @@ The S1 `run.start` payload is closed and every field is required:
 fixture never uses it. Boolean values are not accepted as integers on either
 side. Strings are not silently trimmed or coerced; callers supply canonical
 values.
-
-`limits.max_context_tokens` preserves the `om-pi-ipc.v1` wire contract but is
-derived from `model.context_window_tokens`; both boundaries require the values
-to match. It is not a second operator or Scene setting.
 
 This validation is deliberately duplicated at the process boundary: Python
 rejects an invalid caller before spawn, while Node refuses an invalid or
@@ -1980,11 +1983,11 @@ body:
     a second `length`, failed continuation, insufficient budget, and resumed
     Session each follow the rule in section 14.4;
 12. missing/invalid `context_window_tokens` and out-of-range timeout, output,
-    or direct `max_attempts` fail rather than clamp before spawn;
-    `model.contextWindow` is the sole configured context budget, and the
-    preserved `limits.max_context_tokens` wire field must carry the same value;
-    local/channel accept only `debug:null`, while eval still requires a closed
-    fixture;
+    or direct `max_attempts` fail rather than clamp before spawn; valid context
+    values below, equal to, and above the Scene cap produce
+    `min(model.contextWindow, limits.max_context_tokens)` as the effective
+    context budget; local/channel accept only `debug:null`, while eval still
+    requires a closed fixture;
 13. `assistant model add` requires and round-trips the declared capability,
     model list/current display it, and build-assistant preserves it in resolved
     `assistant.llm` without adding an author-facing retry field;
@@ -2924,7 +2927,7 @@ rollback was changed or executed.
 | Inspection | runtime/config/job questions use the same Agent and read tools |
 | Control | model can request preview only; confirm/apply/readback remain deterministic |
 | Memory | same sender/conversation/canonical key-or-path scope continues; different scopes or senders cannot share memory, and plaintext paths are absent |
-| Context | effective budget comes only from the active model profile's `context_window_tokens`; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
+| Context | effective budget is `min(model capability, Scene cap)`; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
 | Tools | model-visible list equals the Host projection; no Pi builtin write/shell/file tool exists; one lock preserves every concurrent lifecycle/tool event and metric; abandoned reads cannot exceed one worker or write late Host events |
 | Providers | OpenAI, DeepSeek, Kimi, Kimi Code, and Ollama contract tests pass |
 | Cancellation | two independent Host connections racing cancel against commit/discard accept exactly one durable winner, reflected consistently in CLI, Session, Host result, and outbox |
@@ -2945,8 +2948,8 @@ rollback was changed or executed.
 - Partition Host leases and Pi Sessions by authenticated identity plus trusted
   normalized-key or canonical-path-hash authority scope; pass canonical paths
   only as Host-only fixed tool input.
-- Require one operator-declared safe context window; never guess it from a model
-  name or duplicate it in Scene limits.
+- Require an operator-declared safe context window; never guess it from a model
+  name or Scene cap.
 - Use one process-wide read-worker slot and accept bounded retryable busy after
   forced process/Session failure rather than adding a worker pool or lease
   deletion path.
@@ -2966,3 +2969,1026 @@ No product or architecture decision remains open for S1-S7. Implementation may
 correct a verified upstream signature or repository fact, but changing an
 ownership boundary, product scope, protocol guarantee, or cutover strategy
 requires updating this document before code.
+
+## 20. S8 Context-Bounded Tool Loading And Evidence Admission
+
+Status: approved detailed design and implemented source contract. Release,
+deployment, and production enablement have not started.
+
+### 20.1 Problem statement and production evidence
+
+The current Host sends every scene-visible tool description and input schema to
+Pi at request start. Fixed system instructions and the full canonical tool set
+therefore consume input capacity even when a request needs no tool or only one
+tool. Large model projections can then consume the remaining capacity and
+leave too little room for a complete answer.
+
+The motivating incident was not a Feishu rendering defect. For production run
+`run_6908584d4259`, the request for monthly option income produced one compact
+`option_performance_report` observation of 5,435 characters and one
+`analysis_catalog` observation of 96,219 characters. The provider stopped for
+length after emitting one token, `我`, and the existing admission path accepted
+that non-empty text as an answer. The incident exposed four separate contract
+gaps:
+
+1. every business schema was paid for before the model selected a tool;
+2. a generic result projection could expose far more evidence than the answer
+   needed;
+3. context compaction did not own a hard, pre-provider input gate;
+4. final-answer admission checked structure but not evidence coverage or
+   truncation.
+
+S8 addresses the owning boundaries rather than adding a larger prompt, a
+second router model, or another result cache.
+
+### 20.2 Goals, success criteria, and non-goals
+
+S8 succeeds when:
+
+- a conceptual request can be answered without loading any business schema;
+- a factual request starts from a compact Host-authoritative catalog and the Pi
+  main model activates only the canonical tools it needs;
+- no active turn exposes more than two business toolsets or six business tools;
+- tool results state their evidence coverage, freshness, and page/query scope;
+- a complete claim cannot be admitted from partial or unknown-completeness
+  evidence;
+- eligible immutable collection owners support variable page sizes without
+  duplicates inside one bounded snapshot; mutable collections fail closed or
+  require narrowing instead of pretending to provide stable continuation;
+- the Node Pi Runtime owns the final assembled-context calculation, automatic
+  trigger, and pre-provider hard gate, while Pi Core supplies the compaction
+  primitives;
+- every ordinary answer passes one structured evidence-admission tool before
+  the existing Host final-result admission commits it;
+- the fixed prompt plus resident schemas do not exceed the current baseline;
+- eager tool loading remains a temporary, explicit rollback mode until the
+  directory path meets its measured removal gate.
+
+S8 does not add:
+
+- a semantic Host router, keyword intent classifier, planner model, second
+  Agent, or second compaction model;
+- a parallel tool directory, duplicate output-contract registry, or generic
+  raw-result cache;
+- a parallel active-schema store, compaction implementation, or caller-specific
+  token estimator;
+- model-selected toolsets, free-text authorization reasons, or model authority
+  to widen the Host allowlist;
+- offset pagination, model-maintained `seen_ids`, or cross-snapshot deduplication;
+- hidden result completion, automatic fresh-snapshot refill, or automatic
+  fallback from directory mode to eager mode;
+- direct model mutation, confirmation, cancellation, or apply authority.
+
+### 20.3 Ownership model
+
+The single `om_chat` Scene and the existing canonical registry remain. The
+request path has four owners:
+
+| Concern | Owner | Required behavior |
+|---|---|---|
+| Scene and authority scope | Python Service and Host | derive the authorized tool universe from entry contract, scene, config, channel capability, and canonical registry |
+| Tool choice | Pi main model | decide whether evidence is required and select exact canonical tools from the compact catalog |
+| Schema activation and final context | Node Pi Runtime | atomically replace active schemas, assemble the exact provider input, compact, and enforce the hard gate |
+| Business truth and result admission | canonical tool plus Python Host | execute the tool, project bounded evidence, validate claims, commit the existing durable run winner, and deliver the approved text |
+
+The Host never interprets the user's business intent. It already knows the
+maximum authorized universe before the model runs because the entry contract
+fixes the Scene and identity scope, the Scene fixes allowed toolsets, runtime
+configuration may narrow optional toolsets, and the canonical registry owns
+enabled tool definitions and read/Control classification. The model can narrow
+that universe; it cannot broaden it.
+
+Tool need is based on evidence requirements, not keywords:
+
+- general explanations and timeless conceptual guidance may be answered from
+  model knowledge without a business tool;
+- current, account-specific, runtime, financial, quantitative, or historical
+  OM facts require canonical evidence;
+- when completeness or freshness is unknown, the answer must state the gap or
+  ask for a narrower scope rather than infer the missing facts.
+
+### 20.4 Canonical compact catalog
+
+The compact catalog is a projection of the existing canonical registry, not a
+new registry or model tool. Each scene-visible canonical definition must expose
+only the metadata that the main model needs for selection:
+
+```json
+{
+  "name": "option_positions_read",
+  "toolset": "positions",
+  "purpose": "查询授权账户的期权持仓及其生命周期状态",
+  "access": "read",
+  "evidence_type": "collection"
+}
+```
+
+Metadata ownership is closed:
+
+- `AgentTool.catalog_summary` owns the required single-line `purpose`;
+- the existing registry/module grouping derives `toolset`;
+- existing read/Control authority derives `access`;
+- the canonical output contract owns `evidence_type`;
+- the Host derives `name` from the canonical tool definition.
+
+`evidence_type` is a static catalog value from
+`point|collection|aggregate|diagnostic|mixed`. A payload-dependent tool uses
+`mixed` when its actions have different result shapes. Its resolver may refine
+coverage, freshness, and result shape after arguments are known, but it may not
+change the catalog value. This keeps directory selection deterministic without
+adding a second metadata source.
+
+There is no catalog YAML/JSON file and no `list_tools` call. In directory mode,
+missing or invalid catalog metadata for any scene-visible tool fails scene
+preparation before the provider call. The Host must not omit the tool, copy its
+full description into the catalog, or silently switch the request to eager
+mode. Eager mode retains its own compatibility behavior while it exists.
+
+At request start the Host freezes an immutable snapshot containing:
+
+- the authorized canonical tool names;
+- compact catalog entries;
+- full descriptions and input schemas;
+- output-contract versions;
+- read/Control classification;
+- `catalog_hash`, calculated from a deterministic serialization of the above.
+
+Registry, deployment, or configuration changes after request start affect only
+the next external user request.
+
+### 20.5 Preserved startup protocol and S8 `run.start` delta
+
+S8 preserves the `om-pi-ipc.v1` JSONL envelope, one-child-per-request startup,
+and the existing first-message `run.start` protocol. It does not add a separate
+bootstrap process, directory round trip, or model-visible catalog tool call.
+Python and Node change the closed `run.start` payload atomically in the same
+release.
+
+The payload adds:
+
+```json
+{
+  "tool_loading_mode": "directory",
+  "tool_catalog": [
+    {
+      "name": "option_positions_read",
+      "toolset": "positions",
+      "purpose": "查询授权账户的期权持仓及其生命周期状态",
+      "access": "read",
+      "evidence_type": "collection"
+    }
+  ],
+  "catalog_hash": "sha256:..."
+}
+```
+
+The absolute context window has one authority: the operator-declared
+`model.context_window_tokens` already carried by `run.start`. S8 removes the
+semantically duplicate `limits.max_context_tokens`; the Runtime no longer takes
+the minimum of two independently configured windows. `max_output_tokens`
+remains the provider-output reservation. For the adopted DeepSeek V4 Flash
+profile, the declared context window is 128,000 tokens; this value is a model
+profile fact, not a Scene-specific budget.
+
+The same atomic payload migration also removes the unused Scene
+`runtime.max_context_chars` and `runtime.max_context_tokens` fields, their
+`SceneManifest.limits` projections, the Host `max_context_tokens` process
+limit, and the corresponding Node closed-payload field. Python and Node do not
+support mixed old/new payload shapes inside one release. Source and fixture
+search must prove that no Scene or process limit still carries an absolute
+context cap.
+
+The 70% compact trigger, 75% hard input gate, and 50% post-compact target are
+fixed constants owned by the Node Pi Runtime, not operator settings or
+`run.start` fields. The Runtime records the effective values in structured
+metrics. The Python Host neither supplies nor independently calculates them;
+the closed payload does not accept a `context_policy` field. The Runtime
+performs the only final calculation because it alone knows the exact system
+context, compact catalog, active schemas, transcript, tool groups, recovered
+context, and current message sent to the provider.
+
+Initial tool exposure is:
+
+| Mode | Business schemas in `run.start.tools` | Resident internal tools | Catalog context |
+|---|---:|---|---|
+| `eager` | all authorized business schemas | `submit_answer`; authorized `request_control_preview` when present | optional for metrics, not model selection |
+| `directory` | none | `tool_directory`, `submit_answer`; authorized `request_control_preview` when present | required Host-authoritative system context |
+
+These resident tools are protocol/Control tools, not canonical business tools.
+They do not appear as selectable catalog entries and do not count toward
+business tool or toolset limits. The Node Runtime renders the compact catalog
+as non-persistent Host-authoritative system context; it is not compiled into
+the static prompt or copied into the user message.
+
+### 20.6 Directory activation protocol
+
+The resident `tool_directory` exposes exactly one operation:
+
+```json
+{
+  "name": "tool_directory",
+  "input": {
+    "catalog_hash": "sha256:...",
+    "tool_names": ["option_positions_read", "query_cash_headroom"]
+  }
+}
+```
+
+The model does not send toolsets or a free-text reason. The Python Host checks:
+
+1. `catalog_hash` equals the immutable request snapshot;
+2. every name belongs to the request allowlist;
+3. the exact selection spans at most two business toolsets;
+4. the selection contains at most six business tools.
+
+On success, `tool.result` carries two separate views. `observation` is the small
+model-visible acknowledgement. The optional private `tool_activation` field is
+consumed only by the Node Runtime:
+
+```json
+{
+  "call_id": "call_123",
+  "tool_name": "tool_directory",
+  "observation": {
+    "ok": true,
+    "status": "activated",
+    "active_tool_names": ["option_positions_read", "query_cash_headroom"]
+  },
+  "tool_activation": {
+    "catalog_hash": "sha256:...",
+    "schema_hash": "sha256:...",
+    "tools": [
+      {
+        "name": "option_positions_read",
+        "description": "...",
+        "input_schema": {"type": "object", "properties": {}}
+      }
+    ]
+  }
+}
+```
+
+The full descriptions and schemas never enter the model-visible activation
+observation. The existing unique `call_id` correlates the activation; no second
+activation identifier is added. The Runtime validates the catalog and schema
+hashes, exact tool names, and schema shape, then calls Pi
+`prepareNextTurnWithContext` to replace the active business tool set atomically.
+A validation or Pi schema-application failure leaves the previous set
+unchanged. Runtime application failure is terminal; it does not ask the model
+to repair a half-applied set. The replacement Pi context is the only
+provider-visible active-schema state; the Runtime retains only the frozen Host
+universe, hashes, and bounded repair/change counters around it.
+
+Activation is an exact replacement, not an addition:
+
+- the Node Runtime requires `tool_directory` to be the sole call in its batch,
+  so no tool executes against a schema set while that set is being replaced;
+- the same set is an idempotent no-op and consumes no successful-change budget;
+- a different valid set replaces every active business schema and consumes one
+  successful change;
+- an invalid selection leaves the active set unchanged and consumes the one
+  protocol repair; a second invalid selection is terminal;
+- a request permits at most two successful set changes;
+- phase switching may replace schemas but retains already collected business
+  evidence for the current request;
+- a new external user message resets directory mode to no business schemas.
+
+`request_control_preview` remains the only model-facing Control operation. The
+Host includes its existing small schema as a resident tool only when the
+channel supplies authorized Control specs, and it validates the selected spec
+and arguments. It is never selected, added, or removed through
+`tool_directory`. Whether the current message explicitly asks for an action is
+a Pi selection rule, not a second Host intent classifier. A mistaken selection
+can create only the existing no-write preview; explicit confirmation, apply,
+and readback remain deterministic outside Pi. The tool is excluded from the
+business count and must remain the sole call in its batch. Pi never receives
+mutation, confirm, cancel, or apply tools.
+
+### 20.7 Repair budgets and terminal failures
+
+Repairs are independent but share the existing global model-turn, wall-time,
+token, and tool-call budgets:
+
+| Budget | Used for | Maximum |
+|---|---|---:|
+| Protocol repair | invalid hash, unauthorized tool, tool/toolset count violation, or malformed activation | 1 |
+| Answer repair | missing evidence, unsupported claim, insufficient coverage/freshness, a plain final response, or any other failure to call `submit_answer` | 1 |
+
+The same event cannot create a third “no evidence” budget; missing evidence is
+an answer-repair reason. A directory protocol error that also prevents an
+answer consumes protocol repair first, and any later evidence rejection may
+still consume answer repair if global budgets remain.
+
+Compaction failure, context hard-gate failure, private schema validation
+failure, Pi atomic-apply failure, timeout, cancellation, and child failure are
+terminal. They consume no model repair because the model cannot safely correct
+them.
+
+### 20.8 Bounded observation and coverage contract
+
+The canonical tool remains the truth owner. The Python Host may hold the full
+canonical result transiently only long enough to validate it and build the
+model projection. It does not persist an extra raw copy.
+
+S8 extends the existing `compact_observation()` path; it does not introduce a
+second projection framework. Every scene-visible output contract must declare:
+
+- `evidence_type`;
+- a deterministic bounded slice or summary rule;
+- coverage calculation;
+- freshness policy or explicit `not_applicable`;
+- for collections, requested-page and full-query semantics;
+- any cursor TTL and stable sort requirements.
+
+The model projection carries a closed coverage envelope:
+
+```json
+{
+  "coverage": {
+    "status": "complete",
+    "complete_for": "requested_page",
+    "total_count": 143,
+    "included_count": 20,
+    "omitted_count": 123,
+    "scope": {
+      "account": "lx",
+      "market": "US",
+      "requested_limit": 20
+    },
+    "as_of": "2026-08-22T09:30:00+08:00",
+    "has_more": true
+  }
+}
+```
+
+`coverage.status` is `complete`, `partial`, or `unknown`. Completeness is always
+relative to the declared `complete_for` scope: `point`, `requested_page`, or
+`full_query`. A full requested page may be complete for that page while still
+being incomplete for the full collection. Missing resolver metadata, resolver
+failure, or a contract that cannot determine coverage/freshness produces
+`unknown`; that evidence may support diagnosis but cannot support an exhaustive
+claim.
+
+`included_count` is required for a collection projection. `total_count` and
+`omitted_count` may be `null` when the owner cannot determine a total without an
+unbounded or materially more expensive query. A `null` total is never inferred
+from page size and cannot support `complete_for=full_query`; the Host banner
+states that the total is unknown.
+
+The projection budget is a soft target of approximately 4,000 tokens per tool
+result and 20,000 tokens of active evidence per request. Those values never
+authorize truncating a complete claim. If deterministic complete evidence
+cannot fit, the result becomes `needs_narrowing` or the answer fails closed.
+Generic “first 20 items” preview behavior cannot support a `full_query` claim.
+
+When more detail is needed, the Pi main model calls the same canonical tool
+with narrower arguments. S8 does not add `__read_observation__`, a raw-result
+page cache, or a generic result-recall tool. Audit persists only the redacted
+model view, counts, coverage/freshness metadata, and content hash.
+
+All scene-visible output contracts must migrate and pass CI before the evidence
+gate can be enabled, including tools that are uncommon in sampled traffic. CI
+scans the complete scene allowlist; there is no default global TTL or hidden
+allowlist omission.
+
+### 20.9 Stable collection pagination and snapshots
+
+S8 does not add continuation to every collection. Each payload-resolved output
+contract declares `pagination.mode=none|keyset`. `keyset` is permitted only
+when the canonical owner can prove all of these invariants for the cursor TTL:
+
+- row identity is unique and stable;
+- membership and every sort-key field are immutable;
+- the first call can record a replayable upper boundary or version;
+- later calls can apply the same authority scope, filters, boundary, and order.
+
+A mutable position projection, current runtime view, or newly materialized
+analysis view defaults to `none`. If its bounded page omits rows, the result is
+`needs_narrowing`; S8 does not add a generic snapshot store to make it pageable.
+The transaction-detail use case must use a canonical ledger/event owner whose
+contract proves the invariants above; it must not page through
+`analysis_query`. Offset paging and a model-supplied list of seen IDs remain
+forbidden.
+
+An eligible keyset order includes a unique tie-breaker, for example:
+
+```text
+occurred_at DESC, trade_event_id DESC
+```
+
+The opaque cursor binds:
+
+- cursor version and canonical tool name;
+- the normalized membership-and-order query;
+- account, market, and other authority scope;
+- stable sort definition;
+- snapshot boundary;
+- last returned sort key;
+- issued-at and expires-at timestamps.
+
+The signed normalized query excludes `limit` and `include_total`. Therefore an
+eligible stream can serve 10 items, then 20, then 10 without repeating items
+inside its bounded snapshot.
+The cursor is stateless and HMAC-signed. No cursor database or raw-row cache is
+added. The Pi Session may retain the opaque cursor needed for continuation;
+audit stores only its hash.
+
+Cursor signing uses one dedicated secret resolved through the existing secret
+provider, `OM_COPILOT_CURSOR_HMAC_KEY`. It is not the inbound-operation signing
+key and never enters Node/model context. An operator provisions it once through
+the existing root-owned secret CLI before enabling Copilot. Setup, release, and
+upgrade paths neither generate nor read it; only the inbound services that run
+Copilot receive it through the existing per-unit credential binding. All
+processes in one environment use the same value across releases. S8 does not
+add a keyring or transparent rotation: explicitly changing the key invalidates
+outstanding cursors, and the user must start a new query. An `events` request
+fails closed and explicitly when its runtime consumer cannot resolve the key.
+
+Cursor TTL belongs to each canonical output contract. Expired, invalid,
+wrong-signature, wrong-tool, wrong-query, or wrong-authority cursors fail
+explicitly and never start a new snapshot automatically. A new snapshot can
+contain records already seen in the old snapshot; OM tells the user that
+duplicates are possible and does not maintain cross-snapshot `seen_ids`.
+
+`limit` is a maximum, not a fill guarantee. If the user asks “再来二十条” but
+only ten rows remain in the original snapshot, the tool returns:
+
+```json
+{
+  "requested_limit": 20,
+  "returned_count": 10,
+  "snapshot_exhausted": true,
+  "has_more": false,
+  "next_cursor": null
+}
+```
+
+The answer states that only ten remain. It must not cross into a fresh snapshot
+to fill the other ten. The user may explicitly ask to query the latest data;
+that starts a new `stream_id` and may repeat earlier records.
+
+Snapshot validity and current-fact freshness are separate:
+
+- “再来” requires a still-valid cursor and continues the original `as_of`;
+- “查询最新” starts a new snapshot;
+- an old valid snapshot may be continued, but it cannot support a claim about
+  the current total;
+- historical continuation must display its `as_of` time.
+
+Across a new external message, continuation may reuse only an exact opaque
+cursor and its bounded metadata from a still-retained complete canonical
+business observation. A model-generated compaction summary is never cursor
+authority. If compaction has removed that observation, continuation fails with
+guidance to start a new query; the new snapshot may repeat earlier rows. Raw
+rows are never recovered as authoritative evidence. The Host and canonical
+tool revalidate every retained cursor on use.
+
+#### Canonical trade-event stream
+
+The first concrete keyset owner is the canonical ledger `trade_events`
+collection exposed through the existing
+`option_positions_read(action=events)` surface. S8 does not add a second trade
+reader. Omitting `position_effect` returns every event admitted by the
+normalized query; `position_effect=close` selects the existing application
+meaning of close, which includes canonical `close`, `expire_close`,
+`assignment`, and `exercise` events. The existing account, broker, symbol,
+option type, strike, and expiration selectors remain part of the normalized
+query. `config_key` also binds the result to the canonical row market; a US
+request must never return an HK event or vice versa.
+
+The ledger schema adds three query-owned projections beside the immutable event
+payload:
+
+- `ingest_seq`, a globally unique, monotonically increasing integer that never
+  changes after insert;
+- `market`, derived from the canonical contract symbol identity;
+- `position_effect`, derived from the canonical event type.
+
+These fields are written in the same canonical ledger transaction as the
+event. Existing rows receive a deterministic one-time backfill before keyset
+mode can be enabled. Sequence allocation remains inside the SQLite write
+transaction and is protected by a uniqueness constraint; callers never read a
+maximum and allocate the next value outside that transaction. The named
+`ingest_seq` is the public snapshot primitive. SQLite's hidden `rowid` is not a
+cursor or migration contract.
+
+The cursor freezes collection membership, filters, and order; it does not
+freeze every non-query byte in `event_json`. After pagination schema activation,
+SQLite rejects deletion and any update to `event_id`, `trade_time_ms`, account,
+market, position effect, or the broker/symbol/option-type/strike/expiration/
+event-type fields used by this query. Existing controlled enrichment may still
+update non-query evidence such as cash-conversion metadata in `raw_payload`.
+Python's canonical event encoder remains the JSON contract owner; SQLite checks
+only the scalar pagination projections and these immutability boundaries. No
+global mutation revision or duplicate canonical JSON validator is added.
+
+The first page opens one SQLite read transaction, records
+`snapshot_max_ingest_seq = MAX(ingest_seq)`, and reads the page under the same
+transaction. This value is the current maximum inserted sequence, not a row
+count, event time, requested limit, or model-selected value. Later inserts,
+including late-arriving events whose business time is old, receive a greater
+sequence and remain outside that snapshot. OM does not copy rows, retain a
+long-lived read transaction, or create a snapshot cache.
+
+The visible order is fixed for S8:
+
+```text
+trade_time_ms DESC, event_id DESC
+```
+
+`event_id` is the unique tie-breaker. `ingest_seq` controls snapshot membership
+only; it does not replace business-time ordering. A continuation applies the
+same normalized filters and snapshot fence plus the keyset predicate below:
+
+```text
+ingest_seq <= snapshot_max_ingest_seq
+AND (trade_time_ms, event_id) < (last_trade_time_ms, last_event_id)
+```
+
+The `events` action defaults to 10 rows and accepts at most 20. A continuation
+may change `limit`, so streams such as 5 -> 20 -> 10 remain valid; values above
+20 fail validation and are never silently clamped. The owner reads at most
+`limit + 1` matching rows, returns at most `limit`, and uses the extra row only
+to derive `has_more`. The action-specific bound does not change limits for the
+other `option_positions_read` actions.
+
+The event output contract contains:
+
+```json
+{
+  "rows": [],
+  "requested_limit": 10,
+  "returned_count": 0,
+  "total_count": null,
+  "stream_id": "opaque-stream-id",
+  "as_of": "2026-08-22T00:00:00Z",
+  "has_more": false,
+  "snapshot_exhausted": true,
+  "next_cursor": null
+}
+```
+
+`cursor` and `include_total` are `events`-only inputs. `include_total` defaults
+to false and, like `limit`, is excluded from the signed normalized query because it
+does not change row membership or order. When the user explicitly requests an
+exact total, `include_total=true` performs a canonical aggregate over the same
+filters and snapshot fence. An exact `total_count` proves only the aggregate;
+it does not make a partial `rows` page complete. Ordinary pages leave
+`total_count=null` and rely on `has_more` and `snapshot_exhausted`.
+
+The event cursor TTL is 30 minutes. The cursor additionally binds the fixed
+order, `snapshot_max_ingest_seq`, last `(trade_time_ms, event_id)`, normalized
+query, authority scope, `stream_id`, and `as_of` through the section 20.9 HMAC
+contract. A continuation may supply a different `limit` or `include_total`, but
+any repeated filter must normalize to the signed query; conflicts fail
+explicitly. Expiry never starts a new stream.
+
+An unbounded request for all detail rows is not represented by a larger limit
+and must not cause Pi to drain the cursor into model context. OM returns
+`needs_narrowing` guidance so the user can add account, market, date, or other
+selectors, or it uses an explicit canonical aggregate when that answers the
+question. S8 does not add an automatic file export, retention policy, or
+cleanup workflow.
+
+The ledger query must apply authority, filters, snapshot membership, order,
+and keyset before the page limit in SQLite. It must not call
+`list_trade_events()`, deserialize the complete collection, or perform final
+page filtering in Python. Query-critical projections and index paths must
+cover both the unfiltered event stream and the `position_effect`-filtered
+stream. With a properly indexed `ingest_seq`, acquiring the maximum and reading
+a page remain bounded by the index and page size rather than total row count;
+one million rows do not justify a raw-result cache, offset paging, or database
+partitioning by themselves.
+
+### 20.10 Evidence identity, freshness, and request scope
+
+Observation IDs are globally unique opaque values, not run-local counters such
+as `obs_1`. The Host maintains a request-local evidence registry that binds an
+ID to tool, arguments hash, output-contract version, coverage, freshness,
+`as_of`, and redacted content hash.
+
+Claims may reference only observations registered during the current external
+user request. The current uncommitted turn is never compacted, so its business
+tool groups and observation references remain intact. The Host registry, not a
+compaction summary, preserves their claim validity. A new external message
+invalidates old observations as fresh claim evidence even though their compact
+transcript may remain useful as conversation context. Only signed
+cursor/snapshot metadata may cross requests for continuation.
+
+When a follow-up needs an old page fact or aggregate, the model calls the
+canonical tool again for the bounded range. A compact summary is not promoted
+to current authority. Freshness belongs to the output contract:
+
+- current facts without a valid time are `unknown`;
+- historical or immutable facts may declare `not_applicable` or a contract-
+  specific policy;
+- compaction and Session recovery never refresh `as_of`;
+- stale evidence must be refreshed through the canonical tool or disclosed as
+  an evidence gap.
+
+### 20.11 Structured final-answer admission
+
+S8 adds one always-resident internal tool, `submit_answer`. It is a structured
+evidence protocol, not a second model or keyword-based semantic verifier:
+
+```json
+{
+  "mode": "evidence",
+  "status": "complete",
+  "answer_markdown": "截至 2026-08-22……",
+  "claims": [
+    {
+      "text": "当前授权账户有 10 个未平仓期权头寸",
+      "kind": "current_fact",
+      "observation_ids": ["obv_019..."],
+      "required_scope": "full_query"
+    }
+  ]
+}
+```
+
+The closed schema is:
+
+- `mode`: `conceptual` or `evidence`;
+- `status`: `complete`, `partial`, `needs_narrowing`, or
+  `insufficient_evidence`;
+- `answer_markdown`: the proposed user-visible answer;
+- `claims[]`: `text`, `kind`, `observation_ids`, and `required_scope`;
+- claim `kind`: `current_fact`, `historical_fact`, `derived_fact`, or
+  `judgment`;
+- `required_scope`: `point`, `requested_page`, or `full_query`.
+
+Conceptual mode may have no claims. Evidence mode requires at least one claim.
+The Node Runtime requires `submit_answer` to be the sole call in its batch and
+does not dispatch an invalid batch to the Host. The model does not submit
+coverage counts, freshness, or `as_of`; the Host derives them from the current
+request evidence registry. Financial facts,
+current or historical OM facts, numeric results, derived facts, and
+evidence-based judgments must be declared as claims. General explanation and
+advice may remain unclaimed prose, but the verifier makes no semantic guarantee
+for arbitrary free text.
+
+The Host verifier deterministically checks:
+
+1. every observation exists in the current request registry;
+2. the observation belongs to an authorized successful read;
+3. coverage supports the claim's required scope;
+4. freshness and `as_of` support the claim kind;
+5. `partial`, `unknown`, and `needs_narrowing` states are represented honestly;
+6. answer size and Markdown satisfy the existing public result contract.
+
+On acceptance, the Host stores the exact approved Markdown and a private
+admission fingerprint. The Runtime terminates the Pi loop atomically without
+another provider call and emits the existing `run.proposed` answered path. The
+Python Host compares the proposal with the retained approved candidate before
+the existing durable admission CAS and outbox flow.
+
+On rejection, the tool returns only a compact structured reason. The Node
+Runtime owns the one answer-repair counter because it can observe both a
+rejected tool result and a plain assistant final that bypasses `submit_answer`.
+For the first rejected tool result, its compact error observation is the repair
+instruction; for the first plain-final bypass, the Runtime appends one
+synthetic repair prompt. A second rejection or bypass ends with the existing
+safe error path using
+`ANSWER_ADMISSION_FAILED`; it produces no proposal and persists no current-turn
+message. No extra Host callback or fallback-answer IPC is added. Control
+proposals continue through `request_control_preview` and the existing Control
+terminal path, not `submit_answer`.
+
+The Host, not the model, forces coverage banners:
+
+- `complete`: normal answer, with `as_of` when the contract requires it;
+- `partial`: “部分数据” plus included, total/unknown total, omitted, and scope;
+- `unknown`: completeness is unknown and exhaustive wording is prohibited;
+- `needs_narrowing`: fixed guidance to narrow account, time, symbol, or result
+  range.
+
+The model cannot remove or rephrase these safety banners.
+
+The accepted terminal is carried by the existing `tool.result` message with one
+new mutually exclusive private field:
+
+```json
+{
+  "call_id": "call_456",
+  "tool_name": "submit_answer",
+  "observation": {"ok": true, "status": "answer_accepted"},
+  "approved_answer": {
+    "status": "complete",
+    "text": "截至 2026-08-22……",
+    "text_sha256": "sha256:..."
+  }
+}
+```
+
+`tool_activation`, `approved_answer`, and `control_request` cannot coexist in
+one result. A rejection returns only an error observation. Acceptance returns
+`approved_answer`; the Node bridge terminates the successful path only when
+`approved_answer` is present, retains the exact text/hash, and makes no further
+provider call. A second answer-admission failure terminates through the error
+path above, not through a fabricated `approved_answer`.
+
+The answer state machine is:
+
+```text
+running -> submit_pending                         (submit call)
+running -> repair_pending                         (first plain-final bypass)
+submit_pending -> answer_ready                    (accepted `approved_answer`)
+submit_pending -> repair_pending                  (first rejection)
+repair_pending -> running                         (one repair turn)
+answer_ready -> proposed -> committed | discarded | cancelled
+running | submit_pending | repair_pending -> failed
+  (second answer-admission failure; no proposal or current-turn commit)
+```
+
+Before `proposed`, cancellation wins and the current turn is not persisted.
+After `proposed`, the existing Host admission CAS remains the sole winner. The
+Runtime builds the canonical assistant message by replacing the accepted
+`submit_answer` tool-call message content with the approved text while retaining
+that message's model, timestamp, and usage; it sets `stopReason=stop`. The
+proposal text and hash must equal the Host-retained candidate before commit.
+Discard and cancel write no current-turn message. Independently committed
+pre-run compaction remains durable under the existing S3 rule.
+
+### 20.12 Pi Session normalization
+
+Directory activation and answer submission are request-control protocol, not
+durable conversational content. Before committing the current turn, the Node
+Runtime normalizes complete message/tool groups so that:
+
+- `tool_directory` calls, private activation results, rejected `submit_answer`
+  attempts, synthetic repair prompts, and accepted `submit_answer` call/result
+  groups are omitted from the durable Pi Session suffix;
+- the accepted answer is persisted once as a canonical assistant text message;
+- canonical business tool call/result groups remain complete and may support
+  conversational continuity, but their observation IDs cannot satisfy claims
+  in a later external request;
+- no partial tool group is ever retained or deleted independently.
+
+This prevents internal protocol noise and duplicate answer text from consuming
+future context while preserving the user's natural conversation. Pagination
+cursor metadata may remain in a bounded canonical business observation under
+the rules in section 20.9.
+
+### 20.13 Context budget and Pi compaction primitives
+
+S8 uses Pi's exported `estimateContextTokens`, `estimateTokens`,
+`prepareCompaction`, and `compact` primitives with the same active model. The
+Node Pi Runtime owns the automatic trigger, hard gates, and durable compaction
+checkpoint; it does not call the unimplemented `AgentHarness.compact()` API.
+DeepSeek V4 Flash does not use a second summarizer, Host summary model, or
+OM-specific conversation-pruning algorithm.
+
+The effective input capacity is:
+
+```text
+effective_input_capacity = model.context_window_tokens - max_output_tokens
+```
+
+Compaction remains a pre-run Session maintenance action. It operates only on
+the committed Session prefix and runs at most once before the Pi `Agent` starts.
+The current external-request suffix is never partially committed or summarized.
+
+The pre-run sequence is:
+
+1. assemble and estimate the first main-call candidate from static prompt,
+   dynamic catalog, runtime context, initial schemas, committed Session, current
+   user message, and recovered metadata;
+2. when that candidate is at or above 70% and the committed Session has an
+   eligible prefix, prepare Pi compaction from that prefix only;
+3. estimate the separate compaction provider input and reject it above the same
+   75% hard gate before calling the provider;
+4. after successful Pi compact, commit the compaction entry and marker using
+   the existing independent S3 checkpoint, reload the committed prefix, then
+   reassemble the first main-call candidate; the target is at most 50%;
+5. if the candidate is above 75% after the one compact, or no safe compact call
+   can be made, return `BUDGET_EXHAUSTED` before starting the Agent.
+
+Once the Agent starts, the Runtime reassembles and estimates the exact candidate
+before every main provider call, including after activation, tool results, or
+answer repair. It does not compact the open suffix. At or above 70% it records a
+warning; above 75% it returns `BUDGET_EXHAUSTED` before the call. Bounded tool
+projection and narrowing keep current evidence below that gate. There is no
+mid-turn Session write, second compaction loop, or custom pruning algorithm.
+
+Every trigger, hard gate, post-compact check, activation turn, and answer-repair
+turn calls one Runtime-owned `estimateProviderInputTokens()` boundary. It uses
+Pi `estimateContextTokens()` to locate the last valid provider usage and keeps
+the reported input/output/cache total authoritative. Only the unreported
+trailing messages and newly assembled fixed input are estimated. When no valid
+usage exists, the same estimator covers the complete candidate.
+
+Pi's structural `estimateTokens()` remains the baseline, but its character
+heuristic can underestimate Chinese input. For each unreported serialized
+component the single estimator therefore uses:
+
+```text
+conservative_tokens = ceil(
+  max(pi_estimate_tokens, ascii_characters / 4 + non_ascii_characters) * 1.10
+)
+```
+
+The 10% covers serialized structural overhead. There is no separate estimator
+for compaction, main calls, activation, or repair, and no caller may combine
+provider usage with a second full-history estimate.
+
+S8 does not add a DeepSeek-specific tokenizer or auto-tune thresholds from
+traffic. Compaction summaries preserve user goals and preferences, material
+timestamps, unresolved work, and Control references from committed history.
+They never become authority for facts or opaque cursor bytes. Historical facts
+remain historical and are never promoted to current truth. Current-request
+evidence stays in the untouched open suffix and Host evidence registry.
+
+A failed or empty compaction does not modify the committed Session. Unlike the
+S1-S7 compatibility behavior, S8 fails the request closed even if the old
+context might appear to fit; there is no Session reset, outer provider retry,
+or alternate summarizer. This is an explicit S8 contract change.
+
+### 20.14 Prompt, observability, and privacy
+
+The static prompt change is semantic-equivalent cleanup only: insert the new
+directory, evidence, and finalization rules; remove rules they supersede; and
+do not aggressively rewrite unrelated wording in this work unit. The compact
+catalog remains dynamic system context. The compiled static prompt must not
+exceed its pre-S8 character and conservative-token baseline. The two small
+resident internal schemas are measured separately and must remain materially
+smaller than the removed eager business schema set.
+
+Structured metrics record:
+
+- fixed prompt, catalog, active schemas, history, current message, recovered
+  context, tool-result, and repair token estimates;
+- catalog hash, entry count, characters, and token estimate;
+- activation ID, selected names/toolsets, schema hash, no-op/change/rejection,
+  and repair count;
+- observation coverage, narrowing reason, freshness state, and redacted hash;
+- requested/returned page size, stream ID, snapshot status, and cursor hash;
+- compact trigger, before/after estimates, retained groups, latency, result,
+  and failure;
+- 70/75/50 threshold decisions and pre-provider budget rejection;
+- provider-reported usage, retries, status, and latency;
+- answer-admission status, referenced observation IDs, repair count, and final
+  Host banner.
+
+Metrics and audit must not store raw prompts, full canonical responses, full
+cursors, secrets, reasoning text, or private activation schemas. Existing Host
+scene/tool fingerprints remain and are extended rather than replaced.
+
+### 20.15 Rollout, rollback, and eager removal
+
+One source version implements the complete S8 common contract. A single
+temporary setting, `tool_loading_mode=eager|directory`, controls only business
+schema loading. It does not disable output contracts, projection bounds,
+cursor semantics, budget gates, compaction, metrics, or `submit_answer`.
+
+Implementation stays in one source version but is reviewed through small,
+ordered work units. Each work unit must pass its focused tests before the next
+one starts:
+
+1. add canonical catalog/output metadata and a CI inventory that walks the
+   existing scene allowlist directly; do not maintain a second readiness file;
+2. migrate bounded result projection one canonical tool family at a time;
+   default collection tools to `pagination.mode=none` unless the owning module
+   proves the section 20.9 keyset invariants;
+3. add the request-local evidence registry and closed `submit_answer` admission
+   state machine;
+4. replace the duplicate context limits, then add exact-candidate estimation
+   and committed-prefix pre-run compaction;
+5. add directory activation, atomic schema replacement, and Session
+   normalization;
+6. run the aggregate eager-mode integration/regression suite, deploy the one
+   release in `eager`, then explicitly switch the environment to `directory`
+   only after every configured provider profile passes the compatibility gate.
+
+These are review and test boundaries, not new runtime modes, feature flags,
+releases, registries, or services. The only runtime switch remains
+`tool_loading_mode`.
+
+No remote sample is required to authorize the initial explicit directory
+switch. Once enabled, a directory-specific failure raises an alert and requires
+a human configuration change back to eager mode. There is no per-request
+fallback and no automatic production configuration mutation. A failure in a
+common evidence, admission, compact, or budget path requires version rollback;
+eager mode does not bypass it.
+
+Removing eager mode is a later explicit source and release decision. It is
+allowed only when all of these are proven:
+
+- directory mode has been stable for at least 14 days;
+- at least 30 real evidence/tool requests have completed; conceptual-only
+  requests do not count;
+- no allowlist escape, catalog/schema hash mismatch, or half-applied activation
+  has occurred;
+- no confirmed partial or unknown result has been admitted as complete;
+- among directory-mode requests that attempt at least one activation, at least
+  99% reach a valid activation before terminal failure; conceptual requests
+  and requests that require no activation are excluded from the denominator;
+- no fixed prompt/schema context overflow has occurred;
+- median business-schema tokens are at least 50% lower than the measured eager
+  baseline;
+- failure rate and P95 latency have an explicit human sign-off against an eager
+  baseline measured for the same model, provider profile, scene, and reporting
+  window. S8 does not invent an automatic latency threshold.
+
+The criteria never delete eager mode automatically. If evidence is missing or
+ambiguous, eager remains available.
+
+### 20.16 Module change map
+
+| Module | S8 responsibility |
+|---|---|
+| `src/application/agent_tool_registry.py` and canonical `TOOLS` definitions | add/validate `catalog_summary`; derive toolset/access; retain the one canonical registry |
+| canonical output contracts | declare evidence type, deterministic projection, coverage, freshness, page/query scope, cursor TTL, and stable order |
+| `src/application/copilot/scene.py` | build the frozen authorized universe and loading mode without interpreting user intent; remove Scene-owned absolute context caps |
+| `src/application/copilot/host.py` | freeze catalog/schema snapshot, serve private activations, maintain current-request evidence registry, audit metrics, and preserve final durable admission |
+| `src/application/copilot/tools.py` | extend `compact_observation()` with deterministic coverage/freshness projection and eliminate exhaustive claims from generic previews |
+| `src/application/copilot/result_admission.py` | validate `submit_answer` claims against Host evidence and append non-removable coverage banners; retain existing final result checks |
+| `src/application/ledger/repository.py`, `queries.py`, and `api.py` | migrate and query the canonical trade-event stream; own `ingest_seq`, normalized market/effect projections, snapshot fencing, keyset SQL, cursor validation/encoding, and the public ledger facade |
+| `src/application/agent_tools/operations_impl.py` and `positions.py` | keep the existing `option_positions_read(action=events)` entry; expose the events-only cursor/count inputs and output contract; call only the public ledger facade and never load all events |
+| `src/application/copilot/pi_agent_process.py` | serialize the revised closed `run.start` and private activation/admission fields without exposing secrets |
+| `agent-runtime/main.ts` | render dynamic catalog context, own internal tools, atomically replace schemas, enforce budgets/compaction, terminate approved answers, and normalize Session turns |
+| `src/application/secret_store/registry.py` and `service_deploy.py` | register the dedicated cursor HMAC key and bind it only to enabled inbound Copilot services; provisioning is a one-time root bootstrap and setup/upgrade do not consume the key |
+
+No new business router, result store, cursor database, or output-contract
+registry is permitted by this design.
+
+### 20.17 Verification and acceptance matrix
+
+| Area | Required deterministic evidence |
+|---|---|
+| Catalog ownership | every scene-visible tool has valid canonical summary/evidence metadata; hash is deterministic; missing metadata fails scene preparation |
+| Contract inventory | CI walks the canonical scene allowlist and fails any visible tool without an output contract, coverage/freshness resolver, and explicit pagination mode; no manual readiness matrix exists |
+| Intent boundary | conceptual fixture reaches `submit_answer` without a business tool; factual fixtures select tools through the Pi main model; Host has no keyword router |
+| Activation | exact names only, two-toolset/six-tool maximum, hash/allowlist enforcement, idempotent no-op, two successful replacements, one repair, and atomic apply failure all pass |
+| Control | Host rejects unauthorized preview schemas by channel/spec/arguments; a model fixture verifies explicit-action instructions before preview selection; sole-call and deterministic confirm/apply/readback behavior are unchanged |
+| Projection | every allowlisted output contract reports coverage/freshness; `total_count`/`omitted_count` may be null but then cannot support a complete/full-query claim |
+| Pagination | a temporary canonical-ledger fixture proves 5 -> 5 and 10 -> 20 -> 10 non-overlap, same-time tie ordering, exact end-of-snapshot behavior, explicit totals, and variable limits within one boundary; inserts with newer or late historical business times after the first page remain excluded; mutable/non-proven collections expose no continuation cursor and return bounded evidence or `needs_narrowing`; expired, mismatched, or compacted-away cursors never refresh implicitly |
+| Pagination scale | CI query-plan fixtures prove account/market/effect filters, snapshot fence, stable order, and keyset execute at the SQLite owner without full-collection deserialization or a temporary sort; a non-default one-million-row local benchmark proves per-page memory is bounded by page size and later-page cost does not grow linearly with cursor depth |
+| Cursor secret | the secret registry and service render bind the dedicated key only to enabled inbound Copilot consumers; a missing runtime key makes `events` fail explicitly; the same key survives process/release restart, never appears in Node/model/metrics or upgrader state, and an intentional key change deterministically invalidates old cursors |
+| Evidence scope | observation IDs are globally unique and valid only in the current external request; pre-run committed-prefix compaction cannot grant old IDs current authority; old-page follow-up re-calls the canonical tool |
+| Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, plain-final bypass, one Runtime-owned repair across bypass/rejection, second-failure safe error with no commit, cancel/propose race, and exact approved-text/hash comparison pass |
+| Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, <=50 percent target, failed compact rollback, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
+| Session | internal directory/finalizer groups and repair prompts are absent; canonical assistant answer appears once; business tool groups remain complete |
+| Compatibility | eager mode keeps all business schemas while using the same projection, cursor, budget, compact, metrics, and answer-admission contract |
+| Provider profiles | for every configured model/provider profile, a follow-up turn whose durable history contains now-deactivated canonical tool call/result groups succeeds while the active schema set is replaced; any failure blocks directory enablement with no automatic eager fallback |
+| Context migration | source and fixture search finds no Scene/process absolute context cap; the closed Python/Node payload uses only `model.context_window_tokens`; a 128k model with a formerly smaller Scene fixture is admitted by the single authority |
+| Prompt budget | static prompt chars/tokens do not exceed baseline; directory-mode fixed plus active-schema tokens are measured against eager baseline |
+| Audit/privacy | required structured metrics exist; raw prompts/results/cursors/private schemas/secrets/reasoning are absent |
+| Regression | focused Pi contract tests, Copilot Host/Service tests, agent plugin contract/smoke, full Python suite, locked Node tests, and clean-archive smoke pass |
+
+The historical one-character incident is a required regression fixture: a very
+large tool result must become bounded/partial or `needs_narrowing`, the 75%
+gate must prevent an impossible provider call, and a one-token length-stopped
+completion must never become an admitted answer.
+
+### 20.18 Closed S8 decisions
+
+- Use catalog-first loading, not directory-first enumeration or an eager-only
+  prompt.
+- Keep the single Pi main model responsible for exact tool selection.
+- Keep Host authority deterministic and intent-blind.
+- Project the compact catalog from canonical metadata; do not duplicate it.
+- Preserve `run.start`; add the catalog and policy fields there, and keep only
+  one absolute context-window authority.
+- Apply active schemas atomically and replace rather than accumulate them.
+- Bound the request to two toolsets, six business tools, two successful schema
+  changes, one protocol repair, and one answer repair.
+- Extend `compact_observation()` and canonical output contracts; do not add a
+  raw-result cache or generic recall tool.
+- Let only eligible immutable collection owners expose signed stateless keyset
+  cursors with replayable boundaries; mutable or unproven collections narrow or
+  stop instead of inventing snapshot semantics, and no path auto-refreshes to
+  fill a page.
+- Make the existing `option_positions_read(action=events)` canonical event
+  stream the first concrete keyset owner: use explicit `ingest_seq` snapshot
+  membership, fixed `trade_time_ms DESC, event_id DESC` order, a default of 10,
+  a maximum of 20, and a 30-minute cursor TTL; do not add a second trade tool.
+- Compute an exact event total only for an explicit request. Unbounded detail
+  requests narrow or use an aggregate; they never drain pages into Pi context
+  or add an automatic export workflow.
+- Scope factual evidence to one external request; an exact cursor may cross
+  requests only while its complete canonical observation remains retained, and
+  a compaction summary never authorizes continuation.
+- Use Pi compact with the active model only as committed-prefix pre-run
+  maintenance at 70/75/50 thresholds; never compact the open turn, and enforce
+  the hard gate before every provider call.
+- Require `submit_answer` for ordinary answers and keep Control on its separate
+  deterministic path.
+- Guarantee evidence structure and declared scope, not semantic truth for
+  arbitrary prose.
+- Use one dedicated cursor HMAC key through the existing secret boundary; do
+  not add keyrings, transparent rotation, a cursor store, or upgrader ownership.
+  Provision it once for runtime consumers; an intentional key change invalidates
+  outstanding cursors.
+- Freeze trade-event membership, filters, and order rather than every evidence
+  byte: reject deletes and query-critical updates, allow controlled non-query
+  enrichment, and do not add a global mutation revision.
+- Roll out common safeguards in eager mode first, switch directory mode
+  explicitly after offline and configured-provider gates, and remove eager only
+  through a later evidence-backed release decision.
+
+No S8 product or architecture decision remains open. Verified source or
+upstream API details may refine field spelling during implementation, but any
+change to authority, budgets, evidence scope, cursor semantics, compaction
+failure behavior, rollout boundaries, or final-answer admission requires a
+design update before code.

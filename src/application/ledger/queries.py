@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
@@ -12,7 +13,19 @@ from src.application.ledger.lifecycle_overlay import (
     resolve_lifecycle_account_rows,
 )
 from src.application.ledger.repository import (
+    TradeEventPaginationUnavailable,
     require_option_positions_event_read_repo,
+)
+from src.application.ledger.trade_event_pagination import (
+    DEFAULT_LIMIT,
+    TradeEventPaginationError,
+    decode_cursor,
+    encode_cursor,
+    new_stream_state,
+    normalize_event_limit,
+    normalize_event_query,
+    resolve_continuation_query,
+    validate_cursor_state,
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
@@ -295,6 +308,165 @@ def trade_event_log(repo: Any) -> list[dict[str, Any]]:
     sqlite_repo = require_option_positions_event_read_repo(repo)
     events = sqlite_repo.list_trade_events()
     return events if isinstance(events, list) else []
+
+
+def trade_event_page(
+    repo: Any,
+    *,
+    payload: Mapping[str, Any],
+    account: str | None,
+    market: str,
+    authorized_accounts: Iterable[str],
+    cursor_key: str,
+    now_epoch_s: int | None = None,
+    as_of: str | None = None,
+    admit_query: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Read one stable canonical event page and sign its continuation."""
+
+    sqlite_repo = require_option_positions_event_read_repo(repo, require_page=True)
+    limit = normalize_event_limit(payload.get("limit", DEFAULT_LIMIT))
+    include_total = payload.get("include_total", False)
+    if not isinstance(include_total, bool):
+        raise TradeEventPaginationError(
+            "include_total must be a boolean",
+            code="invalid_query",
+        )
+
+    authority_accounts = tuple(
+        sorted(
+            {
+                str(item or "").strip().lower()
+                for item in authorized_accounts
+                if str(item or "").strip()
+            }
+        )
+    )
+    if not authority_accounts:
+        raise TradeEventPaginationError(
+            "event authority account scope is empty",
+            code="authority_unavailable",
+        )
+    normalized_market = str(market or "").strip().upper()
+    authority_scope = {
+        "accounts": list(authority_accounts),
+        "market": normalized_market,
+    }
+
+    raw_cursor = payload.get("cursor")
+    if raw_cursor not in (None, ""):
+        state = decode_cursor(str(raw_cursor), cursor_key, now=now_epoch_s)
+        signed_query = validate_cursor_state(
+            state,
+            authority_scope=authority_scope,
+        )
+        query = resolve_continuation_query(
+            signed_query,
+            payload,
+            account=account,
+            market=normalized_market,
+        )
+    else:
+        query = normalize_event_query(
+            payload,
+            account=account,
+            market=normalized_market,
+        )
+        state = None
+
+    # The first-page timestamp is a conservative lower bound for every fact in
+    # the snapshot.  Capture it before opening the repository read transaction;
+    # a timestamp taken afterwards could claim freshness later than the read.
+    snapshot_as_of = (
+        str(state["as_of"])
+        if state is not None
+        else as_of
+        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+
+    selected_account = query.get("account")
+    if selected_account and selected_account not in authority_accounts:
+        raise TradeEventPaginationError(
+            "event account is outside the authority scope",
+            code="cursor_authority_mismatch" if state is not None else "invalid_query",
+        )
+    if admit_query is not None:
+        admit_query(dict(query), dict(authority_scope))
+
+    try:
+        page = sqlite_repo.list_trade_events_page(
+            limit=limit,
+            snapshot_max_ingest_seq=(
+                int(state["snapshot_max_ingest_seq"])
+                if state is not None
+                else None
+            ),
+            last_trade_time_ms=(
+                int(state["last_trade_time_ms"])
+                if state is not None and state.get("last_trade_time_ms") is not None
+                else None
+            ),
+            last_event_id=(
+                str(state["last_event_id"])
+                if state is not None and state.get("last_event_id") is not None
+                else None
+            ),
+            authorized_accounts=authority_accounts,
+            include_total=include_total,
+            **query,
+        )
+    except TradeEventPaginationUnavailable as exc:
+        raise TradeEventPaginationError(
+            str(exc),
+            code="pagination_unavailable",
+        ) from exc
+    if state is None:
+        state = new_stream_state(
+            query=query,
+            authority_scope=authority_scope,
+            snapshot_max_ingest_seq=int(page["snapshot_max_ingest_seq"]),
+            as_of=snapshot_as_of,
+        )
+    state["last_trade_time_ms"] = page["last_trade_time_ms"]
+    state["last_event_id"] = page["last_event_id"]
+
+    has_more = bool(page["has_more"])
+    total_count = page["total_count"]
+    returned_count = len(page["rows"])
+    return {
+        "rows": list(page["rows"]),
+        "requested_limit": limit,
+        "returned_count": returned_count,
+        "total_count": total_count,
+        "stream_id": str(state["stream_id"]),
+        "as_of": str(state["as_of"]),
+        "has_more": has_more,
+        "snapshot_exhausted": not has_more,
+        "filters": dict(query),
+        "coverage": {
+            "status": "complete",
+            "complete_for": "requested_page",
+            "included_count": returned_count,
+            "omitted_count": (
+                max(0, int(total_count) - returned_count)
+                if total_count is not None
+                else None
+            ),
+            "has_more": has_more,
+            "total_count": total_count,
+            "as_of": str(state["as_of"]),
+            "scope": {
+                "market": normalized_market,
+                "authorized_accounts": list(authority_accounts),
+                "account": selected_account,
+                "requested_limit": limit,
+                "query": dict(query),
+            },
+        },
+        "next_cursor": (
+            encode_cursor(state, cursor_key, now=now_epoch_s) if has_more else None
+        ),
+    }
 
 
 def list_trade_lifecycle_cases(
@@ -882,5 +1054,7 @@ __all__ = [
     "summarize_position_lot_shadow_status",
     "trade_event_economic_allocations",
     "trade_event_log",
+    "trade_event_page",
     "trade_event_projection_preview",
+    "TradeEventPaginationError",
 ]

@@ -135,6 +135,9 @@ def test_projection_column_classification_is_closed(tmp_path: Path) -> None:
         "account",
         "event_json",
         "trade_time_ms",
+        "ingest_seq",
+        "market",
+        "position_effect",
         "created_at_ms",
         "updated_at_ms",
     }
@@ -175,9 +178,16 @@ def test_event_trigger_matrix_idempotency_conflict_and_replace(tmp_path: Path) -
     assert _generations(repo)[0] == 1
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
+        payload = json.loads(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()[0]
+        )
+        payload["price"] = float(payload["price"]) + 1
         conn.execute(
-            "UPDATE trade_events SET trade_time_ms = trade_time_ms + 1 WHERE event_id = ?",
-            (event.event_id,),
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), event.event_id),
         )
         conn.commit()
     assert _generations(repo)[0] == 2
@@ -185,68 +195,72 @@ def test_event_trigger_matrix_idempotency_conflict_and_replace(tmp_path: Path) -
     with repo._connect() as conn:  # type: ignore[attr-defined]
         row = conn.execute("SELECT * FROM trade_events WHERE event_id = ?", (event.event_id,)).fetchone()
         assert row is not None
-        conn.execute(
-            """
-            REPLACE INTO trade_events (
-              event_id, account, event_json, trade_time_ms, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            tuple(
-                row[key]
-                for key in ("event_id", "account", "event_json", "trade_time_ms", "created_at_ms", "updated_at_ms")
-            ),
-        )
-        conn.commit()
-    assert _generations(repo)[0] == 4
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="replacement is not allowed",
+        ):
+            conn.execute(
+                """
+                REPLACE INTO trade_events (
+                  event_id, account, event_json, trade_time_ms, created_at_ms,
+                  updated_at_ms, ingest_seq, market, position_effect
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(
+                    row[key]
+                    for key in (
+                        "event_id",
+                        "account",
+                        "event_json",
+                        "trade_time_ms",
+                        "created_at_ms",
+                        "updated_at_ms",
+                        "ingest_seq",
+                        "market",
+                        "position_effect",
+                    )
+                ),
+            )
+    assert _generations(repo)[0] == 2
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute("DELETE FROM trade_events WHERE event_id = ?", (event.event_id,))
-        conn.commit()
-    assert _generations(repo)[0] == 5
+        with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
+            conn.execute(
+                "DELETE FROM trade_events WHERE event_id = ?", (event.event_id,)
+            )
+    assert _generations(repo)[0] == 2
 
 
-def test_event_and_lot_account_guards_cover_mixed_version_and_conflict(tmp_path: Path) -> None:
+def test_event_and_lot_guards_reject_legacy_or_conflicting_writes(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     event = _event("event-1")
-    payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
 
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute(
-            """
-            INSERT INTO trade_events (
-              event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (event.event_id, payload, event.event_time_ms, 1, 1),
-        )
-        with pytest.raises(sqlite3.IntegrityError, match="conflicts"):
+        with pytest.raises(sqlite3.IntegrityError, match="pagination projection"):
             conn.execute(
                 """
                 INSERT INTO trade_events (
-                  event_id, account, event_json, trade_time_ms, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                  event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                ("event-conflict", "sy", payload, 2, 2, 2),
+                (
+                    event.event_id,
+                    json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True),
+                    event.event_time_ms,
+                    1,
+                    1,
+                ),
             )
-        conn.commit()
-
-    legacy_void = {
-        "event_id": "legacy-void",
-        "trade_time_ms": 3,
-        "position_effect": "void",
-        "raw_payload": {"void_target_event_id": event.event_id},
-    }
+    assert repo.upsert_trade_event(event) is True
     with repo._connect() as conn:  # type: ignore[attr-defined]
-        conn.execute(
-            """
-            INSERT INTO trade_events (
-              event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            ("legacy-void", json.dumps(legacy_void), 3, 3, 3),
-        )
-        conn.commit()
-    assert repo.position_projection_normalized_columns_ready() is False
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="query projection|account conflicts",
+        ):
+            conn.execute(
+                "UPDATE trade_events SET account = 'sy' WHERE event_id = ?",
+                (event.event_id,),
+            )
 
     lot = _lot("lot-1")
     fields_json = json.dumps(lot.fields, ensure_ascii=False, sort_keys=True)

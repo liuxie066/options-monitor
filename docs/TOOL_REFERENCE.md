@@ -229,9 +229,31 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
 
 ./om-agent run --tool option_positions_read \
   --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
+
+./om-agent run --tool option_positions_read \
+  --input-json '{"config_key":"us","action":"events","account":"lx","position_effect":"close","limit":5}'
 ```
 
 `query_cash_headroom` 是 pure-read，并以 `write_cache=false` 查询，不持久化本次 cash query。`option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
+
+`option_positions_read action=events` 读取 canonical SQLite `trade_events`，不会读取报价：
+
+- `limit` 默认 10，范围为 1–20；`position_effect` 当前只接受 `close`。
+- 结果按 `trade_time_ms DESC, event_id DESC` 排序。`has_more=true` 时，将原样返回的
+  `next_cursor` 用于下一次调用；后续页可改变 `limit`，不需要重复筛选条件。
+- cursor 固定首次查询的 market、账户权限、筛选条件和事件成员边界。首次查询后写入的事件，
+  即使业务时间更早，也不会进入该 cursor 流。
+- `include_total=true` 才计算冻结成员集合的 `total_count`。cursor 有效期为 30 分钟；过期、
+  签名错误、权限或筛选条件变化都会明确失败，不会自动从头查询。
+- `snapshot_exhausted=true` 表示当前冻结集合已读完。过期后重新查询会建立新集合，因此可能
+  与旧查询已经返回的记录重叠。
+
+继续读取示例：
+
+```bash
+./om-agent run --tool option_positions_read \
+  --input-json '{"config_key":"us","cursor":"<next_cursor>","limit":5}'
+```
 
 ### Option Performance
 

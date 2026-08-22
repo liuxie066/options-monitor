@@ -1273,6 +1273,11 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
     from src.application.ledger.commands import record_manual_assignment
     from src.application.positions.assigned_stock_quotes import AssignedStockQuoteRefreshResult
+    from src.application.secret_store import (
+        COPILOT_CURSOR_HMAC_KEY,
+        use_secret_provider,
+    )
+    from src.infrastructure.secret_store.memory import InMemorySecretProvider
 
     def _ms(value: str) -> int:
         out = parse_exp_to_ms(value)
@@ -1287,8 +1292,19 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
         encoding="utf-8",
     )
     cfg_path = tmp_path / "config.us.json"
+    runtime_cfg = _public_cfg_with_futu(str(data_cfg_path))
+    runtime_cfg["accounts"].append("user2")
+    runtime_cfg["account_settings"]["user2"] = {
+        "type": "futu",
+        "futu": {
+            "account_id": "999000000000000002",
+            "host": "127.0.0.1",
+            "port": 11111,
+        },
+    }
+    runtime_cfg["portfolio"]["source_by_account"]["user2"] = "futu"
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu(str(data_cfg_path)), ensure_ascii=False, indent=2),
+        json.dumps(runtime_cfg, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -1312,6 +1328,23 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     )
     lot = repo.list_position_lots()[0]
     record_id = str(lot["record_id"])
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="user2",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=90.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.5,
+            opened_at_ms=_ms("2026-04-02"),
+        ),
+    )
 
     listed = run_tool(
         "option_positions_read",
@@ -1322,15 +1355,43 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
             "status": "open",
         },
     )
-    events = run_tool(
-        "option_positions_read",
-        {
-            "config_path": str(cfg_path),
-            "action": "events",
-            "account": "user1",
-            "limit": 5,
-        },
-    )
+    with use_secret_provider(
+        InMemorySecretProvider({COPILOT_CURSOR_HMAC_KEY: "test-cursor-key"})
+    ):
+        events = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "account": "user1",
+                "limit": 5,
+                "include_total": True,
+            },
+        )
+        cursor_only = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "cursor": "not-a-valid-cursor",
+                "limit": 5,
+            },
+        )
+        nested_account = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "action": "events",
+                "query": {"account": "user1"},
+            },
+        )
+    with use_secret_provider(InMemorySecretProvider({})):
+        missing_cursor_key = run_tool(
+            "option_positions_read",
+            {
+                "config_path": str(cfg_path),
+                "action": "events",
+                "account": "user1",
+            },
+        )
     history = run_tool(
         "option_positions_read",
         {
@@ -1375,7 +1436,38 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert listed["data"]["rows"][0]["state_warning"] == "expired_position_marked_open"
     assert listed["data"]["rows"][0]["cash_secured_amount_role"] == "assignment_collateral"
     assert events["ok"] is True
-    assert events["data"]["row_count"] == 1
+    assert events["data"]["action"] == "events"
+    assert events["data"]["returned_count"] == 1
+    assert events["data"]["requested_limit"] == 5
+    assert events["data"]["snapshot_exhausted"] is True
+    assert events["data"]["next_cursor"] is None
+    assert events["data"]["freshness"] == {
+        "status": "historical",
+        "as_of": events["data"]["as_of"],
+        "kind": "ledger_snapshot",
+    }
+    assert events["data"]["coverage"]["total_count"] == 1
+    assert events["data"]["coverage"]["omitted_count"] == 0
+    assert events["data"]["coverage"]["as_of"] == events["data"]["as_of"]
+    event_observation = copilot_tools.compact_observation(
+        "option_positions_read",
+        events,
+        {"config_path": str(cfg_path), "include_total": True},
+    )
+    assert event_observation["freshness"]["status"] == "historical"
+    assert event_observation["freshness"]["as_of"] == events["data"]["as_of"]
+    assert cursor_only["ok"] is False
+    assert cursor_only["error"]["code"] == "INPUT_ERROR"
+    assert "cursor" in cursor_only["error"]["message"].lower()
+    assert nested_account["ok"] is False
+    assert nested_account["error"]["code"] == "INPUT_ERROR"
+    assert nested_account["error"]["message"] == (
+        "unsupported fields for action=events: query"
+    )
+    assert missing_cursor_key["ok"] is False
+    assert missing_cursor_key["error"]["code"] == "DEPENDENCY_MISSING"
+    assert len(repo.list_trade_events()) == 2
+    assert {row["account"] for row in events["data"]["rows"]} == {"user1"}
     assert events["data"]["rows"][0]["symbol"] == "NVDA"
     assert history["ok"] is True
     assert history["data"]["event_count"] == 1

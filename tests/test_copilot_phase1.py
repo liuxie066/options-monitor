@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 
 import pytest
@@ -412,6 +413,151 @@ def test_agent_tool_view_exposes_result_contract() -> None:
     assert "quality" not in nested["value"]
     assert "event-private" not in serialized
     assert len(serialized) < 8000
+
+
+def test_event_cursor_is_exact_for_model_and_hashed_in_audit() -> None:
+    cursor = "opaque.12345678901234567890.cursor"
+    observation = copilot_tools.compact_observation(
+        "option_positions_read",
+        {
+            "ok": True,
+            "data": {
+                "action": "events",
+                "rows": [{"event_id": "event-1"}],
+                "returned_count": 1,
+                "requested_limit": 1,
+                "total_count": None,
+                "stream_id": "tev_test",
+                "as_of": "2026-08-22T00:00:00Z",
+                "has_more": True,
+                "snapshot_exhausted": False,
+                "next_cursor": cursor,
+                "scope": {"action": "events", "account": "lx"},
+                "coverage": {
+                    "status": "complete",
+                    "complete_for": "requested_page",
+                    "included_count": 1,
+                    "has_more": True,
+                    "total_count": None,
+                },
+            },
+        },
+        {"action": "events"},
+    )
+
+    assert observation["value"]["next_cursor"] == cursor
+    assert observation["coverage"]["included_count"] == 1
+    assert observation["result_contract"]["evidence_type"] == "collection"
+    assert observation["result_contract"]["pagination"]["mode"] == "keyset"
+
+    audit = copilot_tools.audit_tool_event_payload(
+        {**observation, "tool_input": {"cursor": cursor}}
+    )
+    expected_hash = hashlib.sha256(cursor.encode("utf-8")).hexdigest()
+    assert audit["value"]["next_cursor"] == {"sha256": expected_hash}
+    assert audit["tool_input"]["cursor"] == {"sha256": expected_hash}
+    assert cursor not in json.dumps(audit, sort_keys=True)
+
+
+def test_event_cursor_only_input_selects_events_and_enforces_its_limit() -> None:
+    from jsonschema import Draft202012Validator
+
+    description = copilot_tools.tool_descriptions(("option_positions_read",))[0]
+    schema_errors = list(
+        Draft202012Validator(description["input_schema"]).iter_errors(
+            {"cursor": "opaque-cursor", "limit": 21}
+        )
+    )
+    assert any(error.validator == "maximum" for error in schema_errors)
+
+    payload, error = copilot_tools.build_tool_payload(
+        "option_positions_read",
+        {"cursor": "opaque-cursor", "limit": 20},
+        fixed_input={"config_key": "us"},
+    )
+    assert error is None
+    assert payload is not None
+    assert payload["action"] == "events"
+
+    rejected, error = copilot_tools.build_tool_payload(
+        "option_positions_read",
+        {"action": "events", "limit": 21},
+        fixed_input={"config_key": "us"},
+    )
+    assert rejected is None
+    assert error == "events limit must be between 1 and 20"
+
+    listed, error = copilot_tools.build_tool_payload(
+        "option_positions_read",
+        {"action": "list", "limit": 500},
+        fixed_input={"config_key": "us"},
+    )
+    assert error is None
+    assert listed is not None and listed["limit"] == 500
+
+    rejected, error = copilot_tools.build_tool_payload(
+        "option_positions_read",
+        {"action": "events", "query": {"account": "lx"}},
+        fixed_input={"config_key": "us"},
+    )
+    assert rejected is None
+    assert error == "unsupported fields for action=events: query"
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "CURSOR_EXPIRED",
+        "CURSOR_SCOPE_MISMATCH",
+        "NEEDS_NARROWING",
+    ),
+)
+def test_event_pagination_errors_remain_explicit_and_not_blindly_retryable(
+    code: str,
+) -> None:
+    observation = copilot_tools.compact_observation(
+        "option_positions_read",
+        {
+            "ok": False,
+            "error": {
+                "code": code,
+                "message": "start a new or narrower query",
+                "details": {"retryable": False},
+            },
+        },
+        {"action": "events"},
+    )
+    assert observation["code"] == code
+    assert observation["retryable"] is False
+
+
+def test_quality_gate_error_remains_explicit_in_model_observation(monkeypatch) -> None:
+    from src.application.agent_tools import positions as positions_tools
+    from src.application.quality.gate import QualityGateBlocked
+    from src.application.tool_execution import execute_tool
+
+    def block(*_args, **_kwargs) -> None:
+        raise QualityGateBlocked(
+            "option_position_report",
+            "QUALITY_DATASET_AMBIGUOUS",
+            ("position_lots",),
+        )
+
+    monkeypatch.setattr(positions_tools, "assert_quality_allows", block)
+    response = execute_tool("option_positions_read", {"action": "list"})
+    observation = copilot_tools.compact_observation(
+        "option_positions_read",
+        response,
+        {"action": "list"},
+    )
+
+    assert observation["code"] == "QUALITY_GATE_BLOCKED"
+    assert observation["retryable"] is False
+    assert observation["details"] == {
+        "consumer": "option_position_report",
+        "reason_code": "QUALITY_DATASET_AMBIGUOUS",
+        "blocked_by": ["position_lots"],
+    }
 
 
 def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
@@ -1611,6 +1757,28 @@ def test_tool_failure_is_recoverable(monkeypatch) -> None:
     result = run_contract(_contract("检查系统"), model_runner=model)
 
     assert calls == ["analysis_query", "runtime_status"]
+    assert result.status == "answered"
+
+
+def test_tool_payload_rejection_reason_is_returned_to_model() -> None:
+    def model(request: ModelRequest) -> ModelTurn:
+        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
+        if not tool_messages:
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        "option_positions_read",
+                        {"action": "events", "query": {"account": "lx"}},
+                    ),
+                )
+            )
+        observation = json.loads(tool_messages[-1]["content"])
+        assert observation["code"] == "INPUT_ERROR"
+        assert observation["message"] == "unsupported fields for action=events: query"
+        return ModelTurn(text="交易事件查询参数无效。")
+
+    result = run_contract(_contract("查询交易事件"), model_runner=model)
+
     assert result.status == "answered"
 
 

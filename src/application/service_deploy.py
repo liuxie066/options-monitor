@@ -21,9 +21,10 @@ from src.application.config_yaml import (
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
 )
+from src.application.assistant.settings import AssistantSettings
 from src.application.platform_profile import default_runtime_root_for_service_target
-from src.application.llm_provider_registry import provider_spec
 from src.application.secret_store import (
+    COPILOT_CURSOR_HMAC_KEY,
     FEISHU_BOT_APP_SECRET,
     FEISHU_HOLDINGS_APP_SECRET,
     INBOUND_OPERATION_HMAC_KEY,
@@ -804,20 +805,30 @@ def _render_systemd_service_asset(name: str, replacements: dict[str, str]) -> st
     return content
 
 
-def _assistant_llm_credential_name(*, repo_root: Path, config_yaml_path: Path | None) -> str | None:
+def _assistant_credential_names(
+    *, repo_root: Path, config_yaml_path: Path | None
+) -> tuple[str | None, str | None]:
     if config_yaml_path is None:
-        return None
-    cfg, _meta = resolve_yaml_assistant_config(repo_root=repo_root, config_path=config_yaml_path)
-    assistant = cfg.get("assistant") if isinstance(cfg.get("assistant"), dict) else {}
-    llm = assistant.get("llm") if isinstance(assistant, dict) and isinstance(assistant.get("llm"), dict) else {}
-    spec = provider_spec(str(llm.get("provider") or ""))
-    return spec.credential_name if spec is not None and spec.requires_api_key else None
+        return None, None
+    cfg, _meta = resolve_yaml_assistant_config(
+        repo_root=repo_root,
+        config_path=config_yaml_path,
+    )
+    settings = AssistantSettings.from_runtime_config(cfg)
+    llm_credential_name = settings.llm.credential_name or None
+    cursor_credential_name = (
+        COPILOT_CURSOR_HMAC_KEY
+        if settings.enabled and settings.copilot.enabled
+        else None
+    )
+    return llm_credential_name, cursor_credential_name
 
 
 def _systemd_secret_bindings(
     *,
     service_names: list[str],
     assistant_credential_name: str | None,
+    cursor_credential_name: str | None,
 ) -> dict[str, tuple[str, ...]]:
     available = set(service_names)
     bindings: dict[str, list[str]] = {}
@@ -843,12 +854,14 @@ def _systemd_secret_bindings(
         FEISHU_BOT_APP_SECRET,
         FEISHU_HOLDINGS_APP_SECRET,
         INBOUND_OPERATION_HMAC_KEY,
+        cursor_credential_name,
         assistant_credential_name,
     )
     bind(
         "options-monitor-wechat-clawbot.service",
         FEISHU_HOLDINGS_APP_SECRET,
         INBOUND_OPERATION_HMAC_KEY,
+        cursor_credential_name,
         assistant_credential_name,
     )
     return {name: tuple(values) for name, values in sorted(bindings.items()) if values}
@@ -1329,10 +1342,13 @@ def render_service_bundle(
         if config_yaml_path is not None
         else None
     )
-    assistant_credential_name = (
-        _assistant_llm_credential_name(repo_root=repo, config_yaml_path=config_yaml_path)
+    assistant_credential_name, cursor_credential_name = (
+        _assistant_credential_names(
+            repo_root=repo,
+            config_yaml_path=config_yaml_path,
+        )
         if include_feishu_ws or include_wechat_clawbot
-        else None
+        else (None, None)
     )
     explicit_opend_root = opend_root is not None and str(opend_root).strip() != ""
     opend_service_plans: list[OpendServicePlan] = []
@@ -2162,6 +2178,7 @@ def render_service_bundle(
             secret_credential_bindings = _systemd_secret_bindings(
                 service_names=service_names,
                 assistant_credential_name=assistant_credential_name,
+                cursor_credential_name=cursor_credential_name,
             )
             secret_deploy_user = str(systemd_user or "root")
             for consumer, logical_names in secret_credential_bindings.items():

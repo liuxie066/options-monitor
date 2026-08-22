@@ -447,8 +447,13 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
     ]["content"]
 
     assert "om-llm-deepseek-api-key" not in tick
+    assert "om-copilot-cursor-hmac-key" not in tick
     assert (
         f"om-llm-deepseek-api-key:{store}/om-llm-deepseek-api-key"
+        in assistant
+    )
+    assert (
+        f"om-copilot-cursor-hmac-key:{store}/om-copilot-cursor-hmac-key"
         in assistant
     )
 

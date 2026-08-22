@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.application.agent_tools.operations_impl import option_positions_read_tool
+from src.application.agent_tools.operations_impl import (
+    normalize_option_positions_read_input,
+    option_positions_read_tool,
+)
 from src.application.agent_tools.materialization_impl import option_performance_report_tool
 from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.positions.inspection import build_lot_event_history
@@ -143,6 +146,47 @@ _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
     "model_preview_fields": ["scope", "coverage", "evidence_scope", "rows", "bootstrap"],
 }
 
+_OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT = {
+    "schema_version": "option_positions_read.events_output.v1",
+    "source_label": "OM canonical SQLite trade_events",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "source_declared",
+    "freshness": "source_declared",
+    "primary_rows": "rows",
+    "row_count_field": "returned_count",
+    "stable_order": "trade_time_ms_desc,event_id_desc",
+    "pagination": {
+        "mode": "keyset",
+        "cursor_ttl_seconds": 1800,
+        "snapshot_boundary": "ingest_seq",
+        "order": ["trade_time_ms DESC", "event_id DESC"],
+    },
+    "freshness_fields": ["as_of"],
+    "fact_fields": [
+        "rows",
+        "requested_limit",
+        "returned_count",
+        "total_count",
+        "stream_id",
+        "as_of",
+        "has_more",
+        "snapshot_exhausted",
+        "next_cursor",
+    ],
+    "model_preview_fields": [
+        "requested_limit",
+        "returned_count",
+        "total_count",
+        "stream_id",
+        "as_of",
+        "has_more",
+        "snapshot_exhausted",
+        "next_cursor",
+        "rows",
+    ],
+}
+
 _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
@@ -243,23 +287,46 @@ def _option_positions_read_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     try:
-        assert_quality_allows(
-            "option_position_report",
-            account=str(payload.get("account") or "").strip().lower() or None,
-            market=str(payload.get("config_key") or "").strip().lower() or None,
+        normalized = normalize_option_positions_read_input(payload)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+
+    def assert_quality(*, account: str | None, market: str | None) -> None:
+        try:
+            assert_quality_allows(
+                "option_position_report",
+                account=account,
+                market=market,
+            )
+        except QualityGateBlocked as exc:
+            raise AgentToolError(
+                code="QUALITY_GATE_BLOCKED",
+                message=str(exc),
+                details={
+                    "consumer": exc.consumer,
+                    "reason_code": exc.reason_code,
+                    "blocked_by": list(exc.blocked_by),
+                    "retryable": False,
+                },
+            ) from exc
+
+    action = _option_positions_action(normalized)
+    if action != "events":
+        assert_quality(
+            account=str(normalized.get("account") or "").strip().lower() or None,
+            market=str(normalized.get("config_key") or "").strip().lower() or None,
         )
-    except QualityGateBlocked as exc:
-        raise AgentToolError(
-            code="QUALITY_GATE_BLOCKED",
-            message=str(exc),
-            details={
-                "consumer": exc.consumer,
-                "reason_code": exc.reason_code,
-                "blocked_by": list(exc.blocked_by),
-            },
-        ) from exc
+
+    def admit_event_query(
+        query: dict[str, Any], authority_scope: dict[str, Any]
+    ) -> None:
+        assert_quality(
+            account=str(query.get("account") or "").strip().lower() or None,
+            market=str(authority_scope.get("market") or "").strip().lower() or None,
+        )
+
     return option_positions_read_tool(
-        payload,
+        normalized,
         load_runtime_config=load_runtime_config,
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
@@ -271,6 +338,7 @@ def _option_positions_read_tool(
         inspect_projection_state=inspect_projection_state,
         repo_base=repo_base,
         mask_path=lambda value: _mask_path_str(value),
+        admit_event_query=admit_event_query if action == "events" else None,
     )
 
 
@@ -286,12 +354,25 @@ def _option_positions_action(payload: dict[str, Any]) -> str:
 
 
 def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any] | None:
-    action = _option_positions_action(payload)
+    try:
+        normalized = normalize_option_positions_read_input(payload)
+    except ValueError:
+        return None
+    action = _option_positions_action(normalized)
     if action == "list":
         return _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT
     if action == "assigned-stock":
         return _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT
+    if action == "events":
+        return _OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT
     return None
+
+
+def _validate_option_positions_input(payload: dict[str, Any]) -> None:
+    try:
+        normalize_option_positions_read_input(payload)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
 
 
 def _wheel_now_ms(payload: Mapping[str, Any]) -> int:
@@ -603,6 +684,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     description=(
         "Read local option position lots, trade events, lot history, assigned-stock lots, or projection "
         "inspection state. For current exposure use action=list and status=open; preserve account and currency. "
+        "For canonical trade history use action=events: each page contains 1-20 rows in stable descending "
+        "trade-time order, and next_cursor continues the same signed snapshot without repeating filters. "
         "An expired_position_marked_open warning identifies a local ledger-state inconsistency only; it does not "
         "prove broker settlement, assignment, liquidation, or a pending order. cash_secured_amount is assignment "
         "collateral, not profit, available cash, or loss. action=assigned-stock can add read-only quote evidence "
@@ -627,7 +710,26 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "description": "list-only open|close|all; legacy callers may pass a single-item list",
         },
         "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit",
-        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum rows"},
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "description": "Maximum rows: list allows 1-500; events allows 1-20",
+        },
+        "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Events-only opaque continuation cursor",
+        },
+        "include_total": {
+            "type": "boolean",
+            "description": "Events-only exact count over the frozen snapshot",
+        },
+        "position_effect": {
+            "type": "string",
+            "enum": ["close"],
+            "description": "Events-only canonical close-effect filter",
+        },
         "exp_within_days": {"type": "integer", "minimum": 0, "description": "List-only expiration horizon"},
         "expiration_month": "list-only optional YYYY-MM",
         "expiration_exact": "list-only optional YYYY-MM-DD",
@@ -652,6 +754,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     examples=(
         {"input": {"config_key": "us", "action": "list", "query": {"account": "lx", "status": "open"}}},
         {"input": {"config_key": "us", "action": "history", "record_id": "rec_xxx"}},
+        {"input": {"config_key": "us", "action": "events", "position_effect": "close", "limit": 10}},
     ),
     output_contract={
         "schema_version": "option_positions_read.output",
@@ -667,7 +770,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "config_key", "action", "broker", "account", "status", "query", "limit",
         "exp_within_days", "expiration_month", "expiration_exact", "expiration_before",
         "expiration_after", "record_id", "symbol", "option_type", "side", "strike",
-        "exp", "stock_lot_id", "refresh_quotes", "as_of_ms",
+        "exp", "stock_lot_id", "refresh_quotes", "as_of_ms", "cursor", "include_total", "position_effect",
     ),
     copilot_input_schema={
         "type": "object",
@@ -686,7 +789,19 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
                 "description": "Position status filter for action=list",
             },
             "query": {"type": "object", "description": "Structured list filter"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+                "description": "list: 1-500; events: 1-20",
+            },
+            "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Opaque events continuation cursor",
+            },
+            "include_total": {"type": "boolean"},
+            "position_effect": {"type": "string", "enum": ["close"]},
             "exp_within_days": {"type": "integer", "minimum": 0},
             "expiration_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
             "expiration_exact": {"type": "string", "format": "date"},
@@ -702,8 +817,34 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "refresh_quotes": {"type": "boolean"},
             "as_of_ms": {"type": "integer"},
         },
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"action": {"const": "events"}},
+                    "required": ["action"],
+                },
+                "then": {"properties": {"limit": {"maximum": 20}}},
+            },
+            {
+                "if": {
+                    "anyOf": [
+                        {"required": ["cursor"]},
+                        {"required": ["include_total"]},
+                        {"required": ["position_effect"]},
+                    ]
+                },
+                "then": {
+                    "properties": {
+                        "action": {"const": "events"},
+                        "limit": {"maximum": 20},
+                    }
+                },
+            },
+        ],
         "additionalProperties": False,
     },
+    input_validator=_validate_option_positions_input,
+    copilot_input_normalizer=normalize_option_positions_read_input,
 )
 
 
