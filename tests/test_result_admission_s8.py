@@ -172,6 +172,60 @@ def test_partial_answer_gets_non_removable_counts_scope_banner() -> None:
     assert '"account": "lx"' in text
 
 
+@pytest.mark.parametrize(
+    "coverage,expected",
+    [
+        (
+            {
+                "status": "complete",
+                "complete_for": "requested_page",
+                "included_count": 10,
+                "total_count": None,
+                "omitted_count": None,
+                "has_more": True,
+                "scope": {"account": "lx"},
+            },
+            "本页已返回 10 条记录，仍有更多记录；请继续查询下一页",
+        ),
+        (
+            {
+                "status": "complete",
+                "complete_for": "full_query",
+                "included_count": 20,
+                "total_count": 20,
+                "omitted_count": 0,
+                "has_more": False,
+                "scope": {"account": "lx"},
+            },
+            "已返回当前条件下全部 20 条记录，没有更多记录",
+        ),
+    ],
+)
+def test_complete_answer_gets_non_removable_pagination_banner(
+    coverage: dict,
+    expected: str,
+) -> None:
+    evidence = _evidence()
+    evidence["coverage"] = coverage
+    required_scope = str(coverage["complete_for"])
+    accepted = admit_submit_answer(
+        _submit(
+            claims=[
+                {
+                    "text": "交易记录范围",
+                    "kind": "current_fact",
+                    "observation_ids": ["obv_a"],
+                    "required_scope": required_scope,
+                }
+            ]
+        ),
+        {"obv_a": evidence},
+    )
+
+    assert accepted["observation"]["ok"] is True
+    assert expected in accepted["approved_answer"]["text"]
+
+
 def test_partial_banner_does_not_sum_duplicate_or_overlapping_evidence() -> None:
     duplicate = _evidence(observation_status="partial")
     accepted = admit_submit_answer(

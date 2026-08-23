@@ -127,7 +127,7 @@ def normalize_option_positions_read_input(
     if explicit_action == "events" and "limit" in normalized:
         limit = normalized["limit"]
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
-            raise ValueError("events limit must be between 1 and 20")
+            raise ValueError("单次最多查询 20 条交易事件，请将数量设为 1 到 20。")
     return normalized
 
 
@@ -441,8 +441,8 @@ def _events_action(
             "pagination_unavailable": "DEPENDENCY_MISSING",
         }.get(exc.code, "INPUT_ERROR")
         hints = {
-            "NEEDS_NARROWING": "Add filters or request no more than 20 events.",
-            "CURSOR_EXPIRED": "Start a new events query; new results may overlap.",
+            "NEEDS_NARROWING": "单次最多查询 20 条，请缩小数量或增加筛选条件后重新查询。",
+            "CURSOR_EXPIRED": "上次查询快照已过期，请重新发起查询；新结果可能与已返回记录重叠。",
             "CURSOR_SCOPE_MISMATCH": "Reuse the cursor without changing its signed filters or authority scope.",
             "DEPENDENCY_MISSING": "Run the controlled option-position projection migration before paging events.",
         }

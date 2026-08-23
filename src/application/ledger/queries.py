@@ -354,7 +354,8 @@ def trade_event_page(
     }
 
     raw_cursor = payload.get("cursor")
-    if raw_cursor not in (None, ""):
+    first_page = raw_cursor in (None, "")
+    if not first_page:
         state = decode_cursor(str(raw_cursor), cursor_key, now=now_epoch_s)
         signed_query = validate_cursor_state(
             state,
@@ -433,6 +434,17 @@ def trade_event_page(
     has_more = bool(page["has_more"])
     total_count = page["total_count"]
     returned_count = len(page["rows"])
+    full_query_covered = first_page and not has_more
+    coverage_total_count = returned_count if full_query_covered else total_count
+    coverage_omitted_count = (
+        0
+        if full_query_covered
+        else (
+            max(0, int(total_count) - returned_count)
+            if total_count is not None
+            else None
+        )
+    )
     return {
         "rows": list(page["rows"]),
         "requested_limit": limit,
@@ -445,15 +457,11 @@ def trade_event_page(
         "filters": dict(query),
         "coverage": {
             "status": "complete",
-            "complete_for": "requested_page",
+            "complete_for": "full_query" if full_query_covered else "requested_page",
             "included_count": returned_count,
-            "omitted_count": (
-                max(0, int(total_count) - returned_count)
-                if total_count is not None
-                else None
-            ),
+            "omitted_count": coverage_omitted_count,
             "has_more": has_more,
-            "total_count": total_count,
+            "total_count": coverage_total_count,
             "as_of": str(state["as_of"]),
             "scope": {
                 "market": normalized_market,
