@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import runpy
+import shlex
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -449,7 +451,7 @@ def test_archive_pull_can_auto_select_remote_replay_evidence_runs_without_stdout
     inventory = {
         "runtime_root": "/var/lib/options-monitor",
         "runs_root": "/var/lib/options-monitor/output_runs",
-        "padding": "x" * 6000,
+        "padding": "x" * 2_100_000,
         "runs": [
             {
                 "run_id": "run-scan",
@@ -484,6 +486,85 @@ def test_archive_pull_can_auto_select_remote_replay_evidence_runs_without_stdout
     assert data["operations"][0]["stdout"].startswith("{")
     assert "--dry-run" in calls[1]
     assert "output_runs/run-scan" in calls[1][-2]
+
+
+def test_remote_inventory_script_applies_run_filter(tmp_path: Path) -> None:
+    from src.application.research.archive import REMOTE_INVENTORY_SCRIPT
+
+    _write_run(tmp_path, "run-selected")
+    _write_run(tmp_path, "run-ignored")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            REMOTE_INVENTORY_SCRIPT,
+            str(tmp_path),
+            "",
+            "0",
+            json.dumps(["run-selected"]),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(proc.stdout)
+    assert [item["run_id"] for item in payload["runs"]] == ["run-selected"]
+
+
+def test_archive_pull_filters_and_batches_explicit_remote_run_inventory(tmp_path: Path) -> None:
+    from src.application.research.archive import archive_pull
+
+    run_ids = [f"run-{index}" for index in range(11)]
+    inventory_batches: list[list[str]] = []
+
+    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] != "ssh":
+            return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+        selected = json.loads(shlex.split(command[-1])[-1])
+        inventory_batches.append(selected)
+        inventory = {
+            "runtime_root": "/var/lib/options-monitor",
+            "runs_root": "/var/lib/options-monitor/output_runs",
+            "source_host": "prod.example",
+            "runs": [{"run_id": run_id, "mtime": 1} for run_id in selected],
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(inventory), stderr="")
+
+    data = archive_pull(
+        repo_root=tmp_path,
+        archive_root=tmp_path / "archive",
+        ssh_target="deploy@example",
+        run_ids=[*run_ids, run_ids[0]],
+        write=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert data["ok"] is True
+    assert data["selected_run_ids"] == run_ids
+    assert inventory_batches == [run_ids[:10], run_ids[10:]]
+    assert data["operations"][0]["batch_count"] == 2
+
+
+def test_archive_pull_rejects_malformed_remote_inventory(tmp_path: Path) -> None:
+    from src.application.research.archive import archive_pull
+
+    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stdout = "not-json" if command[0] == "ssh" else "dry\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    data = archive_pull(
+        repo_root=tmp_path,
+        archive_root=tmp_path / "archive",
+        ssh_target="deploy@example",
+        run_ids=["run-1"],
+        write=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert data["ok"] is False
+    assert data["selected_run_ids"] == []
 
 
 def test_archive_pull_treats_missing_optional_remote_dirs_as_skipped(tmp_path: Path) -> None:
@@ -810,7 +891,9 @@ def test_archive_prune_remote_runs_confirm_after_guard_passes(tmp_path: Path) ->
 
     archive_root = tmp_path / "archive"
     _write_run(archive_root, "run-1")
+    kept_run = _write_run(archive_root, "run-kept")
     _verify_remote_archive(tmp_path, archive_root)
+    (kept_run / "state" / "last_run.json").write_text("changed", encoding="utf-8")
     calls: list[list[str]] = []
     preview = {
         "schema_version": "1.0",
@@ -864,10 +947,14 @@ def test_archive_prune_remote_runs_confirm_after_guard_passes(tmp_path: Path) ->
     assert data["ok"] is True
     assert data["changed"] is True
     assert data["deletion_guard"]["confirmable"] is True
+    assert data["deletion_guard"]["mutated_or_missing_archive_run_ids"] == []
+    assert data["deletion_guard"]["changed_or_missing_remote_run_ids"] == []
     assert data["include_logs"] is False
     assert data["include_logs_requested"] is True
     assert "runtime_log_pruning_disabled" in data["limitations"][0]
     assert len(calls) == 3
+    assert "python3 -c" not in calls[0][-1]
+    assert json.loads(shlex.split(calls[1][-1])[-1]) == ["run-1"]
     assert "--confirm" in calls[2][-1]
     assert all("--cleanup-runtime-logs" not in call[-1] for call in calls)
 
