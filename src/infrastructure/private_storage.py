@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import sqlite3
 import stat
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, TextIO
@@ -13,6 +15,7 @@ from typing import Any, Iterator, TextIO
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+_PRIVATE_FILE_LOCK_STATE = threading.local()
 
 
 def private_path(path: str | Path) -> Path:
@@ -52,6 +55,48 @@ def ensure_private_file(path: str | Path) -> Path:
     if target.is_symlink():
         raise OSError(f"sensitive file must not be a symlink: {target.name}")
     return target
+
+
+@contextmanager
+def exclusive_private_file_lock(path: str | Path) -> Iterator[None]:
+    target = ensure_private_file(path)
+    lock_key = str(target)
+    process_id = os.getpid()
+    state_process_id = getattr(_PRIVATE_FILE_LOCK_STATE, "process_id", None)
+    if state_process_id != process_id:
+        _PRIVATE_FILE_LOCK_STATE.process_id = process_id
+        _PRIVATE_FILE_LOCK_STATE.held = {}
+    held: dict[str, tuple[int, int]] = _PRIVATE_FILE_LOCK_STATE.held
+    current = held.get(lock_key)
+    if current is not None:
+        descriptor, depth = current
+        held[lock_key] = (descriptor, depth + 1)
+        try:
+            yield
+        finally:
+            held[lock_key] = (descriptor, depth)
+        return
+
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags)
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise OSError(f"sensitive lock must be a regular file: {target.name}")
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        held[lock_key] = (descriptor, 1)
+        try:
+            yield
+        finally:
+            del held[lock_key]
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_private_text(path: str | Path, content: str, *, encoding: str = "utf-8") -> Path:
@@ -196,6 +241,7 @@ __all__ = [
     "connect_private_sqlite",
     "ensure_private_directory",
     "ensure_private_file",
+    "exclusive_private_file_lock",
     "open_private_text",
     "private_path",
     "secure_sqlite_artifacts",

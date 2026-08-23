@@ -8,13 +8,18 @@ import time
 
 import pytest
 
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.option_position_lots import parse_exp_to_ms
+from src.application.ledger.maintenance import auto_close_expired_positions
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
 )
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
+    with_sqlite_repo_transaction,
 )
+from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.lifecycle_outbox import (
     BATCH_RETRY_BACKOFF_MS,
     CLAIM_LEASE_MS,
@@ -366,6 +371,111 @@ def test_blocking_provider_does_not_hold_ledger_or_process_lock(
     batches = repo.list_trade_lifecycle_notification_batches()
     assert len(batches) == 1
     assert batches[0]["status"] == "confirmed"
+
+
+def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.trades import lifecycle_batch_dispatcher
+
+    database = tmp_path / "ledger.sqlite3"
+    dispatcher_repo = SQLiteOptionPositionsRepository(database)
+    auto_close_repo = SQLiteOptionPositionsRepository(database)
+    persist_trade_event_object(
+        auto_close_repo,
+        TradeEvent(
+            event_id="seed-expired-put",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="NVDA",
+                option_type="put",
+                position_side="short",
+                strike=100,
+                expiration_ymd="2026-04-17",
+            ),
+            contracts=1,
+            price=1.0,
+            currency="USD",
+            source="test_seed_open_lot",
+            multiplier=100,
+            lot_id="lot-expired-put",
+            raw_payload={"source_type": "test_seed"},
+        ),
+    )
+    positions = [
+        dict(item["fields"], record_id=item["record_id"])
+        for item in auto_close_repo.list_position_lots()
+    ]
+    positions[0]["_auto_close_underlying_spot"] = 101
+    as_of_ms = parse_exp_to_ms("2026-04-20")
+    assert as_of_ms is not None
+
+    dispatcher_write_started = threading.Event()
+    release_dispatcher_write = threading.Event()
+    auto_close_started = threading.Event()
+    auto_close_connection_started = threading.Event()
+
+    def _hold_dispatcher_write(repo, **_kwargs):
+        def _run(_sqlite_repo, _conn):
+            dispatcher_write_started.set()
+            assert release_dispatcher_write.wait(2)
+            return {"status": "idle", "reason": "test_write_complete"}
+
+        return with_sqlite_repo_transaction(repo, _run)
+
+    monkeypatch.setattr(
+        lifecycle_batch_dispatcher,
+        "dispatch_notification_batch_once",
+        _hold_dispatcher_write,
+    )
+    dispatcher = LifecycleReceiptBatchDispatcher(
+        repo=dispatcher_repo,
+        route=_route(),
+        allowed_accounts={"lx"},
+        send_fn=lambda _payload: (_ for _ in ()).throw(
+            AssertionError("provider must not run in this regression")
+        ),
+    )
+    real_auto_close_connect = auto_close_repo._connect
+
+    def _observed_auto_close_connect():
+        auto_close_connection_started.set()
+        return real_auto_close_connect()
+
+    monkeypatch.setattr(auto_close_repo, "_connect", _observed_auto_close_connect)
+
+    def _run_auto_close():
+        auto_close_started.set()
+        return auto_close_expired_positions(
+            auto_close_repo,
+            positions,
+            as_of_ms=as_of_ms,
+            grace_days=1,
+            max_close=5,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        dispatcher_future = executor.submit(dispatcher.run_once)
+        assert dispatcher_write_started.wait(1)
+        auto_close_future = executor.submit(_run_auto_close)
+        try:
+            assert auto_close_started.wait(1)
+            assert auto_close_connection_started.wait(1)
+            time.sleep(0.05)
+            assert not auto_close_future.done()
+        finally:
+            release_dispatcher_write.set()
+
+        assert dispatcher_future.result(timeout=2)["status"] == "idle"
+        auto_close_result = auto_close_future.result(timeout=2).to_payload()
+
+    assert len(auto_close_result["applied"]) == 1
+    assert auto_close_result["errors"] == []
+    assert auto_close_repo.list_position_lots()[0]["fields"]["status"] == "close"
 
 
 def test_quiet_window_and_oldest_max_wait_are_both_enforced(

@@ -47,6 +47,7 @@ from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 from src.infrastructure.private_storage import (
     connect_private_sqlite,
+    exclusive_private_file_lock,
     private_path,
     secure_sqlite_artifacts,
 )
@@ -2573,27 +2574,51 @@ class SQLiteOptionPositionsRepository:
     def _connect(self) -> sqlite3.Connection:
         conn = connect_private_sqlite(self.db_path)
         initialize_ledger_connection(conn)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        with self._writer_lock():
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
         secure_sqlite_artifacts(self.db_path)
         return conn
 
     @contextmanager
+    def _writer_lock(self):
+        with exclusive_private_file_lock(Path(f"{self.db_path}.writer.lock")):
+            yield
+
+    @contextmanager
+    def _writer_connection(self, *, begin_immediate: bool = False):
+        conn = self._connect()
+        try:
+            with self._writer_lock():
+                if begin_immediate:
+                    conn.execute("BEGIN IMMEDIATE")
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        finally:
+            conn.close()
+            secure_sqlite_artifacts(self.db_path)
+
+    @contextmanager
     def _optional_conn(self, conn: sqlite3.Connection | None, *, commit: bool = False):
-        owned = conn is None
-        if conn is None:
-            conn = self._connect()
-        else:
+        if conn is not None:
             initialize_ledger_connection(conn)
+            yield conn
+            return
+        if commit:
+            with self._writer_connection() as active_conn:
+                yield active_conn
+            return
+        conn = self._connect()
         try:
             yield conn
-            if owned and commit:
-                conn.commit()
         finally:
-            if owned:
-                conn.close()
-                secure_sqlite_artifacts(self.db_path)
+            conn.close()
+            secure_sqlite_artifacts(self.db_path)
 
     def _table_exists(self, name: str, *, conn: sqlite3.Connection | None = None) -> bool:
         with self._optional_conn(conn) as active_conn:
@@ -2604,7 +2629,7 @@ class SQLiteOptionPositionsRepository:
         return row is not None
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._writer_connection() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_events (
@@ -8509,21 +8534,10 @@ def with_sqlite_repo_transaction(
         if require_projection_publication
         else require_option_positions_event_write_repo(repo)
     )
-    conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
-    try:
-        if conn is not None:
-            conn.execute("BEGIN IMMEDIATE")
-        result = fn(sqlite_repo, conn)
-        if conn is not None:
-            conn.commit()
-        return result
-    except Exception:
-        if conn is not None:
-            conn.rollback()
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
+    if isinstance(sqlite_repo, SQLiteOptionPositionsRepository):
+        with sqlite_repo._writer_connection(begin_immediate=True) as conn:
+            return fn(sqlite_repo, conn)
+    return fn(sqlite_repo, None)
 
 
 def require_option_positions_read_repo(repo: Any) -> OptionPositionsReadRepo:

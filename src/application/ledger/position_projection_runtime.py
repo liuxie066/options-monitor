@@ -609,9 +609,7 @@ def _run_runtime(
     candidate = require_position_projection_publication_repo(repo)
     if not isinstance(candidate, SQLiteOptionPositionsRepository):
         raise TypeError("position projection runtime requires SQLite transaction authority")
-    conn = candidate._connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    with candidate._writer_connection(begin_immediate=True) as conn:
         result = run_position_projection_in_transaction(
             candidate,
             events,
@@ -621,13 +619,7 @@ def _run_runtime(
             failure_hook=failure_hook,
         )
         _fail(failure_hook, "before_commit")
-        conn.commit()
         return result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 def _unchanged_runtime_result_if_trusted(

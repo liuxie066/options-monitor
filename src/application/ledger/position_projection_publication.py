@@ -17,6 +17,7 @@ from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     require_position_projection_publication_repo,
     require_option_positions_read_repo,
+    with_sqlite_repo_transaction,
 )
 
 
@@ -49,21 +50,15 @@ def publish_full_position_projection(
 
     candidate = require_position_projection_publication_repo(repo)
     if isinstance(candidate, SQLiteOptionPositionsRepository) and conn is None:
-        active_conn = candidate._connect()
-        try:
-            active_conn.execute("BEGIN IMMEDIATE")
-            result = publish_full_position_projection(
-                candidate,
+        return with_sqlite_repo_transaction(
+            candidate,
+            lambda sqlite_repo, active_conn: publish_full_position_projection(
+                sqlite_repo,
                 records,
                 conn=active_conn,
-            )
-            active_conn.commit()
-            return result
-        except Exception:
-            active_conn.rollback()
-            raise
-        finally:
-            active_conn.close()
+            ),
+            require_projection_publication=True,
+        )
     diff: PositionLotDiff = candidate.apply_position_lot_diff(records, conn=conn)
     try:
         implementation_fingerprint = loaded_projector_implementation_fingerprint()

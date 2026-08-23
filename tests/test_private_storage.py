@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -10,7 +12,12 @@ from domain.storage.repositories import state_repo
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades.inbox import enqueue_trade_payload
 from src.infrastructure import private_storage
-from src.infrastructure.private_storage import connect_private_sqlite, ensure_private_file, secure_sqlite_artifacts
+from src.infrastructure.private_storage import (
+    connect_private_sqlite,
+    ensure_private_file,
+    exclusive_private_file_lock,
+    secure_sqlite_artifacts,
+)
 
 
 def _mode(path: Path) -> int:
@@ -56,6 +63,44 @@ def test_sensitive_file_helper_rejects_symlink_target(tmp_path: Path) -> None:
         ensure_private_file(link)
 
     assert outside.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_exclusive_private_file_lock_serializes_contenders(tmp_path: Path) -> None:
+    lock_path = tmp_path / "private" / "ledger.writer.lock"
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def _hold_first() -> None:
+        with exclusive_private_file_lock(lock_path):
+            first_entered.set()
+            assert release_first.wait(2)
+
+    def _enter_second() -> None:
+        with exclusive_private_file_lock(lock_path):
+            second_entered.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(_hold_first)
+        assert first_entered.wait(1)
+        second = executor.submit(_enter_second)
+        try:
+            assert not second_entered.wait(0.1)
+        finally:
+            release_first.set()
+        first.result(timeout=1)
+        second.result(timeout=1)
+
+    assert second_entered.is_set()
+    assert _mode(lock_path) == 0o600
+
+
+def test_exclusive_private_file_lock_is_reentrant_in_same_thread(tmp_path: Path) -> None:
+    lock_path = tmp_path / "private" / "ledger.writer.lock"
+
+    with exclusive_private_file_lock(lock_path):
+        with exclusive_private_file_lock(lock_path):
+            assert _mode(lock_path) == 0o600
 
 
 def test_sqlite_artifact_helper_tolerates_sidecar_disappearing_before_open(
