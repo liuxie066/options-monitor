@@ -680,12 +680,14 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     name="option_positions_read",
-    catalog_summary="读取授权账户的期权持仓。",
+    catalog_summary="读取授权账户的期权持仓、交易事件与最近平仓记录。",
     description=(
         "Read local option position lots, trade events, lot history, assigned-stock lots, or projection "
         "inspection state. For current exposure use action=list and status=open; preserve account and currency. "
         "For canonical trade history use action=events: each page contains 1-20 rows in stable descending "
         "trade-time order, and next_cursor continues the same signed snapshot without repeating filters. "
+        "For the latest N closed trades or close records use action=events, position_effect=close, and limit=N; "
+        "omit account when the user asks across all authorized accounts. "
         "An expired_position_marked_open warning identifies a local ledger-state inconsistency only; it does not "
         "prove broker settlement, assignment, liquidation, or a pending order. cash_secured_amount is assignment "
         "collateral, not profit, available cash, or loss. action=assigned-stock can add read-only quote evidence "

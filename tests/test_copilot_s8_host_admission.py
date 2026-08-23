@@ -87,6 +87,85 @@ def test_host_registers_successful_read_for_submit_answer(monkeypatch) -> None:
     assert "> 数据时间：2026-08-22T09:30:00+08:00。" in result.user_response
 
 
+def test_host_reports_rejected_answer_as_admission_failure_not_model_outage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {"rows": [{"symbol": "PDD"}]}},
+    )
+    monkeypatch.setattr(
+        copilot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: {
+            "tool_name": "option_positions_read",
+            "ok": True,
+            "status": "complete",
+            "value": {"rows": [{"symbol": "PDD"}]},
+            "coverage": {
+                "status": "complete",
+                "complete_for": "requested_page",
+                "scope": {"position_effect": "close", "limit": 5},
+            },
+            "freshness": {
+                "status": "historical",
+                "as_of": "2026-08-23T02:03:07Z",
+            },
+        },
+    )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        evidence = on_tool_call(
+            {
+                "call_id": "read_recent_closes",
+                "tool_name": "option_positions_read",
+                "arguments": {
+                    "action": "events",
+                    "position_effect": "close",
+                    "limit": 5,
+                },
+            }
+        )
+        rejected = on_tool_call(
+            {
+                "call_id": "answer_rejected",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "最近有 5 条平仓记录。",
+                    "claims": [
+                        {
+                            "text": "最近有 5 条平仓记录",
+                            "kind": "current_fact",
+                            "observation_ids": [evidence["ref"]],
+                            "required_scope": "requested_page",
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["ok"] is False
+        assert rejected["observation"]["reason"] == "claim_freshness_not_supported"
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after answer rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+
+    result = run_contract(_contract("查询最近平仓的5条期权交易记录"), model_settings=_TEST_MODEL)
+
+    assert result.ok is False
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == "Copilot 已读取数据，但答案未通过证据校验。"
+    assert any(event.type == "answer_admission_failed" for event in result.events)
+
+
 def test_host_registers_evidence_budget_narrowing_as_diagnostic(monkeypatch) -> None:
     monkeypatch.setattr(
         copilot_tools,
