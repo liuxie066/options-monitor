@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.14",
+  "base": {
+    "tag": "v1.15.13",
+    "commit": "3387a4d1bc9ccfb9d813e05c3f6a7bc9bf6b5f28"
+  },
+  "reviewed_head": "8d98b249f74eb04438875c11208d11a465d336ca",
+  "commits": [
+    {
+      "sha": "8d98b249f74eb04438875c11208d11a465d336ca",
+      "subject": "fix(ledger): migrate voided legacy events"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed the controlled trade-event pagination migration to preserve legacy rows whose sole contract defect is a non-positive timestamp only when a valid canonical void already neutralizes them.",
+      "commits": [
+        "8d98b249f74eb04438875c11208d11a465d336ca"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
