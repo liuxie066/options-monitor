@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.17",
+  "base": {
+    "tag": "v1.15.16",
+    "commit": "e412e3edfef2744894d1a49659f0835624c45ffd"
+  },
+  "reviewed_head": "6984686ff4a866c888fb1f8e621b2bf1f050280f",
+  "commits": [
+    {
+      "sha": "fc381703b9f42c726432de2036bba72caa15f344",
+      "subject": "fix(copilot): report exhausted trade event queries"
+    },
+    {
+      "sha": "6984686ff4a866c888fb1f8e621b2bf1f050280f",
+      "subject": "fix(release): detect blocked loopback preflight"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added a fast loopback-bind permission probe to full release preflight, giving an immediate non-sandbox rerun instruction while retaining the HTTP and model-path tests.",
+      "commits": [
+        "6984686ff4a866c888fb1f8e621b2bf1f050280f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Reported when a bounded Copilot trade-event query has reached the end of its current result set, so larger follow-up requests explain that a new query is required instead of failing evidence admission.",
+      "commits": [
+        "fc381703b9f42c726432de2036bba72caa15f344"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
