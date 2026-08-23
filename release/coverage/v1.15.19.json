@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.19",
+  "base": {
+    "tag": "v1.15.18",
+    "commit": "53100f7f53000da16704d9cfc89640f7a8f36441"
+  },
+  "reviewed_head": "83116709be2fd0ae8db830d3931778837ec6e808",
+  "commits": [
+    {
+      "sha": "83116709be2fd0ae8db830d3931778837ec6e808",
+      "subject": "feat(storage): govern runtime evidence growth"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Replaced prepared option-position context duplication with a compact v2 current-decision binding while retaining explicit v1 reads for historical runtime snapshots.",
+      "commits": [
+        "83116709be2fd0ae8db830d3931778837ec6e808"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced Shadow Replay data-plan receipts to hashes, counts, action summaries, and safety results while retaining exception type and a non-plaintext error hash, and added a separate three-way-verified `shadow-replay-receipts` remote-prune scope with preview and apply-time plan/content checks.",
+      "commits": [
+        "83116709be2fd0ae8db830d3931778837ec6e808"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bound each fixed scheduled target to its exact reliable Daily Brief revision before committing the scan watermark, allowing delivery-only recovery to rebuild the original report even after the successful-current pointer advances.",
+      "commits": [
+        "83116709be2fd0ae8db830d3931778837ec6e808"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Recognized only the canonical `output -> output_accounts/<account>` compatibility symlink during scan-blob GC preview while continuing to block all other symlink traversal.",
+      "commits": [
+        "83116709be2fd0ae8db830d3931778837ec6e808"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
