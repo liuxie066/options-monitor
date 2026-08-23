@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.15.17 - 2026-08-23
+
+### Bug Fixes
+- Reported when a bounded Copilot trade-event query has reached the end of its current result set, so larger follow-up requests explain that a new query is required instead of failing evidence admission.
+
+### Improvements
+- Added a fast loopback-bind permission probe to full release preflight, giving an immediate non-sandbox rerun instruction while retaining the HTTP and model-path tests.
+
 ## 1.15.16 - 2026-08-23
 
 ### Bug Fixes
