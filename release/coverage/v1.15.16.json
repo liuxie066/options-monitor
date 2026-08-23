@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.16",
+  "base": {
+    "tag": "v1.15.15",
+    "commit": "e9ed6ad0e437a634e612f22bf44eb5a306b45543"
+  },
+  "reviewed_head": "be2650cdaa633649af22ffaa077af0ade5cc1242",
+  "commits": [
+    {
+      "sha": "be2650cdaa633649af22ffaa077af0ade5cc1242",
+      "subject": "fix(copilot): scope follow-up evidence to current request"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept follow-up Copilot answers bound to successful observations from the current request, preventing prior-turn evidence references from rejecting paginated replies.",
+      "commits": [
+        "be2650cdaa633649af22ffaa077af0ade5cc1242"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
