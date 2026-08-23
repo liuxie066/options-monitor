@@ -1141,6 +1141,7 @@ def _submit_answer_description() -> dict[str, Any]:
         "name": "submit_answer",
         "description": (
             "提交经过证据范围和新鲜度校验的结构化最终答案。"
+            "observation_ids 只能引用本次 request 内成功读取的证据，不得复用历史会话 observation。"
             "claim kind 必须匹配证据 freshness：current/fresh + as_of 使用 current_fact；"
             "historical + as_of 使用 historical_fact 或 derived_fact；"
             "unknown/stale 只能在不完整答案中使用 judgment。"

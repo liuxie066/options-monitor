@@ -72,7 +72,7 @@ const CONTROL_PREVIEW_TOOL = "request_control_preview";
 const CONTINUATION_PROMPT =
   "Continue exactly where the previous answer stopped. Do not repeat earlier text. Return only the continuation.";
 const ANSWER_REPAIR_PROMPT =
-  "Your previous final answer did not pass the evidence admission protocol. This is the one permitted repair turn. Call submit_answer as the sole tool call with the exact closed schema; do not return plain prose. Match every claim kind to its evidence freshness: current or fresh with as_of uses current_fact; historical with as_of uses historical_fact or derived_fact; unknown or stale supports only judgment in an incomplete answer.";
+  "Your previous final answer did not pass the evidence admission protocol. This is the one permitted repair turn. Call submit_answer as the sole tool call with the exact closed schema; do not return plain prose. Reference only successful observation IDs returned during the current request; never reuse observation IDs from prior conversation turns. Match every claim kind to its evidence freshness: current or fresh with as_of uses current_fact; historical with as_of uses historical_fact or derived_fact; unknown or stale supports only judgment in an incomplete answer.";
 const PROVIDER_API_KINDS: Record<string, Api> = {
   openai: "openai-responses",
   deepseek: "openai-completions",
