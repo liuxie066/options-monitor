@@ -31,6 +31,7 @@ DEFAULT_REMOTE_RUNTIME_ROOT = "/var/lib/options-monitor"
 DEFAULT_REMOTE_REPO_ROOT = "/opt/options-monitor/current"
 SYNC_RELATIVE_DIRS = ("output_shared/research", "output_shared/required_data")
 LOGS_RELATIVE_DIR = "logs"
+REMOTE_INVENTORY_RUN_BATCH_SIZE = 10
 
 REMOTE_INVENTORY_SCRIPT = r"""
 import json
@@ -44,6 +45,11 @@ from pathlib import Path
 runtime = Path(sys.argv[1])
 since_raw = sys.argv[2] if len(sys.argv) > 2 else ""
 require_replay = (sys.argv[3].strip().lower() in {"1", "true", "yes"}) if len(sys.argv) > 3 else False
+run_ids_raw = sys.argv[4] if len(sys.argv) > 4 else ""
+run_ids_payload = json.loads(run_ids_raw) if run_ids_raw else None
+if run_ids_payload is not None and not isinstance(run_ids_payload, list):
+    raise ValueError("run ids must be a JSON list")
+wanted_run_ids = None if run_ids_payload is None else {str(value) for value in run_ids_payload}
 since_days = int(since_raw) if since_raw else None
 cutoff = None if since_days is None else time.time() - max(since_days, 0) * 86400
 runs_root = runtime / "output_runs"
@@ -169,6 +175,8 @@ def scheduler_summary(run_dir):
 
 if runs_root.exists() and runs_root.is_dir():
     for item in sorted(runs_root.iterdir(), key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
+        if wanted_run_ids is not None and item.name not in wanted_run_ids:
+            continue
         try:
             st = item.stat()
         except OSError:
@@ -823,16 +831,46 @@ def archive_prune_remote(
         }
     source_identity = latest.get("source_identity")
     source_identity = source_identity if isinstance(source_identity, dict) else {}
+    normalized_scope = str(scope or "output-runs").strip().lower()
+    if normalized_scope not in {"output-runs", "shadow-replay-receipts"}:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported archive prune scope: {scope}")
     source = {
         "kind": "ssh",
         "ssh_target": target,
         "runtime_root": str(remote_runtime_root),
     }
+    dry_operation: dict[str, Any] | None = None
+    dry_payload: dict[str, Any] = {}
+    preview_validation: dict[str, Any] = {}
+    planned_delete_runs: list[str] | None = None
+    if normalized_scope == "output-runs":
+        dry_command = _remote_cleanup_command(
+            ssh_target=target,
+            remote_repo_root=remote_repo_root,
+            remote_runtime_root=remote_runtime_root,
+            keep_days=keep_days,
+            keep_count=keep_count,
+            include_logs=include_logs,
+            confirm=False,
+        )
+        dry_operation = _run_command(
+            dry_command,
+            run_cmd=run_cmd,
+            timeout=600,
+            stdout_limit=2_000_000,
+        )
+        dry_payload = _parse_cli_json(dry_operation.get("stdout"))
+        preview_validation = _validate_cleanup_preview(
+            dry_payload,
+            remote_runtime_root=remote_runtime_root,
+        )
+        planned_delete_runs = list(preview_validation.get("planned_delete_run_ids") or [])
     remote_inventory_operation, remote_inventory = _remote_inventory(
         source,
         since_days=None,
         require_replay_evidence=False,
         run_cmd=run_cmd,
+        run_ids=planned_delete_runs,
     )
     remote_runs_raw = (
         remote_inventory.get("runs")
@@ -870,7 +908,6 @@ def archive_prune_remote(
         and str(source_identity.get("source_host") or "").strip()
         == current_source_host
     )
-    normalized_scope = str(scope or "output-runs").strip().lower()
     if normalized_scope == "shadow-replay-receipts":
         return _archive_prune_remote_receipts(
             root=root,
@@ -887,11 +924,16 @@ def archive_prune_remote(
             source_binding_ok=source_binding_ok,
             run_cmd=run_cmd,
         )
-    if normalized_scope != "output-runs":
-        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported archive prune scope: {scope}")
+    assert dry_operation is not None
+    assert planned_delete_runs is not None
+    planned_delete_run_set = set(planned_delete_runs)
     current_runs = {
         str(item.get("run_id")): item
-        for item in _run_inventory(root / "output_runs", base=base)
+        for item in _run_inventory(
+            root / "output_runs",
+            base=base,
+            run_ids=planned_delete_runs,
+        )
         if item.get("run_id")
     }
     verified_run_ids: set[str] = set()
@@ -901,6 +943,8 @@ def archive_prune_remote(
         if not isinstance(item, dict) or not item.get("run_id"):
             continue
         run_id = str(item["run_id"])
+        if run_id not in planned_delete_run_set:
+            continue
         current = current_runs.get(run_id)
         content_matches = bool(
             current
@@ -926,22 +970,6 @@ def archive_prune_remote(
             mutated_archive_run_ids.append(run_id)
         if item.get("deletion_verified") and not remote_content_matches:
             changed_remote_run_ids.append(run_id)
-    dry_command = _remote_cleanup_command(
-        ssh_target=target,
-        remote_repo_root=remote_repo_root,
-        remote_runtime_root=remote_runtime_root,
-        keep_days=keep_days,
-        keep_count=keep_count,
-        include_logs=include_logs,
-        confirm=False,
-    )
-    dry_operation = _run_command(dry_command, run_cmd=run_cmd, timeout=600, stdout_limit=2_000_000)
-    dry_payload = _parse_cli_json(dry_operation.get("stdout"))
-    preview_validation = _validate_cleanup_preview(
-        dry_payload,
-        remote_runtime_root=remote_runtime_root,
-    )
-    planned_delete_runs = list(preview_validation.get("planned_delete_run_ids") or [])
     plan_sha256 = str(preview_validation.get("plan_sha256") or "")
     unverified = [run_id for run_id in planned_delete_runs if run_id not in verified_run_ids]
     guard = {
@@ -962,7 +990,7 @@ def archive_prune_remote(
         and source_binding_ok
         and not unverified,
     }
-    operations = [remote_inventory_operation, dry_operation]
+    operations = [dry_operation, remote_inventory_operation]
     if confirm and guard["confirmable"]:
         confirm_command = _remote_cleanup_command(
             ssh_target=target,
@@ -1049,16 +1077,15 @@ def _select_source_runs(
             Path(source["runtime_root"]) / "output_runs",
             since_days=since_days,
             require_replay_evidence=require_replay_evidence,
+            run_ids=explicit if run_ids is not None else None,
         )
-        selected = [
-            item for item in runs if not explicit or str(item.get("run_id")) in set(explicit)
-        ]
-        return [str(item["run_id"]) for item in selected], None, selected, {}
+        return [str(item["run_id"]) for item in runs], None, runs, {}
     operation, payload = _remote_inventory(
         source,
         since_days=since_days,
         require_replay_evidence=require_replay_evidence,
         run_cmd=run_cmd,
+        run_ids=explicit if run_ids is not None else None,
     )
     raw_runs = payload.get("runs") if isinstance(payload, dict) else []
     runs = raw_runs if isinstance(raw_runs, list) else []
@@ -1171,6 +1198,82 @@ def _remote_inventory(
     since_days: int | None,
     require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
+    run_ids: list[str] | tuple[str, ...] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    selected_run_ids = (
+        None
+        if run_ids is None
+        else list(
+            dict.fromkeys(
+                _safe_run_id(value) for value in run_ids if str(value or "").strip()
+            )
+        )
+    )
+    if selected_run_ids is None or len(selected_run_ids) <= REMOTE_INVENTORY_RUN_BATCH_SIZE:
+        return _remote_inventory_once(
+            source,
+            since_days=since_days,
+            require_replay_evidence=require_replay_evidence,
+            run_cmd=run_cmd,
+            run_ids=selected_run_ids,
+        )
+
+    operations: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
+    for start in range(0, len(selected_run_ids), REMOTE_INVENTORY_RUN_BATCH_SIZE):
+        operation, payload = _remote_inventory_once(
+            source,
+            since_days=since_days,
+            require_replay_evidence=require_replay_evidence,
+            run_cmd=run_cmd,
+            run_ids=selected_run_ids[start : start + REMOTE_INVENTORY_RUN_BATCH_SIZE],
+        )
+        operations.append(operation)
+        payloads.append(payload)
+
+    first = payloads[0]
+    runtime_root = first.get("runtime_root")
+    source_host = first.get("source_host")
+    payloads_valid = all(
+        isinstance(payload.get("runs"), list)
+        and payload.get("runtime_root") == runtime_root
+        and payload.get("source_host") == source_host
+        for payload in payloads
+    )
+    runs = [
+        item
+        for payload in payloads
+        for item in payload.get("runs", [])
+        if isinstance(item, dict)
+    ]
+    ok = all(bool(operation.get("ok")) for operation in operations) and payloads_valid
+    payload = {
+        **first,
+        "runs": runs,
+    }
+    operation = {
+        "command": [item.get("command") for item in operations],
+        "ok": ok,
+        "returncode": 0 if ok else 1,
+        "stdout": json.dumps(
+            {"batch_count": len(operations), "run_count": len(runs)},
+            separators=(",", ":"),
+        ),
+        "stderr": "\n".join(
+            str(item.get("stderr") or "") for item in operations if item.get("stderr")
+        ),
+        "batch_count": len(operations),
+    }
+    return operation, payload
+
+
+def _remote_inventory_once(
+    source: dict[str, Any],
+    *,
+    since_days: int | None,
+    require_replay_evidence: bool,
+    run_cmd: Callable[..., Any],
+    run_ids: list[str] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     remote_command = " ".join(
         [
@@ -1180,11 +1283,20 @@ def _remote_inventory(
             shlex.quote(str(source["runtime_root"])),
             shlex.quote("" if since_days is None else str(max(0, int(since_days)))),
             shlex.quote("1" if require_replay_evidence else "0"),
+            shlex.quote("" if run_ids is None else json.dumps(run_ids)),
         ]
     )
     command = ["ssh", str(source["ssh_target"]), remote_command]
-    operation = _run_command(command, run_cmd=run_cmd, timeout=120, stdout_limit=2_000_000)
-    payload = _parse_json(operation.get("stdout"))
+    operation = _run_command(command, run_cmd=run_cmd, timeout=120, stdout_limit=None)
+    raw_stdout = str(operation.get("stdout") or "")
+    payload = _parse_json(raw_stdout)
+    payload_valid = isinstance(payload.get("runs"), list)
+    operation["ok"] = bool(operation.get("ok")) and payload_valid
+    operation["stdout"] = (
+        json.dumps({"run_count": len(payload["runs"])}, separators=(",", ":"))
+        if payload_valid
+        else _limit_text(raw_stdout, 2000)
+    )
     return operation, payload
 
 
@@ -1193,14 +1305,18 @@ def _source_run_dirs(
     *,
     since_days: int | None,
     require_replay_evidence: bool = False,
+    run_ids: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     if not runs_root.exists() or not runs_root.is_dir():
         return []
     cutoff = None
     if since_days is not None:
         cutoff = datetime.now(timezone.utc).timestamp() - max(0, int(since_days)) * 86400
+    wanted = None if run_ids is None else set(run_ids)
     out: list[dict[str, Any]] = []
     for item in sorted(runs_root.iterdir(), key=lambda path: (path.stat().st_mtime, path.name), reverse=True):
+        if wanted is not None and item.name not in wanted:
+            continue
         if not item.is_dir() or item.is_symlink():
             continue
         mtime = item.stat().st_mtime
@@ -1346,12 +1462,24 @@ def _write_sync_manifest(root: Path, manifest: dict[str, Any]) -> None:
     _write_json(path, manifest)
 
 
-def _run_inventory(runs_root: Path, *, base: Path) -> list[dict[str, Any]]:
+def _run_inventory(
+    runs_root: Path,
+    *,
+    base: Path,
+    run_ids: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
     if not runs_root.exists() or not runs_root.is_dir():
         return []
+    wanted = None if run_ids is None else set(run_ids)
     out: list[dict[str, Any]] = []
     for run_dir in sorted(
-        [item.resolve() for item in runs_root.iterdir() if item.is_dir() and not item.is_symlink()],
+        [
+            item.resolve()
+            for item in runs_root.iterdir()
+            if item.is_dir()
+            and not item.is_symlink()
+            and (wanted is None or item.name in wanted)
+        ],
         key=lambda path: (_mtime_utc(path), path.name),
         reverse=True,
     ):
