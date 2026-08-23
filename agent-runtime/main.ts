@@ -2406,7 +2406,8 @@ async function run(): Promise<void> {
       const stopReason = finalMessage.stopReason;
       if (stopReason !== "stop") {
         finishError(
-          assistantTurns >= (limits.max_iterations as number) ||
+          forcedFinalAtTurn !== null ||
+            assistantTurns >= (limits.max_iterations as number) ||
             (stopReason === "length" && continuationUsed)
             ? safeError("BUDGET_EXHAUSTED", "budget", "agent budget exhausted without a final answer", false)
             : safeModelFailure(finalMessage, metrics.lastCompleted)
