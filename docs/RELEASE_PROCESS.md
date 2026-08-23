@@ -168,11 +168,17 @@ make release-preflight ARGS="--full"
 这会按快到慢的顺序检查：
 
 - 当前 Python 解释器和 git 工作区状态
+- 即将运行 full 或 focused 测试时，确认当前环境允许在 `127.0.0.1` 绑定临时监听端口
 - `VERSION` / `CHANGELOG.md` / tag metadata
 - 上一稳定 tag 到当前版本的 commit-to-release-note coverage
 - `docs/DEPENDENCY_GRAPH.md` 是否过期
 - agent plugin focused tests
 - 完整 pytest（传 `--full` 时）
+
+回环探针在依赖安装和 pytest 之前执行。如果 `socket.bind()` 返回
+`PermissionError: [Errno 1] Operation not permitted`，preflight 会明确停止并提示使用允许本机
+回环监听的非沙箱环境重新执行同一命令；它不会跳过或 `xfail` HTTP/模型调用链测试，也不表示
+发布或远端升级已经开始。其他监听错误不会被归类为 sandbox EPERM，需要按实际错误处理。
 
 如果只是想先看 metadata / dependency graph / focused tests，可省略 `--full`。如果需要在提交后确认发布 commit 没有额外本地改动：
 

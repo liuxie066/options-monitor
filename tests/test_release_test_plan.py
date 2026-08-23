@@ -364,6 +364,7 @@ def _run_release_preflight_with_fake_python(
     tmp_path: Path,
     *args: str,
     node_version: str = "v22.19.0",
+    loopback_bind_denied: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     root = Path(__file__).resolve().parents[1]
     log_path = tmp_path / "python-commands.log"
@@ -371,6 +372,13 @@ def _run_release_preflight_with_fake_python(
     fake_python.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "-c" && "${2:-}" == *"OM_RELEASE_PREFLIGHT_LOOPBACK_PROBE"* ]]; then
+  if [[ "${OM_TEST_LOOPBACK_BIND_DENIED:-0}" == "1" ]]; then
+    printf 'PermissionError: [Errno 1] Operation not permitted\\n' >&2
+    exit 77
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "-c" ]]; then
   printf '3.12.0\\n'
   exit 0
@@ -410,6 +418,7 @@ printf 'npm %s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
             "OM_PYTHON": str(fake_python),
             "OM_TEST_PYTHON_LOG": str(log_path),
             "OM_TEST_NODE_VERSION": node_version,
+            "OM_TEST_LOOPBACK_BIND_DENIED": "1" if loopback_bind_denied else "0",
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
         }
     )
@@ -431,6 +440,7 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     proc, commands = _run_release_preflight_with_fake_python(tmp_path, "--full")
 
     assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "[PREFLIGHT_OK] loopback bind available (127.0.0.1)" in proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == ["-m pytest"]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
@@ -480,6 +490,37 @@ def test_release_preflight_rejects_old_node_before_npm(tmp_path: Path) -> None:
     assert proc.returncode == 1
     assert "Node >=22.19.0 is required; observed=v22.18.9" in proc.stderr
     assert not any(command.startswith("npm ") for command in commands)
+
+
+def test_release_preflight_rejects_sandbox_loopback_denial_before_npm(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(
+        tmp_path,
+        "--full",
+        loopback_bind_denied=True,
+    )
+
+    assert proc.returncode == 1
+    assert (
+        "loopback bind denied: 127.0.0.1 socket.bind() returned "
+        "PermissionError: [Errno 1] Operation not permitted"
+    ) in proc.stderr
+    assert "Rerun this unchanged preflight outside the sandbox" in proc.stderr
+    assert "do not skip or xfail the tests" in proc.stderr
+    assert "No release or remote upgrade has started" in proc.stderr
+    assert commands == []
+
+
+def test_release_preflight_skips_loopback_probe_when_no_listener_tests_run(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(
+        tmp_path,
+        "--skip-focused",
+        loopback_bind_denied=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "loopback bind" not in proc.stdout
+    assert "loopback bind" not in proc.stderr
+    assert not any(command.startswith("-m pytest") for command in commands)
 
 
 def test_release_version_recommendation_maps_to_release_focused_tests() -> None:
