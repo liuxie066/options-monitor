@@ -73,6 +73,45 @@ run_step() {
   echo "[PREFLIGHT_OK] ${label} (${elapsed}s)"
 }
 
+probe_loopback_bind() {
+  local output status
+  status=0
+  output="$("${PYTHON_BIN}" -c '
+# OM_RELEASE_PREFLIGHT_LOOPBACK_PROBE
+import errno
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("127.0.0.1", 0))
+except PermissionError as exc:
+    print(f"PermissionError: [Errno {exc.errno}] {exc.strerror}", file=sys.stderr)
+    raise SystemExit(77 if exc.errno == errno.EPERM else 78) from exc
+except OSError as exc:
+    print(f"OSError: [Errno {exc.errno}] {exc.strerror}", file=sys.stderr)
+    raise SystemExit(78) from exc
+finally:
+    sock.close()
+' 2>&1)" || status=$?
+
+  if [[ "${status}" -eq 0 ]]; then
+    echo "[PREFLIGHT_OK] loopback bind available (127.0.0.1)"
+    return
+  fi
+
+  if [[ "${status}" -eq 77 ]]; then
+    echo "[PREFLIGHT_ERROR] loopback bind denied: 127.0.0.1 socket.bind() returned PermissionError: [Errno 1] Operation not permitted" >&2
+    echo "[PREFLIGHT_HINT] HTTP/model-path tests require local loopback listeners. Rerun this unchanged preflight outside the sandbox or grant loopback bind permission; do not skip or xfail the tests." >&2
+    echo "[PREFLIGHT_HINT] No release or remote upgrade has started." >&2
+    exit 1
+  fi
+
+  echo "[PREFLIGHT_ERROR] loopback bind probe failed before tests: ${output:-unknown error}" >&2
+  echo "[PREFLIGHT_HINT] Resolve this local listener error before release preflight; it is not classified as sandbox EPERM." >&2
+  exit 1
+}
+
 echo "[PREFLIGHT] root=${ROOT}"
 echo "[PREFLIGHT] python=$("${PYTHON_BIN}" --version 2>&1)"
 
@@ -105,6 +144,10 @@ if [[ -n "${status}" ]]; then
   fi
 else
   echo "[PREFLIGHT_OK] git worktree clean"
+fi
+
+if (( FULL == 1 || FOCUSED == 1 )); then
+  probe_loopback_bind
 fi
 
 run_step "Pi runtime locked install" \
