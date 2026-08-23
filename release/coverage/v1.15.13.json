@@ -1,0 +1,37 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.13",
+  "base": {
+    "tag": "v1.15.12",
+    "commit": "fcf9ea8e356fcf0aca6e6eac145f606b2ddaa843"
+  },
+  "reviewed_head": "20fa98cd657e86006ad7cdc1476ed844b78524de",
+  "commits": [
+    {
+      "sha": "f4d17e084e35eee7be0d12db59539964ad6f6fab",
+      "subject": "fix(copilot): recover bounded trade history queries"
+    },
+    {
+      "sha": "20fa98cd657e86006ad7cdc1476ed844b78524de",
+      "subject": "fix(ledger): expose trade event page limit"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Paged Copilot analysis materialization through the bounded trade-event cursor contract so history queries no longer exceed the 20-event tool limit.",
+      "commits": [
+        "f4d17e084e35eee7be0d12db59539964ad6f6fab",
+        "20fa98cd657e86006ad7cdc1476ed844b78524de"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Classified a failed forced-final turn after tool-budget exhaustion as budget exhaustion instead of reporting a model outage.",
+      "commits": [
+        "f4d17e084e35eee7be0d12db59539964ad6f6fab"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
