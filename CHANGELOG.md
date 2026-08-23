@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.15.16 - 2026-08-23
+
 ### Bug Fixes
 - Kept follow-up Copilot answers bound to successful observations from the current request, preventing prior-turn evidence references from rejecting paginated replies.
 
