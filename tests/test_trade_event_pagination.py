@@ -27,6 +27,47 @@ def test_public_api_exposes_trade_event_page_limit() -> None:
     assert MAX_TRADE_EVENT_PAGE_ROWS == 20
 
 
+def test_fresh_exhausted_page_covers_full_query_but_continuation_does_not(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    for index in range(20):
+        repo.upsert_trade_event(
+            _event(
+                f"close-{index:02d}",
+                event_time_ms=10_000 + index,
+                event_type="close",
+            )
+        )
+
+    first_ten = _page(
+        repo,
+        {"account": "lx", "position_effect": "close", "limit": 10},
+    )
+    all_twenty = _page(
+        repo,
+        {"account": "lx", "position_effect": "close", "limit": 20},
+    )
+    second_ten = _page(
+        repo,
+        {"cursor": first_ten["next_cursor"], "limit": 10},
+        account=None,
+        now_epoch_s=1_001,
+    )
+
+    assert first_ten["coverage"]["complete_for"] == "requested_page"
+    assert first_ten["coverage"]["included_count"] == 10
+    assert first_ten["coverage"]["has_more"] is True
+    assert first_ten["coverage"]["total_count"] is None
+    assert all_twenty["coverage"]["complete_for"] == "full_query"
+    assert all_twenty["coverage"]["included_count"] == 20
+    assert all_twenty["coverage"]["total_count"] == 20
+    assert all_twenty["coverage"]["omitted_count"] == 0
+    assert all_twenty["snapshot_exhausted"] is True
+    assert second_ten["coverage"]["complete_for"] == "requested_page"
+    assert second_ten["snapshot_exhausted"] is True
+
+
 def _event(
     event_id: str,
     *,

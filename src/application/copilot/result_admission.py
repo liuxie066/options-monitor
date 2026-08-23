@@ -211,8 +211,10 @@ def _forced_banner(
         }
     )
     banners: list[str] = []
-    if status == "complete" and as_of_values:
-        banners.append(f"> 数据时间：{', '.join(as_of_values)}。")
+    if status == "complete":
+        banners.extend(_complete_coverage_banners(coverages))
+        if as_of_values:
+            banners.append(f"> 数据时间：{', '.join(as_of_values)}。")
     elif status == "partial":
         if len(coverages) <= 1:
             coverage = coverages[0] if coverages else {}
@@ -239,6 +241,27 @@ def _forced_banner(
     if freshness_gap:
         banners.append("> 时效性不足：部分证据缺少有效数据时间或已经过期。")
     return "" if not banners else "\n\n" + "\n".join(banners)
+
+
+def _complete_coverage_banners(
+    coverages: list[dict[str, Any]],
+) -> list[str]:
+    banners: list[str] = []
+    for coverage in coverages:
+        included = _coverage_count(coverage.get("included_count"))
+        included_text = f"{included} 条记录" if isinstance(included, int) else "本页记录"
+        if coverage.get("has_more") is True:
+            banners.append(
+                f"> 查询范围：本页已返回 {included_text}，仍有更多记录；请继续查询下一页。"
+            )
+        elif (
+            coverage.get("has_more") is False
+            and coverage.get("complete_for") == "full_query"
+        ):
+            banners.append(
+                f"> 查询范围：已返回当前条件下全部 {included_text}，没有更多记录。"
+            )
+    return banners
 
 
 def _coverage_banner_detail(

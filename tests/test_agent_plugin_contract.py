@@ -128,7 +128,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     definition = get_tool_definition("option_positions_read")
     assert definition is not None
     definition.validate_input({"action": "list", "limit": 500})
-    with pytest.raises(AgentToolError, match="events limit must be between 1 and 20"):
+    with pytest.raises(AgentToolError, match="单次最多查询 20 条交易事件"):
         definition.validate_input({"action": "events", "limit": 21})
     with pytest.raises(AgentToolError, match="require action=events"):
         definition.validate_input({"action": "list", "cursor": "opaque"})

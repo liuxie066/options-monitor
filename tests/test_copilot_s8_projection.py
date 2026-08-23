@@ -123,8 +123,33 @@ def test_declared_full_query_requires_a_known_total(monkeypatch) -> None:
             },
         },
     )
+    complete_observation = copilot_tools.compact_observation(
+        "test_read",
+        {
+            "ok": True,
+            "data": {
+                "value": 42,
+                "coverage": {
+                    "status": "complete",
+                    "complete_for": "full_query",
+                    "included_count": 1,
+                    "total_count": 1,
+                    "omitted_count": 0,
+                    "has_more": False,
+                },
+            },
+        },
+    )
 
     assert observation["coverage"]["status"] == "unknown"
+    assert complete_observation["coverage"] == {
+        "status": "complete",
+        "complete_for": "full_query",
+        "included_count": 1,
+        "total_count": 1,
+        "omitted_count": 0,
+        "has_more": False,
+    }
 
 
 def test_declared_collection_coverage_requires_included_count(monkeypatch) -> None:

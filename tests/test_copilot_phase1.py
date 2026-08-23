@@ -485,7 +485,7 @@ def test_event_cursor_only_input_selects_events_and_enforces_its_limit() -> None
         fixed_input={"config_key": "us"},
     )
     assert rejected is None
-    assert error == "events limit must be between 1 and 20"
+    assert error == "单次最多查询 20 条交易事件，请将数量设为 1 到 20。"
 
     listed, error = copilot_tools.build_tool_payload(
         "option_positions_read",

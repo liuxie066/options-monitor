@@ -1312,6 +1312,52 @@ def test_trade_event_pagination_stops_before_ledger_when_secret_backend_fails(
     assert exc_info.value.message == "inbound.operation_hmac_key could not be resolved"
 
 
+@pytest.mark.parametrize(
+    ("source_code", "expected_code", "expected_hint"),
+    [
+        (
+            "needs_narrowing",
+            "NEEDS_NARROWING",
+            "单次最多查询 20 条，请缩小数量或增加筛选条件后重新查询。",
+        ),
+        (
+            "cursor_expired",
+            "CURSOR_EXPIRED",
+            "上次查询快照已过期，请重新发起查询；新结果可能与已返回记录重叠。",
+        ),
+    ],
+)
+def test_trade_event_pagination_errors_explain_the_next_user_action(
+    monkeypatch,
+    source_code: str,
+    expected_code: str,
+    expected_hint: str,
+) -> None:
+    import src.application.agent_tools.operations_impl as operations_impl
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.ledger.api import TradeEventPaginationError
+
+    monkeypatch.setattr(operations_impl, "resolve_secret", lambda _name: "test-key")
+
+    def fail_page(*_args, **_kwargs):
+        raise TradeEventPaginationError("pagination unavailable", code=source_code)
+
+    monkeypatch.setattr(operations_impl, "trade_event_page", fail_page)
+
+    with pytest.raises(AgentToolError) as exc_info:
+        operations_impl._events_action(
+            object(),
+            {"account": "lx"},
+            market="us",
+            authorized_accounts=["lx"],
+            normalize_broker=str,
+            normalize_account=str,
+        )
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.hint == expected_hint
+
+
 def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
@@ -1508,6 +1554,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     }
     assert events["data"]["coverage"]["total_count"] == 1
     assert events["data"]["coverage"]["omitted_count"] == 0
+    assert events["data"]["coverage"]["complete_for"] == "full_query"
     assert events["data"]["coverage"]["as_of"] == events["data"]["as_of"]
     event_observation = copilot_tools.compact_observation(
         "option_positions_read",
@@ -1529,8 +1576,10 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert "inbound.operation_hmac_key" in missing_cursor_key["error"]["message"]
     assert paged_first["ok"] is True
     assert paged_first["data"]["has_more"] is True
+    assert paged_first["data"]["coverage"]["complete_for"] == "requested_page"
     assert paged_second["ok"] is True
     assert paged_second["data"]["snapshot_exhausted"] is True
+    assert paged_second["data"]["coverage"]["complete_for"] == "requested_page"
     assert {
         paged_first["data"]["rows"][0]["event_id"],
         paged_second["data"]["rows"][0]["event_id"],
