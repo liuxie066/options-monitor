@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Bound each fixed scheduled target to its exact reliable Daily Brief revision before committing the scan watermark, allowing delivery-only recovery to rebuild the original report even after the successful-current pointer advances.
+- Recognized only the canonical `output -> output_accounts/<account>` compatibility symlink during scan-blob GC preview while continuing to block all other symlink traversal.
+
+### Improvements
+- Replaced prepared option-position context duplication with a compact v2 current-decision binding while retaining explicit v1 reads for historical runtime snapshots.
+- Reduced Shadow Replay data-plan receipts to hashes, counts, action summaries, and safety results while retaining exception type and a non-plaintext error hash, and added a separate three-way-verified `shadow-replay-receipts` remote-prune scope with preview and apply-time plan/content checks.
+
 ## 1.15.18 - 2026-08-23
 
 ### Bug Fixes

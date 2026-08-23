@@ -36,6 +36,8 @@ from src.application.opening_candidate_snapshot import (
     validate_opening_candidate_snapshot,
 )
 from src.application.prepared_option_positions_context import (
+    LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+    LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PREPARED_OPTION_POSITIONS_PAYLOAD_NAME,
@@ -92,6 +94,14 @@ _ROLE_SCHEMAS = {
     "prepared_portfolio_context": PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
     "required_data_snapshot": REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
 }
+
+
+def _prepared_option_binding(schema_version: str) -> tuple[str, str]:
+    if schema_version == PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
+        return schema_version, f"state/{PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"
+    if schema_version == LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
+        return schema_version, f"state/{LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"
+    _fail("REFERENCE_SCHEMA_INVALID", "prepared option context schema is unsupported")
 CURRENT_DECISION_READ_KEYS = tuple(
     "account status reason payload lot_count lifecycle_by_lot lifecycle_by_case lifecycle_quality".split()
 )
@@ -425,14 +435,12 @@ def assemble_runtime_portfolio_snapshot(
                 f"prepared option payload authority mismatch: {field}",
             )
 
-    decision = _mapping(
-        option_context.get("decision_state_snapshot"),
-        "decision state snapshot",
+    option_schema, option_relpath = _prepared_option_binding(
+        str(option_manifest.get("schema_version") or "")
     )
-    current_read = _mapping(
-        decision.get("current_decision_read"),
-        "current decision read",
-    )
+    legacy_decision = option_context.get("decision_state_snapshot")
+    decision = legacy_decision if isinstance(legacy_decision, Mapping) else option_context
+    current_read = _mapping(decision.get("current_decision_read"), "current decision read")
     decision_fingerprint = _sha256(
         decision.get("decision_state_fingerprint"),
         "decision_state_fingerprint",
@@ -463,8 +471,8 @@ def assemble_runtime_portfolio_snapshot(
         },
         {
             "role": "prepared_option_positions_context",
-            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-            "relpath": _ROLE_RELPATHS["prepared_option_positions_context"],
+            "schema_version": option_schema,
+            "relpath": option_relpath,
             "sha256": sha256_bytes(prepared_option_manifest_bytes),
             "content_sha256": option_manifest.get("payload_sha256"),
         },
@@ -496,7 +504,7 @@ def assemble_runtime_portfolio_snapshot(
     reference_payloads = {
         _ROLE_RELPATHS["account_config"]: account_config_bytes,
         _ROLE_RELPATHS["candidate_snapshot_manifest"]: candidate_manifest_bytes,
-        _ROLE_RELPATHS["prepared_option_positions_context"]: prepared_option_manifest_bytes,
+        option_relpath: prepared_option_manifest_bytes,
         _ROLE_RELPATHS["prepared_portfolio_context"]: prepared_portfolio_manifest_bytes,
         _ROLE_RELPATHS["required_data_snapshot"]: required_data_manifest_bytes,
         str(candidate_manifest["status_index"]["relpath"]): candidate_status_index_bytes,
@@ -557,12 +565,16 @@ def assemble_runtime_portfolio_snapshot(
         ),
     }
     legacy = {name: section["facts"] for name, section in sections.items()}
-    snapshot_status = str(decision.get("snapshot_status") or "")
+    snapshot_status = str(
+        decision.get("snapshot_status")
+        or option_context.get("decision_snapshot_status")
+        or ""
+    )
     shadow = _mapping(
         option_context.get("current_decision_shadow"),
         "prepared option current decision shadow",
     )
-    if shadow != decision.get("current_decision_shadow"):
+    if legacy_decision is not None and shadow != decision.get("current_decision_shadow"):
         _fail(
             "SOURCE_BINDING_INVALID",
             "prepared option current decision shadow mismatch",
@@ -570,7 +582,12 @@ def assemble_runtime_portfolio_snapshot(
     shadow_status = str(shadow.get("status") or "")
     ledger_shadow_status = (
         "matched"
-        if snapshot_status == "trusted" and decision.get("actionable") is True and shadow_status == "matched"
+        if snapshot_status == "trusted"
+        and (
+            decision.get("actionable") is True
+            or option_context.get("decision_snapshot_actionable") is True
+        )
+        and shadow_status == "matched"
         else "mismatched"
         if shadow_status == "mismatch"
         else "unavailable"
@@ -1075,6 +1092,15 @@ def validate_replay_bundle(
 
     by_role = {row["role"]: row for row in bindings}
     for role, binding in by_role.items():
+        if role == "prepared_option_positions_context":
+            expected_schema, expected_relpath = _prepared_option_binding(
+                binding["schema_version"]
+            )
+            if binding["schema_version"] != expected_schema:
+                _fail("REFERENCE_SCHEMA_INVALID", f"{role} reference schema mismatch")
+            if binding["relpath"] != expected_relpath:
+                _fail("REFERENCE_PATH_INVALID", f"{role} reference path mismatch")
+            continue
         if binding["schema_version"] != _ROLE_SCHEMAS[role]:
             _fail("REFERENCE_SCHEMA_INVALID", f"{role} reference schema mismatch")
         if binding["relpath"] != _ROLE_RELPATHS[role]:
@@ -1203,7 +1229,7 @@ def _validate_source_bindings(
     option_receipt = owners["ledger_projection"]
     _require_owner_receipt(
         option_receipt,
-        owner_schema_version=PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+        owner_schema_version=str(option_manifest["schema_version"]),
         owner_status=option_status,
         reason_codes=_manifest_reason_codes(option_manifest),
         observed=option_observed,
@@ -1376,7 +1402,7 @@ def _validate_prepared_option_reference(
     _keys(payload, common | specific | optional, "prepared option manifest")
     _require_manifest_identity(
         payload,
-        schema=PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+        schema=str(binding["schema_version"]),
         run_id=expected_run_id,
         account=expected_account,
         config_hash=expected_account_config_sha256,

@@ -261,9 +261,9 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         assert loaded[account]["raw_selected_count"] == 0
         assert loaded[account]["open_positions_min"] == []
         assert loaded[account]["decision_snapshot_status"] == "trusted"
-        assert loaded[account]["current_decision_shadow"] == loaded[account][
-            "decision_state_snapshot"
-        ]["current_decision_shadow"]
+        assert "decision_state_snapshot" not in loaded[account]
+        assert isinstance(loaded[account]["current_decision_read"], dict)
+        assert loaded[account]["decision_snapshot_actionable"] is True
         assert loaded[account]["current_decision_shadow"]["status"] == (
             "not_available"
         )
@@ -347,6 +347,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         Path(lx_manifest["manifest_path"]).parent
         / lx_manifest["payload_relpath"]
     )
+    assert payload_path.stat().st_size < 2 * 1024 * 1024
     payload_path.write_text("{}\n", encoding="utf-8")
     with pytest.raises(
         PreparedOptionPositionsContextError,

@@ -35,6 +35,7 @@ CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
 DELIVERY_POINTER_SCHEMA_VERSION = "daily_decision_brief_delivery.v1"
 LEGACY_DELIVERY_POINTER_SCHEMA_VERSION = DELIVERY_POINTER_SCHEMA_VERSION
 DELIVERY_STATE_SCHEMA_VERSION = "daily_decision_brief_delivery.v2"
+DELIVERY_RECOVERY_SCHEMA_VERSION = "daily_decision_brief_delivery_recovery.v1"
 
 _MARKET_RE = re.compile(r"^[A-Z0-9_-]+$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -250,6 +251,187 @@ def record_daily_decision_brief_candidates(
         }
 
 
+def record_daily_decision_brief_fixed_recovery(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    scheduled_target_market: str,
+    revision: int,
+    brief_digest: str,
+    candidate_identities: list[str] | tuple[str, ...],
+    recorded_at_utc: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Bind one fixed target to its exact successful Brief before target commit."""
+
+    base_path = Path(base).resolve()
+    account_norm = _normalize_account(account)
+    market_norm = _normalize_market(market)
+    date_norm = _normalize_market_date(market_trading_date)
+    target_norm = _normalize_scheduled_target(
+        scheduled_target_market,
+        market_date=date_norm,
+    )
+    revision_norm = _normalize_revision(revision)
+    digest_norm = _normalize_sha256(brief_digest, field="brief_digest")
+    identities = _normalize_candidate_identities(
+        candidate_identities,
+        account=account_norm,
+        market=market_norm,
+    )
+    source_brief = _validate_successful_revision_source(
+        base=base_path,
+        account=account_norm,
+        market=market_norm,
+        market_trading_date=date_norm,
+        revision=revision_norm,
+        source_digest=digest_norm,
+    )
+    if identities != sorted(_candidate_identity_set(source_brief)):
+        raise ValueError("fixed recovery candidate_identities must match the referenced brief")
+    recovery = {
+        "scheduled_target_market": target_norm,
+        "revision": revision_norm,
+        "brief_digest": digest_norm,
+        "candidate_identities": identities,
+        "recorded_at_utc": _coerce_utc_iso(recorded_at_utc),
+    }
+
+    state_dir = paths.account_state_dir(base_path, account_norm)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / f"daily_decision_brief.{market_norm}.lock"
+    delivery_path = _delivery_path(base_path, account_norm, market_norm)
+    recovery_path = _delivery_recovery_path(base_path, account_norm, market_norm)
+    with _exclusive_lock(lock_path):
+        delivery_raw = _read_json_strict(delivery_path)
+        if delivery_raw is not _MISSING:
+            delivery = _normalize_delivery_state(
+                delivery_raw,
+                base=base_path,
+                path=delivery_path,
+                account=account_norm,
+                market=market_norm,
+            )
+            day = delivery["days"].get(date_norm)
+            if isinstance(day, Mapping) and target_norm in day["fixed_reports"]:
+                return {
+                    "recorded": False,
+                    "reason": "envelope_exists",
+                    "recovery": None,
+                    "path": recovery_path,
+                }
+
+        state = _load_or_create_delivery_recovery_state(
+            base=base_path,
+            path=recovery_path,
+            account=account_norm,
+            market=market_norm,
+        )
+        day = state["days"].setdefault(date_norm, {})
+        existing = day.get(target_norm)
+        if isinstance(existing, Mapping):
+            if any(
+                existing.get(key) != recovery[key]
+                for key in (
+                    "scheduled_target_market",
+                    "revision",
+                    "brief_digest",
+                    "candidate_identities",
+                )
+            ):
+                raise DailyDecisionBriefStateError(
+                    "fixed recovery target is already bound to another brief revision"
+                )
+            return {
+                "recorded": False,
+                "reason": "already_recorded",
+                "recovery": dict(existing),
+                "path": recovery_path,
+            }
+        day[target_norm] = recovery
+        atomic_write_json(recovery_path, state)
+        return {
+            "recorded": True,
+            "reason": "recorded",
+            "recovery": recovery,
+            "path": recovery_path,
+        }
+
+
+def read_daily_decision_brief_fixed_recovery(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+) -> dict[str, Any]:
+    """Read the oldest exact fixed-report recovery not superseded by an envelope."""
+
+    base_path = Path(base).resolve()
+    account_norm = _normalize_account(account)
+    market_norm = _normalize_market(market)
+    date_norm = _normalize_market_date(market_trading_date)
+    delivery_path = _delivery_path(base_path, account_norm, market_norm)
+    recovery_path = _delivery_recovery_path(base_path, account_norm, market_norm)
+    raw = _read_json_strict(recovery_path)
+    if raw is _MISSING:
+        return {
+            "available": False,
+            "reason": "not_found",
+            "recovery": None,
+            "path": recovery_path,
+        }
+    state = _normalize_delivery_recovery_state(
+        raw,
+        base=base_path,
+        path=recovery_path,
+        account=account_norm,
+        market=market_norm,
+    )
+    fixed_reports: Mapping[str, Any] = {}
+    delivery_raw = _read_json_strict(delivery_path)
+    if delivery_raw is not _MISSING:
+        delivery = _normalize_delivery_state(
+            delivery_raw,
+            base=base_path,
+            path=delivery_path,
+            account=account_norm,
+            market=market_norm,
+        )
+        delivery_day = delivery["days"].get(date_norm)
+        if isinstance(delivery_day, Mapping):
+            fixed_reports = delivery_day["fixed_reports"]
+    recoveries = state["days"].get(date_norm, {})
+    for target in sorted(recoveries):
+        if target in fixed_reports:
+            continue
+        recovery = dict(recoveries[target])
+        brief = _validate_successful_revision_source(
+            base=base_path,
+            account=account_norm,
+            market=market_norm,
+            market_trading_date=date_norm,
+            revision=int(recovery["revision"]),
+            source_digest=str(recovery["brief_digest"]),
+        )
+        return {
+            "available": True,
+            "reason": "recovery_pending",
+            "recovery": recovery,
+            "brief": brief,
+            "brief_digest": daily_brief_digest(brief),
+            "candidate_identities": sorted(_candidate_identity_set(brief)),
+            "path": recovery_path,
+        }
+    return {
+        "available": False,
+        "reason": "none",
+        "recovery": None,
+        "path": recovery_path,
+    }
+
+
 def prepare_daily_decision_brief_delivery(
     *,
     base: Path,
@@ -449,6 +631,14 @@ def prepare_daily_decision_brief_delivery(
             )
             day["candidate_delivery"] = persisted
         atomic_write_json(delivery_path, state)
+        if kind_norm == "fixed_report":
+            _remove_daily_decision_brief_fixed_recovery(
+                base=base_path,
+                account=account_norm,
+                market=market_norm,
+                market_trading_date=date_norm,
+                scheduled_target_market=str(target_norm),
+            )
         plan = {
             "schema_version": "daily_decision_brief_delivery_plan.v1",
             "run_id": run_id_norm,
@@ -1515,7 +1705,14 @@ def _read_brief_result(
             raise DailyDecisionBriefStateError(f"daily brief revision mismatch: {path}")
     except DailyDecisionBriefStateError as exc:
         return {"available": False, "reason": "state_invalid", "error": str(exc), "brief": None, "path": path}
-    return {"available": True, "reason": "ok", "brief": brief, "path": path}
+    return {
+        "available": True,
+        "reason": "ok",
+        "brief": brief,
+        "brief_digest": daily_brief_digest(brief),
+        "candidate_identities": sorted(_candidate_identity_set(brief)),
+        "path": path,
+    }
 
 
 def _current_path(base: Path, account: str, market: str) -> Path:
@@ -1530,6 +1727,10 @@ def _revision_path(base: Path, account: str, market: str, market_date: str, revi
 
 def _delivery_path(base: Path, account: str, market: str) -> Path:
     return paths.account_state_dir(base, account) / f"daily_decision_brief.{market}.delivery.json"
+
+
+def _delivery_recovery_path(base: Path, account: str, market: str) -> Path:
+    return paths.account_state_dir(base, account) / f"daily_decision_brief.{market}.recovery.json"
 
 
 def _list_revision_numbers(
@@ -1588,6 +1789,144 @@ def _load_or_create_delivery_state(
         account=account,
         market=market,
     )
+
+
+def _empty_delivery_recovery_state(*, account: str, market: str) -> dict[str, Any]:
+    return {
+        "schema_version": DELIVERY_RECOVERY_SCHEMA_VERSION,
+        "account": account,
+        "market": market,
+        "days": {},
+    }
+
+
+def _load_or_create_delivery_recovery_state(
+    *,
+    base: Path,
+    path: Path,
+    account: str,
+    market: str,
+) -> dict[str, Any]:
+    raw = _read_json_strict(path)
+    if raw is _MISSING:
+        return _empty_delivery_recovery_state(account=account, market=market)
+    return _normalize_delivery_recovery_state(
+        raw,
+        base=base,
+        path=path,
+        account=account,
+        market=market,
+    )
+
+
+def _normalize_delivery_recovery_state(
+    raw: Any,
+    *,
+    base: Path,
+    path: Path,
+    account: str,
+    market: str,
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise DailyDecisionBriefStateError(f"daily brief recovery state is not an object: {path}")
+    if raw.get("schema_version") != DELIVERY_RECOVERY_SCHEMA_VERSION:
+        raise DailyDecisionBriefStateError(f"unsupported daily brief recovery schema: {path}")
+    try:
+        state_account = _normalize_account(raw.get("account"))
+        state_market = _normalize_market(raw.get("market"))
+    except ValueError as exc:
+        raise DailyDecisionBriefStateError(f"daily brief recovery state is incompatible: {path}: {exc}") from exc
+    if state_account != account or state_market != market:
+        raise DailyDecisionBriefStateError(f"daily brief recovery identity mismatch: {path}")
+    raw_days = raw.get("days")
+    if not isinstance(raw_days, Mapping):
+        raise DailyDecisionBriefStateError(f"daily brief recovery days are invalid: {path}")
+
+    days: dict[str, dict[str, Any]] = {}
+    for raw_date, raw_recoveries in sorted(raw_days.items()):
+        try:
+            market_date = _normalize_market_date(raw_date)
+        except ValueError as exc:
+            raise DailyDecisionBriefStateError(f"daily brief recovery date is invalid: {path}: {exc}") from exc
+        if not isinstance(raw_recoveries, Mapping):
+            raise DailyDecisionBriefStateError(f"daily brief recoveries are invalid: {path}: {market_date}")
+        normalized_recoveries: dict[str, Any] = {}
+        for raw_target, raw_recovery in sorted(raw_recoveries.items()):
+            if not isinstance(raw_recovery, Mapping):
+                raise DailyDecisionBriefStateError(f"daily brief recovery is invalid: {path}: {raw_target}")
+            try:
+                target = _normalize_scheduled_target(raw_target, market_date=market_date)
+                stored_target = _normalize_scheduled_target(
+                    raw_recovery.get("scheduled_target_market"),
+                    market_date=market_date,
+                )
+                revision = _normalize_revision(raw_recovery.get("revision"))
+                digest = _normalize_sha256(raw_recovery.get("brief_digest"), field="brief_digest")
+                recorded_at = _normalize_required_utc_iso(
+                    raw_recovery.get("recorded_at_utc"),
+                    field="recorded_at_utc",
+                )
+                identities = _normalize_candidate_identities(
+                    raw_recovery.get("candidate_identities") or [],
+                    account=account,
+                    market=market,
+                )
+            except ValueError as exc:
+                raise DailyDecisionBriefStateError(f"daily brief recovery is invalid: {path}: {exc}") from exc
+            if target != stored_target:
+                raise DailyDecisionBriefStateError(f"daily brief recovery target mismatch: {path}: {target}")
+            source_brief = _validate_successful_revision_source(
+                base=base,
+                account=account,
+                market=market,
+                market_trading_date=market_date,
+                revision=revision,
+                source_digest=digest,
+            )
+            if identities != sorted(_candidate_identity_set(source_brief)):
+                raise DailyDecisionBriefStateError(f"daily brief recovery candidates mismatch: {path}: {target}")
+            normalized_recoveries[target] = {
+                "scheduled_target_market": target,
+                "revision": revision,
+                "brief_digest": daily_brief_digest(source_brief),
+                "candidate_identities": identities,
+                "recorded_at_utc": recorded_at,
+            }
+        days[market_date] = normalized_recoveries
+    return {
+        "schema_version": DELIVERY_RECOVERY_SCHEMA_VERSION,
+        "account": account,
+        "market": market,
+        "days": days,
+    }
+
+
+def _remove_daily_decision_brief_fixed_recovery(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    scheduled_target_market: str,
+) -> None:
+    path = _delivery_recovery_path(base, account, market)
+    raw = _read_json_strict(path)
+    if raw is _MISSING:
+        return
+    state = _normalize_delivery_recovery_state(
+        raw,
+        base=base,
+        path=path,
+        account=account,
+        market=market,
+    )
+    day = state["days"].get(market_trading_date)
+    if not isinstance(day, dict) or scheduled_target_market not in day:
+        return
+    day.pop(scheduled_target_market, None)
+    if not day:
+        state["days"].pop(market_trading_date, None)
+    atomic_write_json(path, state)
 
 
 def _delivery_day(state: dict[str, Any], market_date: str) -> dict[str, Any]:
@@ -2816,6 +3155,7 @@ def _relative_path(base: Path, path: Path) -> str:
 
 __all__ = [
     "CURRENT_INDEX_SCHEMA_VERSION",
+    "DELIVERY_RECOVERY_SCHEMA_VERSION",
     "DELIVERY_STATE_SCHEMA_VERSION",
     "DELIVERY_POINTER_SCHEMA_VERSION",
     "LEGACY_DELIVERY_POINTER_SCHEMA_VERSION",
@@ -2832,9 +3172,11 @@ __all__ = [
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery",
     "read_daily_decision_brief_delivery_state",
+    "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",
     "record_daily_decision_brief_candidates",
+    "record_daily_decision_brief_fixed_recovery",
     "validate_daily_decision_brief_delivery_identity",
 ]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import runpy
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -204,13 +206,17 @@ def _verify_remote_archive(repo_root: Path, archive_root: Path) -> None:
 
 
 def _remote_inventory_payload(repo_root: Path, archive_root: Path) -> dict[str, Any]:
-    from src.application.research.archive import _run_inventory
+    from src.application.research.archive import (
+        _run_inventory,
+        _shadow_replay_receipt_inventory,
+    )
 
     return {
         "runtime_root": "/var/lib/options-monitor",
         "runs_root": "/var/lib/options-monitor/output_runs",
         "source_host": "prod.example",
         "runs": _run_inventory(archive_root / "output_runs", base=repo_root),
+        "shadow_replay_receipts": _shadow_replay_receipt_inventory(archive_root),
     }
 
 
@@ -219,6 +225,9 @@ def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
 
     archive_root = tmp_path / "archive"
     _write_run(archive_root)
+    receipt = archive_root / "output_shared/research/shadow_replay/receipts/data-plan.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text('{"schema_version":"shadow_replay_data_plan_receipt.v2"}', encoding="utf-8")
 
     data = archive_verify(repo_root=tmp_path, archive_root=archive_root, now_fn=_fixed_now)
 
@@ -229,6 +238,8 @@ def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
     assert data["runs"][0]["run_id"] == "run-1"
     assert data["runs"][0]["verified"] is True
     assert data["runs"][0]["has_replay_evidence"] is True
+    assert data["shadow_replay_receipts"][0]["path"].endswith("data-plan.json")
+    assert len(data["shadow_replay_receipts"][0]["sha256"]) == 64
     assert latest_path.exists()
     assert json.loads(latest_path.read_text(encoding="utf-8"))["verified_at_utc"] == "2026-06-04T12:00:00Z"
 
@@ -859,6 +870,105 @@ def test_archive_prune_remote_runs_confirm_after_guard_passes(tmp_path: Path) ->
     assert len(calls) == 3
     assert "--confirm" in calls[2][-1]
     assert all("--cleanup-runtime-logs" not in call[-1] for call in calls)
+
+
+def test_archive_prune_remote_receipts_requires_three_way_content_match(
+    tmp_path: Path,
+) -> None:
+    from src.application.research.archive import archive_prune_remote
+
+    archive_root = tmp_path / "archive"
+    _write_run(archive_root, "run-1")
+    receipt = archive_root / "output_shared/research/shadow_replay/receipts/old.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text('{"schema_version":"shadow_replay_data_plan_receipt.v2"}', encoding="utf-8")
+    _verify_remote_archive(tmp_path, archive_root)
+    row = _remote_inventory_payload(tmp_path, archive_root)["shadow_replay_receipts"][0]
+    candidate = {key: row[key] for key in ("path", "size_bytes", "sha256")}
+    plan = {
+        "schema_version": "shadow_replay_receipt_prune.v1",
+        "runtime_root": "/var/lib/options-monitor",
+        "keep_days": 3,
+        "keep_count": 30,
+        "candidates": [candidate],
+    }
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    preview = {
+        **plan,
+        "plan_sha256": plan_sha256,
+        "blockers": [],
+        "changed": False,
+        "deleted_paths": [],
+        "ok": True,
+        "status": "preview",
+    }
+    calls: list[list[str]] = []
+
+    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "shadow_replay_receipt_prune.v1" in command[-1]:
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(preview), stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(_remote_inventory_payload(tmp_path, archive_root)),
+            stderr="",
+        )
+
+    data = archive_prune_remote(
+        repo_root=tmp_path,
+        archive_root=archive_root,
+        ssh_target="deploy@example",
+        scope="shadow-replay-receipts",
+        confirm=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert data["ok"] is True
+    assert data["changed"] is False
+    assert data["scope"] == "shadow-replay-receipts"
+    assert data["deletion_guard"]["confirmable"] is True
+    assert data["deletion_guard"]["unverified_delete_paths"] == []
+    assert len(calls) == 2
+
+
+def test_remote_receipt_prune_script_rechecks_plan_before_apply(tmp_path: Path) -> None:
+    from src.application.research.archive import REMOTE_RECEIPT_PRUNE_SCRIPT
+
+    root = tmp_path / "output_shared/research/shadow_replay/receipts"
+    root.mkdir(parents=True)
+    old = root / "old.json"
+    newest = root / "new.json"
+    old.write_text('{"old":true}', encoding="utf-8")
+    newest.write_text('{"new":true}', encoding="utf-8")
+    old_time = datetime.now(timezone.utc).timestamp() - 3600
+    os.utime(old, (old_time, old_time))
+
+    preview_run = subprocess.run(
+        ["python3", "-c", REMOTE_RECEIPT_PRUNE_SCRIPT, str(tmp_path), "0", "1", "preview", ""],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    preview = json.loads(preview_run.stdout)
+    assert preview["status"] == "preview"
+    assert [row["path"] for row in preview["candidates"]] == [
+        "output_shared/research/shadow_replay/receipts/old.json"
+    ]
+
+    old.write_text('{"changed":true}', encoding="utf-8")
+    apply_run = subprocess.run(
+        ["python3", "-c", REMOTE_RECEIPT_PRUNE_SCRIPT, str(tmp_path), "0", "1", "confirm", preview["plan_sha256"]],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    applied = json.loads(apply_run.stdout)
+    assert applied["ok"] is False
+    assert applied["status"] == "plan_changed"
+    assert old.exists()
 
 
 def test_archive_prune_remote_rejects_malformed_cleanup_preview(tmp_path: Path) -> None:

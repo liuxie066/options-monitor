@@ -1113,6 +1113,48 @@ def test_scan_blob_gc_preview_rejects_runtime_root_symlink(tmp_path: Path) -> No
         module.preview_scan_blob_gc(runtime_root=link)
 
 
+def test_scan_blob_gc_preview_accepts_exact_output_account_compatibility_alias(
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    account_root = root / "output_accounts" / "lx"
+    account_root.mkdir(parents=True)
+    output = root / "output"
+    output.symlink_to(account_root, target_is_directory=True)
+
+    result = module.preview_scan_blob_gc(
+        runtime_root=root,
+        now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["deletion_allowed"] is True
+    assert result["compatibility_aliases_not_followed"] == [
+        {
+            "path": "output",
+            "target": "output_accounts/lx",
+            "classification": "compatibility_alias",
+        }
+    ]
+
+
+def test_scan_blob_gc_preview_rejects_output_alias_outside_account_root(
+    tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = root / "output"
+    output.symlink_to(outside, target_is_directory=True)
+
+    result = module.preview_scan_blob_gc(runtime_root=root)
+
+    assert result["deletion_allowed"] is False
+    assert result["compatibility_aliases_not_followed"] == []
+    assert {row["reason"] for row in result["blockers"]} == {
+        "runtime_subroot_unsafe"
+    }
+
+
 @pytest.mark.parametrize(
     "fault",
     ["manifest_invalid", "manifest_shape_invalid", "blob_missing", "blob_corrupt"],

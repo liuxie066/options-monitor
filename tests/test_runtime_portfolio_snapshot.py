@@ -45,8 +45,8 @@ from src.application.tick_run_workspace import (
 
 _CONTRACT_HASH = "f180e7bbcdd2f9bdaf6edfc540099b5c54156f3c6971ce83ef55c6fea51099c8"
 _INPUT_HASHES = {
-    "current_scale": "f2bbb9054492de662ecc845f2777b06348cec2f0cfccaeba3783f3884862a193",
-    "current_state_10x": "36b764faf7f4570ffc21d36b97d249812e4aae9d66f9cf66e64789c44ee97151",
+    "current_scale": "344f3d943f56981174974f64cd5965a5345d057d1a7dfe1aabfa33379d17d4f7",
+    "current_state_10x": "8e057aa0dc95b4af636ef50bfcd9905f691961cc9c3e08f660a0d36096ec4e09",
 }
 
 
@@ -77,13 +77,9 @@ def _owner_assembly_kwargs() -> dict:
                 "application_received_at_utc",
             )
         },
-        "decision_state_snapshot": {
-            "snapshot_status": "trusted",
-            "actionable": True,
-            "decision_state_fingerprint": ledger["decision_state_fingerprint"],
-            "current_decision_read": current_read,
-            "current_decision_shadow": {"status": "matched"},
-        },
+        "current_decision_read": current_read,
+        "decision_snapshot_status": "trusted",
+        "decision_snapshot_actionable": True,
         "decision_state_fingerprint": ledger["decision_state_fingerprint"],
     }
     option_payload_bytes = canonical_json_bytes(option_payload)

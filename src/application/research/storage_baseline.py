@@ -209,7 +209,7 @@ def preview_scan_blob_gc(
         root=root,
         observed_at=observed_at,
     )
-    file_rows, file_blockers = _gc_file_inventory(
+    file_rows, file_blockers, compatibility_aliases = _gc_file_inventory(
         root=root,
         observed_at=observed_at,
         retained_run_ids=retained_run_ids,
@@ -382,6 +382,7 @@ def preview_scan_blob_gc(
             }
             for item in blockers
         ],
+        "compatibility_aliases_not_followed": compatibility_aliases,
         "deletion_allowed": deletion_allowed,
     }
     hash_plan = {
@@ -465,14 +466,22 @@ def _gc_file_inventory(
     root: Path,
     observed_at: datetime,
     retained_run_ids: AbstractSet[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     rows: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
+    compatibility_aliases: list[dict[str, str]] = []
     for name in (*RUNTIME_SUBROOTS, "manifests"):
         base = root / name
         if not base.exists() and not base.is_symlink():
             continue
-        if base.is_symlink() or not base.is_dir():
+        if base.is_symlink():
+            alias = _gc_compatibility_alias(root=root, name=name, path=base)
+            if alias is not None:
+                compatibility_aliases.append(alias)
+                continue
+            blockers.append(_gc_blocker(reason="runtime_subroot_unsafe", path=name))
+            continue
+        if not base.is_dir():
             blockers.append(_gc_blocker(reason="runtime_subroot_unsafe", path=name))
             continue
         aggregates = _RuntimeAggregates()
@@ -503,7 +512,39 @@ def _gc_file_inventory(
                         path=relpath,
                     )
                 )
-    return sorted(rows, key=lambda item: str(item["path"])), blockers
+    return (
+        sorted(rows, key=lambda item: str(item["path"])),
+        blockers,
+        sorted(compatibility_aliases, key=lambda item: item["path"]),
+    )
+
+
+def _gc_compatibility_alias(
+    *,
+    root: Path,
+    name: str,
+    path: Path,
+) -> dict[str, str] | None:
+    if name != "output":
+        return None
+    accounts_root = root / "output_accounts"
+    if accounts_root.is_symlink() or not accounts_root.is_dir():
+        return None
+    try:
+        target = path.resolve(strict=True)
+        canonical_accounts = accounts_root.resolve(strict=True)
+    except OSError:
+        return None
+    if target.parent != canonical_accounts or not target.is_dir():
+        return None
+    lexical_target = accounts_root / target.name
+    if lexical_target.is_symlink() or lexical_target.resolve(strict=True) != target:
+        return None
+    return {
+        "path": name,
+        "target": target.relative_to(root).as_posix(),
+        "classification": "compatibility_alias",
+    }
 
 
 def _gc_manifest_is_protected(
