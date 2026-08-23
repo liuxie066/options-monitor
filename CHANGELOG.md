@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.15.19 - 2026-08-23
+
 ### Bug Fixes
 - Bound each fixed scheduled target to its exact reliable Daily Brief revision before committing the scan watermark, allowing delivery-only recovery to rebuild the original report even after the successful-current pointer advances.
 - Recognized only the canonical `output -> output_accounts/<account>` compatibility symlink during scan-blob GC preview while continuing to block all other symlink traversal.
