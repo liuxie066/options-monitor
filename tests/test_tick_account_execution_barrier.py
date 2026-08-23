@@ -139,6 +139,7 @@ def _fake_prepare(**kwargs):
 
 def _fake_prepare_options(**kwargs):
     from src.application.prepared_option_positions_context import (
+        PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
         PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
         PreparedOptionPositionsBatch,
     )
@@ -159,7 +160,7 @@ def _fake_prepare_options(**kwargs):
         state_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
         manifest = {
-            "schema_version": "prepared_option_positions_context.v1",
+            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
             "run_id": kwargs["run_id"],
             "account": account,
             "status": "ready",
@@ -714,6 +715,10 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         build_close_advice_required_data_plan,
         publish_close_advice_required_data_plan,
     )
+    from src.application.prepared_option_positions_context import (
+        PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+        PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
+    )
     from src.application.source_receipts import sha256_bytes
     from src.infrastructure.io_utils import atomic_write_json
 
@@ -773,7 +778,7 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         / "accounts"
         / "lx"
         / "state"
-        / "prepared_option_positions_context.v1.json"
+        / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
     )
     option_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
@@ -783,7 +788,7 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     atomic_write_json(
         option_manifest_path,
         {
-            "schema_version": "prepared_option_positions_context.v1",
+            "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
             "run_id": request.run_id,
             "account": "lx",
             "status": "ready",
@@ -799,6 +804,11 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         mod,
         "load_prepared_portfolio_context",
         lambda **_kwargs: _portfolio_context("lx"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_option_positions_context",
+        lambda **_kwargs: {"wheel_read_model": {"batches": []}},
     )
     monkeypatch.setattr(
         mod,

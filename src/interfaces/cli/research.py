@@ -189,6 +189,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_prune.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
     archive_prune.add_argument("--keep-days", type=int, default=3)
     archive_prune.add_argument("--keep-count", type=int, default=30)
+    archive_prune.add_argument(
+        "--scope",
+        choices=("output-runs", "shadow-replay-receipts"),
+        default="output-runs",
+    )
     archive_prune.add_argument("--no-logs", action="store_true")
     archive_prune.add_argument("--confirm", action="store_true")
     research_strategy_lab = research_sub.add_parser(
@@ -993,6 +998,7 @@ def handle_research_command(
                 remote_runtime_root=args.remote_runtime_root,
                 keep_days=args.keep_days,
                 keep_count=args.keep_count,
+                scope=args.scope,
                 include_logs=not bool(args.no_logs),
                 confirm=bool(args.confirm),
             )

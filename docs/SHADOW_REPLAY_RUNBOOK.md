@@ -231,12 +231,21 @@ output_shared/research/remote_archive/prod/
 
 `build-datasets --market us|hk --write` 会按已验证 candidate manifest/snapshot 的 market 过滤样本，必要时用 trace metadata 补充 market 识别；不传 `--market` 才会保留所有市场。CSV-only、缺失 snapshot 或 schema 无法验证的历史 run 会被分类为 unsupported，不会被转换成空的成功 dataset。dataset build 默认会尝试读取每个归档 run 内的 `required_data/parsed/*_required_data.csv`，给 dataset 生成第一批本地 `mark_path_snapshots.jsonl`。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
 
-远端清理必须独立执行。默认只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
+远端清理必须独立执行。默认 `--scope output-runs`，只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
 
 ```bash
 ./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
 ./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30 --confirm
 ```
+
+Shadow Replay maintenance receipt 使用独立 scope，不与 `output_runs` 删除计划混合：
+
+```bash
+./om research archive prune-remote --scope shadow-replay-receipts --remote prod --ssh-target deploy@example --keep-days 14 --keep-count 30
+./om research archive prune-remote --scope shadow-replay-receipts --remote prod --ssh-target deploy@example --keep-days 14 --keep-count 30 --confirm
+```
+
+receipt 清理只接受 `output_shared/research/shadow_replay/receipts/*.json`。确认前必须同时满足：最近一次 verified inventory、本地当前归档和远端当前文件的 path、size、SHA-256 完全一致；确认命令还会重新计算计划摘要并在删除前逐文件复核内容。任一来源变化、符号链接或计划漂移都会拒绝删除。预览成功不构成删除授权，`--confirm` 仍是独立操作。
 
 归档不同步 secrets、runtime config、SQLite、trade events、locks 或 broker-facing state。需要分析交易状态时，应另走脱敏导出，不把生产写路径混进 replay 归档。
 
@@ -282,7 +291,7 @@ DATASET_ID=us-<run-id>
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
 ```
 
-默认 dry-run，只返回会执行的动作，不写 receipt。显式 `--write` 时才执行 `collect_marks` / `settle`，并写 receipt 到 `output_shared/research/shadow_replay/receipts/`。`--action` 只能限制为数据维护动作，例如 `--action settle`；它不接受 `analyze`，人工复盘仍从 `analyze` 命令进入。
+默认 dry-run，只返回会执行的动作，不写 receipt。显式 `--write` 时才执行 `collect_marks` / `settle`，并写紧凑的 `shadow_replay_data_plan_receipt.v2` receipt 到 `output_shared/research/shadow_replay/receipts/`。receipt 保留计划/状态摘要、计数、canonical hash、动作结果和 safety；action exception 额外保留异常类型与原始 message 的 SHA-256，不持久化可能含路径或凭据的异常明文。receipt 不再复制完整 before/after status payload，完整研究事实仍由 dataset artifact 持有。`--action` 只能限制为数据维护动作，例如 `--action settle`；它不接受 `analyze`，人工复盘仍从 `analyze` 命令进入。
 
 先检查 readiness：
 

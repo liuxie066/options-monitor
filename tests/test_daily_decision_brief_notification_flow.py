@@ -715,20 +715,21 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
     assert "现金总额｜$100,000.00" in message
 
 
-def test_pipeline_failure_nonfixed_is_quiet_but_commits_after_failure_artifact(monkeypatch, tmp_path: Path) -> None:
+def test_pipeline_failure_nonfixed_is_quiet_and_keeps_scan_retryable(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
 
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed-half", fixed=False, pipeline_ok=False)
     assert mod.run_tick_notification_flow(bundle.request) == 0
-    assert bundle.commits == [{"lx": HALF_TARGET}]
+    assert bundle.commits == []
     assert not bundle.request.tick_metrics["daily_brief"]["prepared"][0]["delivery_key"]
 
 
-def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, tmp_path: Path) -> None:
+def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import (
         read_daily_decision_brief_delivery_state,
+        read_latest_daily_decision_brief,
         read_retryable_daily_decision_brief_delivery,
     )
 
@@ -755,22 +756,25 @@ def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, t
         market="US",
         market_trading_date=MARKET_DATE,
     )["envelope"]
-    assert pending
+    assert pending is None
+    assert read_latest_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["available"] is True
 
     retry_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=retry_calls)
     retry = _request(tmp_path, run_id="commit-recovery")
     assert mod.run_tick_notification_flow(retry.request) == 0
     assert retry.commits == [{"lx": FIXED_TARGET}]
-    assert retry_calls[0]["message"] == pending["rendered_message"]
     delivery = read_daily_decision_brief_delivery_state(
         base=tmp_path,
         account="lx",
         market="US",
     )["state"]
     confirmed = delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
-    assert confirmed["delivery_key"] == pending["delivery_key"]
-    assert confirmed["message_sha256"] == pending["message_sha256"]
+    assert retry_calls[0]["message"] == confirmed["rendered_message"]
     assert confirmed["status"] == "confirmed"
 
 
@@ -832,8 +836,8 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
         if event.get("step") == "tick_latency"
     ]
     assert latency_stages == [
-        "daily_brief_prepare",
         "scheduler_target_commit",
+        "daily_brief_prepare",
         "provider_delivery",
         "recommendation_point_observer",
     ]
@@ -1259,6 +1263,88 @@ def test_delivery_only_without_envelope_is_read_only_and_skips_assembler(monkeyp
     assert mod.run_tick_notification_flow(bundle.request) == 0
     assert bundle.completions == [{"status": "skipped", "message": "no_retryable_delivery"}]
     assert not (tmp_path / "output_runs").exists()
+
+
+def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+        read_daily_decision_brief_fixed_recovery,
+        read_daily_decision_brief_delivery_state,
+        read_latest_daily_decision_brief,
+        read_retryable_daily_decision_brief_delivery,
+    )
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report as actual_render_fixed_report,
+    )
+
+    _patch_assembler(monkeypatch)
+    first = _request(tmp_path, run_id="render-crash")
+    monkeypatch.setattr(
+        mod,
+        "render_fixed_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
+    )
+    with pytest.raises(RuntimeError, match="render failed"):
+        mod.run_tick_notification_flow(first.request)
+    assert first.commits == [{"lx": FIXED_TARGET}]
+    assert read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )["envelope"] is None
+    recovery = read_daily_decision_brief_fixed_recovery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert recovery["available"] is True
+    assert recovery["recovery"]["revision"] == 0
+    original_digest = recovery["brief_digest"]
+
+    advanced = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=_brief(
+            base=tmp_path,
+            run_id="later-scan",
+            candidate=False,
+        ),
+    )
+    assert advanced["current_revision"] == 1
+    assert advanced["current_brief_digest"] != original_digest
+    assert read_latest_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["brief"]["revision"] == 1
+
+    monkeypatch.setattr(mod, "render_fixed_report", actual_render_fixed_report)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    retry = _request(tmp_path, run_id="delivery-recovery", delivery_only=True)
+
+    assert mod.run_tick_notification_flow(retry.request) == 0
+    assert len(calls) == 1
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    envelope = state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    assert envelope["status"] == "confirmed"
+    assert envelope["revision"] == 0
+    assert envelope["source_digest"] == original_digest
+    assert read_daily_decision_brief_fixed_recovery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )["available"] is False
 
 
 def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_path: Path) -> None:

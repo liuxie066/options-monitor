@@ -201,7 +201,82 @@ paths = {}
 for rel in ("output_shared/research", "output_shared/required_data", "logs"):
     path = runtime / rel
     paths[rel] = {"exists": path.exists(), "is_dir": path.is_dir()}
-print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "source_host": socket.getfqdn(), "require_replay_evidence": require_replay, "runs": runs, "paths": paths}))
+receipt_root = runtime / "output_shared/research/shadow_replay/receipts"
+receipts = []
+if receipt_root.exists() and receipt_root.is_dir() and not receipt_root.is_symlink():
+    for path in sorted(receipt_root.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        stat = path.stat()
+        receipts.append({
+            "path": str(path.relative_to(runtime)),
+            "size_bytes": stat.st_size,
+            "mtime": stat.st_mtime,
+            "sha256": digest.hexdigest(),
+        })
+print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "source_host": socket.getfqdn(), "require_replay_evidence": require_replay, "runs": runs, "shadow_replay_receipts": receipts, "paths": paths}))
+""".strip()
+
+REMOTE_RECEIPT_PRUNE_SCRIPT = r"""
+import hashlib
+import json
+import sys
+import time
+from pathlib import Path
+
+runtime = Path(sys.argv[1])
+keep_days = max(0, int(sys.argv[2]))
+keep_count = max(1, int(sys.argv[3]))
+confirm = sys.argv[4] == "confirm"
+expected = sys.argv[5].strip().lower() if len(sys.argv) > 5 else ""
+root = runtime / "output_shared/research/shadow_replay/receipts"
+blockers = []
+rows = []
+if root.is_symlink():
+    blockers.append("receipt_root_is_symlink")
+elif root.exists() and not root.is_dir():
+    blockers.append("receipt_root_is_not_directory")
+elif root.is_dir():
+    for path in root.iterdir():
+        if path.suffix != ".json":
+            continue
+        if path.is_symlink() or not path.is_file():
+            blockers.append("unsafe_receipt_entry:" + path.name)
+            continue
+        stat = path.stat()
+        rows.append({"path": str(path.relative_to(runtime)), "size_bytes": stat.st_size, "mtime": stat.st_mtime, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+rows.sort(key=lambda row: (row["mtime"], row["path"]), reverse=True)
+cutoff = time.time() - keep_days * 86400
+candidates = [row for index, row in enumerate(rows) if index >= keep_count and row["mtime"] < cutoff]
+stable_candidates = [{key: row[key] for key in ("path", "size_bytes", "sha256")} for row in candidates]
+plan = {"schema_version": "shadow_replay_receipt_prune.v1", "runtime_root": str(runtime), "keep_days": keep_days, "keep_count": keep_count, "candidates": stable_candidates}
+plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+payload = {**plan, "plan_sha256": plan_sha256, "blockers": blockers, "changed": False, "deleted_paths": []}
+if confirm:
+    if blockers:
+        payload.update({"ok": False, "status": "blocked"})
+    elif expected != plan_sha256:
+        payload.update({"ok": False, "status": "plan_changed"})
+    else:
+        verified = True
+        for row in stable_candidates:
+            path = runtime / row["path"]
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != row["size_bytes"] or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+                verified = False
+                break
+        if not verified:
+            payload.update({"ok": False, "status": "content_changed"})
+        else:
+            for row in stable_candidates:
+                (runtime / row["path"]).unlink()
+            payload.update({"ok": True, "status": "applied", "changed": bool(stable_candidates), "deleted_paths": [row["path"] for row in stable_candidates]})
+else:
+    payload.update({"ok": not blockers, "status": "preview" if not blockers else "blocked"})
+print(json.dumps(payload, sort_keys=True))
 """.strip()
 
 
@@ -487,6 +562,7 @@ def archive_verify(
         rel: _dir_payload(root / rel, base=base)
         for rel in (*SYNC_RELATIVE_DIRS, LOGS_RELATIVE_DIR)
     }
+    shadow_replay_receipts = _shadow_replay_receipt_inventory(root)
     data = {
         "schema_version": SCHEMA_VERSION,
         "action": "verify",
@@ -506,11 +582,36 @@ def archive_verify(
         },
         "runs": runs,
         "shared": shared,
+        "shadow_replay_receipts": shadow_replay_receipts,
     }
     manifests = root / "manifests"
     manifests.mkdir(parents=True, exist_ok=True)
     _write_json(manifests / "inventory.latest.json", data)
     return data
+
+
+def _shadow_replay_receipt_inventory(root: Path) -> list[dict[str, Any]]:
+    receipt_root = root / "output_shared/research/shadow_replay/receipts"
+    if receipt_root.is_symlink() or not receipt_root.is_dir():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(receipt_root.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        stat = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        rows.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size_bytes": stat.st_size,
+                "mtime": stat.st_mtime,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return rows
 
 
 def archive_build_datasets(
@@ -701,6 +802,7 @@ def archive_prune_remote(
     keep_days: int = 3,
     keep_count: int = 30,
     include_logs: bool = True,
+    scope: str = "output-runs",
     confirm: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
@@ -768,6 +870,25 @@ def archive_prune_remote(
         and str(source_identity.get("source_host") or "").strip()
         == current_source_host
     )
+    normalized_scope = str(scope or "output-runs").strip().lower()
+    if normalized_scope == "shadow-replay-receipts":
+        return _archive_prune_remote_receipts(
+            root=root,
+            remote=remote,
+            target=target,
+            remote_runtime_root=remote_runtime_root,
+            keep_days=keep_days,
+            keep_count=keep_count,
+            confirm=confirm,
+            latest=latest,
+            remote_inventory=remote_inventory,
+            remote_inventory_operation=remote_inventory_operation,
+            remote_inventory_ok=remote_inventory_ok,
+            source_binding_ok=source_binding_ok,
+            run_cmd=run_cmd,
+        )
+    if normalized_scope != "output-runs":
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported archive prune scope: {scope}")
     current_runs = {
         str(item.get("run_id")): item
         for item in _run_inventory(root / "output_runs", base=base)
@@ -886,6 +1007,7 @@ def archive_prune_remote(
     return {
         "schema_version": SCHEMA_VERSION,
         "action": "prune-remote",
+        "scope": "output-runs",
         "ok": bool(ok),
         "changed": bool(confirm and ok and len(operations) > 1),
         "dry_run": not bool(confirm),
@@ -1542,6 +1664,168 @@ def _remote_cleanup_command(
         args.extend(["--confirm", "--yes"])
     remote_command = "cd " + shlex.quote(str(remote_repo_root)) + " && " + " ".join(shlex.quote(arg) for arg in args)
     return ["ssh", ssh_target, remote_command]
+
+
+def _remote_receipt_prune_command(
+    *,
+    ssh_target: str,
+    remote_runtime_root: str | Path,
+    keep_days: int,
+    keep_count: int,
+    confirm: bool,
+    expected_plan_sha256: str = "",
+) -> list[str]:
+    args = [
+        "python3",
+        "-c",
+        REMOTE_RECEIPT_PRUNE_SCRIPT,
+        str(remote_runtime_root),
+        str(max(0, int(keep_days))),
+        str(max(1, int(keep_count))),
+        "confirm" if confirm else "preview",
+        str(expected_plan_sha256 or ""),
+    ]
+    return ["ssh", ssh_target, " ".join(shlex.quote(arg) for arg in args)]
+
+
+def _receipt_rows_by_path(rows: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(rows, list):
+        return {}
+    return {
+        str(row.get("path")): row
+        for row in rows
+        if isinstance(row, dict) and row.get("path")
+    }
+
+
+def _receipt_identity(row: dict[str, Any] | None) -> tuple[Any, Any] | None:
+    if not row:
+        return None
+    return row.get("size_bytes"), row.get("sha256")
+
+
+def _archive_prune_remote_receipts(
+    *,
+    root: Path,
+    remote: str,
+    target: str,
+    remote_runtime_root: str | Path,
+    keep_days: int,
+    keep_count: int,
+    confirm: bool,
+    latest: dict[str, Any],
+    remote_inventory: dict[str, Any],
+    remote_inventory_operation: dict[str, Any],
+    remote_inventory_ok: bool,
+    source_binding_ok: bool,
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    latest_rows = _receipt_rows_by_path(latest.get("shadow_replay_receipts"))
+    local_rows = _receipt_rows_by_path(_shadow_replay_receipt_inventory(root))
+    remote_rows = _receipt_rows_by_path(remote_inventory.get("shadow_replay_receipts"))
+    preview_operation = _run_command(
+        _remote_receipt_prune_command(
+            ssh_target=target,
+            remote_runtime_root=remote_runtime_root,
+            keep_days=keep_days,
+            keep_count=keep_count,
+            confirm=False,
+        ),
+        run_cmd=run_cmd,
+        timeout=600,
+        stdout_limit=2_000_000,
+    )
+    preview = _parse_cli_json(preview_operation.get("stdout"))
+    candidates = preview.get("candidates") if isinstance(preview.get("candidates"), list) else []
+    unverified: list[str] = []
+    for row in candidates:
+        path = str(row.get("path") or "") if isinstance(row, dict) else ""
+        identity = _receipt_identity(row if isinstance(row, dict) else None)
+        if not path or not identity or not (
+            identity == _receipt_identity(latest_rows.get(path))
+            == _receipt_identity(local_rows.get(path))
+            == _receipt_identity(remote_rows.get(path))
+        ):
+            unverified.append(path or "<invalid>")
+    plan_sha256 = str(preview.get("plan_sha256") or "").strip().lower()
+    preview_valid = (
+        preview.get("schema_version") == "shadow_replay_receipt_prune.v1"
+        and preview.get("status") == "preview"
+        and preview.get("ok") is True
+        and not preview.get("blockers")
+        and len(plan_sha256) == 64
+        and all(character in "0123456789abcdef" for character in plan_sha256)
+        and str(preview.get("runtime_root") or "").rstrip("/")
+        == str(remote_runtime_root).rstrip("/")
+        and preview.get("keep_days") == max(0, int(keep_days))
+        and preview.get("keep_count") == max(1, int(keep_count))
+    )
+    guard = {
+        "verified_inventory_path": str(root / "manifests" / "inventory.latest.json"),
+        "source_binding_ok": source_binding_ok,
+        "remote_inventory_ok": remote_inventory_ok,
+        "planned_delete_paths": [str(row.get("path")) for row in candidates if isinstance(row, dict)],
+        "unverified_delete_paths": unverified,
+        "plan_sha256": plan_sha256 or None,
+        "confirmable": bool(preview_operation.get("ok")) and preview_valid and source_binding_ok and not unverified,
+    }
+    operations = [remote_inventory_operation, preview_operation]
+    if confirm and guard["confirmable"]:
+        apply_operation = _run_command(
+            _remote_receipt_prune_command(
+                ssh_target=target,
+                remote_runtime_root=remote_runtime_root,
+                keep_days=keep_days,
+                keep_count=keep_count,
+                confirm=True,
+                expected_plan_sha256=plan_sha256,
+            ),
+            run_cmd=run_cmd,
+            timeout=600,
+            stdout_limit=2_000_000,
+        )
+        apply_payload = _parse_cli_json(apply_operation.get("stdout"))
+        planned_paths = guard["planned_delete_paths"]
+        apply_operation["ok"] = (
+            bool(apply_operation.get("ok"))
+            and apply_payload.get("ok") is True
+            and apply_payload.get("status") == "applied"
+            and apply_payload.get("plan_sha256") == plan_sha256
+            and apply_payload.get("deleted_paths") == planned_paths
+        )
+        operations.append(apply_operation)
+    elif confirm:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "action": "prune-remote",
+            "scope": "shadow-replay-receipts",
+            "ok": False,
+            "changed": False,
+            "dry_run": False,
+            "status": "remote_prune_guard_failed",
+            "remote": _safe_label(remote or DEFAULT_REMOTE),
+            "archive_root": str(root),
+            "deletion_guard": guard,
+            "operations": operations,
+        }
+    ok = all(bool(item.get("ok")) for item in operations)
+    apply_payload = _parse_cli_json(operations[-1].get("stdout")) if len(operations) == 3 else {}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "action": "prune-remote",
+        "scope": "shadow-replay-receipts",
+        "ok": ok,
+        "changed": bool(confirm and ok and apply_payload.get("changed")),
+        "dry_run": not confirm,
+        "remote": _safe_label(remote or DEFAULT_REMOTE),
+        "archive_root": str(root),
+        "remote_runtime_root": str(remote_runtime_root),
+        "keep_days": max(0, int(keep_days)),
+        "keep_count": max(1, int(keep_count)),
+        "deletion_guard": guard,
+        "operations": operations,
+        "remote_cleanup_preview": preview,
+    }
 
 
 def _planned_delete_runs(payload: dict[str, Any]) -> list[str]:

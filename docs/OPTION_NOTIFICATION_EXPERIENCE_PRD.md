@@ -93,7 +93,7 @@ scheduler 触发
 
 `09:30` 不执行扫描，由 `09:40` 开盘后完整报告替代，避免开盘后 10 分钟内重复扫描。港股午休、非交易日、市场 gate 和账户级去重继续生效。现有 10 分钟定时任务只负责唤醒 scheduler；不属于上述目标点时，扫描决策必须 no-op，不执行 pipeline、不请求 broker、不生成新快照或 revision。
 
-扫描 no-op 不等于丢弃发送恢复机会：如果账户+市场已经存在持久化的 pending/ambiguous delivery envelope，且当前仍在既有发送允许窗口内，本次唤醒可以只复用原 envelope 做幂等核验或精确重试。delivery-only 重试不得生成新候选差异、不得改变 revision、candidate set、delivery key 或 message hash。
+扫描 no-op 不等于丢弃发送恢复机会：如果账户+市场已经存在持久化的 pending/ambiguous delivery envelope，且当前仍在既有发送允许窗口内，本次唤醒可以只复用原 envelope 做幂等核验或精确重试。固定报告在提交 scheduler target 前必须持久化 target、revision、Brief digest 和候选 identity 的精确恢复绑定；如果渲染在 envelope 落盘前中断，delivery-only 从该绑定读取 immutable revision 并重建一次 envelope，即使 successful-current 已经前移也不得改用 latest Brief。已有 envelope 时仍必须精确复用，不得旋转 delivery key 或 message hash。
 
 账户级调度去重必须以“已处理的 scheduled scan target”作为权威水位，不能用 pipeline 实际完成时间推断某个计划点已经执行。实际完成时间只用于运行观测。
 
@@ -166,7 +166,7 @@ scheduler 触发
 6. provider 确认成功前不得标记该计划点已发送；
 7. 相同账户、市场、计划点的重试不得重复送达；
 8. provider 未确认的完整报告必须保存稳定 envelope，并可在后续 10 分钟唤醒点做 delivery-only 精确重试，无需等待下一次策略扫描；
-9. delivery-only 重试不得请求 broker、更新 successful current、生成 revision 或旋转 delivery key；
+9. delivery-only 重试不得请求 broker、更新 successful current 或生成 revision；已有 envelope 必须原样复用，只有存在固定目标的 target/revision/digest 恢复绑定且 envelope 缺失时，才允许从该 immutable revision 确定性重建；
 10. `15:50` 完整报告发送失败时，允许在仍属既有发送窗口的 `16:00` 唤醒点重试原 envelope。
 
 ### 7.3 固定报告结构

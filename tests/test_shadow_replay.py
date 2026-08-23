@@ -1402,6 +1402,59 @@ def test_shadow_replay_data_plan_defers_remaining_collects_after_opend_rate_limi
     assert result["actions"][1]["reason"] == "opend_rate_limit_circuit_open"
 
 
+def test_shadow_replay_data_plan_receipt_preserves_bounded_exception_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import hashlib
+    import src.application.shadow_replay.data_plan as data_plan_module
+
+    message = "OpenD timed out at /private/runtime/account-secret"
+    plan_rows = [
+        {
+            "dataset_id": "failed",
+            "dataset_dir": str(tmp_path / "failed"),
+            "action": "collect_marks",
+            "reason": "sampling_due",
+            "dataset_integrity": {"status": "verified"},
+        }
+    ]
+    monkeypatch.setattr(
+        data_plan_module,
+        "shadow_replay_dataset_status",
+        lambda **_kwargs: {
+            "dataset_root": str(tmp_path),
+            "summary": {"dataset_count": 1},
+            "data_plan": plan_rows,
+            "datasets": [],
+        },
+    )
+    monkeypatch.setattr(
+        data_plan_module,
+        "collect_shadow_replay_marks",
+        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError(message)),
+    )
+
+    result = data_plan_module.run_shadow_replay_data_plan(
+        repo_root=tmp_path,
+        source="opend",
+        write=True,
+        receipt_dir=tmp_path / "receipts",
+        now_utc="2026-08-01T00:00:00Z",
+    )
+
+    action = result["actions"][0]
+    receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+    receipt_action = receipt["actions"][0]
+    assert action["error"] == f"TimeoutError: {message}"
+    assert receipt_action["error_type"] == "TimeoutError"
+    assert receipt_action["error_message_sha256"] == hashlib.sha256(
+        message.encode("utf-8")
+    ).hexdigest()
+    assert "error" not in receipt_action
+    assert "account-secret" not in json.dumps(receipt, ensure_ascii=False)
+
+
 def test_shadow_replay_data_plan_skips_unverified_without_consuming_limit(
     monkeypatch,
     tmp_path: Path,
@@ -1576,6 +1629,15 @@ def test_shadow_replay_data_plan_collects_local_marks_and_receipt(tmp_path: Path
     assert result["status_after"]["datasets"][0]["next_suggested_action"] == "collect_marks"
     assert result["safety"]["persistent_write_targets"] == ["shadow_replay_dataset", "shadow_replay_receipt"]
     assert receipt_path.exists()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == "shadow_replay_data_plan_receipt.v2"
+    assert "status_before" not in receipt
+    assert "status_after" not in receipt
+    assert receipt["status_before_sha256"]
+    assert receipt["status_after_sha256"]
+    assert receipt_path.stat().st_size < 512 * 1024
+    assert result["receipt_schema_version"] == receipt["schema_version"]
+    assert result["receipt_sha256"]
     assert len(_jsonl(dataset_dir / "mark_path_snapshots.jsonl")) == 2
 
 

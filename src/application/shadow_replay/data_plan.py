@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +20,7 @@ from src.application.shadow_replay.status import shadow_replay_dataset_status
 
 
 DATA_PLAN_SCHEMA_VERSION = "shadow_replay_data_plan_run.v1"
+DATA_PLAN_RECEIPT_SCHEMA_VERSION = "shadow_replay_data_plan_receipt.v2"
 DEFAULT_ACTIONS = ("collect_marks", "settle")
 SUPPORTED_ACTIONS = ("collect_marks", "settle")
 
@@ -151,8 +154,102 @@ def run_shadow_replay_data_plan(
         ),
     }
     if receipt_path is not None:
-        write_json(receipt_path, result)
+        receipt = _compact_receipt(result)
+        write_json(receipt_path, receipt)
+        result["receipt_schema_version"] = DATA_PLAN_RECEIPT_SCHEMA_VERSION
+        result["receipt_sha256"] = hashlib.sha256(
+            receipt_path.read_bytes()
+        ).hexdigest()
+    else:
+        result["receipt_schema_version"] = None
+        result["receipt_sha256"] = None
     return result
+
+
+def _compact_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    before = result.get("status_before")
+    after = result.get("status_after")
+    return {
+        "schema_version": DATA_PLAN_RECEIPT_SCHEMA_VERSION,
+        "result_schema_version": result["schema_version"],
+        "generated_at_utc": result["generated_at_utc"],
+        "write": result["write"],
+        "source": result["source"],
+        "opend_base_root": result["opend_base_root"],
+        "dataset_root": result["dataset_root"],
+        "required_data_root": result["required_data_root"],
+        "actions_enabled": result["actions_enabled"],
+        "max_datasets": result["max_datasets"],
+        "summary": result["summary"],
+        "status_before_summary": _status_receipt_summary(before),
+        "status_before_sha256": _canonical_sha256(before),
+        "status_after_summary": _status_receipt_summary(after),
+        "status_after_sha256": _canonical_sha256(after),
+        "actions": [_action_receipt(row) for row in result["actions"]],
+        "safety": result["safety"],
+    }
+
+
+def _status_receipt_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    data_plan = value.get("data_plan")
+    review_queue = value.get("review_queue")
+    datasets = value.get("datasets")
+    blocker_counts: Counter[str] = Counter()
+    for row in datasets if isinstance(datasets, list) else []:
+        gaps = row.get("outcome_gaps") if isinstance(row, dict) else None
+        counts = gaps.get("blocker_counts") if isinstance(gaps, dict) else None
+        if isinstance(counts, dict):
+            for reason, count in counts.items():
+                blocker_counts[str(reason)] += int(count or 0)
+    return {
+        "summary": value.get("summary") if isinstance(value.get("summary"), dict) else {},
+        "dataset_count": len(datasets) if isinstance(datasets, list) else 0,
+        "data_plan_count": len(data_plan) if isinstance(data_plan, list) else 0,
+        "review_queue_count": len(review_queue) if isinstance(review_queue, list) else 0,
+        "blocker_counts": dict(sorted(blocker_counts.items())),
+    }
+
+
+def _action_receipt(value: Any) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    operation = row.get("operation")
+    operation = operation if isinstance(operation, dict) else {}
+    receipt = {
+        key: row.get(key)
+        for key in (
+            "dataset_id",
+            "action",
+            "reason",
+            "result_status",
+            "dataset_integrity_status",
+            "dataset_integrity_reason",
+        )
+    }
+    for key in ("error_type", "error_message_sha256"):
+        if row.get(key):
+            receipt[key] = row[key]
+    return receipt | {
+        "operation": {
+            "schema_version": operation.get("schema_version"),
+            "summary": operation.get("summary") if isinstance(operation.get("summary"), dict) else {},
+            "safety": operation.get("safety") if isinstance(operation.get("safety"), dict) else {},
+        }
+    }
+
+
+def _canonical_sha256(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _run_plan_rows(
@@ -289,11 +386,16 @@ def _execute_plan_row(
         else:
             return {**base, "result_status": "skipped", "reason": "unsupported_action"}
     except Exception as exc:
+        error_message = str(exc)
         return {
             **base,
             "result_status": "error",
             "reason": "action_exception",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": f"{type(exc).__name__}: {error_message}",
+            "error_type": type(exc).__name__,
+            "error_message_sha256": hashlib.sha256(
+                error_message.encode("utf-8")
+            ).hexdigest(),
         }
     operation = _operation_payload(payload)
     operation_summary = operation.get("summary") or {}
