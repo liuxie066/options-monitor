@@ -276,6 +276,75 @@ def test_legacy_rows_require_controlled_deterministic_backfill(tmp_path: Path) -
     ]
 
 
+def test_backfill_preserves_voided_legacy_event_with_non_positive_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-voided-invalid-time.sqlite3"
+    target = _event("legacy-close", event_time_ms=10, event_type="close")
+    void = TradeEvent(
+        event_id="void-legacy-close",
+        event_type="void",
+        event_time_ms=20,
+        contract_key=target.contract_key,
+        contracts=0,
+        price=0.0,
+        currency=target.currency,
+        source="pagination_test_repair",
+        target_event_id=target.event_id,
+    )
+    _legacy_store(path, (target, void))
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id = ?",
+                (target.event_id,),
+            ).fetchone()[0]
+        )
+        payload["event_time_ms"] = 0
+        conn.execute(
+            "UPDATE trade_events SET event_json = ?, trade_time_ms = 0 WHERE event_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), target.event_id),
+        )
+
+    inventory = build_position_projection_migration_inventory(path)
+    applied = apply_position_projection_migration(path, inventory)
+
+    assert applied["trade_event_pagination_rows_backfilled"] == 2
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT trade_time_ms, ingest_seq, market, position_effect
+            FROM trade_events WHERE event_id = ?
+            """,
+            (target.event_id,),
+        ).fetchone()
+    assert row == (0, 1, "US", "close")
+
+
+def test_backfill_rejects_unvoided_legacy_event_with_non_positive_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-active-invalid-time.sqlite3"
+    target = _event("legacy-close", event_time_ms=10, event_type="close")
+    _legacy_store(path, (target,))
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id = ?",
+                (target.event_id,),
+            ).fetchone()[0]
+        )
+        payload["event_time_ms"] = 0
+        conn.execute(
+            "UPDATE trade_events SET event_json = ?, trade_time_ms = 0 WHERE event_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), target.event_id),
+        )
+
+    inventory = build_position_projection_migration_inventory(path)
+    with pytest.raises(ValueError, match="event_time_must_be_positive"):
+        apply_position_projection_migration(path, inventory)
+
+
 def test_backfill_rejects_conflicting_existing_projection(tmp_path: Path) -> None:
     path = tmp_path / "legacy-conflict.sqlite3"
     _legacy_store(path, (_event("event-1", event_time_ms=10),))

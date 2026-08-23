@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Allowed the controlled trade-event pagination migration to preserve legacy rows whose sole contract defect is a non-positive timestamp only when a valid canonical void already neutralizes them.
+
 ## 1.15.13 - 2026-08-23
 
 ### Bug Fixes

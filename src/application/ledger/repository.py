@@ -15,7 +15,13 @@ from domain.domain.ledger.position_fingerprint import (
 )
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import normalize_wheel_event
-from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
+from src.application.ledger.event_codec import (
+    encode_trade_event_for_storage,
+    stored_trade_event_to_ledger_event,
+    trade_event_application_payload,
+    trade_event_position_effect,
+    valid_void_target_event_id,
+)
 from src.application.ledger.lifecycle_attempt_audit import (
     LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
     LIFECYCLE_RECEIPT_CODEC,
@@ -330,39 +336,64 @@ class TradeEventPaginationUnavailable(RuntimeError):
 
 def _trade_event_pagination_projections(
     event_json: Any,
+    *,
+    voided_event_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, int, str, str, str]:
     try:
         payload = json.loads(str(event_json or "{}"))
     except json.JSONDecodeError as exc:
         raise ValueError("trade event JSON is invalid during pagination migration") from exc
-    encoded = encode_trade_event_for_storage(payload)
-    if encoded.event is None:
-        raise ValueError(
-            f"trade event cannot be projected: event_id={encoded.event_id}"
-        )
-    account = str(encoded.event.contract_key.account or "").strip()
+    try:
+        encoded = encode_trade_event_for_storage(payload)
+        event = encoded.event
+    except ValueError:
+        event, diagnostics = stored_trade_event_to_ledger_event(payload)
+        error_codes = {
+            item.code for item in diagnostics if item.severity == "error"
+        }
+        if (
+            event is None
+            or error_codes != {"event_time_must_be_positive"}
+            or event.event_id not in voided_event_ids
+        ):
+            raise
+    if event is None:  # pragma: no cover - the encoder contract owns this guard
+        raise ValueError("trade event cannot be projected")
+    account = str(event.contract_key.account or "").strip()
     if not account or account != account.lower():
         raise ValueError(
-            f"trade event account cannot be projected: event_id={encoded.event_id}"
+            f"trade event account cannot be projected: event_id={event.event_id}"
         )
-    market = symbol_market(encoded.event.contract_key.underlying_symbol)
+    market = symbol_market(event.contract_key.underlying_symbol)
     if market not in {"US", "HK"}:
         raise ValueError(
-            f"trade event market cannot be derived: event_id={encoded.event_id}"
+            f"trade event market cannot be derived: event_id={event.event_id}"
         )
-    application_payload = trade_event_application_payload(encoded.payload)
-    position_effect = str(application_payload.get("position_effect") or "").strip().lower()
+    position_effect = trade_event_position_effect(event.event_type).strip().lower()
     if not position_effect:
         raise ValueError(
-            f"trade event position effect cannot be derived: event_id={encoded.event_id}"
+            f"trade event position effect cannot be derived: event_id={event.event_id}"
         )
     return (
-        str(encoded.event_id),
-        int(encoded.event_time_ms),
+        str(event.event_id),
+        int(event.event_time_ms),
         account,
         market,
         position_effect,
     )
+
+
+def _valid_voided_trade_event_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    targets: set[str] = set()
+    for row in conn.execute("SELECT event_json FROM trade_events"):
+        try:
+            payload = json.loads(str(row["event_json"] or "{}"))
+        except json.JSONDecodeError:
+            continue
+        target = valid_void_target_event_id(payload)
+        if target:
+            targets.add(target)
+    return frozenset(targets)
 
 
 def _trade_event_query_projections(event_json: Any) -> tuple[str, str, str]:
@@ -657,6 +688,7 @@ def _backfill_trade_event_pagination_schema(conn: sqlite3.Connection) -> int:
         int(max_row["max_seq"] if max_row is not None else 0),
         int(counter_row["last_value"] if counter_row is not None else 0),
     )
+    voided_event_ids = _valid_voided_trade_event_ids(conn)
     for trigger_name in (
         "trg_trade_events_ingest_seq_immutable",
         "trg_trade_events_query_projection_immutable",
@@ -706,7 +738,10 @@ def _backfill_trade_event_pagination_schema(conn: sqlite3.Connection) -> int:
                     account,
                     market,
                     position_effect,
-                ) = _trade_event_pagination_projections(row["event_json"])
+                ) = _trade_event_pagination_projections(
+                    row["event_json"],
+                    voided_event_ids=voided_event_ids,
+                )
                 event_id = str(row["event_id"])
                 if canonical_event_id != event_id:
                     raise ValueError(
