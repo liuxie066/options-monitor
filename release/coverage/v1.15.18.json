@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.18",
+  "base": {
+    "tag": "v1.15.17",
+    "commit": "795a06781f4b3642cfcb36f3f9dd9ae2b84554ed"
+  },
+  "reviewed_head": "d3751bd0dce1c918560a70796d43d731379c13f2",
+  "commits": [
+    {
+      "sha": "d3751bd0dce1c918560a70796d43d731379c13f2",
+      "subject": "fix(ledger): serialize sqlite writers"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Serialized canonical option-ledger SQLite write transactions and connection-level WAL setup with a database-scoped process lock, preventing lifecycle receipt dispatch from racing auto-close projection refresh without holding the lock during provider sends.",
+      "commits": [
+        "d3751bd0dce1c918560a70796d43d731379c13f2"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
