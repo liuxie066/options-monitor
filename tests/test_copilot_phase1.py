@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
-from pathlib import Path
 
 import pytest
 
@@ -596,18 +595,6 @@ def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
     assert external_positions.input_json_schema()["properties"]["action"]["type"] == ["string", "array"]
     assert "quote_snapshots" in external_positions.input_json_schema()["properties"]
     assert "opend_host" in external_positions.input_json_schema()["properties"]
-
-
-def test_tool_rules_route_recent_close_records_to_canonical_events() -> None:
-    rules = (Path(__file__).resolve().parents[1] / "src/application/copilot/prompts/tool_rules.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "Recent trade records are canonical ledger events" in rules
-    assert "`position_effect=close`" in rules
-    assert "`historical` with `as_of` supports `historical_fact`" in rules
-
-
 @pytest.mark.parametrize(
     ("period", "expected_fields"),
     [

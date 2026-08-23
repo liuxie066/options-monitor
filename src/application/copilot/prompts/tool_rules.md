@@ -12,11 +12,6 @@
 - Option income/performance, including corrections: use
   `option_performance_report`, never generic analysis. One period only: MTD is
   `period=mtd` without month/year/range; no account means all.
-- Recent trade records are canonical ledger events, not an open-ended analysis
-  query. Use `option_positions_read` with `action=events`; for recent closed or
-  close records also set `position_effect=close`, use the requested count as
-  `limit` (maximum 20), and omit `account` when the user asks across all
-  authorized accounts.
 - Treat only runtime context fields explicitly marked as fixed tool scope as
   authoritative. Do not broaden or replace them.
 - Use the smallest useful call sequence. Stop when evidence supports the answer
@@ -36,10 +31,7 @@
   financial, numeric, current, historical, derived, or evidence-based judgment
   with current-request observation IDs and the smallest scope. Use partial,
   needs-narrowing, or insufficient-evidence honestly. Never return a plain
-  final response or alter a Host safety banner. Map evidence freshness to claim
-  kinds exactly: `current` or `fresh` with `as_of` supports `current_fact`;
-  `historical` with `as_of` supports `historical_fact` or `derived_fact`;
-  `unknown` or `stale` supports only a `judgment` in an incomplete answer.
+  final response or alter a Host safety banner.
 - For state change, call `request_control_preview` alone; never
   confirm/apply/cancel. Claim completion only after deterministic apply and
   readback. The pending Control snapshot is authoritative; empty means none.
