@@ -169,6 +169,9 @@ from src.application.ledger.projector_implementation import (
     compute_projector_implementation_fingerprint,
     loaded_projector_implementation_fingerprint,
 )
+from src.application.ledger.trade_event_pagination import (
+    MAX_LIMIT as MAX_TRADE_EVENT_PAGE_ROWS,
+)
 from src.application.ledger.writer import (
     _finish_trade_event_decision_projection as finalize_trade_event_decision_projection,
     persist_trade_event_with_wheel_intent as record_trade_event_with_wheel_intent,
@@ -251,6 +254,7 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 __all__ = [
+    "MAX_TRADE_EVENT_PAGE_ROWS",
     "CURRENT_ASSIGNED_STOCK_SCHEMA",
     "CURRENT_COMBO_GROUP_FACT_SCHEMA",
     "CURRENT_COMBO_SCHEMA",

@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
-from src.application.ledger.api import TradeEventPaginationError, trade_event_page
+from src.application.ledger.api import (
+    MAX_TRADE_EVENT_PAGE_ROWS,
+    TradeEventPaginationError,
+    trade_event_page,
+)
 from src.application.ledger.event_codec import encode_trade_event_for_storage
 from src.application.ledger.position_projection_migration import (
     apply_position_projection_migration,
@@ -17,6 +21,10 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
 CURSOR_KEY = "test-only-cursor-signing-key"
+
+
+def test_public_api_exposes_trade_event_page_limit() -> None:
+    assert MAX_TRADE_EVENT_PAGE_ROWS == 20
 
 
 def _event(

@@ -29,11 +29,9 @@ from src.application.agent_tools.runtime_helpers import read_json_object_or_empt
 from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
 from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import (
+    MAX_TRADE_EVENT_PAGE_ROWS,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
-)
-from src.application.ledger.trade_event_pagination import (
-    MAX_LIMIT as MAX_TRADE_EVENT_PAGE_ROWS,
 )
 from src.application.agent_tool_config import resolve_output_root
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
