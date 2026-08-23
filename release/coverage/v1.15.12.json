@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.12",
+  "base": {
+    "tag": "v1.15.11",
+    "commit": "4075783c74266739cb594ef8d448c5c2eb21fe99"
+  },
+  "reviewed_head": "db4b6310eaf9a8226ab6d7a91cf62968b5985752",
+  "commits": [
+    {
+      "sha": "6bc5d7200702f046b3c2a6761c0418e557284481",
+      "subject": "fix(release): support isolated worktree preflight"
+    },
+    {
+      "sha": "db4b6310eaf9a8226ab6d7a91cf62968b5985752",
+      "subject": "fix(copilot): restore trade event pagination"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept isolated-worktree release preflight on the selected Python runtime so nested checks no longer fall back to an unsupported system interpreter.",
+      "commits": [
+        "6bc5d7200702f046b3c2a6761c0418e557284481"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Restored Copilot trade-event pagination by deriving its signing key from the existing inbound HMAC secret and removing the unused dedicated credential, with fail-closed paused-timer preservation during target service reconciliation.",
+      "commits": [
+        "db4b6310eaf9a8226ab6d7a91cf62968b5985752"
+      ]
+    }
+  ],
+  "no_release_note": []
+}

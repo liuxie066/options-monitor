@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## 1.15.12 - 2026-08-23
+
 ### Bug Fixes
+- Kept isolated-worktree release preflight on the selected Python runtime so nested checks no longer fall back to an unsupported system interpreter.
 - Restored Copilot trade-event pagination by deriving its signing key from the existing inbound HMAC secret and removing the unused dedicated credential, with fail-closed paused-timer preservation during target service reconciliation.
 
 ## 1.15.11 - 2026-08-23
