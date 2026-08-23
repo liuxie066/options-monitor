@@ -863,8 +863,14 @@ def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
     schema = description["input_schema"]
     assert set(schema["required"]) == {"mode", "status", "answer_markdown", "claims"}
     assert "observation_refs" not in schema["properties"]
+    assert "本次 request" in description["description"]
+    assert "不得复用历史会话 observation" in description["description"]
     assert "historical + as_of" in description["description"]
     assert "historical_fact" in description["description"]
+
+    runtime = (REPO / "agent-runtime/main.ts").read_text(encoding="utf-8")
+    assert "successful observation IDs returned during the current request" in runtime
+    assert "never reuse observation IDs from prior conversation turns" in runtime
 
 
 def test_s8_answer_admission_and_activation_names_are_explicit():
