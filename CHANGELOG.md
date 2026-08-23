@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.15.15 - 2026-08-23
+
+### Bug Fixes
+- Routed recent close-history requests to bounded canonical trade events, matched historical evidence claims to their freshness, and reported answer-admission failures separately from model outages.
+
 ## 1.15.14 - 2026-08-23
 
 ### Bug Fixes

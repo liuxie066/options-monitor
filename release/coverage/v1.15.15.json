@@ -1,0 +1,30 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.15.15",
+  "base": {
+    "tag": "v1.15.14",
+    "commit": "b04021815712922bad1e9c46ae97eb7dcc128439"
+  },
+  "reviewed_head": "eafab9bb198ab4383531a36e782f7fa3946da61a",
+  "commits": [
+    {
+      "sha": "4f61ba4f1f04c3a6655e8050465ff04ea2386b70",
+      "subject": "fix(copilot): answer recent close queries reliably"
+    },
+    {
+      "sha": "eafab9bb198ab4383531a36e782f7fa3946da61a",
+      "subject": "fix(copilot): keep static prompt within budget"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Routed recent close-history requests to bounded canonical trade events, matched historical evidence claims to their freshness, and reported answer-admission failures separately from model outages.",
+      "commits": [
+        "4f61ba4f1f04c3a6655e8050465ff04ea2386b70",
+        "eafab9bb198ab4383531a36e782f7fa3946da61a"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
