@@ -43,6 +43,7 @@ _PROCESS_ERROR_CODES = {
     "PI_PROCESS_EXITED": "MODEL_ERROR",
     "TOOL_BRIDGE_ERROR": "TOOL_ERROR",
     "BUDGET_EXHAUSTED": "BUDGET_EXHAUSTED",
+    "ANSWER_ADMISSION_FAILED": "ANSWER_ADMISSION_FAILED",
     "CANCELLED": "CANCELLED",
     "SESSION_ERROR": "INTERNAL_ERROR",
     "PROTOCOL_ERROR": "INTERNAL_ERROR",
@@ -315,6 +316,7 @@ def run_contract(
     retained_decision: str | None = None
     approved_answer_text: str | None = None
     approved_answer_hash: str | None = None
+    last_answer_rejection_reason: str | None = None
     local_admission_state = "open"
 
     def cancellation_requested() -> bool:
@@ -411,7 +413,7 @@ def run_contract(
             )
 
     def on_tool_call(call: dict[str, Any]) -> dict[str, Any]:
-        nonlocal observation_count, active_evidence_tokens
+        nonlocal observation_count, active_evidence_tokens, last_answer_rejection_reason
         tool_name = str(call.get("tool_name") or "")
         call_id = str(call.get("call_id") or "")
         arguments = dict(call.get("arguments") or {})
@@ -540,6 +542,7 @@ def run_contract(
                 if isinstance(observation, dict)
                 else "invalid_result"
             )
+            last_answer_rejection_reason = rejection_reason or None
             event_log.record(
                 "tool_result",
                 {
@@ -957,6 +960,14 @@ def run_contract(
 
     error = dict(process_result.get("error") or {})
     source_code = str(error.get("code") or "INTERNAL_ERROR")
+    if source_code == "MODEL_ERROR" and last_answer_rejection_reason:
+        source_code = "ANSWER_ADMISSION_FAILED"
+        error = {
+            "code": source_code,
+            "stage": "answer",
+            "message": "answer admission failed after a rejected submit_answer",
+            "retryable": False,
+        }
     admission_winner = close_host_admission(
         "cancelled" if source_code == "CANCELLED" else "failed"
     )
@@ -977,6 +988,8 @@ def run_contract(
     }
     if source_code == "CANCELLED":
         record_terminal_event("run_cancelled", private_error)
+    elif source_code == "ANSWER_ADMISSION_FAILED":
+        record_terminal_event("answer_admission_failed", private_error)
     else:
         record_terminal_event("model_error", private_error)
     return finish(
@@ -1126,7 +1139,12 @@ def _tool_directory_description() -> dict[str, Any]:
 def _submit_answer_description() -> dict[str, Any]:
     return {
         "name": "submit_answer",
-        "description": "提交经过证据范围和新鲜度校验的结构化最终答案。",
+        "description": (
+            "提交经过证据范围和新鲜度校验的结构化最终答案。"
+            "claim kind 必须匹配证据 freshness：current/fresh + as_of 使用 current_fact；"
+            "historical + as_of 使用 historical_fact 或 derived_fact；"
+            "unknown/stale 只能在不完整答案中使用 judgment。"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1330,6 +1348,7 @@ def _process_error_result(
         "MODEL_ERROR": "Copilot 模型暂时不可用。",
         "TOOL_ERROR": "Copilot 读取数据失败。",
         "BUDGET_EXHAUSTED": "Copilot 未能在本次运行预算内完成回答。",
+        "ANSWER_ADMISSION_FAILED": "Copilot 已读取数据，但答案未通过证据校验。",
         "INTERNAL_ERROR": (
             "会话暂时繁忙，请稍后重试。"
             if retryable_session

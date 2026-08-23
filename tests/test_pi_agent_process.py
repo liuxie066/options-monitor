@@ -859,9 +859,12 @@ def test_s8_frozen_catalog_material_tamper_is_fail_closed():
 def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
     from src.application.copilot.host import _submit_answer_description
 
-    schema = _submit_answer_description()["input_schema"]
+    description = _submit_answer_description()
+    schema = description["input_schema"]
     assert set(schema["required"]) == {"mode", "status", "answer_markdown", "claims"}
     assert "observation_refs" not in schema["properties"]
+    assert "historical + as_of" in description["description"]
+    assert "historical_fact" in description["description"]
 
 
 def test_s8_answer_admission_and_activation_names_are_explicit():
