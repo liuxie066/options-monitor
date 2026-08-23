@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.15.18 - 2026-08-23
+
 ### Bug Fixes
 - Serialized canonical option-ledger SQLite write transactions and connection-level WAL setup with a database-scoped process lock, preventing lifecycle receipt dispatch from racing auto-close projection refresh without holding the lock during provider sends.
 
