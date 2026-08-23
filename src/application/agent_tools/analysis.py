@@ -32,6 +32,9 @@ from src.application.ledger.api import (
     open_performance_evidence_repository,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
 )
+from src.application.ledger.trade_event_pagination import (
+    MAX_LIMIT as MAX_TRADE_EVENT_PAGE_ROWS,
+)
 from src.application.agent_tool_config import resolve_output_root
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
 from src.application.config_sections import resolve_watchlist_config
@@ -1762,27 +1765,9 @@ def _materialize_views(
         warnings.extend(str(item) for item in position_warnings if str(item).strip())
 
     if requested & _EVENT_SOURCE_VIEWS:
-        event_data, event_warnings, _event_meta = option_positions_read_tool(
-            {
-                "config_key": payload.get("config_key"),
-                "config_path": payload.get("config_path"),
-                "data_config": payload.get("data_config"),
-                "action": "events",
-                "limit": MAX_MATERIALIZED_ROWS,
-            },
-            load_runtime_config=load_runtime_config,
-            resolve_public_data_config_path=resolve_public_data_config_path,
-            normalize_broker=normalize_broker,
-            normalize_account=normalize_account,
-            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
-            resolve_option_positions_repo=resolve_option_positions_repo,
-            list_position_rows=list_position_rows,
-            build_lot_event_history=build_lot_event_history,
-            inspect_projection_state=inspect_projection_state,
-            repo_base=repo_base,
-            mask_path=lambda value: mask_path(value) or "...",
-        )
-        warnings.extend(str(item) for item in event_warnings if str(item).strip())
+        event_rows, event_warnings = _materialize_trade_event_rows(payload)
+        event_data = {"rows": event_rows}
+        warnings.extend(event_warnings)
 
     if requested & _CONFIG_SOURCE_VIEWS:
         config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
@@ -4010,6 +3995,68 @@ def _referenced_analysis_views(sql: str) -> list[str]:
         if candidate in VIEW_SPECS and candidate not in views:
             views.append(candidate)
     return views
+
+
+def _materialize_trade_event_rows(
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+
+    while len(rows) < MAX_MATERIALIZED_ROWS:
+        page_payload = {
+            "config_key": payload.get("config_key"),
+            "config_path": payload.get("config_path"),
+            "data_config": payload.get("data_config"),
+            "action": "events",
+            "limit": min(
+                MAX_TRADE_EVENT_PAGE_ROWS,
+                MAX_MATERIALIZED_ROWS - len(rows),
+            ),
+        }
+        if cursor is not None:
+            page_payload["cursor"] = cursor
+        page, page_warnings, _page_meta = option_positions_read_tool(
+            page_payload,
+            load_runtime_config=load_runtime_config,
+            resolve_public_data_config_path=resolve_public_data_config_path,
+            normalize_broker=normalize_broker,
+            normalize_account=normalize_account,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+            resolve_option_positions_repo=resolve_option_positions_repo,
+            list_position_rows=list_position_rows,
+            build_lot_event_history=build_lot_event_history,
+            inspect_projection_state=inspect_projection_state,
+            repo_base=repo_base,
+            mask_path=lambda value: mask_path(value) or "...",
+        )
+        rows.extend(
+            dict(item)
+            for item in page.get("rows") or []
+            if isinstance(item, dict)
+        )
+        warnings.extend(
+            str(item) for item in page_warnings if str(item).strip()
+        )
+        if not bool(page.get("has_more")):
+            return rows, warnings
+
+        next_cursor = str(page.get("next_cursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            raise AgentToolError(
+                code="DEPENDENCY_MISSING",
+                message="trade event pagination continuation is unavailable",
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    warnings.append(
+        f"trade event materialization reached the {MAX_MATERIALIZED_ROWS}-row cap; "
+        "analysis may be incomplete"
+    )
+    return rows, warnings
 
 
 def _available_fields_by_view(view_names: Iterable[str]) -> dict[str, list[str]]:

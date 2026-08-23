@@ -369,6 +369,42 @@ def test_analysis_query_views_mode_filters_trade_events_by_trade_month(monkeypat
     assert meta["materialized_views"] == ["trade_events"]
 
 
+def test_analysis_query_paginates_trade_events_with_bounded_page_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_positions_tool(payload, *_args, **_kwargs):
+        calls.append(dict(payload))
+        if payload.get("cursor") is None:
+            return {
+                "rows": [{"symbol": f"S{index}"} for index in range(20)],
+                "has_more": True,
+                "next_cursor": "cursor-1",
+            }, [], {}
+        assert payload["cursor"] == "cursor-1"
+        return {
+            "rows": [{"symbol": "S20"}],
+            "has_more": False,
+            "next_cursor": None,
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
+
+    data, warnings, meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {"views": ["trade_events"], "limit": 30},
+    )
+
+    assert warnings == []
+    assert [call["limit"] for call in calls] == [20, 20]
+    assert "cursor" not in calls[0]
+    assert calls[1]["cursor"] == "cursor-1"
+    assert data["view_datasets"]["trade_events"]["row_count"] == 21
+    assert meta["materialized_views"] == ["trade_events"]
+
+
 def test_analysis_query_trade_events_empty_meaning_requires_month_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_positions_tool(payload, *_args, **_kwargs):
         assert payload.get("action") == "events"

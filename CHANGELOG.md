@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Paged Copilot analysis materialization through the bounded trade-event cursor contract so history queries no longer exceed the 20-event tool limit.
+- Classified a failed forced-final turn after tool-budget exhaustion as budget exhaustion instead of reporting a model outage.
+
 ## 1.15.12 - 2026-08-23
 
 ### Bug Fixes

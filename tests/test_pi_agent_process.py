@@ -2859,6 +2859,29 @@ def test_budget_exhaustion_without_text_is_not_a_successful_answer():
     assert len(calls) == 1
 
 
+def test_tool_failure_forced_final_without_text_is_budget_exhausted():
+    payload = _tool_payload([_tool_turn(), _tool_turn("call_2")])
+    payload["limits"]["max_consecutive_failed_tool_batches"] = 1
+    calls = []
+    result = run_pi_agent(
+        payload,
+        request_id="req_1",
+        run_id="run_1",
+        timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call) or {"ok": False},
+        on_proposed=lambda _payload: "commit",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == {
+        "code": "BUDGET_EXHAUSTED",
+        "stage": "budget",
+        "message": "agent budget exhausted without a final answer",
+        "retryable": False,
+    }
+    assert len(calls) == 1
+
+
 def test_session_id_is_sender_and_authority_scoped():
     first = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")
 
