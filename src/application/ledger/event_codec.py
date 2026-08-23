@@ -239,7 +239,7 @@ def _canonical_event_to_application_payload(event: TradeEvent, *, stored_payload
     out.setdefault("symbol", contract_key.underlying_symbol)
     out.setdefault("option_type", contract_key.option_type)
     out.setdefault("side", _legacy_trade_side(event))
-    out.setdefault("position_effect", _legacy_position_effect(event.event_type))
+    out.setdefault("position_effect", trade_event_position_effect(event.event_type))
     out.setdefault("strike", contract_key.strike)
     out.setdefault("multiplier", event.multiplier)
     out.setdefault("expiration_ymd", contract_key.expiration_ymd)
@@ -260,7 +260,7 @@ def _legacy_trade_side(event: TradeEvent) -> str:
     return position_side
 
 
-def _legacy_position_effect(event_type: str) -> str:
+def trade_event_position_effect(event_type: str) -> str:
     if event_type == "open":
         return "open"
     if event_type in {"close", "expire_close", "assignment", "exercise"}:
@@ -282,6 +282,7 @@ __all__ = [
     "stored_trade_event_to_ledger_event",
     "trade_event_application_payload",
     "trade_event_payload_dict",
+    "trade_event_position_effect",
     "trade_event_sort_time_ms",
     "valid_void_target_event_id",
 ]
