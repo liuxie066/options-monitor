@@ -397,10 +397,6 @@ def _research_inputs(
         "cutoff_at_utc": args.cutoff_at_utc,
         "latest_mature_trading_date": args.latest_mature_trading_date,
         "market_calendar": calendar,
-        "datasets_root_ref": (
-            "remote_archive/prod/output_shared/research/shadow_replay/datasets"
-        ),
-        "runs_root_ref": "remote_archive/prod/output_runs",
         "fee_contract": fee_contract,
         "capability_facts": capability_facts_from_receipt(capability),
         "evidence_bundle": evidence_bundle,
@@ -566,7 +562,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
         )
         if args.top1_research_command == "preview":
             data = preview_sell_put_top1_research(
-                context["artifact_root"], **preview_inputs
+                store, context["artifact_root"], **preview_inputs
             )
             return build_response(
                 tool_name=tool_name,

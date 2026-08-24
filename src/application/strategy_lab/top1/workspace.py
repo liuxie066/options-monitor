@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
+from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import expiration_observation_start_ms
@@ -14,6 +15,7 @@ from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     PREVIEW_SCHEMA_VERSION,
+    RECOMMENDATION_POINT_SELECTOR,
     RECIPE_ID,
     RECIPE_VERSION,
     Top1CoreContractError,
@@ -25,7 +27,9 @@ from src.application.strategy_lab.top1.contracts import (
     validate_confirmed_start_command,
 )
 from src.application.strategy_lab.top1.corpus import (
+    RESEARCH_WINDOW_FACTS_SCHEMA,
     CorpusError,
+    preview_research_dataset,
     read_market_calendar_binding,
 )
 from src.application.strategy_lab.top1.economics import build_fx_rate_binding
@@ -40,17 +44,15 @@ from src.application.strategy_lab.top1.lifecycle import (
     start_validation,
 )
 from src.application.strategy_lab.top1.research import (
-    RESEARCH_EVALUATION_INPUT_SCHEMA,
     ResearchEvaluationError,
     required_research_close_keys,
 )
+from src.application.strategy_lab.top1.research_artifacts import (
+    ResearchArtifactError,
+    load_materialized_research_input,
+)
 from src.application.strategy_lab.top1.research_runner import run_research
 from src.application.strategy_lab.top1.readiness import CAPABILITY_FACTS
-from src.application.strategy_lab.top1.research_window import (
-    ResearchWindowError,
-    build_research_window,
-    load_research_window,
-)
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
 from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStore,
@@ -87,6 +89,45 @@ def _derived_key(idempotency_key: str, step: str) -> str:
     return hashlib.sha256(f"{idempotency_key}\0{step}".encode()).hexdigest()
 
 
+def _research_window_facts(
+    *,
+    market: str,
+    account: str,
+    cutoff_at_utc: str,
+    latest_mature_trading_date: str,
+    market_calendar: Mapping[str, Any],
+) -> dict[str, object]:
+    cutoff = datetime.fromisoformat(cutoff_at_utc.replace("Z", "+00:00"))
+    if not cutoff_at_utc.endswith("Z") or cutoff.utcoffset() is None:
+        raise ValueError("cutoff_at_utc must be canonical UTC")
+    cutoff_day = cutoff.astimezone(ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+    dates = [
+        str(value)
+        for value in market_calendar["trading_dates"]
+        if str(value) <= cutoff_day
+    ]
+    if not dates:
+        raise ValueError("market calendar does not cover the research cutoff")
+    facts: dict[str, object] = {
+        "schema_version": RESEARCH_WINDOW_FACTS_SCHEMA,
+        "market": market,
+        "account": account,
+        "cutoff_at_utc": cutoff_at_utc,
+        "cutoff_trading_date": dates[-1],
+        "market_calendar_version": market_calendar["market_calendar_version"],
+        "market_calendar_ref": market_calendar["snapshot_ref"],
+        "market_calendar_sha256": market_calendar["snapshot_content_sha256"],
+        "trading_calendar_dates": dates,
+        "trading_calendar_dates_sha256": canonical_sha256(dates),
+        "latest_mature_trading_date": latest_mature_trading_date,
+        "maturity_evidence_ref": market_calendar["snapshot_ref"],
+        "maturity_evidence_sha256": market_calendar["snapshot_content_sha256"],
+        "recommendation_point_selector": RECOMMENDATION_POINT_SELECTOR,
+    }
+    facts["content_sha256"] = canonical_sha256(facts)
+    return facts
+
+
 def _preview(
     *,
     stage: str = "research",
@@ -114,6 +155,7 @@ def _preview(
 
 
 def _research_preview(
+    store: ExperimentStore,
     artifact_root: str | Path,
     *,
     market: str,
@@ -121,8 +163,6 @@ def _research_preview(
     cutoff_at_utc: str,
     latest_mature_trading_date: str,
     market_calendar: Mapping[str, Any],
-    datasets_root_ref: str,
-    runs_root_ref: str,
     fee_contract: Mapping[str, object],
     capability_facts: Mapping[str, object],
     evidence_bundle: object,
@@ -140,23 +180,32 @@ def _research_preview(
         return _preview(
             status="blocked", reason_codes=["top1_capability_evidence_missing"]
         ), None, {}
+    if store.schema_state().get("status") != "ready":
+        return _preview(
+            status="blocked", reason_codes=["strategy_lab_store_not_ready"]
+        ), None, {}
     try:
-        window = build_research_window(
+        freeze, dataset = preview_research_dataset(
+            store,
             artifact_root,
-            market=market,
-            account=account,
-            cutoff_at_utc=cutoff_at_utc,
-            latest_mature_trading_date=latest_mature_trading_date,
-            market_calendar=market_calendar,
-            datasets_root_ref=datasets_root_ref,
-            runs_root_ref=runs_root_ref,
+            window_facts=_research_window_facts(
+                market=market,
+                account=account,
+                cutoff_at_utc=cutoff_at_utc,
+                latest_mature_trading_date=latest_mature_trading_date,
+                market_calendar=market_calendar,
+            ),
+            environ=environ,
         )
-        window_text = render_json_text(window)
-        window_file_sha256 = hashlib.sha256(window_text.encode()).hexdigest()
-        window_ref = (
-            "strategy_lab/top1/research_windows/"
-            f"{window['content_sha256']}.json"
-        )
+        if freeze["status"] != "ready" or dataset is None:
+            return _preview(
+                status="blocked",
+                reason_codes=[
+                    str(freeze["reason_code"] or "research_dataset_coverage_missing")
+                ],
+            ), None, {}
+        dataset_ref = str(freeze["dataset_ref"])
+        dataset_file_sha256 = str(freeze["dataset_sha256"])
         experiment_id = "sell-put-top1-" + canonical_sha256(
             {
                 "topic_id": _TOPIC_ID,
@@ -164,32 +213,37 @@ def _research_preview(
                 "account": account,
                 "recipe_id": RECIPE_ID,
                 "recipe_version": RECIPE_VERSION,
-                "research_window_content_sha256": window["content_sha256"],
+                "research_dataset_content_sha256": dataset["content_sha256"],
             }
         )[:32]
         spec = build_sell_put_top1_research_spec(
             topic_id=_TOPIC_ID,
             experiment_id=experiment_id,
-            market_calendar_version=str(window["market_calendar_version"]),
+            market_calendar_version=str(dataset["market_calendar_version"]),
             research_source={
-                "mode": "historical_research_window",
-                "dataset_ref": window_ref,
-                "dataset_sha256": window_file_sha256,
+                "mode": "sealed_historical_dataset",
+                "dataset_ref": dataset_ref,
+                "dataset_sha256": dataset_file_sha256,
                 "research_cutoff_at": cutoff_at_utc,
-                "start_trading_date": window["selected_trading_dates"][0],
-                "end_trading_date": window["selected_trading_dates"][-1],
+                "start_trading_date": dataset["selected_trading_dates"][0],
+                "end_trading_date": dataset["selected_trading_dates"][-1],
             },
         )
-        observed_points = load_research_window(artifact_root, window)
-        research_input = {
-            "schema_version": RESEARCH_EVALUATION_INPUT_SCHEMA,
-            "experiment_spec": spec,
-            "dataset_ref": window_ref,
-            "research_window": window,
-            "observed_points": observed_points,
-        }
+        research_input = load_materialized_research_input(
+            artifact_root,
+            spec,
+            research_source=dataset,
+        )
         requirements = required_research_close_keys(research_input, fee_contract)
-    except (ResearchWindowError, ResearchEvaluationError, Top1CoreContractError) as exc:
+    except (
+        CorpusError,
+        KeyError,
+        ResearchArtifactError,
+        ResearchEvaluationError,
+        Top1CoreContractError,
+        TypeError,
+        ValueError,
+    ) as exc:
         return _preview(
             status="blocked",
             reason_codes=[str(getattr(exc, "reason_code", "research_preview_invalid"))],
@@ -222,29 +276,19 @@ def _research_preview(
         )
 
     points = sorted(
-        (
-            {
-                "recommendation_point_id": point["recommendation_point_id"],
-                "candidate_facts_sha256": point["candidate_facts_sha256"],
-                "source_files": sorted(
-                    point["source_files"], key=lambda item: (item["kind"], item["ref"])
-                ),
-            }
-            for day in window["days"]
-            for point in day["points"]
-        ),
+        (dict(point) for day in dataset["days"] for point in day["points"]),
         key=lambda item: str(item["recommendation_point_id"]),
     )
     source_bindings: dict[str, object] = {
         "market_calendar": {
-            "ref": window["market_calendar_ref"],
-            "content_sha256": window["market_calendar_content_sha256"],
-            "file_sha256": window["market_calendar_file_sha256"],
+            "ref": market_calendar["snapshot_ref"],
+            "content_sha256": market_calendar["snapshot_content_sha256"],
+            "file_sha256": market_calendar["snapshot_file_sha256"],
         },
-        "research_window": {
-            "ref": window_ref,
-            "content_sha256": window["content_sha256"],
-            "file_sha256": window_file_sha256,
+        "research_dataset": {
+            "ref": dataset_ref,
+            "content_sha256": dataset["content_sha256"],
+            "file_sha256": dataset_file_sha256,
         },
         "recommendation_points": points,
         "terminal_fx_bindings": [
@@ -269,17 +313,18 @@ def _research_preview(
             preview_sha256=preview_hash,
             source_bindings=source_bindings,
         ),
-        window,
+        dataset,
         terminal_bindings,
     )
 
 
 def preview_sell_put_top1_research(
+    store: ExperimentStore,
     artifact_root: str | Path,
     **kwargs: Any,
 ) -> dict[str, object]:
-    preview, _window, _terminal_bindings = _research_preview(
-        artifact_root, **kwargs
+    preview, _dataset, _terminal_bindings = _research_preview(
+        store, artifact_root, **kwargs
     )
     return preview
 
@@ -299,10 +344,10 @@ def start_confirmed_research(
         raise Top1WorkspaceError(exc.reason_code, str(exc)) from exc
     if command["stage"] != "research":
         _fail("confirmed_start_invalid", "research start requires the research stage")
-    preview, window, terminal_bindings = _research_preview(
-        artifact_root, **preview_kwargs
+    preview, dataset, terminal_bindings = _research_preview(
+        store, artifact_root, **preview_kwargs
     )
-    if preview["status"] != "available" or window is None:
+    if preview["status"] != "available" or dataset is None:
         reason_codes = preview["reason_codes"]
         reason = reason_codes[0] if isinstance(reason_codes, list) and reason_codes else "research_preview_unavailable"
         _fail(str(reason), "research preview is not available")
@@ -342,7 +387,7 @@ def start_confirmed_research(
         publish_exact_text(
             artifact_root,
             str(source["dataset_ref"]),
-            render_json_text(window).encode(),
+            render_json_text(dataset).encode(),
         )
         authorize_research(
             store,

@@ -81,16 +81,21 @@ def _read_canonical_json(
 def load_materialized_research_input(
     artifact_root: str | Path,
     spec: Mapping[str, Any],
+    *,
+    research_source: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     source = spec.get("research_source")
     if not isinstance(source, Mapping):
         _fail("research_artifact_invalid", "research source is invalid")
-    research_source = _read_canonical_json(
-        artifact_root,
-        ref=source.get("dataset_ref"),
-        expected_file_sha256=source.get("dataset_sha256"),
-        label="research_source",
-    )
+    if research_source is None:
+        research_source = _read_canonical_json(
+            artifact_root,
+            ref=source.get("dataset_ref"),
+            expected_file_sha256=source.get("dataset_sha256"),
+            label="research_source",
+        )
+    else:
+        research_source = dict(research_source)
     if research_source.get("schema_version") == HISTORICAL_RESEARCH_WINDOW_SCHEMA:
         if source.get("mode") != "historical_research_window":
             _fail(

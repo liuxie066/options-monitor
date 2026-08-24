@@ -41,6 +41,7 @@ from src.application.strategy_lab.top1.contracts import (
 )
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_SCHEMA_VERSION,
+    RANKING_PROJECTION_SCHEMA_V2,
     Top1RankingError,
     build_ranking_projection,
     rerank_recommendation_point,
@@ -2126,13 +2127,15 @@ def _freeze_result(
     }
 
 
-def freeze_research_dataset(
+def _freeze_research_dataset(
     store: ExperimentStore,
     artifact_root: str | Path,
     *,
     window_facts: Mapping[str, Any],
     required_days: int = RESEARCH_REQUIRED_DAYS,
     environ: Mapping[str, str] | None = None,
+    ranking_projection_schema_version: str,
+    publisher: Any,
 ) -> dict[str, Any]:
     if (
         isinstance(required_days, bool)
@@ -2242,7 +2245,7 @@ def freeze_research_dataset(
                 continue
             if (
                 point_row["ranking_projection_schema_version"]
-                != RANKING_PROJECTION_SCHEMA_VERSION
+                != ranking_projection_schema_version
             ):
                 has_coverage_gap = True
                 continue
@@ -2330,7 +2333,7 @@ def freeze_research_dataset(
         "maturity_evidence_ref": facts["maturity_evidence_ref"],
         "maturity_evidence_sha256": facts["maturity_evidence_sha256"],
         "recommendation_point_selector": RECOMMENDATION_POINT_SELECTOR,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+        "ranking_projection_schema_version": ranking_projection_schema_version,
         "selected_trading_dates": selected_dates,
         "days": dataset_days,
     }
@@ -2338,7 +2341,7 @@ def freeze_research_dataset(
     content = _render(dataset)
     ref = _dataset_ref(market, account, dataset["content_sha256"])
     try:
-        publish_exact_text(artifact_root, ref, content)
+        publisher(artifact_root, ref, content)
     except ValueError:
         return _freeze_result(
             facts,
@@ -2361,6 +2364,46 @@ def freeze_research_dataset(
     )
 
 
+def freeze_research_dataset(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    window_facts: Mapping[str, Any],
+    required_days: int = RESEARCH_REQUIRED_DAYS,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    return _freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=window_facts,
+        required_days=required_days,
+        environ=environ,
+        ranking_projection_schema_version=RANKING_PROJECTION_SCHEMA_VERSION,
+        publisher=publish_exact_text,
+    )
+
+
+def preview_research_dataset(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    window_facts: Mapping[str, Any],
+    required_days: int = RESEARCH_REQUIRED_DAYS,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    captured: list[bytes] = []
+    result = _freeze_research_dataset(
+        store,
+        artifact_root,
+        window_facts=window_facts,
+        required_days=required_days,
+        environ=environ,
+        ranking_projection_schema_version=RANKING_PROJECTION_SCHEMA_V2,
+        publisher=lambda _root, _ref, content: captured.append(content),
+    )
+    return result, json.loads(captured[0]) if captured else None
+
+
 __all__ = [
     "CORPUS_COMMAND_RESULT_SCHEMA",
     "CORPUS_DAY_EXPECTATION_SCHEMA",
@@ -2376,6 +2419,7 @@ __all__ = [
     "discover_recommendation_points",
     "freeze_research_dataset",
     "preview_archived_recommendation_point_migration",
+    "preview_research_dataset",
     "read_bound_market_calendar_snapshot",
     "read_corpus_status",
     "read_market_calendar_binding",

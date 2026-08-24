@@ -53,10 +53,10 @@ flowchart TB
 
     WS --> CT["Experiment Spec 与行为绑定\ncontracts.py"]
     WS --> LC["生命周期与两次授权\nlifecycle.py"]
-    WS --> RR["20 日研究执行\nresearch_runner.py"]
-
-    RR --> RW["历史窗口与来源校验\nresearch_window.py"]
-    RW --> RA["Research Archive / Shadow Replay"]
+    WS --> CF["20 日正式 corpus 只读预览 / 确认后冻结\ncorpus.py"]
+    CF --> RI["sealed historical dataset v2"]
+    RI --> RR["20 日研究执行\nresearch_runner.py"]
+    CF --> RA["Research Archive / 正式推荐点 corpus"]
     RA --> PE["run 内准备好的期权事实\nprepared_option_positions_context.v2"]
 
     RR --> RE["研究选择\nresearch.py"]
@@ -69,7 +69,6 @@ flowchart TB
     ADV --> CP["正式推荐点 corpus"]
     ADV --> FO["fill observation"]
     ADV --> OC["outcome / conclusion"]
-    PE --> RW
     PE --> RP["正式推荐点 v2\n绑定 evidence ref / hash"]
     CS["现有 scheduled 扫描产物\ncanonical candidate snapshot"] --> CQ["紧凑 accepted-candidate 行情\nranking projection v2"]
     CQ --> RP
@@ -225,18 +224,20 @@ candidate quote 字段时，返回稳定 gap reason；未被当前 recipe 使用
 sequenceDiagram
     participant C as Codex / CLI
     participant W as Workspace
-    participant R as Readiness + Archive
+    participant R as Readiness + Formal Corpus
+    participant A as Research Artifact
     participant S as ExperimentStore
     participant E as Research Runner
 
     C->>W: preview_research(cutoff, mature_date)
-    W->>R: 校验 service、calendar、20 日来源、mark、FX、fee、outcome 能力
-    R-->>W: 规范化窗口与来源 hash
+    W->>R: 校验 service、calendar、20 个完整交易日、point、projection、FX、fee
+    R-->>W: 内存构造 sealed historical dataset v2 与来源 hash
     W-->>C: available / blocked / unsupported / disabled + spec + preview_sha256
     Note over W,S: preview 不迁移 store、不创建 experiment、不写 receipt
     C->>W: start_research(confirmed_start.v1)
     W->>R: 重建同一 preview
     W->>W: 比较 hash，并冻结 actor / time / idempotency key
+    W->>A: 发布 preview 对应的精确 dataset
     W->>S: 按子步骤恢复 prepare + authorize research
     W->>E: run_research
     E->>S: research generation + Research Receipt + leader 或停止结论
@@ -246,6 +247,10 @@ sequenceDiagram
 研究 spec 身份；后者按 5.1 的固定公式把该 spec hash 与本次选择的精确 `source_bindings` 一起承诺。
 确认执行前必须重建 preview 并核对 `preview_sha256`，随后 Workspace 把原 `research_spec_sha256`
 传给 lifecycle；不增加独立 preview 表。
+
+正式研究入口不再以 Shadow Replay 的“每日有一个点”作为 20 日完整性的依据。`corpus.py` 按市场
+日历和 canonical expectation IDs 校验每个交易日的全部正式推荐点及 ranking projection v2；任一点
+缺失即返回 blocked。preview 只在内存构造规范 dataset，不写文件；确认 hash 匹配后才发布同一字节。
 
 ### 4.2 验证 preview 与第二次确认
 
@@ -568,8 +573,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/infrastructure/performance_evidence_sqlite.py` | `PerformanceEvidenceSQLiteRepository.import_envelope()`、`read_all()` | 幂等写入和读取不可变 mark / FX facts；不建新事实表或 repository |
 | `src/application/prepared_option_positions_context.py` | `_persist_fx_evidence()` | scheduled tick 继续作为唯一 FXRateFact writer；研究和验证不增加 writer |
 | `src/application/strategy_lab/top1/capability_receipts.py` | `read_top1_capability_receipt()`、`capability_facts_from_receipt()`、`load_account_fee_plan_receipt()` | 复用 OpenD、费用与 outcome 能力证明 |
-| `src/application/strategy_lab/top1/corpus.py` | `read_bound_market_calendar_snapshot()`、`read_market_calendar_binding()`、`read_validation_day_source()`、`read_validation_point_source()`、`read_corpus_status()` | 继续作为日历和正式推荐点读取权威 |
-| `src/application/strategy_lab/top1/research_artifacts.py` | `load_materialized_research_input()`、`load_recorded_research_revision()` | 已提供 hash 绑定的研究输入和 revision 读取 |
+| `src/application/strategy_lab/top1/corpus.py` | `read_bound_market_calendar_snapshot()`、`read_market_calendar_binding()`、`read_validation_day_source()`、`read_validation_point_source()`、`read_corpus_status()` | 继续作为日历、正式推荐点和 20 日完整性读取权威 |
+| `src/application/strategy_lab/top1/research_artifacts.py` | `load_materialized_research_input()`、`load_recorded_research_revision()` | 已提供 hash 绑定的研究输入和 revision 读取；允许 preview 复用同一内存 dataset |
 | `src/application/strategy_lab/top1/lifecycle.py` | `build_hidden_window_commitment()`、`validate_hidden_window_commitment()`、`read_active_experiment_ids()`、`read_advance_context()`、`recover_account_terminal_projections()` | 合同与恢复语义已满足 MVP；只由新应用服务组合 |
 | `src/application/tick_notification_flow.py` | `_observe_recommendation_points_best_effort()`、`_observe_recommendation_points()` | 继续调用现有正式点入口；point gap 只审计降级，不影响扫描或通知 |
 | `src/application/strategy_lab/top1/terminal_projection.py` | `publish_exact_text()` | 已提供不可变写入、同字节幂等和冲突检测 |
@@ -587,8 +592,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/runtime_portfolio_snapshot.py` | `_validate_prepared_option_reference()`、`build_runtime_portfolio_snapshot()`、`validate_replay_bundle()` | 普通 runtime snapshot / replay 兼容绑定 v1/v2 owner receipt；Strategy Lab 不从该兼容面放行 v1 |
 | `src/application/strategy_lab/top1/contracts.py` | `validate_experiment_spec()`、`build_current_behavior_binding()`、`build_research_spec_sha256()`、`build_validation_spec_sha256()` | 升级 v2 字段、变体、指标、FX、research close receipt 和 expiry outcome 合同版本；保持 exact-key 和 fail-closed 校验 |
 | `src/application/strategy_lab/top1/ranking.py` | `build_ranking_projection()`、`validate_ranking_projection()`、`rerank_recommendation_point()` | 升级 projection v2；从 accepted candidate facts 复制 5.5 的固定紧凑白名单，接受已验证的期权市场集中度及事实引用；将冻结收益阈值传入 Candidate Engine |
-| `src/application/strategy_lab/top1/research_window.py` | `_normalize_point()`、`build_research_window()`、`load_research_window()` | 接受在线严格 point 或历史迁移后通过相同 validator 的等价 point；计算新指标并绑定 source hash；删除旧 `CurrencyConverter` scalar 和 `symbol_concentration_after` 回退；事实不足直接 blocked |
-| `src/application/strategy_lab/top1/corpus.py` | `seal_day_expectation()`、`seal_committed_day_expectation()`、`capture_recommendation_point()`、`freeze_research_dataset()` | 删除账户 feature gate；按 point v2 绑定加载 prepared context receipt 并生成 projection；完整日严格校验 12 个正式点，半日市按日历校验；禁止读取 capture 时的当前账本 / mark / FX |
+| `src/application/strategy_lab/top1/research_window.py` | `_normalize_point()`、`build_research_window()`、`load_research_window()` | 保留给历史迁移和兼容读取；正式 Workspace 不再通过该 bridge 判断 20 日完整性 |
+| `src/application/strategy_lab/top1/corpus.py` | `seal_day_expectation()`、`seal_committed_day_expectation()`、`capture_recommendation_point()`、`preview_research_dataset()`、`freeze_research_dataset()` | 删除账户 feature gate；按 point v2 绑定加载 prepared context receipt 并生成 projection；完整日按日历严格校验全部正式点；preview 零写入构造 v2 dataset，确认后才发布精确字节；禁止读取 capture 时的当前账本 / mark / FX |
 | `src/application/strategy_lab/top1/research.py` | `required_research_close_keys()`、`evaluate_research()`、`build_internal_research_revision()`、`validate_internal_research_revision()` | 使用标准 CNY 经济结果和新 evaluator；close receipt v2 绑定 terminal FX；leader 顺序加入 CNY PnL；恢复只读已记录 revision |
 | `src/application/strategy_lab/top1/research_runner.py` | `_close_receipts()`、`run_research()` | 删除账户 feature 检查；只接收 confirmed preview 已绑定的 terminal FX，写入 close receipt v2 / revision，不打开 repository；保留 quota、OpenD close 和幂等恢复 |
 | `src/application/strategy_lab/top1/validation.py` | `_challenger_profile()`、`_arm()`、`consume_validation_point()`、`record_validation_day_gap()` | challenger 同时读取 profile 与冻结阈值；arm 保存标准经济输入及 FX/metric refs；删除集中度作为硬风险证据的判断 |
@@ -605,8 +610,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 
 | 文件 | 函数 | 职责 |
 |---|---|---|
-| `src/application/strategy_lab/top1/workspace.py` | `preview_sell_put_top1_research()` | 只读组合固定 recipe、readiness、20 日窗口和 research spec；从现有 repository 的一个 bundle 选择全部 terminal FX，返回独立的 research spec hash 与含精确来源绑定的 preview hash |
-| 同上 | `start_confirmed_research()` | exact-key 校验 confirmed command，用一个 evidence bundle 重建 preview、核对 scope / hash，把 research spec hash 传给 lifecycle，并把该 preview 内的确切 terminal FX bindings 传给 `run_research()`；以稳定子 key 恢复其余 durable step |
+| `src/application/strategy_lab/top1/workspace.py` | `preview_sell_put_top1_research()` | 只读组合固定 recipe、readiness、正式 corpus 20 日 v2 dataset 和 research spec；从现有 repository 的一个 bundle 选择全部 terminal FX，返回独立的 research spec hash 与含精确来源绑定的 preview hash |
+| 同上 | `start_confirmed_research()` | exact-key 校验 confirmed command，用一个 evidence bundle 重建 preview、核对 scope / hash，发布该 preview 的精确 dataset，把 research spec hash 传给 lifecycle，并把确切 terminal FX bindings 传给 `run_research()`；以稳定子 key 恢复其余 durable step |
 | 同上 | `preview_sell_put_top1_validation()` | 只读校验已发布研究 leader，构造未来 10 日 commitment 和 `validation_spec_sha256`；该 hash 同时作为确认用的 `preview_sha256` |
 | 同上 | `start_confirmed_validation()` | exact-key 校验 confirmed command，重建 preview，把 validation spec hash 与 commitment 传给 lifecycle，并以稳定子 key 恢复 lock、authorize 和 start validation |
 | `src/application/strategy_lab/top1/contracts.py` | `build_sell_put_top1_research_spec()` | 只生成当前固定 HK / lx / Sell Put Top1 recipe 的 v2 research spec |
@@ -768,6 +773,8 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
   capability；首次真实 preview 出现 ready 点时，再增加 apply、idempotent 和不覆盖冲突的测试。
 - `test_strategy_lab_top1_research_window.py`：接受在线严格 v2 point 和历史迁移后通过相同 validator 的
   等价 point；历史持仓 / mark / FX 完整、缺失、过期和冲突。
+- `test_strategy_lab_top1_workspace.py`：正式 20 日 v2 corpus 的 preview 零写入且确定；缺任一 expected point
+  即 blocked；确认 hash 不匹配零写入，匹配后发布同一 dataset 并幂等完成研究。
 - `test_strategy_lab_top1_w1b.py`：opening / terminal 使用不同汇率的 CNY 经济结果，三个原币
   分项严格使用自己 binding；缺失、过期、冲突和 CNY 1:1；双 delta、判断顺序和统计边界。
 - `test_strategy_lab_top1_research.py`：三 challenger、统一 20 日窗口、leader 完整排序；每个

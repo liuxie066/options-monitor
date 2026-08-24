@@ -210,7 +210,7 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
     monkeypatch.setattr(
         cli,
         "preview_sell_put_top1_research",
-        lambda root, **kwargs: calls.append((root, kwargs)) or preview,
+        lambda _store, root, **kwargs: calls.append((root, kwargs)) or preview,
     )
     common = [
         "research",

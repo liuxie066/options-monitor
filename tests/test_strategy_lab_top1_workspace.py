@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 import src.application.strategy_lab.top1.research_runner as runner_module
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from domain.domain.performance.models import FXRateFact
+from src.application.recommendation_point import (
+    RECOMMENDATION_POINT_FILE,
+    capture_scheduled_recommendation_point,
+)
 from src.application.strategy_lab.top1.contracts import (
     CONFIRMED_START_COMMAND_SCHEMA_VERSION,
 )
+from src.application.strategy_lab.top1.corpus import capture_recommendation_point
 from src.application.strategy_lab.top1.readiness import CAPABILITY_FACTS
 from src.application.strategy_lab.top1.workspace import (
     Top1WorkspaceError,
@@ -21,8 +29,18 @@ from src.application.strategy_lab.top1.workspace import (
 from src.infrastructure.performance_evidence_sqlite import EvidenceReadBundle
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 from tests.test_strategy_lab_top1_research import AVAILABLE, _fee_contract
+from tests.test_strategy_lab_top1_corpus import (
+    CALENDAR_HASH,
+    SOURCE_SHA,
+    _candidate,
+    _scheduler,
+    _seal,
+    _store,
+    _trading_days,
+)
 from tests.candidate_evidence_helpers import (
     seal_market_calendar_fixture,
+    seal_opening_candidate_fixture,
     top1_hk_schedule_fixture,
 )
 from tests.test_strategy_lab_top1_research_runner import (
@@ -31,15 +49,115 @@ from tests.test_strategy_lab_top1_research_runner import (
     _prepared,
     _run,
 )
-from tests.test_strategy_lab_top1_research_window import _window_fixture
 
 
 NOW = "2026-08-15T12:00:00Z"
 
 
-def _preview_args(tmp_path: Path) -> tuple[Path, dict[str, object]]:
-    artifact_root, _research_root, _days, window_args = _window_fixture(tmp_path)
-    terminal_at_ms = expiration_observation_start_ms("2026-01-30", "HK")
+def _preview_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    omit_last: bool = False,
+) -> tuple[ExperimentStore, Path, dict[str, object]]:
+    from src.application import recommendation_point as recommendation_module
+    from src.application.strategy_lab.top1 import corpus as corpus_module
+
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    days = _trading_days("2026-06-08", 20)
+    receipts: dict[str, dict[str, object]] = {}
+
+    def receipt_loader(**kwargs: object) -> dict[str, object]:
+        return receipts[str(kwargs["expected_run_id"])]
+
+    monkeypatch.setattr(
+        recommendation_module,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: source_root / "prepared_option_positions_context.v2.json",
+    )
+    monkeypatch.setattr(
+        recommendation_module,
+        "load_prepared_option_positions_context_receipt",
+        receipt_loader,
+    )
+    monkeypatch.setattr(
+        corpus_module,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: source_root / "prepared_option_positions_context.v2.json",
+    )
+    monkeypatch.setattr(
+        corpus_module,
+        "load_prepared_option_positions_context_receipt",
+        receipt_loader,
+    )
+    for index, trading_date in enumerate(days):
+        assert _seal(store, artifact_root, day=trading_date)["status"] == "published"
+        run_id = f"workspace-{index:02d}"
+        seal_opening_candidate_fixture(
+            source_root,
+            run_id=run_id,
+            market="HK",
+            accepted_rows=[{**_candidate(), "currency": "CNY"}],
+        )
+        evidence: dict[str, object] = {
+            "status": "ready",
+            "run_id": run_id,
+            "account": "lx",
+            "account_config_sha256": "a" * 64,
+            "evidence_at_utc": "2026-06-01T00:00:00Z",
+            "open_option_positions": [],
+            "valuation_mark_facts": [],
+            "fx_rate_facts": [],
+        }
+        evidence["content_sha256"] = canonical_sha256(evidence)
+        payload = {"strategy_lab_option_market_evidence": evidence}
+        payload_bytes = (
+            json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode()
+        manifest = {
+            "schema_version": "prepared_option_positions_context.v2",
+            "status": "ready",
+            "run_id": run_id,
+            "account": "lx",
+            "account_config_sha256": "a" * 64,
+            "application_received_at_utc": "2026-06-01T00:00:00Z",
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        }
+        receipts[run_id] = {
+            "manifest": manifest,
+            "payload": payload,
+            "manifest_bytes": (
+                json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False)
+                + "\n"
+            ).encode(),
+            "payload_bytes": payload_bytes,
+        }
+        publication, _point = capture_scheduled_recommendation_point(
+            source_root,
+            run_id,
+            "lx",
+            _scheduler(trading_date),
+            source_commit_sha=SOURCE_SHA,
+            require_option_market_evidence=True,
+        )
+        assert publication == "published"
+        point_ref = (
+            f"output_runs/{run_id}/accounts/lx/state/{RECOMMENDATION_POINT_FILE}"
+        )
+        if omit_last and index == len(days) - 1:
+            continue
+        assert capture_recommendation_point(
+            store,
+            source_root,
+            artifact_root,
+            point_ref=point_ref,
+            trading_date=trading_date,
+            captured_at_utc=f"{trading_date}T02:01:00Z",
+            environ=AVAILABLE,
+        )["status"] == "published"
+    terminal_at_ms = expiration_observation_start_ms("2026-08-21", "HK")
     assert terminal_at_ms is not None
     bundle = EvidenceReadBundle(
         schema_state="initialized_v1",
@@ -57,8 +175,18 @@ def _preview_args(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             ),
         ),
     )
-    return artifact_root, {
-        **window_args,
+    return store, artifact_root, {
+        "market": "HK",
+        "account": "lx",
+        "cutoff_at_utc": "2026-10-01T08:00:00Z",
+        "latest_mature_trading_date": days[-1],
+        "market_calendar": {
+            "market_calendar_version": "hk-calendar.fixture.v1",
+            "snapshot_ref": "evidence/hk-calendar.fixture.json",
+            "snapshot_content_sha256": CALENDAR_HASH,
+            "snapshot_file_sha256": "c" * 64,
+            "trading_dates": days,
+        },
         "fee_contract": _fee_contract(),
         "capability_facts": {name: True for name in CAPABILITY_FACTS},
         "evidence_bundle": bundle,
@@ -91,13 +219,16 @@ def _files(root: Path) -> list[str]:
     )
 
 
-def test_research_preview_is_deterministic_and_read_only(tmp_path: Path) -> None:
-    artifact_root, args = _preview_args(tmp_path)
+def test_research_preview_is_deterministic_and_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, artifact_root, args = _preview_args(tmp_path, monkeypatch)
     before = _files(tmp_path)
 
-    preview = preview_sell_put_top1_research(artifact_root, **args)
+    preview = preview_sell_put_top1_research(store, artifact_root, **args)
 
-    assert preview_sell_put_top1_research(artifact_root, **args) == preview
+    assert preview_sell_put_top1_research(store, artifact_root, **args) == preview
     assert preview["status"] == "available"
     assert preview["reason_codes"] == []
     assert preview["stage_spec_sha256"]
@@ -106,10 +237,28 @@ def test_research_preview_is_deterministic_and_read_only(tmp_path: Path) -> None
     assert _files(tmp_path) == before
 
 
-def test_changed_research_confirmation_has_zero_writes(tmp_path: Path) -> None:
-    artifact_root, args = _preview_args(tmp_path)
-    preview = preview_sell_put_top1_research(artifact_root, **args)
-    store = ExperimentStore(tmp_path / "strategy-lab.sqlite3")
+def test_research_preview_blocks_when_one_expected_point_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, artifact_root, args = _preview_args(
+        tmp_path, monkeypatch, omit_last=True
+    )
+    before = _files(tmp_path)
+
+    preview = preview_sell_put_top1_research(store, artifact_root, **args)
+
+    assert preview["status"] == "blocked"
+    assert preview["reason_codes"] == ["research_dataset_coverage_missing"]
+    assert _files(tmp_path) == before
+
+
+def test_changed_research_confirmation_has_zero_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, artifact_root, args = _preview_args(tmp_path, monkeypatch)
+    preview = preview_sell_put_top1_research(store, artifact_root, **args)
     before = _files(tmp_path)
 
     with pytest.raises(Top1WorkspaceError) as exc_info:
@@ -123,17 +272,15 @@ def test_changed_research_confirmation_has_zero_writes(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.reason_code == "preview_hash_changed"
-    assert store.schema_state()["status"] == "not_initialized"
+    assert store.active_experiments("HK", "lx") == []
     assert _files(tmp_path) == before
 
 
 def test_confirmed_research_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    artifact_root, args = _preview_args(tmp_path)
-    preview = preview_sell_put_top1_research(artifact_root, **args)
-    store = ExperimentStore(tmp_path / "strategy-lab.sqlite3")
-    store.migrate(migrated_at_utc=NOW)
+    store, artifact_root, args = _preview_args(tmp_path, monkeypatch)
+    preview = preview_sell_put_top1_research(store, artifact_root, **args)
     monkeypatch.setattr(runner_module, "rate_limited_opend_call", _direct_limiter)
     gateway = FakeGateway()
     command = _command(preview)
