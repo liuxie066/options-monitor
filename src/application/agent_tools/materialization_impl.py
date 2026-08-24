@@ -702,6 +702,34 @@ def _public_option_performance_report(
         scope["accounts"] = sorted(configured_accounts | observed_accounts)
     data["scope"] = scope
 
+    period = data.get("period") if isinstance(data.get("period"), Mapping) else {}
+    valuation_end_at_ms = period.get("valuation_end_at_ms")
+    freshness_status = {
+        "partial_current": "current",
+        "complete_past": "historical",
+        "partial_cutoff": "historical",
+    }.get(str(period.get("status") or ""))
+    if (
+        freshness_status
+        and isinstance(valuation_end_at_ms, int)
+        and not isinstance(valuation_end_at_ms, bool)
+    ):
+        data["freshness"] = {
+            "status": freshness_status,
+            "as_of": datetime.fromtimestamp(
+                valuation_end_at_ms / 1000,
+                tz=timezone.utc,
+            ).isoformat(),
+        }
+    data["coverage"] = {
+        "status": "complete",
+        "complete_for": "full_query",
+        "included_count": 1,
+        "total_count": 1,
+        "omitted_count": 0,
+        "has_more": False,
+    }
+
     quality = dict(data.get("quality") or {})
     diagnostics = [dict(item) for item in quality.get("diagnostics") or [] if isinstance(item, dict)]
     if request["include_rows"]:
