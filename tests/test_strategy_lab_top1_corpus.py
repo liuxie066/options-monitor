@@ -33,7 +33,7 @@ from src.application.strategy_lab.top1.corpus import (
     capture_recommendation_point,
     discover_recommendation_points,
     freeze_research_dataset,
-    migrate_archived_recommendation_points,
+    preview_archived_recommendation_point_migration,
     read_market_calendar_binding,
     read_corpus_status,
     refresh_market_calendar_binding,
@@ -649,7 +649,7 @@ def test_history_migration_preview_reports_duplicate_identities_without_writes(
     store_path = tmp_path / "strategy-lab.sqlite3"
     artifact_root = tmp_path / "artifacts"
 
-    preview = migrate_archived_recommendation_points(
+    preview = preview_archived_recommendation_point_migration(
         ExperimentStore(store_path),
         source_root,
         artifact_root,
@@ -684,15 +684,6 @@ def test_history_migration_preview_reports_duplicate_identities_without_writes(
         for path in source_root.rglob("*")
         if path.is_file()
     }
-    with pytest.raises(CorpusError, match="apply is not available"):
-        migrate_archived_recommendation_points(
-            ExperimentStore(store_path),
-            source_root,
-            artifact_root,
-            market="HK",
-            account="lx",
-            apply=True,
-        )
 
 
 def test_expectation_is_immutable_idempotent_and_conflict_marked(

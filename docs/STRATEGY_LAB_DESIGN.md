@@ -717,22 +717,24 @@ recommendation point、opening snapshot 和 ranking projection。任一预期点
 评价先计算同点 baseline/challenger 的 paired delta，再对同一账户、同一交易日的
 有效点取日均。统计样本量按交易日计，不把一天 12 个点当成 12 个独立日。
 
-已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据。当前已落地 W0 只把正式研究
-语料窗口从 40 日调整为 20 日，尚未实现历史归档转换或 OpenD 补数；当前入口仍只接受能证明精确
-调度点、事前封存分母及完整排名和结果证据的数据，缺失时 fail closed。
+已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据。当前历史入口只提供零写入
+`history migrate preview`：能够证明精确调度点、事前封存分母、完整排名和结果证据的旧点标为
+`ready`，其余点明确为 gap。只有真实 preview 首次出现 ready 点时才增加幂等 apply；缺失事实继续
+fail closed，不使用 OpenD 补造历史。
 
 已确认的统一平台 MVP 后续方案见
 `STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md` 第 10.3、15 节和
 `STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md` 第 3.2、7.2 节：复用现有 corpus owner
-显式、幂等迁移旧归档中可验证的正式点事实，但仍禁止用当前行情、当前持仓或推导值补造历史。
+先审计旧归档中可验证的正式点事实，并仅在存在 ready 点时增加显式、幂等 apply；仍禁止用当前行情、
+当前持仓或推导值补造历史。
 未来 10 日隐藏验证继续要求事前封存调度点和完整分母。
 
 只读入口：
 
 ```bash
-./om research strategy-lab top1-loop feature status --market hk --account lx --profile-path <runtime>/service.profile.json
 ./om research strategy-lab top1-loop status --market hk --account lx --profile-path <runtime>/service.profile.json --experiment-id <id>
 ./om research strategy-lab top1-loop readiness --market hk --account lx --profile-path <runtime>/service.profile.json
+./om research strategy-lab top1-loop history migrate preview --market hk --account lx --profile-path <runtime>/service.profile.json --source-root <archive-root>
 ```
 
 HK 交易日历证据由操作员显式刷新，不随 loop 自动运行：
