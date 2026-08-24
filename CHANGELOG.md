@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.16.0 - 2026-08-24
+
+### New Features
+- Added the controlled Strategy Lab Sell Put Top1 experiment workflow, with auditable 20-trading-day research, explicit confirmation before research and 10-day hidden validation, and immutable receipts without direct production-configuration writes.
+
+### Improvements
+- Captured compact account- and run-bound option-position, quote, FX, market-concentration, and ranking evidence at formal recommendation points, with complete-day corpus gating and exact source hashes for reproducible research.
+- Kept historical Strategy Lab migration preview-only and limited research archive inventory to selected runs, reporting evidence gaps instead of repairing or inventing legacy facts.
+
+### Bug Fixes
+- Classified Copilot option-performance results as aggregate evidence with explicit full-query coverage and fact-time freshness so historical T-1 results remain admissible.
+- Kept formal-point evidence collection fail-closed and best-effort so missing experiment evidence cannot interrupt ordinary scheduled scanning or notification delivery.
+
 ## 1.15.19 - 2026-08-23
 
 ### Bug Fixes
