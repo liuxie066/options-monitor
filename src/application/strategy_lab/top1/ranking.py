@@ -80,6 +80,25 @@ _CANDIDATE_SOURCE_FIELDS = (
 _CANDIDATE_KEYS = frozenset(
     {"candidate_id", "producer_rank", *_CANDIDATE_SOURCE_FIELDS}
 )
+_CANDIDATE_MARKET_FIELDS = (
+    "option_type",
+    "bid",
+    "ask",
+    "bid_volume",
+    "ask_volume",
+    "last",
+    "implied_volatility",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "volume",
+    "spot",
+    "quote_effective_at_utc",
+    "quote_observed_at_utc",
+    "quote_status",
+)
 _OPTION_MARKET_CANDIDATE_FIELDS = (
     "option_market_concentration_after",
     "option_market_value_cny",
@@ -88,7 +107,11 @@ _OPTION_MARKET_CANDIDATE_FIELDS = (
     "opening_fx_binding",
 )
 _CANDIDATE_KEYS_V2 = frozenset(
-    {*_CANDIDATE_KEYS, *_OPTION_MARKET_CANDIDATE_FIELDS}
+    {
+        *_CANDIDATE_KEYS,
+        *_CANDIDATE_MARKET_FIELDS,
+        *_OPTION_MARKET_CANDIDATE_FIELDS,
+    }
 )
 _PROJECTION_KEYS = frozenset(
     {
@@ -137,6 +160,21 @@ _POSITIVE_NUMERIC_FIELDS = (
     "net_cash_basis",
     "strike",
     "multiplier",
+)
+_CANDIDATE_MARKET_NUMERIC_FIELDS = (
+    "bid",
+    "ask",
+    "bid_volume",
+    "ask_volume",
+    "last",
+    "implied_volatility",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "volume",
+    "spot",
 )
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _HASH_40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -190,6 +228,18 @@ def _utc_timestamp(value: Any, label: str) -> str:
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         _fail(f"{label} must be UTC")
     return text
+
+
+def _optional_utc_timestamp(value: Any, label: str) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        _fail(f"{label} must be an ISO-8601 UTC timestamp")
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        _fail(f"{label} must be UTC")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _relative_posix_path(value: Any, label: str) -> str:
@@ -332,6 +382,37 @@ def build_ranking_projection(
             }
             if evidence is not None:
                 assert evidence_at_ms is not None
+                candidate.update(
+                    {
+                        "option_type": normalized.get("option_type"),
+                        "bid": normalized.get("bid"),
+                        "ask": normalized.get("ask"),
+                        "bid_volume": normalized.get("bid_volume"),
+                        "ask_volume": normalized.get("ask_volume"),
+                        "last": normalized.get("last_price"),
+                        "implied_volatility": normalized.get(
+                            "implied_volatility"
+                        ),
+                        "delta": normalized.get("delta"),
+                        "gamma": normalized.get("gamma"),
+                        "theta": normalized.get("theta"),
+                        "vega": normalized.get("vega"),
+                        "rho": normalized.get("rho"),
+                        "volume": normalized.get("volume"),
+                        "spot": normalized.get("spot"),
+                        "quote_effective_at_utc": _optional_utc_timestamp(
+                            normalized.get("snapshot_requested_at_utc"),
+                            "quote_effective_at_utc",
+                        ),
+                        "quote_observed_at_utc": _optional_utc_timestamp(
+                            normalized.get("snapshot_received_at_utc"),
+                            "quote_observed_at_utc",
+                        ),
+                        "quote_status": normalized.get(
+                            "opening_contract_status"
+                        ),
+                    }
+                )
                 currency = str(candidate["currency"])
                 fx_fact = next(
                     (
@@ -485,6 +566,29 @@ def validate_ranking_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
         for field in _POSITIVE_NUMERIC_FIELDS:
             _finite_number(candidate[field], field, positive=True)
         if is_v2:
+            if candidate["option_type"] != "put":
+                _fail("projected option type must equal put")
+            for field in _CANDIDATE_MARKET_NUMERIC_FIELDS:
+                value = candidate[field]
+                if value is not None:
+                    _finite_number(value, field)
+            for field in ("bid", "ask", "spot"):
+                value = candidate[field]
+                if value is not None and float(value) <= 0:
+                    _fail(f"{field} must be positive when available")
+            for field in ("bid_volume", "ask_volume", "volume"):
+                value = candidate[field]
+                if value is not None and float(value) < 0:
+                    _fail(f"{field} cannot be negative")
+            for field in (
+                "quote_effective_at_utc",
+                "quote_observed_at_utc",
+            ):
+                value = candidate[field]
+                if value is not None:
+                    _utc_timestamp(value, field)
+            if candidate["quote_status"] is not None:
+                _text(candidate["quote_status"], "quote_status")
             _finite_number(
                 candidate["option_market_concentration_after"],
                 "option_market_concentration_after",

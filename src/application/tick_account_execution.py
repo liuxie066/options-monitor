@@ -42,6 +42,7 @@ from src.application.prepared_option_positions_context import (
     load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
 )
+from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
     merge_close_advice_requirements_into_prefetch_config,
@@ -185,6 +186,7 @@ class TickAccountExecutionRequest:
     audit_helper: Any
     repo_root: Path | None = None
     symbols_arg: str | None = None
+    trigger_kind: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -606,6 +608,20 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     message=str(message),
                 ),
                 persist_fx_evidence=not request.smoke,
+                mark_evidence_accounts=(
+                    tuple(
+                        account
+                        for account in sorted(scanning_configs)
+                        if scheduled_scan_targets_by_account.get(account)
+                    )
+                    if (
+                        not request.smoke
+                        and str(request.trigger_kind or "").strip().lower()
+                        == "scheduled"
+                        and strategy_lab_top1_available()
+                    )
+                    else ()
+                ),
             )
         except Exception as exc:
             prepared_options = PreparedOptionPositionsBatch(

@@ -20,6 +20,9 @@ from src.application.ledger.event_codec import trade_event_application_payload
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
 )
+from src.application.performance.evidence_collection import (
+    CurrentEvidenceCollection,
+)
 from src.infrastructure.performance_evidence_sqlite import (
     PerformanceEvidenceSQLiteRepository,
 )
@@ -802,9 +805,11 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
     ) == 3
 
 
-def test_prepare_v2_binds_selected_option_marks_and_fx(
+@pytest.mark.parametrize("collector_fails", [False, True])
+def test_prepare_v2_captures_current_marks_and_degrades_lab_only(
     monkeypatch,
     tmp_path: Path,
+    collector_fails: bool,
 ) -> None:
     from src.application import prepared_option_positions_context as mod
 
@@ -852,11 +857,18 @@ def test_prepare_v2_binds_selected_option_marks_and_fx(
         source="realtime_snapshot",
         source_id="NVDA-put-95",
     )
-    PerformanceEvidenceSQLiteRepository(ledger_path).import_envelope(
-        EvidenceEnvelope(valuation_marks=(mark,)),
-        apply=True,
-        migrated_at_ms=now_ms,
-    )
+    captured_accounts: list[str] = []
+
+    def _collect(**kwargs):
+        captured_accounts.extend(position.account for position in kwargs["option_positions"])
+        if collector_fails:
+            raise RuntimeError("snapshot unavailable")
+        return CurrentEvidenceCollection(
+            status="collected",
+            valuation_marks=(mark,),
+        )
+
+    monkeypatch.setattr(mod, "collect_current_performance_evidence", _collect)
     monkeypatch.setattr(
         mod,
         "get_exchange_rates_or_fetch_latest",
@@ -875,6 +887,7 @@ def test_prepare_v2_binds_selected_option_marks_and_fx(
         account_config_authorities=authorities,
         run_state_dir=tmp_path / "output_runs" / run_id / "state",
         persist_fx_evidence=True,
+        mark_evidence_accounts=("lx",),
     )
     manifest = batch.manifests["lx"]
     payload = load_prepared_option_positions_context(
@@ -885,14 +898,23 @@ def test_prepare_v2_binds_selected_option_marks_and_fx(
         expected_account_config_sha256=authorities["lx"].account_config_sha256,
         expected_manifest_sha256=manifest["manifest_sha256"],
         expected_runtime_config=configs["lx"],
-        require_option_market_evidence=True,
     )
 
     evidence = payload["strategy_lab_option_market_evidence"]
+    assert captured_accounts == ["lx"]
+    assert batch.unavailable_by_account == {}
     assert manifest["schema_version"] == "prepared_option_positions_context.v2"
     assert Path(manifest["manifest_path"]).name == (
         "prepared_option_positions_context.v2.json"
     )
+    if collector_fails:
+        assert evidence["status"] == "unavailable"
+        assert evidence["reason_code"] == "option_market_evidence_mark_missing"
+        assert PerformanceEvidenceSQLiteRepository(
+            ledger_path
+        ).read_all().valuation_marks == ()
+        return
+
     assert evidence["status"] == "ready"
     assert evidence["ledger_generation_sha256_a"] == (
         evidence["ledger_generation_sha256_b"]
@@ -902,6 +924,12 @@ def test_prepare_v2_binds_selected_option_marks_and_fx(
     )
     assert [row["lot_id"] for row in evidence["open_option_positions"]]
     assert evidence["valuation_mark_facts"][0]["fact_id"] == "mark-nvda"
+    assert [
+        fact.fact_id
+        for fact in PerformanceEvidenceSQLiteRepository(
+            ledger_path
+        ).read_all().valuation_marks
+    ] == ["mark-nvda"]
     assert evidence["fx_rate_facts"][0]["base_currency"] == "USD"
     assert "sell_limit" not in json.dumps(evidence)
 

@@ -84,6 +84,9 @@ def _candidate(
         "dte": 34,
         "bid": 2.9,
         "ask": 3.1,
+        "bid_volume": 12,
+        "ask_volume": 18,
+        "last_price": 3.0,
         "mid": 3.0,
         "sell_limit": 3.0,
         "multiplier": 100,
@@ -104,6 +107,14 @@ def _candidate(
         "fee_basis": "futu_us_candidate_upper_bound_2026-08-06",
         "fee_schedule_url": "https://www.futuhk.com/support/topic2_108",
         "implied_volatility": 0.42,
+        "delta": -0.25,
+        "gamma": 0.02,
+        "theta": -0.04,
+        "vega": 0.08,
+        "rho": -0.01,
+        "snapshot_requested_at_utc": "2026-08-15T00:59:00Z",
+        "snapshot_received_at_utc": "2026-08-15T00:59:01Z",
+        "opening_contract_status": "ready",
         "term_matched_rv": 0.30,
         "iv_rv_ratio": 1.4,
         "iv_minus_rv": 0.12,
@@ -372,6 +383,39 @@ def test_v2_projection_adds_option_market_metric_without_changing_v1_callers(
         == evidence["content_sha256"]
         for candidate in projection["candidates"]
     )
+    assert {
+        field: projection["candidates"][0][field]
+        for field in (
+            "bid",
+            "ask",
+            "bid_volume",
+            "ask_volume",
+            "last",
+            "delta",
+            "gamma",
+            "theta",
+            "vega",
+            "rho",
+            "quote_effective_at_utc",
+            "quote_observed_at_utc",
+            "quote_status",
+        )
+    } == {
+        "bid": 2.9,
+        "ask": 3.1,
+        "bid_volume": 12,
+        "ask_volume": 18,
+        "last": 3.0,
+        "delta": -0.25,
+        "gamma": 0.02,
+        "theta": -0.04,
+        "vega": 0.08,
+        "rho": -0.01,
+        "quote_effective_at_utc": "2026-08-15T00:59:00Z",
+        "quote_observed_at_utc": "2026-08-15T00:59:01Z",
+        "quote_status": "ready",
+    }
+    assert "market_facts" not in projection["candidates"][0]
     result = rerank_recommendation_point(
         projection,
         ranking_profile="option_market_concentration",

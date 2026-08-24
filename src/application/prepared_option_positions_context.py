@@ -44,6 +44,9 @@ from src.application.performance.adapters import (
     ledger_performance_inputs_from_rows,
     load_option_valuation_inputs,
 )
+from src.application.performance.evidence_collection import (
+    collect_current_performance_evidence,
+)
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
@@ -335,6 +338,104 @@ def _persist_fx_evidence(
     }
 
 
+def _reuse_existing_valuation_marks(
+    envelope: EvidenceEnvelope,
+    existing_marks: tuple[ValuationMarkFact, ...],
+) -> EvidenceEnvelope:
+    existing_by_source = {fact.source_identity: fact for fact in existing_marks}
+    marks: list[ValuationMarkFact] = []
+    for fact in envelope.valuation_marks:
+        existing = existing_by_source.get(fact.source_identity)
+        if existing is None:
+            marks.append(fact)
+            continue
+        incoming_payload = fact.normalized_payload(include_fact_id=False)
+        existing_payload = existing.normalized_payload(include_fact_id=False)
+        incoming_payload.pop("observed_at_ms")
+        existing_payload.pop("observed_at_ms")
+        marks.append(existing if incoming_payload == existing_payload else fact)
+    return EvidenceEnvelope(valuation_marks=tuple(marks))
+
+
+def _persist_current_option_marks(
+    *,
+    configs: Mapping[str, Mapping[str, Any]],
+    accounts_by_ledger_path: Mapping[Path, list[str]],
+    repos_by_ledger_path: Mapping[Path, Any],
+    rows_a_by_ledger_path: Mapping[Path, Mapping[str, Mapping[str, Any]]],
+    mark_evidence_accounts: frozenset[str],
+    config_path: Path,
+    now_ms: int,
+    log: Callable[[str], None] | None,
+) -> dict[Path, frozenset[str]]:
+    captured_fact_ids: dict[Path, frozenset[str]] = {}
+    for ledger_path, accounts in accounts_by_ledger_path.items():
+        selected_accounts = sorted(mark_evidence_accounts.intersection(accounts))
+        if not selected_accounts:
+            continue
+        captured_fact_ids[ledger_path] = frozenset()
+        repo = repos_by_ledger_path.get(ledger_path)
+        rows_by_account = rows_a_by_ledger_path.get(ledger_path)
+        if repo is None or not isinstance(rows_by_account, Mapping):
+            continue
+        try:
+            positions = []
+            for account in selected_accounts:
+                portfolio = configs[account].get("portfolio")
+                portfolio = portfolio if isinstance(portfolio, Mapping) else {}
+                valuation = load_option_valuation_inputs(
+                    ledger_performance_inputs_from_rows(rows_by_account[account]),
+                    as_of_ms=now_ms,
+                    account=account,
+                    broker=normalize_broker(portfolio.get("broker") or "富途"),
+                )
+                if valuation.diagnostics:
+                    raise ValueError("option valuation projection is incomplete")
+                positions.extend(valuation.positions)
+            if not positions:
+                continue
+            collection = collect_current_performance_evidence(
+                period_status="partial_current",
+                refresh_quotes=True,
+                option_positions=positions,
+                now_ms=now_ms,
+                cfg=configs[selected_accounts[0]],
+                base_dir=config_path.parent,
+                fx_payload_fetcher=lambda: None,
+            )
+            evidence_repo = open_performance_evidence_repository(repo)
+            envelope = _reuse_existing_valuation_marks(
+                EvidenceEnvelope(valuation_marks=collection.valuation_marks),
+                evidence_repo.read_all().valuation_marks,
+            )
+            try:
+                evidence_repo.import_envelope(
+                    envelope,
+                    apply=True,
+                    migrated_at_ms=now_ms,
+                )
+            except Exception:
+                envelope = _reuse_existing_valuation_marks(
+                    EvidenceEnvelope(valuation_marks=collection.valuation_marks),
+                    evidence_repo.read_all().valuation_marks,
+                )
+                evidence_repo.import_envelope(
+                    envelope,
+                    apply=True,
+                    migrated_at_ms=now_ms,
+                )
+            captured_fact_ids[ledger_path] = frozenset(
+                str(fact.fact_id) for fact in envelope.valuation_marks
+            )
+        except Exception as exc:
+            if log is not None:
+                log(
+                    "[WARN] formal option mark evidence capture failed: "
+                    f"{type(exc).__name__}"
+                )
+    return captured_fact_ids
+
+
 def _ledger_generation_sha256(
     rows_by_account: Mapping[str, Mapping[str, Any]],
     accounts: list[str],
@@ -451,6 +552,7 @@ def build_option_market_evidence_payload(
     ledger_generation_sha256_b: str,
     decision_state_fingerprint_a: str,
     decision_state_fingerprint_b: str,
+    captured_mark_fact_ids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Build the strict evidence slice without reading mutable state."""
 
@@ -540,6 +642,10 @@ def build_option_market_evidence_payload(
         if (
             not isinstance(selected.fact, ValuationMarkFact)
             or selected.fact.observed_at_ms > evidence_at_ms
+            or (
+                captured_mark_fact_ids is not None
+                and str(selected.fact.fact_id) not in captured_mark_fact_ids
+            )
         ):
             return _option_market_evidence_payload(
                 **common,
@@ -598,6 +704,7 @@ def prepare_option_positions_contexts(
     run_state_dir: Path,
     log: Callable[[str], None] | None = None,
     persist_fx_evidence: bool = False,
+    mark_evidence_accounts: tuple[str, ...] = (),
 ) -> PreparedOptionPositionsBatch:
     """Publish exact account option contexts from coherent ledger/FX facts."""
 
@@ -629,6 +736,11 @@ def prepare_option_positions_contexts(
         raise PreparedOptionPositionsContextError(
             "prepared option config/authority scopes do not match"
         )
+    mark_evidence_account_set = frozenset(
+        account
+        for account in (normalize_account(value) for value in mark_evidence_accounts)
+        if account in configs
+    )
 
     accounts_by_ledger_path: dict[Path, list[str]] = {}
     data_config_by_ledger_path: dict[Path, Path] = {}
@@ -722,6 +834,16 @@ def prepare_option_positions_contexts(
         )
         if persist_fx_evidence
         else {"status": "disabled"}
+    )
+    captured_mark_fact_ids_by_ledger = _persist_current_option_marks(
+        configs=configs,
+        accounts_by_ledger_path=accounts_by_ledger_path,
+        repos_by_ledger_path=repos_by_ledger_path,
+        rows_a_by_ledger_path=rows_a_by_ledger_path,
+        mark_evidence_accounts=mark_evidence_account_set,
+        config_path=Path(config_path),
+        now_ms=lifecycle_now_ms,
+        log=log,
     )
 
     evidence_by_ledger_path: dict[Path, Any] = {}
@@ -894,6 +1016,11 @@ def prepare_option_positions_contexts(
                         ),
                         decision_state_fingerprint_b=(
                             decision_state_fingerprint_b
+                        ),
+                        captured_mark_fact_ids=(
+                            captured_mark_fact_ids_by_ledger.get(ledger_path)
+                            if account in mark_evidence_account_set
+                            else None
                         ),
                     )
                 except Exception:

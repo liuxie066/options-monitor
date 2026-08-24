@@ -743,10 +743,16 @@ def fetch_symbol_request(
             last_price = option_observation.last_price
             bid = option_observation.bid
             ask = option_observation.ask
+            bid_volume = option_observation.bid_volume
+            ask_volume = option_observation.ask_volume
             vol = option_observation.volume
             oi = option_observation.open_interest
             iv = option_observation.implied_volatility
             delta = option_observation.delta
+            gamma = option_observation.gamma
+            theta = option_observation.theta
+            vega = option_observation.vega
+            rho = option_observation.rho
             multiplier = option_observation.multiplier
 
             row = {
@@ -768,6 +774,8 @@ def fetch_symbol_request(
                 'underlier_observation_reason_code': underlier_observation.reason_code,
                 'bid': bid,
                 'ask': ask,
+                'bid_volume': bid_volume,
+                'ask_volume': ask_volume,
                 'last_price': last_price,
                 'mid': calc_mid(bid, ask, last_price),
                 'volume': vol,
@@ -778,6 +786,10 @@ def fetch_symbol_request(
                 'currency': u.currency,
                 'otm_pct': None,
                 'delta': delta,
+                'gamma': gamma,
+                'theta': theta,
+                'vega': vega,
+                'rho': rho,
                 # contract multiplier (shares per contract)
                 'multiplier': multiplier,
                 'last_price_update_time': option_observation.last_price_update_time,

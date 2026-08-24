@@ -288,6 +288,10 @@ def test_snapshot_adapter_preserves_broker_timestamp_columns() -> None:
                 {
                     "code": "US.NVDA260821P100000",
                     "last_price": 1.5,
+                    "option_gamma": 0.03,
+                    "option_theta": -0.04,
+                    "option_vega": 0.08,
+                    "option_rho": -0.01,
                     "update_time": "2026-07-17 15:00:00",
                 }
             ]
@@ -296,6 +300,10 @@ def test_snapshot_adapter_preserves_broker_timestamp_columns() -> None:
     )
 
     assert "update_time" in kept
+    assert records[0]["option_gamma"] == 0.03
+    assert records[0]["option_theta"] == -0.04
+    assert records[0]["option_vega"] == 0.08
+    assert records[0]["option_rho"] == -0.01
     assert records[0]["update_time"] == "2026-07-17 15:00:00"
 
 
