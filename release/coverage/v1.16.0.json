@@ -1,0 +1,108 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.16.0",
+  "base": {
+    "tag": "v1.15.19",
+    "commit": "276c81aa13b8054f78fae65239cc0b26d3f06a08"
+  },
+  "reviewed_head": "ef592366284f38e2b991cc407338102e3d81671a",
+  "commits": [
+    {
+      "sha": "2e1cf372dcdcb1ae3978db31b5ad157dd3d8a7d3",
+      "subject": "fix(research): scope archive inventory to selected runs"
+    },
+    {
+      "sha": "208163a0e6dee44d7a5bbe51490f15f8dd02e646",
+      "subject": "docs(strategy-lab): define experiment platform MVP"
+    },
+    {
+      "sha": "36b49705a4540d26014c1bba4f6ad4d4f3c5e386",
+      "subject": "feat(strategy-lab): implement bounded Top1 research MVP"
+    },
+    {
+      "sha": "4272a0c46750cafaf0a7c61285b8a46483e154e6",
+      "subject": "fix(strategy-lab): complete strict validation handoff"
+    },
+    {
+      "sha": "fa27196d1f5e661777d80d13fbc7747b37051753",
+      "subject": "docs(strategy-lab): preserve formal point evidence"
+    },
+    {
+      "sha": "7faf3f2260a26f1a6d485a157464c0da10793044",
+      "subject": "feat(strategy-lab): preserve research point evidence"
+    },
+    {
+      "sha": "44f47abef43d012f86a8a18470d6d097f213ba83",
+      "subject": "fix(copilot): align T-1 performance evidence"
+    },
+    {
+      "sha": "4f7dc01aff92490c6ee92a445b019a899fe32295",
+      "subject": "fix(strategy-lab): harden formal point evidence"
+    },
+    {
+      "sha": "4be64f02048fde2087e2c3dbe65d78335e13cf97",
+      "subject": "feat(strategy-lab): merge experiment MVP"
+    },
+    {
+      "sha": "12584b41f6d6cdd89c3c9ca321d10100334ae41f",
+      "subject": "refactor(strategy-lab): keep history migration preview-only"
+    },
+    {
+      "sha": "ef592366284f38e2b991cc407338102e3d81671a",
+      "subject": "feat(strategy-lab): complete formal 20-day research slice"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added the controlled Strategy Lab Sell Put Top1 experiment workflow, with auditable 20-trading-day research, explicit confirmation before research and 10-day hidden validation, and immutable receipts without direct production-configuration writes.",
+      "commits": [
+        "208163a0e6dee44d7a5bbe51490f15f8dd02e646",
+        "36b49705a4540d26014c1bba4f6ad4d4f3c5e386",
+        "4272a0c46750cafaf0a7c61285b8a46483e154e6",
+        "fa27196d1f5e661777d80d13fbc7747b37051753",
+        "7faf3f2260a26f1a6d485a157464c0da10793044",
+        "12584b41f6d6cdd89c3c9ca321d10100334ae41f",
+        "ef592366284f38e2b991cc407338102e3d81671a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Captured compact account- and run-bound option-position, quote, FX, market-concentration, and ranking evidence at formal recommendation points, with complete-day corpus gating and exact source hashes for reproducible research.",
+      "commits": [
+        "4272a0c46750cafaf0a7c61285b8a46483e154e6",
+        "7faf3f2260a26f1a6d485a157464c0da10793044",
+        "4f7dc01aff92490c6ee92a445b019a899fe32295",
+        "ef592366284f38e2b991cc407338102e3d81671a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Kept historical Strategy Lab migration preview-only and limited research archive inventory to selected runs, reporting evidence gaps instead of repairing or inventing legacy facts.",
+      "commits": [
+        "2e1cf372dcdcb1ae3978db31b5ad157dd3d8a7d3",
+        "12584b41f6d6cdd89c3c9ca321d10100334ae41f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Classified Copilot option-performance results as aggregate evidence with explicit full-query coverage and fact-time freshness so historical T-1 results remain admissible.",
+      "commits": [
+        "44f47abef43d012f86a8a18470d6d097f213ba83"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Kept formal-point evidence collection fail-closed and best-effort so missing experiment evidence cannot interrupt ordinary scheduled scanning or notification delivery.",
+      "commits": [
+        "4f7dc01aff92490c6ee92a445b019a899fe32295"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4be64f02048fde2087e2c3dbe65d78335e13cf97",
+      "reason": "Merge commit; user-visible Strategy Lab behavior is covered by its constituent commits and release notes."
+    }
+  ]
+}
