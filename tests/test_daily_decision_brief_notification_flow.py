@@ -152,6 +152,7 @@ def _request(
     config: dict | None = None,
     accounts: tuple[str, ...] = ("lx",),
     trigger_kind: str = "scheduled",
+    markets_to_run: tuple[str, ...] = ("US",),
 ):
     import src.application.tick_notification_flow as mod
     from src.application.multi_tick.misc import AccountResult
@@ -175,7 +176,7 @@ def _request(
     }
     request = mod.TickNotificationRequest(
         base=tmp_path,
-        cfg_path=tmp_path / "config.us.json",
+        cfg_path=tmp_path / f"config.{markets_to_run[0].lower()}.json",
         state_path=tmp_path / "scheduler_state.json",
         scheduler_schedule_key="schedule",
         base_cfg=config or _config(),
@@ -188,8 +189,8 @@ def _request(
         audit_helper=_Audit(),
         vpy=Path("python3"),
         complete_tick_idempotency_fn=lambda **kwargs: completions.append(dict(kwargs)),
-        markets_to_run=("US",),
-        scheduler_markets=("US",),
+        markets_to_run=markets_to_run,
+        scheduler_markets=markets_to_run,
         scheduler_decision={"in_run_window": True, "now_market": scheduler_by_account[accounts[0]]["now_market"]},
         ran_pipeline_accounts=accounts if pipeline_ok and not delivery_only else (),
         account_ids=accounts,
@@ -802,7 +803,11 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
         return "published", {"recommendation_point_id": "p" * 64}
 
     monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
-    bundle = _request(tmp_path, run_id=f"observer-{observer_fails}")
+    bundle = _request(
+        tmp_path,
+        run_id=f"observer-{observer_fails}",
+        markets_to_run=("HK",),
+    )
     complete_tick = bundle.request.complete_tick_idempotency_fn
 
     def complete(**kwargs):
@@ -905,6 +910,7 @@ def test_recommendation_point_observer_excludes_ineligible_paths(
         run_id=f"observer-excluded-{case}",
         delivery_only=case == "delivery_only",
         trigger_kind=case if case in {"manual", "force"} else "scheduled",
+        markets_to_run=("HK",),
     )
     if case == "not_run":
         bundle.request = replace(bundle.request, ran_pipeline_accounts=())
@@ -940,13 +946,17 @@ def test_recommendation_point_observer_excludes_ineligible_paths(
     assert calls == []
 
 
-def test_recommendation_point_observer_isolates_accounts(monkeypatch, tmp_path: Path) -> None:
+def test_recommendation_point_observer_scopes_first_recipe_to_hk_lx(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     import src.application.tick_notification_flow as mod
 
     bundle = _request(
         tmp_path,
         run_id="observer-account-isolation",
         accounts=("lx", "sy"),
+        markets_to_run=("HK",),
     )
     bundle.request = replace(
         bundle.request,
@@ -958,25 +968,23 @@ def test_recommendation_point_observer_isolates_accounts(monkeypatch, tmp_path: 
 
     def capture(_base, _run_id, account, _decision, **_kwargs):
         calls.append(account)
-        if account == "lx":
-            raise mod.RecommendationPointError(
-                "official_point_unavailable",
-                "injected account failure",
-            )
-        return "published", {"recommendation_point_id": "p" * 64}
+        raise mod.RecommendationPointError(
+            "official_point_unavailable",
+            "injected account failure",
+        )
 
     monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
 
     mod._observe_recommendation_points_best_effort(bundle.request)
 
-    assert calls == ["lx", "sy"]
+    assert calls == ["lx"]
     point_events = [
         event
         for event in bundle.request.audit_helper.events
         if event["action"].startswith("recommendation_point_")
     ]
-    assert [event["extra"]["account"] for event in point_events] == ["lx", "sy"]
-    assert [event["status"] for event in point_events] == ["degraded", "ok"]
+    assert [event["extra"]["account"] for event in point_events] == ["lx"]
+    assert [event["status"] for event in point_events] == ["degraded"]
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:
