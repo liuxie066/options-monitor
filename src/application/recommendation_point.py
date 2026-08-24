@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -26,6 +27,14 @@ from src.application.opening_candidate_snapshot import (
     ranked_opening_candidate_decisions,
     validate_opening_candidate_snapshot,
 )
+from src.application.prepared_option_positions_context import (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+    PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+    PreparedOptionPositionsContextError,
+    find_prepared_option_positions_manifest,
+    load_prepared_option_positions_context_receipt,
+)
+from src.application.source_receipts import sha256_bytes
 from src.application.strategy_lab.top1.ranking import (
     Top1RankingError,
     build_ranking_projection,
@@ -37,12 +46,14 @@ from src.application.tick_run_workspace import (
 )
 
 
-RECOMMENDATION_POINT_SCHEMA = "recommendation_point.v1"
+RECOMMENDATION_POINT_SCHEMA_V1 = "recommendation_point.v1"
+RECOMMENDATION_POINT_SCHEMA_V2 = "recommendation_point.v2"
+RECOMMENDATION_POINT_SCHEMA = RECOMMENDATION_POINT_SCHEMA_V1
 RECOMMENDATION_POINT_FILE = "recommendation_point.sell_put.json"
 STRATEGY_FAMILY = "sell_put"
 AVAILABILITY_ENV = "OM_STRATEGY_LAB_TOP1_AVAILABLE"
 
-_POINT_FIELDS = frozenset(
+_POINT_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "recommendation_point_id",
@@ -64,6 +75,14 @@ _POINT_FIELDS = frozenset(
         "content_sha256",
     }
 )
+_POINT_FIELDS_V2 = frozenset(
+    {
+        *_POINT_FIELDS_V1,
+        "option_market_evidence_ref",
+        "option_market_evidence_manifest_sha256",
+        "option_market_evidence_payload_sha256",
+    }
+)
 _POINT_BINDING_FIELDS = (
     "recommendation_point_id",
     "market",
@@ -73,6 +92,12 @@ _POINT_BINDING_FIELDS = (
     "opening_snapshot_sha256",
     "decision_at_utc",
     "source_commit_sha",
+)
+_POINT_BINDING_FIELDS_V2 = (
+    *_POINT_BINDING_FIELDS,
+    "option_market_evidence_ref",
+    "option_market_evidence_manifest_sha256",
+    "option_market_evidence_payload_sha256",
 )
 _TERMINAL_STATUSES = frozenset(
     {"candidates_found", "no_candidate", "partial_data", "data_unavailable"}
@@ -175,6 +200,13 @@ def _opening_snapshot_ref(run_id: str, account: str) -> str:
     )
 
 
+def _option_market_evidence_ref(run_id: str, account: str) -> str:
+    return (
+        f"output_runs/{run_id}/accounts/{account}/state/"
+        f"{PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2}"
+    )
+
+
 def strategy_lab_top1_available(environ: Mapping[str, str] | None = None) -> bool:
     source = os.environ if environ is None else environ
     return source.get(AVAILABILITY_ENV) == "1"
@@ -184,6 +216,8 @@ def build_recommendation_point_id(
     market: str,
     account: str,
     scheduled_scan_target_market: Any,
+    *,
+    schema_version: str = RECOMMENDATION_POINT_SCHEMA,
 ) -> str:
     target = _canonical_timestamp(
         scheduled_scan_target_market,
@@ -191,7 +225,7 @@ def build_recommendation_point_id(
     )
     return canonical_sha256(
         {
-            "schema_version": RECOMMENDATION_POINT_SCHEMA,
+            "schema_version": schema_version,
             "market": _market(market),
             "account": _account(account),
             "strategy_family": STRATEGY_FAMILY,
@@ -204,7 +238,99 @@ def point_binding_from_recommendation_point(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     item = validate_recommendation_point(payload)
-    return {field: item[field] for field in _POINT_BINDING_FIELDS}
+    fields = (
+        _POINT_BINDING_FIELDS_V2
+        if item["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2
+        else _POINT_BINDING_FIELDS
+    )
+    return {field: item[field] for field in fields}
+
+
+def _prepared_option_binding(
+    receipt: Mapping[str, Any],
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    opening_sealed_at_utc: str,
+) -> dict[str, str]:
+    manifest = receipt.get("manifest")
+    payload = receipt.get("payload")
+    manifest_bytes = receipt.get("manifest_bytes")
+    payload_bytes = receipt.get("payload_bytes")
+    if (
+        not isinstance(manifest, Mapping)
+        or not isinstance(payload, Mapping)
+        or not isinstance(manifest_bytes, bytes)
+        or not isinstance(payload_bytes, bytes)
+    ):
+        _fail(
+            "option_market_evidence_contract_missing",
+            "prepared option receipt is incomplete",
+        )
+    if (
+        manifest.get("schema_version")
+        != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+        or manifest.get("status") != "ready"
+        or manifest.get("run_id") != run_id
+        or manifest.get("account") != account
+        or manifest.get("account_config_sha256") != account_config_sha256
+    ):
+        _fail(
+            "option_market_evidence_conflict",
+            "prepared option receipt identity does not match",
+        )
+    evidence = payload.get("strategy_lab_option_market_evidence")
+    if not isinstance(evidence, Mapping) or evidence.get("status") != "ready":
+        _fail(
+            "option_market_evidence_missing",
+            str(
+                (evidence or {}).get("reason_code")
+                if isinstance(evidence, Mapping)
+                else "option market evidence is missing"
+            ),
+        )
+    try:
+        manifest_matches = json.loads(manifest_bytes.decode("utf-8")) == dict(
+            manifest
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        manifest_matches = False
+    if (
+        sha256_bytes(payload_bytes) != manifest.get("payload_sha256")
+        or not manifest_matches
+    ):
+        _fail(
+            "option_market_evidence_conflict",
+            "prepared option receipt hash does not match",
+        )
+    received = _canonical_timestamp(
+        manifest.get("application_received_at_utc"),
+        "prepared option application_received_at_utc",
+    )
+    sealed = _canonical_timestamp(
+        opening_sealed_at_utc,
+        "opening sealed_at_utc",
+    )
+    if datetime.fromisoformat(received.replace("Z", "+00:00")) > (
+        datetime.fromisoformat(sealed.replace("Z", "+00:00"))
+    ):
+        _fail(
+            "option_market_evidence_time_conflict",
+            "prepared option receipt is later than the opening snapshot",
+        )
+    return {
+        "option_market_evidence_ref": _option_market_evidence_ref(
+            run_id,
+            account,
+        ),
+        "option_market_evidence_manifest_sha256": sha256_bytes(
+            manifest_bytes
+        ),
+        "option_market_evidence_payload_sha256": str(
+            manifest["payload_sha256"]
+        ),
+    }
 
 
 def build_recommendation_point(
@@ -214,6 +340,7 @@ def build_recommendation_point(
     *,
     terminal_manifest_sha256: str,
     source_commit_sha: str,
+    prepared_option_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(scheduler_decision, Mapping):
         _fail("official_point_identity_missing", "scheduler decision is missing")
@@ -327,9 +454,19 @@ def build_recommendation_point(
     else:
         _fail("official_point_invalid", "Sell Put terminal status is unsupported")
 
-    point_id = build_recommendation_point_id(market, account, target)
+    point_schema = (
+        RECOMMENDATION_POINT_SCHEMA_V2
+        if prepared_option_receipt is not None
+        else RECOMMENDATION_POINT_SCHEMA_V1
+    )
+    point_id = build_recommendation_point_id(
+        market,
+        account,
+        target,
+        schema_version=point_schema,
+    )
     payload: dict[str, Any] = {
-        "schema_version": RECOMMENDATION_POINT_SCHEMA,
+        "schema_version": point_schema,
         "recommendation_point_id": point_id,
         "strategy_family": STRATEGY_FAMILY,
         "market": market,
@@ -347,6 +484,16 @@ def build_recommendation_point(
         "source_commit_sha": source_sha,
         "producer_accepted_candidate_ids": accepted_ids,
     }
+    if prepared_option_receipt is not None:
+        payload.update(
+            _prepared_option_binding(
+                prepared_option_receipt,
+                run_id=run_id,
+                account=account,
+                account_config_sha256=opening["account_config_sha256"],
+                opening_sealed_at_utc=opening["sealed_at_utc"],
+            )
+        )
 
     projection: dict[str, Any] | None = None
     try:
@@ -373,9 +520,18 @@ def validate_recommendation_point(
     if not isinstance(payload, Mapping):
         _fail("official_point_invalid", "recommendation point must be an object")
     item = dict(payload)
-    if set(item) != _POINT_FIELDS:
+    schema = item.get("schema_version")
+    expected_fields = (
+        _POINT_FIELDS_V2
+        if schema == RECOMMENDATION_POINT_SCHEMA_V2
+        else _POINT_FIELDS_V1
+    )
+    if set(item) != expected_fields:
         _fail("official_point_invalid", "recommendation point keys are incomplete or unexpected")
-    if item["schema_version"] != RECOMMENDATION_POINT_SCHEMA:
+    if schema not in {
+        RECOMMENDATION_POINT_SCHEMA_V1,
+        RECOMMENDATION_POINT_SCHEMA_V2,
+    }:
         _fail("official_point_invalid", "recommendation point schema is invalid")
     if item["strategy_family"] != STRATEGY_FAMILY:
         _fail("official_point_invalid", "strategy family is invalid")
@@ -388,7 +544,12 @@ def validate_recommendation_point(
     )
     _strict_timestamp(item["decision_at_utc"], "decision_at_utc")
     point_id = _hash(item["recommendation_point_id"], "recommendation_point_id", _HASH_64)
-    if point_id != build_recommendation_point_id(market, account, target):
+    if point_id != build_recommendation_point_id(
+        market,
+        account,
+        target,
+        schema_version=str(schema),
+    ):
         _fail("official_point_invalid", "recommendation point identity does not match")
     status = item["terminal_sell_put_status"]
     if status not in _TERMINAL_STATUSES:
@@ -406,6 +567,20 @@ def validate_recommendation_point(
         _fail("official_point_invalid", "terminal manifest ref is invalid")
     if item["opening_snapshot_ref"] != _opening_snapshot_ref(run_id, account):
         _fail("official_point_invalid", "opening snapshot ref is invalid")
+    if schema == RECOMMENDATION_POINT_SCHEMA_V2:
+        if item["option_market_evidence_ref"] != _option_market_evidence_ref(
+            run_id,
+            account,
+        ):
+            _fail(
+                "official_point_invalid",
+                "option market evidence ref is invalid",
+            )
+        for field in (
+            "option_market_evidence_manifest_sha256",
+            "option_market_evidence_payload_sha256",
+        ):
+            _hash(item[field], field, _HASH_64)
     candidate_ids = item["producer_accepted_candidate_ids"]
     if not isinstance(candidate_ids, list):
         _fail("official_point_invalid", "producer candidate IDs must be a list")
@@ -502,6 +677,7 @@ def capture_scheduled_recommendation_point(
     scheduler_decision: Mapping[str, Any],
     *,
     source_commit_sha: str,
+    require_option_market_evidence: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     try:
         bundle = load_candidate_snapshot_bundle(
@@ -524,11 +700,43 @@ def capture_scheduled_recommendation_point(
     opening = owners.get("opening") if isinstance(owners, Mapping) else None
     if not isinstance(opening, Mapping):
         _fail("official_point_unavailable", "opening owner is unavailable")
+    prepared_receipt: Mapping[str, Any] | None = None
+    if require_option_market_evidence:
+        prepared_manifest_path = find_prepared_option_positions_manifest(
+            base=Path(base),
+            run_id=run_id,
+            account=account,
+        )
+        if prepared_manifest_path is None:
+            _fail(
+                "option_market_evidence_contract_missing",
+                "prepared option v2 receipt is unavailable",
+            )
+        try:
+            prepared_receipt = load_prepared_option_positions_context_receipt(
+                manifest_path=prepared_manifest_path,
+                expected_base=Path(base),
+                expected_run_id=run_id,
+                expected_account=account,
+                expected_account_config_sha256=str(
+                    opening.get("account_config_sha256") or ""
+                ),
+                require_option_market_evidence=True,
+            )
+        except PreparedOptionPositionsContextError as exc:
+            reason = str(exc)
+            _fail(
+                reason
+                if reason.startswith("option_market_evidence_")
+                else "option_market_evidence_contract_missing",
+                f"prepared option v2 receipt is invalid: {exc}",
+            )
     point = build_recommendation_point(
         scheduler_decision,
         manifest,
         opening,
         terminal_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         source_commit_sha=source_commit_sha,
+        prepared_option_receipt=prepared_receipt,
     )
     return publish_recommendation_point(Path(base), point), point

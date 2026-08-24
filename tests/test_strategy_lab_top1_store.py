@@ -11,25 +11,13 @@ from typing import Any
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import (
-    SELL_PUT_RANKING_CONTRACT_VERSION,
-    SELL_PUT_RANKING_PROFILES,
-)
-from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
-from src.application.opening_candidate_snapshot import OPENING_CANDIDATE_SNAPSHOT_SCHEMA
 from src.application.shadow_replay.common import artifact_content_sha256, render_json_text
 from src.application.strategy_lab.top1.contracts import (
-    ACCEPTED_SET_CONTRACT_VERSION,
-    EXPERIMENT_SPEC_SCHEMA_VERSION,
-    EXPIRY_OUTCOME_CONTRACT_VERSION,
-    RESEARCH_METRIC_CONTRACT_VERSION,
-    RESEARCH_REQUIRED_DAYS,
-    RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
     VALIDATION_REQUIRED_DAYS,
-    build_behavior_binding,
     build_research_spec_sha256,
+    build_sell_put_top1_research_spec,
     build_validation_spec_sha256,
 )
 from src.application.strategy_lab.top1.lifecycle import (
@@ -37,17 +25,14 @@ from src.application.strategy_lab.top1.lifecycle import (
     authorize_research,
     authorize_validation,
     build_hidden_window_commitment,
-    effective_feature_status,
     prepare_experiment,
     read_public_receipt,
     read_public_status,
     seal_generation,
-    set_account_opt_in,
     start_research,
     start_validation,
     terminate_experiment,
 )
-from src.application.strategy_lab.top1.ranking import RANKING_PROJECTION_SCHEMA_VERSION
 from src.application.strategy_lab.top1.terminal_projection import (
     publish_exact_text,
     recover_terminal_projection,
@@ -70,47 +55,12 @@ SHA_C = "c" * 64
 NOW = "2026-08-15T03:00:00Z"
 
 
-def _behavior_versions(calendar: str = "hk-calendar.v1") -> dict[str, str]:
-    return {
-        "baseline_version": "sell-put-baseline.v1",
-        "opening_snapshot_schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-        "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
-        "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
-        "research_selection_contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
-        "research_metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
-        "validation_fill_contract_version": VALIDATION_FILL_CONTRACT_VERSION,
-        "validation_metric_contract_version": VALIDATION_METRIC_CONTRACT_VERSION,
-        "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
-        "market_calendar_version": calendar,
-        "expiry_outcome_contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
-    }
-
-
 def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
-    profiles = tuple(SELL_PUT_RANKING_PROFILES)
-    spec: dict[str, Any] = {
-        "schema_version": EXPERIMENT_SPEC_SCHEMA_VERSION,
-        "topic_id": f"topic-{experiment_id}",
-        "experiment_id": experiment_id,
-        "market": "HK",
-        "account": "lx",
-        "hypothesis": {
-            "hypothesis_type": "sell_put_ranking",
-            "statement": "Prefer lower cross-symbol concentration earlier.",
-            "mechanism": "Move the existing concentration fact ahead of return.",
-            "independent_variable": "cross_symbol_concentration_priority",
-            "expected_direction": "higher_top1_efficiency_without_higher_concentration",
-        },
-        "baseline": {
-            "version": "sell-put-baseline.v1",
-            "opening_snapshot_schema": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-            "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-            "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
-            "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
-            "behavior_binding_sha256": build_behavior_binding(_behavior_versions()),
-        },
-        "research_source": {
+    spec = build_sell_put_top1_research_spec(
+        topic_id=f"topic-{experiment_id}",
+        experiment_id=experiment_id,
+        market_calendar_version="hk-calendar.v1",
+        research_source={
             "mode": "sealed_historical_dataset",
             "dataset_ref": f"strategy_lab/top1/{experiment_id}/research.json",
             "dataset_sha256": SHA_A,
@@ -118,42 +68,7 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
             "start_trading_date": "2026-06-19",
             "end_trading_date": "2026-08-14",
         },
-        "research_evaluation": {
-            "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
-            "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
-            "fill_assumption": "t0_sell_limit",
-            "required_days": RESEARCH_REQUIRED_DAYS,
-            "window_mode": "fixed_consecutive_trading_days",
-            "visibility": "visible_after_research_seal",
-        },
-        "variants": [
-            {"variant_id": "baseline", "patch": {}},
-            *[
-                {
-                    "variant_id": f"level-{index}",
-                    "patch": {"ranking_profile": profile},
-                }
-                for index, profile in enumerate(profiles, start=1)
-            ],
-        ],
-        "frozen_safety": {
-            "mode": "inherit_each_point_producer_accepted_set",
-            "variant_may_change_acceptance": False,
-        },
-        "economics_contracts": {
-            "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
-            "market_calendar_version": "hk-calendar.v1",
-        },
-        "expiry_outcome": {
-            "contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
-            "spot_source": "opend_history_kline",
-            "ktype": "K_DAY",
-            "autype": "NONE",
-            "price_field": "close",
-            "due_boundary": "expiration_observation_start_ms",
-            "pending_elapsed_hours": 72,
-        },
-    }
+    )
     if validation:
         spec.update(
             {
@@ -209,17 +124,24 @@ def _store(tmp_path: Path) -> ExperimentStore:
 def _enable(
     store: ExperimentStore, root: Path, *, idempotency_key: str = "enable"
 ) -> None:
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key=idempotency_key,
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
+    del store, root, idempotency_key
+
+
+def _restore_v3_feature_table(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE strategy_lab_features(
+                market TEXT NOT NULL,
+                account TEXT NOT NULL,
+                user_opt_in INTEGER NOT NULL CHECK(user_opt_in IN (0, 1)),
+                last_actor TEXT NOT NULL,
+                last_occurred_at_utc TEXT NOT NULL,
+                state_version INTEGER NOT NULL CHECK(state_version >= 1),
+                PRIMARY KEY(market, account)
+            )
+            """
+        )
 
 
 def _ready_research(store: ExperimentStore, root: Path, experiment_id: str) -> None:
@@ -292,7 +214,7 @@ def _lock_store_challenger(
         validation_start_trading_date=trading_dates[0],
         market_calendar_binding=calendar_binding,
         schedule=top1_hk_schedule_fixture(),
-        challenger_variant_id="level-1",
+        challenger_variant_id="concentration-0.002",
         research_spec_sha256=research_hash,
         research_terminal_file_sha256=terminal_hash,
         behavior_binding_sha256=str(spec["baseline"]["behavior_binding_sha256"]),
@@ -306,10 +228,10 @@ def _lock_store_challenger(
         validation_spec_sha256=build_validation_spec_sha256(
             spec,
             research_terminal_sha256=terminal_hash,
-            challenger_variant_id="level-1",
+            challenger_variant_id="concentration-0.002",
             hidden_window_commitment_sha256=commitment_sha,
         ),
-        research_leader="level-1",
+        research_leader="concentration-0.002",
         research_receipt_ref=(
             f"strategy_lab/top1/{experiment_id}/research-receipt.json"
         ),
@@ -362,8 +284,8 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
     store = ExperimentStore(path)
     assert store.schema_state() == {"status": "not_initialized", "schema_version": None}
     assert not path.exists()
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 3}
-    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 3}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 4}
+    assert store.migrate(migrated_at_utc=NOW) == {"status": "ready", "schema_version": 4}
     assert stat_mode(path) == 0o600
     assert not Path(f"{path}-wal").exists()
     with sqlite3.connect(path) as connection:
@@ -375,7 +297,6 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
         }
         assert tables == {
             "strategy_lab_schema",
-            "strategy_lab_features",
             "strategy_lab_experiments",
             "strategy_lab_generations",
             "strategy_lab_hidden_commitments",
@@ -398,19 +319,12 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
             "INSERT INTO strategy_lab_schema VALUES (?, 0, ?)",
             ("sell_put_top1_experiment_store", NOW),
         )
-    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 3
+    assert ExperimentStore(v0_path).migrate(migrated_at_utc=NOW)["schema_version"] == 4
 
     v1_path = tmp_path / "v1.sqlite3"
     v1_store = ExperimentStore(v1_path)
     v1_store.migrate(migrated_at_utc=NOW)
-    v1_store.set_feature(
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key="legacy-feature",
-    )
+    _restore_v3_feature_table(v1_path)
     with sqlite3.connect(v1_path) as connection:
         connection.execute("DROP TABLE strategy_lab_expiry_close_facts")
         connection.execute("DROP TABLE strategy_lab_outcome_jobs")
@@ -423,14 +337,12 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
     assert v1_store.schema_state() == {"status": "migration_required", "schema_version": 1}
     assert v1_store.migrate(migrated_at_utc=NOW) == {
         "status": "ready",
-        "schema_version": 3,
+        "schema_version": 4,
     }
-    assert v1_store.feature("HK", "lx")["user_opt_in"] == 1
 
     v2_path = tmp_path / "v2.sqlite3"
     v2_store = ExperimentStore(v2_path)
     v2_store.migrate(migrated_at_utc=NOW)
-    _enable(v2_store, tmp_path / "v2-artifacts", idempotency_key="v2-feature")
     prepare_experiment(
         v2_store,
         _spec("v2-preserved"),
@@ -441,6 +353,7 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
         artifact_root=tmp_path / "v2-artifacts",
         environ=AVAILABLE,
     )
+    _restore_v3_feature_table(v2_path)
     with sqlite3.connect(v2_path) as connection:
         connection.execute("DROP TABLE strategy_lab_expiry_close_facts")
         connection.execute("DROP TABLE strategy_lab_outcome_jobs")
@@ -448,12 +361,51 @@ def test_schema_migration_is_explicit_private_and_fail_closed(tmp_path: Path) ->
         connection.execute("DROP TABLE strategy_lab_validation_days")
         connection.execute("DROP TABLE strategy_lab_validation_decisions")
         connection.execute("UPDATE strategy_lab_schema SET schema_version = 2")
-    assert v2_store.migrate(migrated_at_utc=NOW) == {
+    with pytest.raises(ExperimentStoreError) as exc_info:
+        v2_store.migrate(migrated_at_utc=NOW)
+    assert exc_info.value.reason_code == "migration_active_experiments"
+    assert v2_store.schema_state() == {"status": "migration_required", "schema_version": 2}
+    with sqlite3.connect(v2_path) as connection:
+        assert connection.execute(
+            "SELECT topic_id FROM strategy_lab_experiments WHERE experiment_id = ?",
+            ("v2-preserved",),
+        ).fetchone() == ("topic-v2-preserved",)
+        assert connection.execute(
+            "SELECT event_type FROM strategy_lab_events WHERE experiment_id = ?",
+            ("v2-preserved",),
+        ).fetchone() == ("experiment_prepared",)
+
+    v3_path = tmp_path / "v3-terminal.sqlite3"
+    v3_store = ExperimentStore(v3_path)
+    v3_store.migrate(migrated_at_utc=NOW)
+    v3_root = tmp_path / "v3-artifacts"
+    prepare_experiment(
+        v3_store,
+        _spec("v3-terminal"),
+        provenance={"source_commit_sha": "commit-v3", "config_sha256": SHA_B},
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="v3-prepare",
+        artifact_root=v3_root,
+        environ=AVAILABLE,
+    )
+    terminate_experiment(
+        v3_store,
+        experiment_id="v3-terminal",
+        reason="human_abandoned",
+        actor="human",
+        occurred_at_utc=NOW,
+        idempotency_key="v3-abort",
+        artifact_root=v3_root,
+    )
+    _restore_v3_feature_table(v3_path)
+    with sqlite3.connect(v3_path) as connection:
+        connection.execute("UPDATE strategy_lab_schema SET schema_version = 3")
+    assert v3_store.migrate(migrated_at_utc=NOW) == {
         "status": "ready",
-        "schema_version": 3,
+        "schema_version": 4,
     }
-    assert v2_store.experiment("v2-preserved")["topic_id"] == "topic-v2-preserved"
-    assert v2_store.events("v2-preserved")[0]["event_type"] == "experiment_prepared"
+    assert read_public_receipt(v3_store, experiment_id="v3-terminal") is not None
 
     partial = tmp_path / "partial.sqlite3"
     with sqlite3.connect(partial) as connection:
@@ -474,26 +426,22 @@ def stat_mode(path: Path) -> int:
     return os.stat(path).st_mode & 0o777
 
 
-def test_default_off_and_maintainer_off_enable_is_no_write(tmp_path: Path) -> None:
+def test_service_off_rejects_lifecycle_write(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"
-    assert effective_feature_status(
-        store, market="HK", account="lx", environ=AVAILABLE
-    )["effective"] is False
     with pytest.raises(Top1LifecycleError) as exc_info:
-        set_account_opt_in(
+        prepare_experiment(
             store,
-            market="HK",
-            account="lx",
-            enabled=True,
+            _spec("service-off"),
+            provenance={"source_commit_sha": "commit-off"},
             actor="human",
             occurred_at_utc=NOW,
-            idempotency_key="enable-off",
+            idempotency_key="prepare-off",
             artifact_root=root,
             environ={},
         )
-    assert exc_info.value.reason_code == "feature_disabled"
-    assert store.feature("HK", "lx") is None
+    assert exc_info.value.reason_code == "strategy_lab_service_disabled"
+    assert store.active_experiments("HK", "lx") == []
 
 
 def test_exact_publisher_adopts_bytes_and_rejects_conflict_or_symlink(
@@ -558,17 +506,6 @@ def test_separate_authorization_starts_evidence_bound_validation(tmp_path: Path)
 def test_public_status_rejects_cross_account_identity(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="sy",
-        enabled=True,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key="enable-sy",
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
     spec = _spec("experiment-sy")
     spec["account"] = "sy"
     prepare_experiment(
@@ -628,7 +565,6 @@ def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None
         store,
         experiment_id="experiment-odd",
         reason="human_abandoned",
-        disabled_scope=None,
         actor="human",
         occurred_at_utc=NOW,
         idempotency_key="abort-odd",
@@ -648,7 +584,6 @@ def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None
         store,
         experiment_id="experiment-even",
         reason="human_abandoned",
-        disabled_scope=None,
         actor="human",
         occurred_at_utc=NOW,
         idempotency_key="abort-even",
@@ -726,7 +661,7 @@ def test_exact_date_overlap_and_content_addressed_orphan(tmp_path: Path) -> None
     assert str(store.experiment("experiment-overlap")["proposed_commitment_ref"]) != orphan_ref
 
 
-def test_terminal_competition_crash_recovery_and_disable(tmp_path: Path) -> None:
+def test_terminal_competition_crash_recovery(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"
     _enable(store, root)
@@ -750,7 +685,6 @@ def test_terminal_competition_crash_recovery_and_disable(tmp_path: Path) -> None
             store,
             experiment_id="experiment-terminal",
             reason="human_abandoned",
-            disabled_scope=None,
             actor="human",
             occurred_at_utc=NOW,
             idempotency_key="abort-terminal",
@@ -759,17 +693,7 @@ def test_terminal_competition_crash_recovery_and_disable(tmp_path: Path) -> None
         )
     assert store.experiment("experiment-terminal")["terminal_mode"] == "aborted"
     assert read_public_receipt(store, experiment_id="experiment-terminal") is None
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=False,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key="disable-after-crash",
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
+    recover_terminal_projection(store, root, experiment_id="experiment-terminal")
     receipt = read_public_receipt(store, experiment_id="experiment-terminal")
     assert receipt is not None
     assert receipt["terminal"]["mode"] == "aborted"
@@ -787,22 +711,4 @@ def test_terminal_competition_crash_recovery_and_disable(tmp_path: Path) -> None
             artifact_root=root,
             environ=AVAILABLE,
         )
-    assert exc_info.value.reason_code in {"feature_disabled", "terminal_conflict"}
-
-    _enable(store, root, idempotency_key="reenable")
-    _ready_research(store, root, "experiment-disable")
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=False,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key="disable",
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
-    disabled = read_public_receipt(store, experiment_id="experiment-disable")
-    assert disabled is not None
-    assert disabled["terminal"]["reason"] == "experimental_feature_disabled"
-    assert disabled["terminal"]["disabled_scope"] == "user"
+    assert exc_info.value.reason_code == "terminal_conflict"

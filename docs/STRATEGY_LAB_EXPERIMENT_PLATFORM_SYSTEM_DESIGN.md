@@ -104,9 +104,11 @@ src/interfaces/cli/strategy_lab_top1.py
 
 ### 3.2 事实时点与不可变边界
 
-`prepared_option_positions_context.v2` 是新 run 的写入合同，仍由现有 prepared context owner 产出，
-不增加 store 或 artifact family。已有 `prepared_option_positions_context.v1` 保留为普通运行链的只读
-恢复合同；Strategy Lab 不把 v1 当作实验事实。
+OM 现有 prepared context owner 已以 `prepared_option_positions_context.v2` 作为新 run 的写入合同。
+本功能复用同一 artifact family，只在 v2 payload 中增加可选的
+`strategy_lab_option_market_evidence`；不增加 store 或 schema 版本。已有
+`prepared_option_positions_context.v1` 保留为普通运行链的只读恢复合同；Strategy Lab 只接受包含完整
+实验事实的 v2。
 
 scheduled tick 使用现有 generation hash 做最小一致读 fence：
 
@@ -170,11 +172,11 @@ currency 只来自前者，持仓、mark 和 FX 只来自后者。`recommendatio
 绑定读取 artifact 并重建 ranking projection；账本在 point 形成后发生变化，不得改变该 point
 的指标或 hash。
 
-新 producer 只在新 run 写 `prepared_option_positions_context.v2.json`；已有 v1 manifest 的 run 只走恢复，
-不在原 run 补写 v2、不改名或重写旧文件。普通运行恢复按 v2、v1 的固定顺序发现 manifest，
-通用 loader 接受两版并保持 v1 现有返回语义；只有 Strategy Lab 调用 loader 时传
-`require_option_market_evidence=True`，强制 v2、完整 evidence 和 hash 校验。因此旧 run 仍可完成扫描或
-Wheel 恢复，但不能生成 `recommendation_point.v2` 或进入实验窗口。
+producer 沿用现有行为，在新 run 写 `prepared_option_positions_context.v2.json`；已有 v1 manifest 的 run
+只走恢复，不在原 run 补写 v2、不改名或重写旧文件。普通运行恢复按 v2、v1 的固定顺序发现
+manifest，通用 loader 接受两版并保持既有返回语义；只有 Strategy Lab 调用 loader 时传
+`require_option_market_evidence=True`，强制 v2、完整嵌套 evidence 和 hash 校验。因此缺少该嵌套事实的
+旧 run 仍可完成扫描或 Wheel 恢复，但不能生成 `recommendation_point.v2` 或进入实验窗口。
 
 历史窗口只接受已归档的 v2 manifest / payload。v1 返回
 `option_market_evidence_contract_missing`，v2 缺少 mark / FX 返回 `option_market_evidence_missing`，不得用
@@ -328,11 +330,11 @@ CLI 必须把完整命令作为 JSON 传给 Workspace；`confirmed_at_utc` 是�
 直接确认 `validation_spec_sha256`，其绑定由 validation spec 与 hidden commitment 持久化。研究与验证
 使用不同 idempotency key；同一命令的重试必须逐字保持上述字段不变。
 
-### 5.3 Prepared Option Market Evidence v2
+### 5.3 Prepared Option Market Evidence（复用 v2）
 
-现有 `option_positions_context.json` 保留 payload 文件名；新 manifest / schema 为
-`prepared_option_positions_context.v2`，旧 v1 manifest 仅供普通运行恢复。v2 payload 新增
-`strategy_lab_option_market_evidence`：
+现有 `option_positions_context.json` payload 文件名以及
+`prepared_option_positions_context.v2` manifest / schema 均保持不变；旧 v1 manifest 仅供普通运行恢复。
+现有 v2 payload 以可选字段形式新增 `strategy_lab_option_market_evidence`：
 
 ```text
 schema_version = option_market_evidence.v1
@@ -536,8 +538,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 文件 | 函数 | 更新内容 |
 |---|---|---|
 | `domain/domain/engine/candidate_engine.py` | `_rank_return_bands()`、`rank_candidate_rows()` | 增加显式 `near_return_threshold`；新增 `option_market_concentration` profile，读取 `option_market_concentration_after`；默认 `current_tie_break` 行为不变 |
-| `src/application/prepared_option_positions_context.py` | `prepare_option_positions_contexts()`、`_validate_option_context_account()`、`_load_prepared_option_positions_context_artifacts()`、`load_prepared_option_positions_context()`、`load_prepared_option_positions_context_receipt()` | producer 用 A/B generation fence 只写 v2；通用 loader 兼容 v1/v2，严格 flag 只接受 ready v2 evidence；漂移只降级嵌套 evidence，不阻断普通 option context |
-| `src/application/tick_account_execution.py` | `run_tick_account_execution()` | 新 run 使用 v2；prefetch recovery 通过 owner helper 按 v2 后 v1 找 manifest，旧 run 继续完成普通账户 pipeline |
+| `src/application/prepared_option_positions_context.py` | `prepare_option_positions_contexts()`、`_validate_option_context_account()`、`_load_prepared_option_positions_context_artifacts()`、`load_prepared_option_positions_context()`、`load_prepared_option_positions_context_receipt()` | producer 沿用 v2 并用 A/B generation fence 增加嵌套 evidence；通用 loader 兼容 v1/v2，严格 flag 只接受 ready v2 evidence；漂移只降级嵌套 evidence，不阻断普通 option context |
+| `src/application/tick_account_execution.py` | `run_tick_account_execution()` | 新 run 沿用 canonical v2；prefetch recovery 通过 owner helper 按 v2 后 v1 找 manifest，旧 run 继续完成普通账户 pipeline |
 | `src/application/recommendation_point.py` | `capture_scheduled_recommendation_point()`、`build_recommendation_point()`、`validate_recommendation_point()`、`point_binding_from_recommendation_point()` | 升级 point v2；现有 capture 入口先加载 canonical candidate bundle，再加载同 run/account 严格 v2 prepared receipt；build 仅组合两个 owner 并绑定 evidence ref / manifest / payload hash |
 | `src/application/runtime_portfolio_snapshot.py` | `_validate_prepared_option_reference()`、`build_runtime_portfolio_snapshot()`、`validate_replay_bundle()` | 普通 runtime snapshot / replay 兼容绑定 v1/v2 owner receipt；Strategy Lab 不从该兼容面放行 v1 |
 | `src/application/strategy_lab/top1/contracts.py` | `validate_experiment_spec()`、`build_current_behavior_binding()`、`build_research_spec_sha256()`、`build_validation_spec_sha256()` | 升级 v2 字段、变体、指标、FX、research close receipt 和 expiry outcome 合同版本；保持 exact-key 和 fail-closed 校验 |

@@ -9,7 +9,14 @@ from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
-from domain.domain.performance.models import EvidenceEnvelope, FXRateFact
+from domain.domain.performance.models import (
+    EvidenceEnvelope,
+    FXRateFact,
+    ValuationMarkFact,
+    normalize_currency,
+    select_fx_rate,
+    select_valuation_mark,
+)
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.services import adapt_option_positions_context
 from src.infrastructure.exchange_rates import (
@@ -32,6 +39,10 @@ from src.application.positions.context_builder import (
     build_shared_context,
     slice_shared_context_for_account,
     validate_option_positions_context_account,
+)
+from src.application.performance.adapters import (
+    ledger_performance_inputs_from_rows,
+    load_option_valuation_inputs,
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
@@ -59,6 +70,85 @@ PREPARED_OPTION_POSITIONS_MANIFEST_NAME = (
 LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME = (
     "prepared_option_positions_context.v1.json"
 )
+PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1 = (
+    LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
+)
+PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2 = (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
+)
+PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMAS = (
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1,
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+)
+PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1 = (
+    LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME
+)
+PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2 = (
+    PREPARED_OPTION_POSITIONS_MANIFEST_NAME
+)
+OPTION_MARKET_EVIDENCE_SCHEMA = "option_market_evidence.v1"
+OPTION_MARKET_EVIDENCE_SELECTION_POLICY = "performance_evidence.latest_at_or_before.v1"
+
+_OPTION_MARKET_EVIDENCE_FIELDS = {
+    "schema_version",
+    "status",
+    "reason_code",
+    "run_id",
+    "account",
+    "account_config_sha256",
+    "evidence_at_utc",
+    "selection_policy_version",
+    "ledger_generation_sha256_a",
+    "ledger_generation_sha256_b",
+    "decision_state_fingerprint_a",
+    "decision_state_fingerprint_b",
+    "open_option_positions",
+    "valuation_mark_facts",
+    "fx_rate_facts",
+    "content_sha256",
+}
+_OPTION_MARKET_POSITION_FIELDS = {
+    "lot_id",
+    "account",
+    "broker",
+    "instrument_key",
+    "symbol",
+    "option_type",
+    "strike",
+    "expiration_ymd",
+    "currency",
+    "multiplier",
+    "position_side",
+    "contracts_open",
+    "market_code",
+}
+_OPTION_MARKET_MARK_FIELDS = {
+    "fact_id",
+    "instrument_key",
+    "price",
+    "mark_kind",
+    "effective_at_ms",
+    "observed_at_ms",
+    "source",
+    "source_id",
+    "revision",
+    "supersedes_fact_id",
+    "source_fact_sha256",
+}
+_OPTION_MARKET_FX_FIELDS = {
+    "fact_id",
+    "base_currency",
+    "quote_currency",
+    "rate",
+    "rate_kind",
+    "effective_at_ms",
+    "observed_at_ms",
+    "source",
+    "source_id",
+    "revision",
+    "supersedes_fact_id",
+    "source_fact_sha256",
+}
 
 
 class PreparedOptionPositionsContextError(RuntimeError):
@@ -245,6 +335,259 @@ def _persist_fx_evidence(
     }
 
 
+def _ledger_generation_sha256(
+    rows_by_account: Mapping[str, Mapping[str, Any]],
+    accounts: list[str],
+) -> str:
+    first_rows = rows_by_account[accounts[0]]
+    return canonical_sha256(
+        {
+            "trade_events": list(first_rows["trade_events"]),
+            "stored_position_lots": list(first_rows["stored_position_lots"]),
+            "wheel_events_by_account": {
+                account: list(
+                    rows_by_account[account].get("account_wheel_events") or []
+                )
+                for account in sorted(accounts)
+            },
+        }
+    )
+
+
+def _scan_currency(config_path: Path) -> str:
+    name = Path(config_path).name.lower()
+    if ".hk." in name or name.endswith(".hk.json"):
+        return "HKD"
+    if ".us." in name or name.endswith(".us.json"):
+        return "USD"
+    raise ValueError("prepared option scan market is unavailable")
+
+
+def _minimal_mark_fact(fact: ValuationMarkFact) -> dict[str, Any]:
+    return {
+        "fact_id": fact.fact_id,
+        "instrument_key": fact.instrument_key,
+        "price": str(fact.price),
+        "mark_kind": fact.mark_kind,
+        "effective_at_ms": fact.effective_at_ms,
+        "observed_at_ms": fact.observed_at_ms,
+        "source": fact.source,
+        "source_id": fact.source_id,
+        "revision": fact.revision,
+        "supersedes_fact_id": fact.supersedes_fact_id,
+        "source_fact_sha256": canonical_sha256(
+            fact.normalized_payload(include_fact_id=True)
+        ),
+    }
+
+
+def _minimal_fx_fact(fact: FXRateFact) -> dict[str, Any]:
+    return {
+        "fact_id": fact.fact_id,
+        "base_currency": fact.base_currency,
+        "quote_currency": fact.quote_currency,
+        "rate": str(fact.rate),
+        "rate_kind": fact.rate_kind,
+        "effective_at_ms": fact.effective_at_ms,
+        "observed_at_ms": fact.observed_at_ms,
+        "source": fact.source,
+        "source_id": fact.source_id,
+        "revision": fact.revision,
+        "supersedes_fact_id": fact.supersedes_fact_id,
+        "source_fact_sha256": canonical_sha256(
+            fact.normalized_payload(include_fact_id=True)
+        ),
+    }
+
+
+def _option_market_evidence_payload(
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    evidence_at_utc: str,
+    ledger_generation_sha256_a: str,
+    ledger_generation_sha256_b: str,
+    decision_state_fingerprint_a: str,
+    decision_state_fingerprint_b: str,
+    status: str,
+    reason_code: str | None,
+    open_option_positions: list[dict[str, Any]] | None = None,
+    valuation_mark_facts: list[dict[str, Any]] | None = None,
+    fx_rate_facts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": OPTION_MARKET_EVIDENCE_SCHEMA,
+        "status": status,
+        "reason_code": reason_code,
+        "run_id": run_id,
+        "account": account,
+        "account_config_sha256": account_config_sha256,
+        "evidence_at_utc": evidence_at_utc,
+        "selection_policy_version": OPTION_MARKET_EVIDENCE_SELECTION_POLICY,
+        "ledger_generation_sha256_a": ledger_generation_sha256_a,
+        "ledger_generation_sha256_b": ledger_generation_sha256_b,
+        "decision_state_fingerprint_a": decision_state_fingerprint_a,
+        "decision_state_fingerprint_b": decision_state_fingerprint_b,
+        "open_option_positions": open_option_positions or [],
+        "valuation_mark_facts": valuation_mark_facts or [],
+        "fx_rate_facts": fx_rate_facts or [],
+    }
+    payload["content_sha256"] = canonical_sha256(payload)
+    return payload
+
+
+def build_option_market_evidence_payload(
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    broker: str,
+    scan_currency: str,
+    rows_a: Mapping[str, Any],
+    evidence_bundle: Any,
+    evidence_at_utc: str,
+    ledger_generation_sha256_a: str,
+    ledger_generation_sha256_b: str,
+    decision_state_fingerprint_a: str,
+    decision_state_fingerprint_b: str,
+) -> dict[str, Any]:
+    """Build the strict evidence slice without reading mutable state."""
+
+    common = {
+        "run_id": run_id,
+        "account": account,
+        "account_config_sha256": account_config_sha256,
+        "evidence_at_utc": evidence_at_utc,
+        "ledger_generation_sha256_a": ledger_generation_sha256_a,
+        "ledger_generation_sha256_b": ledger_generation_sha256_b,
+        "decision_state_fingerprint_a": decision_state_fingerprint_a,
+        "decision_state_fingerprint_b": decision_state_fingerprint_b,
+    }
+    if (
+        ledger_generation_sha256_a != ledger_generation_sha256_b
+        or decision_state_fingerprint_a != decision_state_fingerprint_b
+    ):
+        return _option_market_evidence_payload(
+            **common,
+            status="unavailable",
+            reason_code="option_market_evidence_position_drift",
+        )
+    if str(getattr(evidence_bundle, "schema_state", "")) != "initialized_v1":
+        return _option_market_evidence_payload(
+            **common,
+            status="unavailable",
+            reason_code="option_market_evidence_repository_unavailable",
+        )
+    try:
+        evidence_at_ms = int(
+            datetime.fromisoformat(evidence_at_utc.replace("Z", "+00:00"))
+            .astimezone(timezone.utc)
+            .timestamp()
+            * 1000
+        )
+        ledger_inputs = ledger_performance_inputs_from_rows(rows_a)
+        valuation_inputs = load_option_valuation_inputs(
+            ledger_inputs,
+            as_of_ms=evidence_at_ms,
+            account=account,
+            broker=broker,
+        )
+        account_norm = normalize_account(account)
+        broker_norm = normalize_broker(broker)
+        for diagnostic in valuation_inputs.diagnostics:
+            diagnostic_account = normalize_account(diagnostic.get("account"))
+            diagnostic_broker = normalize_broker(diagnostic.get("broker"))
+            if (
+                not diagnostic_account or diagnostic_account == account_norm
+            ) and (not diagnostic_broker or diagnostic_broker == broker_norm):
+                raise ValueError("option valuation projection is incomplete")
+        positions = list(valuation_inputs.positions)
+        open_positions = [
+            {
+                "lot_id": position.lot_id,
+                "account": position.account,
+                "broker": position.broker,
+                "instrument_key": position.instrument.instrument_key,
+                "symbol": position.instrument.symbol,
+                "option_type": position.instrument.option_type,
+                "strike": str(position.instrument.strike),
+                "expiration_ymd": position.instrument.expiration_ymd,
+                "currency": position.instrument.currency,
+                "multiplier": str(position.instrument.multiplier),
+                "position_side": position.position_side,
+                "contracts_open": position.contracts_open,
+                "market_code": position.market_code,
+            }
+            for position in positions
+        ]
+    except Exception:
+        return _option_market_evidence_payload(
+            **common,
+            status="unavailable",
+            reason_code="option_market_evidence_position_invalid",
+        )
+
+    marks: list[dict[str, Any]] = []
+    for instrument_key in sorted(
+        {position.instrument.instrument_key for position in positions}
+    ):
+        selected = select_valuation_mark(
+            evidence_bundle.valuation_marks,
+            instrument_key=instrument_key,
+            at_ms=evidence_at_ms,
+        )
+        if (
+            not isinstance(selected.fact, ValuationMarkFact)
+            or selected.fact.observed_at_ms > evidence_at_ms
+        ):
+            return _option_market_evidence_payload(
+                **common,
+                status="unavailable",
+                reason_code="option_market_evidence_mark_missing",
+            )
+        marks.append(_minimal_mark_fact(selected.fact))
+
+    try:
+        currencies = {
+            normalize_currency(scan_currency),
+            *(position.instrument.currency for position in positions),
+        }
+    except ValueError:
+        return _option_market_evidence_payload(
+            **common,
+            status="unavailable",
+            reason_code="option_market_evidence_fx_missing",
+        )
+    rates: list[dict[str, Any]] = []
+    for currency in sorted(currencies - {"CNY"}):
+        selected = select_fx_rate(
+            evidence_bundle.fx_rates,
+            base_currency=currency,
+            quote_currency="CNY",
+            at_ms=evidence_at_ms,
+        )
+        if (
+            not isinstance(selected.fact, FXRateFact)
+            or selected.fact.observed_at_ms > evidence_at_ms
+        ):
+            return _option_market_evidence_payload(
+                **common,
+                status="unavailable",
+                reason_code="option_market_evidence_fx_missing",
+            )
+        rates.append(_minimal_fx_fact(selected.fact))
+
+    return _option_market_evidence_payload(
+        **common,
+        status="ready",
+        reason_code=None,
+        open_option_positions=sorted(open_positions, key=lambda item: item["lot_id"]),
+        valuation_mark_facts=marks,
+        fx_rate_facts=rates,
+    )
+
+
 def prepare_option_positions_contexts(
     *,
     base: Path,
@@ -309,7 +652,10 @@ def prepare_option_positions_contexts(
         accounts_by_ledger_path.setdefault(ledger_path, []).append(account)
         data_config_by_ledger_path.setdefault(ledger_path, data_path)
 
-    rows_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
+    observed_at = datetime.now(timezone.utc)
+    observed_at_utc = observed_at.isoformat()
+    lifecycle_now_ms = int(observed_at.timestamp() * 1000)
+    rows_a_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
     repos_by_ledger_path: dict[Path, Any] = {}
     ledger_read_count = 0
     for ledger_path, accounts in sorted(
@@ -321,7 +667,7 @@ def prepare_option_positions_contexts(
                 base=base_path,
                 data_config=data_config_by_ledger_path[ledger_path],
             )
-            rows_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+            rows_a_by_ledger_path[ledger_path] = read_decision_state_rows_many(
                 repo,
                 accounts=tuple(sorted(accounts)),
             )
@@ -332,9 +678,6 @@ def prepare_option_positions_contexts(
             for account in accounts:
                 unavailable[account] = reason
 
-    observed_at = datetime.now(timezone.utc)
-    observed_at_utc = observed_at.isoformat()
-    lifecycle_now_ms = int(observed_at.timestamp() * 1000)
     rates: dict[str, Any] | None
     fx_observation: dict[str, Any] | None = None
     fx_status = "unavailable"
@@ -381,6 +724,36 @@ def prepare_option_positions_contexts(
         else {"status": "disabled"}
     )
 
+    evidence_by_ledger_path: dict[Path, Any] = {}
+    rows_b_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
+    evidence_at_by_ledger_path: dict[Path, str] = {}
+    for ledger_path, accounts in sorted(
+        accounts_by_ledger_path.items(),
+        key=lambda item: str(item[0]),
+    ):
+        repo = repos_by_ledger_path.get(ledger_path)
+        if repo is None:
+            continue
+        try:
+            evidence_by_ledger_path[ledger_path] = (
+                open_performance_evidence_repository(repo).read_all()
+            )
+        except Exception:
+            evidence_by_ledger_path[ledger_path] = None
+        try:
+            rows_b_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+                repo,
+                accounts=tuple(sorted(accounts)),
+            )
+            ledger_read_count += 1
+            evidence_at_by_ledger_path[ledger_path] = datetime.now(
+                timezone.utc
+            ).isoformat()
+        except Exception:
+            evidence_at_by_ledger_path[ledger_path] = datetime.now(
+                timezone.utc
+            ).isoformat()
+
     manifests: dict[str, dict[str, Any]] = {}
     records_by_account: dict[str, list[dict[str, Any]]] = {}
     wheel_models_by_account: dict[str, dict[str, Any]] = {}
@@ -388,26 +761,40 @@ def prepare_option_positions_contexts(
         accounts_by_ledger_path.items(),
         key=lambda item: str(item[0]),
     ):
-        rows_by_account = rows_by_ledger_path.get(ledger_path)
+        rows_a_by_account = rows_a_by_ledger_path.get(ledger_path)
+        rows_b_by_account = rows_b_by_ledger_path.get(ledger_path)
+        rows_by_account = rows_b_by_account or rows_a_by_account
         if not isinstance(rows_by_account, dict):
             continue
         try:
             first_rows = rows_by_account[accounts[0]]
-            generation_payload = {
-                "trade_events": list(first_rows["trade_events"]),
-                "stored_position_lots": list(first_rows["stored_position_lots"]),
-                "wheel_events_by_account": {
-                    account: list(
-                        rows_by_account[account].get("account_wheel_events")
-                        or []
-                    )
-                    for account in sorted(accounts)
-                },
-            }
-            ledger_generation_sha256 = canonical_sha256(generation_payload)
+            if not isinstance(rows_a_by_account, dict):
+                raise ValueError("position fence snapshot A is unavailable")
+            ledger_generation_sha256_a = _ledger_generation_sha256(
+                rows_a_by_account,
+                accounts,
+            )
+            ledger_generation_sha256_b = (
+                _ledger_generation_sha256(rows_b_by_account, accounts)
+                if isinstance(rows_b_by_account, dict)
+                else ""
+            )
+            ledger_generation_sha256 = _ledger_generation_sha256(
+                rows_by_account,
+                accounts,
+            )
             records = list(first_rows["stored_position_lots"])
             snapshots = {}
+            snapshots_a = {}
             for account in accounts:
+                snapshots_a[account] = decision_state_snapshot_from_rows(
+                    rows_a_by_account[account],
+                    account=account,
+                    portfolio_scope_id=portfolio_scope_id(account),
+                    source_observed_at=observed_at_utc,
+                    current_projection=None,
+                    current_decision_now_ms=lifecycle_now_ms,
+                )
                 try:
                     current_projection = read_current_decision_projection(
                         repos_by_ledger_path[ledger_path],
@@ -475,8 +862,62 @@ def prepare_option_positions_contexts(
                     records_by_account.pop(account, None)
                     continue
                 authority = authorities[account]
+                decision_state_fingerprint_a = str(
+                    snapshots_a[account].get("decision_state_fingerprint") or ""
+                )
+                decision_state_fingerprint_b = (
+                    str(
+                        snapshots[account].get("decision_state_fingerprint")
+                        or ""
+                    )
+                    if isinstance(rows_b_by_account, dict)
+                    else ""
+                )
+                try:
+                    option_market_evidence = build_option_market_evidence_payload(
+                        run_id=run_id_norm,
+                        account=account,
+                        account_config_sha256=authority.account_config_sha256,
+                        broker=broker,
+                        scan_currency=_scan_currency(Path(config_path)),
+                        rows_a=rows_a_by_account[account],
+                        evidence_bundle=evidence_by_ledger_path.get(ledger_path),
+                        evidence_at_utc=evidence_at_by_ledger_path[ledger_path],
+                        ledger_generation_sha256_a=(
+                            ledger_generation_sha256_a
+                        ),
+                        ledger_generation_sha256_b=(
+                            ledger_generation_sha256_b
+                        ),
+                        decision_state_fingerprint_a=(
+                            decision_state_fingerprint_a
+                        ),
+                        decision_state_fingerprint_b=(
+                            decision_state_fingerprint_b
+                        ),
+                    )
+                except Exception:
+                    option_market_evidence = _option_market_evidence_payload(
+                        run_id=run_id_norm,
+                        account=account,
+                        account_config_sha256=authority.account_config_sha256,
+                        evidence_at_utc=evidence_at_by_ledger_path.get(
+                            ledger_path,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                        ledger_generation_sha256_a=ledger_generation_sha256_a,
+                        ledger_generation_sha256_b=ledger_generation_sha256_b,
+                        decision_state_fingerprint_a=(
+                            decision_state_fingerprint_a
+                        ),
+                        decision_state_fingerprint_b=(
+                            decision_state_fingerprint_b
+                        ),
+                        status="unavailable",
+                        reason_code="option_market_evidence_contract_missing",
+                    )
                 prepared_authority = {
-                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
                     "run_id": run_id_norm,
                     "account": account,
                     "account_config_sha256": authority.account_config_sha256,
@@ -508,6 +949,9 @@ def prepare_option_positions_contexts(
                 )
                 context["current_decision_shadow"] = dict(
                     decision_snapshot["current_decision_shadow"]
+                )
+                context["strategy_lab_option_market_evidence"] = (
+                    option_market_evidence
                 )
                 context["context_source"] = "prepared"
                 context["prepared_authority"] = prepared_authority
@@ -583,6 +1027,207 @@ def prepare_option_positions_contexts(
     )
 
 
+def find_prepared_option_positions_manifest(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+) -> Path | None:
+    run_id_norm = _required_text(run_id, "run_id")
+    account_norm = normalize_account(account)
+    if (
+        run_id_norm in {".", ".."}
+        or "/" in run_id_norm
+        or "\\" in run_id_norm
+        or not account_norm
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option manifest identity is invalid"
+        )
+    state_dir = (
+        Path(base).resolve()
+        / "output_runs"
+        / run_id_norm
+        / "accounts"
+        / account_norm
+        / "state"
+    )
+    for name in (
+        PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+        PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1,
+    ):
+        path = (state_dir / name).resolve()
+        if path.is_file():
+            return path
+    return None
+
+
+def _validate_option_market_evidence(
+    evidence: Any,
+    *,
+    manifest: Mapping[str, Any],
+) -> None:
+    if not isinstance(evidence, Mapping) or set(evidence) != (
+        _OPTION_MARKET_EVIDENCE_FIELDS
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence contract is invalid"
+        )
+    if evidence.get("schema_version") != OPTION_MARKET_EVIDENCE_SCHEMA:
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence schema mismatch"
+        )
+    if evidence.get("selection_policy_version") != (
+        OPTION_MARKET_EVIDENCE_SELECTION_POLICY
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence selection policy mismatch"
+        )
+    try:
+        evidence_at = datetime.fromisoformat(
+            str(evidence.get("evidence_at_utc") or "").replace("Z", "+00:00")
+        )
+        if evidence_at.utcoffset() != timezone.utc.utcoffset(evidence_at):
+            raise ValueError
+        evidence_at_ms = int(evidence_at.timestamp() * 1000)
+    except (TypeError, ValueError) as exc:
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence timestamp is invalid"
+        ) from exc
+    if evidence.get("status") != "ready" or evidence.get("reason_code") is not None:
+        raise PreparedOptionPositionsContextError(
+            str(
+                evidence.get("reason_code")
+                or "option_market_evidence_missing"
+            )
+        )
+    for key in ("run_id", "account", "account_config_sha256"):
+        if str(evidence.get(key) or "") != str(manifest.get(key) or ""):
+            raise PreparedOptionPositionsContextError(
+                f"prepared option market evidence mismatch: {key}"
+            )
+    for key in (
+        "ledger_generation_sha256_a",
+        "ledger_generation_sha256_b",
+        "decision_state_fingerprint_a",
+        "decision_state_fingerprint_b",
+    ):
+        _required_sha256(evidence.get(key), key)
+    if (
+        evidence["ledger_generation_sha256_a"]
+        != evidence["ledger_generation_sha256_b"]
+        or evidence["ledger_generation_sha256_b"]
+        != manifest.get("ledger_generation_sha256")
+        or evidence["decision_state_fingerprint_a"]
+        != evidence["decision_state_fingerprint_b"]
+        or evidence["decision_state_fingerprint_b"]
+        != manifest.get("decision_state_fingerprint")
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence position drift"
+        )
+    supplied_hash = _required_sha256(
+        evidence.get("content_sha256"),
+        "option market evidence content_sha256",
+    )
+    content = dict(evidence)
+    content.pop("content_sha256")
+    if canonical_sha256(content) != supplied_hash:
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence content hash mismatch"
+        )
+
+    rows_by_field = {
+        "open_option_positions": _OPTION_MARKET_POSITION_FIELDS,
+        "valuation_mark_facts": _OPTION_MARKET_MARK_FIELDS,
+        "fx_rate_facts": _OPTION_MARKET_FX_FIELDS,
+    }
+    for field, expected_fields in rows_by_field.items():
+        rows = evidence.get(field)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, Mapping) or set(row) != expected_fields
+            for row in rows
+        ):
+            raise PreparedOptionPositionsContextError(
+                f"prepared option market evidence {field} is invalid"
+            )
+    positions = evidence["open_option_positions"]
+    marks = evidence["valuation_mark_facts"]
+    rates = evidence["fx_rate_facts"]
+    if any(
+        normalize_account(row.get("account")) != manifest.get("account")
+        for row in positions
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence account mismatch"
+        )
+    lot_ids = [str(row.get("lot_id") or "") for row in positions]
+    if (
+        not all(lot_ids)
+        or len(lot_ids) != len(set(lot_ids))
+        or any(
+            row.get("position_side") not in {"short", "long"}
+            or isinstance(row.get("contracts_open"), bool)
+            or not isinstance(row.get("contracts_open"), int)
+            or row["contracts_open"] <= 0
+            for row in positions
+        )
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence positions are invalid"
+        )
+    instrument_keys = {str(row.get("instrument_key") or "") for row in positions}
+    mark_keys = {str(row.get("instrument_key") or "") for row in marks}
+    if not all(instrument_keys) or instrument_keys != mark_keys:
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence mark coverage mismatch"
+        )
+    if len(mark_keys) != len(marks):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence marks are duplicated"
+        )
+    try:
+        currencies = {
+            normalize_currency(row.get("currency")) for row in positions
+        } - {"CNY"}
+        fx_currencies = {
+            normalize_currency(row.get("base_currency"))
+            for row in rates
+            if normalize_currency(row.get("quote_currency")) == "CNY"
+        }
+    except ValueError as exc:
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence currency is invalid"
+        ) from exc
+    if not currencies.issubset(fx_currencies) or len(fx_currencies) != len(rates):
+        raise PreparedOptionPositionsContextError(
+            "prepared option market evidence FX coverage mismatch"
+        )
+    for row in [*marks, *rates]:
+        _required_text(row.get("fact_id"), "option market evidence fact_id")
+        _required_sha256(row.get("source_fact_sha256"), "source_fact_sha256")
+        for field in ("effective_at_ms", "observed_at_ms"):
+            value = row.get(field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+                or value > evidence_at_ms
+            ):
+                raise PreparedOptionPositionsContextError(
+                    f"prepared option market evidence {field} is invalid"
+                )
+
+
+def validate_strategy_lab_option_market_evidence(
+    evidence: Any,
+    *,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    _validate_option_market_evidence(evidence, manifest=manifest)
+    return dict(evidence)
+
+
 def _load_prepared_option_positions_context_artifacts(
     *,
     manifest_path: Path,
@@ -592,6 +1237,7 @@ def _load_prepared_option_positions_context_artifacts(
     expected_account_config_sha256: str,
     expected_manifest_sha256: str | None = None,
     expected_runtime_config: Mapping[str, Any] | None = None,
+    require_option_market_evidence: bool = False,
 ) -> dict[str, Any]:
     run_id = _required_text(expected_run_id, "expected_run_id")
     account = normalize_account(expected_account)
@@ -660,6 +1306,12 @@ def _load_prepared_option_positions_context_artifacts(
     if manifest.get("schema_version") != expected_schema:
         raise PreparedOptionPositionsContextError(
             "prepared option manifest schema mismatch"
+        )
+    if require_option_market_evidence and expected_schema != (
+        PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+    ):
+        raise PreparedOptionPositionsContextError(
+            "option_market_evidence_contract_missing"
         )
     if _required_text(manifest.get("run_id"), "manifest run_id") != run_id:
         raise PreparedOptionPositionsContextError(
@@ -739,6 +1391,7 @@ def _load_prepared_option_positions_context_artifacts(
             "prepared option payload authority is missing"
         )
     for key in (
+        "schema_version",
         "run_id",
         "account",
         "account_config_sha256",
@@ -810,6 +1463,11 @@ def _load_prepared_option_positions_context_artifacts(
         raise PreparedOptionPositionsContextError(
             "prepared option decision snapshot fingerprint mismatch"
         )
+    if require_option_market_evidence:
+        _validate_option_market_evidence(
+            payload.get("strategy_lab_option_market_evidence"),
+            manifest=manifest,
+        )
     return {
         "manifest": manifest,
         "payload": payload,
@@ -827,6 +1485,7 @@ def load_prepared_option_positions_context_receipt(
     expected_account_config_sha256: str,
     expected_manifest_sha256: str | None = None,
     expected_runtime_config: Mapping[str, Any] | None = None,
+    require_option_market_evidence: bool = False,
 ) -> dict[str, Any]:
     """Load bytes and expose only the owner-validated application receipt."""
 
@@ -838,6 +1497,7 @@ def load_prepared_option_positions_context_receipt(
         expected_account_config_sha256=expected_account_config_sha256,
         expected_manifest_sha256=expected_manifest_sha256,
         expected_runtime_config=expected_runtime_config,
+        require_option_market_evidence=require_option_market_evidence,
     )
     manifest = receipt["manifest"]
     prepared = receipt["payload"]["prepared_authority"]
@@ -863,6 +1523,7 @@ def load_prepared_option_positions_context(
     expected_account_config_sha256: str,
     expected_manifest_sha256: str | None = None,
     expected_runtime_config: Mapping[str, Any] | None = None,
+    require_option_market_evidence: bool = False,
 ) -> dict[str, Any]:
     """Load the existing payload-only facade from a validated receipt."""
 
@@ -874,6 +1535,7 @@ def load_prepared_option_positions_context(
         expected_account_config_sha256=expected_account_config_sha256,
         expected_manifest_sha256=expected_manifest_sha256,
         expected_runtime_config=expected_runtime_config,
+        require_option_market_evidence=require_option_market_evidence,
     )["payload"]
 
 
@@ -942,7 +1604,7 @@ def _publish_ready_context(
         payload=payload_bytes,
     )
     manifest: dict[str, Any] = {
-        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
         "run_id": run_id,
         "account": account,
         "status": "ready",
@@ -980,7 +1642,7 @@ def _publish_unavailable_manifest(
 ) -> dict[str, Any]:
     application_received_at_utc = datetime.now(timezone.utc).isoformat()
     manifest: dict[str, Any] = {
-        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
         "run_id": run_id,
         "account": account,
         "status": "unavailable",
@@ -1013,7 +1675,7 @@ def _publish_manifest(
         base=base,
         run_id=run_id,
         account=account,
-        name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
+        name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
         payload=manifest_bytes,
     )
     return {
@@ -1051,6 +1713,30 @@ def _validate_option_context_account(
         raise PreparedOptionPositionsContextError(
             "prepared option decision snapshot is untrusted"
         )
+    prepared = context.get("prepared_authority")
+    if (
+        isinstance(prepared, Mapping)
+        and prepared.get("schema_version")
+        == PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+    ):
+        evidence = context.get("strategy_lab_option_market_evidence")
+        if isinstance(evidence, Mapping) and evidence.get("status") == "ready":
+            _validate_option_market_evidence(
+                evidence,
+                manifest={
+                    "run_id": prepared.get("run_id"),
+                    "account": prepared.get("account"),
+                    "account_config_sha256": prepared.get(
+                        "account_config_sha256"
+                    ),
+                    "ledger_generation_sha256": prepared.get(
+                        "ledger_generation_sha256"
+                    ),
+                    "decision_state_fingerprint": context.get(
+                        "decision_state_fingerprint"
+                    ),
+                },
+            )
     for field in ("open_positions_min", "assigned_stock_events"):
         rows = context.get(field)
         if not isinstance(rows, list):
@@ -1126,13 +1812,21 @@ __all__ = [
     "LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA",
     "LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME",
     "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA",
+    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1",
+    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2",
+    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMAS",
     "PREPARED_OPTION_POSITIONS_MANIFEST_NAME",
+    "PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1",
+    "PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2",
     "PREPARED_OPTION_POSITIONS_PAYLOAD_NAME",
     "PreparedOptionPositionsBatch",
     "PreparedOptionPositionsContextError",
+    "build_option_market_evidence_payload",
     "cny_per_currency_rates_from_option_context",
     "exchange_rate_scalars_from_option_context",
+    "find_prepared_option_positions_manifest",
     "load_prepared_option_positions_context",
     "load_prepared_option_positions_context_receipt",
     "prepare_option_positions_contexts",
+    "validate_strategy_lab_option_market_evidence",
 ]

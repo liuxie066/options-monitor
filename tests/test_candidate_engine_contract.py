@@ -317,15 +317,46 @@ def test_sell_put_ranking_profiles_have_exact_cross_symbol_orders() -> None:
             )
         ]
 
-    assert SELL_PUT_RANKING_CONTRACT_VERSION == "sell_put_ranking_profile.v1"
+    assert SELL_PUT_RANKING_CONTRACT_VERSION == "sell_put_ranking_profile.v2"
     assert SELL_PUT_RANKING_PROFILES == {
         "without_concentration",
         "current_tie_break",
         "concentration_first",
+        "option_market_concentration",
     }
     assert order("current_tie_break") == ["D_PUT", "B_PUT", "A_PUT", "C_PUT"]
     assert order("without_concentration") == ["D_PUT", "A_PUT", "B_PUT", "C_PUT"]
     assert order("concentration_first") == ["C_PUT", "B_PUT", "A_PUT", "D_PUT"]
+
+
+def test_option_market_concentration_profile_uses_explicit_return_band() -> None:
+    rows = [
+        _policy_row(
+            symbol="A",
+            contract_symbol="A_PUT",
+            period_net_return_on_cash_basis=0.020,
+            option_market_concentration_after=0.80,
+        ),
+        _policy_row(
+            symbol="B",
+            contract_symbol="B_PUT",
+            period_net_return_on_cash_basis=0.015,
+            option_market_concentration_after=0.10,
+        ),
+    ]
+
+    def top1(threshold: float) -> str:
+        return str(
+            rank_candidate_rows(
+                rows,
+                mode="put",
+                sell_put_ranking_profile="option_market_concentration",
+                near_return_threshold=threshold,
+            )[0]["contract_symbol"]
+        )
+
+    assert top1(0.004) == "A_PUT"
+    assert top1(0.006) == "B_PUT"
 
 
 def test_current_tie_break_ranks_known_return_before_null_return() -> None:

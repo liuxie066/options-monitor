@@ -39,7 +39,6 @@ from src.application.strategy_lab.top1.corpus import (
 )
 from src.application.strategy_lab.top1.lifecycle import (
     build_hidden_window_commitment,
-    set_account_opt_in,
 )
 from src.application.strategy_lab.top1.ranking import Top1RankingError
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
@@ -135,17 +134,7 @@ def _store(tmp_path: Path) -> ExperimentStore:
 
 
 def _enable(store: ExperimentStore, artifact_root: Path) -> None:
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc="2026-07-20T00:00:00Z",
-        idempotency_key="enable-corpus",
-        artifact_root=artifact_root,
-        environ=AVAILABLE,
-    )
+    del store, artifact_root
 
 
 def _target_for(day: str, *, hour: int = 10, minute: int = 0) -> str:
@@ -205,6 +194,7 @@ def _seal(
     day: str,
     sealed_at: str | None = None,
     schedule: dict[str, Any] | None = None,
+    environ: dict[str, str] | None = AVAILABLE,
 ) -> dict[str, Any]:
     return seal_day_expectation(
         store,
@@ -216,7 +206,7 @@ def _seal(
         market_calendar_version="hk-calendar.fixture.v1",
         market_calendar_sha256=CALENDAR_HASH,
         sealed_at_utc=sealed_at or f"{day}T01:00:00Z",
-        environ=AVAILABLE,
+        environ=environ,
     )
 
 
@@ -266,7 +256,7 @@ def _rehash(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> None:
+def test_target_wrapper_and_service_off_are_side_effect_free(tmp_path: Path) -> None:
     assert [
         target.isoformat()
         for target in scheduled_scan_targets_for_date(_schedule(), "2026-07-21")
@@ -295,12 +285,12 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
 
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
-    result = _seal(store, artifact_root, day="2026-07-21")
+    result = _seal(store, artifact_root, day="2026-07-21", environ={})
     assert result == {
         "schema_version": CORPUS_COMMAND_RESULT_SCHEMA,
         "operation": "seal_day_expectation",
         "status": "not_evaluable",
-        "reason_code": "feature_disabled",
+        "reason_code": "strategy_lab_service_disabled",
         "market": "HK",
         "account": "lx",
         "trading_date": "2026-07-21",
@@ -326,11 +316,11 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
         point_ref=point_ref,
         trading_date="2026-07-21",
         captured_at_utc="2026-07-21T02:01:00Z",
-        environ=AVAILABLE,
+        environ={},
     )
     assert (capture["status"], capture["reason_code"]) == (
         "not_evaluable",
-        "feature_disabled",
+        "strategy_lab_service_disabled",
     )
     assert store.corpus_point("HK", "lx", point["recommendation_point_id"]) is None
     with pytest.raises(CorpusError) as raised:
@@ -1317,15 +1307,15 @@ def test_freeze_validates_window_facts_feature_gate_and_warming(
             )
         assert raised.value.reason_code == "corpus_input_invalid"
 
-    feature_off = freeze_research_dataset(
+    service_off = freeze_research_dataset(
         store,
         artifact_root,
         window_facts=facts,
-        environ=AVAILABLE,
+        environ={},
     )
-    assert (feature_off["status"], feature_off["reason_code"]) == (
+    assert (service_off["status"], service_off["reason_code"]) == (
         "blocked",
-        "feature_disabled",
+        "strategy_lab_service_disabled",
     )
     assert not (artifact_root / "strategy_lab/top1/corpus").exists()
 

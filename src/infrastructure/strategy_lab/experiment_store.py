@@ -16,7 +16,7 @@ from src.infrastructure.private_storage import (
 
 
 SCHEMA_COMPONENT = "sell_put_top1_experiment_store"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _V1_REQUIRED_TABLES = {
     "strategy_lab_schema",
@@ -31,7 +31,7 @@ _V2_REQUIRED_TABLES = {
     "strategy_lab_corpus_days",
     "strategy_lab_corpus_points",
 }
-_REQUIRED_TABLES = {
+_V3_REQUIRED_TABLES = {
     *_V2_REQUIRED_TABLES,
     "strategy_lab_validation_decisions",
     "strategy_lab_validation_days",
@@ -39,6 +39,7 @@ _REQUIRED_TABLES = {
     "strategy_lab_outcome_jobs",
     "strategy_lab_expiry_close_facts",
 }
+_REQUIRED_TABLES = _V3_REQUIRED_TABLES - {"strategy_lab_features"}
 _V2_REQUIRED_INDEXES = {
     "strategy_lab_one_active_validation",
     "strategy_lab_hidden_date_unique",
@@ -202,9 +203,12 @@ class ExperimentStore:
                 if version == 2:
                     self._validate_v2(connection, deep=True)
                     return {"status": "migration_required", "schema_version": 2}
+                if version == 3:
+                    self._validate_v3(connection, deep=True)
+                    return {"status": "migration_required", "schema_version": 3}
                 if version != SCHEMA_VERSION:
                     return {"status": "schema_unsupported", "schema_version": version}
-                self._validate_v3(connection, deep=True)
+                self._validate_v4(connection, deep=True)
                 return {"status": "ready", "schema_version": version}
             finally:
                 connection.close()
@@ -275,8 +279,10 @@ class ExperimentStore:
                     )
                 elif version == 2:
                     self._validate_v2(connection, deep=True)
-                elif version == SCHEMA_VERSION:
+                elif version == 3:
                     self._validate_v3(connection, deep=True)
+                elif version == SCHEMA_VERSION:
+                    self._validate_v4(connection, deep=True)
                 else:
                     raise ExperimentStoreError(
                         "schema_unsupported", "existing schema cannot be migrated"
@@ -294,9 +300,17 @@ class ExperimentStore:
                 connection.execute(
                     "UPDATE strategy_lab_schema "
                     "SET schema_version = ?, migrated_at_utc = ? WHERE component = ?",
+                    (3, migrated_at_utc, SCHEMA_COMPONENT),
+                )
+                metadata = (3,)
+            if int(metadata[0]) == 3:
+                self._migrate_v3_to_v4(connection)
+                connection.execute(
+                    "UPDATE strategy_lab_schema "
+                    "SET schema_version = ?, migrated_at_utc = ? WHERE component = ?",
                     (SCHEMA_VERSION, migrated_at_utc, SCHEMA_COMPONENT),
                 )
-            self._validate_v3(connection, deep=True)
+            self._validate_v4(connection, deep=True)
             connection.commit()
             committed = True
         except (sqlite3.DatabaseError, ValueError) as exc:
@@ -317,19 +331,10 @@ class ExperimentStore:
         if committed:
             verify = self._readonly_connection()
             try:
-                self._validate_v3(verify, deep=True)
+                self._validate_v4(verify, deep=True)
             finally:
                 verify.close()
         return {"status": "ready", "schema_version": SCHEMA_VERSION}
-
-    def feature(self, market: str, account: str) -> dict[str, Any] | None:
-        with self._read() as connection:
-            return _row(
-                connection.execute(
-                    "SELECT * FROM strategy_lab_features WHERE market = ? AND account = ?",
-                    (market, account),
-                ).fetchone()
-            )
 
     def corpus_day(
         self, market: str, account: str, trading_date: str
@@ -578,80 +583,6 @@ class ExperimentStore:
                 (market, account, recommendation_point_id),
             ).fetchone()
             return {"status": status, "row": dict(row or {})}
-
-    def set_feature(
-        self,
-        *,
-        market: str,
-        account: str,
-        enabled: bool,
-        actor: str,
-        occurred_at_utc: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        request = {"market": market, "account": account, "user_opt_in": enabled}
-        with self._write() as connection:
-            existing_command = self._command_event(
-                connection, f"feature:{market}:{account}", idempotency_key
-            )
-            if existing_command is not None:
-                self._assert_event_replay(
-                    existing_command, request, actor, occurred_at_utc
-                )
-                return dict(
-                    connection.execute(
-                        "SELECT * FROM strategy_lab_features WHERE market = ? AND account = ?",
-                        (market, account),
-                    ).fetchone()
-                    or {}
-                )
-            current = connection.execute(
-                "SELECT * FROM strategy_lab_features WHERE market = ? AND account = ?",
-                (market, account),
-            ).fetchone()
-            version = int(current["state_version"]) if current is not None else 0
-            changed = current is None or bool(current["user_opt_in"]) != enabled
-            next_version = version + int(changed)
-            subject = f"feature:{market}:{account}:state:{next_version}:value:{int(enabled)}"
-            _, inserted = self._claim_event(
-                connection,
-                event_type="feature_intent_set",
-                subject_key=subject,
-                command_scope=f"feature:{market}:{account}",
-                idempotency_key=idempotency_key,
-                actor=actor,
-                occurred_at_utc=occurred_at_utc,
-                payload=request,
-            )
-            if inserted and changed:
-                connection.execute(
-                    """
-                    INSERT INTO strategy_lab_features(
-                        market, account, user_opt_in, last_actor, last_occurred_at_utc,
-                        state_version
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(market, account) DO UPDATE SET
-                        user_opt_in = excluded.user_opt_in,
-                        last_actor = excluded.last_actor,
-                        last_occurred_at_utc = excluded.last_occurred_at_utc,
-                        state_version = excluded.state_version
-                    """,
-                    (
-                        market,
-                        account,
-                        int(enabled),
-                        actor,
-                        occurred_at_utc,
-                        next_version,
-                    ),
-                )
-            return dict(
-                connection.execute(
-                    "SELECT * FROM strategy_lab_features WHERE market = ? AND account = ?",
-                    (market, account),
-                ).fetchone()
-                or {}
-            )
 
     def prepare_experiment(
         self,
@@ -1964,7 +1895,6 @@ class ExperimentStore:
         experiment_id: str,
         expected_state_version: int,
         reason: str,
-        disabled_scope: str | None,
         terminated_at_partition: int | None,
         generation_requests: Sequence[Mapping[str, object]],
         receipt_request: Mapping[str, object],
@@ -1975,7 +1905,6 @@ class ExperimentStore:
         request_payload = {
             "experiment_id": experiment_id,
             "reason": reason,
-            "disabled_scope": disabled_scope,
             "terminated_at_partition": terminated_at_partition,
             "generation_request_sha256": [
                 _sha256_text(compact_json(item)) for item in generation_requests
@@ -2012,7 +1941,7 @@ class ExperimentStore:
                 """
                 UPDATE strategy_lab_experiments SET
                     terminal_mode = 'aborted', terminal_reason = ?,
-                    disabled_scope = ?, terminal_at_utc = ?,
+                    disabled_scope = NULL, terminal_at_utc = ?,
                     terminated_at_partition = ?,
                     final_outcome_status = 'insufficient_evidence',
                     updated_at_utc = ?, state_version = state_version + 1
@@ -2020,7 +1949,6 @@ class ExperimentStore:
                 """,
                 (
                     reason,
-                    disabled_scope,
                     occurred_at_utc,
                     terminated_at_partition,
                     occurred_at_utc,
@@ -3093,7 +3021,7 @@ class ExperimentStore:
         connection = connect_private_sqlite(self.path, isolation_level=None)
         connection.row_factory = sqlite3.Row
         self._configure(connection)
-        self._validate_v3(connection)
+        self._validate_v4(connection)
         return connection
 
     def _readonly_connection(self) -> sqlite3.Connection:
@@ -3153,6 +3081,22 @@ class ExperimentStore:
     def _validate_v3(
         self, connection: sqlite3.Connection, *, deep: bool = False
     ) -> None:
+        self._validate_schema(
+            connection,
+            expected_version=3,
+            required_tables=_V3_REQUIRED_TABLES,
+            required_indexes=_REQUIRED_INDEXES,
+            expected_foreign_keys=_EXPECTED_FOREIGN_KEYS,
+            deep=deep,
+        )
+
+    def _validate_v4(
+        self, connection: sqlite3.Connection, *, deep: bool = False
+    ) -> None:
+        if "strategy_lab_features" in self._tables(connection):
+            raise ExperimentStoreError(
+                "schema_unsupported", "retired feature table is still present"
+            )
         self._validate_schema(
             connection,
             expected_version=SCHEMA_VERSION,
@@ -3446,6 +3390,22 @@ class ExperimentStore:
         )
         ExperimentStore._create_v3_validation_tables(connection)
         connection.execute("DROP TABLE strategy_lab_experiments_v2")
+
+    @staticmethod
+    def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+        active = connection.execute(
+            """
+            SELECT experiment_id FROM strategy_lab_experiments
+            WHERE terminal_mode IS NULL AND phase != 'concluded'
+            LIMIT 1
+            """
+        ).fetchone()
+        if active is not None:
+            raise ExperimentStoreError(
+                "migration_active_experiments",
+                "active v3 experiments must finish before schema migration",
+            )
+        connection.execute("DROP TABLE strategy_lab_features")
 
     @staticmethod
     def _create_v3_experiment_table(connection: sqlite3.Connection) -> None:

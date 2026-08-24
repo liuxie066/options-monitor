@@ -15,7 +15,6 @@ from src.application.strategy_lab.top1.lifecycle import (
     lock_challenger,
     prepare_experiment,
     record_generation_revision,
-    set_account_opt_in,
     start_research,
 )
 from src.application.strategy_lab.top1.research import (
@@ -36,8 +35,8 @@ from tests.test_strategy_lab_top1_research import (
     SOURCE_SHA,
     _build_case,
     _fee_contract,
+    _force_same_top1,
     _receipts,
-    _set_variants,
     _spec,
 )
 
@@ -110,9 +109,9 @@ def _revision(case: dict[str, Any]) -> dict[str, object]:
         close_receipts=receipts,
         quota_decision={
             "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
-            "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+            "required_stock_owners": ["HK.0700", "HK.3690"],
             "already_counted_stock_owners": ["HK.0700"],
-            "new_stock_owners": ["HK.3690", "HK.9988"],
+            "new_stock_owners": ["HK.3690"],
             "remain_quota": 2,
         },
         observed_at_utc=NOW,
@@ -124,22 +123,11 @@ def _prepared(
 ) -> tuple[ExperimentStore, Path, dict[str, Any], str]:
     case = _build_case(tmp_path / "source")
     if same_top1:
-        _set_variants(case, (("same", "current_tie_break"),))
+        _force_same_top1(case)
     root = tmp_path / "artifacts"
     _publish_case(root, case)
     store = ExperimentStore(tmp_path / "strategy-lab.sqlite3")
     store.migrate(migrated_at_utc=NOW)
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc=NOW,
-        idempotency_key="enable",
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
     prepared = prepare_experiment(
         store,
         case["experiment_spec"],
@@ -181,6 +169,10 @@ def _run(
         research_spec_sha256=research_hash,
         fee_contract=_fee_contract() if fee_contract is None else fee_contract,
         gateway=gateway,  # type: ignore[arg-type]
+        terminal_fx_bindings={
+            receipt["expiration"]: receipt["terminal_fx_binding"]
+            for receipt in _receipts()
+        },
         config=None,
         actor="runner",
         occurred_at_utc=NOW,
@@ -210,7 +202,6 @@ def test_runner_deduplicates_closes_and_recovers_terminal_without_provider_repla
     assert {code for code, _expiration in gateway.close_calls} == {
         "HK.0700",
         "HK.3690",
-        "HK.9988",
     }
     first_counts = (gateway.quota_calls, len(gateway.close_calls))
     generation = store.generations(case["experiment_spec"]["experiment_id"])[0]
@@ -225,9 +216,9 @@ def test_runner_deduplicates_closes_and_recovers_terminal_without_provider_repla
     assert evidence["page_complete"] is True
     assert evidence["quota_decision"] == {
         "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
-        "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+        "required_stock_owners": ["HK.0700", "HK.3690"],
         "already_counted_stock_owners": ["HK.0700"],
-        "new_stock_owners": ["HK.3690", "HK.9988"],
+        "new_stock_owners": ["HK.3690"],
         "remain_quota": 2,
     }
     assert evidence["close_receipts"] == _receipts()
@@ -276,19 +267,11 @@ def test_m3_rejects_research_without_a_winner(
 
     result = _run(store, root, case, research_hash, gateway)
     assert result["selection"] == mode
-    variants = (
-        (("same", "current_tie_break"),)
-        if same_top1
-        else (
-            ("without", "without_concentration"),
-            ("concentration", "concentration_first"),
-        )
-    )
     with pytest.raises(Top1LifecycleError) as exc_info:
         lock_challenger(
             store,
-            _spec(case["sealed_dataset"], variants=variants, validation=True),
-            challenger_variant_id="same" if same_top1 else "concentration",
+            _spec(case["sealed_dataset"], variants=(), validation=True),
+            challenger_variant_id="concentration-0.002",
             validation_start_trading_date="2026-10-02",
             schedule=top1_hk_schedule_fixture(),
             actor="human",
@@ -381,7 +364,7 @@ def test_runner_fails_closed_for_quota_provider_and_missing_close(
         assert gateway.close_calls == []
 
 
-def test_runner_checks_feature_gate_before_provider_on_open_generation(
+def test_runner_checks_service_gate_before_provider_on_open_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, root, case, research_hash = _prepared(tmp_path)
@@ -401,7 +384,7 @@ def test_runner_checks_feature_gate_before_provider_on_open_generation(
     with pytest.raises(ResearchRunnerError) as exc_info:
         _run(store, root, case, research_hash, gateway, environ={})
 
-    assert exc_info.value.reason_code == "feature_disabled"
+    assert exc_info.value.reason_code == "strategy_lab_service_disabled"
     assert gateway.quota_calls == 0
     assert gateway.close_calls == []
     assert store.generations(case["experiment_spec"]["experiment_id"])[0][
@@ -409,7 +392,7 @@ def test_runner_checks_feature_gate_before_provider_on_open_generation(
     ] == 0
 
 
-def test_runner_checks_feature_gate_before_completed_revision_replay(
+def test_runner_checks_service_gate_before_completed_revision_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, root, case, research_hash = _prepared(tmp_path)
@@ -423,7 +406,7 @@ def test_runner_checks_feature_gate_before_completed_revision_replay(
     with pytest.raises(ResearchRunnerError) as exc_info:
         _run(store, root, case, research_hash, gateway, environ={})
 
-    assert exc_info.value.reason_code == "feature_disabled"
+    assert exc_info.value.reason_code == "strategy_lab_service_disabled"
     assert (gateway.quota_calls, len(gateway.close_calls)) == first_counts
     generation = store.generations(case["experiment_spec"]["experiment_id"])[0]
     assert generation["terminal_published_event_id"] == published_event_id

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
     capture_recommendation_point,
@@ -19,10 +20,8 @@ from src.application.strategy_lab.top1.corpus import (
 )
 from src.application.strategy_lab.top1.fill_observation import observe_active_contracts
 from src.application.strategy_lab.top1.lifecycle import (
-    effective_feature_status,
     read_active_experiment_ids,
     read_advance_context,
-    reconcile_disabled_experiments,
     recover_account_terminal_projections,
     terminate_experiment,
 )
@@ -78,37 +77,21 @@ def advance_scheduled(
 ) -> dict[str, Any]:
     """Compose existing Top1 commands once for one account and scheduled instant."""
 
-    feature = effective_feature_status(
-        store, market=market, account=account, environ=environ
-    )
+    service_available = strategy_lab_top1_available(environ)
     result: dict[str, Any] = {
         "schema_version": ADVANCE_RESULT_SCHEMA,
         "market": market.upper(),
         "account": account,
         "occurred_at_utc": occurred_at_utc,
-        "feature": feature,
+        "service_available": service_available,
         "corpus": [],
         "readiness": None,
         "experiments": [],
         "recovered_experiment_ids": [],
     }
     invocation_key = _key(idempotency_key, occurred_at_utc)
-    if not feature["effective"]:
-        scope = "maintainer" if not feature["maintainer_available"] else "user"
-        try:
-            terminated = reconcile_disabled_experiments(
-                store,
-                market=market,
-                account=account,
-                disabled_scope=scope,
-                actor=actor,
-                occurred_at_utc=occurred_at_utc,
-                idempotency_key=_key(invocation_key, "disabled"),
-                artifact_root=artifact_root,
-            )
-        except Exception as exc:
-            return {**result, "status": "failed", "error": _error(exc)}
-        return {**result, "status": "disabled", "terminated_experiment_ids": terminated}
+    if not service_available:
+        return {**result, "status": "disabled"}
 
     experiment_results: dict[str, dict[str, Any]] = {}
     contexts: dict[str, dict[str, object]] = {}
@@ -368,7 +351,6 @@ def advance_scheduled(
                     store,
                     experiment_id=experiment_id,
                     reason="behavior_binding_drift",
-                    disabled_scope=None,
                     actor=actor,
                     occurred_at_utc=occurred_at_utc,
                     idempotency_key=_key(invocation_key, experiment_id, "drift"),
