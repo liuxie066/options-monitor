@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -18,13 +20,24 @@ from src.application.strategy_lab.top1.contracts import (
     build_research_spec_sha256,
     build_sell_put_top1_research_preview_sha256,
     build_sell_put_top1_research_spec,
+    build_sell_put_top1_validation_spec,
+    build_validation_spec_sha256,
     validate_confirmed_start_command,
+)
+from src.application.strategy_lab.top1.corpus import (
+    CorpusError,
+    read_market_calendar_binding,
 )
 from src.application.strategy_lab.top1.economics import build_fx_rate_binding
 from src.application.strategy_lab.top1.lifecycle import (
     Top1LifecycleError,
     authorize_research,
+    authorize_validation,
+    build_hidden_window_commitment,
+    lock_challenger,
     prepare_experiment,
+    read_published_research_leader,
+    start_validation,
 )
 from src.application.strategy_lab.top1.research import (
     RESEARCH_EVALUATION_INPUT_SCHEMA,
@@ -39,7 +52,10 @@ from src.application.strategy_lab.top1.research_window import (
     load_research_window,
 )
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
-from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
+from src.infrastructure.strategy_lab.experiment_store import (
+    ExperimentStore,
+    ExperimentStoreError,
+)
 
 
 _TOPIC_ID = "sell-put-top1-option-market-concentration"
@@ -73,6 +89,7 @@ def _derived_key(idempotency_key: str, step: str) -> str:
 
 def _preview(
     *,
+    stage: str = "research",
     status: str,
     reason_codes: list[str],
     experiment_id: str | None = None,
@@ -83,7 +100,7 @@ def _preview(
 ) -> dict[str, object]:
     return {
         "schema_version": PREVIEW_SCHEMA_VERSION,
-        "stage": "research",
+        "stage": stage,
         "status": status,
         "reason_codes": reason_codes,
         "experiment_id": experiment_id,
@@ -355,8 +372,243 @@ def start_confirmed_research(
         raise Top1WorkspaceError(exc.reason_code, str(exc)) from exc
 
 
+def _validation_preview(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    experiment_id: str,
+    validation_start_trading_date: str,
+    schedule: Mapping[str, Any],
+    timer_binding: Mapping[str, object],
+    as_of_utc: str,
+    environ: Mapping[str, str] | None,
+) -> tuple[dict[str, object], dict[str, object] | None, str | None]:
+    if not strategy_lab_top1_available(environ):
+        return (
+            _preview(
+                stage="validation",
+                status="disabled",
+                reason_codes=["strategy_lab_service_disabled"],
+                experiment_id=experiment_id,
+            ),
+            None,
+            None,
+        )
+    if store.schema_state().get("status") != "ready":
+        return (
+            _preview(
+                stage="validation",
+                status="blocked",
+                reason_codes=["strategy_lab_store_not_ready"],
+                experiment_id=experiment_id,
+            ),
+            None,
+            None,
+        )
+    try:
+        experiment = store.experiment(experiment_id)
+        already_started = (
+            experiment["phase"] == "validation"
+            and experiment["validation_progress"] == "collecting_decisions"
+        )
+        stored_spec = json.loads(str(experiment["spec_json"]))
+        spec = build_sell_put_top1_validation_spec(
+            stored_spec,
+            timer_binding=timer_binding,
+        )
+        research = read_published_research_leader(
+            store,
+            spec,
+            artifact_root=artifact_root,
+            environ=environ,
+        )
+        research_hash = str(research["research_spec_sha256"])
+        research_generation = research["research_generation"]
+        assert isinstance(research_generation, Mapping)
+        challenger = str(research["challenger_variant_id"])
+        calendar = read_market_calendar_binding(artifact_root, market="HK")
+        baseline = spec["baseline"]
+        assert isinstance(baseline, Mapping)
+        commitment = build_hidden_window_commitment(
+            experiment_id=experiment_id,
+            account="lx",
+            validation_start_trading_date=validation_start_trading_date,
+            market_calendar_binding=calendar,
+            schedule=schedule,
+            challenger_variant_id=challenger,
+            research_spec_sha256=research_hash,
+            research_terminal_file_sha256=str(
+                research_generation["terminal_file_sha256"]
+            ),
+            behavior_binding_sha256=str(baseline["behavior_binding_sha256"]),
+        )
+        days = commitment["days"]
+        assert isinstance(days, list) and days
+        first_targets = days[0]["scheduled_scan_targets_market"]
+        assert isinstance(first_targets, list) and first_targets
+        first_target = datetime.fromisoformat(
+            str(first_targets[0]).replace("Z", "+00:00")
+        )
+        previewed_at = datetime.fromisoformat(as_of_utc.replace("Z", "+00:00"))
+        if not already_started and first_target <= previewed_at:
+            raise Top1WorkspaceError(
+                "validation_start_not_future",
+                "validation first target must be future",
+            )
+        commitment_sha256 = canonical_sha256(commitment)
+        validation_hash = build_validation_spec_sha256(
+            spec,
+            research_terminal_sha256=str(
+                research_generation["terminal_file_sha256"]
+            ),
+            challenger_variant_id=challenger,
+            hidden_window_commitment_sha256=commitment_sha256,
+        )
+    except (
+        CorpusError,
+        ExperimentStoreError,
+        KeyError,
+        ResearchEvaluationError,
+        Top1CoreContractError,
+        Top1LifecycleError,
+        Top1WorkspaceError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        return (
+            _preview(
+                stage="validation",
+                status="blocked",
+                reason_codes=[
+                    str(getattr(exc, "reason_code", "validation_preview_invalid"))
+                ],
+                experiment_id=experiment_id,
+            ),
+            None,
+            None,
+        )
+    bindings: dict[str, object] = {
+        "research_terminal": {
+            "ref": research_generation["terminal_ref"],
+            "file_sha256": research_generation["terminal_file_sha256"],
+        },
+        "challenger_variant_id": challenger,
+        "hidden_window_commitment": commitment,
+        "hidden_window_commitment_sha256": commitment_sha256,
+    }
+    return (
+        _preview(
+            stage="validation",
+            status="available",
+            reason_codes=[],
+            experiment_id=experiment_id,
+            experiment_spec=spec,
+            stage_spec_sha256=validation_hash,
+            preview_sha256=validation_hash,
+            source_bindings=bindings,
+        ),
+        spec,
+        challenger,
+    )
+
+
+def preview_sell_put_top1_validation(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    **kwargs: Any,
+) -> dict[str, object]:
+    preview, _spec, _challenger = _validation_preview(
+        store,
+        artifact_root,
+        **kwargs,
+    )
+    return preview
+
+
+def start_confirmed_validation(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    confirmed_start: object,
+    **preview_kwargs: Any,
+) -> dict[str, object]:
+    try:
+        command = validate_confirmed_start_command(confirmed_start)
+    except Top1CoreContractError as exc:
+        raise Top1WorkspaceError(exc.reason_code, str(exc)) from exc
+    if command["stage"] != "validation":
+        _fail("confirmed_start_invalid", "validation start requires validation stage")
+    preview, spec, challenger = _validation_preview(
+        store,
+        artifact_root,
+        **preview_kwargs,
+    )
+    if preview["status"] != "available" or spec is None or challenger is None:
+        reasons = preview["reason_codes"]
+        reason = reasons[0] if isinstance(reasons, list) and reasons else "validation_preview_unavailable"
+        _fail(str(reason), "validation preview is not available")
+    if (
+        command["market"] != "HK"
+        or command["account"] != "lx"
+        or command["experiment_id"] != preview["experiment_id"]
+        or command["confirmed_preview_sha256"] != preview["preview_sha256"]
+    ):
+        _fail("preview_hash_changed", "confirmed validation preview no longer matches")
+    actor = str(command["actor"])
+    occurred_at = str(command["confirmed_at_utc"])
+    key = str(command["idempotency_key"])
+    validation_hash = str(preview["stage_spec_sha256"])
+    try:
+        lock_challenger(
+            store,
+            spec,
+            challenger_variant_id=challenger,
+            expected_validation_spec_sha256=validation_hash,
+            validation_start_trading_date=str(
+                preview_kwargs["validation_start_trading_date"]
+            ),
+            schedule=preview_kwargs["schedule"],
+            actor=actor,
+            occurred_at_utc=occurred_at,
+            idempotency_key=_derived_key(key, "lock"),
+            artifact_root=artifact_root,
+            environ=preview_kwargs.get("environ"),
+        )
+        authorize_validation(
+            store,
+            experiment_id=str(preview["experiment_id"]),
+            validation_spec_sha256=validation_hash,
+            actor=actor,
+            occurred_at_utc=occurred_at,
+            idempotency_key=_derived_key(key, "authorize"),
+            artifact_root=artifact_root,
+            environ=preview_kwargs.get("environ"),
+        )
+        started = start_validation(
+            store,
+            experiment_id=str(preview["experiment_id"]),
+            validation_spec_sha256=validation_hash,
+            actor=actor,
+            occurred_at_utc=occurred_at,
+            idempotency_key=_derived_key(key, "start"),
+            artifact_root=artifact_root,
+            environ=preview_kwargs.get("environ"),
+        )
+    except Top1LifecycleError as exc:
+        raise Top1WorkspaceError(exc.reason_code, str(exc)) from exc
+    return {
+        "status": "validation_started",
+        "experiment_id": preview["experiment_id"],
+        "validation_spec_sha256": validation_hash,
+        "validation_progress": started["validation_progress"],
+    }
+
+
 __all__ = [
     "Top1WorkspaceError",
     "preview_sell_put_top1_research",
+    "preview_sell_put_top1_validation",
     "start_confirmed_research",
+    "start_confirmed_validation",
 ]

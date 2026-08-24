@@ -804,6 +804,36 @@ def build_research_spec_sha256(validated_spec: object) -> str:
     return canonical_sha256({key: spec[key] for key in _RESEARCH_HASH_KEYS})
 
 
+def build_sell_put_top1_validation_spec(
+    research_spec: object,
+    *,
+    timer_binding: Mapping[str, object],
+) -> dict[str, object]:
+    spec = validate_experiment_spec(research_spec)
+    for key in _VALIDATION_ONLY_KEYS:
+        spec.pop(key, None)
+    spec.update(
+        {
+            "validation_evaluation": {
+                "required_days": VALIDATION_REQUIRED_DAYS,
+                "window_mode": "fixed_future_consecutive_trading_days",
+                "visibility": "hidden_until_final_seal",
+            },
+            "fill_observation": {
+                "applies_to": "validation_only",
+                "contract_version": VALIDATION_FILL_CONTRACT_VERSION,
+            },
+            "timer_binding": deepcopy(dict(timer_binding)),
+            "validation_metrics": {
+                "contract_version": VALIDATION_METRIC_CONTRACT_VERSION,
+                "confidence_level": 0.95,
+                "worst_fraction": 0.20,
+            },
+        }
+    )
+    return validate_experiment_spec(spec)
+
+
 def build_sell_put_top1_research_preview_sha256(
     *,
     experiment_id: str,

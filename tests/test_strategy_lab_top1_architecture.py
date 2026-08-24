@@ -220,6 +220,7 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "domain.domain.decision_state_fingerprint",
         "src.application.candidate_snapshot_contract",
         "src.application.opening_candidate_snapshot",
+        "src.application.prepared_option_positions_context",
         "src.application.recommendation_point",
         "src.application.scan_scheduler",
         "src.application.shadow_replay.common",

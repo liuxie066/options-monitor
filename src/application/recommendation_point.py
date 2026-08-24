@@ -219,13 +219,19 @@ def build_recommendation_point_id(
     *,
     schema_version: str = RECOMMENDATION_POINT_SCHEMA,
 ) -> str:
+    if schema_version not in {
+        RECOMMENDATION_POINT_SCHEMA_V1,
+        RECOMMENDATION_POINT_SCHEMA_V2,
+    }:
+        _fail("official_point_invalid", "recommendation point schema is invalid")
     target = _canonical_timestamp(
         scheduled_scan_target_market,
         "scheduled_scan_target_market",
     )
     return canonical_sha256(
         {
-            "schema_version": schema_version,
+            # Point identity describes the scheduled decision, not its envelope.
+            "schema_version": RECOMMENDATION_POINT_SCHEMA_V1,
             "market": _market(market),
             "account": _account(account),
             "strategy_family": STRATEGY_FAMILY,

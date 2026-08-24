@@ -33,12 +33,12 @@ from src.application.strategy_lab.top1.contracts import (
     RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
-    VALIDATION_REQUIRED_DAYS,
     Top1CoreContractError,
     build_behavior_binding,
     build_current_behavior_binding,
     build_research_spec_sha256,
     build_sell_put_top1_research_spec,
+    build_sell_put_top1_validation_spec,
     build_validation_spec_sha256,
     validate_experiment_spec,
 )
@@ -157,34 +157,17 @@ def _research_spec() -> dict[str, Any]:
 
 
 def _validation_spec() -> dict[str, Any]:
-    spec = _research_spec()
-    spec.update(
-        {
-            "validation_evaluation": {
-                "required_days": VALIDATION_REQUIRED_DAYS,
-                "window_mode": "fixed_future_consecutive_trading_days",
-                "visibility": "hidden_until_final_seal",
-            },
-            "fill_observation": {
-                "applies_to": "validation_only",
-                "contract_version": VALIDATION_FILL_CONTRACT_VERSION,
-            },
-            "timer_binding": {
-                "revision": "top1-advance.v1",
-                "producer_catchup_grace_seconds": 30,
-                "producer_run_timeout_upper_bound_seconds": 120,
-                "advance_cadence_seconds": 60,
-                "fill_observation_duration_upper_bound_seconds": 120,
-                "terms_capture_duration_upper_bound_seconds": 120,
-            },
-            "validation_metrics": {
-                "contract_version": VALIDATION_METRIC_CONTRACT_VERSION,
-                "confidence_level": 0.95,
-                "worst_fraction": 0.20,
-            },
-        }
+    return build_sell_put_top1_validation_spec(
+        _research_spec(),
+        timer_binding={
+            "revision": "top1-advance.v1",
+            "producer_catchup_grace_seconds": 30,
+            "producer_run_timeout_upper_bound_seconds": 120,
+            "advance_cadence_seconds": 60,
+            "fill_observation_duration_upper_bound_seconds": 120,
+            "terms_capture_duration_upper_bound_seconds": 120,
+        },
     )
-    return spec
 
 
 def _refresh_behavior(spec: dict[str, Any]) -> None:
