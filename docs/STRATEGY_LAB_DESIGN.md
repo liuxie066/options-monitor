@@ -717,11 +717,15 @@ recommendation point、opening snapshot 和 ranking projection。任一预期点
 评价先计算同点 baseline/challenger 的 paired delta，再对同一账户、同一交易日的
 有效点取日均。统计样本量按交易日计，不把一天 12 个点当成 12 个独立日。
 
-已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据。W0 只把正式研究语料窗口
-从 40 日调整为 20 日，不新增历史归档转换或 OpenD 补数能力；只有能证明精确调度点、事前封存
-分母及完整排名和结果证据的数据，才能进入当前正式研究语料。旧归档桥接属于后续独立模块，
-不得为了补数量把旧快照默认迁移成正式样本。未来 10 日隐藏验证继续要求事前封存调度点和完整
-分母。
+已有 Strategy Lab / Shadow Replay 快照可作为提出假设的探索性证据。当前已落地 W0 只把正式研究
+语料窗口从 40 日调整为 20 日，尚未实现历史归档转换或 OpenD 补数；当前入口仍只接受能证明精确
+调度点、事前封存分母及完整排名和结果证据的数据，缺失时 fail closed。
+
+已确认的统一平台 MVP 后续方案见
+`STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md` 第 10.3、15 节和
+`STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md` 第 3.2、7.2 节：复用现有 corpus owner
+显式、幂等迁移旧归档中可验证的正式点事实，但仍禁止用当前行情、当前持仓或推导值补造历史。
+未来 10 日隐藏验证继续要求事前封存调度点和完整分母。
 
 只读入口：
 
