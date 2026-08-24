@@ -10,30 +10,43 @@ from typing import NoReturn, cast
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     SELL_PUT_RANKING_CONTRACT_VERSION,
-    SELL_PUT_RANKING_PROFILES,
 )
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
 )
 from src.application.strategy_lab.top1.ranking import (
-    RANKING_PROJECTION_SCHEMA_VERSION,
+    RANKING_PROJECTION_SCHEMA_V2,
+)
+from src.application.strategy_lab.top1.economics import (
+    SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
+)
+from src.application.strategy_lab.top1.statistics import (
+    TOP1_PAIRED_EVALUATION_VERSION,
+)
+from domain.domain.short_vol_assessment import (
+    OPTION_MARKET_CONCENTRATION_METRIC_VERSION,
 )
 
 
-EXPERIMENT_SPEC_SCHEMA_VERSION = "sell_put_top1_experiment_spec.v1"
-BEHAVIOR_BINDING_SCHEMA_VERSION = "sell_put_top1_behavior_binding.v1"
+EXPERIMENT_SPEC_SCHEMA_VERSION = "sell_put_top1_experiment_spec.v2"
+BEHAVIOR_BINDING_SCHEMA_VERSION = "sell_put_top1_behavior_binding.v2"
 ACCEPTED_SET_CONTRACT_VERSION = "same_point_producer_accepted_set.v1"
-RESEARCH_SELECTION_CONTRACT_VERSION = "sell_put_top1_research_selection.v1"
-RESEARCH_METRIC_CONTRACT_VERSION = "counterfactual_expiry_efficiency.v1"
+RESEARCH_SELECTION_CONTRACT_VERSION = "sell_put_top1_research_selection.v2"
+RESEARCH_METRIC_CONTRACT_VERSION = SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION
 VALIDATION_FILL_CONTRACT_VERSION = "scheduled_point_first_observed_cross.v1"
-VALIDATION_METRIC_CONTRACT_VERSION = "sell_put_top1_paired_daily_efficiency.v1"
-EXPIRY_OUTCOME_CONTRACT_VERSION = "expiry_outcome_at_underlier_close.v1"
+VALIDATION_METRIC_CONTRACT_VERSION = TOP1_PAIRED_EVALUATION_VERSION
+EXPIRY_OUTCOME_CONTRACT_VERSION = "expiry_outcome_at_underlier_close.v2"
+RECIPE_ID = "sell_put_top1_option_market_concentration"
+RECIPE_VERSION = "v1"
+EVIDENCE_SELECTION_CONTRACT_VERSION = "performance_evidence_selection.v1"
 SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
 HISTORICAL_RESEARCH_WINDOW_SCHEMA = "historical_research_window.v1"
 RECOMMENDATION_POINT_SELECTOR = "official_scheduled_sell_put.v1"
 RESEARCH_REQUIRED_DAYS = 20
 VALIDATION_REQUIRED_DAYS = 10
+PREVIEW_SCHEMA_VERSION = "sell_put_top1_preview.v1"
+CONFIRMED_START_COMMAND_SCHEMA_VERSION = "sell_put_top1_confirmed_start.v1"
 
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _BEHAVIOR_KEYS = frozenset(
@@ -50,6 +63,10 @@ _BEHAVIOR_KEYS = frozenset(
         "fee_schedule_version",
         "market_calendar_version",
         "expiry_outcome_contract_version",
+        "economic_result_contract_version",
+        "evaluation_contract_version",
+        "option_market_concentration_metric_version",
+        "evidence_selection_contract_version",
     }
 )
 _RESEARCH_TOP_LEVEL_KEYS = frozenset(
@@ -60,6 +77,7 @@ _RESEARCH_TOP_LEVEL_KEYS = frozenset(
         "market",
         "account",
         "hypothesis",
+        "recipe",
         "baseline",
         "research_source",
         "research_evaluation",
@@ -80,6 +98,7 @@ _VALIDATION_ONLY_KEYS = frozenset(
 _RESEARCH_HASH_KEYS = (
     "schema_version",
     "hypothesis",
+    "recipe",
     "baseline",
     "research_source",
     "research_evaluation",
@@ -87,6 +106,19 @@ _RESEARCH_HASH_KEYS = (
     "frozen_safety",
     "economics_contracts",
     "expiry_outcome",
+)
+_CONFIRMED_START_KEYS = frozenset(
+    {
+        "schema_version",
+        "stage",
+        "market",
+        "account",
+        "experiment_id",
+        "confirmed_preview_sha256",
+        "idempotency_key",
+        "actor",
+        "confirmed_at_utc",
+    }
 )
 
 
@@ -201,7 +233,7 @@ def _current_behavior_versions(spec: Mapping[str, object]) -> dict[str, str]:
         "baseline_version": _text(baseline["version"], "baseline.version"),
         "opening_snapshot_schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
         "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
         "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
         "research_selection_contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
         "research_metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
@@ -213,6 +245,12 @@ def _current_behavior_versions(spec: Mapping[str, object]) -> dict[str, str]:
             "economics_contracts.market_calendar_version",
         ),
         "expiry_outcome_contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
+        "economic_result_contract_version": SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
+        "evaluation_contract_version": TOP1_PAIRED_EVALUATION_VERSION,
+        "option_market_concentration_metric_version": (
+            OPTION_MARKET_CONCENTRATION_METRIC_VERSION
+        ),
+        "evidence_selection_contract_version": EVIDENCE_SELECTION_CONTRACT_VERSION,
     }
 
 
@@ -243,14 +281,21 @@ def _validate_hypothesis(value: object) -> None:
     _ = _text(item["mechanism"], "hypothesis.mechanism")
     _fixed(
         item["independent_variable"],
-        "cross_symbol_concentration_priority",
+        "option_market_concentration_near_return_threshold",
         "hypothesis.independent_variable",
     )
     _fixed(
         item["expected_direction"],
-        "higher_top1_efficiency_without_higher_concentration",
+        "higher_annualized_return_without_lower_cny_pnl",
         "hypothesis.expected_direction",
     )
+
+
+def _validate_recipe(value: object) -> None:
+    item = _mapping(value, "recipe")
+    _exact_keys(item, frozenset({"recipe_id", "recipe_version"}), "recipe")
+    _fixed(item["recipe_id"], RECIPE_ID, "recipe.recipe_id")
+    _fixed(item["recipe_version"], RECIPE_VERSION, "recipe.recipe_version")
 
 
 def _validate_baseline(value: object, spec: Mapping[str, object]) -> None:
@@ -264,6 +309,8 @@ def _validate_baseline(value: object, spec: Mapping[str, object]) -> None:
                 "accepted_set_contract_version",
                 "ranking_projection_schema_version",
                 "sell_put_ranking_contract_version",
+                "ranking_profile",
+                "near_return_threshold",
                 "behavior_binding_sha256",
             }
         ),
@@ -282,7 +329,7 @@ def _validate_baseline(value: object, spec: Mapping[str, object]) -> None:
     )
     _fixed(
         item["ranking_projection_schema_version"],
-        RANKING_PROJECTION_SCHEMA_VERSION,
+        RANKING_PROJECTION_SCHEMA_V2,
         "baseline.ranking_projection_schema_version",
     )
     _fixed(
@@ -290,6 +337,12 @@ def _validate_baseline(value: object, spec: Mapping[str, object]) -> None:
         SELL_PUT_RANKING_CONTRACT_VERSION,
         "baseline.sell_put_ranking_contract_version",
     )
+    _fixed(item["ranking_profile"], "current_tie_break", "baseline.ranking_profile")
+    if _finite_number(
+        item["near_return_threshold"],
+        "baseline.near_return_threshold",
+    ) != 0.002:
+        _fail("baseline.near_return_threshold must equal 0.002")
     supplied = _sha256(item["behavior_binding_sha256"], "baseline.behavior_binding_sha256")
     if supplied != build_behavior_binding(_current_behavior_versions(spec)):
         _fail("baseline.behavior_binding_sha256 does not match current contracts")
@@ -331,10 +384,14 @@ def _validate_research_evaluation(value: object) -> None:
             {
                 "contract_version",
                 "metric_contract_version",
+                "evaluation_contract_version",
                 "fill_assumption",
                 "required_days",
                 "window_mode",
                 "visibility",
+                "confidence_level",
+                "worst_fraction",
+                "minimum_mean_daily_pnl_delta_cny",
             }
         ),
         "research_evaluation",
@@ -348,6 +405,11 @@ def _validate_research_evaluation(value: object) -> None:
         item["metric_contract_version"],
         RESEARCH_METRIC_CONTRACT_VERSION,
         "research_evaluation.metric_contract_version",
+    )
+    _fixed(
+        item["evaluation_contract_version"],
+        TOP1_PAIRED_EVALUATION_VERSION,
+        "research_evaluation.evaluation_contract_version",
     )
     _fixed(item["fill_assumption"], "t0_sell_limit", "research_evaluation.fill_assumption")
     _fixed(
@@ -365,39 +427,64 @@ def _validate_research_evaluation(value: object) -> None:
         "visible_after_research_seal",
         "research_evaluation.visibility",
     )
+    if _finite_number(
+        item["confidence_level"],
+        "research_evaluation.confidence_level",
+    ) != 0.95:
+        _fail("research_evaluation.confidence_level must equal 0.95")
+    if _finite_number(
+        item["worst_fraction"],
+        "research_evaluation.worst_fraction",
+    ) != 0.20:
+        _fail("research_evaluation.worst_fraction must equal 0.20")
+    if _finite_number(
+        item["minimum_mean_daily_pnl_delta_cny"],
+        "research_evaluation.minimum_mean_daily_pnl_delta_cny",
+    ) != 0.0:
+        _fail("research_evaluation minimum CNY PnL delta must equal zero")
 
 
 def _validate_variants(value: object) -> None:
     if not isinstance(value, list):
         _fail("variants must be a list")
     variants = cast(list[object], value)
-    if len(variants) < 2:
-        _fail("variants must contain baseline and at least one level")
+    if len(variants) != 4:
+        _fail("variants must contain the fixed baseline and three challengers")
     baseline = _mapping(variants[0], "variants[0]")
     _exact_keys(baseline, frozenset({"variant_id", "patch"}), "variants[0]")
     if baseline["variant_id"] != "baseline" or baseline["patch"] != {}:
         _fail("variants must begin with the exact baseline arm")
 
-    variant_ids = {"baseline"}
-    profiles: set[str] = set()
-    for index, raw in enumerate(variants[1:], start=1):
+    expected = (
+        ("concentration-0.002", 0.002),
+        ("concentration-0.004", 0.004),
+        ("concentration-0.006", 0.006),
+    )
+    for index, (raw, expected_variant) in enumerate(
+        zip(variants[1:], expected, strict=True),
+        start=1,
+    ):
         item = _mapping(raw, f"variants[{index}]")
         _exact_keys(item, frozenset({"variant_id", "patch"}), f"variants[{index}]")
         variant_id = _text(item["variant_id"], f"variants[{index}].variant_id")
-        if variant_id in variant_ids:
-            _fail("variant IDs must be unique")
-        variant_ids.add(variant_id)
+        if variant_id != expected_variant[0]:
+            _fail("variant IDs must match the fixed recipe")
         patch = _mapping(item["patch"], f"variants[{index}].patch")
-        _exact_keys(patch, frozenset({"ranking_profile"}), f"variants[{index}].patch")
-        profile = _text(
+        _exact_keys(
+            patch,
+            frozenset({"ranking_profile", "near_return_threshold"}),
+            f"variants[{index}].patch",
+        )
+        _fixed(
             patch["ranking_profile"],
+            "option_market_concentration",
             f"variants[{index}].patch.ranking_profile",
         )
-        if profile not in SELL_PUT_RANKING_PROFILES:
-            _fail("variant ranking profile is unsupported")
-        if profile in profiles:
-            _fail("variant ranking profiles must be unique")
-        profiles.add(profile)
+        if _finite_number(
+            patch["near_return_threshold"],
+            f"variants[{index}].patch.near_return_threshold",
+        ) != expected_variant[1]:
+            _fail("variant near-return threshold does not match the fixed recipe")
 
 
 def _validate_frozen_safety(value: object) -> None:
@@ -423,7 +510,18 @@ def _validate_economics_contracts(value: object) -> None:
     item = _mapping(value, "economics_contracts")
     _exact_keys(
         item,
-        frozenset({"fee_schedule_version", "market_calendar_version"}),
+        frozenset(
+            {
+                "fee_schedule_version",
+                "market_calendar_version",
+                "comparison_currency",
+                "contract_quantity",
+                "option_market_concentration_metric_version",
+                "evidence_selection_contract_version",
+                "economic_result_contract_version",
+                "return_capital_basis",
+            }
+        ),
         "economics_contracts",
     )
     _fixed(
@@ -434,6 +532,36 @@ def _validate_economics_contracts(value: object) -> None:
     _ = _text(
         item["market_calendar_version"],
         "economics_contracts.market_calendar_version",
+    )
+    _fixed(
+        item["comparison_currency"],
+        "CNY",
+        "economics_contracts.comparison_currency",
+    )
+    _fixed(
+        item["contract_quantity"],
+        1,
+        "economics_contracts.contract_quantity",
+    )
+    _fixed(
+        item["option_market_concentration_metric_version"],
+        OPTION_MARKET_CONCENTRATION_METRIC_VERSION,
+        "economics_contracts.option_market_concentration_metric_version",
+    )
+    _fixed(
+        item["evidence_selection_contract_version"],
+        EVIDENCE_SELECTION_CONTRACT_VERSION,
+        "economics_contracts.evidence_selection_contract_version",
+    )
+    _fixed(
+        item["economic_result_contract_version"],
+        SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
+        "economics_contracts.economic_result_contract_version",
+    )
+    _fixed(
+        item["return_capital_basis"],
+        "strike_x_multiplier_minus_opening_net_premium",
+        "economics_contracts.return_capital_basis",
     )
 
 
@@ -550,6 +678,7 @@ def validate_experiment_spec(payload: object) -> dict[str, object]:
         _fail("account must be lowercase canonical text")
 
     _validate_hypothesis(spec["hypothesis"])
+    _validate_recipe(spec["recipe"])
     _validate_research_source(spec["research_source"])
     _validate_research_evaluation(spec["research_evaluation"])
     _validate_variants(spec["variants"])
@@ -562,9 +691,163 @@ def validate_experiment_spec(payload: object) -> dict[str, object]:
     return spec
 
 
+def build_sell_put_top1_research_spec(
+    *,
+    topic_id: str,
+    experiment_id: str,
+    research_source: Mapping[str, object],
+    market_calendar_version: str,
+    baseline_version: str = "sell_put_top1_current.v1",
+) -> dict[str, object]:
+    spec: dict[str, object] = {
+        "schema_version": EXPERIMENT_SPEC_SCHEMA_VERSION,
+        "topic_id": _text(topic_id, "topic_id"),
+        "experiment_id": _text(experiment_id, "experiment_id"),
+        "market": "HK",
+        "account": "lx",
+        "hypothesis": {
+            "hypothesis_type": "sell_put_ranking",
+            "statement": (
+                "Prefer lower option-market concentration within a frozen "
+                "near-return threshold."
+            ),
+            "mechanism": (
+                "Re-rank the same accepted Sell Put candidates by frozen option "
+                "market concentration."
+            ),
+            "independent_variable": (
+                "option_market_concentration_near_return_threshold"
+            ),
+            "expected_direction": (
+                "higher_annualized_return_without_lower_cny_pnl"
+            ),
+        },
+        "recipe": {"recipe_id": RECIPE_ID, "recipe_version": RECIPE_VERSION},
+        "baseline": {
+            "version": _text(baseline_version, "baseline_version"),
+            "opening_snapshot_schema": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
+            "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
+            "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
+            "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
+            "ranking_profile": "current_tie_break",
+            "near_return_threshold": 0.002,
+            "behavior_binding_sha256": "0" * 64,
+        },
+        "research_source": deepcopy(dict(research_source)),
+        "research_evaluation": {
+            "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
+            "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
+            "evaluation_contract_version": TOP1_PAIRED_EVALUATION_VERSION,
+            "fill_assumption": "t0_sell_limit",
+            "required_days": RESEARCH_REQUIRED_DAYS,
+            "window_mode": "fixed_consecutive_trading_days",
+            "visibility": "visible_after_research_seal",
+            "confidence_level": 0.95,
+            "worst_fraction": 0.20,
+            "minimum_mean_daily_pnl_delta_cny": 0.0,
+        },
+        "variants": [
+            {"variant_id": "baseline", "patch": {}},
+            *[
+                {
+                    "variant_id": f"concentration-{threshold:.3f}",
+                    "patch": {
+                        "ranking_profile": "option_market_concentration",
+                        "near_return_threshold": threshold,
+                    },
+                }
+                for threshold in (0.002, 0.004, 0.006)
+            ],
+        ],
+        "frozen_safety": {
+            "mode": "inherit_each_point_producer_accepted_set",
+            "variant_may_change_acceptance": False,
+        },
+        "economics_contracts": {
+            "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
+            "market_calendar_version": _text(
+                market_calendar_version,
+                "market_calendar_version",
+            ),
+            "comparison_currency": "CNY",
+            "contract_quantity": 1,
+            "option_market_concentration_metric_version": (
+                OPTION_MARKET_CONCENTRATION_METRIC_VERSION
+            ),
+            "evidence_selection_contract_version": (
+                EVIDENCE_SELECTION_CONTRACT_VERSION
+            ),
+            "economic_result_contract_version": (
+                SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION
+            ),
+            "return_capital_basis": (
+                "strike_x_multiplier_minus_opening_net_premium"
+            ),
+        },
+        "expiry_outcome": {
+            "contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
+            "spot_source": "opend_history_kline",
+            "ktype": "K_DAY",
+            "autype": "NONE",
+            "price_field": "close",
+            "due_boundary": "expiration_observation_start_ms",
+            "pending_elapsed_hours": 72,
+        },
+    }
+    baseline = cast(dict[str, object], spec["baseline"])
+    baseline["behavior_binding_sha256"] = build_current_behavior_binding(spec)
+    return validate_experiment_spec(spec)
+
+
 def build_research_spec_sha256(validated_spec: object) -> str:
     spec = validate_experiment_spec(validated_spec)
     return canonical_sha256({key: spec[key] for key in _RESEARCH_HASH_KEYS})
+
+
+def build_sell_put_top1_research_preview_sha256(
+    *,
+    experiment_id: str,
+    stage_spec_sha256: str,
+    source_bindings: object,
+) -> str:
+    bindings = _mapping(source_bindings, "source_bindings")
+    return canonical_sha256(
+        {
+            "schema_version": PREVIEW_SCHEMA_VERSION,
+            "stage": "research",
+            "experiment_id": _text(experiment_id, "experiment_id"),
+            "stage_spec_sha256": _sha256(
+                stage_spec_sha256, "stage_spec_sha256"
+            ),
+            "source_bindings": dict(bindings),
+        }
+    )
+
+
+def validate_confirmed_start_command(value: object) -> dict[str, object]:
+    command = dict(_mapping(value, "confirmed_start"))
+    _exact_keys(command, _CONFIRMED_START_KEYS, "confirmed_start")
+    _fixed(
+        command["schema_version"],
+        CONFIRMED_START_COMMAND_SCHEMA_VERSION,
+        "confirmed_start.schema_version",
+    )
+    stage = _text(command["stage"], "confirmed_start.stage")
+    if stage not in {"research", "validation"}:
+        _fail("confirmed_start.stage is unsupported")
+    _fixed(command["market"], "HK", "confirmed_start.market")
+    _fixed(command["account"], "lx", "confirmed_start.account")
+    _ = _text(command["experiment_id"], "confirmed_start.experiment_id")
+    _ = _sha256(
+        command["confirmed_preview_sha256"],
+        "confirmed_start.confirmed_preview_sha256",
+    )
+    _ = _text(command["idempotency_key"], "confirmed_start.idempotency_key")
+    _ = _text(command["actor"], "confirmed_start.actor")
+    _ = _utc_timestamp(
+        command["confirmed_at_utc"], "confirmed_start.confirmed_at_utc"
+    )
+    return command
 
 
 def build_validation_spec_sha256(

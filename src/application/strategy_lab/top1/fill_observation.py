@@ -17,7 +17,7 @@ from src.application.strategy_lab.top1.corpus import (
 from src.application.strategy_lab.top1.lifecycle import (
     _call,
     _command_fields,
-    _require_effective,
+    _require_service_available,
     _segment,
 )
 from src.application.strategy_lab.top1.validation import (
@@ -197,17 +197,8 @@ def observe_active_contracts(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
+    _require_service_available(environ)
     current = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(current["market"]),
-        account=str(current["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
     if _call(
         store.validation_observation_committed,
         experiment_id,

@@ -1376,6 +1376,15 @@ def _validate_prepared_option_reference(
     expected_account: str,
     expected_account_config_sha256: str,
 ) -> None:
+    schema = str(payload.get("schema_version") or "")
+    expected_schema, expected_relpath = _prepared_option_binding(schema)
+    if binding.get("schema_version") != expected_schema or binding.get(
+        "relpath"
+    ) != expected_relpath:
+        _fail(
+            "REFERENCE_SCHEMA_INVALID",
+            "prepared option reference schema mismatch",
+        )
     status = _one_of(payload.get("status"), {"ready", "unavailable"}, "prepared option status")
     common = {
         "schema_version",

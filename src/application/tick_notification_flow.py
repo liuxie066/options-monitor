@@ -860,6 +860,7 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
                 account,
                 decision,
                 source_commit_sha=source_sha,
+                require_option_market_evidence=True,
             )
         except RecommendationPointError as exc:
             _audit_recommendation_point(

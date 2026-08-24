@@ -603,25 +603,8 @@ def _command_result(
     }
 
 
-def _feature_enabled(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    environ: Mapping[str, str] | None,
-) -> bool:
-    try:
-        feature = store.feature(market, account)
-    except ExperimentStoreError as exc:
-        reason = (
-            "schema_unsupported"
-            if exc.reason_code == "schema_unsupported"
-            else "corpus_input_invalid"
-        )
-        raise CorpusError(reason, str(exc)) from exc
-    return strategy_lab_top1_available(environ) and bool(
-        feature and feature["user_opt_in"]
-    )
+def _service_available(environ: Mapping[str, str] | None) -> bool:
+    return strategy_lab_top1_available(environ)
 
 
 def _store_call(function: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -985,13 +968,11 @@ def seal_day_expectation(
     sealed_at = _timestamp(sealed_at_utc, "sealed_at_utc")
     if not isinstance(schedule, Mapping):
         _fail("corpus_input_invalid", "schedule must be an object")
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _command_result(
             operation="seal_day_expectation",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1051,11 +1032,11 @@ def seal_committed_day_expectation(
     point_ids = committed_day["expected_recommendation_point_ids"]
     if not isinstance(targets, list) or not isinstance(point_ids, list):
         _fail("corpus_input_invalid", "committed targets and point IDs must be lists")
-    if not _feature_enabled(store, market=market, account=account, environ=environ):
+    if not _service_available(environ):
         return _command_result(
             operation="seal_day_expectation",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1196,13 +1177,11 @@ def capture_recommendation_point(
         _fail("corpus_artifact_invalid", "point ref and body identity do not match")
     if _before(captured_at, str(point["decision_at_utc"])):
         _fail("corpus_input_invalid", "captured_at_utc cannot precede decision_at_utc")
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _command_result(
             operation="capture_recommendation_point",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1778,13 +1757,11 @@ def freeze_research_dataset(
     facts = _validate_window_facts(window_facts)
     market = str(facts["market"])
     account = str(facts["account"])
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _freeze_result(
             facts,
             status="blocked",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             selected_dates=[],
         )
 

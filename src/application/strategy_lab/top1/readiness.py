@@ -128,7 +128,6 @@ def build_top1_readiness(
     drift: Mapping[str, Any],
     service_status: Mapping[str, Any],
     schema_state: Mapping[str, Any],
-    feature_status: Mapping[str, Any] | None,
     corpus_status: Mapping[str, Any] | None,
     calendar_binding: Mapping[str, Any] | None,
     capability_facts: Mapping[str, bool] | None = None,
@@ -186,8 +185,6 @@ def build_top1_readiness(
     runtime_blockers = list(source_blockers)
     if schema_state.get("status") != "ready":
         runtime_blockers.append("strategy_lab_top1_store_not_ready")
-    if not feature_status or feature_status.get("effective") is not True:
-        runtime_blockers.append("strategy_lab_top1_feature_disabled")
     if corpus_status is None:
         runtime_blockers.append("strategy_lab_top1_corpus_unavailable")
     if not _calendar_ready(calendar_binding):
@@ -216,7 +213,6 @@ def build_top1_readiness(
                 None,
             ),
             "store_schema": dict(schema_state),
-            "feature": dict(feature_status) if feature_status is not None else None,
             "corpus": dict(corpus_status) if corpus_status is not None else None,
             "market_calendar": (
                 {

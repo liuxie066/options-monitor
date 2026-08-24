@@ -225,6 +225,31 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
     )
 
 
+def test_runtime_snapshot_preserves_v2_prepared_owner_binding() -> None:
+    assembly = _owner_assembly_kwargs()
+    manifest = json.loads(assembly["prepared_option_manifest_bytes"])
+    manifest["schema_version"] = "prepared_option_positions_context.v2"
+    assembly["prepared_option_manifest_bytes"] = canonical_json_bytes(manifest)
+
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    binding = next(
+        row
+        for row in snapshot["replay_bindings"]
+        if row["role"] == "prepared_option_positions_context"
+    )
+
+    assert binding["schema_version"] == "prepared_option_positions_context.v2"
+    assert binding["relpath"] == (
+        "state/prepared_option_positions_context.v2.json"
+    )
+    assert snapshot == verify_runtime_portfolio_snapshot(
+        snapshot,
+        expected_run_id=assembly["run_id"],
+        expected_account=assembly["account"],
+        reference_payloads=references,
+    )
+
+
 def test_canonical_bytes_and_immutable_publication_are_stable(tmp_path) -> None:
     fixture = generate_fixture("current_scale")
     kwargs = fixture["builder_kwargs"]

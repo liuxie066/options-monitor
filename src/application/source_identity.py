@@ -66,26 +66,74 @@ def source_commit_sha(
                 timeout=5,
                 env=git_env,
             )
-        source_status = runner(
-            [
-                *git_prefix,
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-                "--",
-                "domain",
-                "src",
-                "scripts",
-            ],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=git_env,
-        )
-        if source_status.stdout.strip():
-            return None
+            runner(
+                [*git_prefix, "update-index", "-q", "--refresh"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env,
+            )
+            runner(
+                [
+                    *git_prefix,
+                    "diff-index",
+                    "--quiet",
+                    commit,
+                    "--",
+                    "domain",
+                    "src",
+                    "scripts",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env,
+            )
+            untracked = runner(
+                [
+                    *git_prefix,
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "--",
+                    "domain",
+                    "src",
+                    "scripts",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env,
+            )
+            if untracked.stdout.strip():
+                return None
+        else:
+            source_status = runner(
+                [
+                    *git_prefix,
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                    "--",
+                    "domain",
+                    "src",
+                    "scripts",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env,
+            )
+            if source_status.stdout.strip():
+                return None
     except (OSError, subprocess.SubprocessError):
         return None
     finally:
