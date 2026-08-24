@@ -5,21 +5,27 @@ import math
 import statistics
 from copy import deepcopy
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
 from domain.domain.engine import (
     SELL_PUT_RANKING_CONTRACT_VERSION,
-    SELL_PUT_RANKING_PROFILES,
 )
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
+from domain.domain.performance.models import FXRateFact
+from domain.domain.short_vol_assessment import (
+    OPTION_MARKET_CONCENTRATION_METRIC_VERSION,
+    calculate_option_market_concentration_after,
+)
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
 )
 from src.application.strategy_lab.top1 import economics as economics_module
 from src.application.strategy_lab.top1.contracts import (
     ACCEPTED_SET_CONTRACT_VERSION,
+    EVIDENCE_SELECTION_CONTRACT_VERSION,
     EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     RESEARCH_METRIC_CONTRACT_VERSION,
@@ -27,18 +33,28 @@ from src.application.strategy_lab.top1.contracts import (
     RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
-    VALIDATION_REQUIRED_DAYS,
     Top1CoreContractError,
     build_behavior_binding,
+    build_current_behavior_binding,
     build_research_spec_sha256,
+    build_sell_put_top1_research_spec,
+    build_sell_put_top1_validation_spec,
     build_validation_spec_sha256,
     validate_experiment_spec,
 )
-from src.application.strategy_lab.top1.economics import calculate_expiry_efficiency
+from src.application.strategy_lab.top1.economics import (
+    FX_RATE_BINDING_SCHEMA_VERSION,
+    SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
+    build_fx_rate_binding,
+    calculate_expiry_efficiency,
+    calculate_sell_put_top1_economic_result,
+)
 from src.application.strategy_lab.top1.ranking import (
-    RANKING_PROJECTION_SCHEMA_VERSION,
+    RANKING_PROJECTION_SCHEMA_V2,
 )
 from src.application.strategy_lab.top1.statistics import (
+    TOP1_PAIRED_EVALUATION_VERSION,
+    evaluate_top1_paired_daily_results,
     summarize_paired_daily_deltas,
 )
 
@@ -48,6 +64,56 @@ SHA_B = "b" * 64
 SHA_C = "c" * 64
 
 
+def test_option_market_concentration_uses_absolute_marked_option_value() -> None:
+    result = calculate_option_market_concentration_after(
+        candidate={
+            "symbol": "0700.HK",
+            "sell_limit": 2,
+            "multiplier": 100,
+            "currency": "HKD",
+        },
+        open_option_positions=[
+            {
+                "lot_id": "same-long",
+                "instrument_key": "same",
+                "symbol": "0700.HK",
+                "currency": "HKD",
+                "multiplier": 100,
+                "contracts_open": 1,
+            },
+            {
+                "lot_id": "other-short",
+                "instrument_key": "other",
+                "symbol": "9988.HK",
+                "currency": "HKD",
+                "multiplier": 100,
+                "contracts_open": -2,
+            },
+        ],
+        valuation_mark_facts=[
+            {"instrument_key": "same", "fact_id": "mark-same", "price": 1},
+            {"instrument_key": "other", "fact_id": "mark-other", "price": 2},
+        ],
+        fx_rate_facts=[
+            {
+                "base_currency": "HKD",
+                "quote_currency": "CNY",
+                "fact_id": "fx-hkd",
+                "rate": 0.9,
+            }
+        ],
+    )
+
+    assert result["metric_version"] == OPTION_MARKET_CONCENTRATION_METRIC_VERSION
+    assert result["option_market_value_cny"] == pytest.approx(180)
+    assert result["option_market_concentration_after"] == pytest.approx(300 / 700)
+    assert result["evidence_refs"] == {
+        "position_lot_ids": ["other-short", "same-long"],
+        "valuation_mark_fact_ids": ["mark-other", "mark-same"],
+        "fx_rate_fact_ids": ["fx-hkd"],
+    }
+
+
 def _behavior_versions(
     *, baseline_version: str = "sell-put-baseline.v1", calendar: str = "hk-calendar.v1"
 ) -> dict[str, str]:
@@ -55,7 +121,7 @@ def _behavior_versions(
         "baseline_version": baseline_version,
         "opening_snapshot_schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
         "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
         "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
         "research_selection_contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
         "research_metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
@@ -64,38 +130,22 @@ def _behavior_versions(
         "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
         "market_calendar_version": calendar,
         "expiry_outcome_contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
+        "economic_result_contract_version": SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
+        "evaluation_contract_version": TOP1_PAIRED_EVALUATION_VERSION,
+        "option_market_concentration_metric_version": (
+            OPTION_MARKET_CONCENTRATION_METRIC_VERSION
+        ),
+        "evidence_selection_contract_version": EVIDENCE_SELECTION_CONTRACT_VERSION,
     }
 
 
-def _research_spec(
-    profiles: tuple[str, ...] = ("without_concentration",),
-) -> dict[str, Any]:
-    baseline_version = "sell-put-baseline.v1"
-    calendar = "hk-calendar.v1"
-    return {
-        "schema_version": EXPERIMENT_SPEC_SCHEMA_VERSION,
-        "topic_id": "topic-concentration",
-        "experiment_id": "experiment-001",
-        "market": "HK",
-        "account": "lx",
-        "hypothesis": {
-            "hypothesis_type": "sell_put_ranking",
-            "statement": "Prefer lower cross-symbol concentration earlier.",
-            "mechanism": "Move the existing concentration fact ahead of the return band.",
-            "independent_variable": "cross_symbol_concentration_priority",
-            "expected_direction": "higher_top1_efficiency_without_higher_concentration",
-        },
-        "baseline": {
-            "version": baseline_version,
-            "opening_snapshot_schema": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-            "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-            "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
-            "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
-            "behavior_binding_sha256": build_behavior_binding(
-                _behavior_versions(baseline_version=baseline_version, calendar=calendar)
-            ),
-        },
-        "research_source": {
+def _research_spec() -> dict[str, Any]:
+    return build_sell_put_top1_research_spec(
+        topic_id="topic-concentration",
+        experiment_id="experiment-001",
+        baseline_version="sell-put-baseline.v1",
+        market_calendar_version="hk-calendar.v1",
+        research_source={
             "mode": "sealed_historical_dataset",
             "dataset_ref": "strategy_lab/top1/research-001.json",
             "dataset_sha256": SHA_A,
@@ -103,88 +153,29 @@ def _research_spec(
             "start_trading_date": "2026-06-19",
             "end_trading_date": "2026-08-14",
         },
-        "research_evaluation": {
-            "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
-            "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
-            "fill_assumption": "t0_sell_limit",
-            "required_days": RESEARCH_REQUIRED_DAYS,
-            "window_mode": "fixed_consecutive_trading_days",
-            "visibility": "visible_after_research_seal",
-        },
-        "variants": [
-            {"variant_id": "baseline", "patch": {}},
-            *[
-                {
-                    "variant_id": f"level-{index}",
-                    "patch": {"ranking_profile": profile},
-                }
-                for index, profile in enumerate(profiles, start=1)
-            ],
-        ],
-        "frozen_safety": {
-            "mode": "inherit_each_point_producer_accepted_set",
-            "variant_may_change_acceptance": False,
-        },
-        "economics_contracts": {
-            "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
-            "market_calendar_version": calendar,
-        },
-        "expiry_outcome": {
-            "contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
-            "spot_source": "opend_history_kline",
-            "ktype": "K_DAY",
-            "autype": "NONE",
-            "price_field": "close",
-            "due_boundary": "expiration_observation_start_ms",
-            "pending_elapsed_hours": 72,
-        },
-    }
-
-
-def _validation_spec(
-    profiles: tuple[str, ...] = ("without_concentration", "concentration_first"),
-) -> dict[str, Any]:
-    spec = _research_spec(profiles)
-    spec.update(
-        {
-            "validation_evaluation": {
-                "required_days": VALIDATION_REQUIRED_DAYS,
-                "window_mode": "fixed_future_consecutive_trading_days",
-                "visibility": "hidden_until_final_seal",
-            },
-            "fill_observation": {
-                "applies_to": "validation_only",
-                "contract_version": VALIDATION_FILL_CONTRACT_VERSION,
-            },
-            "timer_binding": {
-                "revision": "top1-advance.v1",
-                "producer_catchup_grace_seconds": 30,
-                "producer_run_timeout_upper_bound_seconds": 120,
-                "advance_cadence_seconds": 60,
-                "fill_observation_duration_upper_bound_seconds": 120,
-                "terms_capture_duration_upper_bound_seconds": 120,
-            },
-            "validation_metrics": {
-                "contract_version": VALIDATION_METRIC_CONTRACT_VERSION,
-                "confidence_level": 0.95,
-                "worst_fraction": 0.20,
-            },
-        }
     )
-    return spec
+
+
+def _validation_spec() -> dict[str, Any]:
+    return build_sell_put_top1_validation_spec(
+        _research_spec(),
+        timer_binding={
+            "revision": "top1-advance.v1",
+            "producer_catchup_grace_seconds": 30,
+            "producer_run_timeout_upper_bound_seconds": 120,
+            "advance_cadence_seconds": 60,
+            "fill_observation_duration_upper_bound_seconds": 120,
+            "terms_capture_duration_upper_bound_seconds": 120,
+        },
+    )
 
 
 def _refresh_behavior(spec: dict[str, Any]) -> None:
-    spec["baseline"]["behavior_binding_sha256"] = build_behavior_binding(
-        _behavior_versions(
-            baseline_version=spec["baseline"]["version"],
-            calendar=spec["economics_contracts"]["market_calendar_version"],
-        )
-    )
+    spec["baseline"]["behavior_binding_sha256"] = build_current_behavior_binding(spec)
 
 
-def test_experiment_spec_golden_shapes_are_detached_and_accept_all_profiles() -> None:
-    research = _research_spec(tuple(sorted(SELL_PUT_RANKING_PROFILES)))
+def test_experiment_spec_golden_shapes_are_detached_and_accept_fixed_recipe() -> None:
+    research = _research_spec()
     validation = _validation_spec()
     research_before = deepcopy(research)
     validation_before = deepcopy(validation)
@@ -222,8 +213,9 @@ def test_experiment_spec_rejects_bad_shapes_constants_and_values() -> None:
     filtering_patch = _research_spec()
     filtering_patch["variants"][1]["patch"] = {"max_spread_ratio": 0.2}
     bad_specs.append(filtering_patch)
-    duplicate_profile = _research_spec(("without_concentration", "without_concentration"))
-    bad_specs.append(duplicate_profile)
+    duplicate_variant = _research_spec()
+    duplicate_variant["variants"][2]["variant_id"] = "concentration-0.002"
+    bad_specs.append(duplicate_variant)
     bad_path = _research_spec()
     bad_path["research_source"]["dataset_ref"] = "../secret.json"
     bad_specs.append(bad_path)
@@ -300,14 +292,14 @@ def test_validation_hash_binds_terminal_challenger_commitment_and_validation_sem
     original = build_validation_spec_sha256(
         spec,
         research_terminal_sha256=SHA_A,
-        challenger_variant_id="level-1",
+        challenger_variant_id="concentration-0.002",
         hidden_window_commitment_sha256=SHA_B,
     )
     assert (
         build_validation_spec_sha256(
             spec,
             research_terminal_sha256=SHA_C,
-            challenger_variant_id="level-1",
+            challenger_variant_id="concentration-0.002",
             hidden_window_commitment_sha256=SHA_B,
         )
         != original
@@ -316,7 +308,7 @@ def test_validation_hash_binds_terminal_challenger_commitment_and_validation_sem
         build_validation_spec_sha256(
             spec,
             research_terminal_sha256=SHA_A,
-            challenger_variant_id="level-2",
+            challenger_variant_id="concentration-0.004",
             hidden_window_commitment_sha256=SHA_B,
         )
         != original
@@ -325,7 +317,7 @@ def test_validation_hash_binds_terminal_challenger_commitment_and_validation_sem
         build_validation_spec_sha256(
             spec,
             research_terminal_sha256=SHA_A,
-            challenger_variant_id="level-1",
+            challenger_variant_id="concentration-0.002",
             hidden_window_commitment_sha256=SHA_C,
         )
         != original
@@ -336,7 +328,7 @@ def test_validation_hash_binds_terminal_challenger_commitment_and_validation_sem
         build_validation_spec_sha256(
             changed_timer,
             research_terminal_sha256=SHA_A,
-            challenger_variant_id="level-1",
+            challenger_variant_id="concentration-0.002",
             hidden_window_commitment_sha256=SHA_B,
         )
         != original
@@ -348,7 +340,7 @@ def test_validation_hash_binds_terminal_challenger_commitment_and_validation_sem
         build_validation_spec_sha256(
             changed_calendar,
             research_terminal_sha256=SHA_A,
-            challenger_variant_id="level-1",
+            challenger_variant_id="concentration-0.002",
             hidden_window_commitment_sha256=SHA_B,
         )
         != original
@@ -390,6 +382,79 @@ def _filled_facts(**overrides: Any) -> dict[str, Any]:
     }
     facts.update(overrides)
     return facts
+
+
+def _fx_binding(fact_id: str, rate: str, selected_at_ms: int) -> dict[str, object]:
+    return build_fx_rate_binding(
+        FXRateFact(
+            fact_id=fact_id,
+            base_currency="HKD",
+            quote_currency="CNY",
+            rate=Decimal(rate),
+            rate_kind="official_close",
+            effective_at_ms=selected_at_ms - 1,
+            observed_at_ms=selected_at_ms - 1,
+            source="official_close",
+            source_id=fact_id,
+        ),
+        selected_at_ms=selected_at_ms,
+    )
+
+
+def _v2_filled_facts(**overrides: Any) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "stage": "research",
+        "fill_status": "t0_assumed_fill",
+        "contract_identity": {
+            "symbol": "0700.HK",
+            "contract_symbol": "HK.00700P260701T100000",
+            "option_type": "put",
+            "strike": 100,
+            "expiration": "2026-07-01",
+            "multiplier": 100,
+            "currency": "HKD",
+        },
+        "holding_start_date": "2026-06-01",
+        "opening_net_premium_native": 500,
+        "expiry_underlier_close_native": 90,
+        "account_fee_plan": {
+            "commission_free": True,
+            "platform_fee": 0.0,
+            "fee_plan_ref": "futu-hk-plan.v1",
+        },
+        "opening_fx_binding": _fx_binding("opening-fx", "0.9", 1_000),
+        "terminal_fx_binding": _fx_binding("terminal-fx", "0.8", 2_000),
+    }
+    facts.update(overrides)
+    return facts
+
+
+def test_cny_economics_binds_opening_and_terminal_fx_separately() -> None:
+    result = calculate_sell_put_top1_economic_result(_v2_filled_facts())
+
+    assert result["status"] == "evaluable"
+    assert result["return_capital_basis_native"] == 9_500
+    assert result["return_capital_basis_cny"] == 8_550
+    assert result["opening_net_premium_cny"] == 450
+    assert result["terminal_fee_native"] == pytest.approx(11.27)
+    assert result["terminal_fee_cny"] == pytest.approx(9.016)
+    assert result["expiry_underlier_pnl_cny"] == -800
+    assert result["economic_pnl_cny"] == pytest.approx(-359.016)
+    assert result["annualized_return"] == pytest.approx(
+        -359.016 / 8_550 / 30 * 365
+    )
+    assert result["opening_fx_evidence_ref"]["fact_id"] == "opening-fx"
+    assert result["terminal_fx_evidence_ref"]["fact_id"] == "terminal-fx"
+    assert _v2_filled_facts()["opening_fx_binding"]["schema_version"] == (
+        FX_RATE_BINDING_SCHEMA_VERSION
+    )
+
+    missing = calculate_sell_put_top1_economic_result(
+        _v2_filled_facts(terminal_fx_binding=None)
+    )
+    assert missing["status"] == "not_evaluable"
+    assert missing["reason_code"] == "required_fx_missing"
+    assert missing["economic_pnl_cny"] is None
 
 
 def test_expiry_economics_no_fill_worthless_and_assignment_hand_calculations() -> None:
@@ -768,3 +833,73 @@ def test_sample_standard_deviation_uses_n_minus_one() -> None:
     values = [0.1, 0.2, 0.4]
     result = summarize_paired_daily_deltas(_daily_points(values), _policy(3))
     assert result["sample_std"] == pytest.approx(statistics.stdev(values))
+
+
+def _v2_policy(required_days: int) -> dict[str, Any]:
+    return {
+        "required_days": required_days,
+        "confidence_level": 0.95,
+        "worst_fraction": 0.20,
+        "minimum_mean_daily_pnl_delta_cny": 0.0,
+    }
+
+
+def _v2_point(
+    index: int,
+    *,
+    return_delta: float = 0.1,
+    pnl_delta: float = 1.0,
+    safety_status: str = "passed",
+) -> dict[str, Any]:
+    def result(annualized_return: float, pnl: float, capital: float) -> dict[str, Any]:
+        return {
+            "status": "evaluable",
+            "annualized_return": annualized_return,
+            "economic_pnl_cny": pnl,
+            "return_capital_basis_cny": capital,
+        }
+
+    return {
+        "recommendation_point_id": f"v2-point-{index}",
+        "trading_date": (date(2026, 2, 1) + timedelta(days=index - 1)).isoformat(),
+        "baseline_candidate_id": f"baseline-{index}",
+        "challenger_candidate_id": f"challenger-{index}",
+        "baseline_economic_result": result(0.1, 10.0, 100.0),
+        "challenger_economic_result": result(
+            0.1 + return_delta,
+            10.0 + pnl_delta,
+            110.0,
+        ),
+        "hard_risk_status": "passed",
+        "frozen_safety_results": [
+            {"metric_id": "accepted_set_unchanged", "status": safety_status}
+        ],
+    }
+
+
+def test_v2_evaluator_uses_return_as_primary_and_cny_pnl_as_non_inferiority() -> None:
+    passed = evaluate_top1_paired_daily_results(
+        [_v2_point(index) for index in range(1, 6)],
+        _v2_policy(5),
+    )
+    assert passed["decision"] == "pass"
+    assert passed["mean_daily_annualized_return_delta"] == pytest.approx(0.1)
+    assert passed["mean_daily_pnl_delta_cny"] == 1.0
+    assert passed["mean_daily_return_capital_basis_delta_cny"] == 10.0
+    assert passed["top1_change_count"] == 5
+
+    pnl_tradeoff = evaluate_top1_paired_daily_results(
+        [_v2_point(index, pnl_delta=-0.01) for index in range(1, 6)],
+        _v2_policy(5),
+    )
+    assert pnl_tradeoff["decision"] == "insufficient_evidence"
+    assert pnl_tradeoff["reason_codes"] == ["pnl_non_inferiority_failed"]
+
+    unsafe = evaluate_top1_paired_daily_results(
+        [_v2_point(1, safety_status="violated")],
+        _v2_policy(5),
+    )
+    assert unsafe["decision"] == "keep_baseline"
+    assert unsafe["reason_codes"] == [
+        "frozen_safety_non_inferiority_failed"
+    ]

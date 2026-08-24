@@ -41,11 +41,13 @@
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：scheduled report、增量提醒和主动查询体验。
 - [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：Sell Put 指派后的批次级 Covered Call 监控、共享覆盖和生命周期边界。
-- [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)：策略实验、证据要求和生产边界。
+- [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)：已落地策略实验入口、证据要求和生产边界。
+- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：统一实验平台的产品范围、价值验证 MVP 和后续接入边界。
 
 ## 技术架构与核心合同
 
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
+- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：统一实验平台 MVP 的技术架构、函数改造和存储收敛边界。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：period、PnL、cash、activity 和 bridge 合同。

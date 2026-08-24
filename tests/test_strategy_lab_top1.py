@@ -10,6 +10,7 @@ from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
 )
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     dependency_from_hash,
@@ -18,6 +19,7 @@ from src.application.opening_candidate_snapshot import (
 from src.application.shadow_replay.common import attach_artifact_provenance
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_ARTIFACT_KIND,
+    RANKING_PROJECTION_SCHEMA_V2,
     Top1RankingError,
     build_ranking_projection,
     rerank_recommendation_point,
@@ -82,6 +84,9 @@ def _candidate(
         "dte": 34,
         "bid": 2.9,
         "ask": 3.1,
+        "bid_volume": 12,
+        "ask_volume": 18,
+        "last_price": 3.0,
         "mid": 3.0,
         "sell_limit": 3.0,
         "multiplier": 100,
@@ -102,6 +107,14 @@ def _candidate(
         "fee_basis": "futu_us_candidate_upper_bound_2026-08-06",
         "fee_schedule_url": "https://www.futuhk.com/support/topic2_108",
         "implied_volatility": 0.42,
+        "delta": -0.25,
+        "gamma": 0.02,
+        "theta": -0.04,
+        "vega": 0.08,
+        "rho": -0.01,
+        "snapshot_requested_at_utc": "2026-08-15T00:59:00Z",
+        "snapshot_received_at_utc": "2026-08-15T00:59:01Z",
+        "opening_contract_status": "ready",
         "term_matched_rv": 0.30,
         "iv_rv_ratio": 1.4,
         "iv_minus_rv": 0.12,
@@ -228,6 +241,55 @@ def _binding(snapshot: dict) -> dict:
     }
 
 
+def _v2_evidence(snapshot: dict) -> dict:
+    evidence = {
+        "schema_version": "option_market_evidence.v1",
+        "status": "ready",
+        "reason_code": None,
+        "run_id": snapshot["run_id"],
+        "account": snapshot["account"],
+        "account_config_sha256": snapshot["account_config_sha256"],
+        "evidence_at_utc": "2026-08-15T00:59:00Z",
+        "selection_policy_version": "option_market_evidence_selection.v1",
+        "ledger_generation_sha256_a": "6" * 64,
+        "ledger_generation_sha256_b": "6" * 64,
+        "decision_state_fingerprint_a": "7" * 64,
+        "decision_state_fingerprint_b": "7" * 64,
+        "open_option_positions": [],
+        "valuation_mark_facts": [],
+        "fx_rate_facts": [
+            {
+                "fact_id": "usd-fx",
+                "base_currency": "USD",
+                "quote_currency": "CNY",
+                "rate": "7",
+                "rate_kind": "spot",
+                "effective_at_ms": 1,
+                "observed_at_ms": 1,
+                "source": "official_close",
+                "source_id": "usd-fx",
+                "revision": 1,
+                "supersedes_fact_id": None,
+                "source_fact_sha256": "8" * 64,
+            }
+        ],
+    }
+    evidence["content_sha256"] = canonical_sha256(evidence)
+    return evidence
+
+
+def _v2_binding(snapshot: dict) -> dict:
+    return {
+        **_binding(snapshot),
+        "option_market_evidence_ref": (
+            f"output_runs/{snapshot['run_id']}/accounts/{snapshot['account']}/state/"
+            "option_positions_context.json"
+        ),
+        "option_market_evidence_manifest_sha256": "8" * 64,
+        "option_market_evidence_payload_sha256": "9" * 64,
+    }
+
+
 def _projection(tmp_path: Path) -> tuple[dict, dict]:
     snapshot = _seal(tmp_path)
     return snapshot, build_ranking_projection(snapshot, point_binding=_binding(snapshot))
@@ -297,6 +359,77 @@ def test_build_projection_is_strict_and_reranks_without_source(tmp_path: Path) -
         next(row["symbol"] for row in projection["candidates"] if row["candidate_id"] == item)
         for item in concentration_first["ordered_candidate_ids"]
     ] == ["AMD", "NVDA", "TSLA"]
+
+
+def test_v2_projection_adds_option_market_metric_without_changing_v1_callers(
+    tmp_path: Path,
+) -> None:
+    snapshot = _seal(tmp_path)
+    evidence = _v2_evidence(snapshot)
+    projection = build_ranking_projection(
+        snapshot,
+        point_binding=_v2_binding(snapshot),
+        option_market_evidence=evidence,
+        require_option_market_evidence=True,
+    )
+
+    assert projection["schema_version"] == RANKING_PROJECTION_SCHEMA_V2
+    assert all(
+        candidate["option_market_concentration_after"] == 1.0
+        and candidate["option_market_value_cny"] > 0
+        and candidate["option_market_evidence_refs"][
+            "prepared_evidence_content_sha256"
+        ]
+        == evidence["content_sha256"]
+        for candidate in projection["candidates"]
+    )
+    assert {
+        field: projection["candidates"][0][field]
+        for field in (
+            "bid",
+            "ask",
+            "bid_volume",
+            "ask_volume",
+            "last",
+            "delta",
+            "gamma",
+            "theta",
+            "vega",
+            "rho",
+            "quote_effective_at_utc",
+            "quote_observed_at_utc",
+            "quote_status",
+        )
+    } == {
+        "bid": 2.9,
+        "ask": 3.1,
+        "bid_volume": 12,
+        "ask_volume": 18,
+        "last": 3.0,
+        "delta": -0.25,
+        "gamma": 0.02,
+        "theta": -0.04,
+        "vega": 0.08,
+        "rho": -0.01,
+        "quote_effective_at_utc": "2026-08-15T00:59:00Z",
+        "quote_observed_at_utc": "2026-08-15T00:59:01Z",
+        "quote_status": "ready",
+    }
+    assert "market_facts" not in projection["candidates"][0]
+    result = rerank_recommendation_point(
+        projection,
+        ranking_profile="option_market_concentration",
+        near_return_threshold=0.006,
+    )
+    assert result["schema_version"] == "sell_put_recommendation_ranking_result.v2"
+    assert result["near_return_threshold"] == 0.006
+
+    with pytest.raises(Top1RankingError, match="option market evidence is required"):
+        build_ranking_projection(
+            snapshot,
+            point_binding=_binding(snapshot),
+            require_option_market_evidence=True,
+        )
 
 
 def test_empty_accepted_set_is_a_valid_projection(tmp_path: Path) -> None:

@@ -26,7 +26,7 @@ from src.application.strategy_lab.top1.corpus import (
 from src.application.strategy_lab.top1.lifecycle import (
     _call,
     _command_fields,
-    _require_effective,
+    _require_service_available,
     _segment,
 )
 from src.application.strategy_lab.top1.ranking import (
@@ -94,17 +94,8 @@ def _context(
     artifact_root: str | Path,
     environ: Mapping[str, str] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    _require_service_available(environ)
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
     if experiment["terminal_mode"] is not None or not (
         experiment["phase"] == "validation"
         and experiment["validation_progress"] == "collecting_decisions"
@@ -286,7 +277,6 @@ def _terminal_if_final(
         post_generation,
         terminal_mode="completed",
         reason=None,
-        disabled_scope=None,
         occurred_at_utc=occurred_at_utc,
     )
 
@@ -357,17 +347,7 @@ def consume_validation_point(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    current = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(current["market"]),
-        account=str(current["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     existing = _call(store.validation_decision, experiment_id, recommendation_point_id)
     if existing is not None:
         if existing["source_status"] != source_status:
@@ -577,17 +557,7 @@ def record_validation_day_gap(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    current = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(current["market"]),
-        account=str(current["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     existing = _call(store.validation_day, experiment_id, trading_date)
     if existing is not None:
         if existing["expected_point_count"] is not None:

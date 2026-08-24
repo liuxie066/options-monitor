@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
@@ -18,8 +18,14 @@ from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
+from src.application.prepared_option_positions_context import (
+    PreparedOptionPositionsContextError,
+    find_prepared_option_positions_manifest,
+    load_prepared_option_positions_context_receipt,
+)
 from src.application.recommendation_point import (
     RECOMMENDATION_POINT_FILE,
+    RECOMMENDATION_POINT_SCHEMA_V2,
     RecommendationPointError,
     build_recommendation_point_id,
     load_recommendation_point,
@@ -57,6 +63,7 @@ CORPUS_COMMAND_RESULT_SCHEMA = "sell_put_top1_corpus_command_result.v1"
 CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
 RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
+HISTORY_MIGRATION_PREVIEW_SCHEMA = "sell_put_top1_history_migration_preview.v1"
 MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
 MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v2"
 _MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = (
@@ -137,6 +144,7 @@ _WINDOW_FACT_FIELDS = frozenset(
 _POINT_REF = re.compile(
     rf"output_runs/([^/]+)/accounts/([^/]+)/state/{re.escape(RECOMMENDATION_POINT_FILE)}\Z"
 )
+_SCHEDULER_DECISION_REF = re.compile(r"output_runs/([^/]+)/state/scheduler_decision.json\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
@@ -603,25 +611,8 @@ def _command_result(
     }
 
 
-def _feature_enabled(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    environ: Mapping[str, str] | None,
-) -> bool:
-    try:
-        feature = store.feature(market, account)
-    except ExperimentStoreError as exc:
-        reason = (
-            "schema_unsupported"
-            if exc.reason_code == "schema_unsupported"
-            else "corpus_input_invalid"
-        )
-        raise CorpusError(reason, str(exc)) from exc
-    return strategy_lab_top1_available(environ) and bool(
-        feature and feature["user_opt_in"]
-    )
+def _service_available(environ: Mapping[str, str] | None) -> bool:
+    return strategy_lab_top1_available(environ)
 
 
 def _store_call(function: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -985,13 +976,11 @@ def seal_day_expectation(
     sealed_at = _timestamp(sealed_at_utc, "sealed_at_utc")
     if not isinstance(schedule, Mapping):
         _fail("corpus_input_invalid", "schedule must be an object")
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _command_result(
             operation="seal_day_expectation",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1051,11 +1040,11 @@ def seal_committed_day_expectation(
     point_ids = committed_day["expected_recommendation_point_ids"]
     if not isinstance(targets, list) or not isinstance(point_ids, list):
         _fail("corpus_input_invalid", "committed targets and point IDs must be lists")
-    if not _feature_enabled(store, market=market, account=account, environ=environ):
+    if not _service_available(environ):
         return _command_result(
             operation="seal_day_expectation",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1167,6 +1156,52 @@ def _capture_not_evaluable(
     )
 
 
+def _build_point_ranking_projection(
+    source_root: str | Path,
+    point: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    option_market_evidence = None
+    if point["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2:
+        prepared_manifest = find_prepared_option_positions_manifest(
+            base=Path(source_root),
+            run_id=str(point["run_id"]),
+            account=str(point["account"]),
+        )
+        if prepared_manifest is None:
+            raise PreparedOptionPositionsContextError(
+                "option_market_evidence_contract_missing"
+            )
+        prepared_receipt = load_prepared_option_positions_context_receipt(
+            manifest_path=prepared_manifest,
+            expected_base=Path(source_root),
+            expected_run_id=str(point["run_id"]),
+            expected_account=str(point["account"]),
+            expected_account_config_sha256=str(snapshot["account_config_sha256"]),
+            expected_manifest_sha256=str(
+                point["option_market_evidence_manifest_sha256"]
+            ),
+            require_option_market_evidence=True,
+        )
+        if prepared_receipt["manifest"].get("payload_sha256") != point[
+            "option_market_evidence_payload_sha256"
+        ]:
+            raise PreparedOptionPositionsContextError(
+                "prepared option payload generation mismatch"
+            )
+        option_market_evidence = prepared_receipt["payload"].get(
+            "strategy_lab_option_market_evidence"
+        )
+    return build_ranking_projection(
+        snapshot,
+        point_binding=point_binding_from_recommendation_point(point),
+        option_market_evidence=option_market_evidence,
+        require_option_market_evidence=(
+            point["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2
+        ),
+    )
+
+
 def capture_recommendation_point(
     store: ExperimentStore,
     source_root: str | Path,
@@ -1196,13 +1231,11 @@ def capture_recommendation_point(
         _fail("corpus_artifact_invalid", "point ref and body identity do not match")
     if _before(captured_at, str(point["decision_at_utc"])):
         _fail("corpus_input_invalid", "captured_at_utc cannot precede decision_at_utc")
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _command_result(
             operation="capture_recommendation_point",
             status="not_evaluable",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             market=market,
             account=account,
             trading_date=day,
@@ -1314,11 +1347,12 @@ def capture_recommendation_point(
             expected_point_count=expected_count,
         )
     try:
-        projection = build_ranking_projection(
-            snapshot,
-            point_binding=point_binding_from_recommendation_point(point),
-        )
-    except (RecommendationPointError, Top1RankingError):
+        projection = _build_point_ranking_projection(source_root, point, snapshot)
+    except (
+        PreparedOptionPositionsContextError,
+        RecommendationPointError,
+        Top1RankingError,
+    ):
         return _capture_not_evaluable(
             store,
             point,
@@ -1465,6 +1499,348 @@ def discover_recommendation_points(
             str(item["point_ref"]),
         ),
     )
+
+
+def migrate_archived_recommendation_points(
+    store: ExperimentStore,
+    source_root: str | Path,
+    artifact_root: str | Path,
+    *,
+    market: str,
+    account: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview strict historical point reuse without repairing old evidence."""
+
+    market, account = _identity(market, account)
+    if type(apply) is not bool:
+        _fail("corpus_input_invalid", "apply must be a boolean")
+    if apply:
+        _fail(
+            "corpus_input_invalid",
+            "historical migration apply is not available until preview is accepted",
+        )
+    root = Path(source_root).resolve()
+    if not root.is_dir():
+        _fail("corpus_input_invalid", "historical source root is unavailable")
+
+    inventory_runs: dict[str, dict[str, Any]] = {}
+    inventory_status = "missing"
+    inventory_path = root / "manifests" / "inventory.latest.json"
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        if (
+            isinstance(inventory, Mapping)
+            and inventory.get("schema_version") == "research_archive.v2"
+            and isinstance(inventory.get("runs"), list)
+        ):
+            for raw_run in inventory["runs"]:
+                if not isinstance(raw_run, Mapping):
+                    continue
+                run_id = str(raw_run.get("run_id") or "")
+                if not run_id:
+                    continue
+                account_evidence = next(
+                    (
+                        dict(item)
+                        for item in (
+                            (raw_run.get("candidate_evidence") or {}).get("accounts")
+                            if isinstance(raw_run.get("candidate_evidence"), Mapping)
+                            else []
+                        )
+                        if isinstance(item, Mapping)
+                        and item.get("account") == account
+                    ),
+                    {},
+                )
+                inventory_runs[run_id] = {
+                    "candidate_evidence_reason_code": str(
+                        account_evidence.get("reason_code")
+                        or account_evidence.get("status")
+                        or "candidate_snapshot_contract_missing"
+                    ),
+                }
+            inventory_status = "verified"
+        else:
+            inventory_status = "invalid"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    scheduled_runs: list[dict[str, Any]] = []
+    pattern = "output_runs/*/state/scheduler_decision.json"
+    for path in sorted(root.glob(pattern)):
+        ref = path.relative_to(root).as_posix()
+        matched = _SCHEDULER_DECISION_REF.fullmatch(ref)
+        if matched is None:
+            continue
+        run_id = matched.group(1)
+        if not (root / "output_runs" / run_id / "accounts" / account).is_dir():
+            continue
+        try:
+            content = path.read_bytes()
+            envelope = json.loads(content.decode("utf-8"))
+            payload = envelope.get("payload") if isinstance(envelope, Mapping) else None
+            decision = (
+                payload.get("decision")
+                if isinstance(payload, Mapping)
+                else envelope
+            )
+            if not isinstance(decision, Mapping) or decision.get("should_run_scan") is not True:
+                continue
+            target_raw = decision.get("scheduled_scan_target_market") or decision.get(
+                "scheduled_target_market"
+            )
+            market_clock = target_raw or decision.get("now_market")
+            parsed_clock = datetime.fromisoformat(str(market_clock))
+            if parsed_clock.utcoffset() != timedelta(hours=8):
+                continue
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+        target = None
+        point_id = None
+        trading_date = None
+        if target_raw:
+            try:
+                target = utc_timestamp(target_raw, "scheduled_scan_target_market")
+                point_id = build_recommendation_point_id(market, account, target)
+                trading_date = (
+                    datetime.fromisoformat(target.replace("Z", "+00:00"))
+                    .astimezone(ZoneInfo("Asia/Hong_Kong"))
+                    .date()
+                    .isoformat()
+                )
+            except (CandidateSnapshotContractError, RecommendationPointError, ValueError):
+                target = None
+        scheduled_runs.append(
+            {
+                "run_id": run_id,
+                "scheduler_decision_ref": ref,
+                "scheduler_decision_sha256": _file_sha256(content),
+                "scheduled_scan_target_market": target,
+                "recommendation_point_id": point_id,
+                "trading_date": trading_date,
+                **inventory_runs.get(run_id, {}),
+            }
+        )
+
+    items: list[dict[str, Any]] = []
+    for run in scheduled_runs:
+        if run["scheduled_scan_target_market"] is not None:
+            continue
+        items.append(
+            {
+                "status": "gap",
+                "reason_code": "historical_point_evidence_missing",
+                "evidence_reason_code": "scheduler_identity_missing",
+                "recommendation_point_id": None,
+                "scheduled_scan_target_market": None,
+                "trading_date": None,
+                "source_run_ids": [run["run_id"]],
+                "source_point_ref": None,
+                "projection_content_sha256": None,
+                "estimated_incremental_bytes": 0,
+            }
+        )
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for run in scheduled_runs:
+        target = run["scheduled_scan_target_market"]
+        if target is not None:
+            grouped.setdefault(str(target), []).append(run)
+
+    store_state = store.schema_state()
+    for target, sources in sorted(grouped.items()):
+        source_run_ids = sorted(str(source["run_id"]) for source in sources)
+        valid: list[tuple[dict[str, Any], dict[str, Any], bytes, str]] = []
+        point_error: str | None = None
+        for source in sources:
+            run_id = str(source["run_id"])
+            point_ref = (
+                f"output_runs/{run_id}/accounts/{account}/state/"
+                f"{RECOMMENDATION_POINT_FILE}"
+            )
+            if not root.joinpath(*point_ref.split("/")).is_file():
+                continue
+            try:
+                point = load_recommendation_point(root, run_id, account)
+                if (
+                    point["market"] != market
+                    or point["scheduled_scan_target_market"] != target
+                    or point["schema_version"] != RECOMMENDATION_POINT_SCHEMA_V2
+                ):
+                    raise RecommendationPointError(
+                        "option_market_evidence_contract_missing",
+                        "historical point is not equivalent to the current contract",
+                    )
+                snapshot = load_opening_candidate_snapshot(
+                    base=root,
+                    run_id=run_id,
+                    account=account,
+                    require_current_contract=True,
+                )
+                if snapshot.get("content_sha256") != point["opening_snapshot_sha256"]:
+                    raise OpeningCandidateSnapshotError(
+                        "opening snapshot hash does not match historical point"
+                    )
+                projection = _build_point_ranking_projection(root, point, snapshot)
+                if projection["producer_accepted_candidate_ids"] != point[
+                    "producer_accepted_candidate_ids"
+                ]:
+                    raise Top1RankingError(
+                        "ranking_projection_incomplete",
+                        "historical accepted candidate set does not match",
+                    )
+                projection_content = _render(projection)
+                valid.append((point, projection, projection_content, point_ref))
+            except RecommendationPointError as exc:
+                point_error = exc.reason_code
+            except OpeningCandidateSnapshotError as exc:
+                point_error = (
+                    "opening_snapshot_missing"
+                    if "unavailable" in str(exc).lower()
+                    else "opening_snapshot_conflict"
+                )
+            except PreparedOptionPositionsContextError as exc:
+                point_error = str(exc) or "option_market_evidence_contract_missing"
+            except Top1RankingError as exc:
+                point_error = exc.reason_code
+
+        item_base = {
+            "recommendation_point_id": sources[0]["recommendation_point_id"],
+            "scheduled_scan_target_market": target,
+            "trading_date": sources[0]["trading_date"],
+            "source_run_ids": source_run_ids,
+        }
+        if len(valid) > 1 and len(
+            {
+                (point["content_sha256"], projection["artifact_provenance"]["content_sha256"])
+                for point, projection, _content, _ref in valid
+            }
+        ) > 1:
+            items.append(
+                {
+                    **item_base,
+                    "status": "conflict",
+                    "reason_code": "historical_point_conflict",
+                    "evidence_reason_code": "duplicate_strict_point_content",
+                    "source_point_ref": None,
+                    "projection_content_sha256": None,
+                    "estimated_incremental_bytes": 0,
+                }
+            )
+            continue
+        if not valid:
+            status = "gap"
+            reason_code = "historical_point_evidence_missing"
+            evidence_reason = (
+                "duplicate_scheduler_identity"
+                if len(sources) > 1
+                else point_error
+                or next(
+                    (
+                        str(source.get("candidate_evidence_reason_code"))
+                        for source in sources
+                        if source.get("candidate_evidence_reason_code")
+                    ),
+                    "option_market_evidence_contract_missing",
+                )
+            )
+            items.append(
+                {
+                    **item_base,
+                    "status": status,
+                    "reason_code": reason_code,
+                    "evidence_reason_code": evidence_reason,
+                    "source_point_ref": None,
+                    "projection_content_sha256": None,
+                    "estimated_incremental_bytes": 0,
+                }
+            )
+            continue
+
+        point, projection, projection_content, point_ref = valid[0]
+        status = "ready"
+        reason_code = None
+        evidence_reason_code = None
+        if store_state.get("status") == "ready":
+            row = _store_call(
+                store.corpus_point,
+                market,
+                account,
+                point["recommendation_point_id"],
+            )
+            if row is not None:
+                try:
+                    indexed, indexed_content = _read_indexed_projection(
+                        artifact_root, row
+                    )
+                    matches = (
+                        row["conflict_status"] == "clean"
+                        and row["capture_status"] == "captured"
+                        and row["source_run_id"] == point["run_id"]
+                        and row["source_point_content_sha256"]
+                        == point["content_sha256"]
+                        and indexed["artifact_provenance"]["content_sha256"]
+                        == projection["artifact_provenance"]["content_sha256"]
+                        and indexed_content == projection_content
+                    )
+                except CorpusError:
+                    matches = False
+                if matches:
+                    status = "idempotent"
+                    reason_code = "historical_point_already_imported"
+                else:
+                    status = "conflict"
+                    reason_code = "historical_point_conflict"
+                    evidence_reason_code = "indexed_point_content_mismatch"
+        items.append(
+            {
+                **item_base,
+                "status": status,
+                "reason_code": reason_code,
+                "evidence_reason_code": evidence_reason_code,
+                "source_point_ref": point_ref,
+                "projection_content_sha256": projection[
+                    "artifact_provenance"
+                ]["content_sha256"],
+                "estimated_incremental_bytes": (
+                    len(projection_content) if status == "ready" else 0
+                ),
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            str(item["scheduled_scan_target_market"] or ""),
+            ",".join(item["source_run_ids"]),
+        )
+    )
+    counts = {
+        status: sum(item["status"] == status for item in items)
+        for status in ("ready", "idempotent", "conflict", "gap")
+    }
+    result: dict[str, Any] = {
+        "schema_version": HISTORY_MIGRATION_PREVIEW_SCHEMA,
+        "operation": "preview",
+        "market": market,
+        "account": account,
+        "source_run_count": len(scheduled_runs),
+        "point_identity_count": len(grouped),
+        "unidentified_run_count": sum(
+            run["scheduled_scan_target_market"] is None for run in scheduled_runs
+        ),
+        "preview_item_count": len(items),
+        "archive_inventory_status": inventory_status,
+        "store_schema": store_state,
+        "counts": counts,
+        "estimated_incremental_bytes": sum(
+            int(item["estimated_incremental_bytes"]) for item in items
+        ),
+        "items": items,
+    }
+    result["preview_sha256"] = canonical_sha256(result)
+    return result
 
 
 def _validate_window_facts(window_facts: Mapping[str, Any]) -> dict[str, Any]:
@@ -1778,13 +2154,11 @@ def freeze_research_dataset(
     facts = _validate_window_facts(window_facts)
     market = str(facts["market"])
     account = str(facts["account"])
-    if not _feature_enabled(
-        store, market=market, account=account, environ=environ
-    ):
+    if not _service_available(environ):
         return _freeze_result(
             facts,
             status="blocked",
-            reason_code="feature_disabled",
+            reason_code="strategy_lab_service_disabled",
             selected_dates=[],
         )
 
@@ -2000,6 +2374,7 @@ __all__ = [
     "CORPUS_DAY_EXPECTATION_SCHEMA",
     "CORPUS_STATUS_SCHEMA",
     "DATASET_FREEZE_RESULT_SCHEMA",
+    "HISTORY_MIGRATION_PREVIEW_SCHEMA",
     "MARKET_CALENDAR_POINTER_SCHEMA",
     "MARKET_CALENDAR_SNAPSHOT_SCHEMA",
     "RESEARCH_WINDOW_FACTS_SCHEMA",
@@ -2008,6 +2383,7 @@ __all__ = [
     "capture_recommendation_point",
     "discover_recommendation_points",
     "freeze_research_dataset",
+    "migrate_archived_recommendation_points",
     "read_bound_market_calendar_snapshot",
     "read_corpus_status",
     "read_market_calendar_binding",

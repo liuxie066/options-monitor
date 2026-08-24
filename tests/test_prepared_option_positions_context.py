@@ -8,17 +8,29 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.performance.models import (
+    EvidenceEnvelope,
+    OptionInstrumentKey,
+    ValuationMarkFact,
+)
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.manual_trades import persist_manual_open_event
+from src.application.ledger.event_codec import trade_event_application_payload
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
+)
+from src.application.performance.evidence_collection import (
+    CurrentEvidenceCollection,
 )
 from src.infrastructure.performance_evidence_sqlite import (
     PerformanceEvidenceSQLiteRepository,
 )
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
+    build_option_market_evidence_payload,
     cny_per_currency_rates_from_option_context,
+    find_prepared_option_positions_manifest,
     load_prepared_option_positions_context,
     load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
@@ -27,6 +39,19 @@ from src.application.tick_run_workspace import publish_account_run_config
 
 
 NOW = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
+
+
+def _canonical_bytes(payload: dict) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def test_cny_per_currency_rates_requires_ready_prepared_fx_authority() -> None:
@@ -200,7 +225,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         persist_fx_evidence=True,
     )
 
-    assert batch.ledger_read_count == 1
+    assert batch.ledger_read_count == 2
     assert batch.fx_observation_count == 1
     assert batch.fx_evidence_status == "persisted"
     assert batch.fx_evidence_ledger_count == 1
@@ -707,7 +732,7 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
         run_state_dir=tmp_path / "output_runs" / run_id / "state",
     )
 
-    assert batch.ledger_read_count == 1
+    assert batch.ledger_read_count == 2
     assert batch.fx_observation_count == 1
     assert batch.unavailable_by_account == {}
     loaded = {
@@ -778,3 +803,467 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
         row["contracts_open"]
         for row in sy_after_lx_rejection["open_positions_min"]
     ) == 3
+
+
+@pytest.mark.parametrize("collector_fails", [False, True])
+def test_prepare_v2_captures_current_marks_and_degrades_lab_only(
+    monkeypatch,
+    tmp_path: Path,
+    collector_fails: bool,
+) -> None:
+    from src.application import prepared_option_positions_context as mod
+
+    run_id = "run-option-market-evidence"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    ledger_path = (
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_path.parent.mkdir(parents=True)
+    repo = SQLiteOptionPositionsRepository(ledger_path)
+    _open_position(
+        repo,
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=2,
+        strike=95,
+        expiry="2099-09-18",
+        opened_at_ms=1_000,
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    mark = ValuationMarkFact(
+        fact_id="mark-nvda",
+        instrument=OptionInstrumentKey(
+            symbol="NVDA",
+            option_type="put",
+            strike="95",
+            expiration_ymd="2099-09-18",
+            currency="USD",
+            multiplier="100",
+        ),
+        price="1.25",
+        mark_kind="realtime_mid",
+        effective_at_ms=now_ms - 1_000,
+        observed_at_ms=now_ms - 1_000,
+        source="realtime_snapshot",
+        source_id="NVDA-put-95",
+    )
+    captured_accounts: list[str] = []
+
+    def _collect(**kwargs):
+        captured_accounts.extend(position.account for position in kwargs["option_positions"])
+        if collector_fails:
+            raise RuntimeError("snapshot unavailable")
+        return CurrentEvidenceCollection(
+            status="collected",
+            valuation_marks=(mark,),
+        )
+
+    monkeypatch.setattr(mod, "collect_current_performance_evidence", _collect)
+    monkeypatch.setattr(
+        mod,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "tencent_quote",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+
+    batch = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        persist_fx_evidence=True,
+        mark_evidence_accounts=("lx",),
+    )
+    manifest = batch.manifests["lx"]
+    payload = load_prepared_option_positions_context(
+        manifest_path=Path(manifest["manifest_path"]),
+        expected_base=tmp_path,
+        expected_run_id=run_id,
+        expected_account="lx",
+        expected_account_config_sha256=authorities["lx"].account_config_sha256,
+        expected_manifest_sha256=manifest["manifest_sha256"],
+        expected_runtime_config=configs["lx"],
+    )
+
+    evidence = payload["strategy_lab_option_market_evidence"]
+    assert captured_accounts == ["lx"]
+    assert batch.unavailable_by_account == {}
+    assert manifest["schema_version"] == "prepared_option_positions_context.v2"
+    assert Path(manifest["manifest_path"]).name == (
+        "prepared_option_positions_context.v2.json"
+    )
+    if collector_fails:
+        assert evidence["status"] == "unavailable"
+        assert evidence["reason_code"] == "option_market_evidence_mark_missing"
+        assert PerformanceEvidenceSQLiteRepository(
+            ledger_path
+        ).read_all().valuation_marks == ()
+        return
+
+    assert evidence["status"] == "ready"
+    assert evidence["ledger_generation_sha256_a"] == (
+        evidence["ledger_generation_sha256_b"]
+    )
+    assert evidence["decision_state_fingerprint_a"] == (
+        evidence["decision_state_fingerprint_b"]
+    )
+    assert [row["lot_id"] for row in evidence["open_option_positions"]]
+    assert evidence["valuation_mark_facts"][0]["fact_id"] == "mark-nvda"
+    assert [
+        fact.fact_id
+        for fact in PerformanceEvidenceSQLiteRepository(
+            ledger_path
+        ).read_all().valuation_marks
+    ] == ["mark-nvda"]
+    assert evidence["fx_rate_facts"][0]["base_currency"] == "USD"
+    assert "sell_limit" not in json.dumps(evidence)
+
+
+def test_position_drift_only_disables_strategy_lab_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import prepared_option_positions_context as mod
+
+    run_id = "run-option-market-drift"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    ledger_path = (
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_path.parent.mkdir(parents=True)
+    writer = SQLiteOptionPositionsRepository(ledger_path)
+    original_read = mod.read_decision_state_rows_many
+    reads = 0
+
+    def _read_with_drift(repo, *, accounts):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            _open_position(
+                writer,
+                account="lx",
+                symbol="NVDA",
+                option_type="put",
+                side="short",
+                contracts=1,
+                strike=95,
+                expiry="2099-09-18",
+                opened_at_ms=1_000,
+            )
+        return original_read(repo, accounts=accounts)
+
+    monkeypatch.setattr(mod, "read_decision_state_rows_many", _read_with_drift)
+    monkeypatch.setattr(
+        mod,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "tencent_quote",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+
+    batch = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        persist_fx_evidence=True,
+    )
+    manifest = batch.manifests["lx"]
+    common = {
+        "manifest_path": Path(manifest["manifest_path"]),
+        "expected_base": tmp_path,
+        "expected_run_id": run_id,
+        "expected_account": "lx",
+        "expected_account_config_sha256": authorities[
+            "lx"
+        ].account_config_sha256,
+        "expected_manifest_sha256": manifest["manifest_sha256"],
+        "expected_runtime_config": configs["lx"],
+    }
+    payload = load_prepared_option_positions_context(**common)
+
+    assert sum(
+        row["contracts_open"] for row in payload["open_positions_min"]
+    ) == 1
+    evidence = payload["strategy_lab_option_market_evidence"]
+    assert evidence["status"] == "unavailable"
+    assert evidence["reason_code"] == "option_market_evidence_position_drift"
+    with pytest.raises(
+        PreparedOptionPositionsContextError,
+        match="option_market_evidence_position_drift",
+    ):
+        load_prepared_option_positions_context(
+            **common,
+            require_option_market_evidence=True,
+        )
+
+
+def test_option_market_evidence_diagnostics_are_account_isolated() -> None:
+    observed_at_ms = int(NOW.timestamp() * 1000)
+    lx_key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=95,
+        expiration_ymd="2099-09-18",
+    )
+    sy_key = ContractKey.from_values(
+        broker="futu",
+        account="sy",
+        underlying_symbol="AAPL",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2099-09-18",
+    )
+    rows = [
+        trade_event_application_payload(
+            TradeEvent(
+                event_id="lx-open",
+                event_type="open",
+                event_time_ms=1_000,
+                contract_key=lx_key,
+                contracts=1,
+                price=1.5,
+                currency="CNY",
+                source="test",
+                multiplier=100,
+                fees=0,
+                lot_id="lx-lot",
+            )
+        ),
+        trade_event_application_payload(
+            TradeEvent(
+                event_id="sy-orphan-close",
+                event_type="close",
+                event_time_ms=2_000,
+                contract_key=sy_key,
+                contracts=1,
+                price=1,
+                currency="CNY",
+                source="test",
+                multiplier=100,
+                fees=0,
+                target_lot_id="missing-sy-lot",
+            )
+        ),
+    ]
+    mark = ValuationMarkFact(
+        fact_id="lx-mark",
+        instrument=OptionInstrumentKey(
+            symbol="NVDA",
+            option_type="put",
+            strike="95",
+            expiration_ymd="2099-09-18",
+            currency="CNY",
+            multiplier="100",
+        ),
+        price="1.25",
+        mark_kind="realtime_mid",
+        effective_at_ms=observed_at_ms - 1,
+        observed_at_ms=observed_at_ms - 1,
+        source="test",
+        source_id="lx-mark",
+    )
+    bundle = type(
+        "EvidenceBundle",
+        (),
+        {
+            "schema_state": "initialized_v1",
+            "valuation_marks": (mark,),
+            "fx_rates": (),
+        },
+    )()
+    common = {
+        "run_id": "account-isolation",
+        "account_config_sha256": "a" * 64,
+        "broker": "futu",
+        "scan_currency": "CNY",
+        "evidence_bundle": bundle,
+        "evidence_at_utc": NOW.isoformat().replace("+00:00", "Z"),
+        "ledger_generation_sha256_a": "b" * 64,
+        "ledger_generation_sha256_b": "b" * 64,
+        "decision_state_fingerprint_a": "c" * 64,
+        "decision_state_fingerprint_b": "c" * 64,
+    }
+
+    lx = build_option_market_evidence_payload(
+        **common,
+        account="lx",
+        rows_a={"trade_events": rows},
+    )
+    sy = build_option_market_evidence_payload(
+        **common,
+        account="sy",
+        rows_a={"trade_events": rows},
+    )
+    unscoped = build_option_market_evidence_payload(
+        **common,
+        account="lx",
+        rows_a={
+            "trade_events": [
+                *rows,
+                {
+                    "event_id": "unscoped-invalid",
+                    "event_type": "open",
+                    "event_time_ms": 3_000,
+                    "contract_key": "invalid",
+                },
+            ]
+        },
+    )
+
+    assert lx["status"] == "ready"
+    assert [row["lot_id"] for row in lx["open_option_positions"]] == [
+        "lx-lot"
+    ]
+    assert sy["reason_code"] == "option_market_evidence_position_invalid"
+    assert unscoped["reason_code"] == "option_market_evidence_position_invalid"
+
+
+def test_generic_recovery_accepts_v1_and_discovery_prefers_v2(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import prepared_option_positions_context as mod
+
+    run_id = "run-v1-recovery"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "test",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+    batch = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+    )
+    v2_path = Path(batch.manifests["lx"]["manifest_path"])
+    payload_path = v2_path.parent / "option_positions_context.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    _ledger_path, repo = mod.open_position_ledger_from_data_config(
+        base=tmp_path,
+        data_config=data_config,
+    )
+    rows = mod.read_decision_state_rows_many(
+        repo,
+        accounts=("lx",),
+    )["lx"]
+    payload["decision_state_snapshot"] = (
+        mod.decision_state_snapshot_from_rows(
+            rows,
+            account="lx",
+            portfolio_scope_id=mod.portfolio_scope_id("lx"),
+            source_observed_at=payload["prepared_authority"][
+                "source_observed_at"
+            ],
+            current_projection=None,
+            current_decision_now_ms=int(
+                datetime.now(timezone.utc).timestamp() * 1000
+            ),
+        )
+    )
+    for v2_only_key in (
+        "current_decision_read",
+        "decision_snapshot_actionable",
+        "current_decision_shadow",
+        "strategy_lab_option_market_evidence",
+    ):
+        payload.pop(v2_only_key, None)
+    payload["prepared_authority"]["schema_version"] = (
+        "prepared_option_positions_context.v1"
+    )
+    payload_bytes = _canonical_bytes(payload)
+    payload_path.write_bytes(payload_bytes)
+    manifest = json.loads(v2_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "prepared_option_positions_context.v1"
+    manifest["payload_sha256"] = hashlib.sha256(payload_bytes).hexdigest()
+    v1_path = v2_path.with_name("prepared_option_positions_context.v1.json")
+    v1_bytes = _canonical_bytes(manifest)
+    v1_path.write_bytes(v1_bytes)
+    v2_bytes = v2_path.read_bytes()
+    v2_path.unlink()
+
+    assert find_prepared_option_positions_manifest(
+        base=tmp_path,
+        run_id=run_id,
+        account="lx",
+    ) == v1_path
+    recovered = load_prepared_option_positions_context(
+        manifest_path=v1_path,
+        expected_base=tmp_path,
+        expected_run_id=run_id,
+        expected_account="lx",
+        expected_account_config_sha256=authorities["lx"].account_config_sha256,
+        expected_manifest_sha256=hashlib.sha256(v1_bytes).hexdigest(),
+        expected_runtime_config=configs["lx"],
+    )
+    assert recovered["prepared_authority"]["schema_version"].endswith(".v1")
+    with pytest.raises(
+        PreparedOptionPositionsContextError,
+        match="option_market_evidence_contract_missing",
+    ):
+        load_prepared_option_positions_context(
+            manifest_path=v1_path,
+            expected_base=tmp_path,
+            expected_run_id=run_id,
+            expected_account="lx",
+            expected_account_config_sha256=authorities[
+                "lx"
+            ].account_config_sha256,
+            expected_manifest_sha256=hashlib.sha256(v1_bytes).hexdigest(),
+            expected_runtime_config=configs["lx"],
+            require_option_market_evidence=True,
+        )
+
+    v2_path.write_bytes(v2_bytes)
+    assert find_prepared_option_positions_manifest(
+        base=tmp_path,
+        run_id=run_id,
+        account="lx",
+    ) == v2_path

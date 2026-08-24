@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,7 +46,14 @@ def _portfolio_context(account: str) -> dict:
     }
 
 
-def _request(tmp_path: Path, *, accounts: list[str], workers: int, force: bool):
+def _request(
+    tmp_path: Path,
+    *,
+    accounts: list[str],
+    workers: int,
+    force: bool,
+    trigger_kind: str = "manual",
+):
     from src.application.tick_account_execution import TickAccountExecutionRequest
 
     run_dir = tmp_path / "output_runs" / "run-1"
@@ -98,6 +106,7 @@ def _request(tmp_path: Path, *, accounts: list[str], workers: int, force: bool):
         scheduler_schedule_key="schedule",
         runlog=_RunLog(),
         audit_helper=_Audit(),
+        trigger_kind=trigger_kind,
     )
 
 
@@ -326,6 +335,12 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         accounts=["lx", "sy"],
         workers=2,
         force=False,
+        trigger_kind="scheduled",
+    )
+    request = replace(
+        request,
+        markets_to_run=["HK"],
+        cfg_path=tmp_path / "config.hk.json",
     )
     request.base_cfg.update(
         {
@@ -336,8 +351,8 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
             "close_advice": {"enabled": True},
             "symbols": [
                 {
-                    "symbol": "NVDA",
-                    "broker": "US",
+                    "symbol": "0700.HK",
+                    "broker": "HK",
                     "fetch": {
                         "source": "opend",
                         "host": "127.0.0.1",
@@ -355,7 +370,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
             "fields": {
                 "broker": "富途",
                 "account": account,
-                "symbol": "NVDA",
+                "symbol": "0700.HK",
                 "status": "open",
                 "side": "short",
                 "option_type": "put",
@@ -363,7 +378,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
                 "contracts_open": 1,
                 "strike": 100,
                 "expiration_ymd": "2026-08-28",
-                "currency": "USD",
+                "currency": "HKD",
             },
         }
         for account in ("lx", "sy")
@@ -374,6 +389,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     quality_gate_calls: list[tuple[str, str | None, str | None]] = []
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
     monkeypatch.setattr(
         mod,
         "expiration_business_today",
@@ -420,7 +436,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
                 "plan_id": "a" * 64,
                 "symbols": [
                     {
-                        "symbol": "NVDA",
+                        "symbol": "0700.HK",
                         "fetch_plan": {},
                     }
                 ],
@@ -465,6 +481,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     outcome = mod.run_tick_account_execution(request)
 
     assert len(prepared_option_calls) == 1
+    assert prepared_option_calls[0]["mark_evidence_accounts"] == ("lx",)
     assert len(prefetch_calls) == 1
     merged_requirements = [
         requirement
@@ -479,8 +496,8 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         for requirement in merged_requirements
     } == {"lot-lx", "lot-sy"}
     assert quality_gate_calls == [
-        ("close_advice", "lx", "us"),
-        ("close_advice", "sy", "us"),
+        ("close_advice", "lx", "hk"),
+        ("close_advice", "sy", "hk"),
     ]
     plan_path = (
         request.run_dir

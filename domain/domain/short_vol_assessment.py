@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Literal
 
+from domain.domain.performance.models import normalize_currency, to_decimal
 from domain.domain.symbol_identity import canonical_symbol
 
 
 ShortVolMode = Literal["put", "call"]
 EVENT_SOURCE_OK_STATUSES = {"ok", "ok_with_fallback"}
+OPTION_MARKET_CONCENTRATION_METRIC_VERSION = (
+    "option_market_concentration_after.v1"
+)
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,93 @@ def portfolio_concentration_fields(
         "concentration_unavailable_reason": ";".join(risk_ctx.unavailable_reasons) or None,
         "portfolio_risk_warnings": ";".join(risk_ctx.warnings) or None,
     }
+
+
+def calculate_option_market_concentration_after(
+    *,
+    candidate: dict[str, Any],
+    open_option_positions: list[dict[str, Any]],
+    valuation_mark_facts: list[dict[str, Any]],
+    fx_rate_facts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Calculate the frozen absolute option-market-value concentration."""
+
+    marks = _unique_by(valuation_mark_facts, "instrument_key")
+    rates = _unique_by(fx_rate_facts, "base_currency")
+
+    def to_cny(amount: Decimal, currency: Any) -> tuple[Decimal, str | None]:
+        normalized = normalize_currency(currency)
+        if normalized == "CNY":
+            return amount, None
+        fact = rates.get(normalized)
+        if fact is None or normalize_currency(fact.get("quote_currency")) != "CNY":
+            raise ValueError(f"FX evidence is missing for {normalized}")
+        return amount * to_decimal(fact.get("rate"), field_name="rate"), str(
+            fact.get("fact_id") or ""
+        )
+
+    existing_total = Decimal(0)
+    existing_symbol = Decimal(0)
+    candidate_symbol = canonical_symbol(candidate.get("symbol"))
+    if not candidate_symbol:
+        raise ValueError("candidate symbol is required")
+    mark_refs: set[str] = set()
+    fx_refs: set[str] = set()
+    position_refs: list[str] = []
+    for position in open_option_positions:
+        instrument_key = str(position.get("instrument_key") or "")
+        mark = marks.get(instrument_key)
+        if mark is None:
+            raise ValueError(f"valuation mark is missing for {instrument_key}")
+        native = abs(
+            to_decimal(mark.get("price"), field_name="mark.price")
+            * to_decimal(position.get("multiplier"), field_name="multiplier")
+            * to_decimal(position.get("contracts_open"), field_name="contracts_open")
+        )
+        value_cny, fx_ref = to_cny(native, position.get("currency"))
+        existing_total += value_cny
+        if canonical_symbol(position.get("symbol")) == candidate_symbol:
+            existing_symbol += value_cny
+        mark_refs.add(str(mark.get("fact_id") or ""))
+        position_refs.append(str(position.get("lot_id") or ""))
+        if fx_ref:
+            fx_refs.add(fx_ref)
+
+    candidate_native = abs(
+        to_decimal(candidate.get("sell_limit"), field_name="sell_limit")
+        * to_decimal(candidate.get("multiplier"), field_name="multiplier")
+    )
+    candidate_cny, candidate_fx_ref = to_cny(
+        candidate_native,
+        candidate.get("currency"),
+    )
+    if candidate_fx_ref:
+        fx_refs.add(candidate_fx_ref)
+    total_after = existing_total + candidate_cny
+    if total_after <= 0:
+        raise ValueError("option market value after candidate must be positive")
+    return {
+        "metric_version": OPTION_MARKET_CONCENTRATION_METRIC_VERSION,
+        "option_market_concentration_after": float(
+            (existing_symbol + candidate_cny) / total_after
+        ),
+        "option_market_value_cny": float(candidate_cny),
+        "evidence_refs": {
+            "position_lot_ids": sorted(position_refs),
+            "valuation_mark_fact_ids": sorted(mark_refs),
+            "fx_rate_fact_ids": sorted(fx_refs),
+        },
+    }
+
+
+def _unique_by(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = str(row.get(key) or "").strip().upper() if key == "base_currency" else str(row.get(key) or "")
+        if not identity or identity in indexed:
+            raise ValueError(f"{key} evidence must be present and unique")
+        indexed[identity] = row
+    return indexed
 
 
 def _first_float(row: dict[str, Any], *keys: str) -> float | None:

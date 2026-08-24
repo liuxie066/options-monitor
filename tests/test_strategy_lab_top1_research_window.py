@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from datetime import date, timedelta
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.shadow_replay.common import (
     DATASET_FILES,
     refresh_dataset_manifest,
@@ -108,8 +111,8 @@ def _seal_dataset(
                 "HK.MET260130P400000",
                 expiration=expiration,
                 strike=400.0,
-                spot=650.0,
-                net_income=980.0,
+                spot=450.0,
+                net_income=1_960.0,
             ),
         ]
         if include_candidates
@@ -154,29 +157,86 @@ def _seal_dataset(
         write_json(dataset / "manifest.json", manifest)
 
     state = research_root / "remote_archive/prod/output_runs" / run_id / f"accounts/{account}/state"
+    ledger_hash = "6" * 64
+    decision_hash = "7" * 64
+    config_hash = "8" * 64
+    evidence = {
+        "schema_version": "option_market_evidence.v1",
+        "status": "ready",
+        "reason_code": None,
+        "run_id": run_id,
+        "account": account,
+        "account_config_sha256": config_hash,
+        "evidence_at_utc": f"{trading_date}T01:59:00Z",
+        "selection_policy_version": "performance_evidence.latest_at_or_before.v1",
+        "ledger_generation_sha256_a": ledger_hash,
+        "ledger_generation_sha256_b": ledger_hash,
+        "decision_state_fingerprint_a": decision_hash,
+        "decision_state_fingerprint_b": decision_hash,
+        "open_option_positions": [
+            {
+                "lot_id": "lot-0700",
+                "account": account,
+                "broker": "futu",
+                "instrument_key": "0700-position",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "strike": "300",
+                "expiration_ymd": expiration,
+                "currency": "HKD",
+                "multiplier": 100,
+                "position_side": "short",
+                "contracts_open": 1,
+                "market_code": "HK",
+            }
+        ],
+        "valuation_mark_facts": [
+            {
+                "fact_id": "mark-0700",
+                "instrument_key": "0700-position",
+                "price": "1",
+                "mark_kind": "fixture",
+                "effective_at_ms": 1,
+                "observed_at_ms": 1,
+                "source": "fixture",
+                "source_id": "mark-0700",
+                "revision": 1,
+                "supersedes_fact_id": None,
+                "source_fact_sha256": "9" * 64,
+            }
+        ],
+        "fx_rate_facts": [
+            {
+                "fact_id": "hkd-opening",
+                "base_currency": "HKD",
+                "quote_currency": "CNY",
+                "rate": "1",
+                "rate_kind": "fixture",
+                "effective_at_ms": 1,
+                "observed_at_ms": 1,
+                "source": "fixture",
+                "source_id": "hkd-opening",
+                "revision": 1,
+                "supersedes_fact_id": None,
+                "source_fact_sha256": "a" * 64,
+            }
+        ],
+    }
+    evidence["content_sha256"] = canonical_sha256(evidence)
+    payload_path = state / "option_positions_context.json"
+    write_json(payload_path, {"strategy_lab_option_market_evidence": evidence})
     write_json(
-        state / "portfolio_context.json",
+        state / "prepared_option_positions_context.v2.json",
         {
-            "as_of_utc": f"{trading_date}T02:00:00Z",
-            "cash_by_currency": {"HKD": 1_000_000.0},
-            "stocks_by_symbol": {
-                "0700.HK": {
-                    "symbol": "0700.HK",
-                    "shares": 1_000.0,
-                    "currency": "HKD",
-                    "market_value": 450_000.0,
-                }
-            },
-        },
-    )
-    write_json(
-        state / "option_positions_context.json",
-        {
-            "cash_secured_by_symbol_by_ccy": {},
-            "cash_secured_total_by_ccy": {},
-            "cash_secured_unavailable_by_symbol": {},
-            "cash_secured_total_cny": 0.0,
-            "exchange_rates": {"rates": {"USDCNY": 7.0, "HKDCNY": 0.9}},
+            "schema_version": "prepared_option_positions_context.v2",
+            "run_id": run_id,
+            "account": account,
+            "status": "ready",
+            "account_config_sha256": config_hash,
+            "payload_relpath": payload_path.name,
+            "payload_sha256": hashlib.sha256(payload_path.read_bytes()).hexdigest(),
+            "ledger_generation_sha256": ledger_hash,
+            "decision_state_fingerprint": decision_hash,
         },
     )
 
@@ -230,6 +290,8 @@ def _window_fixture(
 
 
 def _close_receipt(stock_owner: str, close: float) -> dict[str, object]:
+    terminal_at_ms = expiration_observation_start_ms("2026-01-30", "HK")
+    assert terminal_at_ms is not None
     return {
         "schema_version": RESEARCH_CLOSE_RECEIPT_SCHEMA,
         "market": "HK",
@@ -242,6 +304,24 @@ def _close_receipt(stock_owner: str, close: float) -> dict[str, object]:
         "price_field": "close",
         "status": "available",
         "underlier_close": close,
+        "currency": "HKD",
+        "terminal_at_ms": terminal_at_ms,
+        "terminal_fx_binding": {
+            "schema_version": "fx_rate_binding.v1",
+            "selected_at_ms": terminal_at_ms,
+            "fact_id": "hkd-terminal",
+            "base_currency": "HKD",
+            "quote_currency": "CNY",
+            "rate": "1",
+            "rate_kind": "fixture",
+            "effective_at_ms": 1,
+            "observed_at_ms": 1,
+            "source": "fixture",
+            "source_id": "hkd-terminal",
+            "revision": 1,
+            "supersedes_fact_id": None,
+            "source_fact_sha256": "b" * 64,
+        },
         "reason_detail": None,
     }
 
@@ -272,7 +352,9 @@ def test_historical_window_reuses_shadow_replay_without_copying_candidates(
     assert len(points) == 21
     assert points[-1]["candidates"] == []
     assert all(
-        candidate["symbol_concentration_after"] is not None for point in points for candidate in point["candidates"]
+        candidate["option_market_concentration_after"] is not None
+        for point in points
+        for candidate in point["candidates"]
     )
 
     window_ref = "top1/windows/fixture.json"
@@ -304,10 +386,11 @@ def test_historical_window_reuses_shadow_replay_without_copying_candidates(
     evaluation = evaluate_research(loaded, receipts, _fee_contract())
     assert evaluate_research(loaded, list(reversed(receipts)), _fee_contract()) == evaluation
     assert evaluation["selection"] == "research_leader"
-    assert evaluation["leader_variant_id"] == "concentration"
+    assert evaluation["leader_variant_id"] == "concentration-0.002"
     assert [item["variant_id"] for item in evaluation["variant_results"]] == [
-        "without",
-        "concentration",
+        "concentration-0.002",
+        "concentration-0.004",
+        "concentration-0.006",
     ]
 
     tampered = deepcopy(loaded)

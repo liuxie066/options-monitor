@@ -139,7 +139,7 @@ def _start_validation(
     locked = lock_challenger(
         store,
         validation_spec,
-        challenger_variant_id="concentration",
+        challenger_variant_id=str(result["leader_variant_id"]),
         validation_start_trading_date=dates[0],
         schedule=top1_hk_schedule_fixture(),
         actor="human",

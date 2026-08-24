@@ -21,6 +21,8 @@ from src.application.opening_candidate_snapshot import (
 from src.application.recommendation_point import (
     AVAILABILITY_ENV,
     RECOMMENDATION_POINT_FILE,
+    RECOMMENDATION_POINT_SCHEMA_V1,
+    RECOMMENDATION_POINT_SCHEMA_V2,
     RecommendationPointError,
     build_recommendation_point,
     build_recommendation_point_id,
@@ -97,6 +99,34 @@ def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _prepared_option_receipt(
+    opening: Mapping[str, Any],
+    *,
+    received_at: str = "2026-06-01T00:00:00Z",
+) -> dict[str, Any]:
+    payload = {
+        "strategy_lab_option_market_evidence": {
+            "status": "ready",
+        }
+    }
+    payload_bytes = _canonical_bytes(payload)
+    manifest = {
+        "schema_version": "prepared_option_positions_context.v2",
+        "status": "ready",
+        "run_id": opening["run_id"],
+        "account": opening["account"],
+        "account_config_sha256": opening["account_config_sha256"],
+        "application_received_at_utc": received_at,
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+    }
+    return {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": _canonical_bytes(manifest),
+        "payload_bytes": payload_bytes,
+    }
 
 
 def _build_from_bundle(
@@ -255,6 +285,11 @@ def test_point_identity_canonicalizes_target_and_availability_is_exact() -> None
     assert build_recommendation_point_id("US", "lx", TARGET) != (
         build_recommendation_point_id("US", "lx", "2026-07-21T14:30:00Z")
     )
+    assert build_recommendation_point_id(
+        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V1
+    ) == build_recommendation_point_id(
+        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V2
+    )
     assert strategy_lab_top1_available({AVAILABILITY_ENV: "1"}) is True
     for value in ("", "0", "true", " 1", "1 "):
         assert strategy_lab_top1_available({AVAILABILITY_ENV: value}) is False
@@ -308,6 +343,83 @@ def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
     with pytest.raises(RecommendationPointError) as raised:
         publish_recommendation_point(tmp_path, conflict)
     assert raised.value.reason_code == "official_point_conflict"
+
+
+def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import recommendation_point as mod
+
+    run_id = "strict-v2-point"
+    seal_opening_candidate_fixture(
+        tmp_path,
+        run_id=run_id,
+        accepted_rows=[_candidate()],
+    )
+    opening = load_candidate_snapshot_bundle(
+        base=tmp_path,
+        run_id=run_id,
+        account="lx",
+    )["owners"]["opening"]
+    receipt = _prepared_option_receipt(opening)
+    monkeypatch.setattr(
+        mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: tmp_path / "prepared_option_positions_context.v2.json",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
+    )
+
+    publication, point = capture_scheduled_recommendation_point(
+        tmp_path,
+        run_id,
+        "lx",
+        _scheduler(now_utc="2026-06-01T00:00:01Z"),
+        source_commit_sha=SOURCE_SHA,
+        require_option_market_evidence=True,
+    )
+
+    assert publication == "published"
+    assert point["schema_version"] == "recommendation_point.v2"
+    assert point["option_market_evidence_ref"].endswith(
+        "/prepared_option_positions_context.v2.json"
+    )
+    assert point["option_market_evidence_manifest_sha256"] == hashlib.sha256(
+        receipt["manifest_bytes"]
+    ).hexdigest()
+    assert point["option_market_evidence_payload_sha256"] == receipt[
+        "manifest"
+    ]["payload_sha256"]
+
+    late = _prepared_option_receipt(
+        opening,
+        received_at="2026-06-01T00:00:01Z",
+    )
+    with pytest.raises(RecommendationPointError) as raised:
+        build_recommendation_point(
+            _scheduler(),
+            load_candidate_snapshot_bundle(
+                base=tmp_path,
+                run_id=run_id,
+                account="lx",
+            )["manifest"],
+            opening,
+            terminal_manifest_sha256=hashlib.sha256(
+                read_account_run_state_bytes_safely(
+                    base=tmp_path,
+                    run_id=run_id,
+                    account="lx",
+                    name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+                )
+            ).hexdigest(),
+            source_commit_sha=SOURCE_SHA,
+            prepared_option_receipt=late,
+        )
+    assert raised.value.reason_code == "option_market_evidence_time_conflict"
 
 
 def test_clean_no_candidate_point_is_valid(tmp_path: Path) -> None:

@@ -35,13 +35,14 @@ from src.application.prepared_portfolio_context import (
     prepare_portfolio_contexts,
 )
 from src.application.prepared_option_positions_context import (
-    PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PreparedOptionPositionsBatch,
     PreparedOptionPositionsContextError,
+    find_prepared_option_positions_manifest,
     load_prepared_option_positions_context,
     load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
 )
+from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
     merge_close_advice_requirements_into_prefetch_config,
@@ -185,6 +186,7 @@ class TickAccountExecutionRequest:
     audit_helper: Any
     repo_root: Path | None = None
     symbols_arg: str | None = None
+    trigger_kind: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -606,6 +608,26 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     message=str(message),
                 ),
                 persist_fx_evidence=not request.smoke,
+                mark_evidence_accounts=(
+                    tuple(
+                        account
+                        for account in sorted(scanning_configs)
+                        if account == "lx"
+                        and scheduled_scan_targets_by_account.get(account)
+                    )
+                    if (
+                        not request.smoke
+                        and str(request.trigger_kind or "").strip().lower()
+                        == "scheduled"
+                        and {
+                            str(market or "").strip().lower()
+                            for market in request.markets_to_run
+                        }
+                        == {"hk"}
+                        and strategy_lab_top1_available()
+                    )
+                    else ()
+                ),
             )
         except Exception as exc:
             prepared_options = PreparedOptionPositionsBatch(
@@ -908,9 +930,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             prepared = (
                 account_state_dir / "prepared_portfolio_context.v1.json"
             ).resolve()
-            prepared_option = (
-                account_state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
-            ).resolve()
+            prepared_option = find_prepared_option_positions_manifest(
+                base=request.base,
+                run_id=request.run_id,
+                account=account_key,
+            )
             try:
                 if not prepared.is_file():
                     raise AccountRunConfigError(
@@ -934,7 +958,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
                         "prepared portfolio context is unavailable",
                     )
-                if not prepared_option.is_file():
+                if prepared_option is None:
                     raise AccountRunConfigError(
                         "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
                         "prepared option context manifest is unavailable",

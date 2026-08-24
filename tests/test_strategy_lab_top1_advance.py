@@ -16,10 +16,6 @@ def _explode() -> Any:  # pragma: no cover - asserted unreachable
     raise AssertionError("lazy dependency must not be loaded")
 
 
-def _enabled(*_args: object, **_kwargs: object) -> dict[str, bool]:
-    return {"maintainer_available": True, "user_opt_in": True, "effective": True}
-
-
 def _calendar() -> dict[str, object]:
     return {
         "coverage_start": "2026-08-16",
@@ -36,18 +32,6 @@ def _calendar() -> dict[str, object]:
 def test_disabled_gate_loads_no_schedule_source_readiness_or_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        advance_module,
-        "effective_feature_status",
-        lambda *_args, **_kwargs: {
-            "maintainer_available": False,
-            "user_opt_in": True,
-            "effective": False,
-        },
-    )
-    monkeypatch.setattr(
-        advance_module, "reconcile_disabled_experiments", lambda *_args, **_kwargs: []
-    )
     monkeypatch.setattr(advance_module, "discover_recommendation_points", _explode)
 
     result = advance_scheduled(
@@ -68,6 +52,7 @@ def test_disabled_gate_loads_no_schedule_source_readiness_or_gateway(
     )
 
     assert result["status"] == "disabled"
+    assert result["service_available"] is False
 
 
 def test_collecting_order_due_conclusion_and_peer_failure_isolation(
@@ -113,7 +98,6 @@ def test_collecting_order_due_conclusion_and_peer_failure_isolation(
             "has_outcome_jobs": True,
         }
 
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(advance_module, "read_active_experiment_ids", active)
     monkeypatch.setattr(advance_module, "read_advance_context", context)
     monkeypatch.setattr(advance_module, "seal_committed_day_expectation", _explode)
@@ -199,7 +183,6 @@ def test_behavior_drift_terminates_without_loading_gateway(
         active_calls += 1
         return ["drift"] if active_calls == 1 else []
 
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(advance_module, "read_active_experiment_ids", active)
     monkeypatch.setattr(
         advance_module,
@@ -296,7 +279,6 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
         assert gateway is expected_gateway
         return {"status": "ok"}
 
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module,
         "read_active_experiment_ids",
@@ -359,7 +341,6 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
 def test_out_of_coverage_calendar_blocks_sealing_without_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
     )
@@ -407,7 +388,6 @@ def test_out_of_coverage_calendar_blocks_sealing_without_fallback(
 def test_active_experiment_read_failure_blocks_schedule_sealing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(advance_module, "read_active_experiment_ids", _explode)
     monkeypatch.setattr(
         advance_module,
@@ -455,7 +435,6 @@ def test_readiness_failure_makes_advance_partial(
     monkeypatch: pytest.MonkeyPatch,
     readiness_result: bool | None,
 ) -> None:
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
     )
@@ -517,7 +496,6 @@ def test_timer_binding_mismatch_is_partial_without_gateway(
         },
         "has_outcome_jobs": True,
     }
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: ["mismatch"]
     )
@@ -578,7 +556,6 @@ def test_corpus_conflicts_make_advance_partial(
     capture_status: str,
 ) -> None:
     seal_calls: list[dict[str, object]] = []
-    monkeypatch.setattr(advance_module, "effective_feature_status", _enabled)
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
     )

@@ -240,100 +240,9 @@ def _recover_projection(
         _fail("projection_conflict", str(exc))
 
 
-def effective_feature_status(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    market, account = _identity(market, account)
-    try:
-        feature = store.feature(market, account)
-    except ExperimentStoreError as exc:
-        _raise_store(exc)
-    maintainer_available = strategy_lab_top1_available(environ)
-    user_opt_in = bool(feature and feature["user_opt_in"])
-    return {
-        "maintainer_available": maintainer_available,
-        "user_opt_in": user_opt_in,
-        "effective": maintainer_available and user_opt_in,
-    }
-
-
-def _require_effective(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
-    artifact_root: str | Path,
-    environ: Mapping[str, str] | None,
-) -> None:
-    status = effective_feature_status(
-        store, market=market, account=account, environ=environ
-    )
-    if status["effective"]:
-        return
-    scope = "maintainer" if not status["maintainer_available"] else "user"
-    reconcile_disabled_experiments(
-        store,
-        market=market,
-        account=account,
-        disabled_scope=scope,
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=_derived_key(idempotency_key, "gate-disable"),
-        artifact_root=artifact_root,
-    )
-    _fail("feature_disabled", "Strategy Lab Top1 is disabled")
-
-
-def set_account_opt_in(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    enabled: bool,
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
-    artifact_root: str | Path,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    market, account = _identity(market, account)
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    if type(enabled) is not bool:
-        _fail("experiment_invalid", "enabled must be boolean")
-    if enabled and not strategy_lab_top1_available(environ):
-        _fail("feature_disabled", "maintainer availability is off")
-    _call(
-        store.set_feature,
-        market=market,
-        account=account,
-        enabled=enabled,
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-    )
-    if not enabled:
-        reconcile_disabled_experiments(
-            store,
-            market=market,
-            account=account,
-            disabled_scope="user",
-            actor=actor,
-            occurred_at_utc=occurred_at_utc,
-            idempotency_key=_derived_key(idempotency_key, "user-disable"),
-            artifact_root=artifact_root,
-        )
-    return effective_feature_status(
-        store, market=market, account=account, environ=environ
-    )
+def _require_service_available(environ: Mapping[str, str] | None) -> None:
+    if not strategy_lab_top1_available(environ):
+        _fail("strategy_lab_service_disabled", "Strategy Lab Top1 is disabled")
 
 
 def prepare_experiment(
@@ -359,16 +268,7 @@ def prepare_experiment(
     experiment_id = _segment(validated["experiment_id"], "experiment_id")
     topic_id = _text(validated["topic_id"], "topic_id")
     market, account = _identity(validated["market"], validated["account"])
-    _require_effective(
-        store,
-        market=market,
-        account=account,
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     if not isinstance(provenance, Mapping) or not provenance:
         _fail("experiment_invalid", "provenance must be a non-empty mapping")
     try:
@@ -456,16 +356,7 @@ def _authorize(
         actor, occurred_at_utc, idempotency_key
     )
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     return _call(
         store.authorize,
         experiment_id=experiment_id,
@@ -494,16 +385,7 @@ def start_research(
         actor, occurred_at_utc, idempotency_key
     )
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     spec = json.loads(str(experiment["spec_json"]))
     source = spec["research_source"]
     return _call(
@@ -547,16 +429,7 @@ def record_generation_revision(
         actor, occurred_at_utc, idempotency_key
     )
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     return _call(
         store.record_generation_revision,
         experiment_id=experiment_id,
@@ -594,16 +467,7 @@ def seal_generation(
         actor, occurred_at_utc, idempotency_key
     )
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     generation = next(
         (
             item
@@ -618,7 +482,6 @@ def seal_generation(
         generation,
         terminal_mode="completed",
         reason=None,
-        disabled_scope=None,
         occurred_at_utc=occurred_at_utc,
     )
     return _call(
@@ -769,7 +632,7 @@ def build_hidden_window_commitment(
         "schedule_config_sha256": schedule_hash,
         "days": days,
         "point_selector": "official_scheduled_sell_put.v1",
-        "capture_schema": "recommendation_point.v1",
+        "capture_schema": "recommendation_point.v2",
         "challenger_variant_id": _text(
             challenger_variant_id, "challenger_variant_id"
         ),
@@ -880,7 +743,7 @@ def validate_hidden_window_commitment(
         )
     if item["point_selector"] != "official_scheduled_sell_put.v1" or item[
         "capture_schema"
-    ] != "recommendation_point.v1":
+    ] != "recommendation_point.v2":
         _fail("experiment_conflict", "hidden commitment point contract changed")
     _text(item["challenger_variant_id"], "challenger_variant_id")
     _hash(item["research_spec_sha256"], "research_spec_sha256")
@@ -892,16 +755,10 @@ def validate_hidden_window_commitment(
     return {**item, "trading_dates": dates, "days": days}
 
 
-def lock_challenger(
+def read_published_research_leader(
     store: ExperimentStore,
     validation_spec: object,
     *,
-    challenger_variant_id: str,
-    validation_start_trading_date: str,
-    schedule: Mapping[str, Any],
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
     artifact_root: str | Path,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
@@ -915,17 +772,7 @@ def lock_challenger(
         load_materialized_research_input,
         load_recorded_research_revision,
     )
-    from src.application.strategy_lab.top1.corpus import (
-        CorpusError,
-        read_market_calendar_binding,
-    )
 
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    challenger_variant_id = _text(challenger_variant_id, "challenger_variant_id")
-    if challenger_variant_id == "baseline":
-        _fail("experiment_invalid", "challenger must be non-baseline")
     try:
         spec = validate_experiment_spec(validation_spec)
     except Top1CoreContractError as exc:
@@ -933,18 +780,8 @@ def lock_challenger(
     if "validation_evaluation" not in spec:
         _fail("experiment_invalid", "validation-ready ExperimentSpec is required")
     experiment_id = _segment(spec["experiment_id"], "experiment_id")
-    market, account = _identity(spec["market"], spec["account"])
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=market,
-        account=account,
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
+    _require_service_available(environ)
     research_hash = build_research_spec_sha256(spec)
     if research_hash != experiment["research_spec_sha256"]:
         _fail("experiment_conflict", "research hash changed after start")
@@ -975,9 +812,7 @@ def lock_challenger(
                 "validation_metrics",
             }
         }
-        dataset = load_materialized_research_input(
-            artifact_root, research_spec
-        )
+        dataset = load_materialized_research_input(artifact_root, research_spec)
         revision = load_recorded_research_revision(
             artifact_root, research_generation
         )
@@ -985,9 +820,66 @@ def lock_challenger(
     except (ResearchArtifactError, ResearchEvaluationError) as exc:
         _fail("experiment_conflict", f"research revision is invalid: {exc}")
     evaluation = cast(Mapping[str, object], validated_revision["evaluation"])
-    if evaluation["selection"] != "research_leader":
+    if evaluation["selection"] != "research_leader" or not isinstance(
+        evaluation.get("leader_variant_id"), str
+    ):
         _fail("invalid_transition", "research did not select a challenger")
-    if evaluation["leader_variant_id"] != challenger_variant_id:
+    return {
+        "spec": spec,
+        "experiment": experiment,
+        "research_spec_sha256": research_hash,
+        "research_generation": research_generation,
+        "challenger_variant_id": evaluation["leader_variant_id"],
+    }
+
+
+def lock_challenger(
+    store: ExperimentStore,
+    validation_spec: object,
+    *,
+    challenger_variant_id: str,
+    expected_validation_spec_sha256: str | None = None,
+    validation_start_trading_date: str,
+    schedule: Mapping[str, Any],
+    actor: str,
+    occurred_at_utc: str,
+    idempotency_key: str,
+    artifact_root: str | Path,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    from src.application.strategy_lab.top1.corpus import (
+        CorpusError,
+        read_market_calendar_binding,
+    )
+
+    actor, occurred_at_utc, idempotency_key = _command_fields(
+        actor, occurred_at_utc, idempotency_key
+    )
+    expected_validation_hash = (
+        _hash(
+            expected_validation_spec_sha256,
+            "expected_validation_spec_sha256",
+        )
+        if expected_validation_spec_sha256 is not None
+        else None
+    )
+    challenger_variant_id = _text(challenger_variant_id, "challenger_variant_id")
+    if challenger_variant_id == "baseline":
+        _fail("experiment_invalid", "challenger must be non-baseline")
+    research = read_published_research_leader(
+        store,
+        validation_spec,
+        artifact_root=artifact_root,
+        environ=environ,
+    )
+    spec = cast(dict[str, object], research["spec"])
+    experiment_id = _segment(spec["experiment_id"], "experiment_id")
+    market, account = _identity(spec["market"], spec["account"])
+    research_hash = str(research["research_spec_sha256"])
+    research_generation = cast(
+        Mapping[str, object], research["research_generation"]
+    )
+    if research["challenger_variant_id"] != challenger_variant_id:
         _fail("experiment_invalid", "challenger does not match the research leader")
     research_receipt_ref = _ref(
         research_generation["last_revision_ref"], "research_receipt_ref"
@@ -1044,6 +936,11 @@ def lock_challenger(
         challenger_variant_id=challenger_variant_id,
         hidden_window_commitment_sha256=commitment_sha256,
     )
+    if (
+        expected_validation_hash is not None
+        and validation_hash != expected_validation_hash
+    ):
+        _fail("preview_hash_changed", "validation hash changed before lock")
     variants = {
         str(cast(Mapping[str, object], item)["variant_id"])
         for item in cast(list[object], spec["variants"])
@@ -1132,19 +1029,17 @@ def start_validation(
         actor, occurred_at_utc, idempotency_key
     )
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
+    _require_service_available(environ)
+    already_started = (
+        experiment["phase"] == "validation"
+        and experiment["validation_progress"] == "collecting_decisions"
     )
     if experiment["terminal_mode"] is not None or not (
-        experiment["phase"] == "research"
-        and experiment["research_progress"] == "challenger_locked"
+        already_started
+        or (
+            experiment["phase"] == "research"
+            and experiment["research_progress"] == "challenger_locked"
+        )
     ):
         _fail("invalid_transition", "validation cannot start")
     if (
@@ -1188,9 +1083,9 @@ def start_validation(
         "scheduled_scan_targets_market"
     ]
     assert isinstance(first_target, list)
-    if _utc_datetime(first_target[0], "first_target_at_utc") <= _utc_datetime(
-        occurred_at_utc, "occurred_at_utc"
-    ):
+    if not already_started and _utc_datetime(
+        first_target[0], "first_target_at_utc"
+    ) <= _utc_datetime(occurred_at_utc, "occurred_at_utc"):
         _fail("invalid_transition", "validation first target is no longer future")
     try:
         publish_exact_text(
@@ -1217,7 +1112,6 @@ def terminate_experiment(
     *,
     experiment_id: str,
     reason: str,
-    disabled_scope: str | None,
     actor: str,
     occurred_at_utc: str,
     idempotency_key: str,
@@ -1228,24 +1122,15 @@ def terminate_experiment(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    if reason not in {
-        "human_abandoned",
-        "behavior_binding_drift",
-        "experimental_feature_disabled",
-    }:
+    if reason not in {"human_abandoned", "behavior_binding_drift"}:
         _fail("experiment_invalid", "termination reason is unsupported")
-    if reason == "experimental_feature_disabled":
-        if disabled_scope not in {"user", "maintainer"}:
-            _fail("experiment_invalid", "feature disable requires disabled_scope")
-    elif disabled_scope is not None:
-        _fail("experiment_invalid", "disabled_scope is only valid for feature disable")
 
     for _ in range(3):
         experiment = _call(store.experiment, experiment_id)
         if experiment["terminal_mode"] is not None:
             if (
                 experiment["terminal_reason"] != reason
-                or experiment["disabled_scope"] != disabled_scope
+                or experiment["disabled_scope"] is not None
                 or experiment["terminal_at_utc"] != occurred_at_utc
             ):
                 _fail("terminal_conflict", "experiment terminal intent already differs")
@@ -1259,7 +1144,6 @@ def terminate_experiment(
                 generation,
                 terminal_mode="aborted",
                 reason=reason,
-                disabled_scope=disabled_scope,
                 occurred_at_utc=occurred_at_utc,
                 partial_summary={
                     "revision": generation["revision"],
@@ -1281,7 +1165,6 @@ def terminate_experiment(
             generations,
             generation_requests,
             reason=reason,
-            disabled_scope=disabled_scope,
             occurred_at_utc=occurred_at_utc,
             terminated_at_partition=partition,
         )
@@ -1291,7 +1174,6 @@ def terminate_experiment(
                 experiment_id=experiment_id,
                 expected_state_version=int(experiment["state_version"]),
                 reason=reason,
-                disabled_scope=disabled_scope,
                 terminated_at_partition=partition,
                 generation_requests=generation_requests,
                 receipt_request=receipt_request,
@@ -1309,48 +1191,6 @@ def terminate_experiment(
         store, artifact_root, experiment_id=experiment_id, publisher=publisher
     )
     return _call(store.experiment, experiment_id)
-
-
-def reconcile_disabled_experiments(
-    store: ExperimentStore,
-    *,
-    market: str,
-    account: str,
-    disabled_scope: str,
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
-    artifact_root: str | Path,
-) -> list[str]:
-    market, account = _identity(market, account)
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    if disabled_scope not in {"user", "maintainer"}:
-        _fail("experiment_invalid", "disabled_scope is unsupported")
-    recover_account_terminal_projections(
-        store,
-        artifact_root,
-        market=market,
-        account=account,
-    )
-    experiment_ids: list[str] = []
-    for experiment in _call(store.active_experiments, market, account):
-        experiment_id = str(experiment["experiment_id"])
-        terminate_experiment(
-            store,
-            experiment_id=experiment_id,
-            reason="experimental_feature_disabled",
-            disabled_scope=disabled_scope,
-            actor=actor,
-            occurred_at_utc=occurred_at_utc,
-            idempotency_key=_derived_key(
-                idempotency_key, experiment_id, "feature-disable"
-            ),
-            artifact_root=artifact_root,
-        )
-        experiment_ids.append(experiment_id)
-    return experiment_ids
 
 
 def recover_account_terminal_projections(
@@ -1527,18 +1367,12 @@ def read_public_status(
         and experiment["account"] != expected_account
     ):
         _fail("experiment_conflict", "experiment identity changed")
-    feature = effective_feature_status(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        environ=environ,
-    )
     generations = _call(store.generations, experiment_id)
     decisions = _call(store.validation_decisions, experiment_id)
     jobs = _call(store.outcome_jobs, experiment_id)
     return {
         "schema_version": PUBLIC_STATUS_SCHEMA,
-        "feature": feature,
+        "service_available": strategy_lab_top1_available(environ),
         "experiment": {
             "experiment_id": experiment_id,
             "topic_id": experiment["topic_id"],
@@ -1569,7 +1403,6 @@ def read_public_status(
             ],
             "terminal_mode": experiment["terminal_mode"],
             "terminal_reason": experiment["terminal_reason"],
-            "disabled_scope": experiment["disabled_scope"],
             "final_outcome_status": (
                 experiment["final_outcome_status"]
                 if experiment["phase"] == "concluded"
@@ -1633,18 +1466,16 @@ __all__ = [
     "authorize_research",
     "authorize_validation",
     "build_hidden_window_commitment",
-    "effective_feature_status",
     "lock_challenger",
     "prepare_experiment",
     "read_active_experiment_ids",
     "read_advance_context",
+    "read_published_research_leader",
     "read_public_receipt",
     "read_public_status",
     "recover_account_terminal_projections",
-    "reconcile_disabled_experiments",
     "record_generation_revision",
     "seal_generation",
-    "set_account_opt_in",
     "start_research",
     "start_validation",
     "terminate_experiment",

@@ -22,8 +22,8 @@ from src.infrastructure.private_storage import (
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 
 
-GENERATION_TERMINAL_SCHEMA = "sell_put_top1_generation_terminal.v1"
-EXPERIMENT_RECEIPT_SCHEMA = "sell_put_top1_experiment_receipt.v1"
+GENERATION_TERMINAL_SCHEMA = "sell_put_top1_generation_terminal.v2"
+EXPERIMENT_RECEIPT_SCHEMA = "sell_put_top1_experiment_receipt.v2"
 
 Publisher = Callable[[str | Path, str, bytes], Path]
 
@@ -50,25 +50,18 @@ def build_generation_terminal_request(
     *,
     terminal_mode: str,
     reason: str | None,
-    disabled_scope: str | None,
     occurred_at_utc: str,
     partial_summary: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if terminal_mode not in {"completed", "aborted"}:
         raise ValueError("terminal_mode must be completed or aborted")
-    if terminal_mode == "completed" and (reason is not None or disabled_scope is not None):
-        raise ValueError("completed terminal cannot have reason or disabled_scope")
+    if terminal_mode == "completed" and reason is not None:
+        raise ValueError("completed terminal cannot have reason")
     if terminal_mode == "aborted" and reason not in {
         "human_abandoned",
         "behavior_binding_drift",
-        "experimental_feature_disabled",
     }:
         raise ValueError("aborted terminal reason is unsupported")
-    if reason == "experimental_feature_disabled":
-        if disabled_scope not in {"user", "maintainer"}:
-            raise ValueError("feature-disabled terminal requires disabled_scope")
-    elif disabled_scope is not None:
-        raise ValueError("disabled_scope is only valid for feature disable")
 
     experiment_id = str(generation["experiment_id"])
     generation_kind = str(generation["generation_kind"])
@@ -94,7 +87,6 @@ def build_generation_terminal_request(
         "terminal": {
             "mode": terminal_mode,
             "reason": reason,
-            "disabled_scope": disabled_scope,
             "occurred_at_utc": occurred_at_utc,
             "partial_summary": dict(partial_summary or {}) if terminal_mode == "aborted" else None,
         },
@@ -120,7 +112,6 @@ def build_generation_terminal_request(
         "frozen_row_content_sha256": generation["frozen_row_content_sha256"],
         "terminal_mode": terminal_mode,
         "reason": reason,
-        "disabled_scope": disabled_scope,
         **_projection_request(ref, payload),
     }
 
@@ -171,7 +162,6 @@ def build_aborted_receipt_request(
     generation_requests: Sequence[Mapping[str, object]],
     *,
     reason: str,
-    disabled_scope: str | None,
     occurred_at_utc: str,
     terminated_at_partition: int | None,
 ) -> dict[str, object]:
@@ -188,7 +178,6 @@ def build_aborted_receipt_request(
         "terminal": {
             "mode": "aborted",
             "reason": reason,
-            "disabled_scope": disabled_scope,
             "occurred_at_utc": occurred_at_utc,
             "terminated_at_partition": terminated_at_partition,
         },
@@ -241,7 +230,6 @@ def build_completed_receipt_request(
         "terminal": {
             "mode": "completed",
             "reason": None,
-            "disabled_scope": None,
             "occurred_at_utc": occurred_at_utc,
             "terminated_at_partition": experiment["completed_validation_partitions"],
         },

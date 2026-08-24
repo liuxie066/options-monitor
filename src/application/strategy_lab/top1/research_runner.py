@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+from domain.domain.option_lifecycle import expiration_observation_start_ms
+from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.opend_fetch_config import resolve_opend_fetch_limits
 from src.application.shadow_replay.common import render_json_text
@@ -18,7 +20,6 @@ from src.application.strategy_lab.top1.contracts import (
 )
 from src.application.strategy_lab.top1.lifecycle import (
     Top1LifecycleError,
-    effective_feature_status,
     record_generation_revision,
     seal_generation,
     start_research,
@@ -123,23 +124,9 @@ def _research_generation(
         raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
 
 
-def _require_effective_feature(
-    store: ExperimentStore,
-    *,
-    experiment: Mapping[str, Any],
-    environ: Mapping[str, str] | None,
-) -> None:
-    try:
-        effective = effective_feature_status(
-            store,
-            market=str(experiment["market"]),
-            account=str(experiment["account"]),
-            environ=environ,
-        )["effective"]
-    except Top1LifecycleError as exc:
-        raise ResearchRunnerError(exc.reason_code, str(exc)) from exc
-    if not effective:
-        _fail("feature_disabled", "Strategy Lab Top1 is disabled")
+def _require_service_available(environ: Mapping[str, str] | None) -> None:
+    if not strategy_lab_top1_available(environ):
+        _fail("strategy_lab_service_disabled", "Strategy Lab Top1 is disabled")
 
 
 def _materialized_input(
@@ -192,6 +179,7 @@ def _close_receipts(
     market: str,
     account: str,
     requirements: list[tuple[str, str]],
+    terminal_fx_bindings: Mapping[str, object],
 ) -> tuple[list[dict[str, object]], dict[str, object] | None]:
     if not requirements:
         return [], None
@@ -217,6 +205,12 @@ def _close_receipts(
     limit = resolve_opend_fetch_limits(dict(config or {})).history_kline
     receipts: list[dict[str, object]] = []
     for stock_owner, expiration in requirements:
+        terminal_at_ms = expiration_observation_start_ms(expiration, market)
+        if terminal_at_ms is None or expiration not in terminal_fx_bindings:
+            _fail(
+                "research_terminal_fx_missing",
+                "bound terminal FX evidence is missing",
+            )
         try:
             result = rate_limited_opend_call(
                 base_dir=private_path(artifact_root),
@@ -273,6 +267,9 @@ def _close_receipts(
                 "price_field": "close",
                 "status": status,
                 "underlier_close": close,
+                "currency": "HKD",
+                "terminal_at_ms": terminal_at_ms,
+                "terminal_fx_binding": terminal_fx_bindings[expiration],
                 "reason_detail": reason,
             }
         )
@@ -427,6 +424,7 @@ def run_research(
     research_spec_sha256: str,
     fee_contract: object,
     gateway: FutuGateway,
+    terminal_fx_bindings: Mapping[str, object],
     config: Mapping[str, Any] | None,
     actor: str,
     occurred_at_utc: str,
@@ -446,7 +444,7 @@ def run_research(
             generation=generation,
             dataset=dataset,
         )
-        _require_effective_feature(store, experiment=experiment, environ=environ)
+        _require_service_available(environ)
         _finish_terminal(
             store,
             artifact_root,
@@ -483,7 +481,7 @@ def run_research(
         if generation is None:
             _fail("research_generation_conflict", "research generation was not created")
     else:
-        _require_effective_feature(store, experiment=experiment, environ=environ)
+        _require_service_available(environ)
 
     receipts, quota_decision = _close_receipts(
         artifact_root=artifact_root,
@@ -492,6 +490,7 @@ def run_research(
         market=str(spec["market"]),
         account=str(spec["account"]),
         requirements=requirements,
+        terminal_fx_bindings=terminal_fx_bindings,
     )
     evaluation = _evaluate(dataset, receipts, fee_contract)
     revision = _revision(

@@ -60,12 +60,7 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
         "profile": _profile(tmp_path),
         "drift": drift,
         "service_status": status,
-        "schema_state": {"status": "ready", "schema_version": 3},
-        "feature_status": {
-            "maintainer_available": True,
-            "user_opt_in": True,
-            "effective": True,
-        },
+        "schema_state": {"status": "ready", "schema_version": 4},
         "corpus_status": {"days_total": 1},
         "calendar_binding": {
             "market": "HK",
@@ -195,6 +190,162 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     assert response["data"]["validation_runtime_ready"] is False
     assert response["data"]["facts"]["store_schema"]["status"] == "not_initialized"
     assert not store_path.exists()
+
+
+def test_research_preview_cli_is_read_only_and_start_requires_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.interfaces.cli.strategy_lab_top1 as cli
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.main import parse_args
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+    preview = {
+        "status": "blocked",
+        "reason_codes": ["research_window_coverage_missing"],
+    }
+    calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(cli, "_research_inputs", lambda *_args: ({"scope": "fixed"}, {}))
+    monkeypatch.setattr(
+        cli,
+        "preview_sell_put_top1_research",
+        lambda root, **kwargs: calls.append((root, kwargs)) or preview,
+    )
+    common = [
+        "research",
+        "strategy-lab",
+        "top1-loop",
+        "research",
+        "preview",
+        "--market",
+        "hk",
+        "--account",
+        "lx",
+        "--profile-path",
+        str(profile_path),
+        "--cutoff-at-utc",
+        "2026-08-15T00:00:00Z",
+        "--latest-mature-trading-date",
+        "2026-08-14",
+    ]
+
+    response = cli.handle_top1_command(parse_args(common))
+
+    assert response["ok"] is True
+    assert response["data"] == preview
+    assert calls[0][1] == {"scope": "fixed"}
+    assert not (
+        tmp_path / "runtime/output_shared/research/strategy_lab/experiments.sqlite3"
+    ).exists()
+
+    monkeypatch.setattr(
+        cli,
+        "_research_inputs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not read inputs")),
+    )
+    start = list(common)
+    start[4] = "start"
+    start.extend(["--confirmed-start-file", str(tmp_path / "command.json")])
+    with pytest.raises(AgentToolError, match="requires --write"):
+        cli.handle_top1_command(parse_args(start))
+
+
+def test_validation_and_receipt_cli_expose_the_remaining_mvp_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.interfaces.cli.strategy_lab_top1 as cli
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.main import parse_args
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+
+    class ReadyStore:
+        def schema_state(self) -> dict[str, str]:
+            return {"status": "ready"}
+
+    store = ReadyStore()
+    monkeypatch.setattr(cli, "ExperimentStore", lambda _path: store)
+    monkeypatch.setattr(
+        cli,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            tmp_path / "config.hk.json",
+            {"schedule": {"timezone": "Asia/Hong_Kong"}},
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "preview_sell_put_top1_validation",
+        lambda received_store, _root, **_kwargs: {
+            "status": "blocked",
+            "reason_codes": [
+                "research_leader_unavailable"
+                if received_store is store
+                else "wrong_store"
+            ],
+        },
+    )
+    common = [
+        "research",
+        "strategy-lab",
+        "top1-loop",
+        "validation",
+        "preview",
+        "--market",
+        "hk",
+        "--account",
+        "lx",
+        "--profile-path",
+        str(profile_path),
+        "--experiment-id",
+        "experiment-001",
+        "--validation-start-trading-date",
+        "2026-08-17",
+    ]
+
+    response = cli.handle_top1_command(parse_args(common))
+
+    assert response["ok"] is True
+    assert response["data"]["reason_codes"] == ["research_leader_unavailable"]
+    start = list(common)
+    start[4] = "start"
+    start.extend(["--confirmed-start-file", str(tmp_path / "command.json")])
+    with pytest.raises(AgentToolError, match="requires --write"):
+        cli.handle_top1_command(parse_args(start))
+
+    monkeypatch.setattr(
+        cli,
+        "read_public_receipt",
+        lambda received_store, *, experiment_id: {
+            "experiment_id": experiment_id,
+            "same_store": received_store is store,
+        },
+    )
+    receipt = cli.handle_top1_command(
+        parse_args(
+            [
+                "research",
+                "strategy-lab",
+                "top1-loop",
+                "receipt",
+                "--market",
+                "hk",
+                "--account",
+                "lx",
+                "--profile-path",
+                str(profile_path),
+                "--experiment-id",
+                "experiment-001",
+            ]
+        )
+    )
+    assert receipt["data"] == {
+        "experiment_id": "experiment-001",
+        "same_store": True,
+    }
 
 
 def test_calendar_refresh_cli_requires_write_and_closes_gateway(

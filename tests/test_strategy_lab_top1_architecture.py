@@ -60,9 +60,12 @@ def test_top1_ranking_imports_only_pure_approved_owners() -> None:
         "collections.abc",
         "datetime",
         "typing",
+        "domain.domain.decision_state_fingerprint",
         "domain.domain.engine",
+        "domain.domain.short_vol_assessment",
         "src.application.opening_candidate_snapshot",
         "src.application.shadow_replay.common",
+        "src.application.strategy_lab.top1.economics",
     }
 
 
@@ -85,16 +88,22 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "domain.domain.decision_state_fingerprint",
         "domain.domain.engine",
         "domain.domain.fee_calc",
+        "domain.domain.short_vol_assessment",
         "src.application.opening_candidate_snapshot",
+        "src.application.strategy_lab.top1.economics",
         "src.application.strategy_lab.top1.ranking",
+        "src.application.strategy_lab.top1.statistics",
     }
     assert _imports(ECONOMICS_MODULE) <= {
         "__future__",
         "math",
         "collections.abc",
         "datetime",
+        "decimal",
         "typing",
+        "domain.domain.decision_state_fingerprint",
         "domain.domain.fee_calc",
+        "domain.domain.performance.models",
     }
     assert _imports(STATISTICS_MODULE) <= {
         "__future__",
@@ -117,6 +126,7 @@ def test_top1_core_imports_only_approved_pure_owners() -> None:
         "domain.domain.decision_state_fingerprint",
         "domain.domain.engine",
         "domain.domain.fee_calc",
+        "domain.domain.option_lifecycle",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
         "src.application.strategy_lab.top1.corpus",
@@ -130,6 +140,7 @@ def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
     assert _imports(RECOMMENDATION_POINT_MODULE) <= {
         "__future__",
         "collections.abc",
+        "datetime",
         "hashlib",
         "json",
         "os",
@@ -140,6 +151,8 @@ def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
         "src.application.candidate_snapshot_contract",
         "src.application.candidate_snapshot_manifest",
         "src.application.opening_candidate_snapshot",
+        "src.application.prepared_option_positions_context",
+        "src.application.source_receipts",
         "src.application.strategy_lab.top1.ranking",
         "src.application.tick_run_workspace",
     }
@@ -207,6 +220,7 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "domain.domain.decision_state_fingerprint",
         "src.application.candidate_snapshot_contract",
         "src.application.opening_candidate_snapshot",
+        "src.application.prepared_option_positions_context",
         "src.application.recommendation_point",
         "src.application.scan_scheduler",
         "src.application.shadow_replay.common",
@@ -226,6 +240,7 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "pathlib",
         "typing",
         "zoneinfo",
+        "src.application.recommendation_point",
         "src.application.strategy_lab.top1.corpus",
         "src.application.strategy_lab.top1.fill_observation",
         "src.application.strategy_lab.top1.lifecycle",
@@ -250,8 +265,10 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "collections.abc",
         "pathlib",
         "typing",
+        "domain.domain.option_lifecycle",
         "src.application.opend_call_coordinator",
         "src.application.opend_fetch_config",
+        "src.application.recommendation_point",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
         "src.application.strategy_lab.top1.lifecycle",
