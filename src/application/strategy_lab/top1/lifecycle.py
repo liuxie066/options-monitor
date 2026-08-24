@@ -632,7 +632,7 @@ def build_hidden_window_commitment(
         "schedule_config_sha256": schedule_hash,
         "days": days,
         "point_selector": "official_scheduled_sell_put.v1",
-        "capture_schema": "recommendation_point.v1",
+        "capture_schema": "recommendation_point.v2",
         "challenger_variant_id": _text(
             challenger_variant_id, "challenger_variant_id"
         ),
@@ -743,7 +743,7 @@ def validate_hidden_window_commitment(
         )
     if item["point_selector"] != "official_scheduled_sell_put.v1" or item[
         "capture_schema"
-    ] != "recommendation_point.v1":
+    ] != "recommendation_point.v2":
         _fail("experiment_conflict", "hidden commitment point contract changed")
     _text(item["challenger_variant_id"], "challenger_variant_id")
     _hash(item["research_spec_sha256"], "research_spec_sha256")
@@ -755,16 +755,10 @@ def validate_hidden_window_commitment(
     return {**item, "trading_dates": dates, "days": days}
 
 
-def lock_challenger(
+def read_published_research_leader(
     store: ExperimentStore,
     validation_spec: object,
     *,
-    challenger_variant_id: str,
-    validation_start_trading_date: str,
-    schedule: Mapping[str, Any],
-    actor: str,
-    occurred_at_utc: str,
-    idempotency_key: str,
     artifact_root: str | Path,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
@@ -778,17 +772,7 @@ def lock_challenger(
         load_materialized_research_input,
         load_recorded_research_revision,
     )
-    from src.application.strategy_lab.top1.corpus import (
-        CorpusError,
-        read_market_calendar_binding,
-    )
 
-    actor, occurred_at_utc, idempotency_key = _command_fields(
-        actor, occurred_at_utc, idempotency_key
-    )
-    challenger_variant_id = _text(challenger_variant_id, "challenger_variant_id")
-    if challenger_variant_id == "baseline":
-        _fail("experiment_invalid", "challenger must be non-baseline")
     try:
         spec = validate_experiment_spec(validation_spec)
     except Top1CoreContractError as exc:
@@ -796,7 +780,6 @@ def lock_challenger(
     if "validation_evaluation" not in spec:
         _fail("experiment_invalid", "validation-ready ExperimentSpec is required")
     experiment_id = _segment(spec["experiment_id"], "experiment_id")
-    market, account = _identity(spec["market"], spec["account"])
     experiment = _call(store.experiment, experiment_id)
     _require_service_available(environ)
     research_hash = build_research_spec_sha256(spec)
@@ -829,9 +812,7 @@ def lock_challenger(
                 "validation_metrics",
             }
         }
-        dataset = load_materialized_research_input(
-            artifact_root, research_spec
-        )
+        dataset = load_materialized_research_input(artifact_root, research_spec)
         revision = load_recorded_research_revision(
             artifact_root, research_generation
         )
@@ -839,9 +820,66 @@ def lock_challenger(
     except (ResearchArtifactError, ResearchEvaluationError) as exc:
         _fail("experiment_conflict", f"research revision is invalid: {exc}")
     evaluation = cast(Mapping[str, object], validated_revision["evaluation"])
-    if evaluation["selection"] != "research_leader":
+    if evaluation["selection"] != "research_leader" or not isinstance(
+        evaluation.get("leader_variant_id"), str
+    ):
         _fail("invalid_transition", "research did not select a challenger")
-    if evaluation["leader_variant_id"] != challenger_variant_id:
+    return {
+        "spec": spec,
+        "experiment": experiment,
+        "research_spec_sha256": research_hash,
+        "research_generation": research_generation,
+        "challenger_variant_id": evaluation["leader_variant_id"],
+    }
+
+
+def lock_challenger(
+    store: ExperimentStore,
+    validation_spec: object,
+    *,
+    challenger_variant_id: str,
+    expected_validation_spec_sha256: str | None = None,
+    validation_start_trading_date: str,
+    schedule: Mapping[str, Any],
+    actor: str,
+    occurred_at_utc: str,
+    idempotency_key: str,
+    artifact_root: str | Path,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    from src.application.strategy_lab.top1.corpus import (
+        CorpusError,
+        read_market_calendar_binding,
+    )
+
+    actor, occurred_at_utc, idempotency_key = _command_fields(
+        actor, occurred_at_utc, idempotency_key
+    )
+    expected_validation_hash = (
+        _hash(
+            expected_validation_spec_sha256,
+            "expected_validation_spec_sha256",
+        )
+        if expected_validation_spec_sha256 is not None
+        else None
+    )
+    challenger_variant_id = _text(challenger_variant_id, "challenger_variant_id")
+    if challenger_variant_id == "baseline":
+        _fail("experiment_invalid", "challenger must be non-baseline")
+    research = read_published_research_leader(
+        store,
+        validation_spec,
+        artifact_root=artifact_root,
+        environ=environ,
+    )
+    spec = cast(dict[str, object], research["spec"])
+    experiment_id = _segment(spec["experiment_id"], "experiment_id")
+    market, account = _identity(spec["market"], spec["account"])
+    research_hash = str(research["research_spec_sha256"])
+    research_generation = cast(
+        Mapping[str, object], research["research_generation"]
+    )
+    if research["challenger_variant_id"] != challenger_variant_id:
         _fail("experiment_invalid", "challenger does not match the research leader")
     research_receipt_ref = _ref(
         research_generation["last_revision_ref"], "research_receipt_ref"
@@ -898,6 +936,11 @@ def lock_challenger(
         challenger_variant_id=challenger_variant_id,
         hidden_window_commitment_sha256=commitment_sha256,
     )
+    if (
+        expected_validation_hash is not None
+        and validation_hash != expected_validation_hash
+    ):
+        _fail("preview_hash_changed", "validation hash changed before lock")
     variants = {
         str(cast(Mapping[str, object], item)["variant_id"])
         for item in cast(list[object], spec["variants"])
@@ -987,9 +1030,16 @@ def start_validation(
     )
     experiment = _call(store.experiment, experiment_id)
     _require_service_available(environ)
+    already_started = (
+        experiment["phase"] == "validation"
+        and experiment["validation_progress"] == "collecting_decisions"
+    )
     if experiment["terminal_mode"] is not None or not (
-        experiment["phase"] == "research"
-        and experiment["research_progress"] == "challenger_locked"
+        already_started
+        or (
+            experiment["phase"] == "research"
+            and experiment["research_progress"] == "challenger_locked"
+        )
     ):
         _fail("invalid_transition", "validation cannot start")
     if (
@@ -1033,9 +1083,9 @@ def start_validation(
         "scheduled_scan_targets_market"
     ]
     assert isinstance(first_target, list)
-    if _utc_datetime(first_target[0], "first_target_at_utc") <= _utc_datetime(
-        occurred_at_utc, "occurred_at_utc"
-    ):
+    if not already_started and _utc_datetime(
+        first_target[0], "first_target_at_utc"
+    ) <= _utc_datetime(occurred_at_utc, "occurred_at_utc"):
         _fail("invalid_transition", "validation first target is no longer future")
     try:
         publish_exact_text(
@@ -1420,6 +1470,7 @@ __all__ = [
     "prepare_experiment",
     "read_active_experiment_ids",
     "read_advance_context",
+    "read_published_research_leader",
     "read_public_receipt",
     "read_public_status",
     "recover_account_terminal_projections",

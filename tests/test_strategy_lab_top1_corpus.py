@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -43,6 +44,7 @@ from src.application.strategy_lab.top1.lifecycle import (
 from src.application.strategy_lab.top1.ranking import Top1RankingError
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 from tests.candidate_evidence_helpers import (
+    CONFIG_HASH,
     seal_market_calendar_fixture,
     seal_opening_candidate_fixture,
 )
@@ -733,6 +735,113 @@ def test_clean_point_capture_copies_only_the_rankable_projection(
     assert store.corpus_point(
         "HK", "lx", point["recommendation_point_id"]
     )["conflict_status"] == "conflict"
+
+
+def test_v2_point_capture_loads_its_bound_option_market_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import recommendation_point as recommendation_mod
+    from src.application.strategy_lab.top1 import corpus as corpus_mod
+
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    day = "2026-07-21"
+    run_id = "strict-v2-corpus-point"
+    assert _seal(store, artifact_root, day=day)["status"] == "published"
+    candidate = {**_candidate(), "currency": "CNY"}
+    seal_opening_candidate_fixture(
+        source_root,
+        run_id=run_id,
+        market="HK",
+        accepted_rows=[candidate],
+    )
+    evidence = {
+        "status": "ready",
+        "run_id": run_id,
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+        "evidence_at_utc": "2026-06-01T00:00:00Z",
+        "open_option_positions": [],
+        "valuation_mark_facts": [],
+        "fx_rate_facts": [],
+    }
+    evidence["content_sha256"] = canonical_sha256(evidence)
+    payload = {"strategy_lab_option_market_evidence": evidence}
+    payload_bytes = (
+        json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode()
+    manifest = {
+        "schema_version": "prepared_option_positions_context.v2",
+        "status": "ready",
+        "run_id": run_id,
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+        "application_received_at_utc": "2026-06-01T00:00:00Z",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+    }
+    receipt = {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": (
+            json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode(),
+        "payload_bytes": payload_bytes,
+    }
+    prepared_manifest = source_root / "prepared_option_positions_context.v2.json"
+    monkeypatch.setattr(
+        recommendation_mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: prepared_manifest,
+    )
+    monkeypatch.setattr(
+        recommendation_mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
+    )
+    publication, point = capture_scheduled_recommendation_point(
+        source_root,
+        run_id,
+        "lx",
+        _scheduler(day),
+        source_commit_sha=SOURCE_SHA,
+        require_option_market_evidence=True,
+    )
+    assert publication == "published"
+
+    monkeypatch.setattr(
+        corpus_mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: prepared_manifest,
+    )
+    monkeypatch.setattr(
+        corpus_mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
+    )
+    captured = capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=(
+            f"output_runs/{run_id}/accounts/lx/state/{RECOMMENDATION_POINT_FILE}"
+        ),
+        trading_date=day,
+        captured_at_utc="2026-07-21T02:01:00Z",
+        environ=AVAILABLE,
+    )
+
+    assert captured["status"] == "published"
+    assert captured["recommendation_point_id"] == point["recommendation_point_id"]
+    projection = json.loads(
+        (artifact_root / str(captured["artifact_ref"])).read_text(encoding="utf-8")
+    )
+    assert projection["schema_version"] == "sell_put_ranking_projection.v2"
+    assert projection["candidates"][0]["option_market_concentration_after"] == 1.0
+    assert projection["candidates"][0]["option_market_evidence_refs"][
+        "prepared_evidence_content_sha256"
+    ] == evidence["content_sha256"]
 
 
 def test_capture_rejects_missing_late_and_unexpected_denominators(

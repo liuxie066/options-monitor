@@ -18,8 +18,14 @@ from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
+from src.application.prepared_option_positions_context import (
+    PreparedOptionPositionsContextError,
+    find_prepared_option_positions_manifest,
+    load_prepared_option_positions_context_receipt,
+)
 from src.application.recommendation_point import (
     RECOMMENDATION_POINT_FILE,
+    RECOMMENDATION_POINT_SCHEMA_V2,
     RecommendationPointError,
     build_recommendation_point_id,
     load_recommendation_point,
@@ -1293,11 +1299,52 @@ def capture_recommendation_point(
             expected_point_count=expected_count,
         )
     try:
+        option_market_evidence = None
+        if point["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2:
+            prepared_manifest = find_prepared_option_positions_manifest(
+                base=Path(source_root),
+                run_id=run_id,
+                account=account,
+            )
+            if prepared_manifest is None:
+                raise PreparedOptionPositionsContextError(
+                    "option_market_evidence_contract_missing"
+                )
+            prepared_receipt = load_prepared_option_positions_context_receipt(
+                manifest_path=prepared_manifest,
+                expected_base=Path(source_root),
+                expected_run_id=run_id,
+                expected_account=account,
+                expected_account_config_sha256=str(
+                    snapshot["account_config_sha256"]
+                ),
+                expected_manifest_sha256=str(
+                    point["option_market_evidence_manifest_sha256"]
+                ),
+                require_option_market_evidence=True,
+            )
+            if prepared_receipt["manifest"].get("payload_sha256") != point[
+                "option_market_evidence_payload_sha256"
+            ]:
+                raise PreparedOptionPositionsContextError(
+                    "prepared option payload generation mismatch"
+                )
+            option_market_evidence = prepared_receipt["payload"].get(
+                "strategy_lab_option_market_evidence"
+            )
         projection = build_ranking_projection(
             snapshot,
             point_binding=point_binding_from_recommendation_point(point),
+            option_market_evidence=option_market_evidence,
+            require_option_market_evidence=(
+                point["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2
+            ),
         )
-    except (RecommendationPointError, Top1RankingError):
+    except (
+        PreparedOptionPositionsContextError,
+        RecommendationPointError,
+        Top1RankingError,
+    ):
         return _capture_not_evaluable(
             store,
             point,

@@ -251,6 +251,103 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
         cli.handle_top1_command(parse_args(start))
 
 
+def test_validation_and_receipt_cli_expose_the_remaining_mvp_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.interfaces.cli.strategy_lab_top1 as cli
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.main import parse_args
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+
+    class ReadyStore:
+        def schema_state(self) -> dict[str, str]:
+            return {"status": "ready"}
+
+    store = ReadyStore()
+    monkeypatch.setattr(cli, "ExperimentStore", lambda _path: store)
+    monkeypatch.setattr(
+        cli,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            tmp_path / "config.hk.json",
+            {"schedule": {"timezone": "Asia/Hong_Kong"}},
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "preview_sell_put_top1_validation",
+        lambda received_store, _root, **_kwargs: {
+            "status": "blocked",
+            "reason_codes": [
+                "research_leader_unavailable"
+                if received_store is store
+                else "wrong_store"
+            ],
+        },
+    )
+    common = [
+        "research",
+        "strategy-lab",
+        "top1-loop",
+        "validation",
+        "preview",
+        "--market",
+        "hk",
+        "--account",
+        "lx",
+        "--profile-path",
+        str(profile_path),
+        "--experiment-id",
+        "experiment-001",
+        "--validation-start-trading-date",
+        "2026-08-17",
+    ]
+
+    response = cli.handle_top1_command(parse_args(common))
+
+    assert response["ok"] is True
+    assert response["data"]["reason_codes"] == ["research_leader_unavailable"]
+    start = list(common)
+    start[4] = "start"
+    start.extend(["--confirmed-start-file", str(tmp_path / "command.json")])
+    with pytest.raises(AgentToolError, match="requires --write"):
+        cli.handle_top1_command(parse_args(start))
+
+    monkeypatch.setattr(
+        cli,
+        "read_public_receipt",
+        lambda received_store, *, experiment_id: {
+            "experiment_id": experiment_id,
+            "same_store": received_store is store,
+        },
+    )
+    receipt = cli.handle_top1_command(
+        parse_args(
+            [
+                "research",
+                "strategy-lab",
+                "top1-loop",
+                "receipt",
+                "--market",
+                "hk",
+                "--account",
+                "lx",
+                "--profile-path",
+                str(profile_path),
+                "--experiment-id",
+                "experiment-001",
+            ]
+        )
+    )
+    assert receipt["data"] == {
+        "experiment_id": "experiment-001",
+        "same_store": True,
+    }
+
+
 def test_calendar_refresh_cli_requires_write_and_closes_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

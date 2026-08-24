@@ -28,6 +28,7 @@ from src.application.strategy_lab.top1.corpus import (
     refresh_market_calendar_binding,
 )
 from src.application.strategy_lab.top1.lifecycle import (
+    read_public_receipt,
     read_public_status,
 )
 from src.application.strategy_lab.top1.readiness import (
@@ -37,7 +38,9 @@ from src.application.strategy_lab.top1.readiness import (
 from src.application.strategy_lab.top1.workspace import (
     Top1WorkspaceError,
     preview_sell_put_top1_research,
+    preview_sell_put_top1_validation,
     start_confirmed_research,
+    start_confirmed_validation,
 )
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.infrastructure.futu_gateway import (
@@ -126,6 +129,27 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
         if name == "start":
             parser.add_argument("--confirmed-start-file", required=True)
             parser.add_argument("--write", action="store_true")
+
+    validation = commands.add_parser(
+        "validation", help="preview or start the 10-day hidden validation"
+    )
+    validation_commands = validation.add_subparsers(
+        dest="top1_validation_command", required=True
+    )
+    for name in ("preview", "start"):
+        parser = validation_commands.add_parser(name)
+        _add_identity(parser)
+        parser.add_argument("--experiment-id", required=True)
+        parser.add_argument("--validation-start-trading-date", required=True)
+        if name == "start":
+            parser.add_argument("--confirmed-start-file", required=True)
+            parser.add_argument("--write", action="store_true")
+
+    receipt = commands.add_parser(
+        "receipt", help="read one published final experiment receipt"
+    )
+    _add_identity(receipt)
+    receipt.add_argument("--experiment-id", required=True)
 
 
 def _absolute_profile_path(raw: object) -> Path:
@@ -378,7 +402,8 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     command = args.top1_loop_command
     context = _profile_context(
         args,
-        require_top1=command in {"advance", "calendar", "capabilities", "research"},
+        require_top1=command
+        in {"advance", "calendar", "capabilities", "research", "validation"},
     )
 
     if command == "calendar":
@@ -554,6 +579,84 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 gateway.close()
         return build_response(tool_name=tool_name, ok=True, data=data)
 
+    if command == "validation":
+        if args.top1_validation_command == "start" and not args.write:
+            raise AgentToolError(
+                code="INPUT_ERROR", message="Top1 validation start requires --write"
+            )
+        if store.schema_state().get("status") != "ready":
+            return _store_not_ready(
+                "research.strategy-lab.top1-loop.validation", store
+            )
+        try:
+            _config_path, config = load_runtime_config(
+                config_path=context["config_hk"], expected_market="hk"
+            )
+            schedule = config.get("schedule")
+            if not isinstance(schedule, Mapping):
+                raise ValueError("HK runtime schedule is missing")
+        except Exception as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+        top1 = context["top1"]
+        preview_inputs = {
+            "experiment_id": args.experiment_id,
+            "validation_start_trading_date": args.validation_start_trading_date,
+            "schedule": schedule,
+            "timer_binding": {
+                "revision": ADVANCE_REVISION,
+                "producer_catchup_grace_seconds": 30,
+                "producer_run_timeout_upper_bound_seconds": int(
+                    top1["timeout_start_sec"]
+                ),
+                "advance_cadence_seconds": int(top1["advance_interval"]),
+                "fill_observation_duration_upper_bound_seconds": int(
+                    top1["timeout_start_sec"]
+                ),
+                "terms_capture_duration_upper_bound_seconds": int(
+                    top1["timeout_start_sec"]
+                ),
+            },
+            "as_of_utc": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "environ": None,
+        }
+        tool_name = (
+            "research.strategy-lab.top1-loop.validation."
+            f"{args.top1_validation_command}"
+        )
+        if args.top1_validation_command == "preview":
+            data = preview_sell_put_top1_validation(
+                store,
+                context["artifact_root"],
+                **preview_inputs,
+            )
+            return build_response(
+                tool_name=tool_name,
+                ok=data["status"] in {"available", "blocked", "disabled"},
+                data=data,
+            )
+        try:
+            command_payload = json.loads(
+                Path(args.confirmed_start_file).expanduser().read_text(
+                    encoding="utf-8"
+                )
+            )
+            data = start_confirmed_validation(
+                store,
+                context["artifact_root"],
+                confirmed_start=command_payload,
+                **preview_inputs,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="confirmed start file is unavailable or invalid",
+            ) from exc
+        except Top1WorkspaceError as exc:
+            raise AgentToolError(code=exc.reason_code, message=str(exc)) from exc
+        return build_response(tool_name=tool_name, ok=True, data=data)
+
     if command == "readiness":
         return build_response(
             tool_name="research.strategy-lab.top1-loop.readiness",
@@ -580,6 +683,25 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             ) from exc
         return build_response(
             tool_name="research.strategy-lab.top1-loop.status", ok=True, data=data
+        )
+
+    if command == "receipt":
+        if store.schema_state().get("status") != "ready":
+            return _store_not_ready(
+                "research.strategy-lab.top1-loop.receipt", store
+            )
+        try:
+            data = read_public_receipt(
+                store,
+                experiment_id=args.experiment_id,
+            )
+        except Exception as exc:
+            raise AgentToolError(
+                code=str(getattr(exc, "reason_code", "STATE_ERROR")),
+                message=str(exc),
+            ) from exc
+        return build_response(
+            tool_name="research.strategy-lab.top1-loop.receipt", ok=True, data=data
         )
 
     if command != "advance":

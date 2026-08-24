@@ -21,6 +21,8 @@ from src.application.opening_candidate_snapshot import (
 from src.application.recommendation_point import (
     AVAILABILITY_ENV,
     RECOMMENDATION_POINT_FILE,
+    RECOMMENDATION_POINT_SCHEMA_V1,
+    RECOMMENDATION_POINT_SCHEMA_V2,
     RecommendationPointError,
     build_recommendation_point,
     build_recommendation_point_id,
@@ -282,6 +284,11 @@ def test_point_identity_canonicalizes_target_and_availability_is_exact() -> None
     )
     assert build_recommendation_point_id("US", "lx", TARGET) != (
         build_recommendation_point_id("US", "lx", "2026-07-21T14:30:00Z")
+    )
+    assert build_recommendation_point_id(
+        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V1
+    ) == build_recommendation_point_id(
+        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V2
     )
     assert strategy_lab_top1_available({AVAILABILITY_ENV: "1"}) is True
     for value in ("", "0", "true", " 1", "1 "):
