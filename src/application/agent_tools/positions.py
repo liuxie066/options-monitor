@@ -42,14 +42,13 @@ from src.application.wheel.capacity import load_shared_coverage_fact
 
 
 _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
-    "evidence_type": "collection",
+    "evidence_type": "aggregate",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "schema_version": "option_performance_report.output.v1",
     "source_label": "OM 本地账本 + 显式估值/汇率证据",
-    "primary_rows": "rows",
     "fact_fields": [
         "period.kind",
         "period.requested_start_date",
@@ -90,6 +89,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "assignment_lifecycle.review",
     ],
     "freshness_fields": [
+        "freshness.status",
+        "freshness.as_of",
         "period.status",
         "evidence.schema_state",
         "evidence.collection.status",

@@ -332,14 +332,15 @@ def test_prompt_fingerprint_changes_with_content_and_order(monkeypatch, tmp_path
 def test_agent_tool_view_exposes_result_contract() -> None:
     view = next(item for item in copilot_tools.tool_descriptions(("option_performance_report",)))
 
-    assert view["output_contract"]["primary_rows"] == "rows"
+    assert view["output_contract"]["evidence_type"] == "aggregate"
+    assert view["output_contract"]["coverage"] == "source_declared"
     assert "Key result fields:" in view["description"]
     observation = copilot_tools.compact_observation(
         "option_performance_report",
         {"ok": True, "data": {"rows": [{"fact_kind": "realized_net", "amount": 1.0}]}},
         {"month": "2026-07"},
     )
-    assert "rows=1" in observation["summary"]
+    assert "source=OM 本地账本 + 显式估值/汇率证据" in observation["summary"]
     assert observation["result_contract"]["source_label"] == "OM 本地账本 + 显式估值/汇率证据"
     warning_observation = copilot_tools.compact_observation(
         "option_performance_report",
@@ -870,6 +871,14 @@ def test_observation_projection_prioritizes_contract_facts_and_missing_boundarie
             **filler,
             "period": {"kind": "month", "requested_start_date": "2026-07-01"},
             "scope": {"account": "lx", "accounts": ["lx"]},
+            "coverage": {
+                "status": "complete",
+                "complete_for": "full_query",
+                "included_count": 1,
+                "total_count": 1,
+                "omitted_count": 0,
+                "has_more": False,
+            },
             "quality": {"status": "observed", "missing": []},
             "rows": [{"fact_kind": "realized_net", "amount": 1.0}],
         },

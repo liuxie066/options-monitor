@@ -9,6 +9,7 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
 from src.application.copilot import tools as copilot_tools
+from src.application.copilot.result_admission import admit_submit_answer
 
 
 def _metric(
@@ -252,6 +253,8 @@ def test_public_performance_presentation_is_total_first_accounted_and_identifier
 def test_option_performance_output_contract_exposes_assignment_components() -> None:
     contract = positions.OPTION_PERFORMANCE_REPORT_TOOL.output_contract
 
+    assert contract["evidence_type"] == "aggregate"
+    assert contract["coverage"] == "source_declared"
     assert "pnl.option_realized_gross" in contract["fact_fields"]
     assert "pnl.option_realized_net" in contract["fact_fields"]
     assert "pnl.assigned_stock_realized_gross" in contract["fact_fields"]
@@ -265,6 +268,109 @@ def test_option_performance_output_contract_exposes_assignment_components() -> N
         "evidence.schema_state",
     ]
     assert contract["model_missing_data_fields"] == ["presentation.limitations"]
+
+
+def test_t_minus_one_mtd_cash_income_is_admitted_as_historical_full_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _core_report()
+    report["period"] = {
+        "kind": "mtd",
+        "reporting_timezone": "Asia/Shanghai",
+        "requested_start_date": "2026-08-01",
+        "requested_end_date": "2026-08-23",
+        "valuation_end_at_ms": 1787500799999,
+        "status": "complete_past",
+    }
+    report["cash"]["option_trade_cash_gross"] = _metric(
+        {"HKD": 4806.0, "USD": 2199.0},
+        cny=18942.10462,
+    )
+    _patch_dependencies(monkeypatch, report=report)
+
+    data, _warnings, _meta = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
+        {
+            "config_key": "us",
+            "period": "mtd",
+            "as_of_date": "2026-08-23",
+            "include_rows": False,
+        }
+    )
+    observation = copilot_tools.compact_observation(
+        "option_performance_report",
+        {"ok": True, "data": data},
+    )
+
+    assert observation["coverage"] == {
+        "status": "complete",
+        "complete_for": "full_query",
+        "included_count": 1,
+        "total_count": 1,
+        "omitted_count": 0,
+        "has_more": False,
+        "scope": data["scope"],
+    }
+    assert observation["freshness"] == {
+        "status": "historical",
+        "as_of": "2026-08-23T15:59:59.999000+00:00",
+    }
+    assert (
+        observation["value"]["presentation"]["primary_metrics"]
+        ["option_trade_cash_gross"]["cny"]
+        == 18942.10462
+    )
+    admitted = admit_submit_answer(
+        {
+            "mode": "evidence",
+            "status": "partial",
+            "answer_markdown": "截至 8 月 23 日，8 月 MTD 期权现金流收入为 18,942.10 元。",
+            "claims": [
+                {
+                    "text": "截至 8 月 23 日，8 月 MTD 期权现金流收入为 18,942.10 元",
+                    "kind": "historical_fact",
+                    "observation_ids": ["obv_performance"],
+                    "required_scope": "full_query",
+                }
+            ],
+        },
+        {
+            "obv_performance": {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": observation["status"],
+                "coverage": observation["coverage"],
+                "freshness": observation["freshness"],
+            }
+        },
+    )
+
+    assert admitted["observation"] == {"ok": True, "status": "answer_accepted"}
+    rejected_as_current = admit_submit_answer(
+        {
+            "mode": "evidence",
+            "status": "partial",
+            "answer_markdown": "当前 8 月 MTD 期权现金流收入为 18,942.10 元。",
+            "claims": [
+                {
+                    "text": "当前 8 月 MTD 期权现金流收入为 18,942.10 元",
+                    "kind": "current_fact",
+                    "observation_ids": ["obv_performance"],
+                    "required_scope": "full_query",
+                }
+            ],
+        },
+        {
+            "obv_performance": {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": observation["status"],
+                "coverage": observation["coverage"],
+                "freshness": observation["freshness"],
+            }
+        },
+    )
+
+    assert rejected_as_current["observation"]["reason"] == "claim_freshness_not_supported"
 
 
 def test_copilot_mtd_payload_prunes_conflicts_and_executes_first_call(
