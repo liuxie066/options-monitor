@@ -93,8 +93,26 @@ jobs:
 
       - name: Resolve VERSION release
         id: release
-        if: github.event_name == 'push' && contains(github.event.head_commit.modified, 'VERSION')
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
+          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            echo "::notice::Skipping automatic release for an initial push without a comparison base"
+            exit 0
+          fi
+          if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"
+          fi
+          if git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- VERSION; then
+            exit 0
+          else
+            DIFF_STATUS=$?
+          fi
+          if [[ "${DIFF_STATUS}" -ne 1 ]]; then
+            echo "::error::Unable to compare VERSION across the pushed commit range"
+            exit "${DIFF_STATUS}"
+          fi
           VERSION="$(tr -d '\n' < VERSION)"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 

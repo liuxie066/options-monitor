@@ -351,7 +351,11 @@ def test_version_release_reuses_successful_guardrails_without_duplicate_regressi
     reusable = (root / ".github/workflows/_release-reusable.yml").read_text(encoding="utf-8")
     manual = (root / ".github/workflows/release-from-version.yml").read_text(encoding="utf-8")
 
-    assert "contains(github.event.head_commit.modified, 'VERSION')" in guardrails
+    assert "contains(github.event.head_commit.modified, 'VERSION')" not in guardrails
+    assert "BEFORE_SHA: ${{ github.event.before }}" in guardrails
+    assert 'git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"' in guardrails
+    assert 'git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- VERSION' in guardrails
+    assert 'if [[ "${DIFF_STATUS}" -ne 1 ]]' in guardrails
     assert "uses: ./.github/workflows/_release-reusable.yml" in guardrails
     assert "run_regression_gates: false" in guardrails
     assert reusable.count("if: ${{ inputs.run_regression_gates }}") == 4
