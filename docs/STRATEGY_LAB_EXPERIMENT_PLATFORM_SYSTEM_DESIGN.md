@@ -40,7 +40,7 @@ Shadow Replay、Candidate Engine 和定时推进链已经覆盖大部分闭环�
 | 账户开关 | SQLite `strategy_lab_features` + `user_opt_in` + 环境开关共同决定是否执行 | 无账户 opt-in；运维安全停机时返回 `disabled` | 删除 feature 表、命令、reconcile 和 blocker；保留维护方安全开关 |
 | Proposal | 通用旧 Strategy Lab 有离线 proposal；Top1 Final Receipt 没有 adoption proposal | challenger 通过时附受控采用建议 | 在同一不可变 Final Receipt 内嵌可选 Proposal；不增加第二个 terminal artifact |
 | 正式点行情 | 正式点组合入口已存在；scheduled tick 只持续写 FX，现有 mark collector 仅由人工 performance capture 使用；ranking projection 未保留逐点 Bid / Ask 等紧凑行情 | 每个正式点绑定 accepted candidate 行情、全部未平仓期权 mark 和所需 FX | 在现有 tick / prepared context / projection 调用链接线；不新建表、timer、service 或 receipt |
-| 历史事实 | 旧 run、Shadow Replay、performance evidence、v1 / v2 artifact 均有可复用数据，但严格窗口不做转换 | 优先迁入全部可验证历史事实，并对无法证明的点输出 gap | 在现有 corpus owner 增加显式 preview/apply 的幂等迁移；源 artifact 原样保留 |
+| 历史事实 | 旧 run、Shadow Replay、performance evidence、v1 / v2 artifact 可能包含可复用数据，但严格窗口不做转换 | 先审计全部历史事实；仅迁入通过当前合同的 ready 点，并对其余点输出 gap | 在现有 corpus owner 提供零写入 preview；首次出现 ready 点时再增加显式幂等 apply；源 artifact 原样保留 |
 
 ## 3. 技术架构
 
@@ -196,10 +196,11 @@ accepted set 提取注册字段白名单，不复制完整 snapshot。`recommend
 的指标或 hash。
 
 producer 沿用现有行为，在新 run 写 `prepared_option_positions_context.v2.json`；普通运行恢复按 v2、
-v1 的固定顺序发现 manifest，通用 loader 接受两版并保持既有返回语义。Strategy Lab 在线正式点只
-接受完整 v2 evidence；历史迁移可以读取旧 run 的 v1 / v2 prepared context、scheduler decision、
-opening snapshot、ledger/event snapshot 及 existing performance facts，并仅在能够重建同等严格的
-最小绑定时生成新的内容寻址 corpus point。迁移不改名、不重写旧文件，也不把 v1 本身冒充 v2。
+v1 的固定顺序发现 manifest，通用 loader 接受两版并保持既有返回语义。Strategy Lab 在线正式点和
+历史 preview 都只接受已有的完整 v2 evidence：preview 用 archive inventory 与 scheduler decision
+识别点，再用同 run 的 recommendation point v2、opening snapshot 和 prepared context v2 重建当前
+ranking projection。它不把分散的 v1、ledger/event snapshot 或 performance facts 拼装成新的历史
+point；这些旧格式明确列为 gap，不改名、不重写旧文件，也不把 v1 冒充 v2。
 
 历史窗口接受在线生成的严格 v2 point，或由显式迁移生成且通过同一 projection / point validator 的
 等价 point。旧事实缺少 scheduler identity、来源 hash 或当前 recipe 声明的必需持仓、mark、FX、
@@ -598,7 +599,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
 | `src/application/strategy_lab/top1/terminal_projection.py` | `build_generation_terminal_request()`、`build_aborted_receipt_request()`、`build_completed_receipt_request()`、`recover_terminal_projection()` | completed receipt 在同一 payload 内生成可选 Proposal；继续使用现有单 artifact 发布和 readback |
 | `src/infrastructure/strategy_lab/experiment_store.py` | `migrate()`、schema 校验、`terminate()`、`_request_receipt()`、`pending_projections()`、`mark_projection_published()`、public row codec | 升级 schema v4；v3 有不兼容 active experiment 时拒绝 cutover；删除 feature 表和行为，新终止写入不再产生 feature 语义；receipt 继续使用现有单 projection 状态 |
-| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview/apply、research preview/start、validation preview/start 和 receipt；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态 |
+| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview、research preview/start、validation preview/start 和 receipt；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态；首次出现 ready 历史点时再增加 apply |
 
 ### 6.3 新增函数
 
@@ -614,7 +615,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 同上 | `validate_confirmed_start_command()` | exact-key 校验 confirmed command，并返回供 Workspace 派生子 key 的规范化字段 |
 | `src/application/prepared_option_positions_context.py` | `find_prepared_option_positions_manifest()` | 在单个 run/account state 目录内按 v2 后 v1 返回恢复 manifest；不扫描其他 run |
 | 同上 | `build_option_market_evidence_payload()` | 只从 A/B fence 之间取得的 open positions 和单次 evidence bundle 构造最小 `option_market_evidence.v1`；不自行读取当前状态 |
-| `src/application/strategy_lab/top1/corpus.py` | `migrate_archived_recommendation_points(..., apply=False)` | 扫描已归档 scheduled run，预览或幂等写入能通过当前 point / projection validator 的紧凑 point；保留源 artifact，并为不可转换点返回稳定 gap reason |
+| `src/application/strategy_lab/top1/corpus.py` | `preview_archived_recommendation_point_migration()` | 零写入扫描已归档 scheduled run，列出能通过当前 point / projection validator 的 ready 点，并为不可转换点返回稳定 gap reason；不预建无实际输入的 apply 分支 |
 | `domain/domain/short_vol_assessment.py` | `calculate_option_market_concentration_after()` | 使用同账户全部未平仓期权、事实时点 mark 与 FX 计算 v1 指标并返回证据选择结果 |
 | `src/application/strategy_lab/top1/economics.py` | `build_fx_rate_binding()`、`validate_fx_rate_binding()`、`calculate_sell_put_top1_economic_result()` | 把已选中 `FXRateFact` 规范化为唯一 `fx_rate_binding.v1`；经济函数只消费已绑定 opening / terminal 事实并生成 v2 CNY 结果 |
 | `src/application/strategy_lab/top1/statistics.py` | `evaluate_top1_paired_daily_results()` | 统一执行点配对、按日聚合、Student-t、尾部、PnL 不劣和确定性结论 |
@@ -690,28 +691,24 @@ binding，不为此提高全局上限；超限时删减非 PRD 必需字段，�
 
 ### 7.2 历史正式点迁移
 
-历史迁移扩展现有 corpus owner，不属于 ExperimentStore schema migration，也不在进程启动时自动
-执行。操作员先运行 preview，确认扫描范围、预计新增 point、重复 point、gap reason 和磁盘增量后，
-再通过同一现有 CLI 显式 apply。
+历史迁移审计扩展现有 corpus owner，不属于 ExperimentStore schema migration，也不在进程启动时自动
+执行。操作员运行零写入 preview，确认扫描范围、ready point、重复 point、gap reason 和预计磁盘增量。
+当 `ready = 0` 时流程在 preview 结束，不增加 apply 命令、状态或回执；首次出现 `ready > 0` 时，apply
+才成为进入 W3 前必须补齐并再次评审的最小实现。
 
-迁移按 `market / account / scheduled_scan_target_market` 形成稳定 point identity，来源优先级为：
-
-1. 已存在且可校验的 recommendation point / ranking projection；
-2. 旧 run 中的 scheduler decision、candidate manifest、opening candidate snapshot、prepared option
-   context 或同 run ledger/event snapshot；
-3. existing performance-evidence repository 中在 point time 可按现有选择合同选中的 mark / FX；
-4. Research Archive / Shadow Replay 中已经 hash 绑定的 outcome 和 terminal facts。
-
-只有上述事实能够共同通过当前 point / projection validator 时才写入紧凑 corpus artifact 和现有
-point 索引。apply 使用 content hash 和现有唯一键幂等：相同内容记为 idempotent；相同 point identity
+迁移按 `market / account / scheduled_scan_target_market` 形成稳定 point identity。archive inventory 与
+scheduler decision 只用于发现和解释 point；`ready` 必须来自同 run 中已经存在且能共同通过当前
+validator 的 recommendation point v2、opening snapshot 与 prepared context v2。当前 preview 不跨 owner
+拼装缺失字段，也不从 performance-evidence repository 或 Shadow Replay 合成新的历史 point。后续按需
+实现的 apply 必须使用 content hash 和现有唯一键幂等：相同内容记为 idempotent；相同 point identity
 但内容不同记为 conflict，禁止覆盖。源 run、v1 / v2 manifest、snapshot、SQLite facts 和历史 receipt
 均不改写、不删除。
 
 迁移不调用 OpenD 获取历史 option chain 或精确 Bid / Ask，不用当前账本、当前 mark、当天最后报价、
 开仓权利金或当前 FX 填补缺口。缺少当前 recipe required field 的点返回具体 gap reason；只缺少可选
 字段时保留 point 并标记相应 capability unavailable。完整日当前必须具有 12 个正式点，半日市按交易
-日历和 scheduler expectation 校验。一个 point 或一天失败不回滚其他无冲突 point，但迁移报告必须
-完整列出 applied / idempotent / conflict / gap，研究窗口仍对缺日 fail closed。
+日历和 scheduler expectation 校验。preview 必须完整列出 ready / idempotent / conflict / gap；若后续
+存在 apply，其报告再列 applied / idempotent / conflict / gap。研究窗口始终对缺日 fail closed。
 
 ## 8. 失败与状态映射
 
@@ -766,9 +763,9 @@ point 索引。apply 使用 content hash 和现有唯一键幂等：相同内容
   `recommendation_point_gap`，既有扫描结果和通知交付不受影响。
 - `test_strategy_lab_top1.py`：ranking projection v2、candidate market facts、指标证据和 accepted set 不变；
   expiration / point time 可重算 DTE，Bid / Ask 可重算 Mid，且 fixture 不出现未注册 raw 字段。
-- `test_strategy_lab_top1_corpus.py`：历史迁移 preview 零写入；apply 对可验证旧 run 生成当前严格 point；
-  重跑 idempotent；identity 冲突不覆盖；缺 required mark / FX / scheduler identity 只记录 gap，只缺
-  optional Bid / Ask / Greek 时保留 point 并降低 capability；完整日 12 点和半日市 expectation 均严格校验。
+- `test_strategy_lab_top1_corpus.py`：历史迁移 preview 零写入，稳定报告 ready / conflict / gap；缺 required
+  mark / FX / scheduler identity 只记录 gap，只缺 optional Bid / Ask / Greek 时标为 ready 并降低
+  capability；首次真实 preview 出现 ready 点时，再增加 apply、idempotent 和不覆盖冲突的测试。
 - `test_strategy_lab_top1_research_window.py`：接受在线严格 v2 point 和历史迁移后通过相同 validator 的
   等价 point；历史持仓 / mark / FX 完整、缺失、过期和冲突。
 - `test_strategy_lab_top1_w1b.py`：opening / terminal 使用不同汇率的 CNY 经济结果，三个原币
@@ -821,8 +818,8 @@ point 索引。apply 使用 content hash 和现有唯一键幂等：相同内容
    opening FX 和来源 hash，或有历史迁移生成且通过相同 validator 的等价 point；完整日 12 个正式点
    均齐备，且所有入选真实合约的 expiration boundary 均能从现有
    performance-evidence repository 选出 terminal FX；
-2. 历史迁移报告列出 applied / idempotent / conflict / gap；源 artifact 未改写，缺失 mark、Bid / Ask、
-   持仓或 FX 未补造；
+2. 历史迁移 preview 列出 ready / idempotent / conflict / gap；`ready = 0` 时不产生写入，`ready > 0` 时
+   必须先补齐并执行幂等 apply；源 artifact 未改写，缺失 mark、Bid / Ask、持仓或 FX 未补造；
 3. 使用上述 20 日生成 Research Receipt；
 4. 产生可信 `research_leader`；没有 leader 时正确停止，但不进入隐藏验证；
 5. 用户第二次确认后完成未来 10 个正式推荐日及所需 outcome；
@@ -835,8 +832,9 @@ point 索引。apply 使用 content hash 和现有唯一键幂等：相同内容
 1. 先修复持续取证：把现有 mark collector 接入正式点账户，在现有 repository 幂等持久化；从
    opening snapshot 生成紧凑 candidate facts；完成 prepared context v2、recommendation point v2 和
    ranking projection 回归。任一实验取证失败只记录 gap，不阻断普通扫描或通知；
-2. 增加现有 corpus owner 的历史迁移 preview/apply，并对真实归档先 preview；只迁入能够通过当前
-   validator 的旧事实，保留所有源 artifact，不回填缺失历史；
+2. 增加现有 corpus owner 的历史迁移 preview，并对真实归档执行零写入审计；`ready = 0` 时停止，
+   首次出现 ready 点时再增加 apply；只迁入能够通过当前 validator 的旧事实，保留所有源 artifact，
+   不回填缺失历史；
 3. 用持续取证和迁移结果重新做只读 preflight：记录真实 20 日内每个 expectation point 的 prepared
    context / migrated binding、open position、mark、Bid / Ask、opening FX、来源 hash 和所有入选合约
    expiration boundary 的 terminal FX 覆盖；同时列出现有 v3 active experiment。任一事实缺口都明确

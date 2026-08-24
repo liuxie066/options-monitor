@@ -1501,25 +1501,17 @@ def discover_recommendation_points(
     )
 
 
-def migrate_archived_recommendation_points(
+def preview_archived_recommendation_point_migration(
     store: ExperimentStore,
     source_root: str | Path,
     artifact_root: str | Path,
     *,
     market: str,
     account: str,
-    apply: bool = False,
 ) -> dict[str, Any]:
     """Preview strict historical point reuse without repairing old evidence."""
 
     market, account = _identity(market, account)
-    if type(apply) is not bool:
-        _fail("corpus_input_invalid", "apply must be a boolean")
-    if apply:
-        _fail(
-            "corpus_input_invalid",
-            "historical migration apply is not available until preview is accepted",
-        )
     root = Path(source_root).resolve()
     if not root.is_dir():
         _fail("corpus_input_invalid", "historical source root is unavailable")
@@ -2383,7 +2375,7 @@ __all__ = [
     "capture_recommendation_point",
     "discover_recommendation_points",
     "freeze_research_dataset",
-    "migrate_archived_recommendation_points",
+    "preview_archived_recommendation_point_migration",
     "read_bound_market_calendar_snapshot",
     "read_corpus_status",
     "read_market_calendar_binding",

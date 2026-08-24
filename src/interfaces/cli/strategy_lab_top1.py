@@ -23,7 +23,7 @@ from src.application.strategy_lab.top1.capability_receipts import (
 )
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
-    migrate_archived_recommendation_points,
+    preview_archived_recommendation_point_migration,
     read_corpus_status,
     read_market_calendar_binding,
     refresh_market_calendar_binding,
@@ -539,13 +539,12 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
 
     if command == "history":
         try:
-            data = migrate_archived_recommendation_points(
+            data = preview_archived_recommendation_point_migration(
                 store,
                 args.source_root,
                 context["artifact_root"],
                 market=args.market.upper(),
                 account=args.account,
-                apply=False,
             )
         except CorpusError as exc:
             raise AgentToolError(code=exc.reason_code, message=str(exc)) from exc

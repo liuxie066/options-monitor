@@ -458,9 +458,11 @@ MVP 种子实验在用户确认前展示以下实验卡：
    缺日不得用更早日期替换。
 2. 完整交易日必须包含当天全部正式推荐点；HK / lx 当前为 12 个，半日市按交易日历和对应
    scheduler 合同确定实际有效点。点数不是交易日数，任一预期点缺失时整日不得进入 20 日样本。
-3. 实施时对现有 `output_runs`、Research Archive、Shadow Replay、performance evidence 和 Top1
-   corpus 做幂等历史迁移。只有能够证明 scheduler 点身份、候选事实、当时持仓、事实时点 mark、FX
-   和来源 hash 的旧数据才能生成正式研究点；迁移不得改写源 artifact，也不得伪造缺失事实。
+3. 实施时先对现有 `output_runs`、Research Archive、Shadow Replay、performance evidence 和 Top1
+   corpus 做只读历史迁移审计。只有能够证明 scheduler 点身份、候选事实、当时持仓、事实时点 mark、
+   FX 和来源 hash 的旧数据才能成为 `ready`；只有存在 `ready` 点时才增加并执行显式、幂等的 apply。
+   全部为 gap 时，preview 和逐点 gap 清单即为本轮迁移审计结果，不增加无效写入口；任何迁移都不得
+   改写源 artifact 或伪造缺失事实。
 4. 复用 Research Archive 和 Shadow Replay 的来源引用及内容 hash，不复制完整 candidate snapshot、
    option chain 或 provider payload，也不创建第二套归档。
 5. baseline 和所有 challenger 共享相同窗口、point ids 和输入事实，并调用同一个 Canonical
@@ -777,10 +779,11 @@ Strategy Lab corpus。MVP 直接读取紧凑 JSON，不为这些小型逐点事�
 补充当前能够验证的事实，不能补造当时的推荐点、账户状态、通知或交易。缺失和冲突必须写入
 状态及回执，不能解释为零效果。
 
-历史迁移必须可预览、显式执行、幂等，并保留原始 artifact。迁移器只能转换旧归档中已经存在且
-可校验的 scheduler decision、candidate snapshot、持仓、mark、FX 和 outcome；不得用开仓权利金、
-当天最后一次报价、当前持仓或当前 FX 替代缺失的事实时点证据。迁移后仍不完整的点记录稳定 gap
-原因；只有缺少当前 recipe 必需事实时，对应交易日才不得计入该 recipe 的正式样本。
+历史迁移必须先提供零写入 preview，并保留原始 artifact。preview 只能把旧归档中已经存在且可校验的
+scheduler decision、candidate snapshot、持仓、mark、FX 和 outcome 标为 `ready`；不得用开仓权利金、
+当天最后一次报价、当前持仓或当前 FX 替代缺失的事实时点证据。只有 `ready > 0` 时才建设并执行显式、
+幂等的 apply；`ready = 0` 时以 preview 和稳定 gap 原因完成审计，不增加空写入流程。只有缺少当前
+recipe 必需事实时，对应交易日才不得计入该 recipe 的正式样本。
 
 ### 15.3 状态与回执保留
 
@@ -814,7 +817,8 @@ Strategy Lab 永远不得写生产策略配置、交易、持仓、broker state 
 - 实现第 11 节通用 Top1 评价合同，只比较年化收益率变化和收益金额变化；
 - 将现有行情证据采集接入全部正式推荐点，保存 15.1 定义的紧凑事实；普通扫描和通知在实验
   取证失败时继续运行；
-- 对已有归档执行一次可预览、幂等的历史迁移，复用可验证事实并输出逐点迁移 / gap 清单；
+- 对已有归档执行一次零写入历史迁移审计，输出逐点 ready / conflict / gap 清单；只有存在 ready 点时
+  才增加并执行幂等 apply；
 - 对真实来源完成最近 20 个有效交易日研究，不伪造或替换缺日；
 - 没有可信 `research_leader` 时生成 Research Receipt 并停止；
 - 有可信 leader 时，经第二次确认完成未来 10 个正式推荐日隐藏验证；
@@ -905,7 +909,7 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 | 20 / 10 日内核 | Top1 已有冻结 spec、研究授权、`research_leader`、隐藏窗口、未来点采集、outcome 和终态回执代码及测试 | 在真实来源上完成一次 20 日研究和后续 10 日隐藏验证 | 复用现有内核；代码和测试存在不等于 MVP 已通过，必须以真实 Research Receipt 和 Final Receipt 验收 |
 | 数据组织 | Top1 store 已保存 experiment、generation、corpus day / point、validation 和 outcome 状态，并引用文件 artifact | 只保存恢复、审计和回执所需状态；Research Archive、Shadow Replay 和 provider 原始事实不重复落盘 | 保留必要索引、hash 和状态；若 corpus 表保存了其他 owner 已持有的事实副本，则改为引用并删除重复 payload |
 | 正式点事实 | 正式点入口已存在，但 ordinary scheduled tick 只持续写 FX，未把现有期权 mark collector 接入全部正式点；旧 opening snapshot 包含候选行情但没有形成可长期读取的紧凑逐点合同 | 每个正式点都有 accepted candidate 行情、当时未平仓期权 mark 和 FX 绑定；失败只降级实验取证 | 复用现有 collector、performance-evidence repository、opening snapshot、ranking projection 和 point/corpus；不增加表、服务、timer 或 receipt |
-| 历史迁移 | 旧 run、Shadow Replay、performance evidence 和 v1 / v2 artifact 分散存在，当前严格研究读取不会转换其中可验证事实 | 升级后优先复用历史数据，无法证明的点明确为 gap，不要求每次从零积累 | 在现有 corpus owner 增加显式 preview/apply 的幂等转换；不改写旧 run，不使用当前值回填 |
+| 历史迁移 | 旧 run、Shadow Replay、performance evidence 和 v1 / v2 artifact 分散存在，当前严格研究读取不会转换其中可验证事实 | 先审计全部历史数据；存在 ready 点时迁入，无法证明的点明确为 gap | 在现有 corpus owner 保留零写入 preview；仅当 ready > 0 时增加显式幂等 apply，不改写旧 run，不使用当前值回填 |
 | 账户功能开关 | `strategy_lab_features`、`user_opt_in`、`feature.status`、readiness blocker 和停用 reconcile 共同控制账户级启停 | Strategy Lab 不是账户可选实验室功能；`disabled` 只表示服务故障或运维安全停机 | 按 19.2 删除整条 feature gate 链，不保留兼容别名 |
 | 调度推进 | `advance_scheduled` 已组合推荐点采集、fill、outcome 和终态推进，并与 feature gate 及服务配置耦合 | 实验状态由服务端持续推进，Codex 断开不影响；MVP 不新增调度器 | 复用现有 advance，删除 feature gate 分支，只保留实验生命周期所需调度 |
 | 评价逻辑 | Sell Put Top1 已计算每个 arm 的原币 `economic_pnl` 和 `efficiency`，当前集中度是股票与 Short Put 潜在接货暴露口径，没有本 case 所需的期权市场集中度指标和 0.2 / 0.4 / 0.6 参数化排序；最终判断也只使用资金效率差 | 增加版本化 `option_market_concentration_after.v1`，并使用第 11 节通用合同比较年化收益率和 CNY 收益金额 | 复用现有持仓、mark、FX、经济计算与统计 owner；在 Candidate Engine 拥有边界增加冻结阈值和新指标排序，补充 CNY 分母、损益 delta 和回执证据；不新建 FX 存储、通用公式 DSL 或平行评价器 |
@@ -943,7 +947,8 @@ MVP 只有在真实完成一次 20 日研究和后续 10 日隐藏验证并生�
 3. 20 日研究使用真实、连续、可验证的有效交易日和冻结来源，不伪造或替换缺日；
 4. HK / lx 完整日的 12 个正式推荐点均按同一 scheduler expectation 进入或明确缺失；任一预期点
    缺失时整日不计入样本，半日市按交易日历校验；
-5. 已有归档完成幂等迁移并输出迁移 / gap 清单；缺失的历史 mark、Bid / Ask、持仓或 FX 未被补造；
+5. 已有归档完成零写入迁移审计并输出 ready / conflict / gap 清单；只有存在 ready 点时才完成幂等
+   apply；缺失的历史 mark、Bid / Ask、持仓或 FX 未被补造；
 6. 研究只执行已支持的候选范围；事实或能力不足时返回明确状态和原因；
 7. 至少一次真实 20 日研究按第 11 节冻结的评价合同产生可信 `research_leader`；
 8. 用户第二次确认后，隐藏验证完整使用之后 10 个正式推荐日，不泄露中间效果；
