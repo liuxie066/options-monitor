@@ -146,11 +146,17 @@ def _snapshot(**overrides):  # type: ignore[no-untyped-def]
         "code": "US.NVDA260821P00170000",
         "bid_price": 1.0,
         "ask_price": 1.2,
+        "bid_vol": 4,
+        "ask_vol": 6,
         "last_price": 1.1,
         "update_time": "2026-08-06 10:59:00",
         "price_spread": 0.01,
         "option_implied_volatility": 25.0,
         "option_delta": -0.2,
+        "option_gamma": 0.03,
+        "option_theta": -0.04,
+        "option_vega": 0.08,
+        "option_rho": -0.01,
         "option_open_interest": 0,
         "volume": 0,
         "option_contract_size": 100,
@@ -178,6 +184,12 @@ def test_option_observation_preserves_zero_optional_values_and_normalizes_iv_onl
     assert observation.snapshot_age_seconds == 1.0
     assert observation.implied_volatility == 0.25
     assert observation.delta == -0.2
+    assert observation.bid_volume == 4
+    assert observation.ask_volume == 6
+    assert observation.gamma == 0.03
+    assert observation.theta == -0.04
+    assert observation.vega == 0.08
+    assert observation.rho == -0.01
     assert observation.open_interest == 0
     assert observation.volume == 0
     assert observation.price_tick == 0.01

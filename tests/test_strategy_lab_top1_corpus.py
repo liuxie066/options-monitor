@@ -26,12 +26,14 @@ from src.application.strategy_lab.top1.corpus import (
     CORPUS_COMMAND_RESULT_SCHEMA,
     CORPUS_STATUS_SCHEMA,
     DATASET_FREEZE_RESULT_SCHEMA,
+    HISTORY_MIGRATION_PREVIEW_SCHEMA,
     RESEARCH_WINDOW_FACTS_SCHEMA,
     SEALED_HISTORICAL_DATASET_SCHEMA,
     CorpusError,
     capture_recommendation_point,
     discover_recommendation_points,
     freeze_research_dataset,
+    migrate_archived_recommendation_points,
     read_market_calendar_binding,
     read_corpus_status,
     refresh_market_calendar_binding,
@@ -586,6 +588,111 @@ def test_point_discovery_uses_the_validated_point_clock(tmp_path: Path) -> None:
             "trading_date": "2026-07-21",
         }
     ]
+
+
+def test_history_migration_preview_reports_duplicate_identities_without_writes(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "archive"
+    target = "2026-07-21T10:00:00+08:00"
+    runs = {
+        "run-a": target,
+        "run-b": target,
+        "run-c": None,
+        "run-d": "2026-07-21T10:30:00+08:00",
+    }
+    inventory_rows = []
+    for run_id, scheduled_target in runs.items():
+        state_dir = source_root / "output_runs" / run_id / "state"
+        (state_dir.parent / "accounts" / "lx").mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        decision = {
+            "should_run_scan": True,
+            "scheduled_scan_target_market": scheduled_target,
+            "now_market": "2026-07-21T10:00:30+08:00",
+        }
+        (state_dir / "scheduler_decision.json").write_text(
+            json.dumps({"payload": {"decision": decision}}),
+            encoding="utf-8",
+        )
+        inventory_rows.append(
+            {
+                "run_id": run_id,
+                "verified": True,
+                "source_content_verified": True,
+                "candidate_evidence": {
+                    "accounts": [
+                        {
+                            "account": "lx",
+                            "status": "unsupported_snapshot_schema",
+                            "reason_code": "legacy_status_index_invalid",
+                        }
+                    ]
+                },
+            }
+        )
+    manifests = source_root / "manifests"
+    manifests.mkdir()
+    (manifests / "inventory.latest.json").write_text(
+        json.dumps(
+            {"schema_version": "research_archive.v2", "runs": inventory_rows}
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(source_root).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    store_path = tmp_path / "strategy-lab.sqlite3"
+    artifact_root = tmp_path / "artifacts"
+
+    preview = migrate_archived_recommendation_points(
+        ExperimentStore(store_path),
+        source_root,
+        artifact_root,
+        market="HK",
+        account="lx",
+    )
+
+    assert preview["schema_version"] == HISTORY_MIGRATION_PREVIEW_SCHEMA
+    assert preview["operation"] == "preview"
+    assert preview["source_run_count"] == 4
+    assert preview["point_identity_count"] == 2
+    assert preview["unidentified_run_count"] == 1
+    assert preview["preview_item_count"] == 3
+    assert preview["counts"] == {
+        "ready": 0,
+        "idempotent": 0,
+        "conflict": 0,
+        "gap": 3,
+    }
+    assert preview["estimated_incremental_bytes"] == 0
+    assert {item["evidence_reason_code"] for item in preview["items"]} == {
+        "duplicate_scheduler_identity",
+        "scheduler_identity_missing",
+        "legacy_status_index_invalid",
+    }
+    assert not store_path.exists()
+    assert not artifact_root.exists()
+    assert before == {
+        path.relative_to(source_root).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(CorpusError, match="apply is not available"):
+        migrate_archived_recommendation_points(
+            ExperimentStore(store_path),
+            source_root,
+            artifact_root,
+            market="HK",
+            account="lx",
+            apply=True,
+        )
 
 
 def test_expectation_is_immutable_idempotent_and_conflict_marked(

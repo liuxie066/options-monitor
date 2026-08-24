@@ -23,6 +23,7 @@ from src.application.strategy_lab.top1.capability_receipts import (
 )
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
+    migrate_archived_recommendation_points,
     read_corpus_status,
     read_market_calendar_binding,
     refresh_market_calendar_binding,
@@ -116,6 +117,16 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
         "readiness", help="show source-delivery and validation-runtime blockers"
     )
     _add_identity(readiness)
+
+    history = commands.add_parser("history", help="inspect archived recommendation points")
+    history_commands = history.add_subparsers(required=True)
+    history_migrate = history_commands.add_parser("migrate")
+    history_migrate_commands = history_migrate.add_subparsers(
+        dest="top1_history_migrate_command", required=True
+    )
+    history_preview = history_migrate_commands.add_parser("preview")
+    _add_identity(history_preview)
+    history_preview.add_argument("--source-root", required=True)
 
     research = commands.add_parser("research", help="preview or start the 20-day research")
     research_commands = research.add_subparsers(
@@ -525,6 +536,24 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     store = ExperimentStore(context["store_path"])
+
+    if command == "history":
+        try:
+            data = migrate_archived_recommendation_points(
+                store,
+                args.source_root,
+                context["artifact_root"],
+                market=args.market.upper(),
+                account=args.account,
+                apply=False,
+            )
+        except CorpusError as exc:
+            raise AgentToolError(code=exc.reason_code, message=str(exc)) from exc
+        return build_response(
+            tool_name="research.strategy-lab.top1-loop.history.migrate.preview",
+            ok=True,
+            data=data,
+        )
 
     if command == "research":
         if args.top1_research_command == "start" and not args.write:

@@ -239,6 +239,8 @@ class OpeningOptionObservation:
     reason_codes: tuple[str, ...]
     bid: float | None
     ask: float | None
+    bid_volume: float | None
+    ask_volume: float | None
     last_price: float | None
     last_price_update_time: str | None
     last_price_observed_at_utc: str | None
@@ -250,6 +252,10 @@ class OpeningOptionObservation:
     price_tick: float | None
     implied_volatility: float | None
     delta: float | None
+    gamma: float | None
+    theta: float | None
+    vega: float | None
+    rho: float | None
     open_interest: float | None
     volume: float | None
     option_standard_type: str | None
@@ -300,6 +306,8 @@ def normalize_option_observation(
     sec_status = _enum(snapshot.get("sec_status")) or None
     bid = _finite_float(snapshot.get("bid_price", snapshot.get("bid")))
     ask = _finite_float(snapshot.get("ask_price", snapshot.get("ask")))
+    bid_volume = _finite_float(snapshot.get("bid_vol", snapshot.get("bid_volume")))
+    ask_volume = _finite_float(snapshot.get("ask_vol", snapshot.get("ask_volume")))
     last_price = _finite_float(snapshot.get("last_price"))
     raw_update_time = _text(snapshot.get("update_time")) or None
     decision_at = _utc_now(now_utc)
@@ -337,6 +345,10 @@ def normalize_option_observation(
     )
     implied_volatility = normalize_iv(raw_iv)
     delta = _finite_float(snapshot.get("option_delta", snapshot.get("delta")))
+    gamma = _finite_float(snapshot.get("option_gamma", snapshot.get("gamma")))
+    theta = _finite_float(snapshot.get("option_theta", snapshot.get("theta")))
+    vega = _finite_float(snapshot.get("option_vega", snapshot.get("vega")))
+    rho = _finite_float(snapshot.get("option_rho", snapshot.get("rho")))
     open_interest = _finite_float(
         snapshot.get("option_open_interest", snapshot.get("open_interest"))
     )
@@ -440,6 +452,8 @@ def normalize_option_observation(
         reason_codes=reason_codes,
         bid=bid,
         ask=ask,
+        bid_volume=bid_volume,
+        ask_volume=ask_volume,
         last_price=last_price,
         last_price_update_time=raw_update_time,
         last_price_observed_at_utc=(
@@ -463,6 +477,10 @@ def normalize_option_observation(
         price_tick=price_tick,
         implied_volatility=implied_volatility,
         delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
+        rho=rho,
         open_interest=open_interest,
         volume=volume,
         option_standard_type=standard_type,
