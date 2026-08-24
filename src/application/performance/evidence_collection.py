@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -95,9 +95,7 @@ def collect_current_performance_evidence(
         if existing is None or (not existing.market_code and position.market_code):
             unique_options_by_key[key] = position
     unique_options = tuple(
-        position
-        for key, position in unique_options_by_key.items()
-        if key not in conflicting_option_keys
+        position for key, position in unique_options_by_key.items() if key not in conflicting_option_keys
     )
     rows: list[dict[str, Any]] = []
     if unique_options:
@@ -124,9 +122,14 @@ def collect_current_performance_evidence(
             continue
         price, mark_kind, mark_error = _option_mark(row)
         if price is None:
-            diagnostics.append(_diag("option_mark_missing", lot_id=position.lot_id, contract_code=code, error=mark_error))
+            diagnostics.append(
+                _diag("option_mark_missing", lot_id=position.lot_id, contract_code=code, error=mark_error)
+            )
             continue
-        effective_at_ms, timestamp_fallback = _snapshot_timestamp_ms(row, fallback_ms=instant)
+        effective_at_ms, observed_at_ms, timestamp_fallback = _snapshot_capture_times_ms(
+            row,
+            fallback_ms=instant,
+        )
         quality = {"persistence": "live_unpersisted"}
         if timestamp_fallback:
             quality["timestamp_fallback"] = True
@@ -137,9 +140,9 @@ def collect_current_performance_evidence(
                 price=price,
                 mark_kind=mark_kind,
                 effective_at_ms=effective_at_ms,
-                observed_at_ms=instant,
+                observed_at_ms=observed_at_ms,
                 source="realtime_snapshot",
-                source_id=f"{code}:{effective_at_ms}",
+                source_id=f"{code}:{observed_at_ms}",
                 revision=1,
                 quality=quality,
                 raw=_json_safe(dict(row)),
@@ -225,7 +228,7 @@ def collect_current_performance_evidence(
                         source=source,
                         source_id=f"{currency}CNY:{effective_at_ms}",
                         quality=quality,
-                raw=_json_safe(dict(fx_payload)),
+                        raw=_json_safe(dict(fx_payload)),
                     )
                 )
 
@@ -262,65 +265,59 @@ def _default_option_snapshot_rows(
     port = int(cfg.get("opend_port") or cfg.get("port") or 11111)
     limits = resolve_opend_fetch_limits(dict(cfg))
     batch = resolve_opend_batch_config(dict(cfg))
+    code_by_key = {
+        position.instrument.instrument_key: position.market_code for position in positions if position.market_code
+    }
+    unresolved_by_symbol: dict[str, list[OptionValuationPosition]] = {}
+    for position in positions:
+        if not position.market_code:
+            unresolved_by_symbol.setdefault(position.instrument.symbol, []).append(position)
     gateway = build_ready_futu_quote_gateway(host=host, port=port, is_option_chain_cache_enabled=False)
     try:
-        code_by_key: dict[str, str] = {}
-        chain_row_by_key: dict[str, dict[str, Any]] = {}
-        unresolved_by_symbol: dict[str, list[OptionValuationPosition]] = {}
-        ambiguity_rows: list[dict[str, Any]] = []
-        for position in positions:
-            key = position.instrument.instrument_key
-            if position.market_code:
-                code_by_key[key] = position.market_code
-            else:
-                unresolved_by_symbol.setdefault(position.instrument.symbol, []).append(position)
-
         for symbol, symbol_positions in sorted(unresolved_by_symbol.items()):
             underlier = normalize_underlier(symbol, base_dir=root)
-            expirations = sorted({item.instrument.expiration_ymd for item in symbol_positions})
-            option_types = ",".join(sorted({item.instrument.option_type for item in symbol_positions}))
             chain = fetch_option_chains(
                 gateway=gateway,
                 request=OptionChainFetchRequest(
                     symbol=symbol,
                     underlier_code=underlier.code,
-                    expirations=expirations,
+                    expirations=sorted({item.instrument.expiration_ymd for item in symbol_positions}),
                     host=host,
                     port=port,
-                    option_types=option_types,
+                    option_types=",".join(sorted({item.instrument.option_type for item in symbol_positions})),
                     base_dir=root,
                     asof_date=get_trading_date(underlier.market).isoformat(),
-                    freshness_policy="force_refresh",
-                    chain_cache=False,
-                    max_wait_sec=limits.option_chain.max_wait_sec,
+                    freshness_policy="cache_first",
+                    chain_cache=True,
+                    max_wait_sec=0.0,
                     window_sec=limits.option_chain.window_sec,
                     max_calls=limits.option_chain.max_calls,
+                    no_retry=True,
                 ),
                 retry_call=retry_futu_gateway_call,
             )
             chain_rows = [dict(item) for item in chain.rows if isinstance(item, Mapping)]
             for position in symbol_positions:
-                key = position.instrument.instrument_key
                 candidates = [row for row in chain_rows if _row_matches_position(row, position)]
                 if len(candidates) == 1:
                     code = str(candidates[0].get("code") or candidates[0].get("contract_symbol") or "").strip()
                     if code:
-                        code_by_key[key] = code
-                        chain_row_by_key[key] = candidates[0]
-                elif len(candidates) > 1:
-                    ambiguity_rows.extend({**row, "_requested_instrument_key": key} for row in candidates)
+                        code_by_key[position.instrument.instrument_key] = code
 
         exact_codes = sorted(set(code_by_key.values()))
+        if not exact_codes:
+            return []
         snapshots = fetch_option_snapshots(
             option_codes=exact_codes,
             gateway=gateway,
-            snapshot_limit=limits.market_snapshot,
+            snapshot_limit=replace(limits.market_snapshot, max_wait_sec=0.0),
             base_dir=root,
             snapshot_batch_size=batch.market_snapshot,
-            snapshot_fallback_max_codes=batch.market_snapshot_fallback_max_codes,
+            snapshot_fallback_max_codes=0,
             snapshot_fallback_batch_size=batch.market_snapshot_fallback_batch_size,
+            no_retry=True,
         )
-        out = list(ambiguity_rows)
+        out = []
         for position in positions:
             key = position.instrument.instrument_key
             code = code_by_key.get(key)
@@ -328,10 +325,11 @@ def _default_option_snapshot_rows(
                 continue
             out.append(
                 {
-                    **chain_row_by_key.get(key, {}),
                     **dict(snapshots.snap_map.get(code) or {}),
                     "code": code,
                     "_requested_instrument_key": key,
+                    "_snapshot_requested_at_utc": snapshots.requested_at_utc,
+                    "_snapshot_received_at_utc": snapshots.received_at_utc,
                 }
             )
         return out
@@ -435,6 +433,37 @@ def _snapshot_timestamp_ms(payload: Mapping[str, Any], *, fallback_ms: int) -> t
         except ValueError:
             continue
     return int(fallback_ms), True
+
+
+def _snapshot_capture_times_ms(
+    payload: Mapping[str, Any],
+    *,
+    fallback_ms: int,
+) -> tuple[int, int, bool]:
+    requested_at_ms = _aware_datetime_ms(payload.get("_snapshot_requested_at_utc"))
+    received_at_ms = _aware_datetime_ms(payload.get("_snapshot_received_at_utc"))
+    if requested_at_ms is None and received_at_ms is None:
+        return int(fallback_ms), int(fallback_ms), True
+    effective_at_ms = requested_at_ms or received_at_ms
+    observed_at_ms = received_at_ms or requested_at_ms
+    assert effective_at_ms is not None and observed_at_ms is not None
+    if observed_at_ms < effective_at_ms:
+        return int(fallback_ms), int(fallback_ms), True
+    return effective_at_ms, observed_at_ms, False
+
+
+def _aware_datetime_ms(value: Any) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    timestamp_ms = int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+    return timestamp_ms if timestamp_ms > 0 else None
 
 
 def _diag(code: str, **details: Any) -> dict[str, Any]:

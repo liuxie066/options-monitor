@@ -805,6 +805,11 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
     if (
         request.delivery_only
         or str(request.trigger_kind or "manual").strip().lower() != "scheduled"
+        or {
+            str(market or "").strip().lower()
+            for market in request.markets_to_run
+        }
+        != {"hk"}
         or not strategy_lab_top1_available()
     ):
         return
@@ -816,6 +821,8 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
         for raw_account in request.ran_pipeline_accounts
     )
     for account in ran_accounts:
+        if account != "lx":
+            continue
         decision = decisions.get(account)
         committed_target = _canonical_recommendation_target(targets.get(account))
         scheduler_target = _canonical_recommendation_target(

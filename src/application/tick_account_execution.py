@@ -612,12 +612,18 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     tuple(
                         account
                         for account in sorted(scanning_configs)
-                        if scheduled_scan_targets_by_account.get(account)
+                        if account == "lx"
+                        and scheduled_scan_targets_by_account.get(account)
                     )
                     if (
                         not request.smoke
                         and str(request.trigger_kind or "").strip().lower()
                         == "scheduled"
+                        and {
+                            str(market or "").strip().lower()
+                            for market in request.markets_to_run
+                        }
+                        == {"hk"}
                         and strategy_lab_top1_available()
                     )
                     else ()
