@@ -722,6 +722,12 @@ recommendation point、opening snapshot 和 ranking projection。任一预期点
 `ready`，其余点明确为 gap。只有真实 preview 首次出现 ready 点时才增加幂等 apply；缺失事实继续
 fail closed，不使用 OpenD 补造历史。
 
+若 migration preview 没有 `ready` 点，gap 不得计入研究，也不得通过补造事实降低证据标准；
+研究方可改为重新积累正式点 corpus。研究冻结只接受截至最新成熟日的连续 20 个交易日：每天的
+expectation 必须在首个预期点前封存，全部预期点均须无冲突、已捕获且引用证据可校验。任一日缺失、
+冲突或不可评估都会阻断整个窗口，不得跳过该日拼接样本。积累 corpus 本身不创建实验，也不启动
+研究或隐藏验证；满足 20 日窗口后，仍需独立人工确认才能开始研究。
+
 已确认的统一平台 MVP 后续方案见
 `STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md` 第 10.3、15 节和
 `STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md` 第 3.2、7.2 节：复用现有 corpus owner
