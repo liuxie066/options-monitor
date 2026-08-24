@@ -564,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
         runlog=runlog,
         audit_helper=audit_helper,
         symbols_arg=symbols_arg,
+        trigger_kind=trigger_kind,
     )
     account_execution = run_tick_account_execution(account_execution_request)
     tick_metrics['accounts'].extend(account_execution.account_metrics)

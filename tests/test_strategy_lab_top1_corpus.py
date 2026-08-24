@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -25,12 +26,14 @@ from src.application.strategy_lab.top1.corpus import (
     CORPUS_COMMAND_RESULT_SCHEMA,
     CORPUS_STATUS_SCHEMA,
     DATASET_FREEZE_RESULT_SCHEMA,
+    HISTORY_MIGRATION_PREVIEW_SCHEMA,
     RESEARCH_WINDOW_FACTS_SCHEMA,
     SEALED_HISTORICAL_DATASET_SCHEMA,
     CorpusError,
     capture_recommendation_point,
     discover_recommendation_points,
     freeze_research_dataset,
+    migrate_archived_recommendation_points,
     read_market_calendar_binding,
     read_corpus_status,
     refresh_market_calendar_binding,
@@ -39,11 +42,11 @@ from src.application.strategy_lab.top1.corpus import (
 )
 from src.application.strategy_lab.top1.lifecycle import (
     build_hidden_window_commitment,
-    set_account_opt_in,
 )
 from src.application.strategy_lab.top1.ranking import Top1RankingError
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 from tests.candidate_evidence_helpers import (
+    CONFIG_HASH,
     seal_market_calendar_fixture,
     seal_opening_candidate_fixture,
 )
@@ -135,17 +138,7 @@ def _store(tmp_path: Path) -> ExperimentStore:
 
 
 def _enable(store: ExperimentStore, artifact_root: Path) -> None:
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc="2026-07-20T00:00:00Z",
-        idempotency_key="enable-corpus",
-        artifact_root=artifact_root,
-        environ=AVAILABLE,
-    )
+    del store, artifact_root
 
 
 def _target_for(day: str, *, hour: int = 10, minute: int = 0) -> str:
@@ -205,6 +198,7 @@ def _seal(
     day: str,
     sealed_at: str | None = None,
     schedule: dict[str, Any] | None = None,
+    environ: dict[str, str] | None = AVAILABLE,
 ) -> dict[str, Any]:
     return seal_day_expectation(
         store,
@@ -216,7 +210,7 @@ def _seal(
         market_calendar_version="hk-calendar.fixture.v1",
         market_calendar_sha256=CALENDAR_HASH,
         sealed_at_utc=sealed_at or f"{day}T01:00:00Z",
-        environ=AVAILABLE,
+        environ=environ,
     )
 
 
@@ -266,7 +260,7 @@ def _rehash(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> None:
+def test_target_wrapper_and_service_off_are_side_effect_free(tmp_path: Path) -> None:
     assert [
         target.isoformat()
         for target in scheduled_scan_targets_for_date(_schedule(), "2026-07-21")
@@ -295,12 +289,12 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
 
     store = _store(tmp_path)
     artifact_root = tmp_path / "artifacts"
-    result = _seal(store, artifact_root, day="2026-07-21")
+    result = _seal(store, artifact_root, day="2026-07-21", environ={})
     assert result == {
         "schema_version": CORPUS_COMMAND_RESULT_SCHEMA,
         "operation": "seal_day_expectation",
         "status": "not_evaluable",
-        "reason_code": "feature_disabled",
+        "reason_code": "strategy_lab_service_disabled",
         "market": "HK",
         "account": "lx",
         "trading_date": "2026-07-21",
@@ -326,11 +320,11 @@ def test_target_wrapper_and_feature_off_are_side_effect_free(tmp_path: Path) -> 
         point_ref=point_ref,
         trading_date="2026-07-21",
         captured_at_utc="2026-07-21T02:01:00Z",
-        environ=AVAILABLE,
+        environ={},
     )
     assert (capture["status"], capture["reason_code"]) == (
         "not_evaluable",
-        "feature_disabled",
+        "strategy_lab_service_disabled",
     )
     assert store.corpus_point("HK", "lx", point["recommendation_point_id"]) is None
     with pytest.raises(CorpusError) as raised:
@@ -596,6 +590,111 @@ def test_point_discovery_uses_the_validated_point_clock(tmp_path: Path) -> None:
     ]
 
 
+def test_history_migration_preview_reports_duplicate_identities_without_writes(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "archive"
+    target = "2026-07-21T10:00:00+08:00"
+    runs = {
+        "run-a": target,
+        "run-b": target,
+        "run-c": None,
+        "run-d": "2026-07-21T10:30:00+08:00",
+    }
+    inventory_rows = []
+    for run_id, scheduled_target in runs.items():
+        state_dir = source_root / "output_runs" / run_id / "state"
+        (state_dir.parent / "accounts" / "lx").mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        decision = {
+            "should_run_scan": True,
+            "scheduled_scan_target_market": scheduled_target,
+            "now_market": "2026-07-21T10:00:30+08:00",
+        }
+        (state_dir / "scheduler_decision.json").write_text(
+            json.dumps({"payload": {"decision": decision}}),
+            encoding="utf-8",
+        )
+        inventory_rows.append(
+            {
+                "run_id": run_id,
+                "verified": True,
+                "source_content_verified": True,
+                "candidate_evidence": {
+                    "accounts": [
+                        {
+                            "account": "lx",
+                            "status": "unsupported_snapshot_schema",
+                            "reason_code": "legacy_status_index_invalid",
+                        }
+                    ]
+                },
+            }
+        )
+    manifests = source_root / "manifests"
+    manifests.mkdir()
+    (manifests / "inventory.latest.json").write_text(
+        json.dumps(
+            {"schema_version": "research_archive.v2", "runs": inventory_rows}
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(source_root).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    store_path = tmp_path / "strategy-lab.sqlite3"
+    artifact_root = tmp_path / "artifacts"
+
+    preview = migrate_archived_recommendation_points(
+        ExperimentStore(store_path),
+        source_root,
+        artifact_root,
+        market="HK",
+        account="lx",
+    )
+
+    assert preview["schema_version"] == HISTORY_MIGRATION_PREVIEW_SCHEMA
+    assert preview["operation"] == "preview"
+    assert preview["source_run_count"] == 4
+    assert preview["point_identity_count"] == 2
+    assert preview["unidentified_run_count"] == 1
+    assert preview["preview_item_count"] == 3
+    assert preview["counts"] == {
+        "ready": 0,
+        "idempotent": 0,
+        "conflict": 0,
+        "gap": 3,
+    }
+    assert preview["estimated_incremental_bytes"] == 0
+    assert {item["evidence_reason_code"] for item in preview["items"]} == {
+        "duplicate_scheduler_identity",
+        "scheduler_identity_missing",
+        "legacy_status_index_invalid",
+    }
+    assert not store_path.exists()
+    assert not artifact_root.exists()
+    assert before == {
+        path.relative_to(source_root).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(CorpusError, match="apply is not available"):
+        migrate_archived_recommendation_points(
+            ExperimentStore(store_path),
+            source_root,
+            artifact_root,
+            market="HK",
+            account="lx",
+            apply=True,
+        )
+
+
 def test_expectation_is_immutable_idempotent_and_conflict_marked(
     tmp_path: Path,
 ) -> None:
@@ -743,6 +842,113 @@ def test_clean_point_capture_copies_only_the_rankable_projection(
     assert store.corpus_point(
         "HK", "lx", point["recommendation_point_id"]
     )["conflict_status"] == "conflict"
+
+
+def test_v2_point_capture_loads_its_bound_option_market_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import recommendation_point as recommendation_mod
+    from src.application.strategy_lab.top1 import corpus as corpus_mod
+
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    source_root = tmp_path / "source"
+    day = "2026-07-21"
+    run_id = "strict-v2-corpus-point"
+    assert _seal(store, artifact_root, day=day)["status"] == "published"
+    candidate = {**_candidate(), "currency": "CNY"}
+    seal_opening_candidate_fixture(
+        source_root,
+        run_id=run_id,
+        market="HK",
+        accepted_rows=[candidate],
+    )
+    evidence = {
+        "status": "ready",
+        "run_id": run_id,
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+        "evidence_at_utc": "2026-06-01T00:00:00Z",
+        "open_option_positions": [],
+        "valuation_mark_facts": [],
+        "fx_rate_facts": [],
+    }
+    evidence["content_sha256"] = canonical_sha256(evidence)
+    payload = {"strategy_lab_option_market_evidence": evidence}
+    payload_bytes = (
+        json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode()
+    manifest = {
+        "schema_version": "prepared_option_positions_context.v2",
+        "status": "ready",
+        "run_id": run_id,
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+        "application_received_at_utc": "2026-06-01T00:00:00Z",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+    }
+    receipt = {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": (
+            json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode(),
+        "payload_bytes": payload_bytes,
+    }
+    prepared_manifest = source_root / "prepared_option_positions_context.v2.json"
+    monkeypatch.setattr(
+        recommendation_mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: prepared_manifest,
+    )
+    monkeypatch.setattr(
+        recommendation_mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
+    )
+    publication, point = capture_scheduled_recommendation_point(
+        source_root,
+        run_id,
+        "lx",
+        _scheduler(day),
+        source_commit_sha=SOURCE_SHA,
+        require_option_market_evidence=True,
+    )
+    assert publication == "published"
+
+    monkeypatch.setattr(
+        corpus_mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: prepared_manifest,
+    )
+    monkeypatch.setattr(
+        corpus_mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
+    )
+    captured = capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=(
+            f"output_runs/{run_id}/accounts/lx/state/{RECOMMENDATION_POINT_FILE}"
+        ),
+        trading_date=day,
+        captured_at_utc="2026-07-21T02:01:00Z",
+        environ=AVAILABLE,
+    )
+
+    assert captured["status"] == "published"
+    assert captured["recommendation_point_id"] == point["recommendation_point_id"]
+    projection = json.loads(
+        (artifact_root / str(captured["artifact_ref"])).read_text(encoding="utf-8")
+    )
+    assert projection["schema_version"] == "sell_put_ranking_projection.v2"
+    assert projection["candidates"][0]["option_market_concentration_after"] == 1.0
+    assert projection["candidates"][0]["option_market_evidence_refs"][
+        "prepared_evidence_content_sha256"
+    ] == evidence["content_sha256"]
 
 
 def test_capture_rejects_missing_late_and_unexpected_denominators(
@@ -1317,15 +1523,15 @@ def test_freeze_validates_window_facts_feature_gate_and_warming(
             )
         assert raised.value.reason_code == "corpus_input_invalid"
 
-    feature_off = freeze_research_dataset(
+    service_off = freeze_research_dataset(
         store,
         artifact_root,
         window_facts=facts,
-        environ=AVAILABLE,
+        environ={},
     )
-    assert (feature_off["status"], feature_off["reason_code"]) == (
+    assert (service_off["status"], service_off["reason_code"]) == (
         "blocked",
-        "feature_disabled",
+        "strategy_lab_service_disabled",
     )
     assert not (artifact_root / "strategy_lab/top1/corpus").exists()
 

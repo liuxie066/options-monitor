@@ -26,7 +26,7 @@ from src.application.strategy_lab.top1.lifecycle import (
     _command_fields,
     _derived_key,
     _recover_projection,
-    _require_effective,
+    _require_service_available,
     _segment,
 )
 from src.application.strategy_lab.top1.statistics import (
@@ -270,17 +270,8 @@ def settle_due_outcomes(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
+    _require_service_available(environ)
     experiment = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(experiment["market"]),
-        account=str(experiment["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
     if experiment["terminal_mode"] is not None:
         return {"status": "terminal", "processed": 0}
     now = _utc(occurred_at_utc)
@@ -622,17 +613,8 @@ def conclude_validation(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
+    _require_service_available(environ)
     initial = _call(store.experiment, experiment_id)
-    _require_effective(
-        store,
-        market=str(initial["market"]),
-        account=str(initial["account"]),
-        actor=actor,
-        occurred_at_utc=occurred_at_utc,
-        idempotency_key=idempotency_key,
-        artifact_root=artifact_root,
-        environ=environ,
-    )
     if initial["terminal_mode"] is not None:
         if initial["terminal_mode"] != "completed":
             _fail("terminal_conflict", "experiment was aborted")
@@ -751,7 +733,6 @@ def conclude_validation(
             post_generation,
             terminal_mode="completed",
             reason=None,
-            disabled_scope=None,
             occurred_at_utc=occurred_at_utc,
         )
         versions = {

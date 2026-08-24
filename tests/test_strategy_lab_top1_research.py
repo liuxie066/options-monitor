@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import SELL_PUT_RANKING_CONTRACT_VERSION
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
+from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -29,16 +29,11 @@ from src.application.shadow_replay.common import (
 )
 from src.application.strategy_lab.top1 import research as research_module
 from src.application.strategy_lab.top1.contracts import (
-    ACCEPTED_SET_CONTRACT_VERSION,
-    EXPERIMENT_SPEC_SCHEMA_VERSION,
-    EXPIRY_OUTCOME_CONTRACT_VERSION,
-    RESEARCH_METRIC_CONTRACT_VERSION,
     RESEARCH_REQUIRED_DAYS,
-    RESEARCH_SELECTION_CONTRACT_VERSION,
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
     VALIDATION_REQUIRED_DAYS,
-    build_behavior_binding,
+    build_sell_put_top1_research_spec,
 )
 from src.application.strategy_lab.top1.corpus import (
     RESEARCH_WINDOW_FACTS_SCHEMA,
@@ -53,13 +48,12 @@ from src.application.strategy_lab.top1.lifecycle import (
     prepare_experiment,
     record_generation_revision,
     seal_generation,
-    set_account_opt_in,
     start_research,
     start_validation,
 )
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_ARTIFACT_KIND,
-    RANKING_PROJECTION_SCHEMA_VERSION,
+    RANKING_PROJECTION_SCHEMA_V2,
     build_ranking_projection,
 )
 from src.application.strategy_lab.top1.research import (
@@ -110,11 +104,15 @@ TOP_LEVEL_KEYS = {
 VARIANT_KEYS = {
     "variant_id",
     "ranking_profile",
+    "near_return_threshold",
     "decision",
     "reason_codes",
     "required_days",
     "effective_days",
-    "mean_daily_delta",
+    "effective_point_count",
+    "mean_daily_annualized_return_delta",
+    "mean_daily_pnl_delta_cny",
+    "mean_daily_return_capital_basis_delta_cny",
     "sample_std",
     "standard_error",
     "t_critical",
@@ -123,7 +121,8 @@ VARIANT_KEYS = {
     "worst_tail_mean",
     "serial_correlation_unadjusted",
     "top1_change_count",
-    "daily_deltas",
+    "point_results",
+    "daily_results",
 }
 
 
@@ -224,6 +223,47 @@ def _base_projection(
         account="lx",
         require_current_contract=True,
     )
+    evidence = {
+        "status": "ready",
+        "run_id": run_id,
+        "account": "lx",
+        "account_config_sha256": snapshot["account_config_sha256"],
+        "evidence_at_utc": "2026-06-08T01:59:00Z",
+        "open_option_positions": [
+            {
+                "lot_id": "lot-0700",
+                "instrument_key": "0700-position",
+                "symbol": "0700.HK",
+                "currency": "HKD",
+                "multiplier": 100,
+                "contracts_open": 1,
+            }
+        ],
+        "valuation_mark_facts": [
+            {
+                "fact_id": "mark-0700",
+                "instrument_key": "0700-position",
+                "price": "1",
+            }
+        ],
+        "fx_rate_facts": [
+            {
+                "fact_id": "hkd-opening",
+                "base_currency": "HKD",
+                "quote_currency": "CNY",
+                "rate": "1",
+                "rate_kind": "fixture",
+                "effective_at_ms": 1,
+                "observed_at_ms": 1,
+                "source": "fixture",
+                "source_id": "hkd-opening",
+                "revision": 1,
+                "supersedes_fact_id": None,
+                "source_fact_sha256": "8" * 64,
+            }
+        ],
+    }
+    evidence["content_sha256"] = canonical_sha256(evidence)
     return build_ranking_projection(
         snapshot,
         point_binding={
@@ -238,7 +278,12 @@ def _base_projection(
             "opening_snapshot_sha256": snapshot["content_sha256"],
             "decision_at_utc": "2026-06-08T02:00:00Z",
             "source_commit_sha": SOURCE_SHA,
+            "option_market_evidence_ref": "fixture/option-market.json",
+            "option_market_evidence_manifest_sha256": "6" * 64,
+            "option_market_evidence_payload_sha256": "7" * 64,
         },
+        option_market_evidence=evidence,
+        require_option_market_evidence=True,
     )
 
 
@@ -268,44 +313,12 @@ def _spec(
     variants: tuple[tuple[str, str], ...],
     validation: bool = False,
 ) -> dict[str, Any]:
-    behavior = {
-        "baseline_version": "sell-put-baseline.v1",
-        "opening_snapshot_schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-        "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
-        "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
-        "research_selection_contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
-        "research_metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
-        "validation_fill_contract_version": VALIDATION_FILL_CONTRACT_VERSION,
-        "validation_metric_contract_version": VALIDATION_METRIC_CONTRACT_VERSION,
-        "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
-        "market_calendar_version": manifest["market_calendar_version"],
-        "expiry_outcome_contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
-    }
-    spec: dict[str, Any] = {
-        "schema_version": EXPERIMENT_SPEC_SCHEMA_VERSION,
-        "topic_id": "topic-concentration",
-        "experiment_id": "experiment-w5-evaluator",
-        "market": "HK",
-        "account": "lx",
-        "hypothesis": {
-            "hypothesis_type": "sell_put_ranking",
-            "statement": "Prefer lower concentration when it improves Top1 efficiency.",
-            "mechanism": "Reorder the same producer-accepted candidate universe.",
-            "independent_variable": "cross_symbol_concentration_priority",
-            "expected_direction": (
-                "higher_top1_efficiency_without_higher_concentration"
-            ),
-        },
-        "baseline": {
-            "version": "sell-put-baseline.v1",
-            "opening_snapshot_schema": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
-            "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-            "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
-            "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
-            "behavior_binding_sha256": build_behavior_binding(behavior),
-        },
-        "research_source": {
+    _ = variants
+    spec = build_sell_put_top1_research_spec(
+        topic_id="topic-concentration",
+        experiment_id="experiment-w5-evaluator",
+        market_calendar_version=manifest["market_calendar_version"],
+        research_source={
             "mode": "sealed_historical_dataset",
             "dataset_ref": "strategy_lab/top1/research-w5.json",
             "dataset_sha256": _file_sha256(manifest),
@@ -313,39 +326,7 @@ def _spec(
             "start_trading_date": manifest["selected_trading_dates"][0],
             "end_trading_date": manifest["selected_trading_dates"][-1],
         },
-        "research_evaluation": {
-            "contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
-            "metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
-            "fill_assumption": "t0_sell_limit",
-            "required_days": RESEARCH_REQUIRED_DAYS,
-            "window_mode": "fixed_consecutive_trading_days",
-            "visibility": "visible_after_research_seal",
-        },
-        "variants": [
-            {"variant_id": "baseline", "patch": {}},
-            *[
-                {"variant_id": variant_id, "patch": {"ranking_profile": profile}}
-                for variant_id, profile in variants
-            ],
-        ],
-        "frozen_safety": {
-            "mode": "inherit_each_point_producer_accepted_set",
-            "variant_may_change_acceptance": False,
-        },
-        "economics_contracts": {
-            "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
-            "market_calendar_version": manifest["market_calendar_version"],
-        },
-        "expiry_outcome": {
-            "contract_version": EXPIRY_OUTCOME_CONTRACT_VERSION,
-            "spot_source": "opend_history_kline",
-            "ktype": "K_DAY",
-            "autype": "NONE",
-            "price_field": "close",
-            "due_boundary": "expiration_observation_start_ms",
-            "pending_elapsed_hours": 72,
-        },
-    }
+    )
     if validation:
         spec.update(
             {
@@ -436,7 +417,7 @@ def _build_case(root: Path) -> dict[str, Any]:
         "maturity_evidence_ref": "evidence/hk-maturity.fixture.json",
         "maturity_evidence_sha256": "b" * 64,
         "recommendation_point_selector": "official_scheduled_sell_put.v1",
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_VERSION,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
         "selected_trading_dates": days,
         "days": dataset_days,
     }
@@ -485,6 +466,8 @@ def _receipt(
     close: float | None = 390.0,
     reason: str | None = None,
 ) -> dict[str, Any]:
+    terminal_at_ms = expiration_observation_start_ms(EXPIRATION, "HK")
+    assert terminal_at_ms is not None
     return {
         "schema_version": RESEARCH_CLOSE_RECEIPT_SCHEMA,
         "market": "HK",
@@ -497,12 +480,30 @@ def _receipt(
         "price_field": "close",
         "status": "available" if close is not None else "unavailable",
         "underlier_close": close,
+        "currency": "HKD",
+        "terminal_at_ms": terminal_at_ms,
+        "terminal_fx_binding": {
+            "schema_version": "fx_rate_binding.v1",
+            "selected_at_ms": terminal_at_ms,
+            "fact_id": "hkd-terminal",
+            "base_currency": "HKD",
+            "quote_currency": "CNY",
+            "rate": "1",
+            "rate_kind": "fixture",
+            "effective_at_ms": 1,
+            "observed_at_ms": 1,
+            "source": "fixture",
+            "source_id": "hkd-terminal",
+            "revision": 1,
+            "supersedes_fact_id": None,
+            "source_fact_sha256": "9" * 64,
+        },
         "reason_detail": reason,
     }
 
 
 def _receipts() -> list[dict[str, Any]]:
-    return [_receipt(owner) for owner in ("HK.0700", "HK.3690", "HK.9988")]
+    return [_receipt(owner) for owner in ("HK.0700", "HK.3690")]
 
 
 def _refresh_case(case: dict[str, Any]) -> None:
@@ -540,16 +541,30 @@ def _replace_point_projection(
     _refresh_case(case)
 
 
-def _set_variants(
-    case: dict[str, Any], variants: tuple[tuple[str, str], ...]
-) -> None:
-    case["experiment_spec"]["variants"] = [
-        {"variant_id": "baseline", "patch": {}},
-        *[
-            {"variant_id": variant_id, "patch": {"ranking_profile": profile}}
-            for variant_id, profile in variants
-        ],
-    ]
+def _force_same_top1(case: dict[str, Any]) -> None:
+    points = {
+        point["projection_ref"]: point
+        for day in case["sealed_dataset"]["days"]
+        for point in day["points"]
+    }
+    for materialized in case["ranking_projections"]:
+        projection = materialized["projection"]
+        source = deepcopy(projection.pop("artifact_provenance")["source_generation"])
+        for candidate in projection["candidates"]:
+            candidate["option_market_concentration_after"] = (
+                0.1 if candidate["producer_rank"] == 1 else 0.5
+            )
+        attach_artifact_provenance(
+            projection,
+            artifact_kind=RANKING_PROJECTION_ARTIFACT_KIND,
+            source_generation=source,
+        )
+        point = points[materialized["projection_ref"]]
+        point["projection_content_sha256"] = projection["artifact_provenance"][
+            "content_sha256"
+        ]
+        point["projection_file_sha256"] = _file_sha256(projection)
+    _refresh_case(case)
 
 
 def test_selects_unique_leader_and_aggregates_two_points_by_day(
@@ -560,37 +575,38 @@ def test_selects_unique_leader_and_aggregates_two_points_by_day(
     assert set(result) == TOP_LEVEL_KEYS
     assert result["schema_version"] == RESEARCH_EVALUATION_SCHEMA
     assert result["selection"] == "research_leader"
-    assert result["leader_variant_id"] == "concentration"
+    assert result["leader_variant_id"] == "concentration-0.002"
     assert result["effective_days"] == RESEARCH_REQUIRED_DAYS
     assert result["research_fill_assumption"] == "t0_sell_limit"
     assert result["research_is_counterfactual"] is True
     assert result["contract_terms_revalidated"] is False
     variants = {item["variant_id"]: item for item in result["variant_results"]}
     assert all(set(item) == VARIANT_KEYS for item in variants.values())
-    assert variants["without"]["decision"] == "keep_baseline"
-    assert variants["without"]["reason_codes"] == [
-        "concentration_non_increase_failed"
-    ]
-    assert variants["concentration"]["decision"] == "pass"
-    assert variants["concentration"]["top1_change_count"] == (RESEARCH_REQUIRED_DAYS + 1)
+    assert set(variants) == {
+        "concentration-0.002",
+        "concentration-0.004",
+        "concentration-0.006",
+    }
+    assert all(item["decision"] == "pass" for item in variants.values())
+    selected = variants["concentration-0.002"]
+    assert selected["top1_change_count"] == (RESEARCH_REQUIRED_DAYS + 1)
 
-    first_day = variants["concentration"]["daily_deltas"][0]
+    first_day = selected["daily_results"][0]
     holding_days = (date.fromisoformat(EXPIRATION) - date(2026, 6, 8)).days
     terminal_fee = 45.08
     baseline_efficiency = (1500.0 - 1000.0 - terminal_fee) / 38_500.0 / holding_days * 365
-    challenger = (3000.0 - 1000.0 - terminal_fee) / 37_000.0 / holding_days * 365
-    boosted = (3200.0 - 1000.0 - terminal_fee) / 37_000.0 / holding_days * 365
+    challenger = (1800.0 - 1000.0 - terminal_fee) / 38_200.0 / holding_days * 365
     assert first_day == {
         "trading_date": "2026-06-08",
         "effective_point_count": 2,
-        "daily_delta": pytest.approx(
-            ((challenger - baseline_efficiency) + (boosted - baseline_efficiency))
-            / 2
-        ),
+        "annualized_return_delta": pytest.approx(challenger - baseline_efficiency),
+        "pnl_delta_cny": pytest.approx(300.0),
+        "return_capital_basis_delta_cny": pytest.approx(-300.0),
     }
     assert result["reason_codes"] == [
         "positive_one_sided_lcb",
         "non_negative_worst_tail",
+        "pnl_non_inferiority_passed",
         "hard_risk_passed",
     ]
 
@@ -599,7 +615,7 @@ def test_same_or_empty_top1_needs_no_close_or_fee_plan(
     research_case: dict[str, Any],
 ) -> None:
     case = deepcopy(research_case)
-    _set_variants(case, (("same", "current_tie_break"),))
+    _force_same_top1(case)
 
     result = evaluate_research(case, [], _fee_contract(complete=False))
 
@@ -607,7 +623,10 @@ def test_same_or_empty_top1_needs_no_close_or_fee_plan(
     assert result["leader_variant_id"] is None
     assert result["effective_days"] == RESEARCH_REQUIRED_DAYS
     assert result["reason_codes"] == ["no_research_winner"]
-    assert result["variant_results"][0]["mean_daily_delta"] == 0.0
+    assert all(
+        item["mean_daily_annualized_return_delta"] == 0.0
+        for item in result["variant_results"]
+    )
 
 
 @pytest.mark.parametrize("mode", ["missing", "unavailable", "duplicate"])
@@ -615,7 +634,7 @@ def test_required_close_failures_block_every_variant_and_order_is_stable(
     research_case: dict[str, Any], mode: str
 ) -> None:
     receipts = _receipts()
-    target = next(item for item in receipts if item["stock_owner"] == "HK.9988")
+    target = next(item for item in receipts if item["stock_owner"] == "HK.3690")
     if mode == "missing":
         receipts.remove(target)
     elif mode == "unavailable":
@@ -640,7 +659,7 @@ def test_required_close_failures_block_every_variant_and_order_is_stable(
     assert forward["effective_days"] is None
     assert forward["variant_results"] == []
     assert [item["stock_owner"] for item in forward["missing_receipts"]] == [
-        "HK.9988"
+        "HK.3690"
     ]
     expected = {
         "missing": (
@@ -666,17 +685,16 @@ def test_incomplete_assignment_fee_and_short_window_fail_closed(
     fee_result = evaluate_research(research_case, _receipts(), _fee_contract(complete=False))
     assert fee_result["selection"] == "insufficient_evidence"
     assert fee_result["reason_codes"] == ["required_outcome_missing"]
-    assert fee_result["reason_details"] == ["expiry_fee_unavailable"]
+    assert fee_result["reason_details"] == []
 
     missing_plan = _fee_contract()
     missing_plan["account_fee_plan"] = None
     missing_plan_result = evaluate_research(research_case, _receipts(), missing_plan)
     assert missing_plan_result["selection"] == "insufficient_evidence"
     assert missing_plan_result["reason_codes"] == ["required_outcome_missing"]
-    assert missing_plan_result["reason_details"] == ["expiry_fee_unavailable"]
+    assert missing_plan_result["reason_details"] == []
 
     short = deepcopy(research_case)
-    _set_variants(short, (("same", "current_tie_break"),))
     empty = deepcopy(short["ranking_projections"][0]["projection"])
     source = deepcopy(empty.pop("artifact_provenance")["source_generation"])
     empty["producer_accepted_candidate_ids"] = []
@@ -691,7 +709,7 @@ def test_incomplete_assignment_fee_and_short_window_fail_closed(
         day_index=1,
         projection=empty,
     )
-    short_result = evaluate_research(short, [], _fee_contract(complete=False))
+    short_result = evaluate_research(short, _receipts(), _fee_contract())
     assert short_result["selection"] == "insufficient_evidence"
     assert short_result["effective_days"] == RESEARCH_REQUIRED_DAYS - 1
     assert short_result["reason_codes"] == ["effective_days_below_required"]
@@ -704,7 +722,7 @@ def test_currency_and_materialization_tampering_fail_closed(
     projection = currency["ranking_projections"][0]["projection"]
     source = deepcopy(projection.pop("artifact_provenance")["source_generation"])
     next(
-        row for row in projection["candidates"] if row["stock_owner"] == "HK.9988"
+        row for row in projection["candidates"] if row["stock_owner"] == "HK.3690"
     )["currency"] = "USD"
     attach_artifact_provenance(
         projection,
@@ -719,7 +737,7 @@ def test_currency_and_materialization_tampering_fail_closed(
     _refresh_case(currency)
     monkeypatch.setattr(
         research_module,
-        "calculate_expiry_efficiency",
+        "calculate_sell_put_top1_economic_result",
         lambda _facts: pytest.fail("cross-currency candidate reached economics"),
     )
     result = evaluate_research(currency, _receipts(), _fee_contract())
@@ -767,33 +785,37 @@ def test_baseline_parity_tampering_is_rejected(
 
 
 @pytest.mark.parametrize(
-    ("first", "second", "expected"),
+    ("summaries", "expected"),
     [
-        ((2.0, 1.0, 1.0), (1.0, 9.0, 9.0), "zeta"),
-        ((2.0, 2.0, 1.0), (2.0, 1.0, 9.0), "zeta"),
-        ((2.0, 2.0, 2.0), (2.0, 2.0, 1.0), "zeta"),
-        ((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), "alpha"),
+        (
+            ((2.0, 1.0, 1.0, 1.0), (1.0, 9.0, 9.0, 9.0), (0.0, 9.0, 9.0, 9.0)),
+            "concentration-0.002",
+        ),
+        (
+            ((2.0, 2.0, 1.0, 1.0), (2.0, 1.0, 9.0, 9.0), (2.0, 0.0, 9.0, 9.0)),
+            "concentration-0.002",
+        ),
+        (
+            ((2.0, 2.0, 2.0, 1.0), (2.0, 2.0, 1.0, 9.0), (2.0, 2.0, 0.0, 9.0)),
+            "concentration-0.002",
+        ),
+        (
+            ((2.0, 2.0, 2.0, 2.0), (2.0, 2.0, 2.0, 1.0), (2.0, 2.0, 2.0, 0.0)),
+            "concentration-0.002",
+        ),
     ],
 )
 def test_passing_leader_uses_every_deterministic_tie_break(
     research_case: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
-    first: tuple[float, float, float],
-    second: tuple[float, float, float],
+    summaries: tuple[tuple[float, float, float, float], ...],
     expected: str,
 ) -> None:
     case = deepcopy(research_case)
-    _set_variants(
-        case,
-        (
-            ("zeta", "without_concentration"),
-            ("alpha", "concentration_first"),
-        ),
-    )
-    values = iter((first, second))
+    values = iter(summaries)
 
     def fake_summary(_rows: object, _policy: object) -> dict[str, Any]:
-        mean, lower, tail = next(values)
+        mean, pnl, lower, tail = next(values)
         return {
             "decision": "pass",
             "reason_codes": [
@@ -803,9 +825,13 @@ def test_passing_leader_uses_every_deterministic_tie_break(
             ],
             "required_days": RESEARCH_REQUIRED_DAYS,
             "effective_days": RESEARCH_REQUIRED_DAYS,
+            "effective_point_count": RESEARCH_REQUIRED_DAYS,
+            "top1_change_count": RESEARCH_REQUIRED_DAYS,
             "point_results": [],
-            "daily_deltas": [],
-            "mean_daily_delta": mean,
+            "daily_results": [],
+            "mean_daily_annualized_return_delta": mean,
+            "mean_daily_pnl_delta_cny": pnl,
+            "mean_daily_return_capital_basis_delta_cny": 0.0,
             "sample_std": 0.0,
             "standard_error": 0.0,
             "t_critical": 1.0,
@@ -815,7 +841,11 @@ def test_passing_leader_uses_every_deterministic_tie_break(
             "serial_correlation_unadjusted": True,
         }
 
-    monkeypatch.setattr(research_module, "summarize_paired_daily_deltas", fake_summary)
+    monkeypatch.setattr(
+        research_module,
+        "evaluate_top1_paired_daily_results",
+        fake_summary,
+    )
     result = evaluate_research(case, _receipts(), _fee_contract())
     assert result["leader_variant_id"] == expected
 
@@ -827,17 +857,7 @@ def _store(path: Path) -> ExperimentStore:
 
 
 def _enable(store: ExperimentStore, root: Path, *, key: str) -> None:
-    set_account_opt_in(
-        store,
-        market="HK",
-        account="lx",
-        enabled=True,
-        actor="human",
-        occurred_at_utc="2026-08-15T03:00:00Z",
-        idempotency_key=key,
-        artifact_root=root,
-        environ=AVAILABLE,
-    )
+    del store, root, key
 
 
 def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
@@ -845,7 +865,7 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
 ) -> None:
     evaluation = evaluate_research(research_case, _receipts(), _fee_contract())
     leader = evaluation["leader_variant_id"]
-    assert leader == "concentration"
+    assert leader == "concentration-0.002"
     store = _store(tmp_path / "lab.sqlite3")
     _enable(store, tmp_path, key="enable-m3-seam")
     spec = research_case["experiment_spec"]
@@ -897,8 +917,8 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
         close_receipts=_receipts(),
         quota_decision={
             "schema_version": INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
-            "required_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
-            "already_counted_stock_owners": ["HK.0700", "HK.3690", "HK.9988"],
+            "required_stock_owners": ["HK.0700", "HK.3690"],
+            "already_counted_stock_owners": ["HK.0700", "HK.3690"],
             "new_stock_owners": [],
             "remain_quota": 0,
         },
@@ -1154,8 +1174,6 @@ def test_accepts_real_w4_manifest_after_source_run_deletion(tmp_path: Path) -> N
         "ranking_projections": materialized,
     }
 
-    result = evaluate_research(envelope, [], _fee_contract(complete=False))
-
-    assert result["selection"] == "insufficient_evidence"
-    assert result["effective_days"] == 0
-    assert result["reason_codes"] == ["effective_days_below_required"]
+    with pytest.raises(ResearchEvaluationError) as exc_info:
+        evaluate_research(envelope, [], _fee_contract(complete=False))
+    assert exc_info.value.reason_code == "research_corpus_conflict"

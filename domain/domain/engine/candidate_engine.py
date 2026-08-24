@@ -22,12 +22,13 @@ OPENING_CANDIDATE_MAX_SPREAD_RATIO = 0.40
 SELL_PUT_NEAR_RETURN_THRESHOLD = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD
 EARNINGS_NEAR_EXPIRY_WINDOW_DAYS = 6
 EARNINGS_NEAR_EXPIRY_POLICY_VERSION = "earnings_near_expiry.v1"
-SELL_PUT_RANKING_CONTRACT_VERSION = "sell_put_ranking_profile.v1"
+SELL_PUT_RANKING_CONTRACT_VERSION = "sell_put_ranking_profile.v2"
 SELL_PUT_RANKING_PROFILES = frozenset(
     {
         "without_concentration",
         "current_tie_break",
         "concentration_first",
+        "option_market_concentration",
     }
 )
 
@@ -1136,9 +1137,27 @@ def _sell_put_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
     return True, float("inf")
 
 
+def _sell_put_option_market_concentration_sort(
+    src: dict[str, Any],
+) -> tuple[bool, float]:
+    explicit = _first_float(src, "option_market_concentration_after")
+    if explicit is not None:
+        return False, explicit
+    return True, float("inf")
+
+
 def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
     return (
         *_sell_put_concentration_sort(src),
+        *_sell_put_cross_symbol_tie_key_without_concentration(src),
+    )
+
+
+def _sell_put_option_market_cross_symbol_tie_key(
+    src: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        *_sell_put_option_market_concentration_sort(src),
         *_sell_put_cross_symbol_tie_key_without_concentration(src),
     )
 
@@ -1161,6 +1180,7 @@ def _rank_return_bands(
     *,
     period_return_fn: Any,
     tie_key: Any,
+    near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
     remaining = list(enumerate(rows))
     ranked: list[dict[str, Any]] = []
@@ -1180,7 +1200,7 @@ def _rank_return_bands(
             )
             break
         band_max = max(usable)
-        floor = band_max - OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD
+        floor = band_max - near_return_threshold
         band = [
             (index, row)
             for index, row in remaining
@@ -1471,6 +1491,7 @@ def rank_candidate_rows(
     *,
     mode: StrategyMode | str,
     sell_put_ranking_profile: str = "current_tie_break",
+    near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
     if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
@@ -1479,6 +1500,14 @@ def rank_candidate_rows(
         )
     if mode_norm == "call" and sell_put_ranking_profile != "current_tie_break":
         raise ValueError("Sell Put ranking profiles cannot rank Covered Call rows")
+    if (
+        isinstance(near_return_threshold, bool)
+        or not isinstance(near_return_threshold, (int, float))
+        or not math.isfinite(float(near_return_threshold))
+        or float(near_return_threshold) < 0
+    ):
+        raise ValueError("near_return_threshold must be a finite non-negative number")
+    threshold = float(near_return_threshold)
     normalized_rows = [r for r in rows if isinstance(r, dict)]
     grouped: dict[str, list[dict[str, Any]]] = {}
     group_order: list[str] = []
@@ -1505,6 +1534,7 @@ def rank_candidate_rows(
             grouped[key],
             period_return_fn=period_return_fn,
             tie_key=within_tie_key,
+            near_return_threshold=threshold,
         )
         for key in group_order
     }
@@ -1522,11 +1552,15 @@ def rank_candidate_rows(
                 concentration_groups[concentration],
                 period_return_fn=_sell_put_period_return,
                 tie_key=_sell_put_cross_symbol_tie_key_without_concentration,
+                near_return_threshold=threshold,
             )
         ]
     else:
         cross_tie_key = (
-            _sell_put_cross_symbol_tie_key_without_concentration
+            _sell_put_option_market_cross_symbol_tie_key
+            if mode_norm == "put"
+            and sell_put_ranking_profile == "option_market_concentration"
+            else _sell_put_cross_symbol_tie_key_without_concentration
             if mode_norm == "put"
             and sell_put_ranking_profile == "without_concentration"
             else _sell_put_cross_symbol_tie_key
@@ -1537,6 +1571,7 @@ def rank_candidate_rows(
             representatives,
             period_return_fn=period_return_fn,
             tie_key=cross_tie_key,
+            near_return_threshold=threshold,
         )
     remainder = [
         row

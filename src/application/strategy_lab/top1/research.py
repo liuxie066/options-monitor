@@ -10,6 +10,7 @@ from typing import Any, NoReturn, cast
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import rank_candidate_rows
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
+from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     HISTORICAL_RESEARCH_WINDOW_SCHEMA,
@@ -20,22 +21,25 @@ from src.application.strategy_lab.top1.contracts import (
     build_research_spec_sha256,
     validate_experiment_spec,
 )
-from src.application.strategy_lab.top1.economics import calculate_expiry_efficiency
+from src.application.strategy_lab.top1.economics import (
+    calculate_sell_put_top1_economic_result,
+    validate_fx_rate_binding,
+)
 from src.application.strategy_lab.top1.ranking import (
-    RANKING_PROJECTION_SCHEMA_VERSION,
+    RANKING_PROJECTION_SCHEMA_V2,
     Top1RankingError,
     rerank_recommendation_point,
     validate_ranking_projection,
 )
 from src.application.strategy_lab.top1.statistics import (
-    summarize_paired_daily_deltas,
+    evaluate_top1_paired_daily_results,
 )
 
 
-RESEARCH_EVALUATION_INPUT_SCHEMA = "sell_put_top1_research_evaluation_input.v1"
-RESEARCH_CLOSE_RECEIPT_SCHEMA = "sell_put_top1_research_close_receipt.v1"
-RESEARCH_EVALUATION_SCHEMA = "sell_put_top1_research_evaluation.v1"
-INTERNAL_RESEARCH_REVISION_SCHEMA = "sell_put_top1_research_revision.v1"
+RESEARCH_EVALUATION_INPUT_SCHEMA = "sell_put_top1_research_evaluation_input.v2"
+RESEARCH_CLOSE_RECEIPT_SCHEMA = "sell_put_top1_research_close_receipt.v2"
+RESEARCH_EVALUATION_SCHEMA = "sell_put_top1_research_evaluation.v2"
+INTERNAL_RESEARCH_REVISION_SCHEMA = "sell_put_top1_research_revision.v2"
 INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA = (
     "sell_put_top1_research_quota_decision.v1"
 )
@@ -86,7 +90,11 @@ _HISTORICAL_CANDIDATE_KEYS = frozenset(
         "net_premium",
         "stock_owner",
         "strike",
-        "symbol_concentration_after",
+        "option_market_concentration_after",
+        "option_market_value_cny",
+        "option_market_concentration_metric_version",
+        "option_market_evidence_refs",
+        "opening_fx_binding",
         "fee_schedule_version",
         "fee_basis",
         "fee_schedule_url",
@@ -146,6 +154,9 @@ _CLOSE_KEYS = frozenset(
         "price_field",
         "status",
         "underlier_close",
+        "currency",
+        "terminal_at_ms",
+        "terminal_fx_binding",
         "reason_detail",
     }
 )
@@ -180,7 +191,11 @@ _QUOTA_DECISION_KEYS = frozenset(
 _STAT_FIELDS = (
     "required_days",
     "effective_days",
-    "mean_daily_delta",
+    "effective_point_count",
+    "top1_change_count",
+    "mean_daily_annualized_return_delta",
+    "mean_daily_pnl_delta_cny",
+    "mean_daily_return_capital_basis_delta_cny",
     "sample_std",
     "standard_error",
     "t_critical",
@@ -292,7 +307,7 @@ def _validate_dataset(
         )
     if item["recommendation_point_selector"] != RECOMMENDATION_POINT_SELECTOR:
         _fail("research_corpus_conflict", "sealed dataset selector is unsupported")
-    if item["ranking_projection_schema_version"] != RANKING_PROJECTION_SCHEMA_VERSION:
+    if item["ranking_projection_schema_version"] != RANKING_PROJECTION_SCHEMA_V2:
         _fail("research_corpus_conflict", "sealed dataset projection schema changed")
 
     source = _mapping(spec["research_source"], "experiment_spec.research_source")
@@ -470,8 +485,18 @@ def _validate_close_receipts(
             _fail("research_input_invalid", "close receipt source semantics changed")
         stock_owner = _text(item["stock_owner"], "close_receipt.stock_owner")
         expiration = _iso_date(item["expiration"], "close_receipt.expiration")
+        terminal_at_ms = item["terminal_at_ms"]
+        if (
+            item["currency"] != "HKD"
+            or isinstance(terminal_at_ms, bool)
+            or not isinstance(terminal_at_ms, int)
+            or terminal_at_ms
+            != expiration_observation_start_ms(expiration, market)
+        ):
+            _fail("research_input_invalid", "close receipt terminal binding is invalid")
         status = item["status"]
         close = item["underlier_close"]
+        terminal_fx = item["terminal_fx_binding"]
         reason = item["reason_detail"]
         if status == "available":
             if (
@@ -480,11 +505,32 @@ def _validate_close_receipts(
                 or not math.isfinite(float(close))
                 or float(close) <= 0
                 or reason is not None
+                or terminal_fx is None
             ):
                 _fail("research_input_invalid", "available close receipt is invalid")
+            try:
+                binding = validate_fx_rate_binding(terminal_fx)
+            except ValueError as exc:
+                raise ResearchEvaluationError(
+                    "research_input_invalid",
+                    "available close receipt FX binding is invalid",
+                ) from exc
+            if (
+                binding["base_currency"] != "HKD"
+                or binding["selected_at_ms"] != terminal_at_ms
+            ):
+                _fail("research_input_invalid", "available close receipt FX binding changed")
         elif status == "unavailable":
             if close is not None or reason not in _CLOSE_FAILURE_DETAILS:
                 _fail("research_input_invalid", "unavailable close receipt is invalid")
+            if terminal_fx is not None:
+                try:
+                    validate_fx_rate_binding(terminal_fx)
+                except ValueError as exc:
+                    raise ResearchEvaluationError(
+                        "research_input_invalid",
+                        "unavailable close receipt FX binding is invalid",
+                    ) from exc
         else:
             _fail("research_input_invalid", "close receipt status is unsupported")
         indexed.setdefault((stock_owner, expiration), []).append(dict(item))
@@ -762,49 +808,62 @@ def _research_selections(
     projections: Mapping[str, Mapping[str, Any]],
     observed_points: bool,
 ) -> tuple[
-    list[tuple[str, str]],
+    list[tuple[str, str, float]],
     dict[str, list[dict[str, object]]],
     set[tuple[str, str]],
     bool,
 ]:
 
-    variants: list[tuple[str, str]] = []
+    variants: list[tuple[str, str, float]] = []
     for raw_variant in cast(list[object], spec["variants"])[1:]:
         variant = cast(Mapping[str, object], raw_variant)
         patch = cast(Mapping[str, object], variant["patch"])
-        variants.append((str(variant["variant_id"]), str(patch["ranking_profile"])))
+        variants.append(
+            (
+                str(variant["variant_id"]),
+                str(patch["ranking_profile"]),
+                float(cast(float, patch["near_return_threshold"])),
+            )
+        )
 
     selections: dict[str, list[dict[str, object]]] = {
-        variant_id: [] for variant_id, _profile in variants
+        variant_id: [] for variant_id, _profile, _threshold in variants
     }
     required_close_keys: set[tuple[str, str]] = set()
     currency_mismatch = False
     for point in point_rows:
         projection = projections[point["projection_ref"]]
 
-        def top1_candidate_id(profile: str) -> str | None:
+        def top1_candidate_id(profile: str, threshold: float) -> str | None:
             if observed_points:
                 try:
                     ranked = rank_candidate_rows(
                         [dict(row) for row in projection["candidates"]],
                         mode="put",
                         sell_put_ranking_profile=profile,
+                        near_return_threshold=threshold,
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     _fail("ranking_projection_incomplete", str(exc))
                 return str(ranked[0]["candidate_id"]) if ranked else None
             try:
                 ranking = rerank_recommendation_point(
-                    projection, ranking_profile=profile
+                    projection,
+                    ranking_profile=profile,
+                    near_return_threshold=threshold,
                 )
             except Top1RankingError as exc:
                 _fail(exc.reason_code, str(exc))
             return cast(str | None, ranking["top1_candidate_id"])
 
-        baseline_id = top1_candidate_id("current_tie_break")
+        baseline = cast(Mapping[str, object], spec["baseline"])
+        baseline_id = top1_candidate_id(
+            "current_tie_break",
+            float(cast(float, baseline["near_return_threshold"])),
+        )
         baseline_candidate = _candidate(projection, baseline_id)
-        for variant_id, profile in variants:
-            challenger_id = top1_candidate_id(profile)
+        for variant_id, profile, threshold in variants:
+            challenger_id = top1_candidate_id(profile, threshold)
             challenger_candidate = _candidate(projection, challenger_id)
             if (baseline_candidate is None) != (challenger_candidate is None):
                 _fail(
@@ -924,16 +983,16 @@ def evaluate_research(
 
     economic_failures: list[tuple[str, str | None]] = []
     point_rows_by_variant: dict[str, list[dict[str, object]]] = {
-        variant_id: [] for variant_id, _profile in variants
+        variant_id: [] for variant_id, _profile, _threshold in variants
     }
-    for variant_id, _profile in variants:
+    for variant_id, _profile, _threshold in variants:
         for selection in selections[variant_id]:
             baseline = cast(Mapping[str, object] | None, selection["baseline_candidate"])
             challenger = cast(
                 Mapping[str, object] | None, selection["challenger_candidate"]
             )
-            baseline_efficiency: float | None = None
-            challenger_efficiency: float | None = None
+            baseline_result: dict[str, object] | None = None
+            challenger_result: dict[str, object] | None = None
             if selection["baseline_candidate_id"] != selection["challenger_candidate_id"]:
                 assert baseline is not None and challenger is not None
                 results: list[dict[str, object]] = []
@@ -941,18 +1000,36 @@ def evaluate_research(
                     key = (str(candidate["stock_owner"]), str(candidate["expiration"]))
                     receipt = receipts[key][0]
                     try:
-                        result = calculate_expiry_efficiency(
+                        result = calculate_sell_put_top1_economic_result(
                             {
                                 "stage": "research",
                                 "fill_status": "t0_assumed_fill",
+                                "contract_identity": {
+                                    **{
+                                        field: candidate[field]
+                                        for field in (
+                                            "symbol",
+                                            "contract_symbol",
+                                            "strike",
+                                            "expiration",
+                                            "multiplier",
+                                            "currency",
+                                        )
+                                    },
+                                    "option_type": "put",
+                                },
                                 "holding_start_date": selection["trading_date"],
-                                "expiration": candidate["expiration"],
-                                "opening_net_premium": candidate["net_premium"],
-                                "net_cash_basis": candidate["net_cash_basis"],
-                                "strike": candidate["strike"],
-                                "multiplier": candidate["multiplier"],
-                                "underlier_close": receipt["underlier_close"],
+                                "opening_net_premium_native": candidate["net_premium"],
+                                "expiry_underlier_close_native": receipt[
+                                    "underlier_close"
+                                ],
                                 "account_fee_plan": fee_plan,
+                                "opening_fx_binding": candidate[
+                                    "opening_fx_binding"
+                                ],
+                                "terminal_fx_binding": receipt[
+                                    "terminal_fx_binding"
+                                ],
                             }
                         )
                     except ValueError as exc:
@@ -962,34 +1039,25 @@ def evaluate_research(
                         economic_failures.append(
                             (
                                 str(result["reason_code"]),
-                                (
-                                    str(result["reason_detail"])
-                                    if result["reason_detail"] is not None
-                                    else None
-                                ),
+                                None,
                             )
                         )
-                baseline_efficiency = cast(float | None, results[0]["efficiency"])
-                challenger_efficiency = cast(float | None, results[1]["efficiency"])
+                baseline_result, challenger_result = results
             point_rows_by_variant[variant_id].append(
                 {
                     "recommendation_point_id": selection["recommendation_point_id"],
                     "trading_date": selection["trading_date"],
                     "baseline_candidate_id": selection["baseline_candidate_id"],
                     "challenger_candidate_id": selection["challenger_candidate_id"],
-                    "baseline_efficiency": baseline_efficiency,
-                    "challenger_efficiency": challenger_efficiency,
+                    "baseline_economic_result": baseline_result,
+                    "challenger_economic_result": challenger_result,
                     "hard_risk_status": "passed",
-                    "baseline_concentration": (
-                        baseline["symbol_concentration_after"]
-                        if baseline is not None
-                        else None
-                    ),
-                    "challenger_concentration": (
-                        challenger["symbol_concentration_after"]
-                        if challenger is not None
-                        else None
-                    ),
+                    "frozen_safety_results": [
+                        {
+                            "metric_id": "accepted_set_unchanged",
+                            "status": "passed",
+                        }
+                    ],
                 }
             )
     if economic_failures:
@@ -1001,27 +1069,34 @@ def evaluate_research(
         )
 
     variant_results: list[dict[str, object]] = []
-    for variant_id, profile in variants:
-        summary = summarize_paired_daily_deltas(
+    research_evaluation = cast(
+        Mapping[str, object], spec["research_evaluation"]
+    )
+    for variant_id, profile, threshold in variants:
+        summary = evaluate_top1_paired_daily_results(
             point_rows_by_variant[variant_id],
             {
-                "required_days": RESEARCH_REQUIRED_DAYS,
-                "confidence_level": 0.95,
-                "worst_fraction": 0.20,
-                "require_concentration_non_increase": True,
+                "required_days": research_evaluation["required_days"],
+                "confidence_level": research_evaluation["confidence_level"],
+                "worst_fraction": research_evaluation["worst_fraction"],
+                "minimum_mean_daily_pnl_delta_cny": research_evaluation[
+                    "minimum_mean_daily_pnl_delta_cny"
+                ],
             },
         )
         result: dict[str, object] = {
             "variant_id": variant_id,
             "ranking_profile": profile,
+            "near_return_threshold": threshold,
             "decision": summary["decision"],
             "reason_codes": list(cast(list[str], summary["reason_codes"])),
             **{field: summary[field] for field in _STAT_FIELDS},
-            "top1_change_count": sum(
-                row["baseline_candidate_id"] != row["challenger_candidate_id"]
-                for row in point_rows_by_variant[variant_id]
+            "point_results": list(
+                cast(list[dict[str, object]], summary["point_results"])
             ),
-            "daily_deltas": list(cast(list[dict[str, object]], summary["daily_deltas"])),
+            "daily_results": list(
+                cast(list[dict[str, object]], summary["daily_results"])
+            ),
         }
         variant_results.append(result)
 
@@ -1066,9 +1141,12 @@ def evaluate_research(
             missing_receipts=[],
         )
 
-    def leader_key(result: Mapping[str, object]) -> tuple[float, float, float, str]:
+    def leader_key(
+        result: Mapping[str, object],
+    ) -> tuple[float, float, float, float, str]:
         return (
-            -float(cast(float, result["mean_daily_delta"])),
+            -float(cast(float, result["mean_daily_annualized_return_delta"])),
+            -float(cast(float, result["mean_daily_pnl_delta_cny"])),
             -float(cast(float, result["one_sided_lower_bound"])),
             -float(cast(float, result["worst_tail_mean"])),
             str(result["variant_id"]),

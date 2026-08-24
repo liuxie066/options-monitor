@@ -12,12 +12,17 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
-from domain.domain.short_vol_assessment import portfolio_concentration_fields
+from domain.domain.short_vol_assessment import (
+    calculate_option_market_concentration_after,
+)
 from domain.domain.symbol_identity import resolve_symbol_identity
 from src.application.prepared_option_positions_context import (
-    exchange_rate_scalars_from_option_context,
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+    PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+    PREPARED_OPTION_POSITIONS_PAYLOAD_NAME,
+    PreparedOptionPositionsContextError,
+    validate_strategy_lab_option_market_evidence,
 )
-from src.application.short_vol_risk_context import build_portfolio_risk_context
 from src.application.strategy_lab.evidence import load_strategy_lab_dataset
 from src.application.strategy_lab.top1.contracts import (
     HISTORICAL_RESEARCH_WINDOW_SCHEMA,
@@ -27,7 +32,9 @@ from src.application.strategy_lab.top1.corpus import (
     CorpusError,
     read_bound_market_calendar_snapshot,
 )
-from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+from src.application.strategy_lab.top1.economics import (
+    build_fx_rate_binding_from_projection,
+)
 from src.infrastructure.private_storage import private_path
 
 
@@ -282,60 +289,96 @@ def _normalize_point(
             fail("research_window_not_applicable", "dataset is outside the requested candidate universe")
     accepted = [row for row in scoped if str(row.get("status") or "").lower() == "accepted"]
 
-    need_context = any(
-        row.get("symbol_concentration_after") is None or row.get("net_income_cny") is None for row in accepted
-    )
-    risk_context = None
-    converter = None
-    if need_context:
-        expected_by_kind = {
-            str(item.get("kind")): item for item in expected_source_files or [] if isinstance(item, Mapping)
+    expected_by_kind = {
+        str(item.get("kind")): item
+        for item in expected_source_files or []
+        if isinstance(item, Mapping)
+    }
+    if expected_by_kind:
+        context_refs = {
+            kind: str(expected_by_kind.get(kind, {}).get("ref") or "")
+            for kind in ("prepared_option_manifest", "prepared_option_payload")
         }
-        if expected_by_kind:
-            context_refs = {
-                kind: str(expected_by_kind.get(kind, {}).get("ref") or "")
-                for kind in ("portfolio_context", "option_positions_context")
-            }
-        else:
-            if runs_root_ref is None:
-                fail(
-                    "research_window_coverage_missing",
-                    "historical concentration context is missing",
-                )
-            runs_ref, _runs_path = safe_ref(runs_root_ref, "runs_root_ref")
-            state_ref = f"{runs_ref}/{run_id}/accounts/{account}/state"
-            context_refs = {
-                "portfolio_context": f"{state_ref}/portfolio_context.json",
-                "option_positions_context": (f"{state_ref}/option_positions_context.json"),
-            }
-        contexts: dict[str, dict[str, Any]] = {}
-        for kind, context_ref in context_refs.items():
-            context_ref, context_path = safe_ref(context_ref, f"{kind}.ref")
-            entry = source_file(kind, context_ref, context_path)
-            files.append(entry)
-            try:
-                payload = json.loads(context_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ResearchWindowError(
-                    "research_window_coverage_missing",
-                    f"{kind} cannot be read",
-                ) from exc
-            if not isinstance(payload, dict):
-                fail("research_window_coverage_missing", f"{kind} is invalid")
-            contexts[kind] = payload
-        usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(contexts["option_positions_context"])
-        converter = CurrencyConverter(
-            ExchangeRates(
-                usd_per_cny=usd_per_cny,
-                cny_per_hkd=cny_per_hkd,
+    else:
+        if runs_root_ref is None:
+            fail(
+                "research_window_coverage_missing",
+                "prepared option-market evidence is missing",
             )
+        runs_ref, _runs_path = safe_ref(runs_root_ref, "runs_root_ref")
+        state_ref = f"{runs_ref}/{run_id}/accounts/{account}/state"
+        context_refs = {
+            "prepared_option_manifest": (
+                f"{state_ref}/{PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2}"
+            ),
+            "prepared_option_payload": (
+                f"{state_ref}/{PREPARED_OPTION_POSITIONS_PAYLOAD_NAME}"
+            ),
+        }
+    contexts: dict[str, dict[str, Any]] = {}
+    for kind, context_ref in context_refs.items():
+        context_ref, context_path = safe_ref(context_ref, f"{kind}.ref")
+        entry = source_file(kind, context_ref, context_path)
+        files.append(entry)
+        try:
+            payload = json.loads(context_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResearchWindowError(
+                "research_window_coverage_missing",
+                f"{kind} cannot be read",
+            ) from exc
+        if not isinstance(payload, dict):
+            fail("research_window_coverage_missing", f"{kind} is invalid")
+        contexts[kind] = payload
+    prepared_manifest = contexts["prepared_option_manifest"]
+    option_payload = contexts["prepared_option_payload"]
+    payload_file = next(
+        item for item in files if item["kind"] == "prepared_option_payload"
+    )
+    if (
+        prepared_manifest.get("schema_version")
+        != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+        or prepared_manifest.get("status") != "ready"
+        or prepared_manifest.get("run_id") != run_id
+        or prepared_manifest.get("account") != account
+        or prepared_manifest.get("payload_relpath")
+        != PREPARED_OPTION_POSITIONS_PAYLOAD_NAME
+        or prepared_manifest.get("payload_sha256") != payload_file["sha256"]
+    ):
+        fail(
+            "research_window_coverage_missing",
+            "prepared option-market evidence is not ready",
         )
-        portfolio = dict(contexts["portfolio_context"])
-        portfolio["_global_option_ctx"] = contexts["option_positions_context"]
-        risk_context = build_portfolio_risk_context(
-            portfolio_ctx=portfolio,
-            exchange_rate_converter=converter,
+    try:
+        option_market_evidence = validate_strategy_lab_option_market_evidence(
+            option_payload.get("strategy_lab_option_market_evidence"),
+            manifest=prepared_manifest,
         )
+        evidence_at = datetime.fromisoformat(
+            str(option_market_evidence["evidence_at_utc"]).replace("Z", "+00:00")
+        )
+    except (KeyError, ValueError, PreparedOptionPositionsContextError) as exc:
+        raise ResearchWindowError(
+            "research_window_coverage_missing",
+            "prepared option-market evidence is invalid",
+        ) from exc
+    if (
+        option_market_evidence.get("status") != "ready"
+        or evidence_at.utcoffset() != timezone.utc.utcoffset(evidence_at)
+        or evidence_at > cutoff
+    ):
+        fail(
+            "research_window_coverage_missing",
+            "prepared option-market evidence is not usable",
+        )
+    evidence_at_ms = int(evidence_at.timestamp() * 1000)
+    opening_fx_by_currency = {
+        str(rate.get("base_currency")): build_fx_rate_binding_from_projection(
+            rate,
+            selected_at_ms=evidence_at_ms,
+        )
+        for rate in option_market_evidence["fx_rate_facts"]
+    }
 
     normalized: dict[str, dict[str, Any]] = {}
     cutoff_date = cutoff.astimezone(ZoneInfo("Asia/Hong_Kong")).date()
@@ -368,18 +411,6 @@ def _normalize_point(
             "net_cash_basis",
             positive=True,
         )
-        concentration = row.get("symbol_concentration_after")
-        if concentration is None:
-            assert converter is not None and risk_context is not None
-            assignment_cny = converter.native_to_cny(strike * multiplier, native_ccy=identity.currency)
-            concentration = portfolio_concentration_fields(
-                {**row, "assignment_notional_cny": assignment_cny},
-                mode="put",
-                risk_ctx=risk_context,
-            )["symbol_concentration_after"]
-        concentration_value = number(concentration, "symbol_concentration_after")
-        if concentration_value < 0:
-            fail("research_window_coverage_missing", "concentration is invalid")
         raw_sell_limit = row.get("sell_limit")
         if raw_sell_limit is None:
             mid = number(row.get("mid"), "mid", positive=True)
@@ -417,12 +448,38 @@ def _normalize_point(
                     "research_window_coverage_missing",
                     "historical fee contract is unsupported",
                 ) from exc
+        try:
+            concentration = calculate_option_market_concentration_after(
+                candidate={
+                    "symbol": identity.canonical,
+                    "sell_limit": sell_limit,
+                    "multiplier": multiplier,
+                    "currency": identity.currency,
+                },
+                open_option_positions=list(
+                    option_market_evidence["open_option_positions"]
+                ),
+                valuation_mark_facts=list(
+                    option_market_evidence["valuation_mark_facts"]
+                ),
+                fx_rate_facts=list(option_market_evidence["fx_rate_facts"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ResearchWindowError(
+                "research_window_coverage_missing",
+                "option-market concentration cannot be evaluated",
+            ) from exc
+        opening_fx_binding = opening_fx_by_currency.get(identity.currency)
+        if identity.currency != "CNY" and opening_fx_binding is None:
+            fail("research_window_coverage_missing", "opening FX binding is missing")
+        opening_rate = (
+            1.0
+            if opening_fx_binding is None
+            else float(opening_fx_binding["rate"])
+        )
         period_return = net_premium / net_cash_basis
         discount = (spot - (strike - net_premium / multiplier)) / spot
-        net_income_cny = row.get("net_income_cny")
-        if net_income_cny is None and converter is not None:
-            net_income_cny = converter.native_to_cny(net_premium, native_ccy=identity.currency)
-        net_income_cny = number(net_income_cny, "net_income_cny", positive=True)
+        net_income_cny = net_premium * opening_rate
         dte = number(row.get("dte"), "dte", positive=True)
         candidate = {
             "candidate_id": contract,
@@ -443,7 +500,15 @@ def _normalize_point(
             "period_net_return_on_cash_basis": period_return,
             "annualized_net_return_on_cash_basis": (period_return * 365.0 / dte),
             "net_assignment_discount_pct": discount,
-            "symbol_concentration_after": concentration_value,
+            "option_market_concentration_after": concentration[
+                "option_market_concentration_after"
+            ],
+            "option_market_value_cny": concentration["option_market_value_cny"],
+            "option_market_concentration_metric_version": concentration[
+                "metric_version"
+            ],
+            "option_market_evidence_refs": concentration["evidence_refs"],
+            "opening_fx_binding": opening_fx_binding,
             "net_income": net_premium,
             "net_premium": net_premium,
             "net_cash_basis": net_cash_basis,

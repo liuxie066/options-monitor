@@ -42,7 +42,7 @@ def test_wheel_disabled_without_scope_preserves_candidate_config() -> None:
     assert all("_wheel_call" not in item for item in merged["symbols"])
 
 
-def test_prepared_context_reuses_one_ledger_read_for_active_wheel(
+def test_prepared_context_uses_generation_fence_for_active_wheel(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -126,7 +126,7 @@ def test_prepared_context_reuses_one_ledger_read_for_active_wheel(
         run_state_dir=tmp_path / "output_runs" / run_id / "state",
     )
 
-    assert batch.ledger_read_count == 1
+    assert batch.ledger_read_count == 2
     wheel_model = batch.wheel_read_models_by_account["acct_a"]
     assert wheel_model["batches"][0]["lifecycle_status"] == "active"
     context = load_prepared_option_positions_context(
