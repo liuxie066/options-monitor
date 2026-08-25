@@ -2580,7 +2580,7 @@ def build_corpus_health_receipt(
         }
     )
     fresh_until = observed_at + timedelta(seconds=advance_interval_seconds * 2)
-    return _finalize_health_payload(
+    payload = _finalize_health_payload(
         {
             "schema_version": CORPUS_HEALTH_RECEIPT_SCHEMA,
             "receipt_kind": "current",
@@ -2615,6 +2615,12 @@ def build_corpus_health_receipt(
             "source_evidence_sha256": source_hash,
         }
     )
+    return _validate_health_receipt(
+        payload,
+        expected_kind="current",
+        expected_market=market,
+        expected_account=account,
+    )
 
 
 def _build_daily_health_receipt(
@@ -2641,7 +2647,7 @@ def _build_daily_health_receipt(
         store.corpus_points, market, account, trading_date=trading_date
     )
     observed_at = _utc_datetime(observed_at_utc, "observed_at_utc")
-    return _finalize_health_payload(
+    payload = _finalize_health_payload(
         {
             "schema_version": CORPUS_HEALTH_RECEIPT_SCHEMA,
             "receipt_kind": "trading_day",
@@ -2660,6 +2666,13 @@ def _build_daily_health_receipt(
             "market_calendar": _health_calendar_binding(calendar),
             "source_evidence_sha256": health["evidence_content_sha256"],
         }
+    )
+    return _validate_health_receipt(
+        payload,
+        expected_kind="trading_day",
+        expected_market=market,
+        expected_account=account,
+        expected_subject_trading_date=trading_date,
     )
 
 
@@ -2950,6 +2963,22 @@ def _read_corpus_health_ref(
         ) from exc
     if content != _render(item) or len(content) > MAX_CORPUS_HEALTH_RECEIPT_BYTES:
         _fail("corpus_health_receipt_conflict", "health receipt bytes are invalid")
+    calendar = item["market_calendar"]
+    try:
+        bound_calendar = read_bound_market_calendar_snapshot(
+            artifact_root,
+            market=market,
+            snapshot_ref=calendar["snapshot_ref"],
+            snapshot_content_sha256=calendar["snapshot_content_sha256"],
+            snapshot_file_sha256=calendar["snapshot_file_sha256"],
+        )
+    except CorpusError as exc:
+        raise CorpusError(
+            "corpus_health_receipt_conflict",
+            "corpus health calendar binding is unavailable",
+        ) from exc
+    if _health_calendar_binding(bound_calendar) != calendar:
+        _fail("corpus_health_receipt_conflict", "health calendar binding changed")
     return item, content
 
 
