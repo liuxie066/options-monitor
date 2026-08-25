@@ -24,6 +24,7 @@ from src.application.strategy_lab.top1.capability_receipts import (
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
     preview_archived_recommendation_point_migration,
+    read_corpus_health_receipt,
     read_corpus_status,
     read_market_calendar_binding,
     refresh_market_calendar_binding,
@@ -289,6 +290,24 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
         errors.append(
             {"reason_code": "market_calendar_binding_unavailable", "message": str(exc)}
         )
+    health_receipt: dict[str, Any] | None = None
+    read_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        health_receipt = read_corpus_health_receipt(
+            context["artifact_root"],
+            market="HK",
+            account="lx",
+            now_utc=read_at_utc,
+        )
+        if health_receipt["fresh"] is not True:
+            errors.append(
+                {
+                    "reason_code": "corpus_health_receipt_stale",
+                    "message": "Strategy Lab Top1 corpus health receipt is stale",
+                }
+            )
+    except CorpusError as exc:
+        errors.append({"reason_code": exc.reason_code, "message": str(exc)})
     capability_receipt: dict[str, object] | None = None
     binding = context["top1"].get("opend_binding")
     if isinstance(binding, Mapping):
@@ -313,6 +332,7 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
             if capability_receipt is not None
             else None
         ),
+        corpus_health_receipt=health_receipt,
     )
     result["facts"]["capability_receipt"] = (
         {

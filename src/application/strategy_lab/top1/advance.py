@@ -12,6 +12,7 @@ from src.application.strategy_lab.top1.corpus import (
     CorpusError,
     capture_recommendation_point,
     discover_recommendation_points,
+    publish_corpus_health_receipt,
     read_market_calendar_binding,
     read_validation_day_source,
     read_validation_point_source,
@@ -85,6 +86,7 @@ def advance_scheduled(
         "occurred_at_utc": occurred_at_utc,
         "service_available": service_available,
         "corpus": [],
+        "corpus_health": None,
         "readiness": None,
         "experiments": [],
         "recovered_experiment_ids": [],
@@ -293,6 +295,22 @@ def advance_scheduled(
         result["corpus"].append(
             {"operation": "discover_recommendation_points", **_error(exc)}
         )
+        had_failure = True
+
+    try:
+        health = publish_corpus_health_receipt(
+            store,
+            artifact_root,
+            market=market,
+            account=account,
+            observed_at_utc=occurred_at_utc,
+            advance_interval_seconds=advance_interval_seconds,
+        )
+        result["corpus_health"] = health
+        if health.get("daily_receipt_errors"):
+            had_failure = True
+    except Exception as exc:
+        result["corpus_health"] = _error(exc)
         had_failure = True
 
     runtime_ready = False

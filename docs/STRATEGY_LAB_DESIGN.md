@@ -22,6 +22,11 @@ Strategy Lab 目前有两个边界不同的入口：
 截至当前主线，历史迁移只提供零写入 preview。无法通过当前合同验证的旧 run 只能记为 gap，不能用
 当前行情、持仓、mark 或 FX 补造。若 preview 没有 `ready` 点，正式研究必须等待新的完整 corpus。
 
+现有 advance timer 在每次正式点发现和捕获后发布 corpus 健康回执。`current` 回执展示当前交易日、
+连续完整日数、首个阻塞日、最近成功捕获时间、日历与来源 hash，并以两个 advance 周期为新鲜度上限；
+readiness 只读展示该回执，缺失、过期或篡改必须显式报告。最近 20 个成熟交易日另保留首次观察的
+不可变日回执，仅用于审计当时观察，不替代 canonical corpus，也不用于补造研究窗口。
+
 代码和测试通过不等于 MVP 已通过。MVP 只有在真实完成一次 20 日研究，并在产生可信
 `research_leader` 后经第二次人工确认完成未来 10 个正式推荐日隐藏验证、生成可读 Final Receipt，
 才完成价值验收。
@@ -53,6 +58,9 @@ flowchart TB
     CLI --> W["Top1 Workspace\npreview / confirm / status / receipt"]
     T["正式 scheduled tick"] --> P["recommendation point v2\nprepared option evidence"]
     P --> CP["Top1 corpus"]
+    A["现有 advance timer"] --> CP
+    CP --> H["corpus 健康回执\ncurrent + 每日首次观察"]
+    H --> W
     CP --> W
     W --> R["20 日研究"]
     R -->|"有可信 leader + 第二次确认"| V["未来 10 日隐藏验证"]
@@ -61,7 +69,7 @@ flowchart TB
     W --> S[("ExperimentStore")]
     R --> S
     V --> S
-    A["现有 advance timer"] --> V
+    A --> V
 ```
 
 模块所有权：
@@ -75,6 +83,7 @@ flowchart TB
 | 生命周期、状态和回执 | `top1/lifecycle.py`、`terminal_projection.py`、`ExperimentStore` |
 | 持仓 mark 和 FX | 现有 performance-evidence repository |
 | 调度推进 | 现有 `strategy-lab-top1-advance` timer |
+| corpus 健康计算、发布和读取 | `top1/corpus.py`；`top1/readiness.py` 只展示读取结果 |
 
 不新增第二套 corpus、FX 存储、调度器、状态库或通用公式 DSL。
 
@@ -82,6 +91,7 @@ flowchart TB
 
 ```text
 正式推荐点持续取证
+  -> current / 每日 corpus 健康回执
   -> 连续 20 个完整交易日 corpus
   -> 研究 preview
   -> 第一次人工确认并运行研究
@@ -101,6 +111,9 @@ flowchart TB
 - 每个点必须具有可验证的 recommendation point、opening snapshot、ranking projection、真实合约
   行情、当时未平仓期权 mark 和 FX 引用。
 - 任一预期点缺失、冲突或不可评估，整个交易日不进入研究窗口；不能跳过缺日后拼接 20 日。
+- 当天已到下一正式点或已经捕获更晚点时，前一缺点记为 `overdue`；尚未到期的点保持 `pending`。
+- 每日不可变回执记录首次成熟观察；`current` 回执按 canonical corpus 重新计算，事实恢复后可恢复健康。
+- 回执新鲜不代表研究可启动；只有连续 20 个成熟交易日均完整，research preview 才可用。
 - corpus 积累本身不创建实验，也不启动研究或隐藏验证。
 
 ### 2. 20 日研究
@@ -214,6 +227,7 @@ probe、安装服务或推进实验。
 | 期权市场集中度、CNY 经济结果和双指标评价 | 已实现 |
 | 10 日 validation preview / confirm / scheduled advance / Final Receipt | 已实现 |
 | 账户级实验 feature gate 删除 | 已完成 |
+| corpus `current` / 每日健康回执及 readiness 展示 | 已实现；只报告，不自动修复或启动研究 |
 | 连续 20 个完整交易日真实 corpus | 积累中；以运行时 readiness 为准 |
 | 真实 Research Receipt 和可信 leader | 未完成 |
 | 未来 10 日隐藏验证和 Final Receipt | 未开始；受 research leader 与第二次确认门槛约束 |

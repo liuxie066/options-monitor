@@ -152,6 +152,7 @@ def build_top1_readiness(
     corpus_status: Mapping[str, Any] | None,
     calendar_binding: Mapping[str, Any] | None,
     capability_facts: Mapping[str, bool] | None = None,
+    corpus_health_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine existing read-only facts; never probe providers or mutate services."""
 
@@ -235,6 +236,11 @@ def build_top1_readiness(
             ),
             "store_schema": dict(schema_state),
             "corpus": dict(corpus_status) if corpus_status is not None else None,
+            "corpus_health_receipt": (
+                dict(corpus_health_receipt)
+                if corpus_health_receipt is not None
+                else None
+            ),
             "market_calendar": (
                 {
                     key: calendar_binding.get(key)
