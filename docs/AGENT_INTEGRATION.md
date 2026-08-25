@@ -168,7 +168,10 @@ scanned-run window by date, market, and account. Its `update` command is dry-run
 only builds a local replay dataset from the latest scanned run, and `--write`
 only wraps local Shadow Replay collect/settle data-plan. It separates Sell
 Put, Covered Call, and Combo Yield through strategy-domain adapters; Combo
-Yield must remain group-level and must not use the single-leg parameter model.
+Yield remains group-level. The separate HK / `lx` Sell Put `top1-loop` is the
+formal 20-day research and 10-day hidden-validation path. It is not an
+`om-agent` tool and must follow the two explicit confirmations documented in
+[Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md).
 Use
 `review_readiness` to decide whether evidence is ready for manual strategy
 review, and use `candidate-impact` / `candidate-impact-report` to compare how

@@ -1,12 +1,12 @@
 # Pi Agent Core Integration PRD And Development Design
 
-Status: S1-S7 are implemented and validated in source on this unreleased
-development branch. The Assistant channel entry and shared Host call path use
-Pi Agent Core, the legacy Python Agent runtime is removed, and the mixed
-Python/Node release gates are present. No release, deployment, configured-
-provider canary, or production rollback rehearsal has been performed. Deployed
-production remains on its last released runtime until separately authorized
-release and upgrade gates pass.
+Status: S1-S7 were implemented and released in v1.15.0. The Assistant channel
+entry and shared Host call path use Pi Agent Core, the legacy Python Agent
+runtime is removed, and the mixed Python/Node release gates are active. S8
+context-bounded tool loading and evidence admission were released in v1.15.11.
+The repository is currently at v1.16.0. Deployment and configured-provider
+canary status are environment facts and must be checked through the controlled
+runtime surfaces; Git history alone does not prove an environment was upgraded.
 
 Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
@@ -14,17 +14,15 @@ Last upstream verification: 2026-08-19. The pinned baseline is
 `>=22.19.0`.
 
 Post-cutover S8 status: the context-bounded tool-loading and evidence-admission
-design in section 20 is approved and implemented in source. It has not been
-released, deployed, or enabled. Sections 1 through 19 continue to describe the
-implemented S1-S7 source contract and its pending operational cutover; section
-20 describes the next contract delta and must not be used as evidence of
-current runtime behavior.
+contract in section 20 is implemented and released. Sections 1 through 19
+describe the Pi runtime and cutover contract; section 20 describes the current
+bounded tool-context and admission delta. Runtime enablement still depends on
+the deployed version and configured provider.
 
-This document is the single planning and implementation authority for replacing
-OM's generic Copilot runtime with Pi Agent Core. The currently deployed
-production architecture remains documented in
-[OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) until a separately
-authorized release and upgrade complete the operational cutover.
+This document is the implementation authority for OM's Pi Agent Core runtime.
+[OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) continues to own the product
+and Scene v4 contract; it no longer describes a separate legacy model/tool
+runtime.
 
 ## 1. Product Requirement
 
@@ -747,10 +745,9 @@ current slice's exit gate passes.
 | S7 | packaging, release gates, atomic cutover, legacy runtime deletion | source/full tests and deterministic rollback preservation pass; release, configured-provider quality review, and production rehearsal remain separately authorized |
 
 Sections 11 through 17 are the executable specifications for S1 through S7.
-They are one implementation plan, not seven independently released product
-modes. S1-S7 were delivered as one unreleased source migration; deployed
-production remains on its last released call path until the separate release
-and controlled-upgrade gates pass.
+They were one implementation plan, not seven independently released product
+modes. S1-S7 were released together in v1.15.0. Whether a particular runtime
+uses that call path still depends on its separately controlled upgrade state.
 
 ## 11. S1 Executable Development Specification
 

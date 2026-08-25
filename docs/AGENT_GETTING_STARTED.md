@@ -124,7 +124,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、已有 dataset 上的 readiness/status 等是只读或显式禁止报告落盘；dataset build、mark/settle、proposal、llm-context 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。`strategy-lab update` 默认 dry-run；只有显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset。Strategy Lab 按 Sell Put / Covered Call / Combo Yield 三个 strategy family 分域，设计见 [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、已有 dataset 上的 readiness/status 等是只读或显式禁止报告落盘；dataset build、mark/settle、proposal、llm-context 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。`strategy-lab update` 默认 dry-run；只有显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset。通用 Strategy Lab 按 Sell Put / Covered Call / Combo Yield 三个 strategy family 分域；formal HK / `lx` Sell Put `top1-loop` 另行执行 20 日研究、第二次确认和 10 日隐藏验证，不属于 `./om-agent` manifest。当前边界见 [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 

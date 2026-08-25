@@ -69,9 +69,11 @@ sanitized summary in the inbound audit record.
 
 Research and Shadow Replay are an independent offline evidence/replay module,
 not part of the Inbound Assistant core and not a remote chat surface. Strategy Lab is
-the strategy-evolution product surface above that offline module; its current
-implemented surfaces are evidence update, read-only decision-instance
+the strategy-evolution product surface above that offline module. Its generic
+local research surface provides evidence update, read-only decision-instance
 readiness, experiments, advisory proposals, and redacted local LLM context.
+Its formal HK / `lx` Sell Put `top1-loop` separately owns the confirmed 20-day
+research, 10-day hidden validation, and immutable receipt workflow.
 
 ```text
 ./om research ...
@@ -80,6 +82,11 @@ readiness, experiments, advisory proposals, and redacted local LLM context.
 -> src.application.shadow_replay
 -> src.application.strategy_lab
 ```
+
+The formal path continues through `src.application.strategy_lab.top1`, the
+existing `ExperimentStore`, scheduled recommendation-point corpus, and the
+existing Top1 advance timer. It does not add a second scheduler, corpus, FX
+store, or production configuration writer.
 
 `src.application.research` owns redacted evidence collection, deterministic
 checks, handoff rendering, remote archive mirroring, and local research bundle

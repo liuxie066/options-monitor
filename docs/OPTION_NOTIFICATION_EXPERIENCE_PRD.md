@@ -1,11 +1,14 @@
 # 期权监控通知体验升级 PRD
 
-- **状态**：Approved for implementation
-- **日期**：2026-07-21
+- **状态**：已实现并发布；当前通知产品合同
+- **日期**：2026-08-25
 - **产品范围**：Options Monitor 策略扫描后的主动通知与主动查询
 - **适用策略**：Sell Put、Covered Call、Combo Yield
 - **适用粒度**：账户 + 市场 + 市场交易日
 - **文档性质**：产品需求；不规定具体代码拆分
+
+当前实现由 `daily_decision_brief`、scheduled notification lifecycle 和 notification renderer 拥有。
+本文保留产品口径，不再作为待实施计划；运行行为以当前源码、调度配置、测试和送达回执为准。
 
 ## 1. 背景
 
