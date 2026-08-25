@@ -12,7 +12,7 @@
 ## 1. 设计结论
 
 MVP 没有新建通用实验框架。实现复用 Sell Put Top1 状态机、ExperimentStore、Research Archive、
-Shadow Replay、Candidate Engine 和定时推进链，并已补齐七块：
+Shadow Replay、Candidate Engine 和定时推进链，并已补齐八块：
 
 1. 在 ordinary scheduled tick 内复用现有行情 collector，把全部正式推荐点的未平仓期权 mark 写入
    现有 performance-evidence repository；取证失败只降级 Strategy Lab，不阻断扫描和通知；
@@ -23,7 +23,9 @@ Shadow Replay、Candidate Engine 和定时推进链，并已补齐七块：
 4. 在现有 `top1-loop` CLI 上补无副作用 preview、研究确认、隐藏验证确认和回执读取；
 5. 增加首个 recipe 所需的期权市场集中度、CNY 经济结果和通用 Top1 配对评价合同；
 6. 用一个可幂等重放的确认命令组合现有生命周期动作，不增加第二套确认状态；
-7. 删除账户级实验 opt-in 及其 feature gate 链，保留运维安全停机开关。
+7. 删除账户级实验 opt-in 及其 feature gate 链，保留运维安全停机开关；
+8. 由现有 advance timer 在正式点捕获后发布紧凑 corpus 健康回执，readiness 只读展示积累进度、
+   新鲜度和阻塞原因，不增加修复任务或新调度器。
 
 本次不增加 MCP、Skill、飞书、多实验并行、通用公式 DSL、recipe 插件框架、新状态库、新 corpus
 或新调度器。逐点 JSON 不增加压缩包或冷数据服务。Top1 仍是第一个 recipe，不升级为第二套平台。
@@ -41,6 +43,7 @@ Shadow Replay、Candidate Engine 和定时推进链，并已补齐七块：
 | Proposal | `candidate_for_adoption` 时在同一 Final Receipt 内嵌最小 Proposal | 真实隐藏验证完成前不会产生可采用建议 |
 | 正式点行情 | scheduled tick 绑定 accepted candidate 行情、未平仓期权 mark、opening FX 和来源 hash | 需要持续积累连续完整交易日；任一缺点阻断该日 |
 | 历史事实 | 只读 migration preview 区分 ready / gap，不补造历史；当前没有通用 apply | 只有首次出现真实 ready 点时才评审幂等 apply |
+| 积累健康 | `corpus.py` 发布 `current` 和最近 20 个成熟交易日的首次观察回执；readiness 只读展示 | 回执不替代 canonical corpus，不能自动补点或启动研究 |
 
 ## 3. 技术架构
 
@@ -67,6 +70,9 @@ flowchart TB
 
     TIMER["现有 Top1 advance timer"] --> ADV["advance_scheduled"]
     ADV --> CP["正式推荐点 corpus"]
+    ADV --> CH["corpus health receipt\ncurrent + daily first observation"]
+    CP --> CH
+    CH --> CLI
     ADV --> FO["fill observation"]
     ADV --> OC["outcome / conclusion"]
     PE --> RP["正式推荐点 v2\n绑定 evidence ref / hash"]
@@ -219,6 +225,23 @@ candidate quote 字段时，返回稳定 gap reason；未被当前 recipe 使用
 - 不写 `user_opt_in`，不按账户切换，不自动终止或改写已有实验；
 - 恢复后仍需重新校验 spec、来源 hash、readiness 和确认状态；
 - `strategy_lab_features`、`feature status` 和 disable reconcile 全部删除。
+
+### 3.4 Corpus 健康回执
+
+`sell_put_top1_corpus_health_receipt.v1` 同时用于当前投影和每日首次观察：
+
+- 当前路径为 `strategy_lab/top1/corpus/hk/lx/health/current.json`，每次 advance 原子替换；
+- 每日路径为 `strategy_lab/top1/corpus/hk/lx/health/days/<date>.json`，只覆盖最近 20 个成熟交易日，
+  首次写入后不覆盖；
+- `day` 只保存 expected、captured、pending、overdue、missing、not-evaluable、conflicting、unexpected
+  的计数、状态和原因码，不复制 point payload 或 point ID 列表；
+- `accumulation` 只出现在当前回执，保存最近连续完整日数、剩余日数、窗口边界和首个阻塞日；
+- 当前回执绑定 advance 周期，`fresh_until_utc = observed_at_utc + 2 * interval`；`fresh` 只在读取时计算；
+- 两类回执都校验固定 schema、identity、规范 JSON、大小、content hash、日历与 corpus evidence hash；
+  读取时另返回 file hash。
+
+每日文件表示该日成熟后的首次观察，允许晚于交易日生成；它不锁定 canonical corpus。后续事实恢复只会
+改善重新计算的 `current`，不会改写每日文件。研究 preview 仍重新验证正式 corpus，不能凭健康回执启动。
 
 ## 4. 核心执行流程
 
@@ -603,12 +626,12 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/validation.py` | `_challenger_profile()`、`_arm()`、`consume_validation_point()`、`record_validation_day_gap()` | challenger 同时读取 profile 与冻结阈值；arm 保存标准经济输入及 FX/metric refs；删除集中度作为硬风险证据的判断 |
 | `src/application/strategy_lab/top1/fill_observation.py` | `_job()`、`observe_active_contracts()` | 保留首次 `bid >= sell_limit` 语义；只对 crossing arm 以 observation 时点选 opening FX，同一事务写入 observation 和 outcome job；FX 缺失时仍审计 `crossing=true`，但 arm `not_evaluable` 且不建 job |
 | `src/application/strategy_lab/top1/outcome.py` | `_close_result()`、`settle_due_outcomes()`、`_statistics_rows()`、`conclude_validation()` | 已有 expiry fact 时只读其 close + terminal FX binding；首次成功时同一事务写入 expiry close fact 和 results；生成 CNY 结果并调用新 evaluator |
-| `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 删除 `feature_status` 参数与 feature blocker；分开报告 prepared opening-FX coverage、existing repository schema / scheduled producer readiness、research terminal-FX coverage 和 validation runtime readiness；Top1 source readiness 只消费 Top1 advance unit 的 drift，不被通用 recorder unit 连带阻断 |
+| `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 删除 `feature_status` 参数与 feature blocker；分开报告 prepared opening-FX coverage、existing repository schema / scheduled producer readiness、research terminal-FX coverage 和 validation runtime readiness；只读附带 corpus health receipt，不以它替代既有 readiness gate；Top1 source readiness 只消费 Top1 advance unit 的 drift，不被通用 recorder unit 连带阻断 |
 | `src/application/strategy_lab/top1/lifecycle.py` | prepare / authorize / start / lock / terminate / public status / `read_published_research_leader()` / `read_public_receipt()` 路径 | 用仅检查维护方停机的 `_require_service_available()` 替换账户 gate；研究 leader 的 published revision 读取和绑定校验由 lifecycle 统一拥有；`lock_challenger()` 校验已确认的 `validation_spec_sha256`；receipt 只返回已 published 且内部校验通过的 projection group |
-| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；无活跃验证需要 provider 时，缺少 validation capability 只作为 readiness 事实展示，不把 corpus-only advance 标记为失败；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
+| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；在 expectation / point 捕获后、读取 readiness 前发布 corpus health；发布失败只把本次 advance 标为 `partial`；无活跃验证需要 provider 时，缺少 validation capability 只作为 readiness 事实展示，不把 corpus-only advance 标记为失败；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
 | `src/application/strategy_lab/top1/terminal_projection.py` | `build_generation_terminal_request()`、`build_aborted_receipt_request()`、`build_completed_receipt_request()`、`recover_terminal_projection()` | completed receipt 在同一 payload 内生成可选 Proposal；继续使用现有单 artifact 发布和 readback |
 | `src/infrastructure/strategy_lab/experiment_store.py` | `migrate()`、schema 校验、`terminate()`、`_request_receipt()`、`pending_projections()`、`mark_projection_published()`、public row codec | 升级 schema v4；v3 有不兼容 active experiment 时拒绝 cutover；删除 feature 表和行为，新终止写入不再产生 feature 语义；receipt 继续使用现有单 projection 状态 |
-| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview、research preview/start、validation preview/start 和 receipt；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态；首次出现 ready 历史点时再增加 apply |
+| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview、research preview/start、validation preview/start 和 receipt；readiness 只读加载 corpus health，并显式报告缺失、过期或冲突；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态；首次出现 ready 历史点时再增加 apply |
 
 ### 6.3 已新增函数
 
@@ -625,6 +648,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/prepared_option_positions_context.py` | `find_prepared_option_positions_manifest()` | 在单个 run/account state 目录内按 v2 后 v1 返回恢复 manifest；不扫描其他 run |
 | 同上 | `build_option_market_evidence_payload()` | 只从 A/B fence 之间取得的 open positions 和单次 evidence bundle 构造最小 `option_market_evidence.v1`；不自行读取当前状态 |
 | `src/application/strategy_lab/top1/corpus.py` | `preview_archived_recommendation_point_migration()` | 零写入扫描已归档 scheduled run，列出能通过当前 point / projection validator 的 ready 点，并为不可转换点返回稳定 gap reason；不预建无实际输入的 apply 分支 |
+| 同上 | `build_corpus_health_receipt()`、`publish_corpus_health_receipt()`、`read_corpus_health_receipt()` | 从既有 expectation、point、日历和 hash 计算当前日与连续 20 日健康；原子发布有新鲜度的 `current`，对滚动 20 个成熟交易日只发布首次观察；读取时校验 schema、规范字节、hash、identity 和 freshness |
 | `domain/domain/short_vol_assessment.py` | `calculate_option_market_concentration_after()` | 使用同账户全部未平仓期权、事实时点 mark 与 FX 计算 v1 指标并返回证据选择结果 |
 | `src/application/strategy_lab/top1/economics.py` | `build_fx_rate_binding()`、`validate_fx_rate_binding()`、`calculate_sell_put_top1_economic_result()` | 把已选中 `FXRateFact` 规范化为唯一 `fx_rate_binding.v1`；经济函数只消费已绑定 opening / terminal 事实并生成 v2 CNY 结果 |
 | `src/application/strategy_lab/top1/statistics.py` | `evaluate_top1_paired_daily_results()` | 统一执行点配对、按日聚合、Student-t、尾部、PnL 不劣和确定性结论 |
@@ -773,7 +797,8 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
   `recommendation_point_gap`，既有扫描结果和通知交付不受影响。
 - `test_strategy_lab_top1.py`：ranking projection v2、candidate market facts、指标证据和 accepted set 不变；
   expiration / point time 可重算 DTE，Bid / Ask 可重算 Mid，且 fixture 不出现未注册 raw 字段。
-- `test_strategy_lab_top1_corpus.py`：历史迁移 preview 零写入，稳定报告 ready / conflict / gap；缺 required
+- `test_strategy_lab_top1_corpus.py`：健康回执区分 pending / overdue / missing，连续 20 日计算确定；每日首次
+  观察不可变，当前回执可刷新且过期、篡改 fail closed；历史迁移 preview 零写入，稳定报告 ready / conflict / gap；缺 required
   mark / FX / scheduler identity 只记录 gap，只缺 optional Bid / Ask / Greek 时标为 ready 并降低
   capability；首次真实 preview 出现 ready 点时，再增加 apply、idempotent 和不覆盖冲突的测试。
 - `test_strategy_lab_top1_research_window.py`：接受在线严格 v2 point 和历史迁移后通过相同 validator 的
@@ -794,7 +819,8 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
   readback 后即可 mark published；终态 + pending legacy receipt 的 v3 store 可迁移并按原单 artifact
   流程完成恢复；用真实最大 `fx_rate_binding.v1` 验证 observation / job / fact JSON
   均低于现有 4096-byte 约束，不改 schema 容量。
-- `test_strategy_lab_top1_readiness.py`、`test_strategy_lab_top1_advance.py`：删除 opt-in；维护方停机只暂停。
+- `test_strategy_lab_top1_readiness.py`、`test_strategy_lab_top1_advance.py`：删除 opt-in；维护方停机只暂停；
+  health 在 readiness 前发布，发布失败为 `partial`，readiness 只读展示且不改变原 gate。
 - `test_strategy_lab_top1_research_runner.py`：移除 feature mock，保留幂等恢复和 OpenD 失败路径；
   只消费 confirmed preview 绑定的 terminal FX，缺失时 fail closed；revision 已持久化后重试
   不打开 repository 或重新拉 close。
@@ -841,10 +867,11 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
 
 ## 10. 当前运行与验收顺序
 
-实现阶段已经结束，当前不继续补功能。运行顺序固定为：
+MVP 主流程和积累健康观察已实现，当前不继续扩展产品面。运行顺序固定为：
 
 1. ordinary scheduled tick 持续写正式 recommendation point v2、prepared option evidence、mark 和 FX；
-2. 每日只读检查 expectation、point、来源 hash 和 readiness，缺点时修复事实产出，不补造当天数据；
+2. advance timer 在点捕获后更新 `current` 健康回执，并为滚动 20 个成熟交易日保留首次观察；readiness
+   只读展示新鲜度、连续完整日数和首个阻塞日，缺点时修复事实产出，不补造当天数据；
 3. 只有最近连续 20 个交易日全部完整时，才生成 research preview；
 4. 用户确认精确 preview 后执行研究并读取 Research Receipt；没有可信 `research_leader` 时本轮结束；
 5. 有可信 leader 时生成未来验证 preview，用户第二次确认后才锁定 challenger；

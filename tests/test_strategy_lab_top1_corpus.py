@@ -24,16 +24,20 @@ from src.application.strategy_lab.top1.contracts import (
 )
 from src.application.strategy_lab.top1.corpus import (
     CORPUS_COMMAND_RESULT_SCHEMA,
+    CORPUS_HEALTH_RECEIPT_SCHEMA,
     CORPUS_STATUS_SCHEMA,
     DATASET_FREEZE_RESULT_SCHEMA,
     HISTORY_MIGRATION_PREVIEW_SCHEMA,
     RESEARCH_WINDOW_FACTS_SCHEMA,
     SEALED_HISTORICAL_DATASET_SCHEMA,
     CorpusError,
+    build_corpus_health_receipt,
     capture_recommendation_point,
     discover_recommendation_points,
     freeze_research_dataset,
     preview_archived_recommendation_point_migration,
+    publish_corpus_health_receipt,
+    read_corpus_health_receipt,
     read_market_calendar_binding,
     read_corpus_status,
     refresh_market_calendar_binding,
@@ -198,6 +202,7 @@ def _seal(
     day: str,
     sealed_at: str | None = None,
     schedule: dict[str, Any] | None = None,
+    market_calendar_sha256: str = CALENDAR_HASH,
     environ: dict[str, str] | None = AVAILABLE,
 ) -> dict[str, Any]:
     return seal_day_expectation(
@@ -208,7 +213,7 @@ def _seal(
         schedule=schedule or _schedule(),
         trading_date=day,
         market_calendar_version="hk-calendar.fixture.v1",
-        market_calendar_sha256=CALENDAR_HASH,
+        market_calendar_sha256=market_calendar_sha256,
         sealed_at_utc=sealed_at or f"{day}T01:00:00Z",
         environ=environ,
     )
@@ -1592,3 +1597,228 @@ def test_freeze_validates_window_facts_feature_gate_and_warming(
         window_facts=no_mature,
         environ=AVAILABLE,
     )["reason_code"] == "research_corpus_warming"
+
+
+def _capture_health_day(
+    store: ExperimentStore,
+    source_root: Path,
+    artifact_root: Path,
+    *,
+    day: str,
+    market_calendar_sha256: str,
+) -> None:
+    assert _seal(
+        store,
+        artifact_root,
+        day=day,
+        market_calendar_sha256=market_calendar_sha256,
+    )["status"] == "published"
+    point_ref, _ = _publish_source_point(
+        source_root,
+        run_id=f"health-{day}",
+        day=day,
+    )
+    assert capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=point_ref,
+        trading_date=day,
+        captured_at_utc=f"{day}T02:01:00Z",
+        environ=AVAILABLE,
+    )["status"] == "published"
+
+
+def test_corpus_health_marks_same_day_overdue_without_failing_future_points(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    calendar = seal_market_calendar_fixture(
+        artifact_root,
+        ["2026-07-21", "2026-07-22"],
+    )
+    assert _seal(
+        store,
+        artifact_root,
+        day="2026-07-22",
+        schedule=_multi_point_schedule(),
+        market_calendar_sha256=str(calendar["snapshot_content_sha256"]),
+    )["status"] == "published"
+
+    receipt = build_corpus_health_receipt(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc="2026-07-22T02:05:00Z",
+        advance_interval_seconds=300,
+    )
+
+    assert receipt["day"]["state"] == "degraded"
+    assert receipt["day"]["overdue_count"] == 1
+    assert receipt["day"]["pending_count"] == 2
+    assert receipt["day"]["missing_count"] == 0
+    assert "corpus_point_overdue" in receipt["day"]["reason_codes"]
+
+
+def test_corpus_health_publishes_rolling_daily_receipts_and_detects_tamper(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    source_root = tmp_path / "source"
+    artifact_root = tmp_path / "artifacts"
+    days = _trading_days("2026-06-22", RESEARCH_REQUIRED_DAYS + 1)
+    calendar = seal_market_calendar_fixture(artifact_root, days)
+    calendar_hash = str(calendar["snapshot_content_sha256"])
+    gap_day = days[9]
+    for day in days[:-1]:
+        if day == gap_day:
+            assert _seal(
+                store,
+                artifact_root,
+                day=day,
+                market_calendar_sha256=calendar_hash,
+            )["status"] == "published"
+            continue
+        _capture_health_day(
+            store,
+            source_root,
+            artifact_root,
+            day=day,
+            market_calendar_sha256=calendar_hash,
+        )
+
+    published = publish_corpus_health_receipt(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{days[-1]}T00:30:00Z",
+        advance_interval_seconds=300,
+    )
+    receipt = published["receipt"]
+    assert receipt["schema_version"] == CORPUS_HEALTH_RECEIPT_SCHEMA
+    assert receipt["accumulation"]["consecutive_complete_days"] == 10
+    assert receipt["accumulation"]["research_window_ready"] is False
+    assert receipt["accumulation"]["first_blocker"] == {
+        "trading_date": gap_day,
+        "state": "degraded",
+        "reason_codes": ["corpus_point_missing"],
+    }
+    assert len(published["daily_receipts_published"]) == 20
+
+    first_daily = artifact_root / published["daily_receipts_published"][0]
+    first_bytes = first_daily.read_bytes()
+    gap_daily = (
+        artifact_root
+        / f"strategy_lab/top1/corpus/hk/lx/health/days/{gap_day}.json"
+    )
+    gap_bytes = gap_daily.read_bytes()
+    assert json.loads(gap_bytes)["day"]["state"] == "degraded"
+
+    point_ref, _ = _publish_source_point(
+        source_root,
+        run_id=f"health-recovery-{gap_day}",
+        day=gap_day,
+    )
+    assert capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=point_ref,
+        trading_date=gap_day,
+        captured_at_utc=f"{days[-1]}T00:30:30Z",
+        environ=AVAILABLE,
+    )["status"] == "published"
+    repeated = publish_corpus_health_receipt(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{days[-1]}T00:31:00Z",
+        advance_interval_seconds=300,
+    )
+    assert repeated["daily_receipts_published"] == []
+    assert first_daily.read_bytes() == first_bytes
+    assert gap_daily.read_bytes() == gap_bytes
+    assert repeated["receipt"]["accumulation"]["consecutive_complete_days"] == 20
+    assert repeated["receipt"]["accumulation"]["research_window_ready"] is True
+
+    assert read_corpus_health_receipt(
+        artifact_root,
+        market="HK",
+        account="lx",
+        now_utc=f"{days[-1]}T00:41:00Z",
+    )["fresh"] is True
+    assert read_corpus_health_receipt(
+        artifact_root,
+        market="HK",
+        account="lx",
+        now_utc=f"{days[-1]}T00:41:01Z",
+    )["fresh"] is False
+
+    current = artifact_root / "strategy_lab/top1/corpus/hk/lx/health/current.json"
+    semantic_tamper = json.loads(current.read_text(encoding="utf-8"))
+    semantic_tamper["day"].update(
+        {
+            "state": "complete",
+            "reason_codes": [],
+            "expected_count": 1,
+            "captured_count": 1,
+            "pending_count": 0,
+            "overdue_count": 0,
+            "missing_count": 0,
+            "not_evaluable_count": 0,
+            "conflicting_count": 0,
+            "unexpected_count": 0,
+        }
+    )
+    semantic_tamper["content_sha256"] = canonical_sha256(
+        {key: value for key, value in semantic_tamper.items() if key != "content_sha256"}
+    )
+    current.write_text(
+        json.dumps(semantic_tamper, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CorpusError) as semantic_conflict:
+        read_corpus_health_receipt(
+            artifact_root,
+            market="HK",
+            account="lx",
+            now_utc=f"{days[-1]}T00:31:00Z",
+        )
+    assert semantic_conflict.value.reason_code == "corpus_health_receipt_conflict"
+    publish_corpus_health_receipt(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{days[-1]}T00:31:30Z",
+        advance_interval_seconds=300,
+    )
+
+    gap_daily.write_text("{}\n", encoding="utf-8")
+    degraded = publish_corpus_health_receipt(
+        store,
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{days[-1]}T00:32:00Z",
+        advance_interval_seconds=300,
+    )
+    assert degraded["daily_receipt_errors"][0]["trading_date"] == gap_day
+    assert degraded["receipt"]["observed_at_utc"] == f"{days[-1]}T00:32:00Z"
+    assert gap_daily.read_text(encoding="utf-8") == "{}\n"
+
+    tampered = json.loads(current.read_text(encoding="utf-8"))
+    tampered["accumulation"]["consecutive_complete_days"] = 19
+    current.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(CorpusError) as raised:
+        read_corpus_health_receipt(
+            artifact_root,
+            market="HK",
+            account="lx",
+            now_utc=f"{days[-1]}T00:31:00Z",
+        )
+    assert raised.value.reason_code == "corpus_health_receipt_conflict"

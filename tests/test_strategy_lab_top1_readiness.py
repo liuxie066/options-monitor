@@ -87,11 +87,14 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
     }.issubset(blocked["validation_runtime_blockers"])
 
     ready = build_top1_readiness(
-        **common, capability_facts={name: True for name in CAPABILITY_FACTS}
+        **common,
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+        corpus_health_receipt={"fresh": True, "receipt_ref": "health/current.json"},
     )
     assert ready["source_delivery_ready"] is True
     assert ready["validation_runtime_ready"] is True
     assert ready["validation_runtime_blockers"] == []
+    assert ready["facts"]["corpus_health_receipt"]["fresh"] is True
 
     missing_corpus = build_top1_readiness(
         **{**common, "corpus_status": None},
@@ -206,6 +209,7 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
 ) -> None:
     import src.interfaces.cli.strategy_lab_top1 as cli
     from src.interfaces.cli.main import parse_args
+    from src.application.strategy_lab.top1.corpus import CorpusError
 
     profile = _profile(tmp_path)
     profile_path = tmp_path / "service.profile.json"
@@ -219,6 +223,11 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
         cli,
         "read_market_calendar_binding",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("missing")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "read_corpus_health_receipt",
+        lambda *_args, **_kwargs: {"fresh": False, "receipt_ref": "health/current.json"},
     )
     args = parse_args(
         [
@@ -248,6 +257,26 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     assert response["ok"] is True
     assert response["data"]["validation_runtime_ready"] is False
     assert response["data"]["facts"]["store_schema"]["status"] == "not_initialized"
+    assert response["data"]["facts"]["corpus_health_receipt"]["fresh"] is False
+    assert any(
+        item["reason_code"] == "corpus_health_receipt_stale"
+        for item in response["data"]["fact_errors"]
+    )
+    assert not store_path.exists()
+
+    monkeypatch.setattr(
+        cli,
+        "read_corpus_health_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CorpusError("corpus_health_receipt_unavailable", "missing")
+        ),
+    )
+    missing = cli.handle_top1_command(args)
+    assert missing["data"]["facts"]["corpus_health_receipt"] is None
+    assert any(
+        item["reason_code"] == "corpus_health_receipt_unavailable"
+        for item in missing["data"]["fact_errors"]
+    )
     assert not store_path.exists()
 
 

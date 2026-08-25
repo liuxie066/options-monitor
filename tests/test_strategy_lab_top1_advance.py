@@ -12,6 +12,18 @@ from src.application.strategy_lab.top1.advance import advance_scheduled
 AVAILABLE = {"OM_STRATEGY_LAB_TOP1_AVAILABLE": "1"}
 
 
+@pytest.fixture(autouse=True)
+def _publish_health_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        advance_module,
+        "publish_corpus_health_receipt",
+        lambda *_args, **_kwargs: {
+            "receipt": {"schema_version": "sell_put_top1_corpus_health_receipt.v1"},
+            "daily_receipts_published": [],
+        },
+    )
+
+
 def _explode() -> Any:  # pragma: no cover - asserted unreachable
     raise AssertionError("lazy dependency must not be loaded")
 
@@ -693,3 +705,108 @@ def test_corpus_conflicts_make_advance_partial(
     assert result["status"] == "partial"
     assert seal_calls[0]["trade_date_type"] == "MORNING"
     assert any(item.get("status") == "conflict" for item in result["corpus"])
+
+
+def test_corpus_health_publishes_before_readiness_and_failure_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        advance_module,
+        "read_active_experiment_ids",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        advance_module, "read_market_calendar_binding", lambda *_args, **_kwargs: _calendar()
+    )
+    monkeypatch.setattr(
+        advance_module, "discover_recommendation_points", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def publish(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append("health")
+        return {"receipt": {"fresh": True}, "daily_receipts_published": []}
+
+    def readiness() -> dict[str, object]:
+        assert calls == ["health"]
+        calls.append("readiness")
+        return {"validation_runtime_ready": False}
+
+    monkeypatch.setattr(advance_module, "publish_corpus_health_receipt", publish)
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=readiness,
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=300,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:00:00Z",
+        idempotency_key="health-before-readiness",
+        environ=AVAILABLE,
+    )
+    assert result["status"] == "ok"
+    assert result["corpus_health"]["receipt"] == {"fresh": True}
+    assert calls == ["health", "readiness"]
+
+    monkeypatch.setattr(
+        advance_module,
+        "publish_corpus_health_receipt",
+        lambda *_args, **_kwargs: {
+            "receipt": {"fresh": True},
+            "daily_receipts_published": [],
+            "daily_receipt_errors": [{"reason_code": "daily_conflict"}],
+        },
+    )
+    daily_conflict = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=300,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:05:00Z",
+        idempotency_key="daily-health-conflict",
+        environ=AVAILABLE,
+    )
+    assert daily_conflict["status"] == "partial"
+
+    def fail_health(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError("health failed")
+
+    monkeypatch.setattr(advance_module, "publish_corpus_health_receipt", fail_health)
+    failed = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=300,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:10:00Z",
+        idempotency_key="health-failure",
+        environ=AVAILABLE,
+    )
+    assert failed["status"] == "partial"
+    assert failed["corpus_health"] == {
+        "reason_code": "advance_failed",
+        "message": "health failed",
+    }
