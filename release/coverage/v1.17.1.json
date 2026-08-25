@@ -1,0 +1,58 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.17.1",
+  "base": {
+    "tag": "v1.17.0",
+    "commit": "8fe21701357794b660bcebcf4395a4c2a0c58c2a"
+  },
+  "reviewed_head": "1a9df164693373fdf9273f3c8b3ae3b8f9dfd5cc",
+  "commits": [
+    {
+      "sha": "4a3ce110e83b5b1c1ee4b3cbb1b96d72398b55cd",
+      "subject": "gateflow(strategy-lab): accept corpus health plan"
+    },
+    {
+      "sha": "e0bdde2d59bd44900c23e3213f94052ad4f93bdd",
+      "subject": "gateflow(strategy-lab): accept corpus health S1"
+    },
+    {
+      "sha": "1b847ac59f947ed0894b8f0c04e21735a6d4787e",
+      "subject": "gateflow(strategy-lab): accept corpus health deepreview"
+    },
+    {
+      "sha": "18b5bc5610918441c2855e53c3f834c1d1a56dc9",
+      "subject": "docs(changelog): note corpus health receipts"
+    },
+    {
+      "sha": "1a9df164693373fdf9273f3c8b3ae3b8f9dfd5cc",
+      "subject": "refactor(strategy-lab): remove obsolete history migration"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Removed the obsolete Strategy Lab legacy-history migration preview and historical-window bridge; Top1 research now accepts only sealed current-corpus datasets, while existing archived runtime files remain untouched.",
+      "commits": [
+        "1a9df164693373fdf9273f3c8b3ae3b8f9dfd5cc"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added source-bound Strategy Lab corpus health receipts that expose current and first mature-day observations, 20-day accumulation progress, freshness, and blockers through readiness without changing research gates or production strategy.",
+      "commits": [
+        "e0bdde2d59bd44900c23e3213f94052ad4f93bdd",
+        "1b847ac59f947ed0894b8f0c04e21735a6d4787e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4a3ce110e83b5b1c1ee4b3cbb1b96d72398b55cd",
+      "reason": "Empty Gateflow plan checkpoint; no source, documentation, runtime, or operator behavior changed."
+    },
+    {
+      "commit": "18b5bc5610918441c2855e53c3f834c1d1a56dc9",
+      "reason": "Changelog-only recording of the corpus health receipt improvement already mapped to its implementation commits."
+    }
+  ]
+}

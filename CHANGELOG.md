@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## 1.17.1 - 2026-08-25
+
 ### Improvements
+- Removed the obsolete Strategy Lab legacy-history migration preview and historical-window bridge; Top1 research now accepts only sealed current-corpus datasets, while existing archived runtime files remain untouched.
 - Added source-bound Strategy Lab corpus health receipts that expose current and first mature-day observations, 20-day accumulation progress, freshness, and blockers through readiness without changing research gates or production strategy.
 
 ## 1.17.0 - 2026-08-25
