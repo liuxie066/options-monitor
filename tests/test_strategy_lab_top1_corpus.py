@@ -1662,6 +1662,50 @@ def test_corpus_health_marks_same_day_overdue_without_failing_future_points(
     assert "corpus_point_overdue" in receipt["day"]["reason_codes"]
 
 
+def test_corpus_health_validates_current_before_daily_publication(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    source_root = tmp_path / "source"
+    artifact_root = tmp_path / "artifacts"
+    days = ["2026-07-21", "2026-07-22"]
+    calendar = seal_market_calendar_fixture(artifact_root, days)
+    assert _seal(
+        store,
+        artifact_root,
+        day=days[0],
+        market_calendar_sha256=str(calendar["snapshot_content_sha256"]),
+    )["status"] == "published"
+    point_ref, _ = _publish_source_point(
+        source_root,
+        run_id="future-health-capture",
+        day=days[0],
+    )
+    assert capture_recommendation_point(
+        store,
+        source_root,
+        artifact_root,
+        point_ref=point_ref,
+        trading_date=days[0],
+        captured_at_utc="2026-07-22T00:31:00Z",
+        environ=AVAILABLE,
+    )["status"] == "published"
+
+    with pytest.raises(CorpusError) as raised:
+        publish_corpus_health_receipt(
+            store,
+            artifact_root,
+            market="HK",
+            account="lx",
+            observed_at_utc="2026-07-22T00:30:00Z",
+            advance_interval_seconds=300,
+        )
+    assert raised.value.reason_code == "corpus_health_receipt_conflict"
+    assert not (
+        artifact_root / "strategy_lab/top1/corpus/hk/lx/health"
+    ).exists()
+
+
 def test_corpus_health_publishes_rolling_daily_receipts_and_detects_tamper(
     tmp_path: Path,
 ) -> None:
@@ -1757,6 +1801,19 @@ def test_corpus_health_publishes_rolling_daily_receipts_and_detects_tamper(
         account="lx",
         now_utc=f"{days[-1]}T00:41:01Z",
     )["fresh"] is False
+
+    snapshot = artifact_root / str(calendar["snapshot_ref"])
+    snapshot_bytes = snapshot.read_bytes()
+    snapshot.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(CorpusError) as calendar_conflict:
+        read_corpus_health_receipt(
+            artifact_root,
+            market="HK",
+            account="lx",
+            now_utc=f"{days[-1]}T00:31:00Z",
+        )
+    assert calendar_conflict.value.reason_code == "corpus_health_receipt_conflict"
+    snapshot.write_bytes(snapshot_bytes)
 
     current = artifact_root / "strategy_lab/top1/corpus/hk/lx/health/current.json"
     semantic_tamper = json.loads(current.read_text(encoding="utf-8"))
