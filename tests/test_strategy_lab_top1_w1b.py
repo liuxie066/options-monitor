@@ -222,6 +222,9 @@ def test_experiment_spec_rejects_bad_shapes_constants_and_values() -> None:
     reversed_dates = _research_spec()
     reversed_dates["research_source"]["start_trading_date"] = "2026-08-15"
     bad_specs.append(reversed_dates)
+    retired_source = _research_spec()
+    retired_source["research_source"]["mode"] = "historical_research_window"
+    bad_specs.append(retired_source)
     forged_behavior = _research_spec()
     forged_behavior["baseline"]["behavior_binding_sha256"] = SHA_B
     bad_specs.append(forged_behavior)

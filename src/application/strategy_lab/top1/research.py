@@ -8,12 +8,10 @@ from datetime import date, datetime, timezone
 from typing import Any, NoReturn, cast
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.engine import rank_candidate_rows
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
-    HISTORICAL_RESEARCH_WINDOW_SCHEMA,
     RECOMMENDATION_POINT_SELECTOR,
     RESEARCH_REQUIRED_DAYS,
     SEALED_HISTORICAL_DATASET_SCHEMA,
@@ -52,52 +50,6 @@ _INPUT_KEYS = frozenset(
         "dataset_ref",
         "sealed_dataset",
         "ranking_projections",
-    }
-)
-_HISTORICAL_INPUT_KEYS = frozenset(
-    {
-        "schema_version",
-        "experiment_spec",
-        "dataset_ref",
-        "research_window",
-        "observed_points",
-    }
-)
-_OBSERVED_POINT_KEYS = frozenset(
-    {"trading_date", "recommendation_point_id", "candidates"}
-)
-_HISTORICAL_CANDIDATE_KEYS = frozenset(
-    {
-        "candidate_id",
-        "symbol",
-        "contract_symbol",
-        "option_type",
-        "currency",
-        "expiration",
-        "spot",
-        "dte",
-        "sell_limit",
-        "multiplier",
-        "open_interest",
-        "volume",
-        "spread_ratio",
-        "period_net_return_on_cash_basis",
-        "annualized_net_return_on_cash_basis",
-        "net_assignment_discount_pct",
-        "net_cash_basis",
-        "net_income",
-        "net_income_cny",
-        "net_premium",
-        "stock_owner",
-        "strike",
-        "option_market_concentration_after",
-        "option_market_value_cny",
-        "option_market_concentration_metric_version",
-        "option_market_evidence_refs",
-        "opening_fx_binding",
-        "fee_schedule_version",
-        "fee_basis",
-        "fee_schedule_url",
     }
 )
 _DATASET_KEYS = frozenset(
@@ -647,10 +599,9 @@ def _validated_research_input(
     dict[str, object],
     list[dict[str, str]],
     dict[str, dict[str, Any]],
-    bool,
 ]:
     envelope = _mapping(dataset, "dataset")
-    if set(envelope) not in {_INPUT_KEYS, _HISTORICAL_INPUT_KEYS}:
+    if set(envelope) != _INPUT_KEYS:
         _fail("research_input_invalid", "dataset keys are incomplete or unexpected")
     if envelope["schema_version"] != RESEARCH_EVALUATION_INPUT_SCHEMA:
         _fail("research_input_invalid", "research evaluation input schema is unsupported")
@@ -661,131 +612,6 @@ def _validated_research_input(
     if "validation_evaluation" in spec:
         _fail("experiment_spec_invalid", "research evaluator requires a research-only spec")
     dataset_ref = _relative_ref(envelope["dataset_ref"], "dataset.dataset_ref")
-    if set(envelope) == _HISTORICAL_INPUT_KEYS:
-        window = _mapping(envelope["research_window"], "research_window")
-        source = _mapping(spec["research_source"], "experiment_spec.research_source")
-        economics = _mapping(
-            spec["economics_contracts"], "experiment_spec.economics_contracts"
-        )
-        if (
-            source.get("mode") != "historical_research_window"
-            or window.get("schema_version") != HISTORICAL_RESEARCH_WINDOW_SCHEMA
-            or window.get("market") != spec["market"]
-            or window.get("account") != spec["account"]
-            or window.get("required_days") != RESEARCH_REQUIRED_DAYS
-            or window.get("cutoff_at_utc") != source["research_cutoff_at"]
-            or window.get("market_calendar_version")
-            != economics["market_calendar_version"]
-            or dataset_ref != source["dataset_ref"]
-            or _canonical_file_sha256(window) != source["dataset_sha256"]
-            or window.get("content_sha256")
-            != canonical_sha256(
-                {key: value for key, value in window.items() if key != "content_sha256"}
-            )
-        ):
-            _fail("research_corpus_conflict", "historical window does not match spec")
-        selected_dates = window.get("selected_trading_dates")
-        raw_window_days = window.get("days")
-        raw_points = envelope["observed_points"]
-        if (
-            not isinstance(selected_dates, list)
-            or len(selected_dates) != RESEARCH_REQUIRED_DAYS
-            or not isinstance(raw_window_days, list)
-            or len(raw_window_days) != RESEARCH_REQUIRED_DAYS
-            or not isinstance(raw_points, list)
-        ):
-            _fail("research_corpus_conflict", "historical window coverage is invalid")
-        if (
-            source.get("start_trading_date") != selected_dates[0]
-            or source.get("end_trading_date") != selected_dates[-1]
-        ):
-            _fail(
-                "research_corpus_conflict", "historical window dates do not match spec"
-            )
-        expected_points: dict[str, tuple[str, str]] = {}
-        for day_index, raw_day in enumerate(cast(list[object], raw_window_days)):
-            day = _mapping(raw_day, f"research_window.days[{day_index}]")
-            trading_date = _iso_date(
-                day.get("trading_date"),
-                f"research_window.days[{day_index}].trading_date",
-            )
-            day_points = day.get("points")
-            if (
-                trading_date != selected_dates[day_index]
-                or not isinstance(day_points, list)
-                or not day_points
-            ):
-                _fail("research_corpus_conflict", "historical window day is invalid")
-            for point_index, raw_point in enumerate(cast(list[object], day_points)):
-                point = _mapping(
-                    raw_point,
-                    f"research_window.days[{day_index}].points[{point_index}]",
-                )
-                point_id = _hash(
-                    point.get("recommendation_point_id"),
-                    "recommendation_point_id",
-                    reason_code="research_corpus_conflict",
-                )
-                candidate_hash = _hash(
-                    point.get("candidate_facts_sha256"),
-                    "candidate_facts_sha256",
-                    reason_code="research_corpus_conflict",
-                )
-                if point_id in expected_points:
-                    _fail(
-                        "research_corpus_conflict",
-                        "historical window point is duplicated",
-                    )
-                expected_points[point_id] = (trading_date, candidate_hash)
-        point_rows: list[dict[str, str]] = []
-        projections: dict[str, dict[str, Any]] = {}
-        for index, raw_point in enumerate(cast(list[object], raw_points)):
-            point = _mapping(raw_point, f"observed_points[{index}]")
-            _exact_keys(point, _OBSERVED_POINT_KEYS, f"observed_points[{index}]")
-            trading_date = _iso_date(
-                point["trading_date"], f"observed_points[{index}].trading_date"
-            )
-            point_id = _hash(
-                point["recommendation_point_id"],
-                f"observed_points[{index}].recommendation_point_id",
-                reason_code="research_corpus_conflict",
-            )
-            candidates = point["candidates"]
-            if (
-                not isinstance(candidates, list)
-                or expected_points.get(point_id)
-                != (trading_date, canonical_sha256(candidates))
-                or any(not isinstance(candidate, Mapping) for candidate in candidates)
-                or point_id in projections
-            ):
-                _fail("research_corpus_conflict", "historical point is invalid")
-            candidate_ids = [
-                candidate.get("candidate_id")
-                for candidate in cast(list[Mapping[str, object]], candidates)
-            ]
-            if (
-                any(not isinstance(value, str) or not value for value in candidate_ids)
-                or len(candidate_ids) != len(set(candidate_ids))
-                or any(
-                    set(candidate) != _HISTORICAL_CANDIDATE_KEYS
-                    for candidate in cast(list[Mapping[str, object]], candidates)
-                )
-            ):
-                _fail("research_corpus_conflict", "historical candidate is incomplete")
-            point_rows.append(
-                {
-                    "trading_date": trading_date,
-                    "recommendation_point_id": point_id,
-                    "projection_ref": point_id,
-                }
-            )
-            projections[point_id] = {
-                "candidates": [dict(candidate) for candidate in candidates]
-            }
-        if set(projections) != set(expected_points):
-            _fail("research_corpus_conflict", "historical points do not match window")
-        return spec, dataset_ref, dict(window), point_rows, projections, True
-
     source = _mapping(spec["research_source"], "experiment_spec.research_source")
     if source.get("mode") != "sealed_historical_dataset":
         _fail("research_corpus_conflict", "sealed dataset source mode does not match")
@@ -798,7 +624,7 @@ def _validated_research_input(
         market=str(spec["market"]),
         account=str(spec["account"]),
     )
-    return spec, dataset_ref, sealed_dataset, point_rows, projections, False
+    return spec, dataset_ref, sealed_dataset, point_rows, projections
 
 
 def _research_selections(
@@ -806,7 +632,6 @@ def _research_selections(
     spec: Mapping[str, object],
     point_rows: list[dict[str, str]],
     projections: Mapping[str, Mapping[str, Any]],
-    observed_points: bool,
 ) -> tuple[
     list[tuple[str, str, float]],
     dict[str, list[dict[str, object]]],
@@ -835,17 +660,6 @@ def _research_selections(
         projection = projections[point["projection_ref"]]
 
         def top1_candidate_id(profile: str, threshold: float) -> str | None:
-            if observed_points:
-                try:
-                    ranked = rank_candidate_rows(
-                        [dict(row) for row in projection["candidates"]],
-                        mode="put",
-                        sell_put_ranking_profile=profile,
-                        near_return_threshold=threshold,
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    _fail("ranking_projection_incomplete", str(exc))
-                return str(ranked[0]["candidate_id"]) if ranked else None
             try:
                 ranking = rerank_recommendation_point(
                     projection,
@@ -896,7 +710,7 @@ def required_research_close_keys(
     dataset: object,
     fee_contract: object,
 ) -> list[tuple[str, str]]:
-    spec, _dataset_ref, _sealed_dataset, point_rows, projections, observed_points = (
+    spec, _dataset_ref, _sealed_dataset, point_rows, projections = (
         _validated_research_input(dataset)
     )
     _ = _validate_fee_contract(fee_contract, spec=spec)
@@ -905,7 +719,6 @@ def required_research_close_keys(
             spec=spec,
             point_rows=point_rows,
             projections=projections,
-            observed_points=observed_points,
         )
     )
     return [] if currency_mismatch else sorted(required_close_keys)
@@ -916,7 +729,7 @@ def evaluate_research(
     close_receipts: object,
     fee_contract: object,
 ) -> dict[str, object]:
-    spec, dataset_ref, sealed_dataset, point_rows, projections, observed_points = (
+    spec, dataset_ref, sealed_dataset, point_rows, projections = (
         _validated_research_input(dataset)
     )
     receipts = _validate_close_receipts(
@@ -928,7 +741,6 @@ def evaluate_research(
             spec=spec,
             point_rows=point_rows,
             projections=projections,
-            observed_points=observed_points,
         )
     )
     if currency_mismatch:
@@ -1252,7 +1064,7 @@ def validate_internal_research_revision(
     dataset: object,
     value: object,
 ) -> dict[str, object]:
-    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections, _observed = (
+    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections = (
         _validated_research_input(dataset)
     )
     revision = _mapping(value, "research_revision")
@@ -1333,7 +1145,7 @@ def build_internal_research_revision(
     quota_decision: object,
     observed_at_utc: str,
 ) -> dict[str, object]:
-    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections, _observed = (
+    spec, _dataset_ref, _sealed_dataset, _point_rows, _projections = (
         _validated_research_input(dataset)
     )
     normalized_fee = _normalized_fee_contract(fee_contract, spec=spec)

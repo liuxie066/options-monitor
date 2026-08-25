@@ -19,8 +19,8 @@ Strategy Lab 目前有两个边界不同的入口：
 | 通用本地研究入口 | 对 Shadow Replay dataset 做 readiness、候选影响实验、dry-run proposal 和脱敏 LLM context | 已实现；只用于探索性研究，不是正式 Top1 MVP 验收路径 |
 | `top1-loop` | 对 HK / `lx` Sell Put Top1 完成 20 日研究、10 日隐藏验证和最终回执 | 代码已实现；等待连续正式事实，不得提前开始研究 |
 
-截至当前主线，历史迁移只提供零写入 preview。无法通过当前合同验证的旧 run 只能记为 gap，不能用
-当前行情、持仓、mark 或 FX 补造。若 preview 没有 `ready` 点，正式研究必须等待新的完整 corpus。
+旧归档 run 不再进入 formal Top1 corpus，也不提供迁移入口。正式研究只使用当前合同前瞻采集的完整
+corpus；不能用当前行情、持仓、mark 或 FX 补造历史正式点。
 
 现有 advance timer 在每次正式点发现和捕获后发布 corpus 健康回执。`current` 回执展示当前交易日、
 连续完整日数、首个阻塞日、最近成功捕获时间、日历与来源 hash，并以两个 advance 周期为新鲜度上限；
@@ -163,10 +163,6 @@ Adoption Proposal；其他结论的 proposal 为 `null`。回执不构成生产�
 ./om research strategy-lab top1-loop readiness \
   --market hk --account lx --profile-path <runtime>/service.profile.json
 
-./om research strategy-lab top1-loop history migrate preview \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --source-root <archive-root>
-
 ./om research strategy-lab top1-loop research preview \
   --market hk --account lx --profile-path <runtime>/service.profile.json \
   --cutoff-at-utc <ISO-8601> --latest-mature-trading-date <YYYY-MM-DD>
@@ -222,7 +218,7 @@ probe、安装服务或推进实验。
 | 项目 | 状态 |
 |---|---|
 | 正式推荐点 v2 与 prepared option evidence | 已实现 |
-| 历史事实迁移 preview | 已实现，仅只读；没有真实 ready 点时不增加 apply |
+| 旧归档迁移兼容 | 已删除；正式研究只消费前瞻采集的完整 corpus |
 | 20 日 research preview / confirm / receipt | 已实现 |
 | 期权市场集中度、CNY 经济结果和双指标评价 | 已实现 |
 | 10 日 validation preview / confirm / scheduled advance / Final Receipt | 已实现 |

@@ -619,7 +619,6 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/runtime_portfolio_snapshot.py` | `_validate_prepared_option_reference()`、`build_runtime_portfolio_snapshot()`、`validate_replay_bundle()` | 普通 runtime snapshot / replay 兼容绑定 v1/v2 owner receipt；Strategy Lab 不从该兼容面放行 v1 |
 | `src/application/strategy_lab/top1/contracts.py` | `validate_experiment_spec()`、`build_current_behavior_binding()`、`build_research_spec_sha256()`、`build_validation_spec_sha256()` | 升级 v2 字段、变体、指标、FX、research close receipt 和 expiry outcome 合同版本；保持 exact-key 和 fail-closed 校验 |
 | `src/application/strategy_lab/top1/ranking.py` | `build_ranking_projection()`、`validate_ranking_projection()`、`rerank_recommendation_point()` | 升级 projection v2；从 accepted candidate facts 复制 5.5 的固定紧凑白名单，接受已验证的期权市场集中度及事实引用；将冻结收益阈值传入 Candidate Engine |
-| `src/application/strategy_lab/top1/research_window.py` | `_normalize_point()`、`build_research_window()`、`load_research_window()` | 保留给历史迁移和兼容读取；正式 Workspace 不再通过该 bridge 判断 20 日完整性 |
 | `src/application/strategy_lab/top1/corpus.py` | `seal_day_expectation()`、`seal_committed_day_expectation()`、`capture_recommendation_point()`、`preview_research_dataset()`、`freeze_research_dataset()` | 删除账户 feature gate；按 point v2 绑定加载 prepared context receipt 并生成 projection；完整日按日历严格校验全部正式点；preview 零写入构造 v2 dataset，确认后才发布精确字节；禁止读取 capture 时的当前账本 / mark / FX |
 | `src/application/strategy_lab/top1/research.py` | `required_research_close_keys()`、`evaluate_research()`、`build_internal_research_revision()`、`validate_internal_research_revision()` | 使用标准 CNY 经济结果和新 evaluator；close receipt v2 绑定 terminal FX；leader 顺序加入 CNY PnL；恢复只读已记录 revision |
 | `src/application/strategy_lab/top1/research_runner.py` | `_close_receipts()`、`run_research()` | 删除账户 feature 检查；只接收 confirmed preview 已绑定的 terminal FX，写入 close receipt v2 / revision，不打开 repository；保留 quota、OpenD close 和幂等恢复 |
@@ -631,7 +630,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；在 expectation / point 捕获后、读取 readiness 前发布 corpus health；发布失败只把本次 advance 标为 `partial`；无活跃验证需要 provider 时，缺少 validation capability 只作为 readiness 事实展示，不把 corpus-only advance 标记为失败；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
 | `src/application/strategy_lab/top1/terminal_projection.py` | `build_generation_terminal_request()`、`build_aborted_receipt_request()`、`build_completed_receipt_request()`、`recover_terminal_projection()` | completed receipt 在同一 payload 内生成可选 Proposal；继续使用现有单 artifact 发布和 readback |
 | `src/infrastructure/strategy_lab/experiment_store.py` | `migrate()`、schema 校验、`terminate()`、`_request_receipt()`、`pending_projections()`、`mark_projection_published()`、public row codec | 升级 schema v4；v3 有不兼容 active experiment 时拒绝 cutover；删除 feature 表和行为，新终止写入不再产生 feature 语义；receipt 继续使用现有单 projection 状态 |
-| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview、research preview/start、validation preview/start 和 receipt；readiness 只读加载 corpus health，并显式报告缺失、过期或冲突；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态；首次出现 ready 历史点时再增加 apply |
+| `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 公开 research preview/start、validation preview/start 和 receipt；readiness 只读加载 corpus health，并显式报告缺失、过期或冲突；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态 |
 
 ### 6.3 已新增函数
 
@@ -647,7 +646,6 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 同上 | `validate_confirmed_start_command()` | exact-key 校验 confirmed command，并返回供 Workspace 派生子 key 的规范化字段 |
 | `src/application/prepared_option_positions_context.py` | `find_prepared_option_positions_manifest()` | 在单个 run/account state 目录内按 v2 后 v1 返回恢复 manifest；不扫描其他 run |
 | 同上 | `build_option_market_evidence_payload()` | 只从 A/B fence 之间取得的 open positions 和单次 evidence bundle 构造最小 `option_market_evidence.v1`；不自行读取当前状态 |
-| `src/application/strategy_lab/top1/corpus.py` | `preview_archived_recommendation_point_migration()` | 零写入扫描已归档 scheduled run，列出能通过当前 point / projection validator 的 ready 点，并为不可转换点返回稳定 gap reason；不预建无实际输入的 apply 分支 |
 | 同上 | `build_corpus_health_receipt()`、`publish_corpus_health_receipt()`、`read_corpus_health_receipt()` | 从既有 expectation、point、日历和 hash 计算当前日与连续 20 日健康；原子发布有新鲜度的 `current`，对滚动 20 个成熟交易日只发布首次观察；读取时校验 schema、规范字节、hash、identity 和 freshness |
 | `domain/domain/short_vol_assessment.py` | `calculate_option_market_concentration_after()` | 使用同账户全部未平仓期权、事实时点 mark 与 FX 计算 v1 指标并返回证据选择结果 |
 | `src/application/strategy_lab/top1/economics.py` | `build_fx_rate_binding()`、`validate_fx_rate_binding()`、`calculate_sell_put_top1_economic_result()` | 把已选中 `FXRateFact` 规范化为唯一 `fx_rate_binding.v1`；经济函数只消费已绑定 opening / terminal 事实并生成 v2 CNY 结果 |
@@ -655,8 +653,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/terminal_projection.py` | `build_top1_adoption_proposal()` | 仅在 `candidate_for_adoption` 时构造 Final Receipt 内的最小只读 Proposal 对象；不渲染或发布第二个 artifact |
 | `src/infrastructure/strategy_lab/experiment_store.py` | `_migrate_v3_to_v4()` | 在同一迁移事务内按现有 `active_experiments()` 谓词拒绝不兼容 active v3 状态，删除 feature 表并升级 metadata；不重建 experiment 表 |
 
-`workspace.py` 是本次唯一新增应用模块。历史迁移只在现有 `corpus.py` 增加一个函数。其他新增函数
-进入已有 owner，不创建 recipe registry、metric registry、repository interface 或 service factory。
+`workspace.py` 是本次唯一新增应用模块。其他新增函数进入已有 owner，不创建 recipe registry、
+metric registry、repository interface 或 service factory。
 
 ### 6.4 已删除函数与状态
 
@@ -670,6 +668,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/terminal_projection.py` | `experimental_feature_disabled` 终止分支和新 receipt 的 `disabled_scope` 字段 | 停机不再自动终止实验；历史 receipt 仍按原字节读取 |
 | `src/application/strategy_lab/top1/economics.py` | `calculate_expiry_efficiency()` | 被 CNY 标准经济结果完整替代，不保留兼容别名 |
 | `src/application/strategy_lab/top1/statistics.py` | `summarize_paired_daily_deltas()` | 被双指标通用 evaluator 完整替代，不保留双 owner |
+| `src/application/strategy_lab/top1/research_window.py`、`research.py`、`research_artifacts.py` | `historical_research_window.v1` bridge 及兼容评价分支 | 旧归档缺少当前正式点合同所需事实，formal research 只消费 corpus 冻结的 `sealed_historical_dataset.v1` |
+| `src/application/strategy_lab/top1/corpus.py`、`src/interfaces/cli/strategy_lab_top1.py` | `preview_archived_recommendation_point_migration()`、`history migrate preview` | preview 没有可执行 apply 路径且不能修复旧证据；保留会误导为可迁移能力 |
 | tests / docs | 只验证 opt-in、feature reconcile、旧 concentration gate 或旧 efficiency 字段的内容 | 删除已失效行为，保留生命周期、证据和恢复测试 |
 
 ### 6.5 本次明确不删除
@@ -798,11 +798,8 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
 - `test_strategy_lab_top1.py`：ranking projection v2、candidate market facts、指标证据和 accepted set 不变；
   expiration / point time 可重算 DTE，Bid / Ask 可重算 Mid，且 fixture 不出现未注册 raw 字段。
 - `test_strategy_lab_top1_corpus.py`：健康回执区分 pending / overdue / missing，连续 20 日计算确定；每日首次
-  观察不可变，当前回执可刷新且过期、篡改 fail closed；历史迁移 preview 零写入，稳定报告 ready / conflict / gap；缺 required
-  mark / FX / scheduler identity 只记录 gap，只缺 optional Bid / Ask / Greek 时标为 ready 并降低
-  capability；首次真实 preview 出现 ready 点时，再增加 apply、idempotent 和不覆盖冲突的测试。
-- `test_strategy_lab_top1_research_window.py`：接受在线严格 v2 point 和历史迁移后通过相同 validator 的
-  等价 point；历史持仓 / mark / FX 完整、缺失、过期和冲突。
+  观察不可变，当前回执可刷新且过期、篡改 fail closed；缺 required mark / FX / scheduler identity 只记录
+  gap，只缺 optional Bid / Ask / Greek 时标为 ready 并降低 capability。
 - `test_strategy_lab_top1_workspace.py`：正式 20 日 v2 corpus 的 preview 零写入且确定；缺任一 expected point
   即 blocked；确认 hash 不匹配零写入，匹配后发布同一 dataset 并幂等完成研究。
 - `test_strategy_lab_top1_w1b.py`：opening / terminal 使用不同汇率的 CNY 经济结果，三个原币
