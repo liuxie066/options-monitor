@@ -193,7 +193,12 @@ def _apply_proven_zero_semantics(value: Any) -> Any:
         return [_apply_proven_zero_semantics(item) for item in value]
     if not isinstance(value, Mapping):
         return value
-    out = {key: _apply_proven_zero_semantics(item) for key, item in value.items()}
+    out = {
+        key: item
+        if key in {"option_net_cashflow", "cashflow_return"}
+        else _apply_proven_zero_semantics(item)
+        for key, item in value.items()
+    }
     if {"by_currency", "cny", "status", "missing"}.issubset(out) and out.get("status") == "not_observed":
         out["by_currency"] = {}
         out["cny"] = 0.0

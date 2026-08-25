@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- Added canonical option cash-flow returns for MTD and YTD, combining signed option trades and fees with active secured-capital days across Sell Put, Covered Call, long-option, Combo, and Wheel positions.
+
 ## 1.16.0 - 2026-08-24
 
 ### New Features

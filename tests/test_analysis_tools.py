@@ -90,12 +90,22 @@ def _performance_report(
         "activity": {"premium_collected_gross": _performance_metric(premium_cny)},
         "cash": {
             "option_trade_cash_gross": _performance_metric(option_trade_cash_cny),
+            "option_net_cashflow": _performance_metric(option_trade_cash_cny, usd=120.0),
             "total_cash_change_net": _performance_metric(option_trade_cash_cny),
         },
         "pnl": {
             "realized_gross": _performance_metric(realized_cny),
             "period_total_gross": _performance_metric(realized_cny),
             "period_total_net": _performance_metric(realized_cny),
+        },
+        "cashflow_return": {
+            "capital_basis": "active_option_capital_days_v1",
+            "period_duration_days": 30.0,
+            "capital_days_by_currency": {"USD": 30000.0},
+            "average_incremental_capital_by_currency": {"USD": 1000.0},
+            "period_return": {"by_currency": {"USD": 0.12}, "status": "observed", "missing": []},
+            "annualized_return": {"by_currency": {"USD": 1.46}, "status": "observed", "missing": []},
+            "coverage": {"status": "observed", "missing_by_currency": {}, "global_missing": []},
         },
     }
     return {
@@ -110,6 +120,7 @@ def _performance_report(
         "cash": summary["cash"],
         "pnl": summary["pnl"],
         "capital": {},
+        "cashflow_return": summary["cashflow_return"],
         "breakdowns": {"monthly": [summary]},
         "quality": {"status": "observed"},
         "rows": [],
@@ -464,6 +475,10 @@ def test_analysis_query_primary_option_performance_views_keep_namespaces_separat
     monthly = data["view_datasets"]["option_monthly_performance"]["rows"][0]
     assert monthly["premium_collected_cny"] == 800.0
     assert monthly["option_trade_cash_cny"] == 1200.0
+    assert json.loads(monthly["option_net_cashflow_by_ccy"]) == {"USD": 120.0}
+    assert json.loads(monthly["cashflow_capital_days_by_ccy"]) == {"USD": 30000.0}
+    assert json.loads(monthly["period_cashflow_return_by_ccy"]) == {"USD": 0.12}
+    assert json.loads(monthly["annualized_cashflow_return_by_ccy"]) == {"USD": 1.46}
     assert monthly["period_total_pnl_net_cny"] == 400.0
     assert {row["component"] for row in data["view_datasets"]["option_activity_components"]["rows"]} >= {
         "premium_collected"
@@ -471,6 +486,7 @@ def test_analysis_query_primary_option_performance_views_keep_namespaces_separat
     cash_rows = data["view_datasets"]["option_cash_components"]["rows"]
     assert {row["component"] for row in cash_rows} >= {
         "option_trade_cash",
+        "option_net_cashflow",
         "total_cash_change",
     }
     option_cash = next(row for row in cash_rows if row["component"] == "option_trade_cash")
@@ -1667,7 +1683,7 @@ def test_analysis_query_unknown_column_returns_structured_suggestions() -> None:
     assert exc.value.details["preflight"]["error_code"] == "UNKNOWN_COLUMN"
     assert exc.value.details["unknown_column"] == "net_cashflow"
     assert exc.value.details["referenced_views"] == ["option_monthly_performance"]
-    assert "option_trade_cash_cny" in exc.value.details["suggestions"]
+    assert "option_net_cashflow_cny" in exc.value.details["suggestions"]
 
 
 def test_analysis_query_executes_read_only_aggregates() -> None:

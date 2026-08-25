@@ -138,6 +138,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "never recalculate, subtract, or convert its monetary totals" in definition["system_prompt"]
     assert "Primary metrics" in definition["system_prompt"]
     assert "The latter excludes assigned-stock" in definition["system_prompt"]
+    assert "Never recompute `cashflow_return`" in definition["system_prompt"]
+    assert "cash.option_net_cashflow" in definition["system_prompt"]
     assert "Evaluate CNY independently for each metric" in definition["system_prompt"]
     assert "Moneyness requires an observed underlying price" in definition["system_prompt"]
     assert "runtime context fields explicitly marked as fixed tool scope" in definition["system_prompt"]

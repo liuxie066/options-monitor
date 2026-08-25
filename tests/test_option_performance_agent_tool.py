@@ -42,6 +42,7 @@ def _core_report(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         "cash": {},
         "pnl": {},
         "capital": {},
+        "cashflow_return": {},
         "assigned_stock": {"ending_lots": []},
         "breakdowns": {"monthly": [], "accounts": [], "symbols": []},
         "quality": {"status": "observed", "missing": [], "warnings": [], "evidence_fact_ids": []},
@@ -143,6 +144,7 @@ def test_public_performance_presentation_is_total_first_accounted_and_identifier
     }
     report["cash"] = {
         "option_trade_cash_gross": _metric({"USD": 800.0}, cny=5600.0),
+        "option_net_cashflow": _metric({"USD": 790.0}, cny=5530.0),
         "stock_settlement_cash_gross": _metric({"USD": -10000.0}, cny=-70000.0),
         "stock_settlement_fee_cash": _metric({"USD": -1.0}, cny=-7.0),
         "assigned_stock_sale_cash_gross": _metric({"USD": 5500.0}, cny=38500.0),
@@ -164,16 +166,41 @@ def test_public_performance_presentation_is_total_first_accounted_and_identifier
         {
             "account": "sy",
             "activity": {"premium_collected_gross": _metric({"USD": 600.0}, cny=4200.0)},
-            "cash": {"option_trade_cash_gross": _metric({"USD": 500.0}, cny=3500.0)},
+            "cash": {
+                "option_trade_cash_gross": _metric({"USD": 500.0}, cny=3500.0),
+                "option_net_cashflow": _metric({"USD": 495.0}, cny=3465.0),
+            },
+            "cashflow_return": {
+                "capital_days_by_currency": {"USD": 120000.0},
+                "period_return": {"by_currency": {"USD": 0.12375}, "status": "observed", "missing": []},
+                "annualized_return": {"by_currency": {"USD": 1.505625}, "status": "observed", "missing": []},
+                "coverage": {"status": "observed", "missing_by_currency": {}, "global_missing": []},
+            },
             "pnl": {"option_realized_gross": _metric({"USD": 200.0}, cny=1400.0)},
         },
         {
             "account": "lx",
             "activity": {"premium_collected_gross": _metric({"USD": 400.0}, cny=2800.0)},
-            "cash": {"option_trade_cash_gross": _metric({"USD": 300.0}, cny=2100.0)},
+            "cash": {
+                "option_trade_cash_gross": _metric({"USD": 300.0}, cny=2100.0),
+                "option_net_cashflow": _metric({"USD": 295.0}, cny=2065.0),
+            },
+            "cashflow_return": {
+                "capital_days_by_currency": {"USD": 60000.0},
+                "period_return": {"by_currency": {"USD": 0.1475}, "status": "observed", "missing": []},
+                "annualized_return": {"by_currency": {"USD": 1.794583333333}, "status": "observed", "missing": []},
+                "coverage": {"status": "observed", "missing_by_currency": {}, "global_missing": []},
+            },
             "pnl": {"option_realized_gross": _metric({"USD": 100.0}, cny=700.0)},
         },
     ]
+    report["cashflow_return"] = {
+        "capital_basis": "active_option_capital_days_v1",
+        "capital_days_by_currency": {"USD": 180000.0},
+        "period_return": {"by_currency": {"USD": 0.131666666667}, "status": "observed", "missing": []},
+        "annualized_return": {"by_currency": {"USD": 1.601944444444}, "status": "observed", "missing": []},
+        "coverage": {"status": "observed", "missing_by_currency": {}, "global_missing": []},
+    }
     report["quality"] = {
         "status": "partial",
         "missing": ["fee:event-option-private", "fx:USD:event-net-private"],
@@ -192,6 +219,11 @@ def test_public_performance_presentation_is_total_first_accounted_and_identifier
     assert presentation["primary_metrics"]["option_realized_gross"]["cny"] == 2100.0
     assert presentation["primary_metrics"]["option_realized_gross"]["status"] == "observed"
     assert presentation["primary_metrics"]["option_trade_cash_gross"]["cny"] == 5600.0
+    assert presentation["cashflow_return"]["option_net_cashflow"]["by_currency"] == {"USD": 790.0}
+    assert presentation["cashflow_return"]["capital_days_by_currency"] == {"USD": 180000.0}
+    assert presentation["cashflow_return"]["period_return"]["by_currency"] == {
+        "USD": 0.131666666667
+    }
     assert presentation["reporting_basis"]["net_evidence"]["status"] == "partial"
     assert [row["account"] for row in presentation["account_rows"]] == ["lx", "sy"]
     assert sum(
@@ -202,6 +234,10 @@ def test_public_performance_presentation_is_total_first_accounted_and_identifier
         row["option_trade_cash_gross"]["cny"]
         for row in presentation["account_rows"]
     ) == presentation["primary_metrics"]["option_trade_cash_gross"]["cny"]
+    assert sum(
+        row["option_net_cashflow"]["by_currency"]["USD"]
+        for row in presentation["account_rows"]
+    ) == presentation["cashflow_return"]["option_net_cashflow"]["by_currency"]["USD"]
     assert presentation["assigned_stock_impact"]["assigned_stock_realized_gross"]["cny"] == 3500.0
     assert presentation["assigned_stock_impact"]["combined_realized_gross"]["cny"] == 5600.0
     assert (
@@ -261,6 +297,11 @@ def test_option_performance_output_contract_exposes_assignment_components() -> N
     assert "pnl.assigned_stock_realized_net" in contract["fact_fields"]
     assert "cash.assigned_stock_sale_cash_gross" in contract["fact_fields"]
     assert "cash.stock_settlement_cash_gross" in contract["fact_fields"]
+    assert "cash.option_net_cashflow" in contract["fact_fields"]
+    assert "cashflow_return.period_duration_days" in contract["fact_fields"]
+    assert "cashflow_return.period_return" in contract["fact_fields"]
+    assert "cashflow_return.annualized_return" in contract["fact_fields"]
+    assert "cashflow_return.coverage.missing_by_currency" in contract["missing_data_fields"]
     assert contract["model_value_fields"] == [
         "presentation",
         "period",
