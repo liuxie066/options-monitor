@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Added source-bound Strategy Lab corpus health receipts that expose current and first mature-day observations, 20-day accumulation progress, freshness, and blockers through readiness without changing research gates or production strategy.
+
 ## 1.17.0 - 2026-08-25
 
 ### New Features
