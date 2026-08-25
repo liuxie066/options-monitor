@@ -1,0 +1,72 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.17.0",
+  "base": {
+    "tag": "v1.16.0",
+    "commit": "f35a20c88925d525554abc80b2dc9106d5a8eb04"
+  },
+  "reviewed_head": "7c0dc6b7ad40f2fadb9d55a4f0cab974b947b5e2",
+  "commits": [
+    {
+      "sha": "712ccabd8fc428f5cf3f81c02cddfc004c8310d3",
+      "subject": "fix(release): detect VERSION changes across push range"
+    },
+    {
+      "sha": "8c6a9d7750cd5d8614be7993147b8e6a5a468777",
+      "subject": "docs(strategy-lab): define formal research accumulation gate"
+    },
+    {
+      "sha": "11782b0706d98704e3286a9ba584bb3530aa4cf6",
+      "subject": "feat(performance): add option cashflow returns"
+    },
+    {
+      "sha": "05fd4ad7481d939026a60b938e83f5cae21979e3",
+      "subject": "docs(strategy-lab): refresh living documentation"
+    },
+    {
+      "sha": "0a92fa3aaa0fa39934d416375f56a9e16cac2234",
+      "subject": "fix(strategy-lab): correct W3 readiness diagnostics"
+    },
+    {
+      "sha": "7c0dc6b7ad40f2fadb9d55a4f0cab974b947b5e2",
+      "subject": "docs(repo): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added canonical option cash-flow returns for MTD and YTD, combining signed option trades and fees with active secured-capital days across Sell Put, Covered Call, long-option, Combo, and Wheel positions.",
+      "commits": [
+        "11782b0706d98704e3286a9ba584bb3530aa4cf6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Detected VERSION changes across the complete pushed commit range so queued release metadata commits still trigger the VERSION-driven publication workflow.",
+      "commits": [
+        "712ccabd8fc428f5cf3f81c02cddfc004c8310d3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Scoped Strategy Lab Top1 readiness to its own scheduled units, kept corpus-only W3 accumulation healthy before validation capabilities are available, and distinguished position snapshot read failures from true position drift.",
+      "commits": [
+        "0a92fa3aaa0fa39934d416375f56a9e16cac2234"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "8c6a9d7750cd5d8614be7993147b8e6a5a468777",
+      "reason": "Documentation-only clarification of the formal research accumulation gate; no executable behavior changed."
+    },
+    {
+      "commit": "05fd4ad7481d939026a60b938e83f5cae21979e3",
+      "reason": "Documentation-only refresh of living Strategy Lab references; no executable behavior changed."
+    },
+    {
+      "commit": "7c0dc6b7ad40f2fadb9d55a4f0cab974b947b5e2",
+      "reason": "Mechanical dependency graph refresh required by release preflight; production dependency edges and cycle count were unchanged."
+    }
+  ]
+}

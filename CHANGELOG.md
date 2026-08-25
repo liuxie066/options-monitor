@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+## 1.17.0 - 2026-08-25
+
 ### New Features
 - Added canonical option cash-flow returns for MTD and YTD, combining signed option trades and fees with active secured-capital days across Sell Put, Covered Call, long-option, Combo, and Wheel positions.
+
+### Bug Fixes
+- Detected VERSION changes across the complete pushed commit range so queued release metadata commits still trigger the VERSION-driven publication workflow.
+- Scoped Strategy Lab Top1 readiness to its own scheduled units, kept corpus-only W3 accumulation healthy before validation capabilities are available, and distinguished position snapshot read failures from true position drift.
 
 ## 1.16.0 - 2026-08-24
 
