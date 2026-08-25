@@ -302,8 +302,6 @@ def advance_scheduled(
             raise ValueError("readiness loader must return an object")
         result["readiness"] = dict(readiness)
         runtime_ready = readiness.get("validation_runtime_ready") is True
-        if not runtime_ready:
-            had_failure = True
     except Exception as exc:
         result["readiness"] = {"validation_runtime_ready": False, **_error(exc)}
         had_failure = True
@@ -327,7 +325,10 @@ def advance_scheduled(
             )
             timer_reported.add(experiment_id)
             had_failure = True
-        if not runtime_ready or not timer_matches:
+        if not runtime_ready:
+            had_failure = True
+            return None
+        if not timer_matches:
             return None
         if not gateway_loaded:
             gateway_loaded = True

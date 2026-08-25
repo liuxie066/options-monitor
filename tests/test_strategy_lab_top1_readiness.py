@@ -142,6 +142,65 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
         ]
 
 
+def test_readiness_ignores_unrelated_service_activation_drift(
+    tmp_path: Path,
+) -> None:
+    drift, status = _source_facts()
+    drift.update(
+        {
+            "summary": {"status": "error"},
+            "missing_profile_units": [],
+            "missing_installed_units": [],
+            "mismatched_units": [],
+            "activation_drift_units": [
+                "options-monitor-strategy-lab-sample.timer"
+            ],
+            "activation_preservation_conflicts": [],
+            "execution_drift_units": [],
+        }
+    )
+    result = build_top1_readiness(
+        profile=_profile(tmp_path),
+        drift=drift,
+        service_status=status,
+        schema_state={"status": "ready", "schema_version": 4},
+        corpus_status={"days_total": 1},
+        calendar_binding=None,
+    )
+
+    assert result["source_delivery_ready"] is True
+    assert "strategy_lab_top1_service_drift" not in result[
+        "source_delivery_blockers"
+    ]
+
+    drift["activation_drift_units"] = [ADVANCE_TIMER]
+    blocked = build_top1_readiness(
+        profile=_profile(tmp_path),
+        drift=drift,
+        service_status=status,
+        schema_state={"status": "ready", "schema_version": 4},
+        corpus_status={"days_total": 1},
+        calendar_binding=None,
+    )
+    assert "strategy_lab_top1_service_drift" in blocked[
+        "source_delivery_blockers"
+    ]
+
+    unavailable_drift, _status = _source_facts()
+    unavailable_drift["summary"] = {"status": "error"}
+    unavailable = build_top1_readiness(
+        profile=_profile(tmp_path),
+        drift=unavailable_drift,
+        service_status=status,
+        schema_state={"status": "ready", "schema_version": 4},
+        corpus_status={"days_total": 1},
+        calendar_binding=None,
+    )
+    assert "strategy_lab_top1_service_drift" in unavailable[
+        "source_delivery_blockers"
+    ]
+
+
 def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

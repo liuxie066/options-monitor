@@ -429,11 +429,15 @@ def test_active_experiment_read_failure_blocks_schedule_sealing(
     )
 
 
-@pytest.mark.parametrize("readiness_result", [False, None])
-def test_readiness_failure_makes_advance_partial(
+@pytest.mark.parametrize(
+    ("readiness_result", "expected_status"),
+    [(False, "ok"), (None, "partial")],
+)
+def test_idle_advance_only_fails_when_readiness_cannot_be_loaded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     readiness_result: bool | None,
+    expected_status: str,
 ) -> None:
     monkeypatch.setattr(
         advance_module, "read_active_experiment_ids", lambda *_args, **_kwargs: []
@@ -473,11 +477,85 @@ def test_readiness_failure_makes_advance_partial(
         environ=AVAILABLE,
     )
 
-    assert result["status"] == "partial"
+    assert result["status"] == expected_status
     if readiness_result is None:
         assert result["readiness"]["reason_code"] == "advance_failed"
     else:
         assert result["readiness"]["validation_runtime_ready"] is False
+
+
+def test_validation_provider_need_makes_unready_advance_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = {
+        "experiment_id": "active",
+        "phase": "validation",
+        "validation_progress": "awaiting_outcomes",
+        "terminal_mode": None,
+        "behavior_binding_drift": False,
+        "committed_days": [],
+        "timer_binding": {
+            "revision": "top1-advance.v1",
+            "advance_cadence_seconds": 60,
+        },
+        "has_outcome_jobs": True,
+    }
+    monkeypatch.setattr(
+        advance_module,
+        "read_active_experiment_ids",
+        lambda *_args, **_kwargs: ["active"],
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "read_advance_context",
+        lambda *_args, **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: _calendar(),
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "discover_recommendation_points",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def settle(*_args: object, gateway: object, **_kwargs: object) -> dict[str, str]:
+        assert gateway is None
+        return {"status": "pending"}
+
+    monkeypatch.setattr(
+        advance_module,
+        "settle_due_outcomes",
+        settle,
+    )
+    monkeypatch.setattr(
+        advance_module,
+        "recover_account_terminal_projections",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = advance_scheduled(
+        object(),
+        tmp_path / "source",
+        tmp_path / "artifacts",
+        market="HK",
+        account="lx",
+        load_schedule=lambda: {},
+        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_gateway=_explode,
+        advance_revision="top1-advance.v1",
+        advance_interval_seconds=60,
+        actor="timer",
+        occurred_at_utc="2026-08-16T01:00:00Z",
+        idempotency_key="validation-unready",
+        environ=AVAILABLE,
+    )
+
+    assert result["status"] == "partial"
+    assert result["readiness"]["validation_runtime_ready"] is False
 
 
 def test_timer_binding_mismatch_is_partial_without_gateway(

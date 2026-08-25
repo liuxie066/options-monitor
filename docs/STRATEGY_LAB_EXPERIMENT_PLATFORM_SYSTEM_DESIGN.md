@@ -137,6 +137,10 @@ fence：
    `unavailable`，reason 为 `option_market_evidence_position_drift`，不在同一 tick 隐式重试或拼接两次
    结果。
 
+若 snapshot B 读取本身失败，不得当作 A / B 内容变化：嵌套 evidence 使用
+`option_market_evidence_position_snapshot_unavailable`，run log 保留异常类型，该正式点仍
+fail closed。不使用 snapshot A 冒充完整 fence，也不在同一 tick 自动重试。
+
 mark collector 使用独立的现有 OpenD snapshot 调用，不在 MVP 中和 candidate scan 合并。该调用失败、
 限流或返回不完整时只让嵌套 evidence `unavailable`，现有候选扫描、Daily Brief 和通知仍继续；只有
 实际调用次数或延迟证据表明不可接受时，才考虑共享同一次 provider batch。
@@ -599,9 +603,9 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/validation.py` | `_challenger_profile()`、`_arm()`、`consume_validation_point()`、`record_validation_day_gap()` | challenger 同时读取 profile 与冻结阈值；arm 保存标准经济输入及 FX/metric refs；删除集中度作为硬风险证据的判断 |
 | `src/application/strategy_lab/top1/fill_observation.py` | `_job()`、`observe_active_contracts()` | 保留首次 `bid >= sell_limit` 语义；只对 crossing arm 以 observation 时点选 opening FX，同一事务写入 observation 和 outcome job；FX 缺失时仍审计 `crossing=true`，但 arm `not_evaluable` 且不建 job |
 | `src/application/strategy_lab/top1/outcome.py` | `_close_result()`、`settle_due_outcomes()`、`_statistics_rows()`、`conclude_validation()` | 已有 expiry fact 时只读其 close + terminal FX binding；首次成功时同一事务写入 expiry close fact 和 results；生成 CNY 结果并调用新 evaluator |
-| `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 删除 `feature_status` 参数与 feature blocker；分开报告 prepared opening-FX coverage、existing repository schema / scheduled producer readiness、research terminal-FX coverage 和 validation runtime readiness |
+| `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 删除 `feature_status` 参数与 feature blocker；分开报告 prepared opening-FX coverage、existing repository schema / scheduled producer readiness、research terminal-FX coverage 和 validation runtime readiness；Top1 source readiness 只消费 Top1 advance unit 的 drift，不被通用 recorder unit 连带阻断 |
 | `src/application/strategy_lab/top1/lifecycle.py` | prepare / authorize / start / lock / terminate / public status / `read_published_research_leader()` / `read_public_receipt()` 路径 | 用仅检查维护方停机的 `_require_service_available()` 替换账户 gate；研究 leader 的 published revision 读取和绑定校验由 lifecycle 统一拥有；`lock_challenger()` 校验已确认的 `validation_spec_sha256`；receipt 只返回已 published 且内部校验通过的 projection group |
-| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
+| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 删除 opt-in reconcile；维护方停机时无副作用返回 `disabled`；无活跃验证需要 provider 时，缺少 validation capability 只作为 readiness 事实展示，不把 corpus-only advance 标记为失败；为每次 fill / outcome step 提供 existing repository 的单次只读 evidence bundle，不缓存跨 step 的“当前汇率” |
 | `src/application/strategy_lab/top1/terminal_projection.py` | `build_generation_terminal_request()`、`build_aborted_receipt_request()`、`build_completed_receipt_request()`、`recover_terminal_projection()` | completed receipt 在同一 payload 内生成可选 Proposal；继续使用现有单 artifact 发布和 readback |
 | `src/infrastructure/strategy_lab/experiment_store.py` | `migrate()`、schema 校验、`terminate()`、`_request_receipt()`、`pending_projections()`、`mark_projection_published()`、public row codec | 升级 schema v4；v3 有不兼容 active experiment 时拒绝 cutover；删除 feature 表和行为，新终止写入不再产生 feature 语义；receipt 继续使用现有单 projection 状态 |
 | `src/interfaces/cli/strategy_lab_top1.py` | `add_top1_commands()`、`handle_top1_command()`、`_readiness()` | 删除 `feature status`；增加 history migrate preview、research preview/start、validation preview/start 和 receipt；通过现有 ledger API 打开 performance evidence 并注入 loader；CLI 不选 mark / FX、不编排业务状态；首次出现 ready 历史点时再增加 apply |
@@ -733,6 +737,7 @@ validator 的 recommendation point v2、opening snapshot 与 prepared context v2
 | 研究所需 expiration boundary 无 terminal FX | `blocked` | `terminal_fx_evidence_missing` / `terminal_fx_evidence_conflict` |
 | 在线 prepared context 仍为 v1，或历史 v1 无法迁移为等价 point，或 run / point hash 不一致 | `blocked` | `option_market_evidence_contract_missing` / `option_market_evidence_conflict` |
 | evidence 捕获期间 position generation 变化 | 普通 prepared context 保持可用；嵌套 evidence `unavailable`；实验 preview `blocked` | `option_market_evidence_position_drift` |
+| evidence 捕获期间 position snapshot B 读取失败 | 普通 prepared context 保持可用；嵌套 evidence `unavailable`；run log 记录异常类型 | `option_market_evidence_position_snapshot_unavailable` |
 | OpenD quota、费用或到期 close 能力不足 | `blocked` | 复用现有 capability reason code |
 | 确认 hash 与重建结果不一致 | 拒绝写入 | `preview_hash_changed` |
 | 相同 idempotency key 的确认命令字段变化 | 拒绝写入 | `idempotency_conflict` |
