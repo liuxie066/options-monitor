@@ -47,7 +47,7 @@ def assess_report_coverage(report: Mapping[str, Any], *, scope_proven: bool = Fa
         if (
             status == "observed"
             and isinstance(native, Mapping)
-            and any(str(currency).upper() != "CNY" for currency in native)
+            and _has_nonzero_foreign_amount(native)
             and not (isinstance(fx_fact_ids, (list, tuple)) and fx_fact_ids)
         ):
             reasons.append("observed_non_cny_metric_missing_fx_evidence")
@@ -72,6 +72,18 @@ def assess_report_coverage(report: Mapping[str, Any], *, scope_proven: bool = Fa
         "gross_net_checks": pair_checks,
         "failures": failures,
     }
+
+
+def _has_nonzero_foreign_amount(native: Mapping[str, Any]) -> bool:
+    for currency, amount in native.items():
+        if str(currency).upper() == "CNY":
+            continue
+        try:
+            if float(amount) != 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
 
 
 def _gross_net_coverage_checks(report: Mapping[str, Any]) -> list[dict[str, Any]]:

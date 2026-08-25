@@ -578,12 +578,52 @@ def _presentation_metric(value: Any) -> dict[str, Any]:
     }
 
 
+def _presentation_rate(value: Any) -> dict[str, Any]:
+    metric = value if isinstance(value, Mapping) else {}
+    by_currency = metric.get("by_currency")
+    return {
+        "by_currency": {
+            str(currency): amount
+            for currency, amount in sorted(
+                by_currency.items() if isinstance(by_currency, Mapping) else (),
+                key=lambda item: str(item[0]),
+            )
+        },
+        "status": str(metric.get("status") or "not_observed"),
+        "missing_summary": _presentation_reason_summary(metric.get("missing")),
+    }
+
+
+def _presentation_cashflow_coverage(value: Any) -> dict[str, Any]:
+    coverage = value if isinstance(value, Mapping) else {}
+    missing_by_currency = coverage.get("missing_by_currency")
+    reasons = [
+        str(reason)
+        for values in (
+            missing_by_currency.values() if isinstance(missing_by_currency, Mapping) else ()
+        )
+        for reason in (values if isinstance(values, list) else ())
+    ]
+    reasons.extend(
+        str(reason)
+        for reason in coverage.get("global_missing", [])
+        if str(reason)
+    )
+    return {
+        "status": str(coverage.get("status") or "not_observed"),
+        "missing_summary": _presentation_reason_summary(reasons),
+    }
+
+
 def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str, Any]:
     period = data.get("period") if isinstance(data.get("period"), Mapping) else {}
     scope = data.get("scope") if isinstance(data.get("scope"), Mapping) else {}
     activity = data.get("activity") if isinstance(data.get("activity"), Mapping) else {}
     cash = data.get("cash") if isinstance(data.get("cash"), Mapping) else {}
     pnl = data.get("pnl") if isinstance(data.get("pnl"), Mapping) else {}
+    cashflow_return = (
+        data.get("cashflow_return") if isinstance(data.get("cashflow_return"), Mapping) else {}
+    )
     breakdowns = data.get("breakdowns") if isinstance(data.get("breakdowns"), Mapping) else {}
     quality = data.get("quality") if isinstance(data.get("quality"), Mapping) else {}
 
@@ -598,11 +638,25 @@ def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str,
         row_pnl = raw_row.get("pnl") if isinstance(raw_row.get("pnl"), Mapping) else {}
         row_cash = raw_row.get("cash") if isinstance(raw_row.get("cash"), Mapping) else {}
         row_activity = raw_row.get("activity") if isinstance(raw_row.get("activity"), Mapping) else {}
+        row_cashflow = (
+            raw_row.get("cashflow_return")
+            if isinstance(raw_row.get("cashflow_return"), Mapping)
+            else {}
+        )
         account_rows.append(
             {
                 "account": account,
                 "option_realized_gross": _presentation_metric(row_pnl.get("option_realized_gross")),
                 "option_trade_cash_gross": _presentation_metric(row_cash.get("option_trade_cash_gross")),
+                "option_net_cashflow": _presentation_metric(row_cash.get("option_net_cashflow")),
+                "period_cashflow_return": _presentation_rate(row_cashflow.get("period_return")),
+                "annualized_cashflow_return": _presentation_rate(row_cashflow.get("annualized_return")),
+                "cashflow_capital_days_by_currency": dict(
+                    row_cashflow.get("capital_days_by_currency") or {}
+                ),
+                "cashflow_coverage": _presentation_cashflow_coverage(
+                    row_cashflow.get("coverage")
+                ),
                 "premium_collected_gross": _presentation_metric(row_activity.get("premium_collected_gross")),
             }
         )
@@ -630,6 +684,15 @@ def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str,
                 "metric": "option_realized_net",
                 "status": option_realized_net["status"],
                 "missing_summary": option_realized_net["missing_summary"],
+            }
+        )
+    cashflow_coverage = _presentation_cashflow_coverage(cashflow_return.get("coverage"))
+    if cashflow_coverage["status"] == "partial":
+        limitations.append(
+            {
+                "kind": "metric_status",
+                "metric": "cashflow_return",
+                **cashflow_coverage,
             }
         )
 
@@ -666,6 +729,16 @@ def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str,
         "supporting_metrics": {
             "premium_collected_gross": _presentation_metric(activity.get("premium_collected_gross")),
         },
+        "cashflow_return": {
+            "option_net_cashflow": _presentation_metric(cash.get("option_net_cashflow")),
+            "capital_basis": cashflow_return.get("capital_basis"),
+            "capital_days_by_currency": dict(
+                cashflow_return.get("capital_days_by_currency") or {}
+            ),
+            "period_return": _presentation_rate(cashflow_return.get("period_return")),
+            "annualized_return": _presentation_rate(cashflow_return.get("annualized_return")),
+            "coverage": cashflow_coverage,
+        },
         "assigned_stock_impact": {
             "assigned_stock_realized_gross": _presentation_metric(pnl.get("assigned_stock_realized_gross")),
             "combined_realized_gross": _presentation_metric(pnl.get("realized_gross")),
@@ -673,6 +746,8 @@ def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str,
         "definitions": {
             "option_realized_gross": "期权已实现毛收益，不含指派正股已实现收益。",
             "option_trade_cash_gross": "期权交易产生的有符号现金流，不含指派正股结算和卖出现金。",
+            "option_net_cashflow": "期权交易现金与实际期权费用现金之和。",
+            "cashflow_return": "期权净现金流除以期内活跃期权的平均担保资本；由领域报告直接提供。",
             "excluded_from_option_trade_cash_gross": list(_OPTION_TRADE_CASH_EXCLUDED_FIELDS),
         },
         "limitations": limitations,

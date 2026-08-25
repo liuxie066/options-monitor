@@ -66,6 +66,9 @@ _CASH_NET_KINDS = frozenset(
         "assigned_stock_sale_fee_cash",
     }
 )
+_OPTION_CASH_KINDS = frozenset({"option_trade_cash_gross", "option_fee_cash"})
+_CASHFLOW_RATE_QUANTUM = Decimal("0.000000000001")
+_OptionPositionInterval = tuple[TradeEvent, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,19 @@ class PerformanceFact:
 
 
 @dataclass(frozen=True)
+class _CashflowCapitalIssue:
+    reason: str
+    source_id: str
+    account: str
+    currency: str | None
+    start_at_ms: int
+    end_at_ms: int
+
+    def overlaps(self, *, start_at_ms: int, end_exclusive_at_ms: int) -> bool:
+        return min(self.end_at_ms, end_exclusive_at_ms) > max(self.start_at_ms, start_at_ms)
+
+
+@dataclass(frozen=True)
 class PeriodPerformance:
     period: PeriodWindow
     scope: Mapping[str, Any]
@@ -169,6 +185,7 @@ class PeriodPerformance:
     cash: Mapping[str, Any]
     pnl: Mapping[str, Any]
     capital: Mapping[str, Any]
+    cashflow_return: Mapping[str, Any]
     attribution: Mapping[str, Any]
     assigned_stock: Mapping[str, Any]
     breakdowns: Mapping[str, Any]
@@ -184,6 +201,7 @@ class PeriodPerformance:
             "cash": dict(self.cash),
             "pnl": dict(self.pnl),
             "capital": dict(self.capital),
+            "cashflow_return": dict(self.cashflow_return),
             "attribution": dict(self.attribution),
             "assigned_stock": dict(self.assigned_stock),
             "breakdowns": dict(self.breakdowns),
@@ -295,13 +313,33 @@ def build_period_performance(
             fx_rates=fx_rates,
         )
     )
-    capital, capital_segments = _capital_report(
+    option_intervals, invalid_timeline_events = _option_position_intervals(
         events=scoped_events,
         allocations=scoped_all_allocations,
+        period=period,
+    )
+    capital, capital_segments = _capital_report(
+        option_intervals=option_intervals,
+        invalid_timeline_events=invalid_timeline_events,
         period=period,
         ending_assigned_stock=ending_assigned_stock or {},
         pnl=summary["pnl"],
     )
+    cashflow_segments, cashflow_issues = _cashflow_capital_inputs(
+        option_intervals=option_intervals,
+        invalid_timeline_events=invalid_timeline_events,
+        capital_segments=capital_segments,
+        ending_assigned_stock=ending_assigned_stock or {},
+        period=period,
+    )
+    option_net_cashflow, cashflow_return = _cashflow_return_report(
+        ordered_facts,
+        segments=cashflow_segments,
+        issues=cashflow_issues,
+        start_at_ms=period.effective_start_at_ms,
+        end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+    )
+    summary["cash"]["option_net_cashflow"] = option_net_cashflow
     attribution = build_strategy_attribution(
         events=scoped_events,
         allocations=scoped_all_allocations,
@@ -310,17 +348,19 @@ def build_period_performance(
         period=period,
     )
     breakdowns = {
-        "monthly": _breakdown(
+        "monthly": _monthly_breakdown(
             ordered_facts,
-            key_name="month",
-            key_fn=lambda fact: _month_for_fact(fact, period=period),
             fx_rates=fx_rates,
+            segments=cashflow_segments,
+            issues=cashflow_issues,
+            period=period,
         ),
-        "accounts": _breakdown(
+        "accounts": _account_breakdown(
             ordered_facts,
-            key_name="account",
-            key_fn=lambda fact: fact.account,
             fx_rates=fx_rates,
+            segments=cashflow_segments,
+            issues=cashflow_issues,
+            period=period,
             option_realized_facts=ordered_option_realized_facts,
             assigned_stock_realized_facts=ordered_assigned_stock_facts,
         ),
@@ -397,7 +437,12 @@ def build_period_performance(
     capital_missing = {
         f"capital:{item}" for item in capital.get("coverage", {}).get("missing", []) if str(item)
     }
-    missing = tuple(sorted({*fact_missing, *fx_missing, *capital_missing}))
+    cashflow_missing = {
+        f"cashflow_return:{item}"
+        for item in cashflow_return.get("period_return", {}).get("missing", [])
+        if str(item)
+    }
+    missing = tuple(sorted({*fact_missing, *fx_missing, *capital_missing, *cashflow_missing}))
     if missing or warnings:
         quality_status = MetricStatus.PARTIAL
     elif ordered_facts:
@@ -428,6 +473,7 @@ def build_period_performance(
         cash=summary["cash"],
         pnl=summary["pnl"],
         capital=capital,
+        cashflow_return=cashflow_return,
         attribution=attribution,
         assigned_stock=_assigned_stock_report_summary(
             opening_assigned_stock or {},
@@ -441,10 +487,45 @@ def build_period_performance(
     )
 
 
-def _capital_report(
+def _option_position_intervals(
     *,
     events: Sequence[TradeEvent],
     allocations: Sequence[OptionEconomicAllocation],
+    period: PeriodWindow,
+) -> tuple[tuple[_OptionPositionInterval, ...], tuple[TradeEvent, ...]]:
+    intervals: list[_OptionPositionInterval] = []
+    invalid_events: dict[str, TradeEvent] = {}
+    allocations_by_open: dict[str, list[OptionEconomicAllocation]] = {}
+    for allocation in allocations:
+        allocations_by_open.setdefault(allocation.open_event_id, []).append(allocation)
+    for event in events:
+        if event.event_type != "open":
+            continue
+        remaining = int(event.contracts)
+        if remaining <= 0:
+            continue
+        cursor = int(event.event_time_ms)
+        transitions = sorted(
+            allocations_by_open.get(event.event_id, ()),
+            key=lambda item: (int(item.closed_at_ms), item.allocation_id),
+        )
+        for allocation in transitions:
+            close_at_ms = int(allocation.closed_at_ms)
+            if close_at_ms < cursor or int(allocation.contracts) > remaining:
+                invalid_events[event.event_id] = event
+                continue
+            intervals.append((event, remaining, cursor, close_at_ms))
+            remaining -= int(allocation.contracts)
+            cursor = close_at_ms
+        if remaining > 0:
+            intervals.append((event, remaining, cursor, period.effective_end_exclusive_at_ms))
+    return tuple(intervals), tuple(invalid_events[key] for key in sorted(invalid_events))
+
+
+def _capital_report(
+    *,
+    option_intervals: Sequence[_OptionPositionInterval],
+    invalid_timeline_events: Sequence[TradeEvent],
     period: PeriodWindow,
     ending_assigned_stock: Mapping[str, Any],
     pnl: Mapping[str, Any],
@@ -463,49 +544,19 @@ def _capital_report(
         allocation_status = str(row.get("allocation_status") or "unknown").strip().lower()
         if open_event_id and allocation_status != "explicit":
             warnings.add(f"covered_call_allocation_{allocation_status}:{open_event_id}")
-    allocations_by_open: dict[str, list[OptionEconomicAllocation]] = {}
-    for allocation in allocations:
-        allocations_by_open.setdefault(allocation.open_event_id, []).append(allocation)
-
-    for event in events:
-        if event.event_type != "open":
-            continue
-        remaining = int(event.contracts)
-        if remaining <= 0:
-            continue
-        cursor = int(event.event_time_ms)
-        transitions = sorted(
-            allocations_by_open.get(event.event_id, ()),
-            key=lambda item: (int(item.closed_at_ms), item.allocation_id),
+    for event in invalid_timeline_events:
+        missing.add(f"invalid_option_quantity_timeline:{event.event_id}")
+    for event, remaining, start_at_ms, end_at_ms in option_intervals:
+        _append_option_capital_segment(
+            segments,
+            missing,
+            event=event,
+            remaining_contracts=remaining,
+            start_at_ms=start_at_ms,
+            end_at_ms=end_at_ms,
+            period=period,
+            covered_call_ids=covered_call_ids,
         )
-        for allocation in transitions:
-            close_at_ms = int(allocation.closed_at_ms)
-            if close_at_ms < cursor or int(allocation.contracts) > remaining:
-                missing.add(f"invalid_option_quantity_timeline:{event.event_id}")
-                continue
-            _append_option_capital_segment(
-                segments,
-                missing,
-                event=event,
-                remaining_contracts=remaining,
-                start_at_ms=cursor,
-                end_at_ms=close_at_ms,
-                period=period,
-                covered_call_ids=covered_call_ids,
-            )
-            remaining -= int(allocation.contracts)
-            cursor = close_at_ms
-        if remaining > 0:
-            _append_option_capital_segment(
-                segments,
-                missing,
-                event=event,
-                remaining_contracts=remaining,
-                start_at_ms=cursor,
-                end_at_ms=period.effective_end_exclusive_at_ms,
-                period=period,
-                covered_call_ids=covered_call_ids,
-            )
 
     _append_assigned_stock_capital_segments(
         segments,
@@ -571,6 +622,220 @@ def _capital_report(
         ],
     }
     return report, tuple(relevant_segments)
+
+
+def _cashflow_capital_inputs(
+    *,
+    option_intervals: Sequence[_OptionPositionInterval],
+    invalid_timeline_events: Sequence[TradeEvent],
+    capital_segments: Sequence[CapitalExposureSegment],
+    ending_assigned_stock: Mapping[str, Any],
+    period: PeriodWindow,
+) -> tuple[tuple[CapitalExposureSegment, ...], tuple[_CashflowCapitalIssue, ...]]:
+    segments = [
+        segment
+        for segment in capital_segments
+        if segment.exposure_kind in {"short_put_strike_notional", "long_option_premium_debit"}
+    ]
+    issues: list[_CashflowCapitalIssue] = []
+    allocation_rows_by_open: dict[str, list[dict[str, Any]]] = {}
+    for row in _assigned_stock_rows(ending_assigned_stock, "covered_call_allocations"):
+        open_event_id = str(row.get("open_event_id") or "").strip()
+        if open_event_id:
+            allocation_rows_by_open.setdefault(open_event_id, []).append(row)
+    stock_lots_by_id: dict[str, list[dict[str, Any]]] = {}
+    for lot in _assigned_stock_rows(ending_assigned_stock, "assigned_stock_lots"):
+        lot_id = str(lot.get("stock_lot_id") or "").strip()
+        if lot_id:
+            stock_lots_by_id.setdefault(lot_id, []).append(lot)
+
+    for event in invalid_timeline_events:
+        issue = _cashflow_capital_issue(
+            event,
+            reason=f"invalid_option_quantity_timeline:{event.event_id}",
+            start_at_ms=event.event_time_ms,
+            end_at_ms=period.effective_end_exclusive_at_ms,
+        )
+        if issue.overlaps(
+            start_at_ms=period.effective_start_at_ms,
+            end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+        ):
+            issues.append(issue)
+
+    for event, remaining_contracts, start_at_ms, end_at_ms in option_intervals:
+        if min(end_at_ms, period.effective_end_exclusive_at_ms) <= max(
+            start_at_ms, period.effective_start_at_ms
+        ):
+            continue
+        side = str(event.contract_key.position_side or "").strip().lower()
+        option_type = str(event.contract_key.option_type or "").strip().lower()
+        expected_kind = (
+            "short_put_strike_notional"
+            if side == "short" and option_type == "put"
+            else "long_option_premium_debit"
+            if side == "long"
+            else None
+        )
+        if expected_kind is not None:
+            source_id = lot_id_for_open_event(event)
+            if not any(
+                segment.exposure_kind == expected_kind
+                and segment.source_id == source_id
+                and segment.start_at_ms == start_at_ms
+                and segment.end_at_ms == end_at_ms
+                for segment in segments
+            ):
+                issues.append(
+                    _cashflow_capital_issue(
+                        event,
+                        reason=f"capital_basis_unavailable:{event.event_id}",
+                        start_at_ms=start_at_ms,
+                        end_at_ms=end_at_ms,
+                    )
+                )
+            continue
+        if side == "short" and option_type == "call":
+            covered_start_at_ms = max(start_at_ms, period.effective_start_at_ms)
+            covered_end_at_ms = min(end_at_ms, period.effective_end_exclusive_at_ms)
+            _append_covered_call_cashflow_segments(
+                segments,
+                issues,
+                event=event,
+                remaining_contracts=remaining_contracts,
+                start_at_ms=covered_start_at_ms,
+                end_at_ms=covered_end_at_ms,
+                allocation_rows=allocation_rows_by_open.get(event.event_id, ()),
+                stock_lots_by_id=stock_lots_by_id,
+            )
+            continue
+        issues.append(
+            _cashflow_capital_issue(
+                event,
+                reason=f"capital_basis_unavailable:{event.event_id}",
+                start_at_ms=start_at_ms,
+                end_at_ms=end_at_ms,
+            )
+        )
+    return tuple(segments), tuple(issues)
+
+
+def _cashflow_capital_issue(
+    event: TradeEvent,
+    *,
+    reason: str,
+    start_at_ms: int,
+    end_at_ms: int,
+) -> _CashflowCapitalIssue:
+    try:
+        currency = normalize_currency(event.currency)
+    except ValueError:
+        currency = None
+        reason = f"capital_currency_unknown:{event.event_id}"
+    return _CashflowCapitalIssue(
+        reason=reason,
+        source_id=event.event_id,
+        account=normalize_account(event.contract_key.account),
+        currency=currency,
+        start_at_ms=int(start_at_ms),
+        end_at_ms=int(end_at_ms),
+    )
+
+
+def _append_covered_call_cashflow_segments(
+    segments: list[CapitalExposureSegment],
+    issues: list[_CashflowCapitalIssue],
+    *,
+    event: TradeEvent,
+    remaining_contracts: int,
+    start_at_ms: int,
+    end_at_ms: int,
+    allocation_rows: Sequence[Mapping[str, Any]],
+    stock_lots_by_id: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    issue = _cashflow_capital_issue(
+        event,
+        reason=f"capital_basis_unavailable:{event.event_id}",
+        start_at_ms=start_at_ms,
+        end_at_ms=end_at_ms,
+    )
+    if not allocation_rows or any(
+        str(row.get("allocation_status") or "unknown").strip().lower() != "explicit"
+        for row in allocation_rows
+    ):
+        issues.append(issue)
+        return
+    try:
+        currency = normalize_currency(event.currency)
+        multiplier = to_decimal(event.multiplier, field_name="multiplier")
+    except ValueError:
+        issues.append(issue)
+        return
+    if multiplier <= 0:
+        issues.append(issue)
+        return
+    shares_required = Decimal(remaining_contracts) * multiplier
+    shares_added = Decimal(0)
+    attribution_resolution = resolve_event_attribution(
+        event,
+        lifecycle_source_id=lot_id_for_open_event(event),
+    )
+    for row in sorted(allocation_rows, key=lambda item: str(item.get("stock_lot_id") or "")):
+        if shares_added >= shares_required:
+            break
+        lot_id = str(row.get("stock_lot_id") or "").strip()
+        lots = stock_lots_by_id.get(lot_id, ())
+        try:
+            row_shares = Decimal(int(row.get("shares") or 0))
+            row_start_at_ms = int(row.get("start_at_ms") or 0)
+            row_end_at_ms = int(row.get("end_at_ms") or 0)
+        except (TypeError, ValueError):
+            issues.append(issue)
+            continue
+        if (
+            not lot_id
+            or len(lots) != 1
+            or row_shares <= 0
+            or row_start_at_ms > start_at_ms
+            or row_end_at_ms + 1 < end_at_ms
+        ):
+            issues.append(issue)
+            continue
+        lot = lots[0]
+        try:
+            shares_opened = Decimal(int(lot.get("shares_opened") or 0))
+            stock_cost_basis_total = to_decimal(
+                lot.get("stock_cost_basis_total"),
+                field_name="stock_cost_basis_total",
+            )
+            lot_currency = normalize_currency(lot.get("currency"))
+            row_currency = normalize_currency(row.get("currency"))
+        except (TypeError, ValueError):
+            issues.append(issue)
+            continue
+        if shares_opened <= 0 or stock_cost_basis_total < 0 or lot_currency != currency or row_currency != currency:
+            issues.append(issue)
+            continue
+        active_shares = min(row_shares, shares_required - shares_added)
+        basis_per_share = stock_cost_basis_total / shares_opened
+        segments.append(
+            CapitalExposureSegment(
+                account=event.contract_key.account,
+                broker=event.contract_key.broker,
+                symbol=event.contract_key.underlying_symbol,
+                currency=currency,
+                exposure_kind="covered_call_stock_basis",
+                source_id=f"{lot_id_for_open_event(event)}:{lot_id}",
+                start_at_ms=start_at_ms,
+                end_at_ms=end_at_ms,
+                notional=basis_per_share * active_shares,
+                quantity=active_shares,
+                attribution=attribution_resolution.attribution,
+                attribution_issues=attribution_resolution.issues,
+            )
+        )
+        shares_added += active_shares
+    if shares_added < shares_required:
+        issues.append(issue)
 
 
 def _append_option_capital_segment(
@@ -796,6 +1061,194 @@ def _annualized_efficiency(
         "status": status.value,
         "missing": missing,
     }
+
+
+def _cashflow_return_report(
+    facts: Sequence[PerformanceFact],
+    *,
+    segments: Sequence[CapitalExposureSegment],
+    issues: Sequence[_CashflowCapitalIssue],
+    start_at_ms: int,
+    end_exclusive_at_ms: int,
+    account: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    account_filter = normalize_account(account) if account else ""
+    selected_facts = [
+        fact
+        for fact in facts
+        if fact.fact_kind in _OPTION_CASH_KINDS
+        and start_at_ms <= fact.effective_at_ms < end_exclusive_at_ms
+        and (not account_filter or fact.account == account_filter)
+    ]
+    relevant_segments = [
+        segment
+        for segment in segments
+        if (not account_filter or segment.account == account_filter)
+        and segment.overlap_ms(
+            period_start_at_ms=start_at_ms,
+            period_end_exclusive_at_ms=end_exclusive_at_ms,
+        )
+        > 0
+    ]
+    relevant_issues = [
+        issue
+        for issue in issues
+        if (not account_filter or issue.account == account_filter)
+        and issue.overlaps(start_at_ms=start_at_ms, end_exclusive_at_ms=end_exclusive_at_ms)
+    ]
+
+    capital_days: dict[str, Decimal] = {}
+    for segment in relevant_segments:
+        value = segment.capital_days(
+            period_start_at_ms=start_at_ms,
+            period_end_exclusive_at_ms=end_exclusive_at_ms,
+        )
+        if value > 0:
+            capital_days[segment.currency] = capital_days.get(segment.currency, Decimal(0)) + value
+
+    missing_by_currency: dict[str, set[str]] = {}
+    global_missing: set[str] = set()
+    for issue in relevant_issues:
+        if issue.currency:
+            missing_by_currency.setdefault(issue.currency, set()).add(issue.reason)
+        else:
+            global_missing.add(issue.reason)
+    for fact in selected_facts:
+        if fact.amount is not None:
+            continue
+        reason = f"option_net_cashflow_unavailable:{fact.fact_id}"
+        if fact.currency:
+            missing_by_currency.setdefault(fact.currency, set()).add(reason)
+        else:
+            global_missing.add(reason)
+
+    option_net_cashflow = _cashflow_net_cash_metric(
+        selected_facts,
+        activity_currencies={*capital_days, *missing_by_currency},
+        has_capital_issue=bool(relevant_issues),
+    )
+    net_cash_by_currency = {
+        str(currency): to_decimal(amount, field_name=f"option_net_cashflow[{currency}]")
+        for currency, amount in option_net_cashflow.get("by_currency", {}).items()
+    }
+    currencies = sorted({*capital_days, *net_cash_by_currency, *missing_by_currency})
+    for currency in currencies:
+        if currency in missing_by_currency:
+            continue
+        denominator = capital_days.get(currency, Decimal(0))
+        if denominator <= 0 and currency in net_cash_by_currency:
+            missing_by_currency.setdefault(currency, set()).add(f"zero_capital_days:{currency}")
+        elif denominator > 0 and currency not in net_cash_by_currency:
+            missing_by_currency.setdefault(currency, set()).add(
+                f"option_net_cashflow_unavailable:{currency}"
+            )
+
+    duration_days = Decimal(end_exclusive_at_ms - start_at_ms) / Decimal(86_400_000)
+    period_values: dict[str, float] = {}
+    annualized_values: dict[str, float] = {}
+    if not global_missing:
+        for currency in currencies:
+            if currency in missing_by_currency:
+                continue
+            denominator = capital_days.get(currency, Decimal(0))
+            if denominator <= 0 or currency not in net_cash_by_currency:
+                continue
+            cash_amount = net_cash_by_currency[currency]
+            period_values[currency] = float(
+                (cash_amount * duration_days / denominator).quantize(
+                    _CASHFLOW_RATE_QUANTUM,
+                    rounding=ROUND_HALF_UP,
+                )
+            )
+            annualized_values[currency] = float(
+                (cash_amount / denominator * Decimal(365)).quantize(
+                    _CASHFLOW_RATE_QUANTUM,
+                    rounding=ROUND_HALF_UP,
+                )
+            )
+
+    has_activity = bool(selected_facts or capital_days or relevant_issues)
+    if not has_activity:
+        status = MetricStatus.NOT_APPLICABLE
+    elif missing_by_currency or global_missing:
+        status = MetricStatus.PARTIAL
+    else:
+        status = MetricStatus.OBSERVED
+    missing = [
+        f"{currency}:{reason}"
+        for currency in sorted(missing_by_currency)
+        for reason in sorted(missing_by_currency[currency])
+    ] + [f"global:{reason}" for reason in sorted(global_missing)]
+    rounded_capital_days = {
+        currency: float(value.quantize(CAPITAL_DAYS_QUANTUM, rounding=ROUND_HALF_UP))
+        for currency, value in sorted(capital_days.items())
+    }
+    average_capital = {
+        currency: float(quantize_money(value / duration_days))
+        for currency, value in sorted(capital_days.items())
+    }
+    rate_envelope = {
+        "by_currency": period_values,
+        "status": status.value,
+        "missing": missing,
+    }
+    annualized_envelope = {
+        "by_currency": annualized_values,
+        "status": status.value,
+        "missing": missing,
+    }
+    return option_net_cashflow, {
+        "schema_version": "option_cashflow_return.v1",
+        "capital_basis": "active_option_capital_days_v1",
+        "period_duration_days": float(
+            duration_days.quantize(CAPITAL_DAYS_QUANTUM, rounding=ROUND_HALF_UP)
+        ),
+        "capital_days_by_currency": rounded_capital_days,
+        "average_incremental_capital_by_currency": average_capital,
+        "period_return": rate_envelope,
+        "annualized_return": annualized_envelope,
+        "coverage": {
+            "status": status.value,
+            "missing_by_currency": {
+                currency: sorted(reasons)
+                for currency, reasons in sorted(missing_by_currency.items())
+            },
+            "global_missing": sorted(global_missing),
+        },
+    }
+
+
+def _cashflow_net_cash_metric(
+    facts: Sequence[PerformanceFact],
+    *,
+    activity_currencies: set[str],
+    has_capital_issue: bool,
+) -> dict[str, Any]:
+    if not facts:
+        if not activity_currencies and not has_capital_issue:
+            return DecimalAmountEnvelope(
+                quality=MetricQuality(MetricStatus.NOT_APPLICABLE)
+            ).to_dict()
+        return DecimalAmountEnvelope(
+            by_currency={currency: Decimal(0) for currency in sorted(activity_currencies)},
+            cny=Decimal(0),
+            quality=MetricQuality(MetricStatus.OBSERVED),
+        ).to_dict()
+    envelope = _cash_metric(facts, _OPTION_CASH_KINDS)
+    incomplete_currencies = {
+        str(fact.currency or "")
+        for fact in facts
+        if fact.amount is None
+    }
+    by_currency = dict(envelope.by_currency)
+    for currency in sorted(activity_currencies - incomplete_currencies):
+        by_currency.setdefault(currency, Decimal(0))
+    return DecimalAmountEnvelope(
+        by_currency=by_currency,
+        cny=envelope.cny,
+        quality=envelope.quality,
+        fx_fact_ids=envelope.fx_fact_ids,
+    ).to_dict()
 
 
 def _matches_scope(account: str, broker: str, account_filter: str, broker_filter: str) -> bool:
@@ -1795,11 +2248,7 @@ def _breakdown(
     option_realized_facts: Sequence[PerformanceFact] | None = None,
     assigned_stock_realized_facts: Sequence[PerformanceFact] | None = None,
 ) -> list[dict[str, Any]]:
-    groups: dict[str, list[PerformanceFact]] = {}
-    for fact in facts:
-        key = str(key_fn(fact) or "").strip()
-        if key:
-            groups.setdefault(key, []).append(fact)
+    groups = _fact_groups(facts, key_fn=key_fn)
     out: list[dict[str, Any]] = []
     for key in sorted(groups):
         item = {key_name: key}
@@ -1814,6 +2263,121 @@ def _breakdown(
             )
         out.append(item)
     return out
+
+
+def _fact_groups(
+    facts: Sequence[PerformanceFact],
+    *,
+    key_fn: Any,
+) -> dict[str, list[PerformanceFact]]:
+    groups: dict[str, list[PerformanceFact]] = {}
+    for fact in facts:
+        key = str(key_fn(fact) or "").strip()
+        if key:
+            groups.setdefault(key, []).append(fact)
+    return groups
+
+
+def _monthly_breakdown(
+    facts: Sequence[PerformanceFact],
+    *,
+    fx_rates: Sequence[FXRateFact],
+    segments: Sequence[CapitalExposureSegment],
+    issues: Sequence[_CashflowCapitalIssue],
+    period: PeriodWindow,
+) -> list[dict[str, Any]]:
+    groups = _fact_groups(facts, key_fn=lambda fact: _month_for_fact(fact, period=period))
+    windows = _month_windows(period)
+    keys = set(groups)
+    for month, (start_at_ms, end_exclusive_at_ms) in windows.items():
+        if any(
+            segment.overlap_ms(
+                period_start_at_ms=start_at_ms,
+                period_end_exclusive_at_ms=end_exclusive_at_ms,
+            )
+            > 0
+            for segment in segments
+        ) or any(
+            issue.overlaps(start_at_ms=start_at_ms, end_exclusive_at_ms=end_exclusive_at_ms)
+            for issue in issues
+        ):
+            keys.add(month)
+    out: list[dict[str, Any]] = []
+    for month in sorted(keys):
+        start_at_ms, end_exclusive_at_ms = windows[month]
+        month_facts = groups.get(month, [])
+        item = {"month": month, **_summarize(month_facts, fx_rates=fx_rates)}
+        option_net_cashflow, cashflow_return = _cashflow_return_report(
+            month_facts,
+            segments=segments,
+            issues=issues,
+            start_at_ms=start_at_ms,
+            end_exclusive_at_ms=end_exclusive_at_ms,
+        )
+        item["cash"]["option_net_cashflow"] = option_net_cashflow
+        item["cashflow_return"] = cashflow_return
+        out.append(item)
+    return out
+
+
+def _account_breakdown(
+    facts: Sequence[PerformanceFact],
+    *,
+    fx_rates: Sequence[FXRateFact],
+    segments: Sequence[CapitalExposureSegment],
+    issues: Sequence[_CashflowCapitalIssue],
+    period: PeriodWindow,
+    option_realized_facts: Sequence[PerformanceFact],
+    assigned_stock_realized_facts: Sequence[PerformanceFact],
+) -> list[dict[str, Any]]:
+    groups = _fact_groups(facts, key_fn=lambda fact: fact.account)
+    keys = {
+        *groups,
+        *(segment.account for segment in segments),
+        *(issue.account for issue in issues),
+    }
+    out: list[dict[str, Any]] = []
+    for account in sorted(key for key in keys if key):
+        account_facts = groups.get(account, [])
+        item = {"account": account, **_summarize(account_facts, fx_rates=fx_rates)}
+        item["pnl"].update(
+            _realized_component_summary(
+                [fact for fact in option_realized_facts if fact.account == account],
+                [fact for fact in assigned_stock_realized_facts if fact.account == account],
+                fx_rates=fx_rates,
+            )
+        )
+        option_net_cashflow, cashflow_return = _cashflow_return_report(
+            account_facts,
+            segments=segments,
+            issues=issues,
+            start_at_ms=period.effective_start_at_ms,
+            end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+            account=account,
+        )
+        item["cash"]["option_net_cashflow"] = option_net_cashflow
+        item["cashflow_return"] = cashflow_return
+        out.append(item)
+    return out
+
+
+def _month_windows(period: PeriodWindow) -> dict[str, tuple[int, int]]:
+    tz = ZoneInfo(REPORTING_TIMEZONE)
+    start = datetime.fromtimestamp(period.effective_start_at_ms / 1000, tz=tz)
+    cursor = datetime(start.year, start.month, 1, tzinfo=tz)
+    windows: dict[str, tuple[int, int]] = {}
+    while int(cursor.timestamp() * 1000) < period.effective_end_exclusive_at_ms:
+        if cursor.month == 12:
+            next_cursor = datetime(cursor.year + 1, 1, 1, tzinfo=tz)
+        else:
+            next_cursor = datetime(cursor.year, cursor.month + 1, 1, tzinfo=tz)
+        month = cursor.strftime("%Y-%m")
+        windows[month] = (
+            max(period.effective_start_at_ms, int(cursor.timestamp() * 1000)),
+            min(period.effective_end_exclusive_at_ms, int(next_cursor.timestamp() * 1000)),
+        )
+        cursor = next_cursor
+    return windows
 
 
 def _month_for_fact(fact: PerformanceFact, *, period: PeriodWindow | None = None) -> str:

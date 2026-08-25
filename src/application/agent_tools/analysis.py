@@ -111,6 +111,11 @@ OPTION_PERFORMANCE_FIELDS: tuple[str, ...] = (
     "option_fee_cash_status",
     "option_fee_cash_missing",
     "option_fee_cash_evidence_fact_ids",
+    "option_net_cashflow_cny",
+    "option_net_cashflow_by_ccy",
+    "option_net_cashflow_status",
+    "option_net_cashflow_missing",
+    "option_net_cashflow_evidence_fact_ids",
     "stock_settlement_cash_cny",
     "stock_settlement_cash_by_ccy",
     "stock_settlement_cash_status",
@@ -146,6 +151,19 @@ OPTION_PERFORMANCE_FIELDS: tuple[str, ...] = (
     "period_total_pnl_net_status",
     "capital_days_by_ccy",
     "period_total_net_annualized_efficiency",
+    "cashflow_capital_basis",
+    "cashflow_period_duration_days",
+    "cashflow_capital_days_by_ccy",
+    "cashflow_average_capital_by_ccy",
+    "period_cashflow_return_by_ccy",
+    "period_cashflow_return_status",
+    "period_cashflow_return_missing",
+    "annualized_cashflow_return_by_ccy",
+    "annualized_cashflow_return_status",
+    "annualized_cashflow_return_missing",
+    "cashflow_coverage_status",
+    "cashflow_missing_by_ccy",
+    "cashflow_global_missing",
 )
 
 
@@ -1561,12 +1579,14 @@ def _performance_summary_row(
     cash = source.get("cash") if isinstance(source.get("cash"), dict) else {}
     pnl = source.get("pnl") if isinstance(source.get("pnl"), dict) else {}
     capital = report.get("capital") if summary is None and isinstance(report.get("capital"), dict) else {}
+    cashflow = source.get("cashflow_return") if isinstance(source.get("cashflow_return"), dict) else {}
     _put_metric(row, "premium_collected", activity.get("premium_collected_gross"))
     _put_metric(row, "premium_paid", activity.get("premium_paid_gross"))
     row["contracts_opened"] = activity.get("contracts_opened")
     row["contracts_closed"] = activity.get("contracts_closed")
     _put_metric(row, "option_trade_cash", cash.get("option_trade_cash_gross"))
     _put_metric(row, "option_fee_cash", cash.get("option_fee_cash"))
+    _put_metric(row, "option_net_cashflow", cash.get("option_net_cashflow"))
     _put_metric(row, "stock_settlement_cash", cash.get("stock_settlement_cash_gross"))
     _put_metric(row, "assigned_stock_sale_cash", cash.get("assigned_stock_sale_cash_gross"))
     _put_metric(row, "total_cash_change", cash.get("total_cash_change_net"))
@@ -1578,6 +1598,22 @@ def _performance_summary_row(
     _put_metric(row, "period_total_pnl_net", pnl.get("period_total_net"))
     row["capital_days_by_ccy"] = capital.get("capital_days_by_currency") or {}
     row["period_total_net_annualized_efficiency"] = capital.get("period_total_net_annualized_efficiency")
+    period_cashflow_return = _metric_envelope(cashflow.get("period_return"))
+    annualized_cashflow_return = _metric_envelope(cashflow.get("annualized_return"))
+    cashflow_coverage = _metric_envelope(cashflow.get("coverage"))
+    row["cashflow_capital_basis"] = cashflow.get("capital_basis")
+    row["cashflow_period_duration_days"] = cashflow.get("period_duration_days")
+    row["cashflow_capital_days_by_ccy"] = cashflow.get("capital_days_by_currency") or {}
+    row["cashflow_average_capital_by_ccy"] = cashflow.get("average_incremental_capital_by_currency") or {}
+    row["period_cashflow_return_by_ccy"] = period_cashflow_return.get("by_currency") or {}
+    row["period_cashflow_return_status"] = _metric_status(period_cashflow_return)
+    row["period_cashflow_return_missing"] = list(period_cashflow_return.get("missing") or [])
+    row["annualized_cashflow_return_by_ccy"] = annualized_cashflow_return.get("by_currency") or {}
+    row["annualized_cashflow_return_status"] = _metric_status(annualized_cashflow_return)
+    row["annualized_cashflow_return_missing"] = list(annualized_cashflow_return.get("missing") or [])
+    row["cashflow_coverage_status"] = cashflow_coverage.get("status")
+    row["cashflow_missing_by_ccy"] = cashflow_coverage.get("missing_by_currency") or {}
+    row["cashflow_global_missing"] = list(cashflow_coverage.get("global_missing") or [])
     return row
 
 
@@ -1615,6 +1651,7 @@ _ACTIVITY_COMPONENTS = (
 _CASH_COMPONENTS = (
     ("option_trade_cash", "option trade cash", 10, "option_trade_cash_cny", "option_trade_cash_by_ccy", "option_trade_cash_status", None),
     ("option_fee_cash", "option fee cash", 20, "option_fee_cash_cny", "option_fee_cash_by_ccy", "option_fee_cash_status", None),
+    ("option_net_cashflow", "option net cashflow", 25, "option_net_cashflow_cny", "option_net_cashflow_by_ccy", "option_net_cashflow_status", None),
     ("stock_settlement_cash", "stock settlement principal cash", 30, "stock_settlement_cash_cny", "stock_settlement_cash_by_ccy", "stock_settlement_cash_status", None),
     ("assigned_stock_sale_cash", "assigned-stock sale cash", 40, "assigned_stock_sale_cash_cny", "assigned_stock_sale_cash_by_ccy", "assigned_stock_sale_cash_status", None),
     ("total_cash_change", "total cash change net", 90, "total_cash_change_cny", "total_cash_change_by_ccy", "total_cash_change_status", None),
@@ -4092,13 +4129,17 @@ def _preferred_unknown_column_replacements(unknown_column: str) -> list[str]:
     normalized = _normalized_identifier(unknown_column)
     if normalized in {"netcashflow", "cashflow", "netcashflowcny"}:
         return [
+            "option_net_cashflow_cny",
+            "option_net_cashflow_by_ccy",
             "total_cash_change_cny",
             "total_cash_change_by_ccy",
-            "option_trade_cash_cny",
-            "option_trade_cash_by_ccy",
         ]
     if normalized in {"returnrate", "totalreturnrate"}:
-        return ["period_total_net_annualized_efficiency"]
+        return [
+            "period_cashflow_return_by_ccy",
+            "annualized_cashflow_return_by_ccy",
+            "period_total_net_annualized_efficiency",
+        ]
     if normalized in {"totalreturn", "totalincome", "profit", "pnl"}:
         return [
             "period_total_pnl_net_cny",

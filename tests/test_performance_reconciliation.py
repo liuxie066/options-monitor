@@ -238,6 +238,9 @@ def test_proven_empty_scope_is_observed_zero_but_unproven_scope_remains_not_obse
 
     assert unproven["activity"]["premium_collected_gross"]["status"] == "not_observed"
     assert unproven["activity"]["premium_collected_gross"]["cny"] is None
+    assert proven["cash"]["option_net_cashflow"] == unproven["cash"]["option_net_cashflow"]
+    assert proven["cashflow_return"] == unproven["cashflow_return"]
+    assert proven["cashflow_return"]["period_return"]["status"] == "not_applicable"
     assert proven["activity"]["premium_collected_gross"] == {
         "by_currency": {},
         "cny": 0.0,

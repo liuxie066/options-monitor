@@ -153,6 +153,7 @@ def test_option_performance_renderer_separates_profit_cash_and_assignment() -> N
                 "total_cash_change_net": metric(-4500),
                 "option_trade_cash_gross": metric(800),
                 "option_fee_cash": metric(-0.35),
+                "option_net_cashflow": metric(799.65),
                 "stock_settlement_cash_gross": metric(-10000),
                 "stock_settlement_fee_cash": metric(None, status="partial"),
                 "assigned_stock_sale_cash_gross": metric(5500),
@@ -167,6 +168,11 @@ def test_option_performance_renderer_separates_profit_cash_and_assignment() -> N
                 "option_realized_net": metric(249),
                 "assigned_stock_realized_gross": metric(500),
                 "assigned_stock_realized_net": metric(496),
+            },
+            "cashflow_return": {
+                "capital_days_by_currency": {"USD": 100000.0},
+                "period_return": {"by_currency": {"USD": 0.12}, "status": "observed", "missing": []},
+                "annualized_return": {"by_currency": {"USD": 1.46}, "status": "observed", "missing": []},
             },
             "assignment_lifecycle": {
                 "ending_lots": [{"stock_lot_id": "lot-1"}],
@@ -188,6 +194,10 @@ def test_option_performance_renderer_separates_profit_cash_and_assignment() -> N
     assert "指派股票已实现 PnL" in text
     assert "指派股票卖出回款" in text
     assert "期权费用现金：USD -0.35" in text
+    assert "期权净现金流：USD 799.65" in text
+    assert "期间现金流收益率：USD 12.00%" in text
+    assert "年化现金流收益率：USD 146.00%" in text
+    assert "担保资本天数：USD 100,000.00" in text
     assert "指派股票卖出费用：USD -2.15" in text
     assert "证据不完整" in text
     assert "不直接等于 PnL" in text

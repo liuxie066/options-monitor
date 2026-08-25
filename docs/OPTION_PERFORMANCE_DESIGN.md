@@ -266,6 +266,155 @@ missing net PnL, unsupported inventory basis, and unknown short-call capital are
 `capital.coverage` or the efficiency envelope. No NAV, margin return, integer-day approximation,
 or unqualified `return_rate` is introduced.
 
+## Historical Option Cash-Flow Return
+
+This metric measures period option cash generation against time-weighted capital use. It is not
+PnL, NAV return, current collateral utilization, or full-lifecycle stock return. A month containing
+only a closing debit may therefore have a negative cash-flow return even when the complete option
+lifecycle was profitable.
+
+The canonical native-currency numerator is:
+
+```text
+option_net_cashflow
+  = sum(cash.option_trade_cash_gross)
+  + sum(cash.option_fee_cash)
+```
+
+Both inputs are signed cash facts. An actual option fee is already negative, so it is added once;
+for example, a `100` premium receipt plus a `-2` fee produces `98` net cash. Actual zero is a real
+zero. Estimated or missing option fees leave the gross trade cash visible but make the affected net
+cash-flow return null/partial. Stock settlement principal and fees, assigned-stock sale proceeds and
+fees, dividends, interest, margin movements, and market-value changes are excluded.
+
+The numerator includes every canonical option trade event in the scoped period exactly once, whether
+or not strategy attribution is present. Sell-open and long-option sell-close cash are positive;
+buy-close and long-option buy-open cash are negative. This covers standalone Sell Put and Covered Call,
+both Combo Yield legs, Wheel Calls, and any other canonical option trade without using strategy identity
+as an admission rule. Strategy attribution may provide breakdowns, but missing or conflicting strategy
+metadata does not remove valid cash from the total. It degrades only the affected breakdown unless it
+also prevents the capital basis from being proven.
+
+The cash-flow return denominator uses the existing continuous-time capital-segment model, restricted
+to intervals with an actual option position:
+
+```text
+capital_days = sum(incremental_notional * exact_overlap_ms / 86_400_000)
+average_incremental_capital = capital_days / exact_period_duration_days
+
+period_cashflow_return
+  = option_net_cashflow / average_incremental_capital
+  = option_net_cashflow * exact_period_duration_days / capital_days
+
+annualized_cashflow_return
+  = option_net_cashflow / capital_days * 365
+```
+
+Capital is counted once for each supported position:
+
+- a Short Put uses strike notional for its remaining contracts from sell-open until buy-close, expiry,
+  or assignment;
+- a Long Call or Put uses its remaining opening-premium debit from buy-open until sell-close, expiry,
+  or exercise;
+- an ordinary or Wheel Covered Call uses only the proven stock cost basis allocated to its covered
+  shares, from Call open until Call close, expiry, or assignment;
+- Combo Yield has no special denominator rule: its Short Put and Long Option segments are added using
+  the same rules above;
+- a naked Call or a Call whose covered shares and basis cannot be proven has no valid denominator.
+
+A Sell Put assignment ends its Put segment but does not automatically start a stock-capital segment.
+For an assigned-stock Wheel, stock capital begins only when a Wheel Call opens and ends when that Call
+closes, expires, or is assigned. The interval from assignment to the first Call and gaps between Call
+rounds contribute no cash-flow-return capital-days. Partial coverage uses only the cost basis allocated
+to the covered shares; overlapping Calls must not count the same shares twice. Partial option closes
+reduce exposure at their exact timestamps.
+
+When capital evidence is complete and positive but the period has no option cash, the cash-flow return
+is an observed zero. When neither option cash nor capital exists, it is `not_applicable`. Option cash
+with an unavailable or zero denominator is null/partial. Valid cash remains reportable when capital is
+unavailable. No current margin, buying power, broker aggregate cost, or cash-headroom snapshot may be
+substituted for missing period capital-days.
+
+`cash.option_net_cashflow` and `cashflow_return` are a paired domain result. Their empty-state rules are:
+
+- complete positive capital, or an active position with incomplete capital evidence, plus no period
+  option cash: net cash is observed zero; the return is respectively observed zero or partial/null;
+- no option cash, no overlapping capital segment, and no overlapping capital-evidence issue: both are
+  `not_applicable`;
+- option cash with complete positive capital: both use their observed or fee-degraded evidence status;
+- option cash with zero or unavailable capital: net cash remains visible and the return is partial/null.
+
+The application service's legacy proven-empty normalization must not rewrite either field. Scope
+normalization may continue to affect older report fields, but the domain result above is identical for
+direct domain callers and every public projection.
+
+`cashflow_return.coverage` has this minimal contract:
+
+```text
+{
+  "status": "observed | partial | not_applicable",
+  "missing_by_currency": {"HKD": ["capital_basis_unavailable:<source_id>"]},
+  "global_missing": ["capital_currency_unknown:<source_id>"]
+}
+```
+
+A known-currency issue removes only that currency from `period_return.by_currency` and
+`annualized_return.by_currency`; complete currencies remain available and the envelopes are `partial`.
+An issue whose currency cannot be proven is global and suppresses every rate while preserving known
+cash. Reason codes and currency keys are deterministically sorted. The rate envelopes' `missing` list
+is the flattened, currency-qualified form of the same coverage issues; downstream consumers do not
+derive coverage from it.
+
+Cash-flow return supports both `mtd` and `ytd` through the normalized `PeriodWindow`:
+
+- `mtd` starts at Asia/Shanghai local midnight on the first day of the `as_of_date` month;
+- `ytd` starts at Asia/Shanghai local midnight on January 1 of the `as_of_date` year.
+
+When `as_of_date` is today, both windows end at the current report instant and use the exact elapsed
+duration. A past `as_of_date` includes that complete local date and ends at the next local midnight.
+Both scopes publish the period cash-flow return and annualized cash-flow return from the same formulas
+above.
+
+Natural-month breakdowns are reduced by Asia/Shanghai half-open month window, physical ledger account,
+and native currency. Cash belongs to the month containing its event timestamp; a capital segment
+spanning months contributes only its exact overlap to each month. A complete month uses its exact
+calendar duration. MTD covers only its month-to-as-of interval; YTD sums its scoped cash and
+capital-days across month boundaries before calculating the YTD rates. Aggregates always sum cash and
+capital-days first; they never average position, strategy, account, monthly, MTD, or YTD rates.
+Native currencies remain separate unless complete time-aligned conversion evidence exists.
+
+Monthly and account rows are emitted for the union of scoped option-cash facts, overlapping supported
+capital segments, and overlapping capital-evidence issues. This includes capital-only months and
+accounts but excludes completely empty months. Each row calls the same domain reducer with its clipped
+window; parent results are independently reduced from summed cash and capital-days, then checked for
+conservation.
+
+`domain.domain.performance` is the sole calculation authority for the numerator, capital-days,
+period/month/MTD/YTD return, annualized return, strategy conservation, and evidence status. The
+calculation flow is:
+
+```text
+canonical ledger facts + canonical active-option capital segments
+  + canonical strategy attribution for optional breakdowns
+  -> domain.domain.performance
+  -> option_performance_report
+  -> Agent/CLI/Copilot/Feishu/analysis/research renderers and consumers
+```
+
+Downstream surfaces may select, format, or aggregate already-published canonical facts only as allowed
+by the report contract; they must not reconstruct the numerator, denominator, or rates from raw rows.
+`query_cash_headroom` remains a current capacity view, and candidate expected-return or Strategy Lab
+metrics remain forward-looking/research measures; neither is an alternative source for this historical
+cash-flow return. Given the same scoped ledger facts, every public surface must return identical native
+cash, capital-days, period return, annualized return, and missing/partial status.
+
+The cash-flow-return calculation consumes existing explicit `covered_call_allocations` and assigned-
+stock lot basis as read-only evidence. It intersects an allocated Call's shares with the canonical
+remaining-contract timeline to reduce capital at partial closes. It does not change the shared
+assigned-stock reservation or allocation projector. Shares that the current projector cannot prove
+reusable after a partial close remain unavailable for a later overlapping Call; changing that shared
+Wheel/current-decision lifecycle rule requires a separate design and work unit.
+
 ## Portfolio Bridge Boundary
 
 The primary PnL and cash bridges are per-account accounting boundaries. Each PM fact payload and
@@ -289,6 +438,10 @@ than attributing them to the requested account or treating them as zero.
 - Deterministic valuation evidence, no-write current quote collection,
   assigned-stock lifecycle, continuous-time capital-days and Combo Yield
   attribution are implemented.
+- Historical option cash-flow return is implemented in the canonical period
+  engine for MTD, YTD, natural-month, date-range, and account scopes. Public
+  consumers select its net cash, capital-days, return, and coverage fields
+  without recalculation.
 - Public surfaces are `option_performance_report`, `om option-performance`,
   `analysis_catalog` / `analysis_query`, `portfolio_pnl_bridge` and
   `portfolio_cash_bridge`.

@@ -755,12 +755,32 @@ def _performance_metric_pair_text(gross: Any, net: Any) -> str:
     return f"毛 {_performance_metric_text(gross)}；净 {_performance_metric_text(net)}"
 
 
+def _performance_rate_text(value: Any) -> str:
+    metric = _dict(value)
+    by_ccy = _dict(metric.get("by_currency"))
+    parts: list[str] = []
+    for currency, rate in sorted(by_ccy.items()):
+        try:
+            parts.append(f"{str(currency).upper()} {float(rate) * 100:.2f}%")
+        except (TypeError, ValueError):
+            continue
+    status = str(metric.get("status") or "").strip()
+    status_label = {
+        "partial": "证据不完整",
+        "not_observed": "未观测",
+        "not_applicable": "不适用",
+    }.get(status)
+    text = " / ".join(parts) if parts else "-"
+    return f"{text}（{status_label}）" if status_label else text
+
+
 def _render_option_performance(data: dict[str, Any]) -> str:
     period = _dict(data.get("period"))
     scope = _dict(data.get("scope"))
     activity = _dict(data.get("activity"))
     cash = _dict(data.get("cash"))
     pnl = _dict(data.get("pnl"))
+    cashflow_return = _dict(data.get("cashflow_return"))
     quality = _dict(data.get("quality"))
     lifecycle = _dict(data.get("assignment_lifecycle"))
     account = str(scope.get("account") or "").strip()
@@ -795,6 +815,11 @@ def _render_option_performance(data: dict[str, Any]) -> str:
         f"- 指派/行权正股结算费用：{_performance_metric_text(cash.get('stock_settlement_fee_cash'))}",
         f"- 指派股票卖出回款：{_performance_metric_text(cash.get('assigned_stock_sale_cash_gross'))}",
         f"- 指派股票卖出费用：{_performance_metric_text(cash.get('assigned_stock_sale_fee_cash'))}",
+        "现金流收益率口径（仅期权净现金流 / 活跃期权平均担保资本）：",
+        f"- 期权净现金流：{_performance_metric_text(cash.get('option_net_cashflow'))}",
+        f"- 期间现金流收益率：{_performance_rate_text(cashflow_return.get('period_return'))}",
+        f"- 年化现金流收益率：{_performance_rate_text(cashflow_return.get('annualized_return'))}",
+        f"- 担保资本天数：{_format_performance_ccy_amounts(_dict(cashflow_return.get('capital_days_by_currency'))) or '-'}",
         "活动口径：",
         f"- 收到权利金：{_performance_metric_text(activity.get('premium_collected_gross'))}",
         f"- 支付权利金：{_performance_metric_text(activity.get('premium_paid_gross'))}",
