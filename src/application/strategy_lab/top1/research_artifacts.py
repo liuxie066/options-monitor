@@ -8,15 +8,8 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from src.application.shadow_replay.common import render_json_text
-from src.application.strategy_lab.top1.contracts import (
-    HISTORICAL_RESEARCH_WINDOW_SCHEMA,
-)
 from src.application.strategy_lab.top1.research import (
     RESEARCH_EVALUATION_INPUT_SCHEMA,
-)
-from src.application.strategy_lab.top1.research_window import (
-    ResearchWindowError,
-    load_research_window,
 )
 from src.infrastructure.private_storage import open_private_text, private_path
 
@@ -96,24 +89,6 @@ def load_materialized_research_input(
         )
     else:
         research_source = dict(research_source)
-    if research_source.get("schema_version") == HISTORICAL_RESEARCH_WINDOW_SCHEMA:
-        if source.get("mode") != "historical_research_window":
-            _fail(
-                "research_artifact_invalid",
-                "research source mode does not match window",
-            )
-        try:
-            observed_points = load_research_window(artifact_root, research_source)
-        except ResearchWindowError as exc:
-            raise ResearchArtifactError(exc.reason_code, str(exc)) from exc
-        return {
-            "schema_version": RESEARCH_EVALUATION_INPUT_SCHEMA,
-            "experiment_spec": dict(spec),
-            "dataset_ref": source.get("dataset_ref"),
-            "research_window": research_source,
-            "observed_points": observed_points,
-        }
-
     sealed_dataset = research_source
     if source.get("mode") != "sealed_historical_dataset":
         _fail(

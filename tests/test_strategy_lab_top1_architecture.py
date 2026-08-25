@@ -290,7 +290,6 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
         "src.application.strategy_lab.top1.research",
-        "src.application.strategy_lab.top1.research_window",
         "src.infrastructure.private_storage",
     }
 

@@ -41,7 +41,6 @@ RECIPE_ID = "sell_put_top1_option_market_concentration"
 RECIPE_VERSION = "v1"
 EVIDENCE_SELECTION_CONTRACT_VERSION = "performance_evidence_selection.v1"
 SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
-HISTORICAL_RESEARCH_WINDOW_SCHEMA = "historical_research_window.v1"
 RECOMMENDATION_POINT_SELECTOR = "official_scheduled_sell_put.v1"
 RESEARCH_REQUIRED_DAYS = 20
 VALIDATION_REQUIRED_DAYS = 10
@@ -365,7 +364,7 @@ def _validate_research_source(value: object) -> None:
         "research_source",
     )
     mode = _text(item["mode"], "research_source.mode")
-    if mode not in {"sealed_historical_dataset", "historical_research_window"}:
+    if mode != "sealed_historical_dataset":
         _fail("research_source.mode is unsupported")
     _ = _relative_posix_path(item["dataset_ref"], "research_source.dataset_ref")
     _ = _sha256(item["dataset_sha256"], "research_source.dataset_sha256")
