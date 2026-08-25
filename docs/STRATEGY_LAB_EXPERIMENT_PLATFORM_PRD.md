@@ -1,15 +1,15 @@
 # Strategy Lab 统一策略实验平台 PRD
 
-- **状态**：价值验证优先的产品需求草案（待评审）
-- **日期**：2026-08-24
+- **状态**：已确认；MVP 代码已实现，真实价值验收进行中
+- **日期**：2026-08-25
 - **产品范围**：Agent 可接入、基于历史证据和未来隐藏验证的策略实验工作流
 - **首个实验配方**：Sell Put Top1 推荐优化（HK / lx）
 - **后续策略**：Covered Call、Combo Yield
 - **文档性质**：产品需求；不规定具体代码拆分、数据库表或服务数量
 
-本文是统一实验平台的产品权威。已落地能力和运行边界见
-`docs/STRATEGY_LAB_DESIGN.md`。技术与实施草案必须在本 PRD 确认后按当前源码重新生成；未对齐
-草案只保存在 Git 忽略的 `docs/plans/`，不作为实现依据同步。
+本文是统一实验平台的产品权威。当前运行状态见 `docs/STRATEGY_LAB_DESIGN.md`，已落地技术合同见
+`docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md`。本 PRD 描述产品范围和验收门槛，不用来
+判断某个运行环境已经积累了多少正式数据；动态状态以 readiness 和不可变回执为准。
 
 ## 1. 产品摘要
 
@@ -36,13 +36,17 @@ Options Monitor 已具备实验所需的部分基础：Strategy Lab 的 hypothes
 Research Archive 的证据归档与校验、Shadow Replay 的回跑能力、canonical Candidate Engine，
 以及一个已落地的 Sell Put 验证 case。这些是可复用的实现基础，不是并列产品模块。
 
-当前主要缺口是：
+PRD 立项时的主要缺口是：
 
 1. 策略假设主要依赖人工提出，Agent 尚不能通过统一合同发现当前能验证什么、缺少什么；
 2. 假设、实验设计、历史研究、隐藏验证、回执和采用建议尚未组成一个连续用户流程；
 3. 现有能力分散在不同内部入口，若按 recipe 继续扩展，会重复建设 readiness、状态和事实存储；
 4. 现有 Tool Gateway 主要面向本地 `./om-agent`，跨 Agent、跨设备接入仍需理解目录、CLI 或 SSH；
 5. 实验结论尚未稳定衔接配置采用、受控上线和实际收益观察，无法完整回答优化是否在线上有效。
+
+当前主线已经补齐 Top1 的两次确认、20 日研究、10 日隐藏验证、评价和终态回执代码，并删除账户级
+实验 feature gate。尚未完成的是连续正式事实、真实 Research / Final Receipt 和价值证明；MCP、Skill、
+跨机 Agent 与飞书仍在 MVP 外。不要继续从上述立项缺口推断当前代码状态。
 
 本 PRD 不重写既有研究和策略内核，而是在它们之上建立一个权威 Strategy Lab Workspace，
 完成“Agent 构造假设—平台验证—采用建议—受控上线—结果观察”的统一闭环。产品统一过程中，
@@ -898,38 +902,36 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 存储、Research Archive、Shadow Replay 和 Candidate Engine，不再增加平行入口、状态库、corpus
 或调度器。
 
-### 19.1 当前代码与 MVP 的差异
+### 19.1 当前实现与剩余验收
 
-下表描述当前源码基线，不代表真实数据闭环已经完成：
+下表描述当前主线，而不是立项时的代码基线：
 
-| 维度 | 当前代码 | MVP 目标 | 收敛动作 |
-|---|---|---|---|
-| 实验入口 | 同时存在通用 `strategy-lab` 离线命令和独立 `top1-loop` 运维命令；Top1 CLI 已有 readiness、status 和 advance，但没有一条面向操作员的完整两次确认流程 | Codex 通过一个现有受控本地入口完成 preview、20 日研究确认、隐藏验证确认和回执查询 | 在现有 CLI 上组合最小操作入口；不新增 Agent、MCP 或第二套业务 API |
-| 实验范围 | 通用 Strategy Lab 代码包含 hypothesis、多个策略族 experiment、proposal 和 LLM context；Top1 另有一套状态化协议 | MVP 只验证 HK / lx / Sell Put Top1 种子实验 | Top1 是 MVP 执行权威；旧通用入口停止扩展，实施时审计调用方后删除仅服务旧入口的编排和展示代码 |
-| 20 / 10 日内核 | Top1 已有冻结 spec、研究授权、`research_leader`、隐藏窗口、未来点采集、outcome 和终态回执代码及测试 | 在真实来源上完成一次 20 日研究和后续 10 日隐藏验证 | 复用现有内核；代码和测试存在不等于 MVP 已通过，必须以真实 Research Receipt 和 Final Receipt 验收 |
-| 数据组织 | Top1 store 已保存 experiment、generation、corpus day / point、validation 和 outcome 状态，并引用文件 artifact | 只保存恢复、审计和回执所需状态；Research Archive、Shadow Replay 和 provider 原始事实不重复落盘 | 保留必要索引、hash 和状态；若 corpus 表保存了其他 owner 已持有的事实副本，则改为引用并删除重复 payload |
-| 正式点事实 | 正式点入口已存在，但 ordinary scheduled tick 只持续写 FX，未把现有期权 mark collector 接入全部正式点；旧 opening snapshot 包含候选行情但没有形成可长期读取的紧凑逐点合同 | 每个正式点都有 accepted candidate 行情、当时未平仓期权 mark 和 FX 绑定；失败只降级实验取证 | 复用现有 collector、performance-evidence repository、opening snapshot、ranking projection 和 point/corpus；不增加表、服务、timer 或 receipt |
-| 历史迁移 | 旧 run、Shadow Replay、performance evidence 和 v1 / v2 artifact 分散存在，当前严格研究读取不会转换其中可验证事实 | 先审计全部历史数据；存在 ready 点时迁入，无法证明的点明确为 gap | 在现有 corpus owner 保留零写入 preview；仅当 ready > 0 时增加显式幂等 apply，不改写旧 run，不使用当前值回填 |
-| 账户功能开关 | `strategy_lab_features`、`user_opt_in`、`feature.status`、readiness blocker 和停用 reconcile 共同控制账户级启停 | Strategy Lab 不是账户可选实验室功能；`disabled` 只表示服务故障或运维安全停机 | 按 19.2 删除整条 feature gate 链，不保留兼容别名 |
-| 调度推进 | `advance_scheduled` 已组合推荐点采集、fill、outcome 和终态推进，并与 feature gate 及服务配置耦合 | 实验状态由服务端持续推进，Codex 断开不影响；MVP 不新增调度器 | 复用现有 advance，删除 feature gate 分支，只保留实验生命周期所需调度 |
-| 评价逻辑 | Sell Put Top1 已计算每个 arm 的原币 `economic_pnl` 和 `efficiency`，当前集中度是股票与 Short Put 潜在接货暴露口径，没有本 case 所需的期权市场集中度指标和 0.2 / 0.4 / 0.6 参数化排序；最终判断也只使用资金效率差 | 增加版本化 `option_market_concentration_after.v1`，并使用第 11 节通用合同比较年化收益率和 CNY 收益金额 | 复用现有持仓、mark、FX、经济计算与统计 owner；在 Candidate Engine 拥有边界增加冻结阈值和新指标排序，补充 CNY 分母、损益 delta 和回执证据；不新建 FX 存储、通用公式 DSL 或平行评价器 |
-| Agent 与沟通面 | 当前没有本 PRD 所述的专用 MCP / Skill 产品；已有 LLM context 只是本地 artifact 生成能力 | MVP 不建设 Agent 接入、Skill、跨机认证或飞书 | 不补占位实现；价值验证通过后再单独立项 |
+| 维度 | 当前实现 | 剩余工作 |
+|---|---|---|
+| 操作入口 | `top1-loop` 已提供 readiness、历史 preview、研究 preview/start、验证 preview/start、status、receipt 和 scheduled advance | 由操作员按两次确认流程完成真实验收；不新增 Agent、MCP 或第二套业务 API |
+| 实验范围 | HK / `lx` / Sell Put Top1 是 formal MVP recipe；通用 `strategy-lab` 命令仅保留为本地探索入口 | 不扩展旧通用入口；只有真实第二个 recipe 出现时再提炼共享原语 |
+| 20 / 10 日内核 | 冻结 spec、研究授权、leader、未来 commitment、fill、outcome、评价和 Final Receipt 均已实现并有测试 | 先积累连续 20 个完整交易日；真实研究有可信 leader 后，才能确认并等待未来 10 日验证 |
+| 正式点事实 | recommendation point v2、prepared option evidence、真实合约行情、持仓 mark 和 FX 已接入 existing owner | 运行环境必须持续证明每日 expectation 完整；缺日不能用历史或当前值补造 |
+| 历史迁移 | corpus owner 只提供零写入 preview；不能通过当前 validator 的旧点明确记为 gap | `ready = 0` 时不实现 apply；以后首次出现真实 ready 点再评审最小幂等 apply |
+| 存储 | ExperimentStore、Top1 corpus 和现有 performance-evidence repository 分别保存状态、索引和事实；未增加第二套 FX / corpus 存储 | 继续守住引用与 hash 边界，不复制 provider 大对象 |
+| 账户功能开关 | `strategy_lab_features`、`user_opt_in`、feature command 和相关 blocker 已删除；只保留维护方安全停机 | 无 |
+| 评价逻辑 | 真实合约、期权市场集中度、0.2% / 0.4% / 0.6% 容差带、CNY 收益金额和年化收益率评价已由确定性 owner 实现 | 用真实 Research / Final Receipt 证明指标可用，不由 Agent 改公式 |
+| Agent 与沟通面 | Codex 通过现有项目控制协助操作；专用 MCP、Skill、跨机认证和飞书未建设 | 只有 MVP 证明价值后再单独立项 |
 
-Research Archive、Shadow Replay、Candidate Engine 以及被 Top1 实际复用的底层证据能力不因旧
-通用 Strategy Lab 入口退出而删除。删除范围必须以真实调用关系为准，避免把产品入口收敛变成
-研究基础设施重写。
+Research Archive、Shadow Replay、Candidate Engine 和 performance-evidence repository 继续作为底层
+权威，不因产品入口收敛而删除。代码实现完成不改变第 20 节的真实回执验收门槛。
 
 ### 19.2 删除账户级实验功能管理
 
-仓库当前已有账户级实验功能管理实现，实施时必须删除：
+账户级实验功能管理已经从当前实现删除，包括：
 
 - `strategy_lab_features` / `user_opt_in` 持久状态及其 schema；
 - `feature.status` 和账户启停入口；
 - 围绕账户 feature gate、停用 reconcile 和 `strategy_lab_top1_feature_disabled` blocker 的分支；
 - 只验证上述行为的测试、文档和兼容代码。
 
-不得保留兼容空壳或新别名。删除 schema 前必须确认现有 experiment、研究事实和最终回执不
-依赖该表，并在迁移后保持可读。`disabled` 只保留服务故障或运维安全停机语义。
+当前不得重新加入兼容空壳或新别名。历史 experiment、研究事实和最终回执继续可读；`disabled`
+只保留服务故障或维护方安全停机语义。
 
 ### 19.3 其他收敛规则
 

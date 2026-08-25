@@ -1,10 +1,10 @@
 # Sell Put / Covered Call 候选策略合同
 
-> 状态：已确认的目标口径（2026-08-06）
+> 状态：当前 `main` 策略合同
 >
 > 权威范围：Sell Put / Covered Call 的召回、数据、筛选、容量、排序和候选快照
 >
-> 实施状态：本文件是后续实现与验收依据，不表示当前代码已经全部对齐
+> 实施状态：已实现并发布；具体部署状态以目标环境的运行证据为准
 
 本文是 Sell Put / Covered Call 开仓候选策略的唯一细则真源。产品域和依赖方向见
 [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)；Combo Yield 保持独立策略，
@@ -514,10 +514,9 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 历史 artifact 可以继续只读解释，但不能重新进入当前开仓候选路径。
 
-## 13. 实施状态与上线边界
+## 13. 当前实现状态
 
-`feat/opening-candidate-policy-alignment` 分支已按本合同完成源码实施和离线验证，
-并已合并 `main`、随 v1.10.17 发布：
+当前 `main` 已实现本合同：
 
 - 正式开仓候选使用 OpenD 报价、合约、市场状态、财报日历、QFQ 日线、
   交易日历和汇率证据；
@@ -533,13 +532,14 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
   artifact 已退出当前开仓路径；JSONL 只保留为当前决策追踪证据，历史候选文件只在
   research/archive/shadow 的受限元数据分类边界中识别且不再解析。
 
-上述结论证明当前 `main` 源码与 v1.10.17 发布产物已按本合同运行。受控远程升级是
-独立授权边界；在完成升级和运行时验证前，不得宣称生产环境已按本合同运行。
+发布记录只证明源码和产物已交付。受控远程升级是独立授权边界；在完成升级和运行时
+验证前，不得宣称目标环境已按本合同运行。
 
 ## 附：CC+LP（Covered Call + Long Put）变体
 
-CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp`），完整口径见
-[`docs/plans/cc-lp-same-expiry-policy-confirmation-20260808.md`](plans/cc-lp-same-expiry-policy-confirmation-20260808.md)：
+CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp`）；策略边界见
+[Strategy Architecture](STRATEGY_ARCHITECTURE.md)，组合校验实现见
+`domain/domain/engine/cc_lp.py`：
 
 - 定位：Sell Call 资金腿（收权利金、承担被叫走风险）+ Long Put 看跌反转腿（表达转跌观点），
   与 SP+LC 严格对称，不是保护/保险；

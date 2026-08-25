@@ -3,11 +3,10 @@
 The product architecture remains v2. The general `om_chat` runtime Scene and
 prompt contract are versioned independently and are currently `v4`.
 
-The planned replacement of the generic Agent runtime with Pi Agent Core is
-specified separately in
-[PI_AGENT_CORE_INTEGRATION.md](PI_AGENT_CORE_INTEGRATION.md). Until that atomic
-cutover completes, this document remains the authority for current production
-behavior.
+The generic Agent runtime has been replaced by Pi Agent Core. This document
+continues to own the Copilot product boundary and Scene v4 contract; the
+current model/tool loop, session, admission and rollback implementation is
+specified in [PI_AGENT_CORE_INTEGRATION.md](PI_AGENT_CORE_INTEGRATION.md).
 
 ## Purpose
 

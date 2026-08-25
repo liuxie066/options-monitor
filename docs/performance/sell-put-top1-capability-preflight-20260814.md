@@ -1,5 +1,10 @@
 # Sell Put Top1 W0 Capability Preflight — 2026-08-14
 
+> **历史阶段性证据**：本文只记录 2026-08-14 当时的 W0/W0R 判断，不是当前 Strategy Lab
+> readiness 或实施状态。当前运行合同见
+> [Strategy Lab Current Contract](../STRATEGY_LAB_DESIGN.md)，动态状态以运行时 readiness、Research
+> Receipt 和 Final Receipt 为准。以下正文按原始审计语境保留，不逐段现代化。
+
 - 执行时间：`2026-08-14T14:40:08Z` 至 `2026-08-14T14:54:18Z`（UTC）
 - 最后复查：`2026-08-14T19:33:27Z`（UTC）
 - 源码：`main@c1d759ae10352d2a5664739e2053bb396e698919`

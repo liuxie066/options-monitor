@@ -1,18 +1,16 @@
 # OM 质量检查实现映射
 
-- **状态**：代码与本地验证完成；生产 onboarding 待 Phase 5
-- **日期**：2026-07-26
-- **规范来源**：[check-matrix.md](check-matrix.md)
+- **规范来源**：[investment-quality check matrix](https://github.com/liuxie066/investment-quality/blob/main/docs/quality-monitoring/check-matrix.md)
 
-本文把规范中的 OM 检查 ID 映射到唯一实现入口、确定性测试和门禁范围。它是 Phase 3 的完成证据，不改变检查矩阵的业务语义。
+本文把规范中的 OM 检查 ID 映射到当前实现入口、确定性测试和门禁范围，不改变检查矩阵的业务语义。
 
 ## 运行检查
 
 | ID | 实现入口 | 当前证据 | 本地结论边界 |
 |---|---|---|---|
-| `RT-OM-001` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 复用 `runtime_status` service profile；Host systemd 独立证据由 Phase 4 Watchdog 补充 |
+| `RT-OM-001` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 复用 `runtime_status` service profile；Host systemd 独立证据由 Watchdog 补充 |
 | `RT-OM-002` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 按 account/source 判断 listener heartbeat、stage、last error |
-| `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt；Host timer 独立证据由 Phase 4 Watchdog 补充 |
+| `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt；Host timer 独立证据由 Watchdog 补充 |
 | `RT-OM-004` | `src/application/quality/position_checks.py::build_opend_runtime_check` | `tests/quality/test_om_quality_service.py`、`tests/quality/test_om_quality_checks.py` | 要求 REAL、显式账户、`refresh_cache=True`、snapshot complete |
 
 ## 数据检查
@@ -45,12 +43,5 @@
 
 本地门禁已接入 `option_positions_read`、option performance、持仓物化/报告和 close-advice 读取/生成边界。消费者名称与 payload 中的 `blocked_consumers` 使用同一稳定标识。普通候选扫描不依赖持仓质量，不受无关异常影响。producer 与 gate 都不依赖 Hub 在线；Hub 只消费已发布的 V1 状态。
 
-## 本地质量基线
-
-- canonical Schema 校验：通过；
-- focused quality/contract/agent/ledger/consumer 回归：通过；
-- 完整 pytest：`3238 passed, 10 skipped`；
-- touched Ruff：通过；
-- dependency graph：`production_modules=512`，`cycles=0`。
-
-生产只读 canary、Host Watchdog 交叉证据、Hub onboard、真实告警/恢复和 rollback 属于 Phase 4–5，不能由本地测试替代。
+生产只读 canary、Host Watchdog 交叉证据、Hub onboarding、真实告警/恢复和 rollback
+必须以当前部署证据验证，不能由本地测试替代。

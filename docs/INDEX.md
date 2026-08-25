@@ -1,6 +1,7 @@
 # Docs Index
 
-本文只索引当前维护的 living docs，并说明历史证据的边界。
+本文索引当前维护的 living docs，并明确仍保留在 `docs/` 中的历史材料。GitHub 目录中的文件存在
+不代表它描述当前行为；先从本索引进入。
 
 遇到冲突时，权威顺序是：
 
@@ -39,16 +40,17 @@
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Sell Put、Covered Call、Combo Yield 的开仓边界。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
-- [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：scheduled report、增量提醒和主动查询体验。
-- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：Sell Put 指派后的批次级 Covered Call 监控、共享覆盖和生命周期边界。
-- [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)：已落地策略实验入口、证据要求和生产边界。
-- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：统一实验平台的产品范围、价值验证 MVP 和后续接入边界。
+- [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
+- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：已发布 Wheel V1 的产品合同、批次级 Covered Call 监控、共享覆盖和生命周期边界。
+- [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)：当前已落地入口、20/10 日验收状态、证据要求和生产边界。
+- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：已确认的统一实验平台产品范围、价值验证 MVP 和后续接入边界。
 
 ## 技术架构与核心合同
 
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
-- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：统一实验平台 MVP 的技术架构、函数改造和存储收敛边界。
+- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：已落地 MVP 的技术架构、函数 owner 和存储收敛边界。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
+- [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：period、PnL、cash、activity 和 bridge 合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
@@ -62,8 +64,8 @@
 - [Tool Reference](TOOL_REFERENCE.md)：公开工具分类、风险 metadata 和常用示例。
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Copilot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
-- [OM Copilot v2 Design](OM_COPILOT_V2_DESIGN.md)：当前自由问答 Copilot 架构。
-- [Pi Agent Core Integration](PI_AGENT_CORE_INTEGRATION.md)：Pi Agent Core 替换通用 Copilot runtime 的需求、实现合同和发布边界。
+- [OM Copilot v2 / Scene v4](OM_COPILOT_V2_DESIGN.md)：当前产品/Scene 合同；底层模型工具循环已经切换到 Pi Agent Core。
+- [Pi Agent Core Integration](PI_AGENT_CORE_INTEGRATION.md)：已发布 Pi Agent Core runtime、会话、工具准入和回滚边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
@@ -82,6 +84,14 @@
 - [Trade And Position Ledger Redesign](TRADE_POSITION_LEDGER_REDESIGN.md)：已完成重构的兼容指针；当前合同见 Ledger Architecture。
 
 历史兼容文档只能解释旧 artifact，不能覆盖当前代码行为。
+
+## 退役与阶段性证据
+
+- [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
+- [Sell Put Top1 W0 preflight](performance/sell-put-top1-capability-preflight-20260814.md)：2026-08-14 的阶段性
+  只读证据；不代表当前 readiness，当前状态见 Strategy Lab Current Contract 和运行时回执。
+
+这些文件保留用于解释历史决策，不逐段更新成当前实现。
 
 ## 工作流证据
 
