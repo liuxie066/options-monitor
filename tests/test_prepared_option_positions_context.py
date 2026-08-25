@@ -934,9 +934,21 @@ def test_prepare_v2_captures_current_marks_and_degrades_lab_only(
     assert "sell_limit" not in json.dumps(evidence)
 
 
-def test_position_drift_only_disables_strategy_lab_evidence(
+@pytest.mark.parametrize(
+    ("second_read", "expected_reason"),
+    [
+        ("drift", "option_market_evidence_position_drift"),
+        (
+            "unavailable",
+            "option_market_evidence_position_snapshot_unavailable",
+        ),
+    ],
+)
+def test_position_fence_failure_only_disables_strategy_lab_evidence(
     monkeypatch,
     tmp_path: Path,
+    second_read: str,
+    expected_reason: str,
 ) -> None:
     from src.application import prepared_option_positions_context as mod
 
@@ -962,6 +974,8 @@ def test_position_drift_only_disables_strategy_lab_evidence(
         nonlocal reads
         reads += 1
         if reads == 2:
+            if second_read == "unavailable":
+                raise RuntimeError("snapshot unavailable")
             _open_position(
                 writer,
                 account="lx",
@@ -986,6 +1000,7 @@ def test_position_drift_only_disables_strategy_lab_evidence(
         },
     )
 
+    messages: list[str] = []
     batch = prepare_option_positions_contexts(
         base=tmp_path,
         run_id=run_id,
@@ -994,6 +1009,7 @@ def test_position_drift_only_disables_strategy_lab_evidence(
         account_config_authorities=authorities,
         run_state_dir=tmp_path / "output_runs" / run_id / "state",
         persist_fx_evidence=True,
+        log=messages.append,
     )
     manifest = batch.manifests["lx"]
     common = {
@@ -1011,13 +1027,17 @@ def test_position_drift_only_disables_strategy_lab_evidence(
 
     assert sum(
         row["contracts_open"] for row in payload["open_positions_min"]
-    ) == 1
+    ) == (1 if second_read == "drift" else 0)
     evidence = payload["strategy_lab_option_market_evidence"]
     assert evidence["status"] == "unavailable"
-    assert evidence["reason_code"] == "option_market_evidence_position_drift"
+    assert evidence["reason_code"] == expected_reason
+    if second_read == "unavailable":
+        assert messages == [
+            "[WARN] prepared option position snapshot B unavailable: RuntimeError"
+        ]
     with pytest.raises(
         PreparedOptionPositionsContextError,
-        match="option_market_evidence_position_drift",
+        match=expected_reason,
     ):
         load_prepared_option_positions_context(
             **common,

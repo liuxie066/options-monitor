@@ -24,6 +24,15 @@ _PROFILE_FIELDS = {
     "advance_interval",
     "timeout_start_sec",
 }
+_TOP1_UNITS = {ADVANCE_SERVICE, ADVANCE_TIMER}
+_UNIT_DRIFT_FIELDS = (
+    "missing_profile_units",
+    "missing_installed_units",
+    "mismatched_units",
+    "activation_drift_units",
+    "activation_preservation_conflicts",
+    "execution_drift_units",
+)
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -122,6 +131,18 @@ def _service_check_ok(status: Mapping[str, Any], name: str, check: str) -> bool:
     return False
 
 
+def _top1_unit_drifted(drift: Mapping[str, Any]) -> bool:
+    if _object(drift.get("summary")).get("status") == "ok":
+        return False
+    for field in _UNIT_DRIFT_FIELDS:
+        values = drift.get(field)
+        if not isinstance(values, list):
+            return True
+        if _TOP1_UNITS.intersection(str(value) for value in values):
+            return True
+    return False
+
+
 def build_top1_readiness(
     *,
     profile: Mapping[str, Any],
@@ -168,7 +189,7 @@ def build_top1_readiness(
     env_file = str(profile.get("env_file") or "").strip()
     if not env_file or not Path(env_file).expanduser().is_absolute():
         source_blockers.append("strategy_lab_top1_env_file_missing")
-    if _object(drift.get("summary")).get("status") != "ok":
+    if _top1_unit_drifted(drift):
         source_blockers.append("strategy_lab_top1_service_drift")
     if not units_present:
         source_blockers.append("strategy_lab_top1_units_missing")

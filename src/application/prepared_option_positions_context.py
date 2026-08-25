@@ -552,6 +552,7 @@ def build_option_market_evidence_payload(
     ledger_generation_sha256_b: str,
     decision_state_fingerprint_a: str,
     decision_state_fingerprint_b: str,
+    position_snapshot_b_available: bool = True,
     captured_mark_fact_ids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Build the strict evidence slice without reading mutable state."""
@@ -566,6 +567,12 @@ def build_option_market_evidence_payload(
         "decision_state_fingerprint_a": decision_state_fingerprint_a,
         "decision_state_fingerprint_b": decision_state_fingerprint_b,
     }
+    if not position_snapshot_b_available:
+        return _option_market_evidence_payload(
+            **common,
+            status="unavailable",
+            reason_code="option_market_evidence_position_snapshot_unavailable",
+        )
     if (
         ledger_generation_sha256_a != ledger_generation_sha256_b
         or decision_state_fingerprint_a != decision_state_fingerprint_b
@@ -848,6 +855,7 @@ def prepare_option_positions_contexts(
 
     evidence_by_ledger_path: dict[Path, Any] = {}
     rows_b_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
+    rows_b_unavailable: set[Path] = set()
     evidence_at_by_ledger_path: dict[Path, str] = {}
     for ledger_path, accounts in sorted(
         accounts_by_ledger_path.items(),
@@ -871,7 +879,13 @@ def prepare_option_positions_contexts(
             evidence_at_by_ledger_path[ledger_path] = datetime.now(
                 timezone.utc
             ).isoformat()
-        except Exception:
+        except Exception as exc:
+            rows_b_unavailable.add(ledger_path)
+            if log is not None:
+                log(
+                    "[WARN] prepared option position snapshot B unavailable: "
+                    f"{type(exc).__name__}"
+                )
             evidence_at_by_ledger_path[ledger_path] = datetime.now(
                 timezone.utc
             ).isoformat()
@@ -1005,17 +1019,16 @@ def prepare_option_positions_contexts(
                         rows_a=rows_a_by_account[account],
                         evidence_bundle=evidence_by_ledger_path.get(ledger_path),
                         evidence_at_utc=evidence_at_by_ledger_path[ledger_path],
-                        ledger_generation_sha256_a=(
-                            ledger_generation_sha256_a
-                        ),
-                        ledger_generation_sha256_b=(
-                            ledger_generation_sha256_b
-                        ),
+                        ledger_generation_sha256_a=ledger_generation_sha256_a,
+                        ledger_generation_sha256_b=ledger_generation_sha256_b,
                         decision_state_fingerprint_a=(
                             decision_state_fingerprint_a
                         ),
                         decision_state_fingerprint_b=(
                             decision_state_fingerprint_b
+                        ),
+                        position_snapshot_b_available=(
+                            ledger_path not in rows_b_unavailable
                         ),
                         captured_mark_fact_ids=(
                             captured_mark_fact_ids_by_ledger.get(ledger_path)
