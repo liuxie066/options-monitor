@@ -1,0 +1,95 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "2.0.0",
+  "base": {
+    "tag": "v1.17.3",
+    "commit": "8742e86f3e33f9fd70fc734d4130e8a88d6854cd"
+  },
+  "reviewed_head": "0bf0fcf755ec932e1d48829a812cdd286a46e15c",
+  "commits": [
+    {
+      "sha": "d2f5353e04ebfb9246f196e71e956e1983de9d6f",
+      "subject": "refactor(compat): remove retired layers"
+    },
+    {
+      "sha": "1bd561142a20053aa558f33907059ed84166f228",
+      "subject": "refactor(strategy): retire yield enhancement naming"
+    },
+    {
+      "sha": "16e8f7e42e51b8fb2863f44f3bf03a128c665ac9",
+      "subject": "refactor(ledger): split oversized persistence modules"
+    },
+    {
+      "sha": "66e4f5bd555759ea7d36cb3151171b46fe1d870a",
+      "subject": "refactor(repo): split deploy tests and trim facades"
+    },
+    {
+      "sha": "5e18c6ab2093a57e32a78393b5bb3d6a54d309f3",
+      "subject": "refactor(repo): merge compatibility cleanup"
+    },
+    {
+      "sha": "5809ee16c25496c929f3705dbc5d7d55570f50fb",
+      "subject": "fix(performance): complete option return evidence"
+    },
+    {
+      "sha": "ae581d8ed53646a9d31709c1a33f86d5f9fc3f05",
+      "subject": "docs(repo): refresh dependency graph"
+    },
+    {
+      "sha": "0bf0fcf755ec932e1d48829a812cdd286a46e15c",
+      "subject": "fix(architecture): expose order fee semantics via ledger api"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Removed the retired legacy configuration and Daily Brief delivery migration CLI surfaces; installations must already use YAML authoring and current delivery state before upgrading.",
+      "commits": [
+        "d2f5353e04ebfb9246f196e71e956e1983de9d6f"
+      ]
+    },
+    {
+      "category": "Breaking Changes",
+      "text": "Removed active `yield_enhancement` naming and configuration aliases in favor of `combo_yield`, while preserving read-only interpretation of historical ledger and artifact data.",
+      "commits": [
+        "1bd561142a20053aa558f33907059ed84166f228"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed a failed Copilot answer-admission turn to collect fresh read-only evidence before its single resubmission, so option-performance replies no longer fail by reusing stale observations.",
+      "commits": [
+        "5809ee16c25496c929f3705dbc5d7d55570f50fb"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Classified lifecycle-only option expiries as actual zero-fee events while keeping broker expiries with missing order identity explicitly incomplete until OpenD supplies authoritative fees.",
+      "commits": [
+        "5809ee16c25496c929f3705dbc5d7d55570f50fb"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "16e8f7e42e51b8fb2863f44f3bf03a128c665ac9",
+      "reason": "Internal ledger module split preserving the existing public and runtime contracts."
+    },
+    {
+      "commit": "66e4f5bd555759ea7d36cb3151171b46fe1d870a",
+      "reason": "Internal test and facade organization with no user, configuration, or production runtime behavior change."
+    },
+    {
+      "commit": "5e18c6ab2093a57e32a78393b5bb3d6a54d309f3",
+      "reason": "Merge-only integration commit whose constituent changes are reviewed under their owning commits."
+    },
+    {
+      "commit": "ae581d8ed53646a9d31709c1a33f86d5f9fc3f05",
+      "reason": "Mechanically refreshed generated dependency graph documentation for the already reviewed source tree."
+    },
+    {
+      "commit": "0bf0fcf755ec932e1d48829a812cdd286a46e15c",
+      "reason": "Release-preflight boundary correction exposing existing fee semantics through the canonical ledger API without changing runtime behavior."
+    }
+  ]
+}
