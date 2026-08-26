@@ -201,6 +201,70 @@ def test_assignment_starts_wheel_and_manual_end_is_cas_idempotent(
     assert terminal["phase"] is None
 
 
+def test_combo_funding_put_assignment_starts_wheel_and_preserves_combo_tail(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    group_id = "combo_yield:lx:nvda-20260821"
+    for option_type, side, strike, role, opened_at_ms in (
+        ("put", "short", 100, "funding_put", 1_000),
+        ("call", "long", 120, "participation_call", 1_100),
+    ):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type=option_type,
+                side=side,
+                contracts=1,
+                currency="USD",
+                strike=strike,
+                multiplier=100,
+                expiration_ymd="2026-08-21",
+                premium_per_share=2.5,
+                opened_at_ms=opened_at_ms,
+                strategy_snapshot={
+                    "strategy": "combo_yield",
+                    "leg_role": role,
+                    "strategy_group_id": group_id,
+                },
+            ),
+        )
+
+    lots = repo.list_position_lots()
+    funding_put = next(row for row in lots if row["fields"]["option_type"] == "put")
+    assignment = record_manual_assignment(
+        repo,
+        record_id=str(funding_put["record_id"]),
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100,
+        as_of_ms=2_000,
+        request_id="combo-funding-put-assignment-1",
+        wheel_start_enabled=True,
+    )
+    stock_lot_id = f'assigned-stock-{assignment["result"]["event_id"]}'
+    model = build_wheel_read_model(repo, "lx", 3_000)
+    assigned_stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    residual_call = next(
+        row["fields"]
+        for row in repo.list_position_lots()
+        if row["fields"]["option_type"] == "call"
+    )
+
+    assert model["batches"][0]["stock_lot_id"] == stock_lot_id
+    assert model["batches"][0]["phase"] == "ready"
+    assert assigned_stock["strategy_group_id"] == group_id
+    assert assigned_stock["leg_role"] == "assigned_stock"
+    assert assigned_stock["source_option_leg_role"] == "funding_put"
+    assert residual_call["status"] == "open"
+    assert residual_call["strategy_group_id"] == group_id
+    assert residual_call["leg_role"] == "participation_call"
+
+
 def test_assignment_replay_does_not_backfill_wheel_start(tmp_path: Path) -> None:
     repo, put_lot_id, _stock_lot_id = _assign_short_put(
         tmp_path,
