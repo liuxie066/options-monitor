@@ -161,7 +161,14 @@ def test_position_lot_projection_uses_position_patch_decoder() -> None:
 
 
 def test_position_lot_sync_metadata_is_retired() -> None:
-    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    repository_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(
+            (REPO_ROOT / "src" / "application" / "ledger").glob(
+                "repository*.py"
+            )
+        )
+    )
     commands_text = (REPO_ROOT / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
     assert not (REPO_ROOT / "src" / "application" / "ledger" / "sync_metadata.py").exists()
@@ -175,8 +182,15 @@ def test_position_lot_sync_metadata_is_retired() -> None:
 def test_position_lot_projection_write_path_uses_explicit_record_contract() -> None:
     record_text = (REPO_ROOT / "src" / "application" / "ledger" / "position_records.py").read_text(encoding="utf-8")
     publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
-    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
-    writer_text = (REPO_ROOT / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
+    repository_text = "\n".join(
+        (
+            REPO_ROOT / "src" / "application" / "ledger" / filename
+        ).read_text(encoding="utf-8")
+        for filename in ("repository_common.py", "repository_projection_tail.py")
+    )
+    writer_text = (
+        REPO_ROOT / "src" / "application" / "ledger" / "writer_trade_events.py"
+    ).read_text(encoding="utf-8")
 
     assert "class PositionLotRecord" in record_text
     assert "lots: list[PositionLotRecord]" in publisher_text
@@ -432,7 +446,12 @@ def test_trade_intake_lives_under_trades_namespace() -> None:
 
 
 def test_repository_config_and_guards_live_under_ledger_repository() -> None:
-    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    repository_text = "\n".join(
+        (
+            REPO_ROOT / "src" / "application" / "ledger" / filename
+        ).read_text(encoding="utf-8")
+        for filename in ("repository.py", "repository_common.py")
+    )
     moved_defs = (
         "class SQLiteOptionPositionsRepository",
         "def option_positions_bootstrap_from_feishu_enabled(",
@@ -458,7 +477,12 @@ def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
 
 def test_event_write_projection_lives_under_ledger_writer() -> None:
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
-    writer_text = (REPO_ROOT / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
+    writer_text = "\n".join(
+        (
+            REPO_ROOT / "src" / "application" / "ledger" / filename
+        ).read_text(encoding="utf-8")
+        for filename in ("writer_common.py", "writer_trade_events.py")
+    )
     moved_defs = (
         "def projection_diagnostics_summary(",
         "def rebuild_position_lots_from_trade_events(",
@@ -475,7 +499,15 @@ def test_event_write_projection_lives_under_ledger_writer() -> None:
 
 def test_trade_event_codec_has_dedicated_storage_boundary() -> None:
     codec_text = (REPO_ROOT / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
-    repository_text = (REPO_ROOT / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
+    repository_text = "\n".join(
+        (
+            REPO_ROOT / "src" / "application" / "ledger" / filename
+        ).read_text(encoding="utf-8")
+        for filename in (
+            "repository_trade_events.py",
+            "repository_trade_schema.py",
+        )
+    )
     publisher_text = (REPO_ROOT / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
 
     assert "def encode_trade_event_for_storage(" in codec_text

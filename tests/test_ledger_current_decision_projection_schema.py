@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.application.ledger import repository as ledger_repository
+from src.application.ledger import repository_core
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
@@ -108,14 +109,14 @@ def test_phase3b_schema_upgrade_is_additive_idempotent_and_does_not_backfill(
     db_path = tmp_path / "ledger.sqlite3"
     event_json = _legacy_db(db_path)
     startup_sql: list[str] = []
-    connect = ledger_repository.connect_private_sqlite
+    connect = repository_core.connect_private_sqlite
 
     def _traced_connect(path: Path) -> sqlite3.Connection:
         conn = connect(path)
         conn.set_trace_callback(startup_sql.append)
         return conn
 
-    monkeypatch.setattr(ledger_repository, "connect_private_sqlite", _traced_connect)
+    monkeypatch.setattr(repository_core, "connect_private_sqlite", _traced_connect)
 
     repo = SQLiteOptionPositionsRepository(db_path)
     initialization_sql = tuple(startup_sql)

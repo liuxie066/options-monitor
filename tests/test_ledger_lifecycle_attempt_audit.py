@@ -12,7 +12,7 @@ import pytest
 
 import src.application.ledger.lifecycle_attempt_audit as audit_codec
 import src.application.ledger.lifecycle_settlement_semantics as settlement_semantics
-import src.application.ledger.repository as repository_module
+import src.application.ledger.repository_lifecycle_attempts as repository_attempts
 from src.application.ledger.api import (
     record_lifecycle_attempt_audit_atomically,
 )
@@ -1766,7 +1766,7 @@ def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
         versioned_semantic,
     )
     monkeypatch.setattr(
-        repository_module,
+        repository_attempts,
         "settlement_semantic_from_evidence",
         versioned_semantic,
     )

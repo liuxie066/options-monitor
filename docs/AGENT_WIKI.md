@@ -500,9 +500,10 @@ Ownership:
 | Domain projection | `domain/domain/ledger/projection.py` |
 | Public application boundary | `src/application/ledger/api.py` |
 | Use-case commands | `src/application/ledger/commands.py` |
-| Repository/config boundary | `src/application/ledger/repository.py` |
+| Repository/config boundary | `src/application/ledger/repository.py` facade；实现位于 `repository_*.py` |
 | Stored event codec | `src/application/ledger/event_codec.py` |
-| Event write and projection publish | `src/application/ledger/writer.py` |
+| Event write and projection publish | `src/application/ledger/writer.py` facade；实现位于 `writer_*.py` |
+| Current decision projection | `src/application/ledger/current_decision_projection.py` facade；实现位于 `current_decision_*.py` |
 | Manual trades | `src/application/ledger/manual_trades.py` |
 | Void/repair interventions | `src/application/ledger/interventions.py` |
 | Auto-close maintenance | `src/application/ledger/maintenance.py`, `src/application/positions/auto_close.py` |
