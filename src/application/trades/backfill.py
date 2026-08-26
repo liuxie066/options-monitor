@@ -11,6 +11,7 @@ from src.application.trades.deal_identity import (
     completed_ledger_deal_keys,
 )
 from src.application.trades.history_backfill import fetch_opend_history_deals
+from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.inbox import (
     enqueue_trade_payload,
@@ -27,6 +28,11 @@ from src.application.trades.state import (
     write_trade_intake_state,
 )
 from src.infrastructure.io_utils import atomic_write_json, read_json, utc_now
+
+
+_FEE_PROVIDER_START_MS = int(
+    datetime(2018, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
+)
 
 
 def payload_deal_id(payload: dict[str, Any] | None) -> str:
@@ -60,6 +66,8 @@ def run_history_backfill(
     inbox_path: Path | None = None,
     checkpoint_path: Path | None = None,
     history_deals_fn: Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]] = fetch_opend_history_deals,
+    fee_sync_fn: Callable[..., dict[str, Any]] = sync_order_fees,
+    fee_provider: Any | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now()
@@ -366,29 +374,78 @@ def run_history_backfill(
         elif status == "failed":
             failed_count += 1
 
+    fee_sync_results: list[dict[str, Any]] = []
+    fee_selection_after = dict(
+        checkpoint_payload.get("fee_selection_after_by_source") or {}
+    )
+    fee_cursor_advanced = False
+    if fee_provider is not None:
+        for futu_account_id in sorted(
+            {str(value or "").strip() for value in futu_account_ids if str(value or "").strip()}
+        ):
+            account = str(account_mapping.get(futu_account_id) or "").strip().lower()
+            if not account:
+                continue
+            cursor_key = f"{account}:{futu_account_id}"
+            try:
+                with lock_context:
+                    fee_result = fee_sync_fn(
+                        repo,
+                        account=account,
+                        futu_account_id=futu_account_id,
+                        start_ms=_FEE_PROVIDER_START_MS,
+                        end_exclusive_ms=int(now.astimezone(timezone.utc).timestamp() * 1000) + 1,
+                        provider=fee_provider,
+                        apply=apply_changes,
+                        observed_at_ms=int(now.astimezone(timezone.utc).timestamp() * 1000),
+                        selection_after=fee_selection_after.get(cursor_key),
+                        max_orders=400,
+                    )
+            except Exception as exc:
+                fee_result = {
+                    "schema_version": "order_fee_sync_receipt.v1",
+                    "account": account,
+                    "futu_account_id": futu_account_id,
+                    "provider_attempted": False,
+                    "reason": "fee_sync_failed",
+                    "error_type": type(exc).__name__,
+                }
+            fee_sync_results.append(fee_result)
+            if apply_changes and bool(fee_result.get("provider_attempted")):
+                proposed = (fee_result.get("selection_cursor") or {}).get("after")
+                if proposed not in (None, ""):
+                    fee_selection_after[cursor_key] = str(proposed)
+                    fee_cursor_advanced = True
+
     checkpoint_advanced = False
     history_query_complete = _history_query_complete(
         diagnostics,
         expected_account_ids=futu_account_ids,
     )
+    checkpoint_update = dict(checkpoint_payload)
     if apply_changes and durable_queue_complete and history_query_complete:
         window_end_utc = str(
             diagnostics.get("window_end_utc")
             or now.astimezone(timezone.utc).isoformat()
         )
-        atomic_write_json(
-            checkpoint_file,
+        checkpoint_update.update(
             {
                 "last_successful_window_end_utc": window_end_utc,
                 "configured_lookback_hours": configured_lookback_hours,
                 "last_effective_lookback_hours": lookback_hours,
-                "updated_at_utc": utc_now(),
-            },
+            }
         )
         checkpoint_advanced = True
+    if fee_cursor_advanced:
+        checkpoint_update["fee_selection_after_by_source"] = fee_selection_after
+    if checkpoint_advanced or fee_cursor_advanced:
+        checkpoint_update["updated_at_utc"] = utc_now()
+        atomic_write_json(checkpoint_file, checkpoint_update)
     diagnostics["history_query_complete"] = history_query_complete
     diagnostics["durable_queue_complete"] = durable_queue_complete
     diagnostics["checkpoint_advanced"] = checkpoint_advanced
+    diagnostics["fee_cursor_advanced"] = fee_cursor_advanced
+    diagnostics["fee_sync"] = fee_sync_results
     lifecycle_discovery_after = _lifecycle_discovery_after_backfill_phase(
         repo=repo,
         accounts=lifecycle_accounts,

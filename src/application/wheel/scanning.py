@@ -7,8 +7,12 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from domain.domain.assigned_stock import assigned_stock_fee_fact
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.fee_calc import (
+    FUTU_HK_FEE_SCHEDULE_URL,
+    FUTU_US_FEE_SCHEDULE_URL,
+    calc_futu_stock_fee,
+)
 from domain.domain.engine import (
     CandidateCalculationError,
     calculate_opening_candidate_metrics,
@@ -201,18 +205,28 @@ def _exit_fee_fact(
     custom = fee_context.get("stock_exit_fee_fact_fn") if isinstance(fee_context, Mapping) else None
     if callable(custom):
         return dict(custom(stock, candidate, shares))
-    return assigned_stock_fee_fact(
-        {
-            "account": stock.get("account"),
-            "broker": stock.get("broker"),
-            "symbol": stock.get("symbol"),
-            "currency": stock.get("currency"),
-            "shares": shares,
-            "price": candidate.get("strike"),
-        },
-        component="wheel_projected_stock_exit_fee",
-        transaction_kind="sale",
-    )
+    currency = str(stock.get("currency") or "").strip().upper()
+    try:
+        amount = calc_futu_stock_fee(
+            currency,
+            float(candidate.get("strike")),
+            shares=shares,
+            is_sell=True,
+        )
+    except (TypeError, ValueError):
+        return {
+            "component": "wheel_projected_stock_exit_fee",
+            "basis": "missing",
+            "amount": 0.0,
+            "reason": "projected_stock_exit_fee_unavailable",
+        }
+    return {
+        "component": "wheel_projected_stock_exit_fee",
+        "basis": "estimated",
+        "amount": amount,
+        "source": FUTU_HK_FEE_SCHEDULE_URL if currency == "HKD" else FUTU_US_FEE_SCHEDULE_URL,
+        "reason": "projected_stock_exit_fee_formula",
+    }
 
 
 def run_wheel_call_scan(

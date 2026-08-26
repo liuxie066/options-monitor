@@ -34,7 +34,7 @@ def _event(
 ) -> TradeEvent:
     raw_payload = dict(raw or {})
     if basis:
-        raw_payload["fee_provenance"] = {"basis": basis, "source": "test"}
+        raw_payload["fee_provenance"] = {"basis": basis, "source": "test", "amount": fees}
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -45,7 +45,7 @@ def _event(
         currency=currency,
         source="test",
         multiplier=multiplier,
-        fees=fees,
+        fees=0.0 if basis == "estimated" else fees,
         lot_id="lot-1" if event_type == "open" else None,
         target_lot_id=target_lot_id,
         raw_payload=raw_payload,
@@ -122,6 +122,26 @@ def test_invalid_explicit_fee_provenance_fails_closed_instead_of_legacy_inferenc
     assert fee.amount is None
     assert fee.basis.value == "missing"
     assert "invalid fee provenance basis" in str(fee.reason)
+
+
+def test_fee_provenance_conflict_with_compatibility_amount_fails_closed() -> None:
+    actual = _event(
+        "actual-conflict",
+        "close",
+        fees=9,
+        raw={"fee_provenance": {"basis": "actual", "amount": 1, "source": "test"}},
+    )
+    estimated = _event(
+        "estimated-conflict",
+        "close",
+        fees=9,
+        raw={"fee_provenance": {"basis": "estimated", "amount": 1, "source": "test"}},
+    )
+
+    assert fee_fact_for_event(actual).basis.value == "missing"
+    assert "conflicts" in str(fee_fact_for_event(actual).reason)
+    assert fee_fact_for_event(estimated).basis.value == "missing"
+    assert "conflicts" in str(fee_fact_for_event(estimated).reason)
 
 
 def test_missing_fee_preserves_gross_and_nulls_net() -> None:

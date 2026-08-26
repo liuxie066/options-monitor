@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
+from domain.domain.ledger.economics import (
+    OptionEconomicAllocation,
+    fee_fact_for_event,
+    fee_fact_from_persisted_evidence,
+)
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.lots import PositionLot
@@ -41,6 +45,7 @@ __all__ = [
     "TradeEvent",
     "EMPTY_PROJECTION_DIAGNOSTIC_SHA256",
     "fee_fact_for_event",
+    "fee_fact_from_persisted_evidence",
     "ordered_position_lots_fingerprint",
     "position_lots_fingerprint",
     "project_resumable_trade_events",

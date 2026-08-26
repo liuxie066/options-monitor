@@ -6,7 +6,11 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
-from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
+from domain.domain.ledger.economics import (
+    OptionEconomicAllocation,
+    fee_fact_for_event,
+    fee_fact_from_persisted_evidence,
+)
 from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, lot_id_for_open_event, validate_trade_event
 from domain.domain.option_position_identity import normalize_account, normalize_broker
 from domain.domain.performance.attribution import (
@@ -23,6 +27,7 @@ from domain.domain.performance.models import (
     DecimalAmountEnvelope,
     FXRateFact,
     FeeBasis,
+    FeeComponent,
     MetricQuality,
     MetricStatus,
     OptionValuationPosition,
@@ -36,6 +41,7 @@ from domain.domain.performance.models import (
 )
 from domain.domain.performance.period import PeriodWindow, REPORTING_TIMEZONE
 from domain.domain.performance.strategy_attribution import build_strategy_attribution
+from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 
 _MONETARY_KINDS = frozenset(
@@ -88,6 +94,7 @@ class PerformanceFact:
     attribution: StrategyAttribution | None = None
     attribution_issues: tuple[str, ...] = ()
     cash_conversion: Mapping[str, Any] | None = None
+    fee_basis: str | None = None
 
     def __post_init__(self) -> None:
         kind = str(self.fact_kind or "").strip()
@@ -122,6 +129,10 @@ class PerformanceFact:
         object.__setattr__(self, "source_event_id", str(self.source_event_id or "").strip())
         object.__setattr__(self, "allocation_id", str(self.allocation_id).strip() if self.allocation_id else None)
         object.__setattr__(self, "missing_reason", str(self.missing_reason).strip() if self.missing_reason else None)
+        fee_basis = str(self.fee_basis or "").strip().lower() or None
+        if fee_basis not in {None, "actual", "estimated", "missing"}:
+            raise ValueError("fee_basis must be actual, estimated, or missing")
+        object.__setattr__(self, "fee_basis", fee_basis)
         object.__setattr__(
             self,
             "evidence_fact_ids",
@@ -161,6 +172,7 @@ class PerformanceFact:
             "attribution": None if self.attribution is None else self.attribution.to_dict(),
             "attribution_issues": list(self.attribution_issues),
             "cash_conversion": dict(self.cash_conversion) if self.cash_conversion is not None else None,
+            "fee_basis": self.fee_basis,
         }
 
 
@@ -648,6 +660,10 @@ def _cashflow_capital_inputs(
         lot_id = str(lot.get("stock_lot_id") or "").strip()
         if lot_id:
             stock_lots_by_id.setdefault(lot_id, []).append(lot)
+    overallocated_call_ids = _overallocated_covered_call_open_ids(
+        allocation_rows_by_open,
+        stock_lots_by_id,
+    )
 
     for event in invalid_timeline_events:
         issue = _cashflow_capital_issue(
@@ -697,6 +713,16 @@ def _cashflow_capital_inputs(
         if side == "short" and option_type == "call":
             covered_start_at_ms = max(start_at_ms, period.effective_start_at_ms)
             covered_end_at_ms = min(end_at_ms, period.effective_end_exclusive_at_ms)
+            if event.event_id in overallocated_call_ids:
+                issues.append(
+                    _cashflow_capital_issue(
+                        event,
+                        reason=f"capital_basis_unavailable:{event.event_id}",
+                        start_at_ms=covered_start_at_ms,
+                        end_at_ms=covered_end_at_ms,
+                    )
+                )
+                continue
             _append_covered_call_cashflow_segments(
                 segments,
                 issues,
@@ -717,6 +743,46 @@ def _cashflow_capital_inputs(
             )
         )
     return tuple(segments), tuple(issues)
+
+
+def _overallocated_covered_call_open_ids(
+    allocation_rows_by_open: Mapping[str, Sequence[Mapping[str, Any]]],
+    stock_lots_by_id: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> set[str]:
+    intervals_by_lot: dict[str, list[tuple[str, int, int, int]]] = {}
+    for open_event_id, rows in allocation_rows_by_open.items():
+        for row in rows:
+            stock_lot_id = str(row.get("stock_lot_id") or "").strip()
+            lots = stock_lots_by_id.get(stock_lot_id, ())
+            try:
+                shares = int(row.get("shares") or 0)
+                start_at_ms = int(row.get("start_at_ms") or 0)
+                end_at_ms = int(row.get("end_at_ms") or 0)
+                capacity = int(lots[0].get("shares_opened") or 0)
+            except (IndexError, TypeError, ValueError):
+                continue
+            if len(lots) != 1 or shares <= 0 or capacity <= 0 or end_at_ms < start_at_ms:
+                continue
+            intervals_by_lot.setdefault(stock_lot_id, []).append(
+                (open_event_id, start_at_ms, end_at_ms, shares)
+            )
+
+    invalid: set[str] = set()
+    for stock_lot_id, intervals in intervals_by_lot.items():
+        capacity = int(stock_lots_by_id[stock_lot_id][0].get("shares_opened") or 0)
+        boundaries: dict[int, list[tuple[str, int]]] = {}
+        for open_event_id, start_at_ms, end_exclusive_at_ms, shares in intervals:
+            boundaries.setdefault(start_at_ms, []).append((open_event_id, shares))
+            boundaries.setdefault(end_exclusive_at_ms, []).append((open_event_id, -shares))
+        active: dict[str, int] = {}
+        for at_ms in sorted(boundaries):
+            for open_event_id, delta in boundaries[at_ms]:
+                active[open_event_id] = active.get(open_event_id, 0) + delta
+                if active[open_event_id] == 0:
+                    del active[open_event_id]
+            if sum(active.values()) > capacity:
+                invalid.update(active)
+    return invalid
 
 
 def _cashflow_capital_issue(
@@ -758,84 +824,108 @@ def _append_covered_call_cashflow_segments(
         start_at_ms=start_at_ms,
         end_at_ms=end_at_ms,
     )
-    if not allocation_rows or any(
-        str(row.get("allocation_status") or "unknown").strip().lower() != "explicit"
-        for row in allocation_rows
-    ):
-        issues.append(issue)
-        return
     try:
         currency = normalize_currency(event.currency)
         multiplier = to_decimal(event.multiplier, field_name="multiplier")
+        strike = to_decimal(event.contract_key.strike, field_name="strike")
     except ValueError:
         issues.append(issue)
         return
-    if multiplier <= 0:
+    if multiplier <= 0 or strike <= 0:
         issues.append(issue)
         return
     shares_required = Decimal(remaining_contracts) * multiplier
-    shares_added = Decimal(0)
+    original_shares = Decimal(int(event.contracts)) * multiplier
+    covered_shares = shares_required
+    explicit_stock_lot_id = next(
+        (
+            str((event.raw_payload or {}).get(key) or "").strip()
+            for key in ("stock_lot_id", "target_stock_lot_id", "source_stock_lot_id")
+            if str((event.raw_payload or {}).get(key) or "").strip()
+        ),
+        None,
+    )
+    if explicit_stock_lot_id and not allocation_rows:
+        issues.append(issue)
+        return
+    if allocation_rows:
+        allocated = Decimal(0)
+        stock_lot_ids: set[str] = set()
+        event_identity = (
+            normalize_account(event.contract_key.account),
+            normalize_broker(event.contract_key.broker),
+            canonical_contract_symbol(event.contract_key.underlying_symbol),
+            currency,
+        )
+        for row in allocation_rows:
+            try:
+                stock_lot_id = str(row.get("stock_lot_id") or "").strip()
+                lots = stock_lots_by_id.get(stock_lot_id, ())
+                lot = lots[0]
+                row_shares = Decimal(int(row.get("shares") or 0))
+                row_start_at_ms = int(row.get("start_at_ms") or 0)
+                row_end_at_ms = int(row.get("end_at_ms") or 0)
+                row_currency = normalize_currency(row.get("currency") or currency)
+                lot_currency = normalize_currency(lot.get("currency"))
+                lot_shares = Decimal(int(lot.get("shares_opened") or 0))
+                lot_assigned_at_ms = int(lot.get("assigned_at_ms") or 0)
+            except (IndexError, TypeError, ValueError):
+                issues.append(issue)
+                return
+            row_identity = (
+                normalize_account(row.get("account")),
+                normalize_broker(row.get("broker")),
+                canonical_contract_symbol(row.get("symbol")),
+                row_currency,
+            )
+            lot_identity = (
+                normalize_account(lot.get("account")),
+                normalize_broker(lot.get("broker")),
+                canonical_contract_symbol(lot.get("symbol")),
+                lot_currency,
+            )
+            if (
+                str(row.get("allocation_status") or "unknown").strip().lower() != "explicit"
+                or not stock_lot_id
+                or len(lots) != 1
+                or stock_lot_id in stock_lot_ids
+                or row_shares <= 0
+                or row_shares > lot_shares
+                or lot_assigned_at_ms <= 0
+                or lot_assigned_at_ms > row_start_at_ms
+                or row_start_at_ms > start_at_ms
+                or row_end_at_ms < end_at_ms
+                or row_identity != event_identity
+                or lot_identity != event_identity
+            ):
+                issues.append(issue)
+                return
+            stock_lot_ids.add(stock_lot_id)
+            allocated += row_shares
+        if allocated <= 0 or allocated > original_shares:
+            issues.append(issue)
+            return
+        covered_shares = min(allocated, shares_required)
     attribution_resolution = resolve_event_attribution(
         event,
         lifecycle_source_id=lot_id_for_open_event(event),
     )
-    for row in sorted(allocation_rows, key=lambda item: str(item.get("stock_lot_id") or "")):
-        if shares_added >= shares_required:
-            break
-        lot_id = str(row.get("stock_lot_id") or "").strip()
-        lots = stock_lots_by_id.get(lot_id, ())
-        try:
-            row_shares = Decimal(int(row.get("shares") or 0))
-            row_start_at_ms = int(row.get("start_at_ms") or 0)
-            row_end_at_ms = int(row.get("end_at_ms") or 0)
-        except (TypeError, ValueError):
-            issues.append(issue)
-            continue
-        if (
-            not lot_id
-            or len(lots) != 1
-            or row_shares <= 0
-            or row_start_at_ms > start_at_ms
-            or row_end_at_ms + 1 < end_at_ms
-        ):
-            issues.append(issue)
-            continue
-        lot = lots[0]
-        try:
-            shares_opened = Decimal(int(lot.get("shares_opened") or 0))
-            stock_cost_basis_total = to_decimal(
-                lot.get("stock_cost_basis_total"),
-                field_name="stock_cost_basis_total",
-            )
-            lot_currency = normalize_currency(lot.get("currency"))
-            row_currency = normalize_currency(row.get("currency"))
-        except (TypeError, ValueError):
-            issues.append(issue)
-            continue
-        if shares_opened <= 0 or stock_cost_basis_total < 0 or lot_currency != currency or row_currency != currency:
-            issues.append(issue)
-            continue
-        active_shares = min(row_shares, shares_required - shares_added)
-        basis_per_share = stock_cost_basis_total / shares_opened
-        segments.append(
-            CapitalExposureSegment(
-                account=event.contract_key.account,
-                broker=event.contract_key.broker,
-                symbol=event.contract_key.underlying_symbol,
-                currency=currency,
-                exposure_kind="covered_call_stock_basis",
-                source_id=f"{lot_id_for_open_event(event)}:{lot_id}",
-                start_at_ms=start_at_ms,
-                end_at_ms=end_at_ms,
-                notional=basis_per_share * active_shares,
-                quantity=active_shares,
-                attribution=attribution_resolution.attribution,
-                attribution_issues=attribution_resolution.issues,
-            )
+    segments.append(
+        CapitalExposureSegment(
+            account=event.contract_key.account,
+            broker=event.contract_key.broker,
+            symbol=event.contract_key.underlying_symbol,
+            currency=currency,
+            exposure_kind="covered_call_strike_notional",
+            source_id=lot_id_for_open_event(event),
+            start_at_ms=start_at_ms,
+            end_at_ms=end_at_ms,
+            notional=strike * covered_shares,
+            quantity=covered_shares,
+            attribution=attribution_resolution.attribution,
+            attribution_issues=attribution_resolution.issues,
         )
-        shares_added += active_shares
-    if shares_added < shares_required:
-        issues.append(issue)
+    )
 
 
 def _append_option_capital_segment(
@@ -1197,6 +1287,14 @@ def _cashflow_return_report(
         "status": status.value,
         "missing": missing,
     }
+    fee_basis_by_currency: dict[str, dict[str, int]] = {}
+    for fact in selected_facts:
+        if fact.fact_kind != "option_fee_cash" or not fact.currency or not fact.fee_basis:
+            continue
+        counts = fee_basis_by_currency.setdefault(
+            fact.currency, {"actual": 0, "estimated": 0, "missing": 0}
+        )
+        counts[fact.fee_basis] += 1
     return option_net_cashflow, {
         "schema_version": "option_cashflow_return.v1",
         "capital_basis": "active_option_capital_days_v1",
@@ -1214,6 +1312,7 @@ def _cashflow_return_report(
                 for currency, reasons in sorted(missing_by_currency.items())
             },
             "global_missing": sorted(global_missing),
+            "fee_basis_by_currency": fee_basis_by_currency,
         },
     }
 
@@ -1447,7 +1546,7 @@ def _option_fee_cash_fact(
     currency_reason: str | None,
 ) -> PerformanceFact:
     fee = fee_fact_for_event(event)
-    amount = -fee.amount if fee.basis == FeeBasis.ACTUAL and fee.amount is not None else None
+    amount = -fee.amount if fee.is_complete and fee.amount is not None else None
     reason = (
         None if amount is not None else fee.reason or f"{fee.basis.value} option fee is not production cash evidence"
     )
@@ -1459,6 +1558,7 @@ def _option_fee_cash_fact(
         effective_at_ms=event.event_time_ms,
         amount=amount,
         missing_reason=reason,
+        fee_basis=fee.basis.value,
         **_event_fact_kwargs(event, currency=currency),
     )
 
@@ -1569,34 +1669,21 @@ def _stock_settlement_facts(event: TradeEvent) -> list[PerformanceFact]:
     except (TypeError, ValueError) as exc:
         cash_amount = None
         cash_reason = f"stock settlement cash unavailable: {exc}"
-    fee_raw = raw.get("fees") if raw.get("fees") not in (None, "") else raw.get("fee")
-    fee_provenance = raw.get("fee_provenance") if isinstance(raw.get("fee_provenance"), Mapping) else {}
-    fee_basis = str(fee_provenance.get("basis") or "").strip().lower()
-    if fee_basis != FeeBasis.ACTUAL.value:
+    fee_raw = raw.get("fees") if raw.get("fees") not in (None, "") else raw.get("fee", 0)
+    fee_fact = fee_fact_from_persisted_evidence(
+        event_id=f"{event.event_id}:stock_settlement",
+        component=FeeComponent.STOCK_SETTLEMENT,
+        provenance=raw.get("fee_provenance"),
+        compatibility_amount=fee_raw,
+    )
+    if fee_fact.basis != FeeBasis.ACTUAL:
         fee_amount = None
-        fee_reason = str(
-            fee_provenance.get("reason")
-            or (
-                f"stock settlement fee basis is {fee_basis}"
-                if fee_basis in {FeeBasis.ESTIMATED.value, FeeBasis.MISSING.value}
-                else "stock settlement fee lacks actual provenance"
-            )
-        )
-    elif fee_raw in (None, ""):
-        fee_amount = None
-        fee_reason = "actual stock settlement fee amount is missing"
+        fee_reason = fee_fact.reason or f"stock settlement fee basis is {fee_fact.basis.value}"
     else:
-        try:
-            fee = to_decimal(fee_raw, field_name="stock settlement fee")
-            if fee < 0:
-                raise ValueError("stock settlement fee cannot be negative")
-            fee_amount = -quantize_money(fee)
-            fee_reason = currency_reason
-            if currency_reason:
-                fee_amount = None
-        except (TypeError, ValueError) as exc:
+        fee_amount = -quantize_money(fee_fact.amount)
+        fee_reason = currency_reason
+        if currency_reason:
             fee_amount = None
-            fee_reason = f"stock settlement fee unavailable: {exc}"
     return [
         PerformanceFact(
             fact_kind="stock_settlement_cash_gross",

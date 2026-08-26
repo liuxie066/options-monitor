@@ -91,6 +91,10 @@ stock_unrealized_gross
 Option Performance 的 production net 只接受 `actual` fee evidence，包括显式
 actual zero。estimated 或 missing fee 保留 gross，并使受影响 net 为 partial/null。
 
+费用事实统一遵循 `actual -> frozen estimated -> missing`。OpenD
+`order_fee_query` 经订单终态、币种和成交数量校验后才能成为 actual；未取得实际费用时，
+写入边界冻结现有公式费用。读模型只消费已持久化 provenance，不重新估算。
+
 assigned-stock read view 另外保留两类生命周期字段：
 
 - `assignment_lifecycle_pnl` 是兼容 lot 口径：
@@ -173,10 +177,10 @@ assigned-stock lot 查询：
   --dry-run
 ```
 
-确认 broker/account/symbol、目标 lot、数量、价格、费用和 source identity 后，
-移除 `--dry-run`，改用 `--apply --confirm` 执行同一业务 payload。省略 `--fees`
-表示估算；只有显式
-`--fees 0` 才是 actual zero。
+确认 broker/account/symbol、目标 lot、数量、价格和 source identity 后，移除
+`--dry-run`，改用 `--apply --confirm` 执行同一业务 payload。人工 sale 不接收
+`--fees`；写入时冻结公式费用。只有具备 canonical broker order identity 的
+broker sale 才能由统一 OpenD 订单费用同步升级为 actual，包括实际零费用。
 
 Broker stock sell intake 仅在 deal 能唯一匹配开放 assigned-stock lot 时写 sale；
 无法安全归属时进入人工 review。

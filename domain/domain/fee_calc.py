@@ -7,8 +7,6 @@ from decimal import Decimal, ROUND_CEILING
 from math import isfinite
 from typing import Any
 
-import pandas as pd
-
 from domain.domain.option_position_identity import normalize_currency
 
 
@@ -17,6 +15,7 @@ FUTU_HK_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_335"
 FUTU_US_OPTION_FEE_BASIS = "futu_us_fixed_package_2026-07-22"
 FUTU_HK_OPTION_FEE_BASIS = "futu_hk_tier1_upper_bound_2026-07-22"
 FUTU_OPTION_FEE_SCHEDULE_VERSION = "futu_option_sell_fee.v1"
+FUTU_EXECUTED_OPTION_FEE_FORMULA_VERSION = "futu_executed_option_fee.v1"
 FUTU_US_OPTION_CANDIDATE_FEE_BASIS = "futu_us_candidate_upper_bound_2026-08-06"
 FUTU_US_CANDIDATE_PLATFORM_FEE_UPPER_BOUND = 0.60
 FUTU_US_FIXED_PLATFORM_FEE = 0.30
@@ -35,34 +34,6 @@ class OptionFeeEstimate:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-_ACTUAL_FEE_TOTAL_KEYS = (
-    "total_fee",
-    "total_fees",
-    "fees_total",
-    "fee_total",
-    "commission_and_fees",
-    "charges",
-    "fees",
-    "fee",
-)
-_ACTUAL_FEE_COMPONENT_KEYS = (
-    "commission",
-    "commission_fee",
-    "platform_fee",
-    "transaction_fee",
-    "trading_fee",
-    "exchange_fee",
-    "settlement_fee",
-    "system_fee",
-    "regulatory_fee",
-    "reg_fee",
-    "sec_fee",
-    "taf",
-    "orf",
-    "stamp_duty",
-)
-
 
 def _require_positive(name: str, value: float | None) -> float:
     if value is None or value <= 0:
@@ -161,8 +132,8 @@ def estimate_futu_option_sell_fee(
     """Return the versioned candidate-stage sell-fee estimate.
 
     Candidate calculations must bind the broker-observed contract multiplier;
-    this strict facade intentionally has no multiplier default. Actual trade
-    performance continues to use broker-reported fees via ``extract_actual_fees``.
+    this strict facade intentionally has no multiplier default. Executed trade
+    performance consumes persisted fee provenance instead of this candidate estimate.
     """
 
     ccy = normalize_currency(currency)
@@ -194,6 +165,40 @@ def estimate_futu_option_sell_fee(
         amount=amount,
         currency=ccy,
         fee_schedule_version=FUTU_OPTION_FEE_SCHEDULE_VERSION,
+        fee_basis=basis,
+        fee_schedule_url=url,
+    )
+
+
+def estimate_futu_executed_option_fee(
+    currency: str | None,
+    order_price: float,
+    *,
+    contracts: int,
+    multiplier: int,
+    is_sell: bool,
+) -> OptionFeeEstimate:
+    """Freeze the existing Futu formula for one executed option event."""
+
+    ccy = normalize_currency(currency)
+    if ccy == "USD":
+        basis = FUTU_US_OPTION_FEE_BASIS
+        url = FUTU_US_FEE_SCHEDULE_URL
+    elif ccy == "HKD":
+        basis = FUTU_HK_OPTION_FEE_BASIS
+        url = FUTU_HK_FEE_SCHEDULE_URL
+    else:
+        raise ValueError("currency must resolve to USD or HKD")
+    return OptionFeeEstimate(
+        amount=calc_futu_option_fee(
+            ccy,
+            order_price,
+            contracts=contracts,
+            multiplier=multiplier,
+            is_sell=is_sell,
+        ),
+        currency=ccy,
+        fee_schedule_version=FUTU_EXECUTED_OPTION_FEE_FORMULA_VERSION,
         fee_basis=basis,
         fee_schedule_url=url,
     )
@@ -317,9 +322,8 @@ def calc_futu_hk_terminal_fee(
     HK$2/contract, expired-worthless is 0. Requires explicit account fee-plan
     facts (commission_free, platform_fee, fee_plan_ref); when any is missing
     the result fails closed (complete=false) while keeping a clearly named
-    standard fixed non-commission-free estimate for audit. Actual broker fees
-    remain authoritative via extract_actual_fees / fee_provenance upstream and
-    are never overridden by this estimate.
+    standard fixed non-commission-free estimate for audit. Admitted OpenD
+    order-fee provenance remains authoritative and is never overridden by this estimate.
     """
 
     terminal_kind = str(kind or "").strip().lower()
@@ -434,64 +438,14 @@ def calc_futu_hk_terminal_fee(
     return result
 
 
-def extract_actual_fees(payload: Any) -> dict[str, Any] | None:
-    """Extract explicitly supplied broker fees without treating absent zero as actual."""
-
-    for source_name, source in _fee_sources(payload):
-        for key in _ACTUAL_FEE_TOTAL_KEYS:
-            if key not in source:
-                continue
-            value = safe_float(source.get(key))
-            if value is not None:
-                return {
-                    "amount": round(abs(value), 6),
-                    "source": f"{source_name}.{key}",
-                    "components": [key],
-                }
-
-        components: list[str] = []
-        total = 0.0
-        for key in _ACTUAL_FEE_COMPONENT_KEYS:
-            if key not in source:
-                continue
-            value = safe_float(source.get(key))
-            if value is None:
-                continue
-            components.append(key)
-            total += abs(value)
-        if components:
-            return {
-                "amount": round(total, 6),
-                "source": f"{source_name}.components",
-                "components": components,
-            }
-    return None
-
-
-def _fee_sources(payload: Any) -> list[tuple[str, dict[str, Any]]]:
-    if not isinstance(payload, dict):
-        return []
-    out: list[tuple[str, dict[str, Any]]] = [("raw_payload", payload)]
-    for key in ("raw", "deal", "broker_payload", "raw_payload"):
-        nested = payload.get(key)
-        if isinstance(nested, dict) and nested is not payload:
-            out.append((f"raw_payload.{key}", nested))
-    return out
-
-
-def safe_float(v):
+def safe_float(value: Any) -> float | None:
     try:
-        if pd.isna(v):
-            return None
-        return float(v)
-    except Exception:
+        number = float(value)
+    except (TypeError, ValueError):
         return None
+    return number if isfinite(number) else None
 
 
-def safe_int(v):
-    try:
-        if pd.isna(v):
-            return None
-        return int(float(v))
-    except Exception:
-        return None
+def safe_int(value: Any) -> int | None:
+    number = safe_float(value)
+    return int(number) if number is not None else None

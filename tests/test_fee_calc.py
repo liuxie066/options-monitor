@@ -123,33 +123,6 @@ def test_calc_futu_option_fee_rejects_missing_or_unsupported_currency() -> None:
         assert "USD or HKD" in str(exc)
 
 
-def test_extract_actual_fees_prefers_explicit_total_then_components() -> None:
-    from domain.domain.fee_calc import extract_actual_fees
-
-    total = extract_actual_fees({"total_fee": 3.5, "commission": 2.0, "platform_fee": 1.0})
-    components = extract_actual_fees({"commission": 2.0, "platform_fee": 1.0})
-
-    assert total == {"amount": 3.5, "source": "raw_payload.total_fee", "components": ["total_fee"]}
-    assert components == {
-        "amount": 3.0,
-        "source": "raw_payload.components",
-        "components": ["commission", "platform_fee"],
-    }
-    assert extract_actual_fees({}) is None
-
-    signed = extract_actual_fees({"commission": -0.99, "reg_fee": -0.01})
-    assert signed == {
-        "amount": 1.0,
-        "source": "raw_payload.components",
-        "components": ["commission", "reg_fee"],
-    }
-    assert extract_actual_fees({"charges": -2.5}) == {
-        "amount": 2.5,
-        "source": "raw_payload.charges",
-        "components": ["charges"],
-    }
-
-
 def test_calc_futu_us_stock_fee_includes_sell_only_regulatory_fees() -> None:
     from domain.domain.fee_calc import calc_futu_us_stock_fee
 
@@ -168,7 +141,7 @@ def test_calc_futu_hk_stock_fee_rounds_stamp_duty_up() -> None:
     assert out == round(3.0 + 15.0 + 1001 * 0.000042 + 2.0 + 1001 * 0.0000565 + 1001 * 0.000027 + 1001 * 0.0000015, 6)
 
 
-def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
+def test_broker_trade_normalization_does_not_admit_raw_fee_components_as_actual() -> None:
     from types import SimpleNamespace
 
     from src.application.ledger.writer import _trade_event_from_normalized_deal
@@ -196,12 +169,8 @@ def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
         )
     )
 
-    assert event.fees == 2.29
-    assert event.raw_payload["fee_provenance"] == {
-        "basis": "actual",
-        "source": "raw_payload.components",
-        "components": ["commission", "platform_fee"],
-    }
+    assert event.fees == 0
+    assert "fee_provenance" not in event.raw_payload
 
 
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:

@@ -266,7 +266,7 @@ def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once(
             "currency": "USD",
             "shares": 100,
             "start_at_ms": opened_at,
-            "end_at_ms": _ms("2026-06-30T16:00:00"),
+            "end_at_ms": _ms("2026-06-30T16:00:00") + 1,
             "allocation_status": "explicit",
             "linkage_basis": "stock_lot_id",
         }
@@ -387,8 +387,7 @@ def test_hk_assignment_stock_fee_fails_closed_and_suppresses_net_outputs() -> No
         transaction_kind="assignment",
     )
     assert fee_fact["basis"] == "missing"
-    assert fee_fact["reason"] == "hk_account_fee_plan_missing"
-    assert fee_fact["estimated_amount"] is not None
+    assert fee_fact["reason"] == "zero/absent fee has no provenance"
 
     report = _base_projection(
         assignment_payload={
@@ -434,8 +433,7 @@ def test_hk_assignment_projection_rejects_unvalidated_fee_plan_payload() -> None
         fact for fact in row["fee_evidence"] if fact["component"] == "assignment_stock_fee"
     )
     assert assignment_fee["basis"] == "missing"
-    assert assignment_fee["reason"] == "hk_account_fee_plan_missing"
-    assert assignment_fee["estimated_amount"] == 79.215
+    assert assignment_fee["reason"] == "zero/absent fee has no provenance"
     assert "fee_plan_ref" not in assignment_fee
     assert row["lifecycle_pnl_net"] is None
     assert row["annualized_capital_efficiency"] is None
@@ -463,8 +461,7 @@ def test_hk_assignment_fee_rejects_lossy_raw_numeric_inputs() -> None:
             transaction_kind="assignment",
         )
         assert fact["basis"] == "missing"
-        assert fact["reason"] == "stock_fee_inputs_incomplete"
-        assert fact["estimated_amount"] is None
+        assert fact["reason"] == "zero/absent fee has no provenance"
 
 
 def test_hk_assignment_actual_fee_precedes_terminal_estimate() -> None:
@@ -486,11 +483,11 @@ def test_hk_assignment_actual_fee_precedes_terminal_estimate() -> None:
         "basis": "actual",
         "amount": 12.5,
         "source": "broker_receipt",
-        "reason": "stored_actual_fee",
+        "reason": None,
     }
 
 
-def test_hk_expired_worthless_option_leg_has_explicit_zero_fee_policy() -> None:
+def test_hk_expired_worthless_option_leg_requires_persisted_fee_evidence() -> None:
     fact = _option_fee_fact(
         {
             "event_type": "expire_auto_close",
@@ -501,9 +498,6 @@ def test_hk_expired_worthless_option_leg_has_explicit_zero_fee_policy() -> None:
         },
         component="put_expired_option_fee",
     )
-    assert fact["basis"] == "estimated"
+    assert fact["basis"] == "missing"
     assert fact["amount"] == 0.0
-    assert fact["reason"] == "hk_expired_worthless_no_fee"
-    assert fact["estimated_amount"] == 0.0
-    assert fact["source"] == "https://www.futuhk.com/en/support/topic2_335"
-    assert fact["schedule_version"] == "futu_hk_terminal_fee.v1"
+    assert fact["reason"] == "canonical_option_fee_evidence_unavailable"

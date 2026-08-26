@@ -71,6 +71,10 @@ from src.application.ledger.cash_conversion_migration import (
     CashConversionBackfillResult,
     backfill_cash_conversions,
 )
+from src.application.ledger.order_fee_migration import (
+    ActualOrderFee,
+    enrich_order_fees,
+)
 from src.application.ledger.queries import (
     AssignedStockEventLog,
     assigned_stock_event_log,
@@ -269,7 +273,9 @@ __all__ = [
     "build_source_consumption_claim",
     "apply_lifecycle_migration_manifest",
     "CashConversionBackfillResult",
+    "ActualOrderFee",
     "backfill_cash_conversions",
+    "enrich_order_fees",
     "broker_external_event_key",
     "build_lifecycle_migration_inventory",
     "build_notification_intent",

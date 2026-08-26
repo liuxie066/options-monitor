@@ -41,7 +41,34 @@ CLI、服务定义和环境文件控制。
 - PM 调用失败按配置有限重试；失败不会回滚 OM 已记录的期权/生命周期事实。
 - 推送和 history backfill 使用同一个标准化回调；成功的 `deal_id` 会持久化，
   进程重启或回补再次看到该成交时不会重复同步。
+- 成交写入时冻结公式费用；history backfill 随后复用同一个 OpenD context，
+  按 canonical `(broker, account, futu_account_id, order_id)` 查询终态订单和实际费用。
 - PM 的既有早晚全量同步仍是最终对账兜底。
+
+## 订单费用同步
+
+OpenD 适配器只负责查询与规范化。账本应用层选择完整订单组，并在查询费用前校验
+REAL 账户、终态、币种和成交数量。`order_fee_query` 返回的订单总费用按同合约成交
+数量确定性分配；Combo、跨类型订单、日期边界不完整、冲突 actual 或无法证明的股票
+sale 订单均不写入。actual zero 是完整证据。
+
+```bash
+# 默认只预览；日期按 Asia/Shanghai，结束日期包含当日
+./om trade-events fees-sync \
+  --config-key us --account lx \
+  --start-date 2026-08-01 --end-date 2026-08-23
+
+# 高风险账本写入，仍需统一写入确认
+./om trade-events fees-sync \
+  --config-key us --account lx \
+  --start-date 2026-08-01 --end-date 2026-08-23 \
+  --apply --confirm
+```
+
+写入以订单组为事务单位，使用旧 JSON 比较交换、写后读回、投影重放和审计哈希。
+dry-run 不创建审计表。历史回补负责补 actual；仍取不到 actual 的旧裸费用只冻结一次
+当前公式版本，后续读取不随费率变化重算。OpenD 不可用、查询失败或证据不一致时保留
+estimated/missing 和显式诊断，不回退到 raw deal fee 字段。
 
 ## Push 来源身份
 

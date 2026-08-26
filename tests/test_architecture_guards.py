@@ -34,6 +34,33 @@ def _imported_modules_with_from_names(path: Path) -> list[str]:
     return modules
 
 
+def test_position_lot_does_not_read_compatibility_fee_field() -> None:
+    assert "event.fees" not in (ROOT / "domain" / "domain" / "ledger" / "lots.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_executed_fee_readers_do_not_import_fee_formulas() -> None:
+    readers = (
+        ROOT / "domain" / "domain" / "assigned_stock.py",
+        ROOT / "domain" / "domain" / "ledger" / "lots.py",
+        ROOT / "domain" / "domain" / "ledger" / "projection.py",
+        ROOT / "domain" / "domain" / "performance" / "engine.py",
+        ROOT / "src" / "application" / "cash_conversion.py",
+        ROOT / "src" / "application" / "ledger" / "current_decision_projection.py",
+    )
+    offenders = [
+        str(path.relative_to(ROOT))
+        for path in readers
+        if any(
+            module == "domain.domain.fee_calc"
+            for module in _imported_modules(path)
+        )
+    ]
+
+    assert offenders == []
+
+
 def test_runtime_config_generation_excludes_assistant_control_plane() -> None:
     from src.application.config_yaml import PASSTHROUGH_KEYS, resolve_yaml_runtime_config
 

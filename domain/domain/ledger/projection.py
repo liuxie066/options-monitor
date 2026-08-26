@@ -15,6 +15,7 @@ from domain.domain.ledger.economics import (
     OptionEconomicAllocation,
     allocate_open_fee_for_close,
     build_option_economic_allocation,
+    fee_fact_for_event,
 )
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.invariants import check_position_lot_invariants
@@ -697,8 +698,15 @@ def _apply_close_event(
                 allocated_before=allocated_before,
                 diagnostics=diagnostics,
             )
+    lot_fee = fee_fact_for_event(event)
+    actual_fee_amount = (
+        float(lot_fee.amount)
+        if lot_fee.basis.value == "actual" and lot_fee.amount is not None
+        else 0.0
+    )
     lots_by_id[target_lot_id] = lot.apply_close(
         event,
+        actual_fee_amount=actual_fee_amount,
         retain_close_event_ids=False,
     )
     allocated_open_fee_by_lot_id[target_lot_id] = allocated_after

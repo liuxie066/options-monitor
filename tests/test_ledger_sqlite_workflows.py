@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
 
-from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event
 import src.application.ledger.bootstrap as bootstrap
 import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.interventions as ledger_interventions
@@ -3109,7 +3109,7 @@ def test_event_codec_preserves_top_level_fee_provenance_for_compatibility() -> N
     assert imported[0].raw_payload["fee_provenance"] == {"basis": "actual", "source": "manual-zero"}
 
 
-def test_multi_lot_close_writer_conserves_total_close_fee_across_allocations(tmp_path: Path) -> None:
+def test_multi_lot_close_writer_conserves_frozen_formula_fee_across_allocations(tmp_path: Path) -> None:
     from src.application.ledger.api import trade_event_economic_allocations
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "multi_lot_close_fees.sqlite3")
@@ -3137,7 +3137,7 @@ def test_multi_lot_close_writer_conserves_total_close_fee_across_allocations(tmp
                 multiplier=100,
                 fees=0,
                 lot_id=f"lot-fee-{index}",
-                raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+                raw_payload={},
             ),
         )
 
@@ -3153,8 +3153,8 @@ def test_multi_lot_close_writer_conserves_total_close_fee_across_allocations(tmp
             currency="USD",
             source="test",
             multiplier=100,
-            fees=2,
-            raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+            fees=0,
+            raw_payload={},
         ),
     )
 
@@ -3162,9 +3162,134 @@ def test_multi_lot_close_writer_conserves_total_close_fee_across_allocations(tmp
 
     assert len(allocations) == 2
     assert [item.contracts for item in allocations] == [1, 1]
-    assert [item.close_fee.amount for item in allocations] == [Decimal("1.000000"), Decimal("1.000000")]
-    assert sum(item.close_fee.amount or Decimal(0) for item in allocations) == Decimal("2.000000")
-    assert sum(item.realized_pnl_net or Decimal(0) for item in allocations) == Decimal("198.000000")
+    assert [item.close_fee.amount for item in allocations] == [Decimal("1.508300"), Decimal("1.508300")]
+    assert sum(item.close_fee.amount or Decimal(0) for item in allocations) == Decimal("3.016600")
+    assert all(item.realized_pnl_net is None for item in allocations)
+
+
+def test_multi_lot_close_writer_allocates_one_trusted_actual_total(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "multi-lot-actual.sqlite3")
+    key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    for index in (1, 2):
+        ledger_writer.persist_trade_event_object(
+            repo,
+            TradeEvent(
+                event_id=f"open-actual-{index}",
+                event_type="open",
+                event_time_ms=1000 + index,
+                contract_key=key,
+                contracts=1,
+                price=2,
+                currency="USD",
+                source="manual",
+                multiplier=100,
+                lot_id=f"lot-actual-{index}",
+            ),
+        )
+
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="close-actual-both",
+            event_type="close",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=2,
+            price=1,
+            currency="USD",
+            source="opend_push",
+            multiplier=100,
+            raw_payload={
+                "source_type": "broker_trade_event",
+                "futu_account_id": "123",
+                "order_id": "order-close-actual",
+                "source_deal_id": "deal-close-actual",
+                "fee_amount": "3.000001",
+            },
+        ),
+    )
+
+    closes = sorted(
+        (
+            TradeEvent.from_dict(row)
+            for row in repo.list_trade_events()
+            if row["event_type"] == "close"
+        ),
+        key=lambda event: event.event_id,
+    )
+    assert [fee_fact_for_event(event).amount for event in closes] == [
+        Decimal("1.500001"),
+        Decimal("1.500000"),
+    ]
+    assert sum((fee_fact_for_event(event).amount or Decimal(0)) for event in closes) == Decimal(
+        "3.000001"
+    )
+
+
+def test_atomic_close_split_without_expected_contract_evidence_keeps_fee_missing(
+    tmp_path: Path,
+) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "missing-split-size.sqlite3")
+    key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    for index in (1, 2):
+        ledger_writer.persist_trade_event_object(
+            repo,
+            TradeEvent(
+                event_id=f"open-missing-size-{index}",
+                event_type="open",
+                event_time_ms=1000 + index,
+                contract_key=key,
+                contracts=1,
+                price=2,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                lot_id=f"lot-missing-size-{index}",
+            ),
+        )
+    ledger_writer.persist_trade_event_objects_atomically(
+        repo,
+        [
+            TradeEvent(
+                event_id=f"close-missing-size-{index}",
+                event_type="close",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=1,
+                price=1,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                target_lot_id=f"lot-missing-size-{index}",
+                raw_payload={"source_deal_id": "deal-missing-size"},
+            )
+            for index in (1, 2)
+        ],
+    )
+
+    facts = [
+        fee_fact_for_event(TradeEvent.from_dict(row))
+        for row in repo.list_trade_events()
+        if row["event_type"] == "close"
+    ]
+    assert [fact.basis.value for fact in facts] == ["missing", "missing"]
+    assert {fact.reason for fact in facts} == {"source_deal_fee_contracts_unavailable"}
 
 
 def test_close_writer_preserves_invalid_explicit_fee_amount_as_missing(tmp_path: Path) -> None:
@@ -3220,8 +3345,189 @@ def test_close_writer_preserves_invalid_explicit_fee_amount_as_missing(tmp_path:
     assert len(allocations) == 1
     assert allocations[0].realized_pnl_gross == Decimal("100.000000")
     assert allocations[0].close_fee.amount is None
-    assert "invalid fee provenance amount" in str(allocations[0].close_fee.reason)
+    assert allocations[0].close_fee.reason == "actual_fee_evidence_not_admitted"
     assert allocations[0].realized_pnl_net is None
+
+
+@pytest.mark.parametrize(
+    ("fee_fields", "fees", "expected"),
+    [
+        (
+            {
+                "fee_provenance": {
+                    "basis": "actual",
+                    "amount": "2.500000",
+                    "source": "opend.order_fee_query",
+                },
+                "fee_amount": "2.5",
+                "commission": "999",
+            },
+            2.5,
+            Decimal("2.500000"),
+        ),
+        (
+            {"commission": "-1.99", "platform_fee": "-0.6"},
+            0,
+            Decimal("2.590000"),
+        ),
+        (
+            {"fee_provenance": {"basis": "actual", "source": "opend.order_fee_query"}},
+            0,
+            Decimal("0.000000"),
+        ),
+    ],
+)
+def test_writer_admits_only_consistent_actual_fee_candidates_from_trusted_broker_receipt(
+    tmp_path: Path,
+    fee_fields: dict[str, Any],
+    fees: float,
+    expected: Decimal,
+) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "actual-fee.sqlite3")
+    event = TradeEvent(
+        event_id="trusted-actual",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=ContractKey.from_values(
+            broker="富途",
+            account="lx",
+            underlying_symbol="NVDA",
+            option_type="put",
+            position_side="short",
+            strike=100,
+            expiration_ymd="2026-08-21",
+        ),
+        contracts=1,
+        price=2,
+        currency="USD",
+        source="opend_push",
+        multiplier=100,
+        fees=fees,
+        lot_id="trusted-actual-lot",
+        raw_payload={
+            "source_type": "broker_trade_event",
+            "futu_account_id": "123",
+            "order_id": "order-actual",
+            "source_deal_id": "deal-actual",
+            **fee_fields,
+        },
+    )
+
+    ledger_writer.persist_trade_event_object(repo, event)
+
+    persisted = TradeEvent.from_dict(repo.list_trade_events()[0])
+    fact = fee_fact_for_event(persisted)
+    assert fact.basis.value == "actual"
+    assert fact.amount == expected
+    assert Decimal(str(persisted.fees)).quantize(Decimal("0.000001")) == expected
+
+
+def test_writer_marks_conflicting_trusted_actual_candidates_missing_without_blocking_intake(
+    tmp_path: Path,
+) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "actual-fee-conflict.sqlite3")
+    event = TradeEvent(
+        event_id="trusted-conflict",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=ContractKey.from_values(
+            broker="富途",
+            account="lx",
+            underlying_symbol="NVDA",
+            option_type="put",
+            position_side="short",
+            strike=100,
+            expiration_ymd="2026-08-21",
+        ),
+        contracts=1,
+        price=2,
+        currency="USD",
+        source="opend_push",
+        multiplier=100,
+        fees=2,
+        lot_id="trusted-conflict-lot",
+        raw_payload={
+            "source_type": "broker_trade_event",
+            "futu_account_id": "123",
+            "order_id": "order-conflict",
+            "source_deal_id": "deal-conflict",
+            "fee_amount": "3",
+        },
+    )
+
+    result = ledger_writer.persist_trade_event_object(repo, event)
+
+    persisted = TradeEvent.from_dict(repo.list_trade_events()[0])
+    fact = fee_fact_for_event(persisted)
+    assert result.created is True
+    assert fact.basis.value == "missing"
+    assert fact.reason == "actual_fee_candidates_conflict"
+    assert persisted.fees == 0
+    assert persisted.raw_payload["fee_provenance"]["candidate_diagnostics"] == [
+        {"source": "legacy_top_level", "amount": "2.000000"},
+        {"source": "raw_payload.fee_amount", "amount": "3.000000"},
+    ]
+
+
+def test_writer_recomputes_incoming_estimate_and_rejects_manual_actual(
+    tmp_path: Path,
+) -> None:
+    key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "fee-admission.sqlite3")
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="incoming-estimate",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=key,
+            contracts=1,
+            price=2,
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            lot_id="incoming-estimate-lot",
+            raw_payload={
+                "fee_provenance": {"basis": "estimated", "amount": "999"}
+            },
+        ),
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="manual-actual",
+            event_type="open",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=1,
+            price=2,
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            fees=2,
+            lot_id="manual-actual-lot",
+        ),
+    )
+
+    events = {
+        row["event_id"]: TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+    }
+    estimate = fee_fact_for_event(events["incoming-estimate"])
+    manual = fee_fact_for_event(events["manual-actual"])
+    assert estimate.basis.value == "estimated"
+    assert estimate.amount != Decimal("999.000000")
+    assert events["incoming-estimate"].fees == 0
+    assert manual.basis.value == "missing"
+    assert manual.reason == "actual_fee_evidence_not_admitted"
 
 
 def test_manual_assignment_request_retry_returns_original_result_after_lot_closed(
