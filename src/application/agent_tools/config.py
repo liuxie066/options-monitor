@@ -23,7 +23,7 @@ from src.application.agent_tool_config import write_tools_enabled
 from src.application.config_yaml_symbols import mutate_yaml_symbol_config
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.symbol_calibration import calibrate_symbol
-from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+from src.application.combo_yield_config import resolve_combo_yield_cfg
 
 
 _CONFIG_VALIDATE_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -216,8 +216,6 @@ _STRATEGY_ALIASES = {
     "备兑": "sell_call",
     "combo yield": "combo_yield",
     "combo_yield": "combo_yield",
-    "yield enhancement": "combo_yield",
-    "yield_enhancement": "combo_yield",
     "收益增强": "combo_yield",
 }
 _FIELD_ALIASES = {
@@ -571,7 +569,7 @@ TOOLS: tuple[AgentTool, ...] = (
 def _symbol_strategy_configs(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     sell_put = entry.get("sell_put") if isinstance(entry.get("sell_put"), dict) else {}
     sell_call = entry.get("sell_call") if isinstance(entry.get("sell_call"), dict) else {}
-    combo_yield = resolve_yield_enhancement_cfg(entry)
+    combo_yield = resolve_combo_yield_cfg(entry)
     return {
         "sell_put": dict(sell_put),
         "sell_call": dict(sell_call),
@@ -589,7 +587,7 @@ def _public_symbol_config(entry: dict[str, Any]) -> dict[str, Any]:
         value = entry.get(key)
         if isinstance(value, dict):
             out[key] = dict(value)
-    combo_yield = resolve_yield_enhancement_cfg(entry)
+    combo_yield = resolve_combo_yield_cfg(entry)
     if combo_yield:
         out["combo_yield"] = dict(combo_yield)
     return out
@@ -609,6 +607,11 @@ def _normalize_strategy(raw: Any) -> str | None:
     if not value:
         return None
     key = value.replace("-", "_").lower()
+    if key in {"yield enhancement", "yield_enhancement"}:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="yield_enhancement has been removed; use combo_yield",
+        )
     return _STRATEGY_ALIASES.get(value) or _STRATEGY_ALIASES.get(key) or _STRATEGY_ALIASES.get(key.replace("_", " "))
 
 

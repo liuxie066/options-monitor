@@ -48,9 +48,9 @@ from src.application.shadow_replay.common import (
     write_json,
     write_jsonl,
 )
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 
 
@@ -144,8 +144,8 @@ def capture_combo_variants(
     policy_payloads: dict[str, dict[str, Any]] = {}
     variant_plans: dict[str, dict[str, RequiredDataFetchPlanBundle]] = {}
     for symbol, symbol_cfg in symbol_cfgs.items():
-        baseline_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-        baseline_policy = derive_yield_enhancement_policy(baseline_cfg, market=market)
+        baseline_cfg = resolve_combo_yield_cfg(symbol_cfg)
+        baseline_policy = derive_combo_yield_policy(baseline_cfg, market=market)
         policy_payloads[symbol] = baseline_policy.to_config()
         production_plan = plan_builder(
                 base=base,
@@ -156,7 +156,7 @@ def capture_combo_variants(
                 want_call=False,
                 sell_put_cfg=dict(symbol_cfg.get("sell_put") or {}),
                 sell_call_cfg={},
-                yield_enhancement_cfg=_force_combo_enabled(baseline_cfg),
+                combo_yield_cfg=_force_combo_enabled(baseline_cfg),
                 symbol_cfg=symbol_cfg,
                 fetch_host=host,
                 fetch_port=port,
@@ -179,7 +179,7 @@ def capture_combo_variants(
                 want_call=False,
                 sell_put_cfg=dict(symbol_cfg.get("sell_put") or {}),
                 sell_call_cfg={},
-                yield_enhancement_cfg=variant_cfg,
+                combo_yield_cfg=variant_cfg,
                 symbol_cfg=symbol_cfg,
                 fetch_host=host,
                 fetch_port=port,
@@ -316,7 +316,7 @@ def capture_combo_variants(
         },
         "normalized_global_combo_liquidity": {
             symbol: _normalized_json(
-                symbol_cfg.get("_global_yield_enhancement_liquidity") or {}
+                symbol_cfg.get("_global_combo_yield_liquidity") or {}
             )
             for symbol, symbol_cfg in sorted(symbol_cfgs.items())
         },

@@ -19,9 +19,9 @@ class CandidateLiquidityDefaults:
 
 DEFAULT_SELL_PUT_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
 DEFAULT_SELL_CALL_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
-DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=90)
+DEFAULT_SELL_PUT_COMBO_YIELD_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=90)
 DEFAULT_CANDIDATE_LIQUIDITY = CandidateLiquidityDefaults()
-DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY = CandidateLiquidityDefaults(
+DEFAULT_SELL_PUT_COMBO_YIELD_LIQUIDITY = CandidateLiquidityDefaults(
     min_open_interest=100.0,
     min_volume=5.0,
     max_spread_ratio=0.35,

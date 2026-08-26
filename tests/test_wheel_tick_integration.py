@@ -182,7 +182,7 @@ def test_wheel_required_data_preserves_existing_strategy_config_matrix(
                 "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
                 "sell_put": {"enabled": sell_put_enabled},
                 "sell_call": {"enabled": sell_call_enabled},
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": combo_enabled,
                     "variant": "sp_lc",
                 },
@@ -209,6 +209,6 @@ def test_wheel_required_data_preserves_existing_strategy_config_matrix(
     )
 
     assert config == original
-    for key in ("sell_put", "sell_call", "yield_enhancement"):
+    for key in ("sell_put", "sell_call", "combo_yield"):
         assert merged["symbols"][0][key] == original["symbols"][0][key]
     assert merged["symbols"][0]["_wheel_call"]["enabled"] is True

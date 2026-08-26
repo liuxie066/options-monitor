@@ -31,12 +31,12 @@ def _sample_candidate(symbol: str = "NVDA") -> dict:
     }
 
 
-def test_render_yield_enhancement_alerts_renders_typed_candidates(tmp_path: Path) -> None:
-    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+def test_render_combo_yield_alerts_renders_typed_candidates(tmp_path: Path) -> None:
+    from src.application.render_combo_yield_alerts import render_combo_yield_alerts
 
     output_path = tmp_path / "nvda_combo_yield_alerts.txt"
 
-    text = render_yield_enhancement_alerts(
+    text = render_combo_yield_alerts(
         candidates=pd.DataFrame([_sample_candidate()]),
         output_path=output_path,
         top=1,
@@ -50,12 +50,12 @@ def test_render_yield_enhancement_alerts_renders_typed_candidates(tmp_path: Path
     assert output_path.read_text(encoding="utf-8") == text
 
 
-def test_render_yield_enhancement_alerts_accepts_record_lists(tmp_path: Path) -> None:
-    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+def test_render_combo_yield_alerts_accepts_record_lists(tmp_path: Path) -> None:
+    from src.application.render_combo_yield_alerts import render_combo_yield_alerts
 
     output_path = tmp_path / "combo_yield_alerts.txt"
 
-    text = render_yield_enhancement_alerts(
+    text = render_combo_yield_alerts(
         candidates=[_sample_candidate("AAPL")],
         output_path=output_path,
         top=1,
@@ -66,12 +66,12 @@ def test_render_yield_enhancement_alerts_accepts_record_lists(tmp_path: Path) ->
     assert output_path.read_text(encoding="utf-8") == text
 
 
-def test_render_yield_enhancement_alerts_writes_empty_message(tmp_path: Path) -> None:
-    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+def test_render_combo_yield_alerts_writes_empty_message(tmp_path: Path) -> None:
+    from src.application.render_combo_yield_alerts import render_combo_yield_alerts
 
     output_path = tmp_path / "custom.txt"
 
-    text = render_yield_enhancement_alerts(
+    text = render_combo_yield_alerts(
         candidates=pd.DataFrame(),
         output_path=output_path,
         top=1,

@@ -18,9 +18,10 @@ from src.application.config_yaml import (
     explain_yaml_config_key,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
+    runtime_strategy_keys_to_yaml_authoring,
 )
 from src.application.config_yaml_init import init_yaml_config
-from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.config_yaml_symbols import mutate_yaml_symbol_config, set_yaml_symbol_config
 from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
@@ -324,6 +325,34 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_yaml_config_rejects_string_combo_yield_enabled(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "        combo_yield: true",
+            '        combo_yield:\n          enabled: "false"',
+        ),
+    )
+
+    with pytest.raises(AgentToolError, match="combo_yield.enabled must be a boolean"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_yaml_config_rejects_retired_combo_yield_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace("        combo_yield: true", "        yield_enhancement: true"),
+    )
+
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_runtime_strategy_conversion_rejects_retired_combo_yield_key() -> None:
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        runtime_strategy_keys_to_yaml_authoring({"yield_enhancement": {"enabled": True}})
+
+
 def test_yaml_runtime_build_defaults_to_canonical_runtime_path(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
 
@@ -412,7 +441,7 @@ markets:
 
 
 def test_yaml_combo_yield_keeps_only_authored_fields_explicit(tmp_path: Path) -> None:
-    from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+    from src.application.combo_yield_config import derive_combo_yield_policy
 
     config_path = _write_yaml(
         tmp_path / "config.yaml",
@@ -445,7 +474,7 @@ markets:
             profiles=cfg["templates"],
             apply_profiles_fn=apply_profiles,
         )
-        policies[item["symbol"]] = derive_yield_enhancement_policy(
+        policies[item["symbol"]] = derive_combo_yield_policy(
             resolved["combo_yield"],
             market="us",
         )
@@ -688,6 +717,23 @@ def test_yaml_symbol_set_updates_combo_yield_enabled_as_dry_run(tmp_path: Path) 
     assert out["summary"]["entry"]["covered_call"]["enabled"] is True
     assert out["validation"]["hk"]["ok"] is True
     assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_yaml_symbol_edit_rejects_retired_combo_yield_path(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        mutate_yaml_symbol_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            payload={
+                "action": "edit",
+                "symbol": "FUTU",
+                "set": {"yield_enhancement.enabled": True},
+            },
+            config_path=config_path,
+            apply=False,
+        )
 
 
 def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:

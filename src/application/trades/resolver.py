@@ -5,7 +5,6 @@ from typing import Any, Protocol
 
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import canonical_symbol
-from src.application.strategy_policy import YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 from src.application.ledger.api import (
     BrokerTradeOperation,
     CloseTargetResolution,
@@ -750,7 +749,6 @@ def _with_combo_yield_long_call_payload(
     group_id = _stable_combo_yield_group_id(deal)
     payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
     payload.setdefault("leg_role", "enhancement_call")
-    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
     if group_id:
         payload.setdefault("strategy_group_id", group_id)
     if companion is not None:
@@ -763,7 +761,6 @@ def _with_combo_yield_long_call_payload(
             "strategy": STRATEGY_COMBO_YIELD,
             "strategy_source": "trade_intake_inference",
             "leg_role": "enhancement_call",
-            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
         }
         if group_id:
             payload["strategy_snapshot"]["strategy_group_id"] = group_id
@@ -780,7 +777,6 @@ def _with_combo_yield_sell_put_payload(
     group_id = _stable_combo_yield_group_id(deal)
     payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
     payload.setdefault("leg_role", "sell_put")
-    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
     if group_id:
         payload.setdefault("strategy_group_id", group_id)
     paired_record_id = str(companion.get("record_id") or "").strip()
@@ -792,7 +788,6 @@ def _with_combo_yield_sell_put_payload(
             "strategy": STRATEGY_COMBO_YIELD,
             "strategy_source": "trade_intake_inference",
             "leg_role": "sell_put",
-            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
         }
         if group_id:
             payload["strategy_snapshot"]["strategy_group_id"] = group_id

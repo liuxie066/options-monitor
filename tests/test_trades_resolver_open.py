@@ -506,6 +506,16 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
     pair_payload = {
         "structure_mode": "same_expiry_pair",
         "pair_intent_id": "intent-pdd-20260717-1",
+        "yield_enhancement_mode": "vol_convexity_enhancement",
+        "fields": {
+            "strategy": "yield_enhancement",
+            "yield_enhancement_mode": "vol_convexity_enhancement",
+        },
+        "strategy_snapshot": {
+            "structure_mode": "same_expiry_pair",
+            "pair_intent_id": "intent-pdd-20260717-1",
+            "yield_enhancement_mode": "vol_convexity_enhancement",
+        },
     }
 
     put_result = resolve_trade_deal(
@@ -560,6 +570,10 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
     assert "strategy" not in call_lot["fields"]
     assert "leg_role" not in call_lot["fields"]
     assert "strategy_group_id" not in call_lot["fields"]
+    for event in repo.list_trade_events():
+        assert "yield_enhancement_mode" not in event["raw_payload"]
+        assert "fields" not in event["raw_payload"]
+        assert "yield_enhancement_mode" not in event["raw_payload"]["strategy_snapshot"]
     put_enrichment = put_result.diagnostics["combo_yield_enrichment"]
     assert put_enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
     assert put_enrichment["pair_intent_id"] == "intent-pdd-20260717-1"
@@ -605,7 +619,7 @@ def test_combo_yield_pair_intent_from_strategy_snapshot_records_independent_open
 
 def test_combo_yield_explicit_pair_intent_preserves_incoming_relation_metadata() -> None:
     snapshot = {
-        "strategy": "sell_put",
+        "strategy": "yield_enhancement",
         "strategy_family": "sell_put",
         "strategy_source": "attacker-source",
         "leg_role": "participation_call",
@@ -626,7 +640,7 @@ def test_combo_yield_explicit_pair_intent_preserves_incoming_relation_metadata()
             raw_payload={
                 "structure_mode": "same_expiry_pair",
                 "pair_intent_id": "intent-authoritative",
-                "strategy": "sell_put",
+                "strategy": "yield_enhancement",
                 "leg_role": "participation_call",
                 "yield_enhancement_mode": "attacker-mode",
                 "strategy_group_id": "attacker-group",
@@ -640,11 +654,19 @@ def test_combo_yield_explicit_pair_intent_preserves_incoming_relation_metadata()
 
     assert result.status == "dry_run"
     fields = result.operations[0].to_payload()["fields"]
-    assert fields["strategy"] == "sell_put"
+    assert fields["strategy"] == "combo_yield"
     assert fields["leg_role"] == "participation_call"
-    assert fields["yield_enhancement_mode"] == "attacker-mode"
+    assert "yield_enhancement_mode" not in fields
+    assert "yield_enhancement_mode" not in fields["strategy_snapshot"]
     assert fields["strategy_group_id"] == "attacker-group"
-    assert fields["strategy_snapshot"] == snapshot
+    assert fields["strategy_snapshot"] == {
+        **{
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"strategy", "yield_enhancement_mode"}
+        },
+        "strategy": "combo_yield",
+    }
     enrichment = result.diagnostics["combo_yield_enrichment"]
     assert enrichment["decision"] == "explicit_pair_intent_structure_unsupported"
     assert enrichment["pair_intent_id"] == "intent-authoritative"

@@ -1591,7 +1591,7 @@ def _normalize_delivery_state(
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate is invalid: {path}: {exc}") from exc
             delivery_key = str(raw_alerted.get("delivery_key") or "").strip()
             via = str(raw_alerted.get("via") or "").strip().lower()
-            if not delivery_key or via not in {"fixed_report", "candidate_alert"}:
+            if not delivery_key or via not in {"fixed_report", "candidate_alert", "legacy_delivery"}:
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate metadata is invalid: {path}: {identity}")
             source_brief = _validate_successful_revision_source(
                 base=base,

@@ -380,7 +380,7 @@ DATASET_ID=us-<run-id>
 
 Combo 变体使用独立的 Shadow 数据集和 `shadow_combo_pair_id`，不会创建
 `strategy_group_id`、pair intent、ledger event、通知或生产候选。生产
-`rank_yield_enhancement_*` delegate 在这个流程中保持不变。
+`rank_combo_yield_*` delegate 在这个流程中保持不变。
 
 先预览捕获范围和 OpenD 调用预算：
 

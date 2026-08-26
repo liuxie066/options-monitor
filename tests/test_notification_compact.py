@@ -25,7 +25,7 @@ def test_build_notification_block_compact_sell_put() -> None:
     assert "---" not in out
 
 
-def test_build_notification_block_compact_yield_enhancement() -> None:
+def test_build_notification_block_compact_combo_yield() -> None:
     from src.application.notify_symbols import _build_notification_block_compact
 
     out = _build_notification_block_compact(

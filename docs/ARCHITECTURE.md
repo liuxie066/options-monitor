@@ -345,7 +345,7 @@ data quotes, quality flags, Futu fee estimates, rows, and output files around
 that domain logic.
 Domain policy owns one fixed `strict_profit_capture.v1` rule for short puts and
 short calls. It emits only `close`, `hold`, or `not_evaluable`; it does not pair
-yield-enhancement legs, compare opening candidates, or produce roll,
+combo-yield legs, compare opening candidates, or produce roll,
 replacement, reallocation, short-vol, or long-option exit actions. The runner
 preserves those strict decisions, including fail-closed `not_evaluable` rows,
 and publishes CSV/text reports plus their integrity manifest. The Close Advice

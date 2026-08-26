@@ -144,6 +144,8 @@ def persist_manual_open_event_with_ledger(repo: Any, command: OpenPositionComman
                     (event.raw_payload or {}).get("manual_request_intent_hash")
                     or ""
                 ),
+                command=resolved_command,
+                fields=fields,
             )
         return OpenLedgerResult(
             result=LedgerWriteResult.from_payload(duplicate_result),
@@ -267,7 +269,6 @@ def persist_manual_adjust_event_with_ledger(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> ManualAdjustLedgerResult:
@@ -284,7 +285,6 @@ def persist_manual_adjust_event_with_ledger(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
         source="manual_adjust_preflight",
@@ -309,7 +309,6 @@ def persist_manual_adjust_event_with_ledger(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=int(event_time_ms),
     )
@@ -1679,7 +1678,6 @@ def preview_manual_position_adjust(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreviewResult:
     fields = repo.get_record_fields(record_id)
@@ -1696,7 +1694,6 @@ def preview_manual_position_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
     )
     patch_contract = build_open_adjustment_patch_contract(
@@ -1710,7 +1707,6 @@ def preview_manual_position_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=int(ledger_preflight.event_time_ms),
     )
@@ -1735,7 +1731,6 @@ def record_manual_position_adjust(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustLedgerResult:
     return persist_manual_adjust_event_with_ledger(
@@ -1751,7 +1746,6 @@ def record_manual_position_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
     )
 

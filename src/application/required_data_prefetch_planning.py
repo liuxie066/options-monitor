@@ -32,9 +32,9 @@ from src.application.close_advice_required_data import (
 )
 from src.application.wheel.config import resolve_wheel_config
 from src.application.required_data_plan_identity import required_data_plan_id
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 
 
@@ -226,7 +226,7 @@ def merge_close_advice_requirements_into_prefetch_config(
                     },
                     "sell_put": {"enabled": False},
                     "sell_call": {"enabled": False},
-                    "yield_enhancement": {"enabled": False},
+                    "combo_yield": {"enabled": False},
                 }
                 _append_position_requirements(
                     position_only,
@@ -364,7 +364,7 @@ def merge_wheel_requirements_into_prefetch_config(
                 "fetch": {"source": route[0], "host": route[1], "port": route[2]},
                 "sell_put": {"enabled": False},
                 "sell_call": {"enabled": False},
-                "yield_enhancement": {"enabled": False},
+                "combo_yield": {"enabled": False},
             }
             items.append(item)
             by_route[(symbol, route)] = item
@@ -464,8 +464,8 @@ def _reject_position_requirement(
 def _has_non_account_market_demand(symbol_cfg: dict[str, Any]) -> bool:
     return bool(
         _as_dict(symbol_cfg.get("sell_put")).get("enabled", False)
-        or derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(symbol_cfg)
+        or derive_combo_yield_policy(
+            resolve_combo_yield_cfg(symbol_cfg)
         ).enabled
     )
 
@@ -750,10 +750,10 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
 
     sp = _as_dict(symbol_cfg.get("sell_put"))
     cc = _as_dict(symbol_cfg.get("sell_call"))
-    ye = resolve_yield_enhancement_cfg(symbol_cfg)
+    ye = resolve_combo_yield_cfg(symbol_cfg)
     want_put = bool(sp.get("enabled", False))
     want_direct_call = bool(cc.get("enabled", False))
-    yield_policy = derive_yield_enhancement_policy(ye)
+    yield_policy = derive_combo_yield_policy(ye)
     want_yield_call = bool(yield_policy.enabled)
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)

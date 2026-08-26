@@ -39,7 +39,7 @@ from src.application.tick_run_workspace import (
     load_published_account_run_config,
     read_account_run_state_bytes_safely,
 )
-from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+from src.application.combo_yield_config import resolve_combo_yield_cfg
 
 
 CANDIDATE_EVIDENCE_CLASSIFICATION_SCHEMA = "candidate_evidence_compatibility.v1"
@@ -536,7 +536,9 @@ def _legacy_expected_owners(
             symbol_cfg = symbol_cfgs.get(symbol)
             if symbol_cfg is None:
                 raise CandidateEvidenceHistoryError(f"legacy Combo symbol is absent from immutable config: {symbol}")
-            combo_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+            if "combo_yield" not in symbol_cfg and isinstance(symbol_cfg.get("yield_enhancement"), dict):
+                symbol_cfg = {**symbol_cfg, "combo_yield": dict(symbol_cfg["yield_enhancement"])}
+            combo_cfg = resolve_combo_yield_cfg(symbol_cfg)
             variant = str(combo_cfg.get("variant") or "").strip().lower()
             if not combo_cfg or not bool(combo_cfg.get("enabled")) or variant not in {"sp_lc", "cc_lp"}:
                 raise CandidateEvidenceHistoryError(f"legacy Combo variant cannot be resolved: {symbol}")

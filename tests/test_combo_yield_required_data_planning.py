@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 
-def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monkeypatch, tmp_path: Path) -> None:
+def test_sell_put_combo_yield_fetches_put_and_call_without_sell_call(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
@@ -22,7 +22,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
         want_call=False,
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_dte": 20,
             "max_dte": 90,
@@ -54,7 +54,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
     assert call_plan.strike_window.max_strike == 122.4
 
 
-def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(monkeypatch, tmp_path: Path) -> None:
+def test_sell_put_combo_yield_minimal_config_derives_call_fetch_window(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
@@ -71,7 +71,7 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
         want_call=False,
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
-        yield_enhancement_cfg={"enabled": True},
+        combo_yield_cfg={"enabled": True},
         fetch_host="127.0.0.1",
         fetch_port=11111,
     )
@@ -91,7 +91,7 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
     assert call_plan.strike_window.max_strike == 142.8
 
 
-def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(monkeypatch, tmp_path: Path) -> None:
+def test_combo_yield_fetch_plan_declares_put_and_call_without_sell_put(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
@@ -115,7 +115,7 @@ def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(mon
             "max_strike": 96,
         },
         sell_call_cfg={},
-        yield_enhancement_cfg={"enabled": True},
+        combo_yield_cfg={"enabled": True},
         fetch_host="127.0.0.1",
         fetch_port=11111,
     )
@@ -129,7 +129,7 @@ def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(mon
     assert call_plan.strike_window.source == "combo_yield.call.spot_derived_bounds"
 
 
-def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkeypatch, tmp_path: Path) -> None:
+def test_sell_put_combo_yield_merges_with_existing_sell_call_bounds(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
@@ -151,7 +151,7 @@ def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkey
             "max_strike": 96,
         },
         sell_call_cfg={"enabled": True, "min_dte": 30, "max_dte": 45, "min_strike": 104, "max_strike": 118},
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "call": {"min_strike": 108, "max_strike": 125},
         },

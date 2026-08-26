@@ -12,7 +12,7 @@ from src.application.symbol_mutations import (
     require_calibrated_symbol,
     set_path as _shared_set_path,
 )
-from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+from src.application.combo_yield_config import resolve_combo_yield_cfg
 from src.application.write_contract import attach_write_contract
 
 
@@ -22,7 +22,7 @@ def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize
         fetch = item.get("fetch") if isinstance(item.get("fetch"), dict) else {}
         sell_put = item.get("sell_put") if isinstance(item.get("sell_put"), dict) else {}
         sell_call = item.get("sell_call") if isinstance(item.get("sell_call"), dict) else {}
-        combo_yield = resolve_yield_enhancement_cfg(item)
+        combo_yield = resolve_combo_yield_cfg(item)
         rows.append(
             {
                 "symbol": str(item.get("symbol") or "").strip().upper(),

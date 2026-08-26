@@ -30,10 +30,10 @@ from domain.domain.sell_call_config import resolve_min_annualized_net_premium_re
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain.symbol_identity import symbol_market
 from domain.domain import normalize_processor_row, normalize_processor_rows
-from src.application.yield_enhancement_config import (
+from src.application.combo_yield_config import (
     COMBO_YIELD_CONFIG_KEY,
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
@@ -356,7 +356,7 @@ def _yield_snapshot_status(
     statuses: list[dict[str, Any]],
 ) -> str | None:
     if not statuses:
-        raise ValueError("yield enhancement capture statuses are missing")
+        raise ValueError("combo yield capture statuses are missing")
     observed = [
         item for item in statuses if item["status"] != "not_applicable"
     ]
@@ -480,10 +480,9 @@ def resolve_watchlist_item_runtime_config(
     sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
     sell_call_cfg.pop('min_annualized_net_return', None)
     resolved['sell_call'] = sell_call_cfg
-    resolved_yield_enhancement_cfg = resolve_yield_enhancement_cfg(resolved)
-    if resolved_yield_enhancement_cfg:
-        resolved.pop('yield_enhancement', None)
-        resolved[COMBO_YIELD_CONFIG_KEY] = resolved_yield_enhancement_cfg
+    resolved_combo_yield_cfg = resolve_combo_yield_cfg(resolved)
+    if resolved_combo_yield_cfg:
+        resolved[COMBO_YIELD_CONFIG_KEY] = resolved_combo_yield_cfg
 
     resolved['_global_sell_put_liquidity'] = _extract_liquidity_fields(
         _resolve_profile_side_cfg(item, profiles, 'sell_put'),
@@ -493,9 +492,9 @@ def resolve_watchlist_item_runtime_config(
         _resolve_profile_side_cfg(item, profiles, 'sell_call'),
         is_put=False,
     )
-    yield_enhancement_profile = resolve_yield_enhancement_cfg(_resolve_profile_cfg(item, profiles))
-    resolved['_global_yield_enhancement_liquidity'] = _extract_liquidity_fields(
-        yield_enhancement_profile,
+    combo_yield_profile = resolve_combo_yield_cfg(_resolve_profile_cfg(item, profiles))
+    resolved['_global_combo_yield_liquidity'] = _extract_liquidity_fields(
+        combo_yield_profile,
         is_put=False,
         fields=LIQUIDITY_COMMON_FIELDS + ('max_combo_spread_ratio',),
     )
@@ -641,8 +640,8 @@ def run_watchlist_pipeline(
                         "account_config_sha256": str(account_config_sha256 or ""),
                     }
                 )
-            yield_policy = derive_yield_enhancement_policy(
-                resolve_yield_enhancement_cfg(resolved)
+            yield_policy = derive_combo_yield_policy(
+                resolve_combo_yield_cfg(resolved)
             )
             if yield_policy.enabled:
                 variant = str(
@@ -712,8 +711,8 @@ def run_watchlist_pipeline(
                 }
             ),
         ]
-        if derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(item0),
+        if derive_combo_yield_policy(
+            resolve_combo_yield_cfg(item0),
             market=symbol_market(symbol),
         ).enabled:
             rows.append(

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD, canonical_strategy_id
 from src.application.config_profiles import apply_profiles, deep_merge
 from src.application.config_sections import resolve_templates_config
 from src.application.config_defaults import DEFAULT_CONFIG
@@ -15,16 +16,13 @@ RETURN_FIRST_PROFILE = "return_first"
 SHORT_VOL_PROFILE = "short_vol"
 INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
 COMBO_YIELD_STRATEGY = "combo_yield"
-LEGACY_YIELD_ENHANCEMENT_STRATEGY = "yield_enhancement"
-YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
-YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
-YIELD_ENHANCEMENT_PUT_LEG_ROLES = {
+COMBO_YIELD_PUT_LEG_ROLES = {
     "funding_put",
     "sell_put",
     "enhancement_put",
     "yield_enhancement_put",
 }
-YIELD_ENHANCEMENT_CALL_LEG_ROLES = {
+COMBO_YIELD_CALL_LEG_ROLES = {
     "participation_call",
     "enhancement_call",
     "long_call",
@@ -43,9 +41,6 @@ class StrategySemantics:
     scan_uses_underwriting_gate: bool
     scan_uses_short_vol_gate: bool
     scan_uses_path_risk: bool
-    yield_enhancement_mode: str | None
-    yield_enhancement_requires_rv: bool
-    yield_enhancement_uses_short_vol_gate: bool
     close_advice_profile: str
     close_requires_rv: bool
     close_uses_short_vol_thesis: bool
@@ -59,9 +54,6 @@ class StrategySemantics:
             "scan_requires_rv": bool(self.scan_requires_rv),
             "scan_uses_underwriting_gate": bool(self.scan_uses_underwriting_gate),
             "scan_uses_short_vol_gate": bool(self.scan_uses_short_vol_gate),
-            "yield_enhancement_mode": self.yield_enhancement_mode or "",
-            "yield_enhancement_requires_rv": bool(self.yield_enhancement_requires_rv),
-            "yield_enhancement_uses_short_vol_gate": bool(self.yield_enhancement_uses_short_vol_gate),
             "close_advice_profile": self.close_advice_profile,
             "close_requires_rv": bool(self.close_requires_rv),
             "close_uses_short_vol_thesis": bool(self.close_uses_short_vol_thesis),
@@ -93,17 +85,16 @@ class StrategyResolution:
 
 
 @dataclass(frozen=True)
-class YieldEnhancementPositionRole:
+class ComboYieldPositionRole:
     strategy: str
     leg_role: str
     strategy_group_id: str
-    yield_enhancement_mode: str
-    is_yield_enhancement_short_put: bool
-    is_yield_enhancement_long_call: bool
+    is_combo_yield_short_put: bool
+    is_combo_yield_long_call: bool
 
     @property
-    def is_yield_enhancement(self) -> bool:
-        return self.is_yield_enhancement_short_put or self.is_yield_enhancement_long_call
+    def is_combo_yield(self) -> bool:
+        return self.is_combo_yield_short_put or self.is_combo_yield_long_call
 
 
 def assert_strategy_config_resolved(symbol_cfg: dict[str, Any] | None) -> None:
@@ -162,26 +153,6 @@ def risk_model_for_profile(profile: str) -> str:
     return "return_first_legacy"
 
 
-def yield_enhancement_mode_for_strategy_profile(profile: Any) -> str:
-    normalized = normalize_strategy_profile(profile)
-    if normalized in {SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}:
-        return YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
-    return YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
-
-
-def strategy_profile_for_yield_enhancement_mode(mode: Any, *, default: str = RETURN_FIRST_PROFILE) -> str:
-    normalized = str(mode or "").strip().lower()
-    if normalized == YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE:
-        return SHORT_VOL_PROFILE
-    if normalized == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE:
-        return RETURN_FIRST_PROFILE
-    return normalize_strategy_profile(default)
-
-
-def yield_enhancement_mode_uses_short_vol(mode: Any) -> bool:
-    return strategy_profile_for_yield_enhancement_mode(mode) == SHORT_VOL_PROFILE
-
-
 def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySemantics:
     normalized_family = str(family or "").strip().lower()
     normalized_profile = normalize_strategy_profile(profile)
@@ -191,7 +162,6 @@ def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySema
         and scan_profile == INSURANCE_UNDERWRITING_PROFILE
     )
     uses_short_vol_thesis = normalized_profile in {SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}
-    yield_mode = YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE if normalized_family == SELL_PUT_FAMILY else None
     close_profile_token = SHORT_VOL_PROFILE if uses_short_vol_thesis else normalized_profile
     if normalized_family == SELL_CALL_FAMILY:
         close_profile = f"covered_call_{close_profile_token}"
@@ -208,11 +178,6 @@ def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySema
         scan_uses_underwriting_gate=uses_underwriting,
         scan_uses_short_vol_gate=False,
         scan_uses_path_risk=False,
-        yield_enhancement_mode=yield_mode,
-        yield_enhancement_requires_rv=(
-            normalized_family == SELL_PUT_FAMILY and uses_underwriting
-        ),
-        yield_enhancement_uses_short_vol_gate=False,
         close_advice_profile=close_profile,
         close_requires_rv=uses_short_vol_thesis,
         close_uses_short_vol_thesis=uses_short_vol_thesis,
@@ -238,22 +203,22 @@ def strategy_semantics_for_side_config(
     )
 
 
-def resolve_yield_enhancement_position_role(position: dict[str, Any]) -> YieldEnhancementPositionRole:
+def resolve_combo_yield_position_role(position: dict[str, Any]) -> ComboYieldPositionRole:
     option_type = str(position.get("option_type") or "").strip().lower()
     side = str(position.get("side") or position.get("position_side") or "").strip().lower()
     strategy = _first_position_strategy_field(position, "strategy").lower()
     leg_role = _first_position_strategy_field(position, "leg_role").lower()
     group_id = _first_position_strategy_field(position, "strategy_group_id")
-    mode = _yield_enhancement_mode(position)
-
-    has_yield_marker = _is_yield_enhancement_strategy_token(strategy) or bool(mode)
+    has_yield_marker = _is_combo_yield_strategy_token(strategy) or bool(
+        _legacy_combo_yield_mode(position)
+    )
     is_short_put = (
         option_type == "put"
         and side in {"", "short"}
         and (
             has_yield_marker
             or leg_role == "funding_put"
-            or (leg_role in YIELD_ENHANCEMENT_PUT_LEG_ROLES and bool(group_id))
+            or (leg_role in COMBO_YIELD_PUT_LEG_ROLES and bool(group_id))
         )
     )
     is_long_call = (
@@ -261,16 +226,15 @@ def resolve_yield_enhancement_position_role(position: dict[str, Any]) -> YieldEn
         and side == "long"
         and (
             has_yield_marker
-            or leg_role in YIELD_ENHANCEMENT_CALL_LEG_ROLES
+            or leg_role in COMBO_YIELD_CALL_LEG_ROLES
         )
     )
-    return YieldEnhancementPositionRole(
+    return ComboYieldPositionRole(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=group_id,
-        yield_enhancement_mode=mode,
-        is_yield_enhancement_short_put=is_short_put,
-        is_yield_enhancement_long_call=is_long_call,
+        is_combo_yield_short_put=is_short_put,
+        is_combo_yield_long_call=is_long_call,
     )
 
 
@@ -289,13 +253,13 @@ def resolve_position_strategy(
     config: dict[str, Any] | None,
 ) -> StrategyResolution:
     family = strategy_family_for_position(position) or ""
-    yield_profile = _yield_enhancement_strategy_profile(position, family=family)
-    if yield_profile:
-        profile = normalize_strategy_profile(yield_profile)
+    legacy_combo_profile = _legacy_combo_yield_strategy_profile(position, family=family)
+    if legacy_combo_profile:
+        profile = normalize_strategy_profile(legacy_combo_profile)
         return StrategyResolution(
             strategy_family=family,
             strategy_profile=profile,
-            strategy_source="position_yield_enhancement_mode",
+            strategy_source="position_legacy_combo_yield_mode",
             config_path=None,
             risk_model=risk_model_for_profile(profile),
         )
@@ -309,6 +273,15 @@ def resolve_position_strategy(
             strategy_source="position_snapshot",
             config_path=None,
             risk_model=risk_model_for_profile(profile),
+        )
+
+    if family == SELL_PUT_FAMILY and _is_combo_yield_position(position):
+        return StrategyResolution(
+            strategy_family=family,
+            strategy_profile=RETURN_FIRST_PROFILE,
+            strategy_source="position_combo_yield_identity",
+            config_path=None,
+            risk_model=risk_model_for_profile(RETURN_FIRST_PROFILE),
         )
 
     profile, path = _current_config_strategy_profile(position, config=config, family=family)
@@ -360,7 +333,7 @@ def _snapshot_strategy_profile(position: dict[str, Any], *, family: str) -> str 
             continue
         profile = raw.get("strategy_profile") or raw.get("profile") or raw.get("strategy")
         if profile:
-            if _is_yield_enhancement_strategy_token(profile):
+            if _is_combo_yield_strategy_token(profile):
                 continue
             return str(profile)
 
@@ -368,31 +341,29 @@ def _snapshot_strategy_profile(position: dict[str, Any], *, family: str) -> str 
     if raw_family and raw_family != family:
         return None
     profile = position.get("strategy_profile") or position.get("strategy")
-    if _is_yield_enhancement_strategy_token(profile):
+    if _is_combo_yield_strategy_token(profile):
         return None
     return str(profile) if profile else None
 
 
-def _is_yield_enhancement_strategy_token(value: Any) -> bool:
-    return str(value or "").strip().lower() in {
-        COMBO_YIELD_STRATEGY,
-        LEGACY_YIELD_ENHANCEMENT_STRATEGY,
-        "rebound_combo",
-    }
+def _is_combo_yield_strategy_token(value: Any) -> bool:
+    return canonical_strategy_id(str(value or "")) == STRATEGY_COMBO_YIELD
 
 
-def _yield_enhancement_strategy_profile(position: dict[str, Any], *, family: str) -> str | None:
+def _legacy_combo_yield_strategy_profile(position: dict[str, Any], *, family: str) -> str | None:
     if family != SELL_PUT_FAMILY:
         return None
-    mode = _yield_enhancement_mode(position)
-    if mode:
-        return strategy_profile_for_yield_enhancement_mode(mode)
-    if _is_yield_enhancement_position(position):
+    legacy_mode = _legacy_combo_yield_mode(position)
+    if legacy_mode == "vol_convexity_enhancement":
+        return SHORT_VOL_PROFILE
+    if legacy_mode == "income_upside_enhancement":
         return RETURN_FIRST_PROFILE
     return None
 
 
-def _yield_enhancement_mode(position: dict[str, Any]) -> str:
+def _legacy_combo_yield_mode(position: dict[str, Any]) -> str:
+    """Read retired ledger facts; active code must never emit this field."""
+
     for source in (position, *_position_strategy_snapshots(position)):
         if not isinstance(source, dict):
             continue
@@ -411,8 +382,8 @@ def _position_strategy_snapshots(position: dict[str, Any]) -> tuple[dict[str, An
     return tuple(out)
 
 
-def _is_yield_enhancement_position(position: dict[str, Any]) -> bool:
-    return resolve_yield_enhancement_position_role(position).is_yield_enhancement_short_put
+def _is_combo_yield_position(position: dict[str, Any]) -> bool:
+    return resolve_combo_yield_position_role(position).is_combo_yield_short_put
 
 
 def _current_config_strategy_profile(

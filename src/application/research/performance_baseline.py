@@ -887,7 +887,6 @@ def _synthetic_event(
             strategy="combo_yield",
             leg_role="funding_put",
             strategy_group_id="bench-special-combo",
-            yield_enhancement_mode="same_expiry_pair",
             strategy_snapshot={"schema_version": "benchmark_strategy_snapshot.v1"},
         )
     if event_type == "close":
@@ -1708,7 +1707,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
                     "strategy": "combo_yield",
                     "leg_role": role,
                     "strategy_group_id": group_id,
-                    "yield_enhancement_mode": "same_expiry_pair",
                     "strategy_snapshot": {
                         "schema_version": "benchmark_strategy_snapshot.v1"
                     },
@@ -1751,7 +1749,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
                 "strategy": "combo_yield",
                 "leg_role": "participation_call",
                 "strategy_group_id": "bench-special-combo",
-                "yield_enhancement_mode": "same_expiry_pair",
             },
         )
         intent = build_combo_identity_intent(

@@ -18,6 +18,7 @@ from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     effective_multiplier,
     effective_strike,
+    strip_retired_strategy_metadata,
 )
 from domain.domain.lifecycle_allocation import (
     allocation_id_for,
@@ -6036,7 +6037,10 @@ def _canonical_close_events_for_storage(
 def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     trade_side = normalize_trade_side(getattr(deal, "side", None)) or ""
     position_effect = normalize_position_effect(getattr(deal, "position_effect", None)) or ""
-    raw_payload = dict(getattr(deal, "raw_payload", {}) or {})
+    raw_payload = strip_retired_strategy_metadata(
+        dict(getattr(deal, "raw_payload", {}) or {})
+    )
+    raw_payload.pop("fields", None)
     source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
     event_id = broker_external_event_key(deal)
     event_type = _event_type_from_position_effect(position_effect, raw_payload=raw_payload)

@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.engine import rank_candidate_rows, rank_yield_enhancement_rows
+from domain.domain.engine import rank_candidate_rows, rank_combo_yield_rows
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 
@@ -64,7 +64,7 @@ SELL_PUT_EMPTY_FIELDS = {
     'total_short_put_concentration_after': None,
 }
 
-YIELD_ENHANCEMENT_EMPTY_FIELDS = {
+COMBO_YIELD_EMPTY_FIELDS = {
     'structure_mode': None,
     'put_expiration': None,
     'put_dte': None,
@@ -350,13 +350,13 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
     )
 
 
-def summarize_yield_enhancement(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None = None) -> dict[str, Any]:
+def summarize_combo_yield(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None = None) -> dict[str, Any]:
     _ = symbol_cfg or {}
-    row = _empty_summary_row(symbol, STRATEGY_COMBO_YIELD, extra_fields=YIELD_ENHANCEMENT_EMPTY_FIELDS)
+    row = _empty_summary_row(symbol, STRATEGY_COMBO_YIELD, extra_fields=COMBO_YIELD_EMPTY_FIELDS)
     if df.empty:
         return row
 
-    ranked = rank_yield_enhancement_rows(df.to_dict('records'))
+    ranked = rank_combo_yield_rows(df.to_dict('records'))
     if not ranked:
         row['candidate_count'] = len(df)
         return row
@@ -379,6 +379,6 @@ def summarize_yield_enhancement(df: pd.DataFrame, symbol: str, *, symbol_cfg: di
         'option_ccy': top.get('option_ccy') or top.get('currency') or _option_ccy(symbol),
         'note': '已按组合收益筛出推荐Call',
     })
-    for key in YIELD_ENHANCEMENT_EMPTY_FIELDS:
+    for key in COMBO_YIELD_EMPTY_FIELDS:
         row[key] = top.get(key)
     return row

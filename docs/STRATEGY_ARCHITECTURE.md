@@ -53,7 +53,7 @@ Covered Call 的核心目标是：在愿意以合适价格卖出正股、但不�
 
 ## Combo Yield
 
-Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。当前 runtime key 是 `combo_yield`；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。
+Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。当前 runtime key、模块、类型和函数统一使用 `combo_yield` / `ComboYield`。
 
 运行所有权同样独立：per-symbol pipeline 分别调用 Sell Put step 与 Combo Yield step。`sell_put.enabled=false`、Sell Put 扫描失败或 Sell Put 无候选都不会隐式禁用 Combo Yield；Combo Yield 只由自身 `enabled` 和共享 required-data 是否可用决定。它可以复用 Sell Put 配置作为 funding-put 的期限、价格边界和 underwriting 输入，但不复用 Sell Put step 的候选结果或成功状态。共享 required-data 获取仍是 symbol 级前置边界。
 
@@ -216,12 +216,14 @@ Combo Yield 仅支持 `same_expiry_pair`。`min_expiry_gap_days` / `max_expiry_g
 - 历史 `enrich_and_filter_*_short_vol` 开仓别名及对应配置包装已移除，当前开仓只有 underwriting 入口。
 - 历史 `short_vol` 解析只服务离线开仓研究；Close Advice 不消费该配置、字段或结论。
 - 开仓 underwriting 不再请求全局 path-risk / concentration context；只有明确声明 `scan_uses_path_risk` 的策略才应加载该上下文。
+- `yield_enhancement_mode` 已退出活动策略、CLI 和账本写路径；旧 position/open/adjust event 仅在重放时读取，以保持历史风险画像。
+- sealed Combo candidate snapshot 继续接受其既有字段集合，避免改变旧快照 hash；新候选不再生成该 mode 字段。
+- YAML authoring、结构化配置编辑和 runtime JSON 均拒绝旧 `yield_enhancement` 键；活动配置只接受 `combo_yield`。
 
 不在本轮实现：
 
 - 修改生产 `config.yaml` / `config.us.json` / `config.hk.json`
 - 重构 shadow replay 的历史策略画像
-- 重命名 Combo Yield 的 legacy `yield_enhancement` 文件名和持仓标记
 
 ### 跨期收益与资金占用归因
 

@@ -2319,11 +2319,9 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
             "--record-id",
             lot["record_id"],
             "--strategy",
-            "yield_enhancement",
+            "combo_yield",
             "--leg-role",
             "enhancement_call",
-            "--yield-enhancement-mode",
-            "income_upside_enhancement",
             "--dry-run",
         ],
     )
@@ -2332,9 +2330,9 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
 
     out = capsys.readouterr().out
     assert "[DRY_RUN] adjust fields:" in out
-    assert '"strategy": "yield_enhancement"' in out
+    assert '"strategy": "combo_yield"' in out
     assert '"leg_role": "enhancement_call"' in out
-    assert '"yield_enhancement_mode": "income_upside_enhancement"' in out
+    assert "yield_enhancement_mode" not in out
 
 
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
