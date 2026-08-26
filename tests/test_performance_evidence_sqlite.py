@@ -119,6 +119,28 @@ def test_apply_migrates_once_imports_atomically_and_is_idempotent(tmp_path: Path
     }.issubset(_table_names(path))
 
 
+def test_read_all_validates_persisted_corrections_independent_of_fact_id_order(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    repo = PerformanceEvidenceSQLiteRepository(path)
+    parent = {**_rate(), "fact_id": "fx_z_parent"}
+    correction = {
+        **_rate(source="manual_correction", source_id="corrected"),
+        "fact_id": "fx_a_child",
+        "rate": "7.11",
+        "supersedes_fact_id": "fx_z_parent",
+    }
+
+    repo.import_envelope(
+        _envelope(rates=[parent, correction]),
+        apply=True,
+        migrated_at_ms=NOW_MS,
+    )
+
+    bundle = repo.read_all()
+    assert bundle.schema_state == "initialized_v1"
+    assert {fact.fact_id for fact in bundle.fx_rates} == {"fx_z_parent", "fx_a_child"}
+
+
 def test_batch_conflict_rolls_back_migration_and_all_facts(tmp_path: Path) -> None:
     path = tmp_path / "ledger.sqlite3"
     repo = PerformanceEvidenceSQLiteRepository(path)
