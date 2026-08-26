@@ -23,6 +23,7 @@ from src.application.recommendation_point import (
     RECOMMENDATION_POINT_FILE,
     RECOMMENDATION_POINT_SCHEMA_V1,
     RECOMMENDATION_POINT_SCHEMA_V2,
+    RECOMMENDATION_POINT_SCHEMA_V3,
     RecommendationPointError,
     build_recommendation_point,
     build_recommendation_point_id,
@@ -568,6 +569,39 @@ def test_validator_rejects_contract_and_content_drift(tmp_path: Path) -> None:
         with pytest.raises(RecommendationPointError) as raised:
             validate_recommendation_point(invalid)
         assert raised.value.reason_code == "official_point_invalid"
+
+
+def test_v3_validator_recomputes_formal_point_time_coherence(tmp_path: Path) -> None:
+    run_id = "invalid-coherence"
+    seal_opening_candidate_fixture(tmp_path, run_id=run_id, accepted_rows=[_candidate()])
+    point, _opening = _build_from_bundle(tmp_path, run_id)
+    point.update(
+        {
+            "schema_version": RECOMMENDATION_POINT_SCHEMA_V3,
+            "required_data_manifest_ref": "output_runs/run/required.json",
+            "required_data_manifest_sha256": "1" * 64,
+            "prepared_context_manifest_ref": "output_runs/run/prepared.json",
+            "prepared_context_manifest_sha256": "2" * 64,
+            "prepared_context_payload_sha256": "3" * 64,
+            "formal_point_time_coherence": {
+                "schema_version": "formal_point_time_coherence.v1",
+                "status": "ready",
+                "reason_code": None,
+                "minimum_observed_at_utc": "2026-07-21T14:00:00Z",
+                "maximum_observed_at_utc": "2026-07-21T14:00:01Z",
+                "observation_count": 2,
+                "skew_ms": 1,
+                "max_skew_ms": 300_000,
+            },
+        }
+    )
+    point["content_sha256"] = canonical_sha256(
+        {key: value for key, value in point.items() if key != "content_sha256"}
+    )
+
+    with pytest.raises(RecommendationPointError) as raised:
+        validate_recommendation_point(point)
+    assert raised.value.reason_code == "official_point_invalid"
 
 
 def test_load_rejects_noncanonical_persisted_bytes(tmp_path: Path) -> None:

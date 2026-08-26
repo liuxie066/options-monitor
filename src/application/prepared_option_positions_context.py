@@ -367,13 +367,13 @@ def _persist_current_option_marks(
     config_path: Path,
     now_ms: int,
     log: Callable[[str], None] | None,
-) -> dict[Path, frozenset[str]]:
-    captured_fact_ids: dict[Path, frozenset[str]] = {}
+) -> dict[Path, tuple[ValuationMarkFact, ...]]:
+    captured_facts: dict[Path, tuple[ValuationMarkFact, ...]] = {}
     for ledger_path, accounts in accounts_by_ledger_path.items():
         selected_accounts = sorted(mark_evidence_accounts.intersection(accounts))
         if not selected_accounts:
             continue
-        captured_fact_ids[ledger_path] = frozenset()
+        captured_facts[ledger_path] = ()
         repo = repos_by_ledger_path.get(ledger_path)
         rows_by_account = rows_a_by_ledger_path.get(ledger_path)
         if repo is None or not isinstance(rows_by_account, Mapping):
@@ -404,6 +404,7 @@ def _persist_current_option_marks(
                 fx_payload_fetcher=lambda: None,
             )
             evidence_repo = open_performance_evidence_repository(repo)
+            captured_facts[ledger_path] = tuple(collection.valuation_marks)
             envelope = _reuse_existing_valuation_marks(
                 EvidenceEnvelope(valuation_marks=collection.valuation_marks),
                 evidence_repo.read_all().valuation_marks,
@@ -424,16 +425,13 @@ def _persist_current_option_marks(
                     apply=True,
                     migrated_at_ms=now_ms,
                 )
-            captured_fact_ids[ledger_path] = frozenset(
-                str(fact.fact_id) for fact in envelope.valuation_marks
-            )
         except Exception as exc:
             if log is not None:
                 log(
                     "[WARN] formal option mark evidence capture failed: "
                     f"{type(exc).__name__}"
                 )
-    return captured_fact_ids
+    return captured_facts
 
 
 def _ledger_generation_sha256(
@@ -553,7 +551,7 @@ def build_option_market_evidence_payload(
     decision_state_fingerprint_a: str,
     decision_state_fingerprint_b: str,
     position_snapshot_b_available: bool = True,
-    captured_mark_fact_ids: frozenset[str] | None = None,
+    captured_mark_facts: tuple[ValuationMarkFact, ...] | None = None,
 ) -> dict[str, Any]:
     """Build the strict evidence slice without reading mutable state."""
 
@@ -642,17 +640,17 @@ def build_option_market_evidence_payload(
         {position.instrument.instrument_key for position in positions}
     ):
         selected = select_valuation_mark(
-            evidence_bundle.valuation_marks,
+            (
+                captured_mark_facts
+                if captured_mark_facts is not None
+                else evidence_bundle.valuation_marks
+            ),
             instrument_key=instrument_key,
             at_ms=evidence_at_ms,
         )
         if (
             not isinstance(selected.fact, ValuationMarkFact)
             or selected.fact.observed_at_ms > evidence_at_ms
-            or (
-                captured_mark_fact_ids is not None
-                and str(selected.fact.fact_id) not in captured_mark_fact_ids
-            )
         ):
             return _option_market_evidence_payload(
                 **common,
@@ -699,6 +697,208 @@ def build_option_market_evidence_payload(
         valuation_mark_facts=marks,
         fx_rate_facts=rates,
     )
+
+
+def _reuse_prepared_option_positions_contexts(
+    *,
+    base: Path,
+    run_id: str,
+    configs: Mapping[str, Mapping[str, Any]],
+    authorities: Mapping[str, AccountRunConfigAuthority],
+) -> dict[str, Any]:
+    manifests: dict[str, dict[str, Any]] = {}
+    records_by_account: dict[str, list[dict[str, Any]]] = {}
+    wheel_models_by_account: dict[str, dict[str, Any]] = {}
+    unavailable: dict[str, str] = {}
+    pending: list[str] = []
+    observed_values: list[str] = []
+    for account in sorted(configs):
+        state_dir = base / "output_runs" / run_id / "accounts" / account / "state"
+        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2
+        payload_path = state_dir / PREPARED_OPTION_POSITIONS_PAYLOAD_NAME
+        manifest_exists = manifest_path.is_file() and not manifest_path.is_symlink()
+        payload_exists = payload_path.is_file() and not payload_path.is_symlink()
+        if not manifest_exists and not payload_exists:
+            pending.append(account)
+            continue
+        if manifest_exists:
+            try:
+                manifest_bytes = read_account_run_state_bytes_safely(
+                    base=base,
+                    run_id=run_id,
+                    account=account,
+                    name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+                )
+                manifest = json.loads(manifest_bytes)
+                if not isinstance(manifest, dict) or manifest_bytes != _json_bytes(manifest):
+                    raise PreparedOptionPositionsContextError(
+                        "prepared option manifest is not canonical"
+                    )
+                if (
+                    manifest.get("schema_version")
+                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+                    or manifest.get("run_id") != run_id
+                    or normalize_account(manifest.get("account")) != account
+                    or manifest.get("account_config_sha256")
+                    != authorities[account].account_config_sha256
+                ):
+                    raise PreparedOptionPositionsContextError(
+                        "prepared option manifest identity mismatch"
+                    )
+                status = str(manifest.get("status") or "").strip().lower()
+                if status == "unavailable" and not payload_exists:
+                    reason = _required_text(
+                        manifest.get("reason"), "prepared option unavailable reason"
+                    )
+                    manifests[account] = {
+                        **manifest,
+                        "manifest_path": str(manifest_path),
+                        "manifest_sha256": sha256_bytes(manifest_bytes),
+                    }
+                    unavailable[account] = reason
+                    observed_values.append(str(manifest.get("source_observed_at") or ""))
+                    continue
+                if status != "ready" or not payload_exists:
+                    raise PreparedOptionPositionsContextError(
+                        "prepared_option_context_partial"
+                    )
+                receipt = load_prepared_option_positions_context_receipt(
+                    manifest_path=manifest_path,
+                    expected_base=base,
+                    expected_run_id=run_id,
+                    expected_account=account,
+                    expected_account_config_sha256=(
+                        authorities[account].account_config_sha256
+                    ),
+                    expected_runtime_config=configs[account],
+                )
+            except Exception:
+                manifests[account] = {
+                    "status": "unavailable",
+                    "reason": "prepared_option_context_partial",
+                }
+                unavailable[account] = "prepared_option_context_partial"
+                continue
+        else:
+            try:
+                payload_bytes = read_account_run_state_bytes_safely(
+                    base=base,
+                    run_id=run_id,
+                    account=account,
+                    name=PREPARED_OPTION_POSITIONS_PAYLOAD_NAME,
+                )
+                payload = json.loads(payload_bytes)
+                if not isinstance(payload, dict) or payload_bytes != _json_bytes(payload):
+                    raise PreparedOptionPositionsContextError(
+                        "prepared option payload is not canonical"
+                    )
+                prepared = payload.get("prepared_authority")
+                if not isinstance(prepared, Mapping):
+                    raise PreparedOptionPositionsContextError(
+                        "prepared option payload authority is missing"
+                    )
+                if (
+                    prepared.get("schema_version")
+                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+                    or prepared.get("run_id") != run_id
+                    or normalize_account(prepared.get("account")) != account
+                    or prepared.get("account_config_sha256")
+                    != authorities[account].account_config_sha256
+                ):
+                    raise PreparedOptionPositionsContextError(
+                        "prepared option payload identity mismatch"
+                    )
+                recovered: dict[str, Any] = {
+                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+                    "run_id": run_id,
+                    "account": account,
+                    "status": "ready",
+                    "account_config_sha256": authorities[
+                        account
+                    ].account_config_sha256,
+                    "payload_relpath": PREPARED_OPTION_POSITIONS_PAYLOAD_NAME,
+                    "payload_sha256": sha256_bytes(payload_bytes),
+                    "ledger_generation_sha256": _required_sha256(
+                        prepared.get("ledger_generation_sha256"),
+                        "ledger_generation_sha256",
+                    ),
+                    "decision_state_fingerprint": _required_sha256(
+                        payload.get("decision_state_fingerprint"),
+                        "decision_state_fingerprint",
+                    ),
+                    "source_observed_at": _required_text(
+                        prepared.get("source_observed_at"), "source_observed_at"
+                    ),
+                    "application_received_at_utc": _required_text(
+                        prepared.get("application_received_at_utc"),
+                        "application_received_at_utc",
+                    ),
+                    "fx_status": _required_text(
+                        prepared.get("fx_status"), "fx_status"
+                    ),
+                    "fx_observation_sha256": _required_sha256(
+                        prepared.get("fx_observation_sha256"),
+                        "fx_observation_sha256",
+                    ),
+                }
+                if prepared.get("fx_error_type"):
+                    recovered["fx_error_type"] = _required_text(
+                        prepared["fx_error_type"], "fx_error_type"
+                    )
+                published = _publish_manifest(
+                    base=base,
+                    run_id=run_id,
+                    account=account,
+                    manifest=recovered,
+                )
+                receipt = load_prepared_option_positions_context_receipt(
+                    manifest_path=Path(published["manifest_path"]),
+                    expected_base=base,
+                    expected_run_id=run_id,
+                    expected_account=account,
+                    expected_account_config_sha256=(
+                        authorities[account].account_config_sha256
+                    ),
+                    expected_runtime_config=configs[account],
+                )
+            except Exception:
+                manifests[account] = {
+                    "status": "unavailable",
+                    "reason": "prepared_option_context_partial",
+                }
+                unavailable[account] = "prepared_option_context_partial"
+                continue
+        manifest = dict(receipt["manifest"])
+        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2
+        manifest_bytes = receipt["manifest_bytes"]
+        manifests[account] = {
+            **manifest,
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": sha256_bytes(manifest_bytes),
+        }
+        payload = receipt["payload"]
+        current_read = payload.get("current_decision_read")
+        position_lots = (
+            current_read.get("position_lots")
+            if isinstance(current_read, Mapping)
+            and isinstance(current_read.get("position_lots"), list)
+            else []
+        )
+        records_by_account[account] = [
+            dict(row) for row in position_lots if isinstance(row, Mapping)
+        ]
+        wheel = payload.get("wheel_read_model")
+        if isinstance(wheel, Mapping):
+            wheel_models_by_account[account] = dict(wheel)
+        observed_values.append(str(manifest.get("source_observed_at") or ""))
+    return {
+        "manifests": manifests,
+        "records_by_account": records_by_account,
+        "wheel_models_by_account": wheel_models_by_account,
+        "unavailable": unavailable,
+        "pending": pending,
+        "observed_at_utc": max((value for value in observed_values if value), default=datetime.now(timezone.utc).isoformat()),
+    }
 
 
 def prepare_option_positions_contexts(
@@ -749,9 +949,32 @@ def prepare_option_positions_contexts(
         if account in configs
     )
 
+    reused = _reuse_prepared_option_positions_contexts(
+        base=base_path,
+        run_id=run_id_norm,
+        configs=configs,
+        authorities=authorities,
+    )
+    manifests = dict(reused["manifests"])
+    records_by_account = dict(reused["records_by_account"])
+    wheel_models_by_account = dict(reused["wheel_models_by_account"])
+    unavailable = dict(reused["unavailable"])
+    configs = {account: configs[account] for account in reused["pending"]}
+    authorities = {account: authorities[account] for account in reused["pending"]}
+    mark_evidence_account_set = mark_evidence_account_set.intersection(configs)
+    if not configs:
+        return PreparedOptionPositionsBatch(
+            manifests=manifests,
+            position_records_by_account=records_by_account,
+            unavailable_by_account=unavailable,
+            observed_at_utc=str(reused["observed_at_utc"]),
+            ledger_read_count=0,
+            fx_observation_count=0,
+            wheel_read_models_by_account=wheel_models_by_account,
+        )
+
     accounts_by_ledger_path: dict[Path, list[str]] = {}
     data_config_by_ledger_path: dict[Path, Path] = {}
-    unavailable: dict[str, str] = {}
     for account in sorted(configs):
         try:
             data_path = resolve_position_data_config_path(
@@ -842,7 +1065,7 @@ def prepare_option_positions_contexts(
         if persist_fx_evidence
         else {"status": "disabled"}
     )
-    captured_mark_fact_ids_by_ledger = _persist_current_option_marks(
+    captured_mark_facts_by_ledger = _persist_current_option_marks(
         configs=configs,
         accounts_by_ledger_path=accounts_by_ledger_path,
         repos_by_ledger_path=repos_by_ledger_path,
@@ -890,9 +1113,6 @@ def prepare_option_positions_contexts(
                 timezone.utc
             ).isoformat()
 
-    manifests: dict[str, dict[str, Any]] = {}
-    records_by_account: dict[str, list[dict[str, Any]]] = {}
-    wheel_models_by_account: dict[str, dict[str, Any]] = {}
     for ledger_path, accounts in sorted(
         accounts_by_ledger_path.items(),
         key=lambda item: str(item[0]),
@@ -1030,8 +1250,8 @@ def prepare_option_positions_contexts(
                         position_snapshot_b_available=(
                             ledger_path not in rows_b_unavailable
                         ),
-                        captured_mark_fact_ids=(
-                            captured_mark_fact_ids_by_ledger.get(ledger_path)
+                        captured_mark_facts=(
+                            captured_mark_facts_by_ledger.get(ledger_path)
                             if account in mark_evidence_account_set
                             else None
                         ),
@@ -1066,6 +1286,8 @@ def prepare_option_positions_contexts(
                     "fx_status": fx_status,
                     "source_observed_at": observed_at_utc,
                 }
+                if fx_error_type:
+                    prepared_authority["fx_error_type"] = fx_error_type
                 context = dict(context)
                 try:
                     wheel_model = build_wheel_read_model_from_rows(

@@ -16,7 +16,10 @@ from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
 )
 from src.application.strategy_lab.top1.ranking import (
+    RANKING_PROJECTION_SCHEMA_V3,
     RANKING_PROJECTION_SCHEMA_V2,
+    RECIPE_ID,
+    RECIPE_VERSION,
 )
 from src.application.strategy_lab.top1.economics import (
     SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION,
@@ -37,8 +40,6 @@ RESEARCH_METRIC_CONTRACT_VERSION = SELL_PUT_TOP1_ECONOMIC_RESULT_VERSION
 VALIDATION_FILL_CONTRACT_VERSION = "scheduled_point_first_observed_cross.v1"
 VALIDATION_METRIC_CONTRACT_VERSION = TOP1_PAIRED_EVALUATION_VERSION
 EXPIRY_OUTCOME_CONTRACT_VERSION = "expiry_outcome_at_underlier_close.v2"
-RECIPE_ID = "sell_put_top1_option_market_concentration"
-RECIPE_VERSION = "v1"
 EVIDENCE_SELECTION_CONTRACT_VERSION = "performance_evidence_selection.v1"
 SEALED_HISTORICAL_DATASET_SCHEMA = "sealed_historical_dataset.v1"
 HISTORICAL_RESEARCH_WINDOW_SCHEMA = "historical_research_window.v1"
@@ -233,7 +234,10 @@ def _current_behavior_versions(spec: Mapping[str, object]) -> dict[str, str]:
         "baseline_version": _text(baseline["version"], "baseline.version"),
         "opening_snapshot_schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
         "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
+        "ranking_projection_schema_version": _text(
+            baseline["ranking_projection_schema_version"],
+            "baseline.ranking_projection_schema_version",
+        ),
         "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
         "research_selection_contract_version": RESEARCH_SELECTION_CONTRACT_VERSION,
         "research_metric_contract_version": RESEARCH_METRIC_CONTRACT_VERSION,
@@ -327,11 +331,11 @@ def _validate_baseline(value: object, spec: Mapping[str, object]) -> None:
         ACCEPTED_SET_CONTRACT_VERSION,
         "baseline.accepted_set_contract_version",
     )
-    _fixed(
-        item["ranking_projection_schema_version"],
+    if item["ranking_projection_schema_version"] not in {
         RANKING_PROJECTION_SCHEMA_V2,
-        "baseline.ranking_projection_schema_version",
-    )
+        RANKING_PROJECTION_SCHEMA_V3,
+    }:
+        _fail("baseline.ranking_projection_schema_version is unsupported")
     _fixed(
         item["sell_put_ranking_contract_version"],
         SELL_PUT_RANKING_CONTRACT_VERSION,
@@ -698,7 +702,13 @@ def build_sell_put_top1_research_spec(
     research_source: Mapping[str, object],
     market_calendar_version: str,
     baseline_version: str = "sell_put_top1_current.v1",
+    ranking_projection_schema_version: str = RANKING_PROJECTION_SCHEMA_V3,
 ) -> dict[str, object]:
+    if ranking_projection_schema_version not in {
+        RANKING_PROJECTION_SCHEMA_V2,
+        RANKING_PROJECTION_SCHEMA_V3,
+    }:
+        _fail("ranking_projection_schema_version is unsupported")
     spec: dict[str, object] = {
         "schema_version": EXPERIMENT_SPEC_SCHEMA_VERSION,
         "topic_id": _text(topic_id, "topic_id"),
@@ -727,7 +737,7 @@ def build_sell_put_top1_research_spec(
             "version": _text(baseline_version, "baseline_version"),
             "opening_snapshot_schema": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
             "accepted_set_contract_version": ACCEPTED_SET_CONTRACT_VERSION,
-            "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V2,
+            "ranking_projection_schema_version": ranking_projection_schema_version,
             "sell_put_ranking_contract_version": SELL_PUT_RANKING_CONTRACT_VERSION,
             "ranking_profile": "current_tie_break",
             "near_return_threshold": 0.002,

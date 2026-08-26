@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -34,6 +34,10 @@ from src.application.prepared_option_positions_context import (
     find_prepared_option_positions_manifest,
     load_prepared_option_positions_context_receipt,
 )
+from src.application.required_data_snapshot import (
+    RequiredDataSnapshotError,
+    load_required_data_snapshot_manifest_snapshot,
+)
 from src.application.source_receipts import sha256_bytes
 from src.application.strategy_lab.top1.ranking import (
     Top1RankingError,
@@ -48,6 +52,7 @@ from src.application.tick_run_workspace import (
 
 RECOMMENDATION_POINT_SCHEMA_V1 = "recommendation_point.v1"
 RECOMMENDATION_POINT_SCHEMA_V2 = "recommendation_point.v2"
+RECOMMENDATION_POINT_SCHEMA_V3 = "recommendation_point.v3"
 RECOMMENDATION_POINT_SCHEMA = RECOMMENDATION_POINT_SCHEMA_V1
 RECOMMENDATION_POINT_FILE = "recommendation_point.sell_put.json"
 STRATEGY_FAMILY = "sell_put"
@@ -83,6 +88,17 @@ _POINT_FIELDS_V2 = frozenset(
         "option_market_evidence_payload_sha256",
     }
 )
+_POINT_FIELDS_V3 = frozenset(
+    {
+        *_POINT_FIELDS_V1,
+        "required_data_manifest_ref",
+        "required_data_manifest_sha256",
+        "prepared_context_manifest_ref",
+        "prepared_context_manifest_sha256",
+        "prepared_context_payload_sha256",
+        "formal_point_time_coherence",
+    }
+)
 _POINT_BINDING_FIELDS = (
     "recommendation_point_id",
     "market",
@@ -99,12 +115,35 @@ _POINT_BINDING_FIELDS_V2 = (
     "option_market_evidence_manifest_sha256",
     "option_market_evidence_payload_sha256",
 )
+_POINT_BINDING_FIELDS_V3 = (
+    *_POINT_BINDING_FIELDS,
+    "required_data_manifest_ref",
+    "required_data_manifest_sha256",
+    "prepared_context_manifest_ref",
+    "prepared_context_manifest_sha256",
+    "prepared_context_payload_sha256",
+    "formal_point_time_coherence",
+)
 _TERMINAL_STATUSES = frozenset(
     {"candidates_found", "no_candidate", "partial_data", "data_unavailable"}
 )
 _CLEAN_STATUSES = frozenset({"candidates_found", "no_candidate"})
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _HASH_40 = re.compile(r"[0-9a-f]{40}\Z")
+_TIME_COHERENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "reason_code",
+        "minimum_observed_at_utc",
+        "maximum_observed_at_utc",
+        "observation_count",
+        "skew_ms",
+        "max_skew_ms",
+    }
+)
+_TIME_COHERENCE_SCHEMA = "formal_point_time_coherence.v1"
+_TIME_COHERENCE_MAX_SKEW_MS = 300_000
 
 
 class RecommendationPointError(RuntimeError):
@@ -222,6 +261,7 @@ def build_recommendation_point_id(
     if schema_version not in {
         RECOMMENDATION_POINT_SCHEMA_V1,
         RECOMMENDATION_POINT_SCHEMA_V2,
+        RECOMMENDATION_POINT_SCHEMA_V3,
     }:
         _fail("official_point_invalid", "recommendation point schema is invalid")
     target = _canonical_timestamp(
@@ -244,12 +284,141 @@ def point_binding_from_recommendation_point(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     item = validate_recommendation_point(payload)
-    fields = (
-        _POINT_BINDING_FIELDS_V2
-        if item["schema_version"] == RECOMMENDATION_POINT_SCHEMA_V2
-        else _POINT_BINDING_FIELDS
-    )
+    fields = {
+        RECOMMENDATION_POINT_SCHEMA_V1: _POINT_BINDING_FIELDS,
+        RECOMMENDATION_POINT_SCHEMA_V2: _POINT_BINDING_FIELDS_V2,
+        RECOMMENDATION_POINT_SCHEMA_V3: _POINT_BINDING_FIELDS_V3,
+    }[item["schema_version"]]
     return {field: item[field] for field in fields}
+
+
+def _required_data_binding(opening: Mapping[str, Any]) -> tuple[str, str]:
+    rows = [
+        row
+        for row in opening.get("dependencies") or []
+        if isinstance(row, Mapping) and row.get("kind") == "required_data"
+    ]
+    if len(rows) != 1:
+        _fail("required_data_contract_missing", "required-data dependency is missing")
+    ref = rows[0].get("relpath")
+    digest = rows[0].get("sha256")
+    if (
+        not isinstance(ref, str)
+        or not ref
+        or ref.startswith("/")
+        or "\\" in ref
+        or any(part in {"", ".", ".."} for part in ref.split("/"))
+    ):
+        _fail("required_data_contract_missing", "required-data dependency ref is invalid")
+    return ref, _hash(digest, "required_data_manifest_sha256", _HASH_64)
+
+
+def _prepared_context_binding(
+    receipt: Mapping[str, Any],
+    *,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    opening_sealed_at_utc: str,
+) -> dict[str, str]:
+    existing = _prepared_option_binding(
+        receipt,
+        run_id=run_id,
+        account=account,
+        account_config_sha256=account_config_sha256,
+        opening_sealed_at_utc=opening_sealed_at_utc,
+    )
+    return {
+        "prepared_context_manifest_ref": existing["option_market_evidence_ref"],
+        "prepared_context_manifest_sha256": existing[
+            "option_market_evidence_manifest_sha256"
+        ],
+        "prepared_context_payload_sha256": existing[
+            "option_market_evidence_payload_sha256"
+        ],
+    }
+
+
+def _milliseconds_to_utc(value: Any, label: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        _fail("formal_point_time_skew", f"{label} is missing")
+    return (
+        datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def build_formal_point_time_coherence(
+    opening: Mapping[str, Any],
+    required_data_manifest: Mapping[str, Any],
+    prepared_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    timestamps: list[str] = []
+    missing = False
+    symbols = required_data_manifest.get("symbols")
+    if not isinstance(symbols, Mapping) or not symbols:
+        missing = True
+    else:
+        for row in symbols.values():
+            if not isinstance(row, Mapping) or row.get("status") != "ready":
+                missing = True
+                continue
+            try:
+                timestamps.append(
+                    _strict_timestamp(row.get("source_observed_at"), "source_observed_at")
+                )
+            except RecommendationPointError:
+                missing = True
+    for row in opening.get("candidate_decisions") or []:
+        normalized = row.get("normalized_input") if isinstance(row, Mapping) else None
+        try:
+            timestamps.append(
+                _strict_timestamp(
+                    normalized.get("snapshot_received_at_utc")
+                    if isinstance(normalized, Mapping)
+                    else None,
+                    "snapshot_received_at_utc",
+                )
+            )
+        except RecommendationPointError:
+            missing = True
+    payload = prepared_receipt.get("payload")
+    evidence = (
+        payload.get("strategy_lab_option_market_evidence")
+        if isinstance(payload, Mapping)
+        else None
+    )
+    marks = evidence.get("valuation_mark_facts") if isinstance(evidence, Mapping) else None
+    if not isinstance(marks, list):
+        missing = True
+        marks = []
+    for row in marks:
+        if not isinstance(row, Mapping):
+            missing = True
+            continue
+        for field in ("effective_at_ms", "observed_at_ms"):
+            try:
+                timestamps.append(_milliseconds_to_utc(row.get(field), field))
+            except RecommendationPointError:
+                missing = True
+    parsed = sorted(
+        datetime.fromisoformat(value.replace("Z", "+00:00")) for value in timestamps
+    )
+    minimum = parsed[0].isoformat().replace("+00:00", "Z") if parsed else None
+    maximum = parsed[-1].isoformat().replace("+00:00", "Z") if parsed else None
+    skew_ms = int((parsed[-1] - parsed[0]).total_seconds() * 1000) if parsed else None
+    ready = not missing and skew_ms is not None and skew_ms <= _TIME_COHERENCE_MAX_SKEW_MS
+    return {
+        "schema_version": _TIME_COHERENCE_SCHEMA,
+        "status": "ready" if ready else "not_evaluable",
+        "reason_code": None if ready else "formal_point_time_skew",
+        "minimum_observed_at_utc": minimum,
+        "maximum_observed_at_utc": maximum,
+        "observation_count": len(timestamps),
+        "skew_ms": skew_ms,
+        "max_skew_ms": _TIME_COHERENCE_MAX_SKEW_MS,
+    }
 
 
 def _prepared_option_binding(
@@ -347,6 +516,9 @@ def build_recommendation_point(
     terminal_manifest_sha256: str,
     source_commit_sha: str,
     prepared_option_receipt: Mapping[str, Any] | None = None,
+    required_data_manifest: Mapping[str, Any] | None = None,
+    required_data_manifest_ref: str | None = None,
+    required_data_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(scheduler_decision, Mapping):
         _fail("official_point_identity_missing", "scheduler decision is missing")
@@ -460,8 +632,13 @@ def build_recommendation_point(
     else:
         _fail("official_point_invalid", "Sell Put terminal status is unsupported")
 
+    formal = required_data_manifest is not None
+    if formal and prepared_option_receipt is None:
+        _fail("option_market_evidence_contract_missing", "formal point requires prepared evidence")
     point_schema = (
-        RECOMMENDATION_POINT_SCHEMA_V2
+        RECOMMENDATION_POINT_SCHEMA_V3
+        if formal
+        else RECOMMENDATION_POINT_SCHEMA_V2
         if prepared_option_receipt is not None
         else RECOMMENDATION_POINT_SCHEMA_V1
     )
@@ -490,7 +667,33 @@ def build_recommendation_point(
         "source_commit_sha": source_sha,
         "producer_accepted_candidate_ids": accepted_ids,
     }
-    if prepared_option_receipt is not None:
+    if point_schema == RECOMMENDATION_POINT_SCHEMA_V3:
+        dependency_ref, dependency_hash = _required_data_binding(opening)
+        if (
+            required_data_manifest_ref != dependency_ref
+            or required_data_manifest_sha256 != dependency_hash
+            or required_data_manifest.get("run_id") != run_id
+        ):
+            _fail("required_data_conflict", "required-data manifest binding does not match")
+        payload.update(
+            {
+                "required_data_manifest_ref": dependency_ref,
+                "required_data_manifest_sha256": dependency_hash,
+                **_prepared_context_binding(
+                    prepared_option_receipt,
+                    run_id=run_id,
+                    account=account,
+                    account_config_sha256=opening["account_config_sha256"],
+                    opening_sealed_at_utc=opening["sealed_at_utc"],
+                ),
+                "formal_point_time_coherence": build_formal_point_time_coherence(
+                    opening,
+                    required_data_manifest,
+                    prepared_option_receipt,
+                ),
+            }
+        )
+    elif prepared_option_receipt is not None:
         payload.update(
             _prepared_option_binding(
                 prepared_option_receipt,
@@ -501,20 +704,21 @@ def build_recommendation_point(
             )
         )
 
-    projection: dict[str, Any] | None = None
-    try:
-        projection = build_ranking_projection(
-            opening,
-            point_binding={field: payload[field] for field in _POINT_BINDING_FIELDS},
-        )
-    except Top1RankingError as exc:
-        if point_status in _CLEAN_STATUSES:
-            _fail("official_point_invalid", f"clean point is not rankable: {exc}")
-    if (
-        projection is not None
-        and projection.get("producer_accepted_candidate_ids") != accepted_ids
-    ):
-        _fail("official_point_invalid", "W1A accepted candidate IDs do not match")
+    if point_schema != RECOMMENDATION_POINT_SCHEMA_V3:
+        projection: dict[str, Any] | None = None
+        try:
+            projection = build_ranking_projection(
+                opening,
+                point_binding={field: payload[field] for field in _POINT_BINDING_FIELDS},
+            )
+        except Top1RankingError as exc:
+            if point_status in _CLEAN_STATUSES:
+                _fail("official_point_invalid", f"clean point is not rankable: {exc}")
+        if (
+            projection is not None
+            and projection.get("producer_accepted_candidate_ids") != accepted_ids
+        ):
+            _fail("official_point_invalid", "W1A accepted candidate IDs do not match")
 
     payload["content_sha256"] = canonical_sha256(payload)
     return validate_recommendation_point(payload)
@@ -527,16 +731,17 @@ def validate_recommendation_point(
         _fail("official_point_invalid", "recommendation point must be an object")
     item = dict(payload)
     schema = item.get("schema_version")
-    expected_fields = (
-        _POINT_FIELDS_V2
-        if schema == RECOMMENDATION_POINT_SCHEMA_V2
-        else _POINT_FIELDS_V1
-    )
+    expected_fields = {
+        RECOMMENDATION_POINT_SCHEMA_V1: _POINT_FIELDS_V1,
+        RECOMMENDATION_POINT_SCHEMA_V2: _POINT_FIELDS_V2,
+        RECOMMENDATION_POINT_SCHEMA_V3: _POINT_FIELDS_V3,
+    }.get(schema, _POINT_FIELDS_V1)
     if set(item) != expected_fields:
         _fail("official_point_invalid", "recommendation point keys are incomplete or unexpected")
     if schema not in {
         RECOMMENDATION_POINT_SCHEMA_V1,
         RECOMMENDATION_POINT_SCHEMA_V2,
+        RECOMMENDATION_POINT_SCHEMA_V3,
     }:
         _fail("official_point_invalid", "recommendation point schema is invalid")
     if item["strategy_family"] != STRATEGY_FAMILY:
@@ -587,6 +792,68 @@ def validate_recommendation_point(
             "option_market_evidence_payload_sha256",
         ):
             _hash(item[field], field, _HASH_64)
+    if schema == RECOMMENDATION_POINT_SCHEMA_V3:
+        for field in ("required_data_manifest_ref", "prepared_context_manifest_ref"):
+            ref = _text(item[field], field)
+            if ref.startswith("/") or "\\" in ref or any(
+                part in {"", ".", ".."} for part in ref.split("/")
+            ):
+                _fail("official_point_invalid", f"{field} is invalid")
+        for field in (
+            "required_data_manifest_sha256",
+            "prepared_context_manifest_sha256",
+            "prepared_context_payload_sha256",
+        ):
+            _hash(item[field], field, _HASH_64)
+        coherence = item["formal_point_time_coherence"]
+        if not isinstance(coherence, Mapping) or set(coherence) != _TIME_COHERENCE_FIELDS:
+            _fail("official_point_invalid", "formal point time coherence is invalid")
+        if coherence.get("schema_version") != _TIME_COHERENCE_SCHEMA:
+            _fail("official_point_invalid", "formal point time coherence schema is invalid")
+        if coherence.get("status") not in {"ready", "not_evaluable"}:
+            _fail("official_point_invalid", "formal point time coherence status is invalid")
+        if (coherence["status"] == "ready") != (coherence.get("reason_code") is None):
+            _fail("official_point_invalid", "formal point time coherence reason is invalid")
+        if coherence["status"] == "not_evaluable" and coherence.get("reason_code") != "formal_point_time_skew":
+            _fail("official_point_invalid", "formal point time coherence reason is unsupported")
+        count = coherence.get("observation_count")
+        skew = coherence.get("skew_ms")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            _fail("official_point_invalid", "formal point observation count is invalid")
+        if skew is not None and (isinstance(skew, bool) or not isinstance(skew, int) or skew < 0):
+            _fail("official_point_invalid", "formal point skew is invalid")
+        if coherence.get("max_skew_ms") != _TIME_COHERENCE_MAX_SKEW_MS:
+            _fail("official_point_invalid", "formal point skew limit is invalid")
+        minimum = coherence.get("minimum_observed_at_utc")
+        maximum = coherence.get("maximum_observed_at_utc")
+        parsed_minimum = (
+            datetime.fromisoformat(_strict_timestamp(minimum, "minimum_observed_at_utc").replace("Z", "+00:00"))
+            if minimum is not None
+            else None
+        )
+        parsed_maximum = (
+            datetime.fromisoformat(_strict_timestamp(maximum, "maximum_observed_at_utc").replace("Z", "+00:00"))
+            if maximum is not None
+            else None
+        )
+        if count == 0:
+            if minimum is not None or maximum is not None or skew is not None:
+                _fail("official_point_invalid", "empty formal point coherence is inconsistent")
+        elif parsed_minimum is None or parsed_maximum is None or skew is None:
+            _fail("official_point_invalid", "formal point coherence range is incomplete")
+        elif parsed_minimum > parsed_maximum or skew != int(
+            (parsed_maximum - parsed_minimum).total_seconds() * 1000
+        ):
+            _fail("official_point_invalid", "formal point coherence range is inconsistent")
+        if coherence["status"] == "ready" and (
+            count == 0
+            or
+            skew is None
+            or skew > _TIME_COHERENCE_MAX_SKEW_MS
+            or minimum is None
+            or maximum is None
+        ):
+            _fail("official_point_invalid", "formal point ready coherence is incomplete")
     candidate_ids = item["producer_accepted_candidate_ids"]
     if not isinstance(candidate_ids, list):
         _fail("official_point_invalid", "producer candidate IDs must be a list")
@@ -684,6 +951,7 @@ def capture_scheduled_recommendation_point(
     *,
     source_commit_sha: str,
     require_option_market_evidence: bool = False,
+    require_formal_contract: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     try:
         bundle = load_candidate_snapshot_bundle(
@@ -707,7 +975,10 @@ def capture_scheduled_recommendation_point(
     if not isinstance(opening, Mapping):
         _fail("official_point_unavailable", "opening owner is unavailable")
     prepared_receipt: Mapping[str, Any] | None = None
-    if require_option_market_evidence:
+    required_manifest: Mapping[str, Any] | None = None
+    required_manifest_ref: str | None = None
+    required_manifest_sha256: str | None = None
+    if require_option_market_evidence or require_formal_contract:
         prepared_manifest_path = find_prepared_option_positions_manifest(
             base=Path(base),
             run_id=run_id,
@@ -718,6 +989,30 @@ def capture_scheduled_recommendation_point(
                 "option_market_evidence_contract_missing",
                 "prepared option v2 receipt is unavailable",
             )
+        try:
+            if require_formal_contract:
+                required_manifest_ref, required_manifest_sha256 = _required_data_binding(
+                    opening
+                )
+                required_path = Path(base).resolve().joinpath(
+                    *required_manifest_ref.split("/")
+                )
+                required_manifest, _required_root, required_bytes = (
+                    load_required_data_snapshot_manifest_snapshot(
+                        manifest_path=required_path,
+                        expected_run_id=run_id,
+                    )
+                )
+                if (
+                    hashlib.sha256(required_bytes).hexdigest()
+                    != required_manifest_sha256
+                ):
+                    _fail(
+                        "required_data_conflict",
+                        "required-data manifest hash does not match",
+                    )
+        except (OSError, RequiredDataSnapshotError) as exc:
+            _fail("required_data_contract_missing", f"required-data manifest is invalid: {exc}")
         try:
             prepared_receipt = load_prepared_option_positions_context_receipt(
                 manifest_path=prepared_manifest_path,
@@ -744,5 +1039,8 @@ def capture_scheduled_recommendation_point(
         terminal_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         source_commit_sha=source_commit_sha,
         prepared_option_receipt=prepared_receipt,
+        required_data_manifest=required_manifest,
+        required_data_manifest_ref=required_manifest_ref,
+        required_data_manifest_sha256=required_manifest_sha256,
     )
     return publish_recommendation_point(Path(base), point), point

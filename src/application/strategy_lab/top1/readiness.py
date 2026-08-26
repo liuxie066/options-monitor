@@ -5,6 +5,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from src.application.research.formal_corpus import CORPUS_HEALTH_SCHEMA
+from src.application.strategy_lab.top1.contracts import RESEARCH_REQUIRED_DAYS
+
 
 READINESS_SCHEMA = "sell_put_top1_readiness.v1"
 ADVANCE_SERVICE = "options-monitor-strategy-lab-top1-advance.service"
@@ -208,6 +211,25 @@ def build_top1_readiness(
         runtime_blockers.append("strategy_lab_top1_store_not_ready")
     if corpus_status is None:
         runtime_blockers.append("strategy_lab_top1_corpus_unavailable")
+    elif corpus_status.get("schema_version") != CORPUS_HEALTH_SCHEMA:
+        runtime_blockers.append("strategy_lab_top1_corpus_invalid")
+    else:
+        if corpus_status.get("status") not in {"healthy", "unhealthy"}:
+            runtime_blockers.append("strategy_lab_top1_corpus_invalid")
+        complete_days = corpus_status.get("continuous_complete_trading_days")
+        if (
+            isinstance(complete_days, bool)
+            or not isinstance(complete_days, int)
+            or complete_days < RESEARCH_REQUIRED_DAYS
+        ):
+            runtime_blockers.append("research_corpus_warming")
+        storage = _object(corpus_status.get("storage"))
+        capacity = _object(storage.get("capacity"))
+        capacity_status = capacity.get("status")
+        if capacity_status in {"warning", "critical"}:
+            runtime_blockers.append("research_storage_capacity_risk")
+        elif capacity_status not in {"ok", "insufficient_history"}:
+            runtime_blockers.append("research_storage_capacity_unavailable")
     if not _calendar_ready(calendar_binding):
         runtime_blockers.append("market_calendar_binding_unavailable")
     runtime_blockers.extend(

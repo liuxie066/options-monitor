@@ -18,6 +18,15 @@ from src.application.strategy_lab.top1.research_window import (
     ResearchWindowError,
     load_research_window,
 )
+from src.application.research.formal_corpus import (
+    FormalCorpusError,
+    load_formal_point,
+)
+from src.application.strategy_lab.top1.ranking import (
+    Top1RankingError,
+    build_top1_recipe_projection,
+    materialize_top1_recipe_input,
+)
 from src.infrastructure.private_storage import open_private_text, private_path
 
 
@@ -132,6 +141,56 @@ def load_materialized_research_input(
             if not isinstance(raw_point, Mapping):
                 _fail("research_artifact_invalid", "sealed dataset point is invalid")
             ref = raw_point.get("projection_ref")
+            if isinstance(ref, str) and ref.endswith(".json.gz"):
+                try:
+                    loaded = load_formal_point(
+                        artifact_root,
+                        market=str(sealed_dataset["market"]),
+                        account=str(sealed_dataset["account"]),
+                        trading_date=str(raw_day["trading_date"]),
+                        recommendation_point_id=str(
+                            raw_point["recommendation_point_id"]
+                        ),
+                    )
+                    if (
+                        loaded["status"] != "available"
+                        or loaded["artifact_ref"] != ref
+                    ):
+                        raise ValueError("formal point binding changed")
+                    recipe_projection = build_top1_recipe_projection(
+                        loaded["point"],
+                        formal_point_ref=ref,
+                    )
+                    projection_bytes = render_json_text(recipe_projection).encode()
+                    if (
+                        hashlib.sha256(projection_bytes).hexdigest()
+                        != raw_point.get("projection_file_sha256")
+                        or recipe_projection["artifact_provenance"]["content_sha256"]
+                        != raw_point.get("projection_content_sha256")
+                    ):
+                        raise ValueError("materialized projection hash changed")
+                    projection = materialize_top1_recipe_input(
+                        loaded["point"], recipe_projection
+                    )
+                except (
+                    FormalCorpusError,
+                    KeyError,
+                    Top1RankingError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise ResearchArtifactError(
+                        "research_artifact_invalid",
+                        "formal ranking projection cannot be materialized",
+                    ) from exc
+                projections.append(
+                    {
+                        "projection_ref": ref,
+                        "recipe_projection": recipe_projection,
+                        "projection": projection,
+                    }
+                )
+                continue
             projections.append(
                 {
                     "projection_ref": ref,

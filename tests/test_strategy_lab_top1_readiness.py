@@ -54,6 +54,15 @@ def _source_facts() -> tuple[dict[str, object], dict[str, object]]:
     return drift, status
 
 
+def _healthy_corpus(*, complete_days: int = 20) -> dict[str, object]:
+    return {
+        "schema_version": "corpus_health_receipt.v1",
+        "status": "healthy",
+        "continuous_complete_trading_days": complete_days,
+        "storage": {"capacity": {"status": "ok"}},
+    }
+
+
 def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
     drift, status = _source_facts()
     common = {
@@ -61,7 +70,7 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
         "drift": drift,
         "service_status": status,
         "schema_state": {"status": "ready", "schema_version": 4},
-        "corpus_status": {"days_total": 1},
+        "corpus_status": _healthy_corpus(),
         "calendar_binding": {
             "market": "HK",
             "market_calendar_version": "hk-calendar.v1",
@@ -92,6 +101,47 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
     assert ready["source_delivery_ready"] is True
     assert ready["validation_runtime_ready"] is True
     assert ready["validation_runtime_blockers"] == []
+
+    warming = build_top1_readiness(
+        **{**common, "corpus_status": _healthy_corpus(complete_days=19)},
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+    )
+    assert "research_corpus_warming" in warming["validation_runtime_blockers"]
+
+    historical_gap = build_top1_readiness(
+        **{
+            **common,
+            "corpus_status": {**_healthy_corpus(), "status": "unhealthy"},
+        },
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+    )
+    assert historical_gap["validation_runtime_ready"] is True
+    assert historical_gap["validation_runtime_blockers"] == []
+
+    invalid_corpus = build_top1_readiness(
+        **{
+            **common,
+            "corpus_status": {**_healthy_corpus(), "status": "unknown"},
+        },
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+    )
+    assert "strategy_lab_top1_corpus_invalid" in invalid_corpus[
+        "validation_runtime_blockers"
+    ]
+
+    missing_capacity = build_top1_readiness(
+        **{
+            **common,
+            "corpus_status": {
+                **_healthy_corpus(),
+                "storage": {"capacity": None},
+            },
+        },
+        capability_facts={name: True for name in CAPABILITY_FACTS},
+    )
+    assert "research_storage_capacity_unavailable" in missing_capacity[
+        "validation_runtime_blockers"
+    ]
 
     missing_corpus = build_top1_readiness(
         **{**common, "corpus_status": None},
@@ -164,7 +214,7 @@ def test_readiness_ignores_unrelated_service_activation_drift(
         drift=drift,
         service_status=status,
         schema_state={"status": "ready", "schema_version": 4},
-        corpus_status={"days_total": 1},
+        corpus_status=_healthy_corpus(),
         calendar_binding=None,
     )
 
@@ -179,7 +229,7 @@ def test_readiness_ignores_unrelated_service_activation_drift(
         drift=drift,
         service_status=status,
         schema_state={"status": "ready", "schema_version": 4},
-        corpus_status={"days_total": 1},
+        corpus_status=_healthy_corpus(),
         calendar_binding=None,
     )
     assert "strategy_lab_top1_service_drift" in blocked[
@@ -193,7 +243,7 @@ def test_readiness_ignores_unrelated_service_activation_drift(
         drift=unavailable_drift,
         service_status=status,
         schema_state={"status": "ready", "schema_version": 4},
-        corpus_status={"days_total": 1},
+        corpus_status=_healthy_corpus(),
         calendar_binding=None,
     )
     assert "strategy_lab_top1_service_drift" in unavailable[
@@ -480,6 +530,14 @@ def test_calendar_refresh_cli_requires_write_and_closes_gateway(
         / "runtime/output_shared/research/strategy_lab/experiments.sqlite3"
     ).exists()
 
+    profile = _profile(tmp_path)
+    profile.pop("strategy_lab_top1")
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(cli, "build_ready_futu_quote_gateway", explode)
+    with pytest.raises(AgentToolError, match="OpenD binding is required") as raised:
+        cli.handle_top1_command(parse_args([*command, "--write"]))
+    assert raised.value.code == "CONFIG_ERROR"
+
 
 def test_capability_refresh_cli_requires_write_and_readiness_only_reads_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -637,6 +695,26 @@ def test_disabled_advance_migrates_store_but_loads_no_runtime_dependencies(
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
     monkeypatch.delenv("OM_STRATEGY_LAB_TOP1_AVAILABLE", raising=False)
+    store_path = (
+        tmp_path
+        / "runtime"
+        / "output_shared"
+        / "research"
+        / "strategy_lab"
+        / "experiments.sqlite3"
+    )
+    expectation_calls: list[str] = []
+
+    def seal_expectations(*_args: object, **_kwargs: object) -> dict[str, object]:
+        assert not store_path.exists()
+        expectation_calls.append("sealed")
+        return {"status": "degraded", "results": []}
+
+    monkeypatch.setattr(
+        cli,
+        "seal_profile_formal_expectations",
+        seal_expectations,
+    )
 
     def explode(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("disabled advance must not load runtime dependencies")
@@ -664,16 +742,10 @@ def test_disabled_advance_migrates_store_but_loads_no_runtime_dependencies(
 
     response = cli.handle_top1_command(args)
 
-    store_path = (
-        tmp_path
-        / "runtime"
-        / "output_shared"
-        / "research"
-        / "strategy_lab"
-        / "experiments.sqlite3"
-    )
     assert response["ok"] is True
     assert response["data"]["status"] == "disabled"
+    assert response["data"]["formal_expectations"]["status"] == "degraded"
+    assert expectation_calls == ["sealed"]
     assert store_path.exists()
 
 

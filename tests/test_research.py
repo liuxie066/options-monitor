@@ -192,6 +192,32 @@ def test_storage_baseline_cli_dispatches_read_only_options(monkeypatch, tmp_path
     ]
 
 
+def test_formal_corpus_health_cli_reports_zero_collection(tmp_path: Path) -> None:
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    response = handle_research_command(
+        parse_args(
+            [
+                "research",
+                "corpus-health",
+                "--runtime-root",
+                str(tmp_path),
+                "--market",
+                "us",
+                "--account",
+                "lx",
+            ]
+        ),
+        repo_base_fn=lambda: tmp_path,
+    )
+
+    assert response["ok"] is True
+    assert response["tool_name"] == "research.corpus-health"
+    assert response["data"]["status"] == "unhealthy"
+    assert response["data"]["days_total"] == 0
+
+
 def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.application.research import storage_baseline
     from src.interfaces.cli.main import parse_args
