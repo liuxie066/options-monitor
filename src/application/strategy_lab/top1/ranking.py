@@ -26,14 +26,19 @@ from src.application.shadow_replay.common import (
 )
 from src.application.strategy_lab.top1.economics import (
     build_fx_rate_binding_from_projection,
+    validate_fx_rate_binding,
 )
 
 
 RANKING_PROJECTION_SCHEMA_V1 = "sell_put_ranking_projection.v1"
 RANKING_PROJECTION_SCHEMA_V2 = "sell_put_ranking_projection.v2"
+RANKING_PROJECTION_SCHEMA_V3 = "sell_put_ranking_projection.v3"
 RANKING_PROJECTION_SCHEMA_VERSION = RANKING_PROJECTION_SCHEMA_V1
 RANKING_RESULT_SCHEMA_VERSION = "sell_put_recommendation_ranking_result.v1"
 RANKING_PROJECTION_ARTIFACT_KIND = "sell_put_ranking_projection"
+RECIPE_ID = "sell_put_top1_option_market_concentration"
+RECIPE_VERSION = "v1"
+_RECIPE_PROJECTION_BEHAVIOR_SCHEMA = "sell_put_top1_recipe_projection_behavior.v1"
 
 _POINT_KEYS = frozenset(
     {
@@ -131,6 +136,30 @@ _PROJECTION_KEYS_V2 = frozenset(
         "option_market_evidence_ref",
         "option_market_evidence_manifest_sha256",
         "option_market_evidence_payload_sha256",
+    }
+)
+_PROJECTION_KEYS_V3 = frozenset(
+    {
+        "schema_version",
+        "formal_point_ref",
+        "formal_point_content_sha256",
+        "recipe_id",
+        "recipe_version",
+        "behavior_binding_sha256",
+        "materialized_input_content_sha256",
+        "producer_accepted_candidate_ids",
+        "candidates",
+        "artifact_provenance",
+    }
+)
+_CANDIDATE_KEYS_V3 = frozenset(
+    {
+        "candidate_id",
+        "option_market_concentration_after",
+        "option_market_value_cny",
+        "option_market_concentration_metric_version",
+        "option_market_evidence_refs",
+        "opening_fx_binding",
     }
 )
 _PROVENANCE_KEYS = frozenset(
@@ -285,6 +314,19 @@ def _validate_point_binding(
         ):
             _hash(item[field], field, _HASH_64)
     return item
+
+
+def recipe_projection_behavior_sha256() -> str:
+    return canonical_sha256(
+        {
+            "schema_version": _RECIPE_PROJECTION_BEHAVIOR_SCHEMA,
+            "recipe_id": RECIPE_ID,
+            "recipe_version": RECIPE_VERSION,
+            "accepted_set_contract": "same_point_producer_accepted_set.v1",
+            "ranking_contract": SELL_PUT_RANKING_CONTRACT_VERSION,
+            "metric_contract": OPTION_MARKET_CONCENTRATION_METRIC_VERSION,
+        }
+    )
 
 
 def build_ranking_projection(
@@ -503,11 +545,238 @@ def build_ranking_projection(
     return validate_ranking_projection(payload)
 
 
+def _formal_point_ranking_input(
+    formal_point: Mapping[str, Any],
+) -> dict[str, Any]:
+    point = formal_point.get("recommendation_point")
+    opening = formal_point.get("opening_snapshot")
+    evidence = formal_point.get("option_market_evidence")
+    if not all(isinstance(value, Mapping) for value in (point, opening, evidence)):
+        _fail("formal point facts are incomplete")
+    assert isinstance(point, Mapping)
+    projection = build_ranking_projection(
+        opening,
+        point_binding={
+            "recommendation_point_id": point["recommendation_point_id"],
+            "market": point["market"],
+            "account": point["account"],
+            "run_id": point["run_id"],
+            "opening_snapshot_ref": point["opening_snapshot_ref"],
+            "opening_snapshot_sha256": point["opening_snapshot_sha256"],
+            "decision_at_utc": point["decision_at_utc"],
+            "source_commit_sha": point["source_commit_sha"],
+            "option_market_evidence_ref": point[
+                "prepared_context_manifest_ref"
+            ],
+            "option_market_evidence_manifest_sha256": point[
+                "prepared_context_manifest_sha256"
+            ],
+            "option_market_evidence_payload_sha256": point[
+                "prepared_context_payload_sha256"
+            ],
+        },
+        option_market_evidence=evidence,
+        require_option_market_evidence=True,
+    )
+    if projection["producer_accepted_candidate_ids"] != point[
+        "producer_accepted_candidate_ids"
+    ]:
+        _fail("formal point accepted candidate IDs changed")
+    return projection
+
+
+def build_top1_recipe_projection(
+    formal_point: Mapping[str, Any],
+    *,
+    formal_point_ref: str,
+) -> dict[str, Any]:
+    formal_ref = _relative_posix_path(formal_point_ref, "formal_point_ref")
+    formal_hash = _hash(
+        formal_point.get("content_sha256"),
+        "formal_point_content_sha256",
+        _HASH_64,
+    )
+    materialized = _formal_point_ranking_input(formal_point)
+    payload = {
+        "schema_version": RANKING_PROJECTION_SCHEMA_V3,
+        "formal_point_ref": formal_ref,
+        "formal_point_content_sha256": formal_hash,
+        "recipe_id": RECIPE_ID,
+        "recipe_version": RECIPE_VERSION,
+        "behavior_binding_sha256": recipe_projection_behavior_sha256(),
+        "materialized_input_content_sha256": materialized["artifact_provenance"][
+            "content_sha256"
+        ],
+        "producer_accepted_candidate_ids": list(
+            materialized["producer_accepted_candidate_ids"]
+        ),
+        "candidates": [
+            {key: candidate[key] for key in _CANDIDATE_KEYS_V3}
+            for candidate in materialized["candidates"]
+        ],
+    }
+    attach_artifact_provenance(
+        payload,
+        artifact_kind=RANKING_PROJECTION_ARTIFACT_KIND,
+        source_generation={
+            "generation_id": f"formal_point:{formal_hash}",
+            "revision": 1,
+            "source_ref": formal_ref,
+            "source_sha256": formal_hash,
+        },
+    )
+    return validate_ranking_projection(payload)
+
+
+def materialize_top1_recipe_input(
+    formal_point: Mapping[str, Any],
+    recipe_projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    compact = validate_ranking_projection(recipe_projection)
+    if compact["schema_version"] != RANKING_PROJECTION_SCHEMA_V3:
+        _fail("recipe projection must use v3")
+    if compact["formal_point_content_sha256"] != formal_point.get("content_sha256"):
+        _fail("recipe projection formal point binding changed")
+    materialized = _formal_point_ranking_input(formal_point)
+    if compact["materialized_input_content_sha256"] != materialized[
+        "artifact_provenance"
+    ]["content_sha256"]:
+        _fail("recipe projection materialized input binding changed")
+    expected = {
+        candidate["candidate_id"]: {
+            key: candidate[key] for key in _CANDIDATE_KEYS_V3
+        }
+        for candidate in materialized["candidates"]
+    }
+    if compact["producer_accepted_candidate_ids"] != materialized[
+        "producer_accepted_candidate_ids"
+    ] or compact["candidates"] != [
+        expected[candidate_id]
+        for candidate_id in materialized["producer_accepted_candidate_ids"]
+    ]:
+        _fail("recipe projection metrics changed")
+    return materialized
+
+
+def _validate_recipe_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(payload)
+    _exact_keys(item, _PROJECTION_KEYS_V3, "recipe projection")
+    _relative_posix_path(item["formal_point_ref"], "formal_point_ref")
+    formal_hash = _hash(
+        item["formal_point_content_sha256"],
+        "formal_point_content_sha256",
+        _HASH_64,
+    )
+    if item["recipe_id"] != RECIPE_ID or item["recipe_version"] != RECIPE_VERSION:
+        _fail("recipe projection identity is invalid")
+    if item["behavior_binding_sha256"] != recipe_projection_behavior_sha256():
+        _fail("recipe projection behavior binding changed")
+    _hash(
+        item["materialized_input_content_sha256"],
+        "materialized_input_content_sha256",
+        _HASH_64,
+    )
+    candidate_ids = item["producer_accepted_candidate_ids"]
+    candidates = item["candidates"]
+    if (
+        not isinstance(candidate_ids, list)
+        or any(not isinstance(value, str) or not value for value in candidate_ids)
+        or len(candidate_ids) != len(set(candidate_ids))
+        or not isinstance(candidates, list)
+        or len(candidates) != len(candidate_ids)
+    ):
+        _fail("recipe projection candidates are invalid")
+    projected_ids: list[str] = []
+    for raw_candidate in candidates:
+        if not isinstance(raw_candidate, Mapping):
+            _fail("recipe projection candidate must be an object")
+        candidate = dict(raw_candidate)
+        _exact_keys(candidate, _CANDIDATE_KEYS_V3, "recipe projection candidate")
+        projected_ids.append(_text(candidate["candidate_id"], "candidate_id"))
+        _finite_number(
+            candidate["option_market_concentration_after"],
+            "option_market_concentration_after",
+        )
+        if not 0 <= float(candidate["option_market_concentration_after"]) <= 1:
+            _fail("option market concentration must be between zero and one")
+        _finite_number(
+            candidate["option_market_value_cny"],
+            "option_market_value_cny",
+            positive=True,
+        )
+        if (
+            candidate["option_market_concentration_metric_version"]
+            != OPTION_MARKET_CONCENTRATION_METRIC_VERSION
+        ):
+            _fail("option market concentration metric version is invalid")
+        refs = candidate["option_market_evidence_refs"]
+        if not isinstance(refs, Mapping) or set(refs) != {
+            "prepared_evidence_ref",
+            "prepared_evidence_content_sha256",
+            "position_lot_ids",
+            "valuation_mark_fact_ids",
+            "fx_rate_fact_ids",
+        }:
+            _fail("option market evidence refs are incomplete or unexpected")
+        _relative_posix_path(
+            refs["prepared_evidence_ref"], "prepared_evidence_ref"
+        )
+        _hash(
+            refs["prepared_evidence_content_sha256"],
+            "prepared_evidence_content_sha256",
+            _HASH_64,
+        )
+        for field in (
+            "position_lot_ids",
+            "valuation_mark_fact_ids",
+            "fx_rate_fact_ids",
+        ):
+            values = refs[field]
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(value, str) or not value for value in values)
+                or values != sorted(set(values))
+            ):
+                _fail(f"{field} must be a sorted unique string list")
+        binding = candidate["opening_fx_binding"]
+        if binding is not None:
+            try:
+                validate_fx_rate_binding(binding)
+            except ValueError as exc:
+                _fail(f"opening FX binding is invalid: {exc}")
+    if projected_ids != candidate_ids:
+        _fail("recipe projection candidate order changed")
+    provenance = item["artifact_provenance"]
+    if not isinstance(provenance, Mapping):
+        _fail("artifact provenance must be an object")
+    source = provenance.get("source_generation")
+    if source != {
+        "generation_id": f"formal_point:{formal_hash}",
+        "revision": 1,
+        "source_ref": item["formal_point_ref"],
+        "source_sha256": formal_hash,
+    }:
+        _fail("recipe projection source generation changed")
+    try:
+        validation = validate_artifact_provenance(
+            item,
+            artifact_kind=RANKING_PROJECTION_ARTIFACT_KIND,
+            schema_version=RANKING_PROJECTION_SCHEMA_V3,
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"artifact provenance is invalid: {exc}")
+    if not validation["trusted"]:
+        _fail("artifact provenance is invalid")
+    return item
+
+
 def validate_ranking_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         _fail("ranking projection must be an object")
     item = dict(payload)
     schema = item.get("schema_version")
+    if schema == RANKING_PROJECTION_SCHEMA_V3:
+        return _validate_recipe_projection(item)
     if schema not in {
         RANKING_PROJECTION_SCHEMA_V1,
         RANKING_PROJECTION_SCHEMA_V2,
@@ -680,6 +949,8 @@ def rerank_recommendation_point(
     near_return_threshold: float = 0.002,
 ) -> dict[str, Any]:
     item = validate_ranking_projection(projection)
+    if item["schema_version"] == RANKING_PROJECTION_SCHEMA_V3:
+        _fail("recipe projection must be materialized before reranking")
     ranked = rank_candidate_rows(
         [dict(candidate) for candidate in item["candidates"]],
         mode="put",

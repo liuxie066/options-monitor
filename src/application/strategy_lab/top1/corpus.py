@@ -33,6 +33,18 @@ from src.application.recommendation_point import (
     strategy_lab_top1_available,
 )
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
+from src.application.research.formal_corpus import (
+    FormalCorpusError,
+    MARKET_CALENDAR_POINTER_SCHEMA,
+    MARKET_CALENDAR_SNAPSHOT_SCHEMA,
+    build_corpus_health_receipt,
+    formal_corpus_present,
+    load_formal_expectation,
+    load_formal_point,
+    read_bound_market_calendar_snapshot as _read_bound_market_calendar_snapshot,
+    read_market_calendar_binding as _read_market_calendar_binding,
+    refresh_market_calendar_binding as _refresh_market_calendar_binding,
+)
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     RECOMMENDATION_POINT_SELECTOR,
@@ -42,14 +54,16 @@ from src.application.strategy_lab.top1.contracts import (
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_SCHEMA_VERSION,
     RANKING_PROJECTION_SCHEMA_V2,
+    RANKING_PROJECTION_SCHEMA_V3,
     Top1RankingError,
+    build_top1_recipe_projection,
     build_ranking_projection,
+    materialize_top1_recipe_input,
     rerank_recommendation_point,
     validate_ranking_projection,
 )
 from src.application.strategy_lab.top1.terminal_projection import publish_exact_text
 from src.infrastructure.private_storage import (
-    atomic_write_private_text,
     open_private_text,
     private_path,
 )
@@ -65,46 +79,6 @@ CORPUS_STATUS_SCHEMA = "sell_put_top1_corpus_status.v1"
 RESEARCH_WINDOW_FACTS_SCHEMA = "sell_put_top1_research_window_facts.v1"
 DATASET_FREEZE_RESULT_SCHEMA = "sell_put_top1_dataset_freeze_result.v1"
 HISTORY_MIGRATION_PREVIEW_SCHEMA = "sell_put_top1_history_migration_preview.v1"
-MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
-MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v2"
-_MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = (
-    "sell_put_top1_market_calendar_source_receipt.v1"
-)
-
-_CALENDAR_POINTER_FIELDS = frozenset(
-    {
-        "schema_version",
-        "market",
-        "snapshot_ref",
-        "snapshot_content_sha256",
-        "snapshot_file_sha256",
-        "content_sha256",
-    }
-)
-_CALENDAR_SNAPSHOT_FIELDS = frozenset(
-    {
-        "schema_version",
-        "market",
-        "market_calendar_version",
-        "coverage_start",
-        "coverage_end",
-        "trading_sessions",
-        "source_receipt_sha256",
-        "observed_at_utc",
-        "content_sha256",
-    }
-)
-_CALENDAR_SOURCE_FIELDS = frozenset(
-    {
-        "retcode",
-        "rows",
-        "coverage_complete",
-        "pagination_complete",
-        "page_count",
-    }
-)
-_CALENDAR_SOURCE_ROW_FIELDS = frozenset({"time", "trade_date_type"})
-_CALENDAR_SESSION_TYPES = frozenset({"WHOLE", "MORNING", "AFTERNOON"})
 
 _EXPECTATION_FIELDS = frozenset(
     {
@@ -246,97 +220,12 @@ def _dataset_ref(market: str, account: str, content_sha256: str) -> str:
     )
 
 
-def _calendar_pointer_ref(market: str) -> str:
-    return (
-        "strategy_lab/top1/capabilities/market-calendar/"
-        f"{market.lower()}/current.json"
-    )
-
-
-def _calendar_snapshot_ref(market: str, content_sha256: str) -> str:
-    return (
-        "strategy_lab/top1/capabilities/market-calendar/"
-        f"{market.lower()}/snapshots/{content_sha256}.json"
-    )
-
-
 def _render(payload: dict[str, Any]) -> bytes:
     return render_json_text(payload).encode("utf-8")
 
 
 def _file_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-
-def _read_canonical_artifact(
-    artifact_root: str | Path,
-    ref: str,
-) -> tuple[dict[str, Any], bytes]:
-    path = private_path(artifact_root).joinpath(*ref.split("/"))
-    try:
-        with open_private_text(path) as handle:
-            content = handle.read().encode("utf-8")
-        payload = json.loads(content.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CorpusError(
-            "market_calendar_binding_unavailable",
-            "market calendar artifact is unavailable",
-        ) from exc
-    if not isinstance(payload, dict) or content != _render(payload):
-        _fail(
-            "market_calendar_binding_unavailable",
-            "market calendar artifact bytes are not canonical",
-        )
-    return payload, content
-
-
-def _validate_calendar_snapshot(
-    payload: Mapping[str, Any],
-    *,
-    expected_market: str,
-) -> dict[str, Any]:
-    item = dict(payload)
-    try:
-        if set(item) != _CALENDAR_SNAPSHOT_FIELDS:
-            raise ValueError("snapshot keys are invalid")
-        if item["schema_version"] != MARKET_CALENDAR_SNAPSHOT_SCHEMA:
-            raise ValueError("snapshot schema is invalid")
-        if item["market"] != expected_market:
-            raise ValueError("snapshot market does not match")
-        _text(item["market_calendar_version"], "market_calendar_version")
-        coverage_start = _trading_date(item["coverage_start"])
-        coverage_end = _trading_date(item["coverage_end"])
-        if coverage_start > coverage_end:
-            raise ValueError("snapshot coverage is reversed")
-        values = item["trading_sessions"]
-        if not isinstance(values, list) or not values:
-            raise ValueError("snapshot trading sessions are missing")
-        trading_dates: list[str] = []
-        for raw_session in values:
-            if not isinstance(raw_session, Mapping):
-                raise ValueError("snapshot trading session must be an object")
-            session = dict(raw_session)
-            if set(session) != {"trading_date", "trade_date_type"}:
-                raise ValueError("snapshot trading session keys are invalid")
-            trading_dates.append(_trading_date(session["trading_date"]))
-            if session["trade_date_type"] not in _CALENDAR_SESSION_TYPES:
-                raise ValueError("snapshot trade date type is invalid")
-        if trading_dates != sorted(set(trading_dates)):
-            raise ValueError("snapshot trading dates are not ordered and unique")
-        if trading_dates[0] < coverage_start or trading_dates[-1] > coverage_end:
-            raise ValueError("snapshot trading dates exceed coverage")
-        _hash(item["source_receipt_sha256"], "source_receipt_sha256")
-        _timestamp(item["observed_at_utc"], "observed_at_utc")
-        _hash(item["content_sha256"], "content_sha256")
-        content = {key: value for key, value in item.items() if key != "content_sha256"}
-        if canonical_sha256(content) != item["content_sha256"]:
-            raise ValueError("snapshot content hash does not match")
-    except (CorpusError, KeyError, TypeError, ValueError) as exc:
-        raise CorpusError(
-            "market_calendar_binding_unavailable",
-            f"market calendar snapshot is invalid: {exc}",
-        ) from exc
-    return {**item, "trading_dates": trading_dates}
 
 
 def read_bound_market_calendar_snapshot(
@@ -347,35 +236,14 @@ def read_bound_market_calendar_snapshot(
     snapshot_content_sha256: str,
     snapshot_file_sha256: str,
 ) -> dict[str, Any]:
-    """Read one exact content-addressed calendar snapshot without using current."""
-
-    market, _ = _identity(market, "calendar")
-    try:
-        ref = _relative_ref(snapshot_ref, "snapshot_ref")
-        content_hash = _hash(
-            snapshot_content_sha256, "snapshot_content_sha256"
-        )
-        file_hash = _hash(snapshot_file_sha256, "snapshot_file_sha256")
-    except CorpusError as exc:
-        raise CorpusError("market_calendar_binding_unavailable", str(exc)) from exc
-    if ref != _calendar_snapshot_ref(market, content_hash):
-        _fail(
-            "market_calendar_binding_unavailable",
-            "market calendar snapshot ref is not content-addressed",
-        )
-    payload, content = _read_canonical_artifact(artifact_root, ref)
-    item = _validate_calendar_snapshot(payload, expected_market=market)
-    if item["content_sha256"] != content_hash or _file_sha256(content) != file_hash:
-        _fail(
-            "market_calendar_binding_unavailable",
-            "market calendar snapshot hashes do not match",
-        )
-    return {
-        **item,
-        "snapshot_ref": ref,
-        "snapshot_content_sha256": content_hash,
-        "snapshot_file_sha256": file_hash,
-    }
+    return _calendar_call(
+        _read_bound_market_calendar_snapshot,
+        artifact_root,
+        market=market,
+        snapshot_ref=snapshot_ref,
+        snapshot_content_sha256=snapshot_content_sha256,
+        snapshot_file_sha256=snapshot_file_sha256,
+    )
 
 
 def read_market_calendar_binding(
@@ -383,106 +251,11 @@ def read_market_calendar_binding(
     *,
     market: str,
 ) -> dict[str, Any]:
-    """Read and verify the current compact market-calendar capability."""
-
-    market, _ = _identity(market, "calendar")
-    ref = _calendar_pointer_ref(market)
-    payload, content = _read_canonical_artifact(artifact_root, ref)
-    try:
-        if set(payload) != _CALENDAR_POINTER_FIELDS:
-            raise ValueError("pointer keys are invalid")
-        if payload["schema_version"] != MARKET_CALENDAR_POINTER_SCHEMA:
-            raise ValueError("pointer schema is invalid")
-        if payload["market"] != market:
-            raise ValueError("pointer market does not match")
-        snapshot_ref = _relative_ref(payload["snapshot_ref"], "snapshot_ref")
-        snapshot_content_hash = _hash(
-            payload["snapshot_content_sha256"], "snapshot_content_sha256"
-        )
-        snapshot_file_hash = _hash(
-            payload["snapshot_file_sha256"], "snapshot_file_sha256"
-        )
-        _hash(payload["content_sha256"], "content_sha256")
-        pointer_body = {
-            key: value for key, value in payload.items() if key != "content_sha256"
-        }
-        if canonical_sha256(pointer_body) != payload["content_sha256"]:
-            raise ValueError("pointer content hash does not match")
-        if content != _render(payload):
-            raise ValueError("pointer bytes are not canonical")
-    except (CorpusError, KeyError, TypeError, ValueError) as exc:
-        raise CorpusError(
-            "market_calendar_binding_unavailable",
-            f"market calendar pointer is invalid: {exc}",
-        ) from exc
-    return read_bound_market_calendar_snapshot(
+    return _calendar_call(
+        _read_market_calendar_binding,
         artifact_root,
         market=market,
-        snapshot_ref=snapshot_ref,
-        snapshot_content_sha256=snapshot_content_hash,
-        snapshot_file_sha256=snapshot_file_hash,
     )
-
-
-def _normalized_calendar_source_receipt(
-    receipt: object,
-    *,
-    market: str,
-    coverage_start: str,
-    coverage_end: str,
-) -> dict[str, Any]:
-    try:
-        if not isinstance(receipt, Mapping):
-            raise ValueError("receipt must be an object")
-        item = dict(receipt)
-        if set(item) != _CALENDAR_SOURCE_FIELDS:
-            raise ValueError("receipt keys are invalid")
-        if type(item["retcode"]) is not int or item["retcode"] != 0:
-            raise ValueError("receipt retcode is invalid")
-        if item["coverage_complete"] is not True:
-            raise ValueError("receipt coverage is incomplete")
-        if item["pagination_complete"] is not True:
-            raise ValueError("receipt pagination is incomplete")
-        if type(item["page_count"]) is not int or item["page_count"] != 1:
-            raise ValueError("receipt page count is invalid")
-        rows = item["rows"]
-        if not isinstance(rows, list) or not rows:
-            raise ValueError("receipt rows are missing")
-        sessions: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for raw_row in rows:
-            if not isinstance(raw_row, Mapping):
-                raise ValueError("receipt row must be an object")
-            row = dict(raw_row)
-            if set(row) != _CALENDAR_SOURCE_ROW_FIELDS:
-                raise ValueError("receipt row keys are invalid")
-            trading_date = _trading_date(row["time"])
-            session_type = _text(row["trade_date_type"], "trade_date_type")
-            if trading_date < coverage_start or trading_date > coverage_end:
-                raise ValueError("receipt row exceeds requested coverage")
-            if trading_date in seen:
-                raise ValueError("receipt contains duplicate trading dates")
-            if session_type not in _CALENDAR_SESSION_TYPES:
-                raise ValueError("receipt trade date type is invalid")
-            seen.add(trading_date)
-            sessions.append(
-                {"trading_date": trading_date, "trade_date_type": session_type}
-            )
-    except (CorpusError, KeyError, TypeError, ValueError) as exc:
-        raise CorpusError(
-            "market_calendar_source_invalid",
-            f"HK market calendar source receipt is invalid: {exc}",
-        ) from exc
-    return {
-        "schema_version": _MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA,
-        "source": "futu.request_trading_days",
-        "market": market,
-        "coverage_start": coverage_start,
-        "coverage_end": coverage_end,
-        "trading_sessions": sorted(
-            sessions, key=lambda value: value["trading_date"]
-        ),
-    }
 
 
 def refresh_market_calendar_binding(
@@ -495,91 +268,23 @@ def refresh_market_calendar_binding(
     coverage_end: str,
     observed_at_utc: str,
 ) -> dict[str, Any]:
-    """Collect and publish one compact, hash-bound HK trading calendar."""
-
-    market, _ = _identity(market, "calendar")
-    version = _text(market_calendar_version, "market_calendar_version")
-    start = _trading_date(coverage_start)
-    end = _trading_date(coverage_end)
-    observed_at = _timestamp(observed_at_utc, "observed_at_utc")
-    if start > end:
-        _fail("corpus_input_invalid", "market calendar coverage is reversed")
-    try:
-        receipt = gateway.get_trading_days_with_receipt(
-            market=market,
-            start=start,
-            end=end,
-        )
-    except Exception as exc:
-        raise CorpusError(
-            "market_calendar_source_unavailable",
-            "HK market calendar source is unavailable",
-        ) from exc
-    normalized_receipt = _normalized_calendar_source_receipt(
-        receipt,
+    return _calendar_call(
+        _refresh_market_calendar_binding,
+        artifact_root,
+        gateway=gateway,
         market=market,
-        coverage_start=start,
-        coverage_end=end,
+        market_calendar_version=market_calendar_version,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        observed_at_utc=observed_at_utc,
     )
-    sessions = normalized_receipt["trading_sessions"]
-    source_receipt_sha256 = canonical_sha256(normalized_receipt)
 
-    pointer_ref = _calendar_pointer_ref(market)
-    pointer_path = private_path(artifact_root).joinpath(*pointer_ref.split("/"))
-    if pointer_path.exists() or pointer_path.is_symlink():
-        try:
-            current = read_market_calendar_binding(artifact_root, market=market)
-        except CorpusError:
-            current = None
-        expected = {
-            "market": market,
-            "market_calendar_version": version,
-            "coverage_start": start,
-            "coverage_end": end,
-            "trading_sessions": sessions,
-            "source_receipt_sha256": source_receipt_sha256,
-        }
-        if current is not None and all(
-            current[key] == value for key, value in expected.items()
-        ):
-            return {"status": "unchanged", "binding": current}
 
-    snapshot: dict[str, Any] = {
-        "schema_version": MARKET_CALENDAR_SNAPSHOT_SCHEMA,
-        "market": market,
-        "market_calendar_version": version,
-        "coverage_start": start,
-        "coverage_end": end,
-        "trading_sessions": sessions,
-        "source_receipt_sha256": source_receipt_sha256,
-        "observed_at_utc": observed_at,
-    }
-    snapshot["content_sha256"] = canonical_sha256(snapshot)
-    snapshot_content = _render(snapshot)
-    snapshot_ref = _calendar_snapshot_ref(market, snapshot["content_sha256"])
-    pointer: dict[str, Any] = {
-        "schema_version": MARKET_CALENDAR_POINTER_SCHEMA,
-        "market": market,
-        "snapshot_ref": snapshot_ref,
-        "snapshot_content_sha256": snapshot["content_sha256"],
-        "snapshot_file_sha256": _file_sha256(snapshot_content),
-    }
-    pointer["content_sha256"] = canonical_sha256(pointer)
+def _calendar_call(function: Any, /, *args: Any, **kwargs: Any) -> Any:
     try:
-        publish_exact_text(artifact_root, snapshot_ref, snapshot_content)
-        atomic_write_private_text(pointer_path, render_json_text(pointer))
-        binding = read_market_calendar_binding(artifact_root, market=market)
-    except (CorpusError, OSError, ValueError) as exc:
-        raise CorpusError(
-            "market_calendar_artifact_conflict",
-            "market calendar artifact cannot be published",
-        ) from exc
-    if binding["snapshot_content_sha256"] != snapshot["content_sha256"]:
-        _fail(
-            "market_calendar_artifact_conflict",
-            "published market calendar does not match the collected evidence",
-        )
-    return {"status": "published", "binding": binding}
+        return function(*args, **kwargs)
+    except FormalCorpusError as exc:
+        raise CorpusError(exc.reason_code, str(exc)) from exc
 
 
 def _command_result(
@@ -1971,28 +1676,73 @@ def read_validation_day_source(
 
     market, account = _identity(market, account)
     trading_date = _trading_date(trading_date)
-    row = _store_call(store.corpus_day, market, account, trading_date)
-    if row is None:
-        return {"status": "missing", "row": None, "expectation": None}
-    if row["conflict_status"] != "clean" or row["completeness_reason"] is not None:
+    if not formal_corpus_present(
+        artifact_root, market=market, account=account
+    ):
+        row = _store_call(store.corpus_day, market, account, trading_date)
+        if row is None:
+            return {"status": "missing", "row": None, "expectation": None}
+        if (
+            row["conflict_status"] != "clean"
+            or row["completeness_reason"] is not None
+        ):
+            return {
+                "status": "not_evaluable",
+                "reason_code": row["completeness_reason"]
+                or "research_corpus_conflict",
+                "row": dict(row),
+                "expectation": None,
+            }
+        expectation, _content = _read_indexed_expectation(artifact_root, row)
+        if not expectation["expected_recommendation_point_ids"]:
+            return {
+                "status": "not_evaluable",
+                "reason_code": "corpus_day_expectation_empty",
+                "row": dict(row),
+                "expectation": expectation,
+            }
         return {
-            "status": "not_evaluable",
-            "reason_code": row["completeness_reason"] or "research_corpus_conflict",
+            "status": "available",
+            "reason_code": None,
             "row": dict(row),
-            "expectation": None,
+            "expectation": expectation,
         }
-    expectation, _content = _read_indexed_expectation(artifact_root, row)
-    if not expectation["expected_recommendation_point_ids"]:
+    del store
+    try:
+        loaded = load_formal_expectation(
+            artifact_root,
+            market=market,
+            account=account,
+            trading_date=trading_date,
+        )
+    except FormalCorpusError as exc:
+        raise CorpusError(exc.reason_code, str(exc)) from exc
+    expectation = loaded.get("expectation")
+    row = (
+        {
+            "market": market,
+            "account": account,
+            "trading_date": trading_date,
+            "expectation_ref": loaded.get("artifact_ref"),
+            "expectation_content_sha256": loaded.get(
+                "artifact_content_sha256"
+            ),
+            "expectation_file_sha256": loaded.get("artifact_file_sha256"),
+        }
+        if isinstance(expectation, Mapping)
+        else None
+    )
+    if loaded["status"] != "available":
         return {
-            "status": "not_evaluable",
-            "reason_code": "corpus_day_expectation_empty",
-            "row": dict(row),
+            "status": loaded["status"],
+            "reason_code": loaded.get("reason_code"),
+            "row": row,
             "expectation": expectation,
         }
     return {
         "status": "available",
         "reason_code": None,
-        "row": dict(row),
+        "row": row,
         "expectation": expectation,
     }
 
@@ -2008,6 +1758,8 @@ def read_validation_point_source(
 ) -> dict[str, Any]:
     """Read one point strictly bound to its canonical day expectation and index."""
 
+    market, account = _identity(market, account)
+    trading_date = _trading_date(trading_date)
     day = read_validation_day_source(
         store,
         artifact_root,
@@ -2025,42 +1777,120 @@ def read_validation_point_source(
             "unexpected_recommendation_point",
             "validation point is absent from the canonical expectation",
         )
-    row = _store_call(
-        store.corpus_point, market, account, recommendation_point_id
-    )
-    if row is None:
+    if not formal_corpus_present(
+        artifact_root, market=market, account=account
+    ):
+        row = _store_call(
+            store.corpus_point, market, account, recommendation_point_id
+        )
+        if row is None:
+            return {
+                **day,
+                "status": "missing",
+                "reason_code": "corpus_point_missing",
+                "point_row": None,
+                "projection": None,
+            }
+        if row["trading_date"] != trading_date:
+            _fail("corpus_artifact_invalid", "point index trading date changed")
+        if row["conflict_status"] != "clean":
+            return {
+                **day,
+                "status": "not_evaluable",
+                "reason_code": "research_corpus_conflict",
+                "point_row": dict(row),
+                "projection": None,
+            }
+        if row["capture_status"] != "captured":
+            return {
+                **day,
+                "status": "not_evaluable",
+                "reason_code": row["reason_code"],
+                "point_row": dict(row),
+                "projection": None,
+            }
+        projection, _content = _read_indexed_projection(artifact_root, row)
+        return {
+            **day,
+            "status": "available",
+            "reason_code": None,
+            "point_row": dict(row),
+            "projection": projection,
+        }
+    try:
+        loaded = load_formal_point(
+            artifact_root,
+            market=market,
+            account=account,
+            trading_date=trading_date,
+            recommendation_point_id=recommendation_point_id,
+        )
+    except FormalCorpusError as exc:
+        raise CorpusError(exc.reason_code, str(exc)) from exc
+    if loaded["status"] == "missing":
         return {
             **day,
             "status": "missing",
-            "reason_code": "corpus_point_missing",
+            "reason_code": loaded.get("reason_code"),
             "point_row": None,
             "projection": None,
         }
-    if row["trading_date"] != trading_date:
-        _fail("corpus_artifact_invalid", "point index trading date changed")
-    if row["conflict_status"] != "clean":
+    if loaded["status"] != "available":
+        point = loaded.get("point")
+        return {
+            **day,
+            "status": loaded["status"],
+            "reason_code": loaded.get("reason_code"),
+            "point_row": (
+                {
+                    "recommendation_point_id": recommendation_point_id,
+                    "source_point_ref": loaded.get("artifact_ref"),
+                    "source_point_content_sha256": (
+                        point.get("content_sha256")
+                        if isinstance(point, Mapping)
+                        else None
+                    ),
+                }
+                if point is not None
+                else None
+            ),
+            "projection": None,
+        }
+    point = loaded["point"]
+    try:
+        recipe_projection = build_top1_recipe_projection(
+            point,
+            formal_point_ref=str(loaded["artifact_ref"]),
+        )
+        projection = materialize_top1_recipe_input(point, recipe_projection)
+    except Top1RankingError as exc:
         return {
             **day,
             "status": "not_evaluable",
-            "reason_code": "research_corpus_conflict",
-            "point_row": dict(row),
+            "reason_code": exc.reason_code,
+            "point_row": None,
             "projection": None,
         }
-    if row["capture_status"] != "captured":
-        return {
-            **day,
-            "status": "not_evaluable",
-            "reason_code": row["reason_code"],
-            "point_row": dict(row),
-            "projection": None,
-        }
-    projection, _content = _read_indexed_projection(artifact_root, row)
+    projection_content = _render(recipe_projection)
+    row = {
+        "recommendation_point_id": recommendation_point_id,
+        "trading_date": trading_date,
+        "projection_ref": loaded["artifact_ref"],
+        "projection_content_sha256": recipe_projection["artifact_provenance"][
+            "content_sha256"
+        ],
+        "projection_file_sha256": _file_sha256(projection_content),
+        "source_point_ref": loaded["artifact_ref"],
+        "source_point_content_sha256": loaded["artifact_content_sha256"],
+        "captured_at_utc": point["captured_at_utc"],
+    }
     return {
         **day,
         "status": "available",
         "reason_code": None,
         "point_row": dict(row),
         "projection": projection,
+        "recipe_projection": recipe_projection,
     }
 
 
@@ -2069,7 +1899,16 @@ def read_corpus_status(
     *,
     market: str,
     account: str,
+    artifact_root: str | Path | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
+    if artifact_root is not None:
+        return build_corpus_health_receipt(
+            artifact_root,
+            market=market,
+            account=account,
+            repo_root=repo_root,
+        )
     market, account = _identity(market, account)
     days = _store_call(store.corpus_days, market, account)
     points = _store_call(store.corpus_points, market, account)
@@ -2136,6 +1975,7 @@ def _freeze_research_dataset(
     environ: Mapping[str, str] | None = None,
     ranking_projection_schema_version: str,
     publisher: Any,
+    use_formal_corpus: bool = False,
 ) -> dict[str, Any]:
     if (
         isinstance(required_days, bool)
@@ -2155,6 +1995,15 @@ def _freeze_research_dataset(
             status="blocked",
             reason_code="strategy_lab_service_disabled",
             selected_dates=[],
+        )
+
+    if use_formal_corpus:
+        return _freeze_formal_research_dataset(
+            store,
+            artifact_root,
+            facts=facts,
+            required_days=required_days,
+            publisher=publisher,
         )
 
     dates = list(facts["trading_calendar_dates"])
@@ -2364,6 +2213,178 @@ def _freeze_research_dataset(
     )
 
 
+def _freeze_formal_research_dataset(
+    store: ExperimentStore,
+    artifact_root: str | Path,
+    *,
+    facts: Mapping[str, Any],
+    required_days: int,
+    publisher: Any,
+) -> dict[str, Any]:
+    market = str(facts["market"])
+    account = str(facts["account"])
+    dates = list(facts["trading_calendar_dates"])
+    latest_mature = facts["latest_mature_trading_date"]
+    if latest_mature is None or dates.index(latest_mature) + 1 < required_days:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_corpus_warming",
+            selected_dates=[],
+        )
+    mature_index = dates.index(latest_mature)
+    selected_dates = dates[mature_index - required_days + 1 : mature_index + 1]
+    dataset_days: list[dict[str, Any]] = []
+    conflict = False
+    gap = False
+    for trading_date in selected_dates:
+        day = read_validation_day_source(
+            store,
+            artifact_root,
+            market=market,
+            account=account,
+            trading_date=trading_date,
+        )
+        if day["status"] != "available":
+            conflict |= day["status"] == "conflict"
+            gap |= day["status"] != "conflict"
+            continue
+        expectation = day["expectation"]
+        row = day["row"]
+        assert isinstance(expectation, Mapping) and isinstance(row, Mapping)
+        if (
+            expectation["market_calendar_version"]
+            != facts["market_calendar_version"]
+            or expectation["market_calendar_sha256"]
+            != facts["market_calendar_sha256"]
+            or not _before(
+                str(expectation["sealed_at_utc"]), str(facts["cutoff_at_utc"])
+            )
+        ):
+            gap = True
+            continue
+        points: list[dict[str, Any]] = []
+        for point_id in expectation["expected_recommendation_point_ids"]:
+            source = read_validation_point_source(
+                store,
+                artifact_root,
+                market=market,
+                account=account,
+                trading_date=trading_date,
+                recommendation_point_id=str(point_id),
+            )
+            if source["status"] != "available":
+                conflict |= source["status"] == "conflict"
+                gap |= source["status"] != "conflict"
+                continue
+            point_row = source["point_row"]
+            projection = source["projection"]
+            assert isinstance(point_row, Mapping) and isinstance(
+                projection, Mapping
+            )
+            captured_at = str(point_row["captured_at_utc"])
+            decision_at = str(projection["decision_at_utc"])
+            if _before(captured_at, decision_at):
+                conflict = True
+                continue
+            if not _before(decision_at, str(facts["cutoff_at_utc"])) or not _before(
+                captured_at, str(facts["cutoff_at_utc"])
+            ):
+                gap = True
+                continue
+            try:
+                rerank_recommendation_point(
+                    projection,
+                    ranking_profile="current_tie_break",
+                )
+            except Top1RankingError:
+                gap = True
+                continue
+            points.append(
+                {
+                    "recommendation_point_id": point_id,
+                    "projection_ref": point_row["projection_ref"],
+                    "projection_content_sha256": point_row[
+                        "projection_content_sha256"
+                    ],
+                    "projection_file_sha256": point_row[
+                        "projection_file_sha256"
+                    ],
+                }
+            )
+        if len(points) == len(expectation["expected_recommendation_point_ids"]):
+            dataset_days.append(
+                {
+                    "trading_date": trading_date,
+                    "expectation_ref": row["expectation_ref"],
+                    "expectation_content_sha256": row[
+                        "expectation_content_sha256"
+                    ],
+                    "expectation_file_sha256": row["expectation_file_sha256"],
+                    "points": points,
+                }
+            )
+        else:
+            gap = True
+    if conflict:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="formal_corpus_conflict",
+            selected_dates=selected_dates,
+        )
+    if gap or len(dataset_days) != required_days:
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="research_window_coverage_missing",
+            selected_dates=selected_dates,
+        )
+    dataset: dict[str, Any] = {
+        "schema_version": SEALED_HISTORICAL_DATASET_SCHEMA,
+        "market": market,
+        "account": account,
+        "cutoff_at_utc": facts["cutoff_at_utc"],
+        "cutoff_trading_date": facts["cutoff_trading_date"],
+        "required_days": required_days,
+        "window_facts_content_sha256": facts["content_sha256"],
+        "market_calendar_version": facts["market_calendar_version"],
+        "market_calendar_ref": facts["market_calendar_ref"],
+        "market_calendar_sha256": facts["market_calendar_sha256"],
+        "trading_calendar_dates_sha256": facts[
+            "trading_calendar_dates_sha256"
+        ],
+        "latest_mature_trading_date": latest_mature,
+        "maturity_evidence_ref": facts["maturity_evidence_ref"],
+        "maturity_evidence_sha256": facts["maturity_evidence_sha256"],
+        "recommendation_point_selector": RECOMMENDATION_POINT_SELECTOR,
+        "ranking_projection_schema_version": RANKING_PROJECTION_SCHEMA_V3,
+        "selected_trading_dates": selected_dates,
+        "days": dataset_days,
+    }
+    dataset["content_sha256"] = canonical_sha256(dataset)
+    content = _render(dataset)
+    ref = _dataset_ref(market, account, dataset["content_sha256"])
+    try:
+        publisher(artifact_root, ref, content)
+    except (OSError, ValueError):
+        return _freeze_result(
+            facts,
+            status="blocked",
+            reason_code="formal_corpus_conflict",
+            selected_dates=selected_dates,
+        )
+    return _freeze_result(
+        facts,
+        status="ready",
+        reason_code=None,
+        selected_dates=selected_dates,
+        dataset_ref=ref,
+        dataset_sha256=_file_sha256(content),
+        dataset_content_sha256=dataset["content_sha256"],
+    )
+
+
 def freeze_research_dataset(
     store: ExperimentStore,
     artifact_root: str | Path,
@@ -2390,6 +2411,7 @@ def preview_research_dataset(
     window_facts: Mapping[str, Any],
     required_days: int = RESEARCH_REQUIRED_DAYS,
     environ: Mapping[str, str] | None = None,
+    use_formal_corpus: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     captured: list[bytes] = []
     result = _freeze_research_dataset(
@@ -2398,8 +2420,13 @@ def preview_research_dataset(
         window_facts=window_facts,
         required_days=required_days,
         environ=environ,
-        ranking_projection_schema_version=RANKING_PROJECTION_SCHEMA_V2,
+        ranking_projection_schema_version=(
+            RANKING_PROJECTION_SCHEMA_V3
+            if use_formal_corpus
+            else RANKING_PROJECTION_SCHEMA_V2
+        ),
         publisher=lambda _root, _ref, content: captured.append(content),
+        use_formal_corpus=use_formal_corpus,
     )
     return result, json.loads(captured[0]) if captured else None
 

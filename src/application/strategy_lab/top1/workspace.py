@@ -12,12 +12,17 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from domain.domain.performance.models import FXRateFact, select_fx_rate
 from src.application.recommendation_point import strategy_lab_top1_available
+from src.application.research.formal_corpus import (
+    CORPUS_HEALTH_SCHEMA,
+    formal_corpus_present,
+)
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     PREVIEW_SCHEMA_VERSION,
     RECOMMENDATION_POINT_SELECTOR,
     RECIPE_ID,
     RECIPE_VERSION,
+    RESEARCH_REQUIRED_DAYS,
     Top1CoreContractError,
     build_research_spec_sha256,
     build_sell_put_top1_research_preview_sha256,
@@ -165,6 +170,7 @@ def _research_preview(
     market_calendar: Mapping[str, Any],
     fee_contract: Mapping[str, object],
     capability_facts: Mapping[str, object],
+    corpus_status: Mapping[str, object] | None,
     evidence_bundle: object,
     environ: Mapping[str, str] | None,
 ) -> tuple[dict[str, object], dict[str, Any] | None, dict[str, object]]:
@@ -184,6 +190,37 @@ def _research_preview(
         return _preview(
             status="blocked", reason_codes=["strategy_lab_store_not_ready"]
         ), None, {}
+    if corpus_status is None:
+        return _preview(
+            status="blocked", reason_codes=["strategy_lab_top1_corpus_unavailable"]
+        ), None, {}
+    if (
+        corpus_status.get("schema_version") != CORPUS_HEALTH_SCHEMA
+        or corpus_status.get("status") not in {"healthy", "unhealthy"}
+    ):
+        return _preview(
+            status="blocked", reason_codes=["strategy_lab_top1_corpus_invalid"]
+        ), None, {}
+    complete_days = corpus_status.get("continuous_complete_trading_days")
+    if (
+        isinstance(complete_days, bool)
+        or not isinstance(complete_days, int)
+        or complete_days < RESEARCH_REQUIRED_DAYS
+    ):
+        return _preview(
+            status="blocked", reason_codes=["research_corpus_warming"]
+        ), None, {}
+    storage = corpus_status.get("storage")
+    capacity = storage.get("capacity") if isinstance(storage, Mapping) else None
+    capacity_status = capacity.get("status") if isinstance(capacity, Mapping) else None
+    if capacity_status in {"warning", "critical"}:
+        return _preview(
+            status="blocked", reason_codes=["research_storage_capacity_risk"]
+        ), None, {}
+    if capacity_status not in {"ok", "insufficient_history"}:
+        return _preview(
+            status="blocked", reason_codes=["research_storage_capacity_unavailable"]
+        ), None, {}
     try:
         freeze, dataset = preview_research_dataset(
             store,
@@ -196,6 +233,11 @@ def _research_preview(
                 market_calendar=market_calendar,
             ),
             environ=environ,
+            use_formal_corpus=formal_corpus_present(
+                artifact_root,
+                market=market,
+                account=account,
+            ),
         )
         if freeze["status"] != "ready" or dataset is None:
             return _preview(
@@ -220,6 +262,9 @@ def _research_preview(
             topic_id=_TOPIC_ID,
             experiment_id=experiment_id,
             market_calendar_version=str(dataset["market_calendar_version"]),
+            ranking_projection_schema_version=str(
+                dataset["ranking_projection_schema_version"]
+            ),
             research_source={
                 "mode": "sealed_historical_dataset",
                 "dataset_ref": dataset_ref,

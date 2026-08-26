@@ -389,7 +389,6 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     quality_gate_calls: list[tuple[str, str | None, str | None]] = []
 
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
-    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
     monkeypatch.setattr(
         mod,
         "expiration_business_today",

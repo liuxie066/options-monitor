@@ -907,6 +907,34 @@ def test_prepare_v2_captures_current_marks_and_degrades_lab_only(
     assert Path(manifest["manifest_path"]).name == (
         "prepared_option_positions_context.v2.json"
     )
+    monkeypatch.setattr(
+        mod,
+        "collect_current_performance_evidence",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-run retry must not query option marks")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-run retry must not query FX")
+        ),
+    )
+    replayed = prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        persist_fx_evidence=True,
+        mark_evidence_accounts=("lx",),
+    )
+    assert replayed.ledger_read_count == 0
+    assert replayed.fx_observation_count == 0
+    assert replayed.unavailable_by_account == {}
+    assert replayed.manifests["lx"]["manifest_sha256"] == manifest["manifest_sha256"]
     if collector_fails:
         assert evidence["status"] == "unavailable"
         assert evidence["reason_code"] == "option_market_evidence_mark_missing"
