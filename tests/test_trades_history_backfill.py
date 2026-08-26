@@ -218,6 +218,72 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
     assert len([item for item in calls if "closed" in item]) == 2
 
 
+def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class _FakeData:
+        def __init__(self, rows: list[dict]) -> None:
+            self.rows = rows
+
+        def to_dict(self, orient: str) -> list[dict]:
+            assert orient == "records"
+            return self.rows
+
+    class _FakeContext:
+        def __init__(self, **kwargs):
+            calls.append({"init": kwargs})
+
+        def history_order_list_query(self, **kwargs):
+            calls.append({"orders": kwargs})
+            return 0, _FakeData(
+                [{"order_id": "o1", "order_status": "FILLED_ALL", "dealt_qty": 2, "currency": "USD"}]
+            )
+
+        def order_fee_query(self, **kwargs):
+            calls.append({"fees": kwargs})
+            return 0, _FakeData([{"order_id": "o1", "fee_amount": 0, "fee_details": {"commission": 0}}])
+
+        def close(self):
+            calls.append({"closed": True})
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            OpenSecTradeContext=_FakeContext,
+            TrdEnv=SimpleNamespace(REAL="REAL"),
+            RET_OK=0,
+        ),
+    )
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+
+    orders, _ = client.fetch_terminal_orders(
+        futu_account_id="123",
+        order_ids=["o1"],
+        start="2026-05-01 00:00:00",
+        end="2026-05-02 00:00:00",
+    )
+    fees, _ = client.fetch_order_fees(futu_account_id="123", order_ids=["o1"])
+    client.close()
+
+    assert orders["o1"] == {
+        "provider": "opend",
+        "futu_account_id": "123",
+        "order_id": "o1",
+        "status": "terminal_with_fill",
+        "dealt_qty": "2.000000",
+        "currency": "USD",
+    }
+    assert fees["o1"]["fee_amount"] == "0.000000"
+    assert calls[1]["orders"]["trd_env"] == "REAL"
+    assert calls[1]["orders"]["acc_id"] == 123
+    assert calls[2]["fees"] == {
+        "order_id_list": ["o1"],
+        "trd_env": "REAL",
+        "acc_id": 123,
+    }
+
+
 def test_backfill_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
     from src.application.trades import history_backfill as mod
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError

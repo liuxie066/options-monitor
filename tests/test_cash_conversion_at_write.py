@@ -32,7 +32,7 @@ def _ms(value: str) -> int:
     return int(datetime.fromisoformat(value).replace(tzinfo=TZ).timestamp() * 1000)
 
 
-def _open_event(event_id: str, *, price: float, fees: float = 0.0) -> TradeEvent:
+def _open_event(event_id: str, *, price: float) -> TradeEvent:
     return TradeEvent(
         event_id=event_id,
         event_type="open",
@@ -51,9 +51,9 @@ def _open_event(event_id: str, *, price: float, fees: float = 0.0) -> TradeEvent
         currency="USD",
         source="test",
         multiplier=100,
-        fees=fees,
+        fees=0.0,
         lot_id=f"lot-{event_id}",
-        raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+        raw_payload={},
     )
 
 
@@ -71,7 +71,7 @@ def test_trade_write_freezes_cny_and_duplicate_keeps_original_booking_rate(
     monkeypatch,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
-    event = _open_event("open-1", price=2.0, fees=1.0)
+    event = _open_event("open-1", price=2.0)
     fx_payloads = iter(
         [
             {"rates": {"USDCNY": 7.2}, "timestamp": "2026-07-03T02:00:00+00:00"},
@@ -90,11 +90,11 @@ def test_trade_write_freezes_cny_and_duplicate_keeps_original_booking_rate(
     stored = repo.list_trade_events()[0]["raw_payload"]["cash_conversions"]
     assert stored["option_trade_cash_gross"]["fx_rate"] == "7.2"
     assert stored["option_trade_cash_gross"]["amount_cny"] == "1440"
-    assert stored["option_fee_cash"]["amount_cny"] == "-7.2"
+    assert stored["option_fee_cash"]["amount_cny"] == "-18.16776"
     report = _report(repo)
     assert report["cash"]["option_trade_cash_gross"]["cny"] == 1440.0
-    assert report["cash"]["option_fee_cash"]["cny"] == -7.2
-    assert report["cash"]["total_cash_change_net"]["cny"] == 1432.8
+    assert report["cash"]["option_fee_cash"]["cny"] == -18.16776
+    assert report["cash"]["total_cash_change_net"]["cny"] == 1421.83224
 
 
 def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monkeypatch) -> None:
@@ -311,7 +311,6 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
         target_stock_lot_id=stock_lot_id,
         shares=100,
         price=105.0,
-        fees=0.0,
         trade_time_ms=_ms("2026-07-23T10:00:00"),
         dry_run=False,
     )

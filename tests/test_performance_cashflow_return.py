@@ -182,13 +182,11 @@ def test_empty_capital_only_and_incomplete_capital_states_are_distinct() -> None
     }
     assert assess_report_coverage(capital_only)["status"] == "pass"
     assert incomplete["cash"]["option_net_cashflow"]["by_currency"] == {"USD": 0.0}
-    assert incomplete["cashflow_return"]["period_return"]["by_currency"] == {}
-    assert incomplete["cashflow_return"]["coverage"]["missing_by_currency"] == {
-        "USD": ["capital_basis_unavailable:call-open"]
-    }
+    assert incomplete["cashflow_return"]["period_return"]["by_currency"] == {"USD": 0.0}
+    assert incomplete["cashflow_return"]["coverage"]["missing_by_currency"] == {}
 
 
-def test_covered_call_counts_only_allocated_stock_basis_while_call_is_active() -> None:
+def test_covered_call_uses_strike_notional_for_explicit_share_allocation() -> None:
     events = [
         _event(
             "call-open",
@@ -227,7 +225,7 @@ def test_covered_call_counts_only_allocated_stock_basis_while_call_is_active() -
                 "currency": "USD",
                 "assigned_at_ms": _ms("2026-05-01T00:00:00"),
                 "shares_opened": 300,
-                "stock_cost_basis_total": 30000,
+                "stock_cost_basis_total": 36000,
             }
         ],
         "covered_call_allocations": [
@@ -240,7 +238,7 @@ def test_covered_call_counts_only_allocated_stock_basis_while_call_is_active() -
                 "currency": "USD",
                 "shares": 200,
                 "start_at_ms": _ms("2026-05-02T00:00:00"),
-                "end_at_ms": _ms("2026-05-04T00:00:00") - 1,
+                "end_at_ms": _ms("2026-05-04T00:00:00"),
                 "allocation_status": "explicit",
                 "linkage_basis": "stock_lot_id",
             }
@@ -255,6 +253,219 @@ def test_covered_call_counts_only_allocated_stock_basis_while_call_is_active() -
 
     assert report["cashflow_return"]["capital_days_by_currency"] == {"USD": 30000.0}
     assert report["cashflow_return"]["coverage"]["missing_by_currency"] == {}
+
+
+@pytest.mark.parametrize(
+    "allocations",
+    [
+        [
+            {"stock_lot_id": "stock-1", "shares": 100},
+            {"stock_lot_id": "stock-1", "shares": 100},
+        ],
+        [{"stock_lot_id": "stock-1", "shares": 101}],
+        [{"stock_lot_id": "stock-1", "shares": 100}],
+    ],
+)
+def test_covered_call_rejects_duplicate_or_overallocated_stock_lots(allocations: list[dict]) -> None:
+    start_ms = _ms("2026-05-02T00:00:00")
+    end_ms = _ms("2026-05-04T00:00:00") - 1
+    stock = {
+        "assigned_stock_lots": [],
+        "covered_call_allocations": [
+            {
+                "open_event_id": "call-open",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "start_at_ms": start_ms,
+                "end_at_ms": end_ms,
+                "allocation_status": "explicit",
+                "linkage_basis": "stock_lot_id",
+                **allocation,
+            }
+            for allocation in allocations
+        ],
+    }
+    report = _report(
+        [
+            _event(
+                "call-open",
+                "open",
+                "2026-05-02T00:00:00",
+                option_type="call",
+                side="short",
+            )
+        ],
+        ending_assigned_stock=stock,
+    )
+
+    assert report["cashflow_return"]["coverage"]["status"] == "partial"
+    assert report["cashflow_return"]["capital_days_by_currency"] == {}
+    assert report["cashflow_return"]["coverage"]["missing_by_currency"]["USD"] == [
+        "capital_basis_unavailable:call-open"
+    ]
+
+
+def test_covered_call_rejects_overlapping_allocations_above_stock_lot_capacity() -> None:
+    start_ms = _ms("2026-05-02T00:00:00")
+    end_ms = _ms("2026-05-04T00:00:00") - 1
+    stock = {
+        "assigned_stock_lots": [
+            {
+                "stock_lot_id": "stock-1",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "assigned_at_ms": _ms("2026-05-01T00:00:00"),
+                "shares_opened": 100,
+            }
+        ],
+        "covered_call_allocations": [
+            {
+                "open_event_id": open_event_id,
+                "stock_lot_id": "stock-1",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "shares": 100,
+                "start_at_ms": start_ms,
+                "end_at_ms": end_ms,
+                "allocation_status": "explicit",
+                "linkage_basis": "stock_lot_id",
+            }
+            for open_event_id in ("call-open-1", "call-open-2")
+        ],
+    }
+    report = _report(
+        [
+            _event(
+                "call-open-1",
+                "open",
+                "2026-05-02T00:00:00",
+                option_type="call",
+                side="short",
+            ),
+            _event(
+                "call-open-2",
+                "open",
+                "2026-05-02T00:00:00",
+                option_type="call",
+                side="short",
+                strike=110,
+            ),
+        ],
+        ending_assigned_stock=stock,
+    )
+
+    assert report["cashflow_return"]["capital_days_by_currency"] == {}
+    assert report["cashflow_return"]["coverage"]["missing_by_currency"]["USD"] == [
+        "capital_basis_unavailable:call-open-1",
+        "capital_basis_unavailable:call-open-2",
+    ]
+
+
+def test_covered_call_allows_adjacent_wheel_allocations_on_the_same_stock_lot() -> None:
+    pivot_ms = _ms("2026-05-03T00:00:00")
+    stock = {
+        "assigned_stock_lots": [
+            {
+                "stock_lot_id": "stock-1",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "assigned_at_ms": _ms("2026-05-01T00:00:00"),
+                "shares_opened": 100,
+            }
+        ],
+        "covered_call_allocations": [
+            {
+                "open_event_id": "call-open-1",
+                "stock_lot_id": "stock-1",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "shares": 100,
+                "start_at_ms": _ms("2026-05-02T00:00:00"),
+                "end_at_ms": pivot_ms,
+                "allocation_status": "explicit",
+                "linkage_basis": "stock_lot_id",
+            },
+            {
+                "open_event_id": "call-open-2",
+                "stock_lot_id": "stock-1",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "currency": "USD",
+                "shares": 100,
+                "start_at_ms": pivot_ms,
+                "end_at_ms": _ms("2026-05-04T00:00:00"),
+                "allocation_status": "explicit",
+                "linkage_basis": "stock_lot_id",
+            },
+        ],
+    }
+    report = _report(
+        [
+            _event(
+                "call-open-1",
+                "open",
+                "2026-05-02T00:00:00",
+                option_type="call",
+                side="short",
+            ),
+            _event(
+                "call-close-1",
+                "close",
+                "2026-05-03T00:00:00",
+                option_type="call",
+                side="short",
+                target_lot_id="lot-call-open-1",
+            ),
+            _event(
+                "call-open-2",
+                "open",
+                "2026-05-03T00:00:00",
+                option_type="call",
+                side="short",
+                strike=110,
+            ),
+        ],
+        ending_assigned_stock=stock,
+    )
+
+    assert report["cashflow_return"]["capital_days_by_currency"] == {"USD": 21000.0}
+    assert report["cashflow_return"]["coverage"]["missing_by_currency"] == {}
+
+
+def test_covered_call_rejects_unresolved_explicit_stock_lot() -> None:
+    report = _report(
+        [
+            _event(
+                "call-open",
+                "open",
+                "2026-05-02T00:00:00",
+                option_type="call",
+                side="short",
+                raw={"stock_lot_id": "missing-stock-lot"},
+            )
+        ],
+        ending_assigned_stock={
+            "assigned_stock_lots": [],
+            "covered_call_allocations": [],
+        },
+    )
+
+    assert report["cashflow_return"]["period_return"]["status"] == "partial"
+    assert report["cashflow_return"]["capital_days_by_currency"] == {}
+    assert report["cashflow_return"]["coverage"]["missing_by_currency"]["USD"] == [
+        "capital_basis_unavailable:call-open"
+    ]
 
 
 def test_service_accepts_real_as_of_allocation_for_open_covered_call(tmp_path) -> None:
@@ -372,14 +583,13 @@ def test_currency_scoped_capital_issue_keeps_complete_currency_rate() -> None:
 
     cashflow = _report(events)["cashflow_return"]
 
-    assert set(cashflow["period_return"]["by_currency"]) == {"USD"}
-    assert cashflow["coverage"]["missing_by_currency"] == {
-        "HKD": ["capital_basis_unavailable:hkd-call"]
-    }
-    assert cashflow["coverage"]["status"] == "partial"
+    assert set(cashflow["period_return"]["by_currency"]) == {"HKD", "USD"}
+    assert cashflow["period_return"]["by_currency"]["HKD"] == 0.01
+    assert cashflow["coverage"]["missing_by_currency"] == {}
+    assert cashflow["coverage"]["status"] == "observed"
 
 
-def test_unsupported_position_suppresses_supported_rate_in_same_currency() -> None:
+def test_covered_call_strike_notional_combines_with_put_capital_in_same_currency() -> None:
     events = [
         _event("put-open", "open", "2026-05-01T00:00:00"),
         _event(
@@ -395,10 +605,8 @@ def test_unsupported_position_suppresses_supported_rate_in_same_currency() -> No
     cashflow = _report(events)["cashflow_return"]
 
     assert cashflow["capital_days_by_currency"]["USD"] > 0
-    assert cashflow["period_return"]["by_currency"] == {}
-    assert cashflow["coverage"]["missing_by_currency"] == {
-        "USD": ["capital_basis_unavailable:call-open"]
-    }
+    assert cashflow["period_return"]["by_currency"] == {"USD": 0.01}
+    assert cashflow["coverage"]["missing_by_currency"] == {}
 
 
 def test_missing_actual_fee_keeps_gross_cash_but_suppresses_net_cash_and_rate() -> None:

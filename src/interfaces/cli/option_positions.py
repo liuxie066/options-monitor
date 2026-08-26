@@ -459,12 +459,6 @@ def main(argv: list[str] | None = None) -> int:
     p_assigned_stock_sale.add_argument('--currency', default=None, choices=['USD', 'HKD', 'CNY'])
     p_assigned_stock_sale.add_argument('--shares', type=int, required=True)
     p_assigned_stock_sale.add_argument('--price', type=float, required=True)
-    p_assigned_stock_sale.add_argument(
-        '--fees',
-        type=float,
-        default=None,
-        help='actual total fees; omit to estimate from the standard broker fee schedule, use --fees 0 for actual zero',
-    )
     p_assigned_stock_sale.add_argument('--trade-time-ms', type=int, required=True)
     p_assigned_stock_sale.add_argument('--source-deal-id', default=None)
     p_assigned_stock_sale.add_argument('--format', default='text', choices=['text', 'json'])
@@ -1422,7 +1416,6 @@ def main(argv: list[str] | None = None) -> int:
                 target_stock_lot_id=args.target_stock_lot_id,
                 shares=int(args.shares),
                 price=float(args.price),
-                fees=float(args.fees) if args.fees is not None else None,
                 trade_time_ms=int(args.trade_time_ms),
                 account=args.account,
                 broker=args.broker,

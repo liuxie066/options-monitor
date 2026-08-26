@@ -22,6 +22,10 @@ trade_events -> deterministic projection -> position_lots
 
 不要直接修改 SQLite 行。修复必须表达为可审计的语义事件，或通过受控 projection rebuild / verify 恢复派生状态。
 
+订单费用是同一成交事件的延迟证据，不另建费用事实账本。受控 fee enrichment 是唯一
+允许更新既有事件费用 provenance 的路径：按完整订单组执行 CAS、审计、读回并在同一
+事务重放受影响投影。其他模块不得直接改 `event_json`。
+
 ## 模块所有权
 
 | 边界 | 当前 owner |
@@ -31,6 +35,7 @@ trade_events -> deterministic projection -> position_lots
 | 命令与维护动作 | `src/application/ledger/commands.py` |
 | 查询与读模型 | `src/application/ledger/queries.py`、`read_model.py` |
 | 事件写入与投影发布 | `src/application/ledger/writer.py` |
+| 订单费用迁移与审计 | `src/application/ledger/order_fee_migration.py`；公共入口仍由 `ledger/api.py` 导出 |
 | SQLite repository | `src/application/ledger/repository.py` |
 | lot 目标解析与 preflight | `src/application/ledger/lot_resolver.py`、`preflight.py` |
 | 人工持仓工作流 | `src/application/positions/` |
@@ -98,6 +103,9 @@ trade_events -> deterministic projection -> position_lots
 ./om option-positions list --account lx --status open
 ./om option-positions inspect --record-id <lot-id>
 ./om trade-events list --account lx
+./om trade-events fees-sync \
+  --config-key us --account lx \
+  --start-date 2026-08-01 --end-date 2026-08-23
 
 ./om-agent run --tool option_positions_read \
   --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'

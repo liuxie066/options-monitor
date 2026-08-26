@@ -139,6 +139,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
                 "'fast_if_safe'",
             ): 1,
             (
+                "src/application/ledger/order_fee_migration.py",
+                "_apply_unit",
+                "'forced_full'",
+            ): 1,
+            (
                 "src/application/ledger/position_projection_migration.py",
                 "apply_position_projection_migration",
                 "'forced_full'",

@@ -5,14 +5,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
-from domain.domain.ledger import TradeEvent
+from domain.domain.ledger import TradeEvent, fee_fact_from_persisted_evidence
 from domain.domain.performance.engine import cash_facts_for_trade_event
 from domain.domain.performance.cash_conversion import (
     MAX_BOOKING_RATE_DISTANCE_MS,
     cash_conversion_id,
     cash_conversion_identity,
 )
-from domain.domain.performance.models import normalize_currency, quantize_money, to_decimal
+from domain.domain.performance.models import FeeComponent, normalize_currency, quantize_money, to_decimal
 from src.infrastructure.exchange_rates import get_cached_exchange_rates
 
 
@@ -76,12 +76,16 @@ def attach_assigned_stock_sale_cash_conversions(
             observed_at_ms=observed_at_ms,
         )
     }
-    fee_provenance = out.get("fee_provenance") if isinstance(out.get("fee_provenance"), Mapping) else {}
-    if str(fee_provenance.get("basis") or "").strip().lower() == "actual":
-        fee = to_decimal(out.get("fees") or 0, field_name="assigned stock sale fees")
+    fee = fee_fact_from_persisted_evidence(
+        event_id=stock_event_id,
+        component=FeeComponent.STOCK_SALE,
+        provenance=out.get("fee_provenance"),
+        compatibility_amount=out.get("fees") or 0,
+    )
+    if fee.is_complete and fee.amount is not None:
         conversions["assigned_stock_sale_fee_cash"] = build_cash_conversion(
             cash_fact_id=f"assigned_stock_sale_fee_cash:{stock_event_id}",
-            amount=-quantize_money(fee),
+            amount=-quantize_money(fee.amount),
             currency=currency,
             fx_payload=fx_payload,
             effective_at_ms=int(out.get("trade_time_ms") or out.get("event_time_ms") or observed_at_ms),

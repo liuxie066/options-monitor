@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest  # pyright: ignore[reportMissingImports]
 
@@ -108,6 +109,77 @@ def test_trade_events_list_text_shows_trade_time_beijing(monkeypatch, tmp_path: 
 
     out = capsys.readouterr().out
     assert "time 1970-01-01 08:00:01 北京时间" in out
+
+
+def test_trade_events_fee_sync_defaults_to_dry_run(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    config_path = tmp_path / "config.us.json"
+    data_config = tmp_path / "data.json"
+    calls: list[dict] = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+
+        def close(self):
+            calls.append({"closed": True})
+
+    monkeypatch.setattr(cli, "load_runtime_config", lambda **_kwargs: (config_path, {"accounts": ["lx"]}))
+    monkeypatch.setattr(cli, "resolve_position_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        cli,
+        "resolve_account_broker_binding_sets",
+        lambda _values: {
+            "lx": SimpleNamespace(
+                ok=True,
+                host="127.0.0.1",
+                port=11111,
+                trd_env="REAL",
+                required_account_ids=("123",),
+            )
+        },
+    )
+    monkeypatch.setattr(cli, "OpenDHistoryDealClient", _Client)
+
+    def _sync(_repo, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"sync": kwargs})
+        return {
+            "selected_order_count": 0,
+            "actual_observation_count": 0,
+            "reason_counts": {},
+            "migration": {"status_counts": {}},
+        }
+
+    monkeypatch.setattr(cli, "sync_order_fees", _sync)
+
+    result = cli.main(
+        [
+            "fees-sync",
+            "--config-key",
+            "us",
+            "--account",
+            "lx",
+            "--start-date",
+            "2026-08-01",
+            "--end-date",
+            "2026-08-23",
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["dry_run"] is True
+    assert payload["write_applied"] is False
+    assert next(item["sync"] for item in calls if "sync" in item)["apply"] is False
+    assert next(item["sync"] for item in calls if "sync" in item)[
+        "allowed_futu_account_ids"
+    ] == ("123",)
+    assert calls[-1] == {"closed": True}
 
 
 def test_trade_events_list_treats_canonical_void_as_voided(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -19,7 +19,7 @@ from domain.domain.performance.models import (
 
 
 def _missing_fee_fact(
-    event: TradeEvent,
+    source_event_id: str,
     *,
     component: FeeComponent,
     reason: str,
@@ -29,7 +29,7 @@ def _missing_fee_fact(
         amount=None,
         basis=FeeBasis.MISSING,
         component=component,
-        source_event_id=event.event_id,
+        source_event_id=source_event_id,
         source=source,
         reason=reason,
     )
@@ -43,54 +43,103 @@ def fee_component_for_event(event: TradeEvent) -> FeeComponent:
     return FeeComponent.OPTION_CLOSE
 
 
-def fee_fact_for_event(event: TradeEvent) -> FeeFact:
-    payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    provenance = payload.get("fee_provenance")
-    component = fee_component_for_event(event)
+def fee_fact_from_persisted_evidence(
+    *,
+    event_id: str,
+    component: FeeComponent,
+    provenance: Any,
+    compatibility_amount: Any,
+) -> FeeFact:
+    """Resolve persisted fee evidence without calling a fee formula."""
+
+    source_event_id = str(event_id or "").strip()
     if isinstance(provenance, dict):
+        try:
+            compatibility_fee = quantize_money(
+                to_decimal(
+                    0 if compatibility_amount in (None, "") else compatibility_amount,
+                    field_name="fees",
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            return _missing_fee_fact(
+                source_event_id,
+                component=component,
+                source=provenance.get("source"),
+                reason=f"invalid compatibility fee amount: {exc}",
+            )
         basis_raw = str(provenance.get("basis") or "").strip().lower()
         if basis_raw not in {item.value for item in FeeBasis}:
             return _missing_fee_fact(
-                event,
+                source_event_id,
                 component=component,
                 source=provenance.get("source"),
                 reason=f"invalid fee provenance basis: {basis_raw or '<empty>'}",
             )
         basis = FeeBasis(basis_raw)
         if basis == FeeBasis.MISSING:
+            if compatibility_fee != 0:
+                return _missing_fee_fact(
+                    source_event_id,
+                    component=component,
+                    source=provenance.get("source"),
+                    reason="fee provenance basis conflicts with non-zero compatibility amount",
+                )
             return FeeFact(
                 amount=None,
                 basis=basis,
                 component=component,
-                source_event_id=event.event_id,
+                source_event_id=source_event_id,
                 source=provenance.get("source"),
                 reason=provenance.get("reason") or "fee provenance explicitly missing",
             )
         amount_raw = provenance.get("amount")
+        if amount_raw in (None, "") and basis == FeeBasis.ACTUAL:
+            amount_raw = compatibility_fee
         if amount_raw in (None, ""):
-            amount_raw = event.fees
+            return _missing_fee_fact(
+                source_event_id,
+                component=component,
+                source=provenance.get("source"),
+                reason=f"{basis.value} fee provenance amount is missing",
+            )
         try:
+            amount = quantize_money(to_decimal(amount_raw, field_name="fee provenance amount"))
+            if basis == FeeBasis.ACTUAL and amount != compatibility_fee:
+                return _missing_fee_fact(
+                    source_event_id,
+                    component=component,
+                    source=provenance.get("source"),
+                    reason="fee provenance amount conflicts with compatibility amount",
+                )
+            if basis == FeeBasis.ESTIMATED and compatibility_fee != 0:
+                return _missing_fee_fact(
+                    source_event_id,
+                    component=component,
+                    source=provenance.get("source"),
+                    reason="fee provenance basis conflicts with non-zero compatibility amount",
+                )
             return FeeFact(
-                amount=amount_raw,
+                amount=amount,
                 basis=basis,
                 component=component,
-                source_event_id=event.event_id,
+                source_event_id=source_event_id,
                 source=provenance.get("source"),
                 reason=provenance.get("reason"),
             )
         except (TypeError, ValueError) as exc:
             return _missing_fee_fact(
-                event,
+                source_event_id,
                 component=component,
                 source=provenance.get("source"),
                 reason=f"invalid fee provenance amount: {exc}",
             )
 
     try:
-        numeric_fee = to_decimal(event.fees, field_name="fees")
+        numeric_fee = to_decimal(compatibility_amount, field_name="fees")
     except (TypeError, ValueError) as exc:
         return _missing_fee_fact(
-            event,
+            source_event_id,
             component=component,
             reason=f"invalid legacy fee amount: {exc}",
         )
@@ -100,21 +149,31 @@ def fee_fact_for_event(event: TradeEvent) -> FeeFact:
                 amount=numeric_fee,
                 basis=FeeBasis.ACTUAL,
                 component=component,
-                source_event_id=event.event_id,
+                source_event_id=source_event_id,
                 source="legacy_nonzero_fees",
                 reason="non-zero canonical fee predates explicit provenance",
             )
         except ValueError as exc:
             return _missing_fee_fact(
-                event,
+                source_event_id,
                 component=component,
                 source="legacy_nonzero_fees",
                 reason=f"invalid legacy fee amount: {exc}",
             )
     return _missing_fee_fact(
-        event,
+        source_event_id,
         component=component,
         reason="zero/absent fee has no provenance",
+    )
+
+
+def fee_fact_for_event(event: TradeEvent) -> FeeFact:
+    payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    return fee_fact_from_persisted_evidence(
+        event_id=event.event_id,
+        component=fee_component_for_event(event),
+        provenance=payload.get("fee_provenance"),
+        compatibility_amount=event.fees,
     )
 
 
@@ -329,4 +388,5 @@ __all__ = [
     "build_option_economic_allocation",
     "fee_component_for_event",
     "fee_fact_for_event",
+    "fee_fact_from_persisted_evidence",
 ]

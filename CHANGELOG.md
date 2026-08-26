@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Made persisted broker actual fees, including actual zero, the canonical executed-trade fee evidence for option cash-flow returns; controlled backfill freezes formula estimates only when actual fees are unavailable and preserves missing evidence as partial.
+
 ## 1.17.1 - 2026-08-25
 
 ### Improvements

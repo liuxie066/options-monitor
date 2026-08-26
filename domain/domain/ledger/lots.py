@@ -49,6 +49,7 @@ class PositionLot:
         self,
         event: TradeEvent,
         *,
+        actual_fee_amount: float,
         retain_close_event_ids: bool = True,
     ) -> "PositionLot":
         next_open = int(self.contracts_open) - int(event.contracts)
@@ -58,7 +59,12 @@ class PositionLot:
             contracts_open=next_open,
             contracts_closed=next_closed,
             status="close" if next_open == 0 else "open",
-            realized_pnl=self.realized_pnl + _realized_pnl_delta(self, event),
+            realized_pnl=self.realized_pnl
+            + _realized_pnl_delta(
+                self,
+                event,
+                actual_fee_amount=actual_fee_amount,
+            ),
             last_event_id=event.event_id,
             close_event_ids=(
                 (*self.close_event_ids, event.event_id)
@@ -130,14 +136,19 @@ class PositionLot:
         }
 
 
-def _realized_pnl_delta(lot: PositionLot, event: TradeEvent) -> float:
+def _realized_pnl_delta(
+    lot: PositionLot,
+    event: TradeEvent,
+    *,
+    actual_fee_amount: float,
+) -> float:
     contracts = int(event.contracts)
     multiplier = float(lot.multiplier)
     if lot.contract_key.position_side == "short":
         gross = (float(lot.premium_open) - float(event.price)) * contracts * multiplier
     else:
         gross = (float(event.price) - float(lot.premium_open)) * contracts * multiplier
-    return gross - float(event.fees or 0.0)
+    return gross - float(actual_fee_amount)
 
 
 def _patch_value(patch: PositionLotPatch, key: str, fallback: Any) -> Any:

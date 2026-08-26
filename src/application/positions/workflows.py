@@ -10,7 +10,6 @@ from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
     FUTU_US_FEE_SCHEDULE_URL,
     calc_futu_stock_fee,
-    extract_actual_fees,
 )
 from domain.domain.ledger.position_fields import (
     OpenPositionCommand,
@@ -162,6 +161,8 @@ def _build_assigned_stock_sale_event(
     symbol: str | None,
     currency: str | None,
     source_deal_id: str | None,
+    futu_account_id: str | None,
+    order_id: str | None,
     source: str,
 ) -> dict[str, Any]:
     payload = {
@@ -178,6 +179,8 @@ def _build_assigned_stock_sale_event(
         "trade_time_ms": int(trade_time_ms),
         "source": str(source or "").strip() or "manual",
         "source_deal_id": str(source_deal_id or "").strip() or None,
+        "futu_account_id": str(futu_account_id or "").strip() or None,
+        "order_id": str(order_id or "").strip() or None,
     }
     if isinstance(fee_provenance, dict):
         payload["fee_provenance"] = dict(fee_provenance)
@@ -196,20 +199,6 @@ class BrokerAssignedStockSaleMatchError(ValueError):
         super().__init__(message)
         self.code = str(code)
         self.diagnostics = dict(diagnostics or {})
-
-
-def _stock_sale_deal_fee(deal: Any) -> tuple[float | None, dict[str, Any] | None]:
-    raw = getattr(deal, "raw_payload", None)
-    payload = raw if isinstance(raw, dict) else {}
-    extracted = extract_actual_fees(payload)
-    if extracted is None:
-        return None, None
-    return float(extracted["amount"]), {
-        "basis": "actual",
-        "source": str(extracted.get("source") or "broker_payload"),
-        "reason": "broker_reported_fee",
-        "components": list(extracted.get("components") or []),
-    }
 
 
 def _resolve_stock_sale_fee(
@@ -239,10 +228,13 @@ def _resolve_stock_sale_fee(
             "source": source if ccy in {"USD", "HKD"} else "assigned_stock_sale",
             "reason": "stock_fee_estimate_failed",
         }
-    return float(amount), {
+    return 0.0, {
         "basis": "estimated",
+        "amount": str(round(float(amount), 6)),
         "source": source,
-        "reason": "standard_fixed_stock_fee_schedule_estimate",
+        "reason": "executed_stock_fee_formula",
+        "formula_version": "futu_executed_stock_fee.v1",
+        "schedule_reference": source,
     }
 
 
@@ -456,7 +448,6 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         )
 
     lot = viable[0]
-    fees, fee_provenance = _stock_sale_deal_fee(deal)
     return {
         "lot": lot,
         "existing_events": existing_events,
@@ -464,15 +455,15 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         "selector": selector,
         "shares": int(shares or 0),
         "price": float(price or 0.0),
-        "fees": fees,
-        "fee_provenance": fee_provenance,
+        "fees": None,
+        "fee_provenance": None,
         "trade_time_ms": int(trade_time_ms or 0),
         "source_deal_id": source_deal_id,
         "diagnostics": diagnostics
         | {
             "matched_stock_lot_id": lot.get("stock_lot_id"),
-            "fee_basis": (fee_provenance or {}).get("basis"),
-            "fee_source": (fee_provenance or {}).get("source"),
+            "fee_basis": "pending_formula_freeze",
+            "fee_source": None,
         },
     }
 
@@ -912,6 +903,8 @@ def _execute_assigned_stock_sale(
     symbol: str | None = None,
     currency: str | None = None,
     source_deal_id: str | None = None,
+    futu_account_id: str | None = None,
+    order_id: str | None = None,
     source: str,
     existing_events: list[dict[str, Any]] | None = None,
     before_report: dict[str, Any] | None = None,
@@ -968,6 +961,8 @@ def _execute_assigned_stock_sale(
         symbol=symbol,
         currency=currency,
         source_deal_id=source_deal_id,
+        futu_account_id=futu_account_id,
+        order_id=order_id,
         source=source,
     )
     existing_same = next(
@@ -1059,7 +1054,6 @@ def execute_manual_assigned_stock_sale(
     target_stock_lot_id: str,
     shares: int,
     price: float,
-    fees: float | None = None,
     trade_time_ms: int,
     account: str | None = None,
     broker: str | None = None,
@@ -1073,22 +1067,16 @@ def execute_manual_assigned_stock_sale(
         target_stock_lot_id=target_stock_lot_id,
         shares=shares,
         price=price,
-        fees=fees,
-        fee_provenance=(
-            {
-                "basis": "actual",
-                "source": "manual_input",
-                "reason": "explicit_manual_fee",
-            }
-            if fees is not None
-            else None
-        ),
+        fees=None,
+        fee_provenance=None,
         trade_time_ms=trade_time_ms,
         account=account,
         broker=broker,
         symbol=symbol,
         currency=currency,
         source_deal_id=source_deal_id,
+        futu_account_id=None,
+        order_id=None,
         source="manual",
         dry_run=dry_run,
     )
@@ -1131,6 +1119,8 @@ def execute_broker_assigned_stock_sale(
         symbol=getattr(deal, "symbol", None),
         currency=getattr(deal, "currency", None),
         source_deal_id=str(match["source_deal_id"]),
+        futu_account_id=str(getattr(deal, "futu_account_id", "") or "") or None,
+        order_id=str(getattr(deal, "order_id", "") or "") or None,
         source="broker",
         existing_events=list(match.get("existing_events") or []),
         before_report=dict(match.get("before_report") or {}),

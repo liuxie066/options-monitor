@@ -11,7 +11,7 @@ from domain.domain.combo_identity import (
     identity_from_intent,
     validate_combo_identity,
 )
-from domain.domain.fee_calc import extract_actual_fees
+from domain.domain.fee_calc import estimate_futu_executed_option_fee
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
     effective_contracts_open,
@@ -24,7 +24,7 @@ from domain.domain.lifecycle_allocation import (
     resolve_allocations,
     terminal_event_id_for,
 )
-from domain.domain.option_position_identity import normalize_currency
+from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from domain.domain.option_lifecycle import (
     build_lifecycle_case,
     expiration_observation_start_ms,
@@ -112,6 +112,39 @@ _APPEND_SAFE_EVENT_TYPES = frozenset(
         "adjust",
         "verification",
     }
+)
+
+_ACTUAL_FEE_TOTAL_KEYS = (
+    "fee_amount",
+    "total_fee",
+    "total_fees",
+    "fee_total",
+    "fees_total",
+    "fees",
+)
+_ACTUAL_FEE_COMPONENT_KEYS = (
+    "commission",
+    "commission_fee",
+    "platform_fee",
+    "system_fee",
+    "settlement_fee",
+    "trading_fee",
+    "transaction_fee",
+    "stamp_duty",
+    "transaction_levy",
+    "trading_tariff",
+    "orf",
+    "occ_fee",
+    "cat_fee",
+    "sec_fee",
+    "taf",
+    "exercise_fee",
+)
+_ACTUAL_FEE_RAW_SOURCE_KEYS = (
+    "raw",
+    "raw_payload",
+    "broker_payload",
+    "deal",
 )
 
 
@@ -798,8 +831,13 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
             [item.event_id for item in storage_events],
             conn=conn,
         )
-        fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
+        storage_events = _prepare_fee_evidence_for_storage(
+            storage_events,
+            existing_by_id=existing_by_id,
+            frozen_at_ms=observed_at_ms,
+        )
+        fx_payload = load_cash_fx_payload(sqlite_repo)
         storage_events = [
             _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
             if item.event_id in existing_by_id
@@ -868,16 +906,21 @@ def persist_trade_event_with_combo_identity(
             (storage_event.event_id,),
             conn=conn,
         )
+        observed_at_ms = utc_now_ms()
+        storage_event = _prepare_fee_evidence_for_storage(
+            [storage_event],
+            existing_by_id=existing_by_id,
+            frozen_at_ms=observed_at_ms,
+        )[0]
         if storage_event.event_id in existing_by_id:
             storage_event = _event_with_existing_cash_conversions(
-                storage_event,
-                existing_by_id[storage_event.event_id],
+                storage_event, existing_by_id[storage_event.event_id]
             )
         else:
             storage_event = attach_trade_event_cash_conversions(
                 storage_event,
                 fx_payload=load_cash_fx_payload(sqlite_repo),
-                observed_at_ms=utc_now_ms(),
+                observed_at_ms=observed_at_ms,
             )
         group_id = str(intent.get("group_id") or "").strip()
         existing_identity = sqlite_repo.get_strategy_group_identity(group_id, conn=conn)
@@ -2367,8 +2410,13 @@ def apply_lifecycle_allocation_atomically(
             [item.event_id for item in projection_rows],
             conn=conn,
         )
-        fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
+        projection_rows = _prepare_fee_evidence_for_storage(
+            projection_rows,
+            existing_by_id=existing_by_id,
+            frozen_at_ms=observed_at_ms,
+        )
+        fx_payload = load_cash_fx_payload(sqlite_repo)
         projection_rows = [
             _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
             if item.event_id in existing_by_id
@@ -4902,6 +4950,547 @@ def _canonical_storage_event(item: Any) -> TradeEvent:
     return encoded.event
 
 
+def _prepare_fee_evidence_for_storage(
+    events: Sequence[TradeEvent],
+    *,
+    existing_by_id: Mapping[str, dict[str, Any]],
+    frozen_at_ms: int,
+) -> list[TradeEvent]:
+    """Freeze fee estimates only for new events and preserve replay evidence."""
+
+    rows = list(events)
+    grouped: dict[str, list[int]] = {}
+    for index, event in enumerate(rows):
+        payload = event.raw_payload or {}
+        fee_order_group_id = str(
+            payload.get("source_deal_id") or payload.get("fee_order_group_id") or ""
+        ).strip()
+        if fee_order_group_id and event.event_type == "close":
+            grouped.setdefault(fee_order_group_id, []).append(index)
+    handled: set[int] = set()
+    for indexes in grouped.values():
+        if len(indexes) < 2:
+            continue
+        existing_count = sum(rows[index].event_id in existing_by_id for index in indexes)
+        if 0 < existing_count < len(indexes):
+            raise ValueError("broker close split replay is only partially present")
+        if existing_count:
+            continue
+        group = [rows[index] for index in indexes]
+        frozen = _freeze_source_deal_fee_group(
+            group,
+            frozen_at_ms=frozen_at_ms,
+        )
+        for index, event in zip(indexes, frozen, strict=True):
+            rows[index] = event
+            handled.add(index)
+
+    for index, event in enumerate(rows):
+        existing = existing_by_id.get(event.event_id)
+        if existing is not None:
+            rows[index] = _event_with_existing_fee_evidence(event, existing)
+        elif index not in handled:
+            rows[index] = _freeze_new_event_fee(event, frozen_at_ms=frozen_at_ms)
+    return rows
+
+
+def _freeze_source_deal_fee_group(
+    events: Sequence[TradeEvent],
+    *,
+    frozen_at_ms: int,
+) -> list[TradeEvent]:
+    problem = _source_deal_group_problem(events)
+    resolutions = [_incoming_fee_resolution(event) for event in events]
+    diagnostics = _group_fee_candidate_diagnostics(resolutions)
+    if problem is not None:
+        return [
+            _event_with_missing_fee(event, reason=problem, diagnostics=diagnostics)
+            for event in events
+        ]
+    if all(item["status"] == "explicit_missing" for item in resolutions):
+        return [replace(event, fees=0.0) for event in events]
+    if any(item["status"] == "explicit_missing" for item in resolutions):
+        return [
+            _event_with_missing_fee(
+                event,
+                reason="source_deal_fee_evidence_conflict",
+                diagnostics=diagnostics,
+            )
+            for event in events
+        ]
+    blocked = [item for item in resolutions if item["status"] == "missing"]
+    actual = [item for item in resolutions if item["status"] == "actual"]
+    if blocked or (actual and len(actual) != len(events)):
+        reason = (
+            str(blocked[0]["reason"])
+            if blocked
+            else "source_deal_fee_evidence_conflict"
+        )
+        return [
+            _event_with_missing_fee(event, reason=reason, diagnostics=diagnostics)
+            for event in events
+        ]
+    if actual:
+        amounts = {item["amount"] for item in actual}
+        sources = {str(item["source"]) for item in actual}
+        if len(amounts) != 1 or len(sources) != 1:
+            return [
+                _event_with_missing_fee(
+                    event,
+                    reason="source_deal_fee_evidence_conflict",
+                    diagnostics=diagnostics,
+                )
+                for event in events
+            ]
+        return _allocate_actual_fee_group(
+            events,
+            total=next(iter(amounts)),
+            source=next(iter(sources)),
+            frozen_at_ms=frozen_at_ms,
+        )
+    return _freeze_formula_fee_group(events, frozen_at_ms=frozen_at_ms)
+
+
+def _source_deal_group_problem(events: Sequence[TradeEvent]) -> str | None:
+    rows = list(events)
+    comparable = {
+        (
+            event.contract_key.broker,
+            event.contract_key.account,
+            event.currency,
+            event.contract_key.position_side,
+            event.price,
+            event.multiplier,
+        )
+        for event in rows
+    }
+    if len(comparable) != 1 or any(event.contracts <= 0 for event in rows):
+        return "source_deal_fee_inputs_conflict"
+    expected: set[int] = set()
+    for event in rows:
+        payload = event.raw_payload or {}
+        completion = payload.get("broker_deal_completion")
+        resolution = payload.get("close_target_resolution")
+        raw_expected = (
+            (completion or {}).get("expected_contracts")
+            if isinstance(completion, Mapping)
+            else None
+        )
+        if raw_expected in (None, "") and isinstance(resolution, Mapping):
+            selector = resolution.get("selector")
+            raw_expected = (
+                selector.get("contracts_to_close")
+                if isinstance(selector, Mapping)
+                else None
+            )
+        if raw_expected in (None, ""):
+            raw_expected = (resolution or {}).get("contracts_to_close") if isinstance(resolution, Mapping) else None
+        try:
+            if raw_expected not in (None, ""):
+                expected.add(int(raw_expected))
+        except (TypeError, ValueError):
+            return "source_deal_fee_inputs_conflict"
+    allocated = sum(event.contracts for event in rows)
+    if not expected:
+        return "source_deal_fee_contracts_unavailable"
+    if len(expected) > 1 or expected != {allocated}:
+        return "source_deal_fee_contracts_conflict"
+    return None
+
+
+def _allocate_actual_fee_group(
+    events: Sequence[TradeEvent],
+    *,
+    total: Decimal,
+    source: str,
+    frozen_at_ms: int,
+) -> list[TradeEvent]:
+    rows = sorted(events, key=lambda item: (item.event_time_ms, item.event_id))
+    total_contracts = sum(event.contracts for event in rows)
+    allocated = Decimal(0)
+    by_id: dict[str, TradeEvent] = {}
+    for index, event in enumerate(rows):
+        amount = (
+            quantize_money(total - allocated)
+            if index == len(rows) - 1
+            else quantize_money(total * Decimal(event.contracts) / Decimal(total_contracts))
+        )
+        allocated = quantize_money(allocated + amount)
+        by_id[event.event_id] = _event_with_actual_fee(
+            event,
+            amount=amount,
+            source=source,
+            frozen_at_ms=frozen_at_ms,
+        )
+    return [by_id[event.event_id] for event in events]
+
+
+def _freeze_formula_fee_group(
+    events: Sequence[TradeEvent],
+    *,
+    frozen_at_ms: int,
+) -> list[TradeEvent]:
+    rows = sorted(events, key=lambda item: (item.event_time_ms, item.event_id))
+    if any(normalize_broker(event.contract_key.broker) != "富途" for event in rows):
+        return [
+            _event_with_missing_fee(event, reason="unsupported_broker_fee_schedule")
+            for event in events
+        ]
+    first = rows[0]
+    comparable = {
+        (event.currency, event.price, event.multiplier, event.contract_key.position_side)
+        for event in rows
+    }
+    if len(comparable) != 1:
+        return [
+            _event_with_missing_fee(event, reason="source_deal_fee_inputs_conflict")
+            for event in events
+        ]
+    total_contracts = sum(int(event.contracts) for event in rows)
+    try:
+        estimate = estimate_futu_executed_option_fee(
+            first.currency,
+            first.price,
+            contracts=total_contracts,
+            multiplier=int(first.multiplier),
+            is_sell=first.contract_key.position_side == "long",
+        )
+    except (TypeError, ValueError):
+        return [
+            _event_with_missing_fee(event, reason="option_fee_estimate_failed")
+            for event in events
+        ]
+    total = quantize_money(estimate.amount)
+    allocated = Decimal(0)
+    by_id: dict[str, TradeEvent] = {}
+    for index, event in enumerate(rows):
+        amount = (
+            quantize_money(total - allocated)
+            if index == len(rows) - 1
+            else quantize_money(total * Decimal(event.contracts) / Decimal(total_contracts))
+        )
+        allocated = quantize_money(allocated + amount)
+        by_id[event.event_id] = _event_with_estimated_fee(
+            event,
+            amount=amount,
+            estimate=estimate,
+            frozen_at_ms=frozen_at_ms,
+        )
+    return [by_id[event.event_id] for event in events]
+
+
+def _freeze_new_event_fee(event: TradeEvent, *, frozen_at_ms: int) -> TradeEvent:
+    if event.event_type not in {"open", "close"}:
+        return event
+    if normalize_broker(event.contract_key.broker) != "富途":
+        return _event_with_missing_fee(
+            event,
+            reason="unsupported_broker_fee_schedule",
+        )
+    resolution = _incoming_fee_resolution(event)
+    if resolution["status"] == "actual":
+        return _event_with_actual_fee(
+            event,
+            amount=resolution["amount"],
+            source=str(resolution["source"]),
+            frozen_at_ms=frozen_at_ms,
+        )
+    if resolution["status"] == "explicit_missing":
+        return replace(event, fees=0.0)
+    if resolution["status"] == "missing":
+        return _event_with_missing_fee(
+            event,
+            reason=str(resolution["reason"]),
+            diagnostics=list(resolution.get("diagnostics") or []),
+        )
+    try:
+        estimate = estimate_futu_executed_option_fee(
+            event.currency,
+            event.price,
+            contracts=int(event.contracts),
+            multiplier=int(event.multiplier),
+            is_sell=(
+                event.contract_key.position_side == "short"
+                if event.event_type == "open"
+                else event.contract_key.position_side == "long"
+            ),
+        )
+    except (TypeError, ValueError):
+        return _event_with_missing_fee(event, reason="option_fee_estimate_failed")
+    return _event_with_estimated_fee(
+        event,
+        amount=quantize_money(estimate.amount),
+        estimate=estimate,
+        frozen_at_ms=frozen_at_ms,
+    )
+
+
+def _incoming_fee_resolution(event: TradeEvent) -> dict[str, Any]:
+    payload = dict(event.raw_payload or {})
+    provenance = payload.get("fee_provenance")
+    basis = ""
+    if provenance is not None and not isinstance(provenance, Mapping):
+        return _missing_fee_resolution("actual_fee_candidate_invalid")
+    if isinstance(provenance, Mapping):
+        basis = str(provenance.get("basis") or "").strip().lower()
+        if basis not in {"actual", "estimated", "missing"}:
+            return _missing_fee_resolution("actual_fee_candidate_invalid")
+
+    raw_candidates, raw_present, raw_problem = _raw_actual_fee_candidates(payload)
+    top_amount, top_problem = _optional_fee_amount(event.fees)
+    top_present = top_problem is not None or (top_amount is not None and top_amount != 0)
+    explicit_actual = basis == "actual"
+    incoming_actual = bool(explicit_actual or raw_present or top_present)
+    if not incoming_actual:
+        if basis == "missing":
+            return {"status": "explicit_missing", "diagnostics": []}
+        return {"status": "formula", "diagnostics": []}
+    if not _trusted_actual_fee_context(event):
+        return _missing_fee_resolution("actual_fee_evidence_not_admitted")
+    if top_problem is not None or raw_problem is not None:
+        return _missing_fee_resolution("actual_fee_candidate_invalid")
+    if top_present and basis in {"estimated", "missing"}:
+        return _missing_fee_resolution("actual_fee_basis_conflict")
+
+    candidates: list[tuple[int, str, Decimal, str]] = []
+    if explicit_actual:
+        amount, problem = _optional_fee_amount(provenance.get("amount"))
+        if problem is not None:
+            return _missing_fee_resolution("actual_fee_candidate_invalid")
+        if amount is None:
+            amount = top_amount or Decimal(0)
+        candidates.append(
+            (
+                0,
+                "explicit_provenance",
+                amount,
+                str(provenance.get("source") or "opend.trade_event"),
+            )
+        )
+    candidates.extend(raw_candidates)
+    if top_present and top_amount is not None:
+        candidates.append((3, "legacy_top_level", top_amount, "legacy_top_level"))
+    diagnostics = [
+        {"source": label, "amount": format(amount, "f")}
+        for _priority, label, amount, _source in sorted(
+            candidates,
+            key=lambda item: (item[1], item[2]),
+        )
+    ]
+    if not candidates:
+        return _missing_fee_resolution("actual_fee_candidate_invalid", diagnostics)
+    if len({amount for _priority, _label, amount, _source in candidates}) != 1:
+        return _missing_fee_resolution("actual_fee_candidates_conflict", diagnostics)
+    selected = min(candidates, key=lambda item: (item[0], item[1]))
+    return {
+        "status": "actual",
+        "amount": selected[2],
+        "source": selected[3],
+        "diagnostics": diagnostics,
+    }
+
+
+def _trusted_actual_fee_context(event: TradeEvent) -> bool:
+    payload = event.raw_payload or {}
+    return bool(
+        normalize_broker(event.contract_key.broker) == "富途"
+        and event.source == "opend_push"
+        and str(payload.get("source_type") or "").strip().lower()
+        == "broker_trade_event"
+        and str(payload.get("futu_account_id") or "").strip()
+        and str(payload.get("order_id") or "").strip()
+    )
+
+
+def _raw_actual_fee_candidates(
+    payload: Mapping[str, Any],
+) -> tuple[list[tuple[int, str, Decimal, str]], bool, str | None]:
+    candidates: list[tuple[int, str, Decimal, str]] = []
+    present = False
+    for source_name, source in _raw_fee_sources(payload):
+        totals = [(key, source.get(key)) for key in _ACTUAL_FEE_TOTAL_KEYS if key in source]
+        components = [
+            (key, source.get(key))
+            for key in _ACTUAL_FEE_COMPONENT_KEYS
+            if key in source
+        ]
+        if totals:
+            present = True
+            for key, value in totals:
+                amount, problem = _optional_fee_amount(value)
+                if problem is not None or amount is None:
+                    return [], True, "actual_fee_candidate_invalid"
+                candidates.append(
+                    (1, f"{source_name}.{key}", amount, f"opend.trade_event.{source_name}.{key}")
+                )
+        elif components:
+            present = True
+            amount = Decimal(0)
+            for _key, value in components:
+                component, problem = _optional_fee_amount(value, absolute=True)
+                if problem is not None or component is None:
+                    return [], True, "actual_fee_candidate_invalid"
+                amount = quantize_money(amount + component)
+            candidates.append(
+                (2, f"{source_name}.components", amount, f"opend.trade_event.{source_name}.components")
+            )
+    return candidates, present, None
+
+
+def _raw_fee_sources(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    sources: list[tuple[str, Mapping[str, Any]]] = [("raw_payload", payload)]
+    for key in _ACTUAL_FEE_RAW_SOURCE_KEYS:
+        value = payload.get(key)
+        if isinstance(value, Mapping) and value is not payload:
+            sources.append((key, value))
+    return sources
+
+
+def _optional_fee_amount(
+    value: Any,
+    *,
+    absolute: bool = False,
+) -> tuple[Decimal | None, str | None]:
+    if value in (None, ""):
+        return None, None
+    try:
+        amount = quantize_money(to_decimal(value, field_name="actual fee candidate"))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, "actual_fee_candidate_invalid"
+    if not amount.is_finite():
+        return None, "actual_fee_candidate_invalid"
+    if absolute:
+        amount = abs(amount)
+    elif amount < 0:
+        return None, "actual_fee_candidate_invalid"
+    return amount, None
+
+
+def _missing_fee_resolution(
+    reason: str,
+    diagnostics: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    return {
+        "status": "missing",
+        "reason": reason,
+        "diagnostics": [dict(item) for item in diagnostics],
+    }
+
+
+def _group_fee_candidate_diagnostics(
+    resolutions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    unique = {
+        json.dumps(dict(item), ensure_ascii=False, sort_keys=True)
+        for resolution in resolutions
+        for item in resolution.get("diagnostics") or []
+        if isinstance(item, Mapping)
+    }
+    return [json.loads(item) for item in sorted(unique)]
+
+
+def _event_with_estimated_fee(
+    event: TradeEvent,
+    *,
+    amount: Decimal,
+    estimate: Any,
+    frozen_at_ms: int,
+) -> TradeEvent:
+    payload = dict(event.raw_payload or {})
+    payload["fee_provenance"] = {
+        "basis": "estimated",
+        "amount": canonical_decimal_text(amount),
+        "source": "formula",
+        "reason": "executed_option_fee_formula",
+        "formula_version": estimate.fee_schedule_version,
+        "formula_basis": estimate.fee_basis,
+        "schedule_reference": estimate.fee_schedule_url,
+        "frozen_at_ms": int(frozen_at_ms),
+    }
+    return replace(event, fees=0.0, raw_payload=payload)
+
+
+def _event_with_actual_fee(
+    event: TradeEvent,
+    *,
+    amount: Decimal,
+    source: str,
+    frozen_at_ms: int,
+) -> TradeEvent:
+    payload = dict(event.raw_payload or {})
+    incoming = payload.get("fee_provenance")
+    provenance = {
+        key: incoming[key]
+        for key in (
+            "provider_observed_at_ms",
+            "provider_batch_id",
+            "fee_details_sha256",
+        )
+        if isinstance(incoming, Mapping) and incoming.get(key) not in (None, "")
+    }
+    payload["fee_provenance"] = {
+        "basis": "actual",
+        "amount": canonical_decimal_text(amount),
+        "source": source,
+        "reason": "broker_receipt_fee",
+        "frozen_at_ms": int(frozen_at_ms),
+        **provenance,
+    }
+    return replace(event, fees=float(amount), raw_payload=payload)
+
+
+def _event_with_missing_fee(
+    event: TradeEvent,
+    *,
+    reason: str,
+    diagnostics: Sequence[Mapping[str, Any]] = (),
+) -> TradeEvent:
+    payload = dict(event.raw_payload or {})
+    payload["fee_provenance"] = {
+        "basis": "missing",
+        "source": "writer",
+        "reason": reason,
+    }
+    if diagnostics:
+        payload["fee_provenance"]["candidate_diagnostics"] = [
+            dict(item) for item in diagnostics
+        ]
+    return replace(event, fees=0.0, raw_payload=payload)
+
+
+def _event_with_existing_fee_evidence(event: TradeEvent, existing: dict[str, Any]) -> TradeEvent:
+    existing_payload = existing.get("raw_payload")
+    if not isinstance(existing_payload, dict):
+        return event
+    incoming_payload = dict(event.raw_payload or {})
+    if "fee_provenance" in incoming_payload or quantize_money(event.fees) != 0:
+        stored_provenance = existing_payload.get("fee_provenance")
+        if (
+            isinstance(stored_provenance, dict)
+            and stored_provenance.get("basis") == "missing"
+            and stored_provenance.get("reason") == "actual_fee_evidence_not_admitted"
+        ):
+            incoming_payload["fee_provenance"] = dict(stored_provenance)
+            event = replace(
+                event,
+                fees=float(existing.get("fees") or 0.0),
+                raw_payload=incoming_payload,
+            )
+        if "cash_conversions" not in incoming_payload and isinstance(
+            existing_payload.get("cash_conversions"), dict
+        ):
+            incoming_payload["cash_conversions"] = dict(existing_payload["cash_conversions"])
+            event = replace(event, raw_payload=incoming_payload)
+        incoming = encode_trade_event_for_storage(event).event_json
+        stored = encode_trade_event_for_storage(existing).event_json
+        if incoming != stored:
+            raise ValueError(f"trade event fee evidence conflict for event_id={event.event_id}")
+        return event
+    if "fee_provenance" in existing_payload:
+        incoming_payload["fee_provenance"] = dict(existing_payload["fee_provenance"])
+    return replace(event, fees=float(existing.get("fees") or 0.0), raw_payload=incoming_payload)
+
+
 def _event_with_existing_cash_conversions(event: TradeEvent, existing: dict[str, Any]) -> TradeEvent:
     existing_raw_payload = existing.get("raw_payload")
     if not isinstance(existing_raw_payload, dict):
@@ -5080,8 +5669,13 @@ def persist_trade_event_objects_atomically(
                 wheel_linkage_status[original.event_id] = status
                 if intent_event is not None:
                     wheel_intent_events[original.event_id] = intent_event
-        fx_payload = load_cash_fx_payload(sqlite_repo)
         observed_at_ms = utc_now_ms()
+        storage_events = _prepare_fee_evidence_for_storage(
+            storage_events,
+            existing_by_id=existing_by_id,
+            frozen_at_ms=observed_at_ms,
+        )
+        fx_payload = load_cash_fx_payload(sqlite_repo)
         storage_events = [
             _event_with_existing_cash_conversions(event, existing_by_id[event.event_id])
             if event.event_id in existing_by_id
@@ -5356,11 +5950,11 @@ def _events_for_storage(
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
-    fee_splits = _close_fee_splits(event, resolution.matches)
     for index, match in enumerate(resolution.matches):
         event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
         match_payload = {
             **payload,
+            "fee_order_group_id": event.event_id,
             "record_id": match.record_id,
             "target_lot_id": match.record_id,
             "close_target_resolution": resolution_payload,
@@ -5368,14 +5962,11 @@ def _events_for_storage(
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             match_payload["close_target_source_event_id"] = source_event_id
-        allocated_fee = fee_splits[index]
-        match_payload = _payload_with_allocated_fee(match_payload, allocated_fee)
         out.append(
             replace(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
-                fees=float(allocated_fee),
                 raw_payload=match_payload,
             )
         )
@@ -5418,11 +6009,11 @@ def _canonical_close_events_for_storage(
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
-    fee_splits = _close_fee_splits(event, resolution.matches)
     for index, match in enumerate(resolution.matches):
         event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
         raw_payload = {
             **dict(event.raw_payload or {}),
+            "fee_order_group_id": event.event_id,
             "record_id": match.record_id,
             "target_lot_id": match.record_id,
             "close_target_resolution": resolution_payload,
@@ -5430,74 +6021,15 @@ def _canonical_close_events_for_storage(
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             raw_payload["close_target_source_event_id"] = source_event_id
-        allocated_fee = fee_splits[index]
-        raw_payload = _payload_with_allocated_fee(raw_payload, allocated_fee)
         out.append(
             replace(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
-                fees=float(allocated_fee),
                 target_lot_id=match.record_id,
                 raw_payload=raw_payload,
             )
         )
-    return out
-
-
-def _close_fee_splits(event: Any, matches: Sequence[Any]) -> list[Decimal]:
-    ordered = list(matches)
-    if not ordered:
-        return []
-    total_contracts = sum(int(match.contracts_to_close) for match in ordered)
-    if total_contracts <= 0:
-        raise ValueError("close fee allocation requires positive matched contracts")
-
-    payload = dict(getattr(event, "raw_payload", {}) or {})
-    provenance = payload.get("fee_provenance")
-    amount_raw: Any = getattr(event, "fees", 0.0)
-    if isinstance(provenance, dict):
-        basis = str(provenance.get("basis") or "").strip().lower()
-        if basis in {"actual", "estimated"} and provenance.get("amount") not in (None, ""):
-            amount_raw = provenance["amount"]
-    try:
-        total_fee = quantize_money(to_decimal(amount_raw, field_name="close fee"))
-    except (TypeError, ValueError):
-        try:
-            total_fee = quantize_money(to_decimal(getattr(event, "fees", 0.0), field_name="close fee"))
-        except (TypeError, ValueError):
-            total_fee = Decimal(0)
-
-    allocated_before = Decimal(0)
-    out: list[Decimal] = []
-    for index, match in enumerate(ordered):
-        if index == len(ordered) - 1:
-            allocated = quantize_money(total_fee - allocated_before)
-        else:
-            allocated = quantize_money(total_fee * Decimal(int(match.contracts_to_close)) / Decimal(total_contracts))
-        out.append(allocated)
-        allocated_before = quantize_money(allocated_before + allocated)
-    return out
-
-
-def _payload_with_allocated_fee(payload: dict[str, Any], amount: Decimal) -> dict[str, Any]:
-    out = dict(payload)
-    provenance = out.get("fee_provenance")
-    if not isinstance(provenance, dict):
-        return out
-    updated = dict(provenance)
-    basis = str(updated.get("basis") or "").strip().lower()
-    if basis in {"actual", "estimated"}:
-        existing_amount = updated.get("amount")
-        if existing_amount not in (None, ""):
-            try:
-                to_decimal(existing_amount, field_name="fee provenance amount")
-            except (TypeError, ValueError):
-                return out
-        updated["amount"] = canonical_decimal_text(amount, field_name="allocated close fee")
-    elif basis == "missing":
-        updated.pop("amount", None)
-    out["fee_provenance"] = updated
     return out
 
 
@@ -5525,13 +6057,6 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     multiplier_source = str(getattr(deal, "multiplier_source", "") or "").strip()
     if multiplier_source:
         raw_payload.setdefault("multiplier_source", multiplier_source)
-    actual_fees = extract_actual_fees(raw_payload)
-    if actual_fees is not None:
-        raw_payload["fee_provenance"] = {
-            "basis": "actual",
-            "source": actual_fees["source"],
-            "components": actual_fees["components"],
-        }
     event_time_ms = _required_broker_trade_time_ms(deal)
     contract_key = ContractKey.from_values(
         broker=getattr(deal, "broker", None) or "富途",
@@ -5552,7 +6077,7 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         currency=normalize_currency(getattr(deal, "currency", None)),
         source="opend_push",
         multiplier=float(getattr(deal, "multiplier", None) or 100),
-        fees=float(actual_fees["amount"]) if actual_fees is not None else 0.0,
+        fees=0.0,
         target_lot_id=str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip() or None,
         raw_payload=raw_payload,
     )

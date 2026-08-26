@@ -37,6 +37,12 @@ Symbols are canonical, currency is uppercase, dates are `YYYY-MM-DD`, and Decima
 - `actual` amount zero is a real zero; a legacy zero without provenance becomes `missing`.
 - Gross metrics ignore fees. Net metrics require all incurred fee components needed by that metric.
 
+Canonical fee evidence has one precedence contract: admitted OpenD `order_fee_query`
+evidence is `actual`; otherwise the writer freezes the existing Futu executed-order
+formula as `estimated`; unsupported or invalid evidence is `missing`. Estimated
+amounts live in `fee_provenance.amount` and do not masquerade as top-level actual
+fees. Consumers resolve this persisted fact and never call a fee formula themselves.
+
 ## Canonical Option Economic Allocations
 
 The canonical ledger projection is the sole owner of option close matching and lifecycle PnL allocation. Every valid close-like event (`close`, `expire_close`, `assignment`, or `exercise`) targeting an open lot produces one stable `OptionEconomicAllocation`; downstream performance code consumes these allocations and must not independently rematch option lots.
@@ -59,7 +65,7 @@ The pure period engine consumes effective canonical trade events plus canonical 
 - Long option opens create positive `premium_paid_gross` and negative option trade cash; long closes create positive option trade cash.
 - Premium activity is not PnL. Realized option PnL is recognized only at the allocation close timestamp.
 - Assignment/exercise option close price zero is valid. Recorded stock settlement principal is a separate signed cash fact and never an option loss.
-- Option fee cash is production-observed only from actual fee facts. Estimated or missing fees make affected net metrics partial/null while gross metrics remain available.
+- Option fee cash accepts persisted `actual` or frozen `estimated` fee facts. A missing fee makes affected cash-flow metrics partial/null while gross trade cash remains available. Production realized-net PnL remains actual-only.
 - Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
 - An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
 
@@ -281,11 +287,13 @@ option_net_cashflow
   + sum(cash.option_fee_cash)
 ```
 
-Both inputs are signed cash facts. An actual option fee is already negative, so it is added once;
-for example, a `100` premium receipt plus a `-2` fee produces `98` net cash. Actual zero is a real
-zero. Estimated or missing option fees leave the gross trade cash visible but make the affected net
-cash-flow return null/partial. Stock settlement principal and fees, assigned-stock sale proceeds and
-fees, dividends, interest, margin movements, and market-value changes are excluded.
+Both inputs are signed cash facts. An option fee is already negative, so it is added once; for
+example, a `100` premium receipt plus a `-2` fee produces `98` net cash. Actual zero is a real zero.
+Persisted actual and frozen formula-estimated fees both participate in this cash-flow numerator;
+`cashflow_return.coverage.fee_basis_by_currency` preserves their quality. A missing fee leaves gross
+trade cash visible but makes the affected net cash-flow return null/partial. Stock settlement
+principal and fees, assigned-stock sale proceeds and fees, dividends, interest, margin movements,
+and market-value changes are excluded.
 
 The numerator includes every canonical option trade event in the scoped period exactly once, whether
 or not strategy attribution is present. Sell-open and long-option sell-close cash are positive;
@@ -316,18 +324,20 @@ Capital is counted once for each supported position:
   or assignment;
 - a Long Call or Put uses its remaining opening-premium debit from buy-open until sell-close, expiry,
   or exercise;
-- an ordinary or Wheel Covered Call uses only the proven stock cost basis allocated to its covered
-  shares, from Call open until Call close, expiry, or assignment;
+- an ordinary or Wheel Covered Call uses strike notional for its remaining covered shares, from Call
+  open until Call close, expiry, or assignment;
 - Combo Yield has no special denominator rule: its Short Put and Long Option segments are added using
   the same rules above;
-- a naked Call or a Call whose covered shares and basis cannot be proven has no valid denominator.
+- an invalid explicit covered-share allocation has no valid denominator.
 
 A Sell Put assignment ends its Put segment but does not automatically start a stock-capital segment.
 For an assigned-stock Wheel, stock capital begins only when a Wheel Call opens and ends when that Call
 closes, expires, or is assigned. The interval from assignment to the first Call and gaps between Call
-rounds contribute no cash-flow-return capital-days. Partial coverage uses only the cost basis allocated
-to the covered shares; overlapping Calls must not count the same shares twice. Partial option closes
-reduce exposure at their exact timestamps.
+rounds contribute no cash-flow-return capital-days. The configured scope treats canonical short Calls
+as covered. With no explicit allocation, the denominator is
+`strike * multiplier * remaining_contracts`; an explicit allocation may reduce the covered share
+count but never increase it beyond the remaining contract quantity. Stock average cost and current
+holdings are not denominator inputs. Partial option closes reduce exposure at their exact timestamps.
 
 When capital evidence is complete and positive but the period has no option cash, the cash-flow return
 is an observed zero. When neither option cash nor capital exists, it is `not_applicable`. Option cash

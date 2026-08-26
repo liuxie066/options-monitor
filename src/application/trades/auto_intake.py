@@ -1979,6 +1979,7 @@ def _run_listener_source_loop(
                                 inbox_path=inbox_path,
                                 checkpoint_path=backfill_checkpoint_path,
                                 history_deals_fn=history_client.fetch,
+                                fee_provider=history_client,
                             )
                         except Exception as exc:
                             result = {
@@ -2733,6 +2734,12 @@ def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: 
 
 def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    fee_rows = [
+        dict(item)
+        for item in diagnostics.get("fee_sync") or []
+        if isinstance(item, dict)
+    ]
+    fee_error = _latest_fee_sync_error(fee_rows)
     out = dict(status_state)
     out.update(
         {
@@ -2755,11 +2762,50 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
             "last_backfill_unresolved_count": result.get("unresolved_count"),
             "last_backfill_result": result.get("last_result"),
             "last_backfill_error": result.get("error"),
+            "last_fee_sync": {
+                "selected_count": sum(int(item.get("selected_order_count") or 0) for item in fee_rows),
+                "actual_count": sum(int(item.get("actual_observation_count") or 0) for item in fee_rows),
+                "conflict_count": sum(
+                    int((item.get("reason_counts") or {}).get("actual_fee_conflict") or 0)
+                    for item in fee_rows
+                ),
+                "pending_count": sum(
+                    int((item.get("reason_counts") or {}).get("terminal_pending") or 0)
+                    for item in fee_rows
+                ),
+                "cursor_advanced": bool(diagnostics.get("fee_cursor_advanced")),
+                "selection_cursor": next(
+                    (
+                        dict(item["selection_cursor"])
+                        for item in reversed(fee_rows)
+                        if isinstance(item.get("selection_cursor"), dict)
+                    ),
+                    None,
+                ),
+                "last_error": fee_error.get("reason") if fee_error else None,
+                "last_error_type": fee_error.get("error_type") if fee_error else None,
+            },
         }
     )
     prior = int(out.get("missed_push_backfill_count") or 0)
     out["missed_push_backfill_count"] = prior + int(result.get("applied_count") or 0)
     return out
+
+
+def _latest_fee_sync_error(rows: list[dict[str, Any]]) -> dict[str, str] | None:
+    for row in reversed(rows):
+        if row.get("error_type"):
+            return {
+                "reason": str(row.get("reason") or "fee_sync_failed"),
+                "error_type": str(row["error_type"]),
+            }
+        for issue in reversed(row.get("issues") or []):
+            if isinstance(issue, dict) and issue.get("error_type"):
+                return {
+                    "reason": str(issue.get("reason") or "provider_query_failed"),
+                    "error_type": str(issue["error_type"]),
+                }
+    return None
 
 
 def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:

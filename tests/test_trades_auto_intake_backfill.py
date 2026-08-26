@@ -718,3 +718,22 @@ def test_history_backfill_handles_lifecycle_pending_in_durable_inbox(
     assert trade_inbox_summary(inbox_path)["pending_count"] == 0
     assert trade_inbox_summary(inbox_path)["handled_count"] == 1
     assert list_retryable_trade_payloads(inbox_path, retry_delay_sec=0) == []
+
+
+def test_history_backfill_fee_sync_failure_receipt_redacts_exception_message(
+    tmp_path: Path,
+) -> None:
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        history_deals_fn=lambda **_kwargs: ([], {}),
+        process_payload_fn=lambda *_args, **_kwargs: {},
+        fee_provider=object(),
+        fee_sync_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("secret-order-id=/private/path")
+        ),
+    )
+
+    fee_receipt = out["diagnostics"]["fee_sync"][0]
+    assert fee_receipt["reason"] == "fee_sync_failed"
+    assert fee_receipt["error_type"] == "RuntimeError"
+    assert "secret-order-id" not in str(fee_receipt)

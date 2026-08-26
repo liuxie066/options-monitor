@@ -2552,8 +2552,9 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert dry_run_payload["operation"] == "manual_assigned_stock_sale"
     assert dry_run_payload["write_model"] == "assigned_stock_events"
     assert dry_run_payload["write_applied"] is False
-    assert dry_run_payload["sale_event"]["fees"] == 2.5261
+    assert dry_run_payload["sale_event"]["fees"] == 0.0
     assert dry_run_payload["sale_event"]["fee_provenance"]["basis"] == "estimated"
+    assert dry_run_payload["sale_event"]["fee_provenance"]["amount"] == "2.5261"
     assert repo.list_assigned_stock_events() == []
 
     monkeypatch.setattr(

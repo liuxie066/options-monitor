@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,11 @@ from src.application.ledger.api import (
     open_position_ledger_from_runtime_config as resolve_option_positions_repo,
     resolve_position_data_config_path,
 )
+from src.application.account_config import resolve_account_broker_binding_sets
+from src.application.agent_tool_config import load_runtime_config
+from domain.domain.performance.period import PeriodRequest, normalize_period
+from src.application.trades.history_backfill import OpenDHistoryDealClient
+from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
     apply_repair_trade_event,
     apply_void_trade_event,
@@ -104,13 +110,37 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--format", choices=["text", "json"], default="text")
     _add_write_flags(p_repair, high_risk=True)
 
+    p_fees = sub.add_parser(
+        "fees-sync",
+        help="preview or apply OpenD actual order-fee enrichment",
+    )
+    p_fees.add_argument("--config-key", required=True, choices=["us", "hk"])
+    p_fees.add_argument("--config", dest="config_path", default=None)
+    p_fees.add_argument("--account", required=True)
+    p_fees.add_argument("--start-date", required=True, help="YYYY-MM-DD")
+    p_fees.add_argument("--end-date", required=True, help="YYYY-MM-DD")
+    p_fees.add_argument("--format", choices=["text", "json"], default="json")
+    _add_write_flags(p_fees, high_risk=True)
+    p_fees.add_argument(
+        "--confirm-write",
+        dest="confirm",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
     args = parser.parse_args(argv)
     write_controls: dict[str, dict[str, bool]] = {}
     if args.cmd == "replay":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="trade-events replay", high_risk=False)
-    elif args.cmd in {"void", "repair"}:
+    elif args.cmd in {"void", "repair", "fees-sync"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"trade-events {args.cmd}", high_risk=True)
     base = Path(__file__).resolve().parents[3]
+    if args.cmd == "fees-sync":
+        return _run_fee_sync(
+            args,
+            base=base,
+            write_requested=bool(write_controls["fees-sync"]["write_requested"]),
+        )
     data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
     if bool(write_controls.get(args.cmd, {}).get("write_requested", False)):
         guard = _guard_write(
@@ -250,6 +280,85 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raise SystemExit("unknown trade-events command")
+
+
+def _run_fee_sync(
+    args: argparse.Namespace,
+    *,
+    base: Path,
+    write_requested: bool,
+) -> int:
+    config_path, cfg = load_runtime_config(
+        config_key=args.config_key,
+        config_path=args.config_path,
+    )
+    data_config_path = resolve_position_data_config_path(
+        base=base,
+        cfg=cfg,
+        data_config=args.data_config,
+        config_path=config_path,
+    )
+    if write_requested:
+        guard = _guard_write(
+            data_config=data_config_path,
+            args=args,
+            as_json=args.format == "json",
+        )
+        if guard is None:
+            return 2
+    _data_config, repo = resolve_option_positions_repo(
+        base=base,
+        cfg=cfg,
+        data_config=data_config_path,
+        config_path=config_path,
+        runtime_root=_runtime_root_arg(args),
+    )
+    account = str(args.account or "").strip().lower()
+    bindings = resolve_account_broker_binding_sets([(args.config_key, cfg)])
+    binding = bindings.get(account)
+    if binding is None or not binding.ok or binding.host is None or binding.port is None:
+        raise SystemExit(f"fee sync broker binding is unavailable for account={account}")
+    if str(binding.trd_env or "").upper() != "REAL":
+        raise SystemExit("fee sync requires a REAL broker account binding")
+    window = normalize_period(
+        PeriodRequest(
+            period="range",
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+    )
+    client = OpenDHistoryDealClient(host=binding.host, port=binding.port)
+    try:
+        receipt = sync_order_fees(
+            repo,
+            account=account,
+            start_ms=window.effective_start_at_ms,
+            end_exclusive_ms=window.effective_end_exclusive_at_ms,
+            provider=client,
+            apply=write_requested,
+            observed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            allowed_futu_account_ids=binding.required_account_ids,
+        )
+    finally:
+        client.close()
+    receipt["period"] = window.to_dict()
+    receipt["ledger_store"] = ledger_store_payload(_data_config, repo)
+    receipt = attach_write_contract(
+        receipt,
+        dry_run=not write_requested,
+        write_applied=write_requested,
+        rollback_hint="restore the ledger backup or apply a separately reviewed correction",
+    )
+    if args.format == "json":
+        _print_json(receipt)
+    else:
+        mode = "DONE" if write_requested else "DRY_RUN"
+        print(
+            f"[{mode}] selected={receipt.get('selected_order_count')} "
+            f"actual={receipt.get('actual_observation_count')} "
+            f"reasons={receipt.get('reason_counts')}"
+        )
+    return 0 if not receipt.get("migration", {}).get("status_counts", {}).get("rolled_back") else 2
 
 
 if __name__ == "__main__":

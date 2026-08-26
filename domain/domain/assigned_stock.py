@@ -5,19 +5,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-from domain.domain.fee_calc import (
-    FUTU_HK_FEE_SCHEDULE_URL,
-    FUTU_US_FEE_SCHEDULE_URL,
-    calc_futu_hk_terminal_fee,
-    calc_futu_option_fee,
-    calc_futu_stock_fee,
-    extract_actual_fees,
-)
 from domain.domain.ledger import (
     ContractKey,
     OptionEconomicAllocation,
     PositionLot,
     TradeEvent,
+    fee_fact_for_event,
+    fee_fact_from_persisted_evidence,
 )
 from domain.domain.ledger.events import validate_trade_event
 from domain.domain.ledger.position_fields import (
@@ -35,6 +29,7 @@ from domain.domain.option_position_identity import (
 )
 from domain.domain.trade_contract_identity import normalize_trade_side
 from domain.domain.performance.models import (
+    FeeComponent,
     OptionInstrumentKey,
     ValuationMarkFact,
     quantize_money,
@@ -382,92 +377,22 @@ def _elapsed_days(start_ms: int | None, end_ms: int | None) -> float | None:
         return None
     return round((int(end_ms) - int(start_ms)) / _DAY_MS, 6)
 
-def _actual_option_fee_fact(event: dict[str, Any], *, component: str) -> dict[str, Any] | None:
-    payload = _event_payload(event)
-    provenance = payload.get("fee_provenance") if isinstance(payload.get("fee_provenance"), dict) else {}
-    if str(provenance.get("basis") or "").strip().lower() == "actual":
-        amount = safe_float(event.get("fees"))
-        if amount is not None and amount >= 0:
-            return {
-                "component": component,
-                "basis": "actual",
-                "amount": _round_money(amount),
-                "source": str(provenance.get("source") or "event.fees"),
-                "reason": "broker_reported_fee",
-            }
-    extracted = extract_actual_fees(payload)
-    if extracted is None:
-        return None
-    return {
-        "component": component,
-        "basis": "actual",
-        "amount": _round_money(extracted["amount"]),
-        "source": str(extracted.get("source") or "broker_payload"),
-        "reason": "broker_reported_fee",
-        "components": list(extracted.get("components") or []),
-    }
-
 def _option_fee_fact(event: dict[str, Any], *, component: str) -> dict[str, Any]:
-    actual = _actual_option_fee_fact(event, component=component)
-    if actual is not None:
-        return actual
-    price = safe_float(event.get("price"))
-    contracts = int(abs(float(event.get("contracts") or 0)))
-    multiplier = int(abs(float(event.get("multiplier") or 0)))
-    close_type = _event_close_type(event)
-    if price == 0 and close_type in {EXPIRE_AUTO_CLOSE, "assignment", "exercise"}:
-        currency = normalize_currency(event.get("currency"))
-        if close_type == EXPIRE_AUTO_CLOSE and currency == "HKD":
-            terminal = calc_futu_hk_terminal_fee(
-                "expired_worthless",
-                contracts=contracts,
-            )
-            return {
-                "component": component,
-                "basis": terminal["basis"],
-                "amount": _round_money(terminal["amount"]) if terminal["amount"] is not None else 0.0,
-                "source": terminal["source"],
-                "reason": terminal["reason"],
-                "schedule_version": terminal["schedule_version"],
-                "fee_plan_ref": terminal.get("fee_plan_ref"),
-                "estimated_amount": terminal.get("estimated_amount"),
-            }
-        return {
-            "component": component,
-            "basis": "estimated",
-            "amount": 0.0,
-            "source": "domain.domain.fee_calc.calc_futu_option_fee",
-            "reason": "zero_price_lifecycle_option_leg",
-        }
-    if price is None or price <= 0 or contracts <= 0 or multiplier <= 0:
-        return {
-            "component": component,
-            "basis": "missing",
-            "amount": 0.0,
-            "reason": "option_fee_inputs_incomplete",
-        }
     try:
-        amount = calc_futu_option_fee(
-            normalize_currency(event.get("currency")) or "USD",
-            price,
-            contracts=contracts,
-            multiplier=multiplier,
-            is_sell=normalize_trade_side(event.get("side")) == "sell",
-        )
-    except Exception:
+        fact = fee_fact_for_event(TradeEvent.from_dict(event))
+    except (TypeError, ValueError):
         return {
             "component": component,
             "basis": "missing",
             "amount": 0.0,
-            "reason": "option_fee_estimate_failed",
+            "reason": "canonical_option_fee_evidence_unavailable",
         }
-    currency = normalize_currency(event.get("currency")) or "USD"
     return {
         "component": component,
-        "basis": "estimated",
-        "amount": _round_money(amount),
-        "source": FUTU_HK_FEE_SCHEDULE_URL if currency == "HKD" else FUTU_US_FEE_SCHEDULE_URL,
-        "reason": "standard_option_fee_schedule_estimate",
+        "basis": fact.basis.value,
+        "amount": _round_money(float(fact.amount)) if fact.amount is not None else 0.0,
+        "source": fact.source,
+        "reason": fact.reason,
     }
 
 def assigned_stock_fee_fact(
@@ -476,104 +401,26 @@ def assigned_stock_fee_fact(
     component: str,
     transaction_kind: str,
 ) -> dict[str, Any]:
-    provenance = value.get("fee_provenance") if isinstance(value.get("fee_provenance"), dict) else {}
-    provenance_basis = str(provenance.get("basis") or "").strip().lower()
-    explicit_amount = safe_float(value.get("fees") if value.get("fees") not in (None, "") else value.get("fee"))
-    if provenance_basis in {"actual", "estimated", "missing"}:
-        amount = _round_money(explicit_amount) if explicit_amount is not None and explicit_amount >= 0 else 0.0
-        return {
-            "component": component,
-            "basis": provenance_basis,
-            "amount": amount,
-            "source": str(provenance.get("source") or "event.fee_provenance"),
-            "reason": str(provenance.get("reason") or f"stored_{provenance_basis}_fee"),
-        }
-
-    extracted = extract_actual_fees(value)
-    if extracted is not None and float(extracted.get("amount") or 0.0) > 0:
-        return {
-            "component": component,
-            "basis": "actual",
-            "amount": _round_money(extracted["amount"]),
-            "source": str(extracted.get("source") or "broker_payload"),
-            "reason": "broker_reported_fee",
-            "components": list(extracted.get("components") or []),
-        }
-
-    broker = normalize_broker(value.get("broker"))
-    if broker and broker != "富途":
-        return {
-            "component": component,
-            "basis": "missing",
-            "amount": 0.0,
-            "reason": "unsupported_broker_fee_schedule",
-        }
-    currency = normalize_currency(value.get("currency"))
-    shares = _stock_event_shares(value)
-    price = _stock_event_price(value)
-    source = FUTU_HK_FEE_SCHEDULE_URL if currency == "HKD" else FUTU_US_FEE_SCHEDULE_URL
-    if transaction_kind == "assignment" and currency == "USD":
-        return {
-            "component": component,
-            "basis": "missing",
-            "amount": 0.0,
-            "source": source,
-            "reason": "us_assignment_fee_rule_not_explicit",
-        }
-    if transaction_kind == "assignment" and currency == "HKD":
-        terminal = calc_futu_hk_terminal_fee(
-            "assignment",
-            order_price=(
-                value.get("price")
-                if value.get("price") not in (None, "")
-                else value.get("avg_price")
-            ),
-            shares=(
-                value.get("shares")
-                if value.get("shares") not in (None, "")
-                else value.get("quantity")
-            ),
-            contracts=(
-                value.get("contracts")
-                if value.get("contracts") not in (None, "")
-                else value.get("option_contracts")
-            ),
-        )
-        return {
-            "component": component,
-            "basis": terminal["basis"],
-            "amount": _round_money(terminal["amount"]) if terminal["amount"] is not None else 0.0,
-            "source": terminal["source"],
-            "reason": terminal["reason"],
-            "schedule_version": terminal["schedule_version"],
-            "fee_plan_ref": terminal["fee_plan_ref"],
-            "estimated_amount": terminal["estimated_amount"],
-            "estimated_basis": terminal["estimated_basis"],
-        }
-    if currency not in {"USD", "HKD"} or shares <= 0 or price is None or price <= 0:
-        return {
-            "component": component,
-            "basis": "missing",
-            "amount": 0.0,
-            "source": source if currency in {"USD", "HKD"} else None,
-            "reason": "stock_fee_inputs_incomplete",
-        }
+    del transaction_kind
+    event_id = str(value.get("stock_event_id") or value.get("event_id") or component).strip()
+    provenance = value.get("fee_provenance")
+    compatibility_amount = value.get("fees") if value.get("fees") not in (None, "") else value.get("fee", 0)
+    fee_component = FeeComponent.STOCK_SALE if "sale" in component else FeeComponent.STOCK_SETTLEMENT
     try:
-        amount = calc_futu_stock_fee(currency, price, shares=shares, is_sell=transaction_kind == "sale")
-    except Exception:
-        return {
-            "component": component,
-            "basis": "missing",
-            "amount": 0.0,
-            "source": source,
-            "reason": "stock_fee_estimate_failed",
-        }
+        fact = fee_fact_from_persisted_evidence(
+            event_id=event_id,
+            component=fee_component,
+            provenance=provenance,
+            compatibility_amount=compatibility_amount,
+        )
+    except (TypeError, ValueError):
+        fact = None
     return {
         "component": component,
-        "basis": "estimated",
-        "amount": _round_money(amount),
-        "source": source,
-        "reason": "standard_fixed_stock_fee_schedule_estimate",
+        "basis": fact.basis.value if fact is not None else "missing",
+        "amount": _round_money(float(fact.amount)) if fact is not None and fact.amount is not None else 0.0,
+        "source": fact.source if fact is not None else None,
+        "reason": fact.reason if fact is not None else "persisted_stock_fee_evidence_invalid",
     }
 
 
@@ -707,7 +554,11 @@ def _attribute_covered_calls(
         economics_complete = remaining == 0 or open_unrealized is not None
         gross_pnl = _round_money(realized_gross + float(open_unrealized or 0.0))
         closed_times = [int(row.get("closed_at") or 0) for row in realized_rows if int(row.get("closed_at") or 0) > 0]
-        reservation_end = max(closed_times) if remaining == 0 and closed_times else as_of_ms
+        reservation_end = (
+            max(closed_times)
+            if remaining == 0 and closed_times
+            else as_of_ms + 1
+        )
         if reservation_end <= opened_at:
             reservation_end = max(as_of_ms, opened_at + 1)
         fee_facts = [_option_fee_fact(open_event, component="covered_call_open_option_fee")]
