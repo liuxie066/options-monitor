@@ -13,6 +13,7 @@
 - Added production-bound HK/US Strategy Lab formal corpus capture with deterministic gzip, source-hash readback, corpus health diagnostics, and fail-closed 20-day research gating while preserving ordinary scan and notification outcomes.
 
 ### Improvements
+- Retired active `yield_enhancement` compatibility naming and configuration aliases in favor of `combo_yield`, while preserving read-only interpretation of historical ledger and artifact data.
 - Made persisted broker actual fees, including actual zero, the canonical executed-trade fee evidence for option cash-flow returns; controlled backfill freezes formula estimates only when actual fees are unavailable and preserves missing evidence as partial.
 - Tightened OpenD and Futu integration boundaries by moving provider adapters into their owning application and infrastructure modules and extending architecture regressions without changing public CLI behavior.
 

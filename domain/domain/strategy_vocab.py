@@ -7,7 +7,6 @@ from typing import Iterable
 STRATEGY_SELL_PUT = "sell_put"
 STRATEGY_COVERED_CALL = "sell_call"
 STRATEGY_COMBO_YIELD = "combo_yield"
-STRATEGY_YIELD_ENHANCEMENT = STRATEGY_COMBO_YIELD
 STRATEGY_CLOSE_ADVICE = "close_advice"
 STRATEGY_OTHER = "other"
 

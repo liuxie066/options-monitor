@@ -349,7 +349,6 @@ def build_context(
                     "strategy": item.fields.get("strategy"),
                     "leg_role": item.fields.get("leg_role"),
                     "strategy_group_id": item.fields.get("strategy_group_id"),
-                    "yield_enhancement_mode": item.fields.get("yield_enhancement_mode"),
                     "strategy_snapshot": item.fields.get("strategy_snapshot"),
                     **dict(lifecycle_by_lot.get(item.record_id) or {}),
                 }

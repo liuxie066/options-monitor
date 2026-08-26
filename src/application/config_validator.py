@@ -27,15 +27,15 @@ from src.application.llm_provider_registry import supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
-from src.application.yield_enhancement_config import (
-    YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
-    YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
-    YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
-    YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS,
-    YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
-    YIELD_ENHANCEMENT_OBJECTIVES,
-    YIELD_ENHANCEMENT_STRUCTURE_MODES,
-    YIELD_ENHANCEMENT_VARIANTS,
+from src.application.combo_yield_config import (
+    COMBO_YIELD_LEGACY_CALL_BOUND_FIELDS,
+    COMBO_YIELD_LEGACY_CALL_OTM_FIELDS,
+    COMBO_YIELD_LEGACY_OPTIMIZER_FIELDS,
+    COMBO_YIELD_LEGACY_PUT_OTM_FIELDS,
+    COMBO_YIELD_LEGACY_SCENARIO_FIELDS,
+    COMBO_YIELD_OBJECTIVES,
+    COMBO_YIELD_STRUCTURE_MODES,
+    COMBO_YIELD_VARIANTS,
 )
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
@@ -43,7 +43,7 @@ LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_volume',
     'max_spread_ratio',
 )
-YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
+COMBO_YIELD_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
 )
 REMOVED_STRATEGY_FILTER_FIELDS = (
@@ -70,7 +70,7 @@ WHEEL_ALLOWED_FIELDS = {
     'min_iv_rv_ratio',
     'min_iv_minus_rv',
 }
-YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
+COMBO_YIELD_REMOVED_TARGET_FIELDS = (
     'target_price',
     'target_price_mode',
     'target_upside_pct',
@@ -202,16 +202,16 @@ OPENING_STRATEGY_ALLOWED_FIELDS = {
     *LEGACY_SELL_CALL_FETCH_FIELDS,
     *LEGACY_SELL_PUT_OTM_FIELDS,
 }
-YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS = {
+COMBO_YIELD_CALL_ALLOWED_FIELDS = {
     'min_delta',
     'max_delta',
     'min_strike',
     'max_strike',
     'min_dte',
     'max_dte',
-    *YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
+    *COMBO_YIELD_LEGACY_CALL_OTM_FIELDS,
 }
-YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
+COMBO_YIELD_ALLOWED_FIELDS = {
     'enabled',
     'structure_mode',
     'objective',
@@ -232,11 +232,11 @@ YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
     'strategy',
     'strategy_profile',
     *REMOVED_STRATEGY_FILTER_FIELDS,
-    *YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS,
-    *YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
-    *YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
-    *YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
-    *YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS,
+    *COMBO_YIELD_REMOVED_TARGET_FIELDS,
+    *COMBO_YIELD_LEGACY_SCENARIO_FIELDS,
+    *COMBO_YIELD_LEGACY_OPTIMIZER_FIELDS,
+    *COMBO_YIELD_LEGACY_CALL_BOUND_FIELDS,
+    *COMBO_YIELD_LEGACY_PUT_OTM_FIELDS,
 }
 
 
@@ -579,7 +579,7 @@ def validate_resolved_watchlist_item_runtime_config(item: dict) -> None:
             )
     combo_cfg = item.get('combo_yield')
     if combo_cfg is not None:
-        _validate_yield_enhancement_cfg(combo_cfg, f'{symbol}.combo_yield')
+        _validate_combo_yield_cfg(combo_cfg, f'{symbol}.combo_yield')
     if item.get('yield_enhancement') is not None:
         die(f'{symbol}.yield_enhancement has been removed; use {symbol}.combo_yield instead')
 
@@ -659,7 +659,7 @@ def _validate_optional_dte_window(cfg: dict, path: str):
             die(f'{path}.min_dte/max_dte must be integers')
 
 
-def _validate_yield_enhancement_cfg(cfg: dict, path: str):
+def _validate_combo_yield_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
     removed_gap_keys = [
@@ -672,7 +672,8 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             f"{path} has removed staggered-expiry gap fields: {', '.join(removed_gap_keys)}; "
             "Combo Yield supports same_expiry_pair only"
         )
-    _reject_unknown_keys(cfg, YIELD_ENHANCEMENT_ALLOWED_FIELDS, path)
+    _reject_unknown_keys(cfg, COMBO_YIELD_ALLOWED_FIELDS, path)
+    _validate_optional_bool(cfg, 'enabled', path)
     removed_funding_keys = [
         key
         for key in ('funding_mode', 'max_call_cost_to_put_credit', 'max_debit', 'max_debit_native')
@@ -688,31 +689,31 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
     if bad_keys:
         die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
-    removed_target_keys = [k for k in YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS if k in cfg]
+    removed_target_keys = [k for k in COMBO_YIELD_REMOVED_TARGET_FIELDS if k in cfg]
     if removed_target_keys:
         die(
             f"{path} has removed target-price fields: {', '.join(removed_target_keys)}; "
             "combo_yield uses price bounds and funding economics"
         )
-    legacy_scenario_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS if k in cfg]
+    legacy_scenario_keys = [k for k in COMBO_YIELD_LEGACY_SCENARIO_FIELDS if k in cfg]
     if legacy_scenario_keys:
         die(
             f"{path} has removed scenario fields: {', '.join(legacy_scenario_keys)}; "
             "use funding, call cost, strike bounds, and delta controls instead"
         )
-    legacy_optimizer_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS if k in cfg]
+    legacy_optimizer_keys = [k for k in COMBO_YIELD_LEGACY_OPTIMIZER_FIELDS if k in cfg]
     if legacy_optimizer_keys:
         die(
             f"{path} has removed optimizer fields: {', '.join(legacy_optimizer_keys)}; "
             "use funding, call cost, strike bounds, and delta controls instead"
         )
-    legacy_call_bound_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS if k in cfg]
+    legacy_call_bound_keys = [k for k in COMBO_YIELD_LEGACY_CALL_BOUND_FIELDS if k in cfg]
     if legacy_call_bound_keys:
         die(
             f"{path} has removed call OTM fields: {', '.join(legacy_call_bound_keys)}; "
             "use combo_yield.call.min_strike/max_strike instead"
         )
-    legacy_put_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS if k in cfg]
+    legacy_put_otm_keys = [k for k in COMBO_YIELD_LEGACY_PUT_OTM_FIELDS if k in cfg]
     if legacy_put_otm_keys:
         die(
             f"{path} has removed put OTM fields: {', '.join(legacy_put_otm_keys)}; "
@@ -720,8 +721,8 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         )
     if 'objective' in cfg and cfg.get('objective') is not None:
         objective = str(cfg.get('objective') or '').strip().lower()
-        if objective not in YIELD_ENHANCEMENT_OBJECTIVES:
-            die(f"{path}.objective must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OBJECTIVES))}")
+        if objective not in COMBO_YIELD_OBJECTIVES:
+            die(f"{path}.objective must be one of: {', '.join(sorted(COMBO_YIELD_OBJECTIVES))}")
     if 'output_mode' in cfg:
         die(
             f"{path}.output_mode has been removed; Combo Yield candidate output is sealed JSON only; "
@@ -729,13 +730,13 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         )
     if 'structure_mode' in cfg and cfg.get('structure_mode') is not None:
         structure_mode = str(cfg.get('structure_mode') or '').strip().lower()
-        if structure_mode not in YIELD_ENHANCEMENT_STRUCTURE_MODES:
-            die(f"{path}.structure_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_STRUCTURE_MODES))}")
+        if structure_mode not in COMBO_YIELD_STRUCTURE_MODES:
+            die(f"{path}.structure_mode must be one of: {', '.join(sorted(COMBO_YIELD_STRUCTURE_MODES))}")
     if 'variant' in cfg and cfg.get('variant') is not None:
         variant = str(cfg.get('variant') or '').strip().lower()
-        if variant not in YIELD_ENHANCEMENT_VARIANTS:
-            die(f"{path}.variant must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_VARIANTS))}")
-    for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
+        if variant not in COMBO_YIELD_VARIANTS:
+            die(f"{path}.variant must be one of: {', '.join(sorted(COMBO_YIELD_VARIANTS))}")
+    for key in COMBO_YIELD_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (
         'min_combo_net_credit',
@@ -749,7 +750,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if call_leg is not None and not isinstance(call_leg, dict):
         die(f'{path}.call must be an object')
     if isinstance(call_leg, dict):
-        _reject_unknown_keys(call_leg, YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS, f'{path}.call')
+        _reject_unknown_keys(call_leg, COMBO_YIELD_CALL_ALLOWED_FIELDS, f'{path}.call')
         redundant_call_dte_keys = [
             key for key in ('min_dte', 'max_dte') if call_leg.get(key) is not None
         ]
@@ -761,7 +762,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             )
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')
-        legacy_call_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS if k in call_leg]
+        legacy_call_otm_keys = [k for k in COMBO_YIELD_LEGACY_CALL_OTM_FIELDS if k in call_leg]
         if legacy_call_otm_keys:
             die(
                 f"{path}.call has removed OTM fields: {', '.join(legacy_call_otm_keys)}; "
@@ -1409,10 +1410,10 @@ def validate_config(cfg: dict):
                             f"templates.{profile_name}.sell_put.{nested_combo_yield_keys[0]} has been removed; "
                             f"use templates.{profile_name}.combo_yield instead"
                         )
-            yield_enhancement_cfg = profile.get('combo_yield')
-            if yield_enhancement_cfg is not None:
-                _validate_yield_enhancement_cfg(
-                    yield_enhancement_cfg,
+            combo_yield_cfg = profile.get('combo_yield')
+            if combo_yield_cfg is not None:
+                _validate_combo_yield_cfg(
+                    combo_yield_cfg,
                     f'templates.{profile_name}.combo_yield',
                 )
             if profile.get('yield_enhancement') is not None:
@@ -1475,10 +1476,10 @@ def validate_config(cfg: dict):
         nested_combo_yield_keys = [key for key in ("combo_yield", "yield_enhancement") if sp.get(key) is not None]
         if nested_combo_yield_keys:
             die(f"{sym}.sell_put.{nested_combo_yield_keys[0]} has been removed; use {sym}.combo_yield instead")
-        yield_enhancement_cfg = item.get('combo_yield')
-        if yield_enhancement_cfg is not None:
-            _validate_yield_enhancement_cfg(
-                yield_enhancement_cfg,
+        combo_yield_cfg = item.get('combo_yield')
+        if combo_yield_cfg is not None:
+            _validate_combo_yield_cfg(
+                combo_yield_cfg,
                 f'{sym}.combo_yield',
             )
         if item.get('yield_enhancement') is not None:

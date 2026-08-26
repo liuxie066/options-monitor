@@ -2918,7 +2918,7 @@ def _check_runtime_config(path: Path, *, market: str) -> dict[str, Any]:
             "value": {
                 "path": str(path),
                 "repair": f"./om config build --source yaml --market {market} --output {shlex.quote(str(path))}",
-                "migration": "./om config migrate-yaml --output config.yaml --apply",
+                "authoring": "create config.yaml, then rebuild the runtime config",
             },
         }
     return {"name": f"runtime_config_{market}", "status": "ok", "message": "runtime config metadata exists", "value": str(path)}

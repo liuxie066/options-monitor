@@ -3156,7 +3156,7 @@ def test_same_millisecond_rows_repair_head_by_rowid_without_regression(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import src.application.ledger.repository as repository_module
+    import src.application.ledger.repository_lifecycle_cases as repository_module
 
     repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
         tmp_path

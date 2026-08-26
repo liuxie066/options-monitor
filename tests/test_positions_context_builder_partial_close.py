@@ -136,8 +136,8 @@ def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
                 "account": "sy",
                 "symbol": "9992.HK",
                 "status": "open",
-                "side": "long",
-                "option_type": "call",
+                "side": "short",
+                "option_type": "put",
                 "contracts": 1,
                 "contracts_open": 1,
                 "currency": "HKD",
@@ -145,8 +145,8 @@ def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
                 "multiplier": 200,
                 "premium": 6.38,
                 "strategy": "yield_enhancement",
-                "leg_role": "enhancement_call",
-                "yield_enhancement_mode": "income_upside_enhancement",
+                "leg_role": "sell_put",
+                "yield_enhancement_mode": "vol_convexity_enhancement",
             },
         }
     ]
@@ -155,9 +155,15 @@ def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
 
     row = ctx["open_positions_min"][0]
     assert row["strategy"] == "yield_enhancement"
-    assert row["leg_role"] == "enhancement_call"
-    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert row["leg_role"] == "sell_put"
+    assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
     assert row["strategy_group_id"] is None
+    from src.application.strategy_policy import resolve_position_strategy
+
+    assert resolve_position_strategy(
+        position=row,
+        config={"symbols": [{"symbol": "9992.HK", "sell_put": {"strategy": "return_first"}}]},
+    ).strategy_profile == "short_vol"
 
 
 def test_build_context_reads_premium_from_note_fallback() -> None:

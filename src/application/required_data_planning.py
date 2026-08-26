@@ -22,8 +22,8 @@ from src.application.opend_symbol_chain_fetching import (
     discover_option_expirations,
     list_option_expirations,
 )
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
 )
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
@@ -515,13 +515,13 @@ def _resolve_combo_yield_call_plan(
     *,
     symbol: str,
     sell_put_cfg: dict,
-    yield_enhancement_cfg: dict,
+    combo_yield_cfg: dict,
     limit_expirations: int,
     available_expirations: list[str],
     trading_date: date | None = None,
     spot_reference: float | None,
 ) -> OptionSideFetchPlan:
-    cfg = dict(yield_enhancement_cfg or {})
+    cfg = dict(combo_yield_cfg or {})
     call_cfg = dict(cfg.get("call") or {})
     call_cfg.pop("min_dte", None)
     call_cfg.pop("max_dte", None)
@@ -1031,7 +1031,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg: dict | None = None,
     sell_call_cfg: dict | None = None,
     wheel_call_cfg: dict | None = None,
-    yield_enhancement_cfg: dict | None = None,
+    combo_yield_cfg: dict | None = None,
     position_requirements: list[dict[str, Any]] | None = None,
     symbol_cfg: dict[str, Any] | None = None,
     fetch_host: str = "127.0.0.1",
@@ -1066,7 +1066,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
     wheel_call_cfg = dict(wheel_call_cfg or {})
-    resolved_yield_enhancement_cfg = dict(yield_enhancement_cfg or {})
+    resolved_combo_yield_cfg = dict(combo_yield_cfg or {})
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sell_put_cfg)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=sell_call_cfg)
     expiration_discovery: OptionExpirationDiscoveryResult | None = None
@@ -1240,8 +1240,8 @@ def build_required_data_fetch_plan(
 
     side_plans: list[OptionSideFetchPlan] = []
     spot_observation_error: str | None = None
-    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg)
-    combo_yield_enabled = bool(yield_enhancement_policy.enabled)
+    combo_yield_policy = derive_combo_yield_policy(resolved_combo_yield_cfg)
+    combo_yield_enabled = bool(combo_yield_policy.enabled)
     if want_put or combo_yield_enabled:
         try:
             side_plans.append(
@@ -1287,7 +1287,7 @@ def build_required_data_fetch_plan(
             _resolve_combo_yield_call_plan(
                 symbol=symbol,
                 sell_put_cfg=sell_put_cfg,
-                yield_enhancement_cfg=resolved_yield_enhancement_cfg,
+                combo_yield_cfg=resolved_combo_yield_cfg,
                 limit_expirations=limit_expirations,
                 available_expirations=available_expirations,
                 trading_date=trading_date,
@@ -1320,7 +1320,7 @@ def build_required_data_fetch_plan(
         or (want_call and sell_call_semantics.scan_requires_rv)
         or (
             combo_yield_enabled
-            and yield_enhancement_policy.requires_realized_volatility
+            and combo_yield_policy.requires_realized_volatility
         )
         or any(
             bool(item.get("requires_realized_volatility"))

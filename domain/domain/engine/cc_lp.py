@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .yield_enhancement import YieldEnhancementLeg
+from .combo_yield import ComboYieldLeg
 
 
 CC_LP_DEFAULT_MIN_PUT_DELTA = 0.10
@@ -40,8 +40,8 @@ class CcLpMetrics:
 
 
 def validate_cc_lp_pair(
-    call_leg: YieldEnhancementLeg,
-    put_leg: YieldEnhancementLeg,
+    call_leg: ComboYieldLeg,
+    put_leg: ComboYieldLeg,
     *,
     min_put_delta: float = CC_LP_DEFAULT_MIN_PUT_DELTA,
     max_put_delta: float = CC_LP_DEFAULT_MAX_PUT_DELTA,
@@ -83,8 +83,8 @@ def validate_cc_lp_pair(
 
 def compute_cc_lp_metrics(
     *,
-    call_leg: YieldEnhancementLeg,
-    put_leg: YieldEnhancementLeg,
+    call_leg: ComboYieldLeg,
+    put_leg: ComboYieldLeg,
     call_sell_fee: float,
     put_buy_fee: float,
     covered_notional: float,

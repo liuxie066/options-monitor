@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 
 @dataclass(frozen=True)
-class YieldEnhancementLeg:
+class ComboYieldLeg:
     symbol: str
     option_type: str
     expiration: str
@@ -28,7 +28,7 @@ class YieldEnhancementLeg:
 
 
 @dataclass(frozen=True)
-class YieldEnhancementMetrics:
+class ComboYieldMetrics:
     net_credit: float
     net_debit: float
     put_only_net_credit: float
@@ -58,7 +58,7 @@ class YieldEnhancementMetrics:
 
 
 @dataclass(frozen=True)
-class YieldEnhancementFundingDecision:
+class ComboYieldFundingDecision:
     accepted: bool
     reject_reasons: tuple[str, ...]
     put_net_credit: float
@@ -117,9 +117,9 @@ def _normalize_weights(weights: tuple[float, ...], count: int) -> tuple[float, .
     return tuple(value / total for value in cleaned)
 
 
-def validate_yield_enhancement_pair(
-    put_leg: YieldEnhancementLeg,
-    call_leg: YieldEnhancementLeg,
+def validate_combo_yield_pair(
+    put_leg: ComboYieldLeg,
+    call_leg: ComboYieldLeg,
 ) -> list[str]:
     rejects: list[str] = []
     if str(put_leg.option_type).lower() != "put":
@@ -145,20 +145,20 @@ def validate_yield_enhancement_pair(
     return rejects
 
 
-def compute_yield_enhancement_metrics(
+def compute_combo_yield_metrics(
     *,
-    put_leg: YieldEnhancementLeg,
-    call_leg: YieldEnhancementLeg,
+    put_leg: ComboYieldLeg,
+    call_leg: ComboYieldLeg,
     put_sell_fee: float,
     call_buy_fee: float,
     expected_move_iv: float | None = None,
     scenario_move_factors: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5),
     scenario_weights: tuple[float, ...] = (0.2, 0.3, 0.4, 0.1),
     min_combo_notional_floor: float = 1.0,
-) -> YieldEnhancementMetrics:
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+) -> ComboYieldMetrics:
+    rejects = validate_combo_yield_pair(put_leg, call_leg)
     if rejects:
-        raise ValueError(f"invalid yield enhancement pair: {', '.join(rejects)}")
+        raise ValueError(f"invalid combo yield pair: {', '.join(rejects)}")
 
     multiplier = float(put_leg.multiplier)
     spot = float(put_leg.spot)
@@ -226,7 +226,7 @@ def compute_yield_enhancement_metrics(
         denominator = max(abs(net_credit), float(min_combo_notional_floor or 1.0))
         combo_spread_ratio = spread_notional / denominator if denominator > 0 else None
 
-    return YieldEnhancementMetrics(
+    return ComboYieldMetrics(
         net_credit=round(net_credit, 6),
         net_debit=round(net_debit, 6),
         put_only_net_credit=round(put_proceeds, 6),
@@ -264,19 +264,19 @@ def _round_optional(value: float | None) -> float | None:
     return round(float(value), 6) if value is not None else None
 
 
-def compute_yield_enhancement_funding_decision(
+def compute_combo_yield_funding_decision(
     *,
-    put_leg: YieldEnhancementLeg,
-    call_leg: YieldEnhancementLeg,
+    put_leg: ComboYieldLeg,
+    call_leg: ComboYieldLeg,
     put_sell_fee: float,
     call_buy_fee: float,
-    combo_metrics: YieldEnhancementMetrics,
+    combo_metrics: ComboYieldMetrics,
     min_combo_net_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
-) -> YieldEnhancementFundingDecision:
+) -> ComboYieldFundingDecision:
     """Decide whether the put premium can sensibly fund a speculative long call."""
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+    rejects = validate_combo_yield_pair(put_leg, call_leg)
     reject_reasons: list[str] = list(rejects)
 
     multiplier = float(put_leg.multiplier)
@@ -336,7 +336,7 @@ def compute_yield_enhancement_funding_decision(
     premium_funding_score = sum(components.values())
     unique_rejects = tuple(dict.fromkeys(reject_reasons))
 
-    return YieldEnhancementFundingDecision(
+    return ComboYieldFundingDecision(
         accepted=(len(unique_rejects) == 0),
         reject_reasons=unique_rejects,
         put_net_credit=round(put_net_credit, 6),
@@ -356,7 +356,7 @@ def compute_yield_enhancement_funding_decision(
     )
 
 
-def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+def combo_yield_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
     def f(key: str, default: float = 0.0) -> float:
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
@@ -383,8 +383,8 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def rank_yield_enhancement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted([dict(row) for row in rows], key=yield_enhancement_rank_key)
+def rank_combo_yield_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(row) for row in rows], key=combo_yield_rank_key)
 
 
 @dataclass(frozen=True)
@@ -631,13 +631,13 @@ def _typed_rank_key(values: tuple[Any, ...]) -> list[dict[str, Any]]:
     ]
 
 
-def select_best_yield_enhancement_per_symbol(
+def select_best_combo_yield_per_symbol(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return one canonical highest-ranked Combo Yield pair per underlying."""
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in rank_yield_enhancement_rows(rows):
+    for row in rank_combo_yield_rows(rows):
         symbol = str(row.get("symbol") or "").strip().upper()
         key = symbol or str(
             row.get("candidate_pair_id")
@@ -652,12 +652,12 @@ def select_best_yield_enhancement_per_symbol(
     return selected
 
 
-def rank_yield_enhancement_calls_for_put(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def rank_combo_yield_calls_for_put(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     copied = [dict(row) for row in rows]
-    return rank_yield_enhancement_rows(copied)
+    return rank_combo_yield_rows(copied)
 
 
-def yield_enhancement_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+def combo_yield_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
     def f(key: str, default: float = 0.0) -> float:
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
@@ -674,7 +674,7 @@ def yield_enhancement_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, .
     )
 
 
-def yield_enhancement_pair_shadow_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+def combo_yield_pair_shadow_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
     def f(key: str, default: float = 0.0) -> float:
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
@@ -701,9 +701,9 @@ def yield_enhancement_pair_shadow_rank_key(row: dict[str, Any]) -> tuple[Any, ..
     )
 
 
-def rank_yield_enhancement_call_lottery_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted([dict(row) for row in rows], key=yield_enhancement_call_lottery_rank_key)
+def rank_combo_yield_call_lottery_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(row) for row in rows], key=combo_yield_call_lottery_rank_key)
 
 
-def rank_yield_enhancement_shadow_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted([dict(row) for row in rows], key=yield_enhancement_pair_shadow_rank_key)
+def rank_combo_yield_shadow_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(row) for row in rows], key=combo_yield_pair_shadow_rank_key)

@@ -23,6 +23,7 @@ from domain.domain.option_position_identity import (
     parse_exp_to_ms,
     resolve_open_currency,
 )
+from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD, canonical_strategy_id
 
 
 class _Unset:
@@ -39,9 +40,9 @@ POSITION_LOT_STRATEGY_PATCH_FIELDS = (
     "leg_role",
     "strategy_group_id",
     "source_stock_lot_id",
-    "yield_enhancement_mode",
     "strategy_snapshot",
 )
+LEGACY_POSITION_LOT_PATCH_FIELDS = ("yield_enhancement_mode",)
 
 POSITION_LOT_PATCH_FIELDS = (
     "contracts_open",
@@ -65,6 +66,7 @@ POSITION_LOT_PATCH_FIELDS = (
     "currency",
     "note",
     *POSITION_LOT_STRATEGY_PATCH_FIELDS,
+    *LEGACY_POSITION_LOT_PATCH_FIELDS,
 )
 
 
@@ -99,6 +101,21 @@ def _optional_patch_object(value: Any, field_name: str) -> dict[str, Any] | _Uns
     if not isinstance(value, dict) or not value:
         raise ValueError(f"{field_name} must be a non-empty JSON object when provided")
     return dict(value)
+
+
+def strip_retired_strategy_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    out = {key: value for key, value in payload.items() if key != "yield_enhancement_mode"}
+    if canonical_strategy_id(out.get("strategy")) == STRATEGY_COMBO_YIELD:
+        out["strategy"] = STRATEGY_COMBO_YIELD
+    snapshot = out.get("strategy_snapshot")
+    if isinstance(snapshot, dict):
+        cleaned_snapshot = {
+            key: value for key, value in snapshot.items() if key != "yield_enhancement_mode"
+        }
+        if canonical_strategy_id(cleaned_snapshot.get("strategy")) == STRATEGY_COMBO_YIELD:
+            cleaned_snapshot["strategy"] = STRATEGY_COMBO_YIELD
+        out["strategy_snapshot"] = cleaned_snapshot
+    return out
 
 
 def normalize_trade_price(value: Any, field_name: str = "premium_per_share", *, allow_zero: bool = False) -> float:
@@ -383,8 +400,8 @@ class PositionLotPatch:
     leg_role: _PatchValue = _UNSET
     strategy_group_id: _PatchValue = _UNSET
     source_stock_lot_id: _PatchValue = _UNSET
-    yield_enhancement_mode: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
+    yield_enhancement_mode: _PatchValue = _UNSET
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -440,8 +457,8 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         leg_role=payload.get("leg_role", _UNSET),
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
         source_stock_lot_id=payload.get("source_stock_lot_id", _UNSET),
-        yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
+        yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
     )
 
 
@@ -518,7 +535,9 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
         multiplier=normalized_multiplier,
         underlying_share_locked=(int(underlying_locked) if underlying_locked is not None else None),
         cash_secured_amount=(float(cash_secured) if cash_secured is not None else None),
-        strategy_snapshot=(dict(cmd.strategy_snapshot) if isinstance(cmd.strategy_snapshot, dict) else None),
+        strategy_snapshot=(strip_retired_strategy_metadata(cmd.strategy_snapshot) or None)
+        if isinstance(cmd.strategy_snapshot, dict)
+        else None,
     )
 
 
@@ -526,9 +545,15 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     return build_position_lot_fields(cmd).to_dict()
 
 
-def strategy_metadata_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+def strategy_metadata_fields_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    include_legacy: bool = False,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
+    if not include_legacy:
+        payload = strip_retired_strategy_metadata(payload)
     snapshot = payload.get("strategy_snapshot")
     snapshot_fields = snapshot if isinstance(snapshot, dict) else {}
     out: dict[str, Any] = {}
@@ -543,6 +568,13 @@ def strategy_metadata_fields_from_payload(payload: dict[str, Any] | None) -> dic
         text = str(value or "").strip()
         if text:
             out[key] = text
+    if include_legacy:
+        value = payload.get("yield_enhancement_mode")
+        if value in (None, ""):
+            value = snapshot_fields.get("yield_enhancement_mode")
+        text = str(value or "").strip()
+        if text:
+            out["yield_enhancement_mode"] = text
     return out
 
 
@@ -587,10 +619,11 @@ def build_open_adjustment_patch_contract(
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_stock_lot_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> PositionLotPatch:
+    if isinstance(strategy_snapshot, dict):
+        strategy_snapshot = strip_retired_strategy_metadata(strategy_snapshot) or None
     if all(
         value is None
         for value in (
@@ -604,7 +637,6 @@ def build_open_adjustment_patch_contract(
             leg_role,
             strategy_group_id,
             source_stock_lot_id,
-            yield_enhancement_mode,
             strategy_snapshot,
         )
     ):
@@ -650,14 +682,14 @@ def build_open_adjustment_patch_contract(
     patch_underlying_locked: _PatchValue = _UNSET
     patch_position_id: _PatchValue = _UNSET
     patch_note: _PatchValue = _UNSET
-    patch_strategy = _optional_patch_text(strategy, "strategy")
+    canonical_strategy = strip_retired_strategy_metadata({"strategy": strategy}).get("strategy")
+    patch_strategy = _optional_patch_text(canonical_strategy, "strategy")
     patch_leg_role = _optional_patch_text(leg_role, "leg_role")
     patch_strategy_group_id = _optional_patch_text(strategy_group_id, "strategy_group_id")
     patch_source_stock_lot_id = _optional_patch_text(
         source_stock_lot_id,
         "source_stock_lot_id",
     )
-    patch_yield_enhancement_mode = _optional_patch_text(yield_enhancement_mode, "yield_enhancement_mode")
     patch_strategy_snapshot = _optional_patch_object(strategy_snapshot, "strategy_snapshot")
 
     if contracts is not None:
@@ -730,7 +762,6 @@ def build_open_adjustment_patch_contract(
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
         source_stock_lot_id=patch_source_stock_lot_id,
-        yield_enhancement_mode=patch_yield_enhancement_mode,
         strategy_snapshot=patch_strategy_snapshot,
     )
 
@@ -748,7 +779,6 @@ def build_open_adjustment_patch(
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_stock_lot_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -764,7 +794,6 @@ def build_open_adjustment_patch(
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
         source_stock_lot_id=source_stock_lot_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     ).to_dict()

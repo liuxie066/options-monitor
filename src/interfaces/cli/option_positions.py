@@ -810,7 +810,6 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--strategy', default=None, help='strategy marker, e.g. combo_yield')
     p_adjust.add_argument('--leg-role', default=None, help='strategy leg role, e.g. enhancement_call')
     p_adjust.add_argument('--strategy-group-id', default=None)
-    p_adjust.add_argument('--yield-enhancement-mode', default=None)
     p_adjust.add_argument('--strategy-snapshot-json', default=None, help='JSON object stored as strategy_snapshot')
     p_adjust.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_adjust, high_risk=True)
@@ -2423,7 +2422,6 @@ def main(argv: list[str] | None = None) -> int:
                 strategy=args.strategy,
                 leg_role=args.leg_role,
                 strategy_group_id=args.strategy_group_id,
-                yield_enhancement_mode=args.yield_enhancement_mode,
                 strategy_snapshot=_parse_json_object_arg(args.strategy_snapshot_json, name="--strategy-snapshot-json"),
                 dry_run=dry_run,
             )

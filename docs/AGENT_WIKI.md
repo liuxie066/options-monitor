@@ -500,9 +500,10 @@ Ownership:
 | Domain projection | `domain/domain/ledger/projection.py` |
 | Public application boundary | `src/application/ledger/api.py` |
 | Use-case commands | `src/application/ledger/commands.py` |
-| Repository/config boundary | `src/application/ledger/repository.py` |
+| Repository/config boundary | `src/application/ledger/repository.py` facade；实现位于 `repository_*.py` |
 | Stored event codec | `src/application/ledger/event_codec.py` |
-| Event write and projection publish | `src/application/ledger/writer.py` |
+| Event write and projection publish | `src/application/ledger/writer.py` facade；实现位于 `writer_*.py` |
+| Current decision projection | `src/application/ledger/current_decision_projection.py` facade；实现位于 `current_decision_*.py` |
 | Manual trades | `src/application/ledger/manual_trades.py` |
 | Void/repair interventions | `src/application/ledger/interventions.py` |
 | Auto-close maintenance | `src/application/ledger/maintenance.py`, `src/application/positions/auto_close.py` |
@@ -738,11 +739,11 @@ notifications, or mutate broker-facing state.
 
 - YAML authoring: `src/application/config_yaml.py`, `src/application/config_yaml_init.py`
 - Runtime snapshot validation: `src/application/config_validator.py`
-- Legacy JSON migration reader: `src/application/layered_config.py`
-- Examples: `configs/examples/config.yaml.example`, `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
+- Runtime config resolution: `src/application/layered_config.py`
+- Example: `configs/examples/config.yaml.example`
 - Full config docs: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`
 
-`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are one-time `config migrate-yaml` inputs only, not an upgrade-recovery path; production upgrade fails closed when the YAML authoring source is unavailable.
+`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON authoring and its migration command are retired; production upgrade fails closed when the YAML authoring source is unavailable.
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
@@ -853,7 +854,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Close Advice frozen snapshot | `python3.12 -m pytest -q -p no:cacheprovider tests/test_close_advice_required_data.py tests/test_close_advice_runner.py tests/test_account_run.py tests/test_tick_account_execution_barrier.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
-| Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
+| Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/*/test_service_deploy_*.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 
@@ -921,8 +922,9 @@ Smallest remaining actions, with blockers called out.
 - Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads remain explicit operator queries requiring an account; market keeps the existing US default when omitted.
 - Query safety: query is byte-for-byte read-only with respect to delivery state and does not refresh data, scan, send, confirm, or mutate candidate state.
 - Delivery ambiguity: ambiguous envelopes are frozen. Later attempts either replay the exact message/key/hash under the provider idempotency contract or wait for explicit confirmation.
+- Delivery state cutoff: only `daily_decision_brief_delivery.v2` is accepted. Retired v1 state fails closed; the current release has no converter.
 - Multi-market: an explicit combined-market tick is terminal fail-closed before Daily Brief assemble, revision/current persistence, delivery-envelope creation, or provider work. Production scheduled runs remain single-market.
-- Rollout safety: release, remote upgrade, production pointer migration, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
+- Rollout safety: release, remote upgrade, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
 
 Read surfaces:
 
@@ -931,12 +933,4 @@ Read surfaces:
 ./om daily-brief day --account lx [--market US|HK] --date YYYY-MM-DD [--revision N] [--json]
 ./om-agent run --tool daily_decision_brief_read --input-json '{}'
 ./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
-```
-
-Delivery state inspection and migration remain explicit operator commands:
-
-```bash
-./om daily-brief delivery-inspect --account lx --market HK
-./om daily-brief delivery-migrate --account lx --market HK          # dry-run
-./om daily-brief delivery-migrate --account lx --market HK --confirm
 ```

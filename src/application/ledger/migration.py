@@ -10,11 +10,9 @@ from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     effective_multiplier,
     effective_strike,
-    normalize_side,
     normalize_status,
     safe_float,
 )
-from domain.domain.trade_contract_identity import normalize_position_effect, normalize_trade_side
 
 
 @dataclass(frozen=True)
@@ -83,29 +81,6 @@ class ShadowReplayResult:
         }
 
 
-def import_legacy_trade_events(events: list[Any]) -> tuple[list[TradeEvent], list[LedgerDiagnostic]]:
-    imported: list[TradeEvent] = []
-    diagnostics: list[LedgerDiagnostic] = []
-    for item in events:
-        event, item_diagnostics = legacy_trade_event_to_ledger_event(item)
-        diagnostics.extend(item_diagnostics)
-        if event is not None:
-            imported.append(event)
-    return imported, diagnostics
-
-
-def shadow_replay_legacy_trade_events(events: list[Any]) -> ShadowReplayResult:
-    imported, diagnostics = import_legacy_trade_events(events)
-    projection = project_trade_events(imported)
-    return ShadowReplayResult(
-        source="legacy_trade_events",
-        source_record_count=len(events),
-        imported_event_count=len(imported),
-        projection=projection,
-        import_diagnostics=diagnostics,
-    )
-
-
 def import_position_lot_snapshot(
     records: list[dict[str, Any]],
     *,
@@ -137,74 +112,6 @@ def shadow_replay_position_lot_snapshot(
         import_diagnostics=diagnostics,
         reconciliation=reconciliation,
     )
-
-
-def legacy_trade_event_to_ledger_event(item: Any) -> tuple[TradeEvent | None, list[LedgerDiagnostic]]:
-    event_id = str(_get(item, "event_id") or "").strip()
-    diagnostics: list[LedgerDiagnostic] = []
-    raw_payload = _dict_or_empty(_get(item, "raw_payload"))
-    raw_fields = _dict_or_empty(raw_payload.get("fields"))
-    position_effect = normalize_position_effect(_get(item, "position_effect"))
-    raw_side = _get(item, "side")
-    trade_side = normalize_trade_side(raw_side)
-    event_type = _map_legacy_event_type(position_effect, raw_payload)
-    position_side = _legacy_position_side(position_effect=position_effect, trade_side=trade_side, raw_side=raw_side)
-    if not event_type or not position_side:
-        diagnostics.append(
-            LedgerDiagnostic(
-                event_id=event_id,
-                severity="error",
-                code="legacy_event_type_unresolved",
-                message="legacy trade event could not be mapped to a ledger event",
-                details={
-                    "position_effect": _get(item, "position_effect"),
-                    "side": _get(item, "side"),
-                },
-            )
-        )
-        return None, diagnostics
-    try:
-        contract_key = ContractKey.from_values(
-            broker=_coalesce(_get(item, "broker"), raw_fields.get("broker"), raw_fields.get("market")),
-            account=_coalesce(_get(item, "account"), raw_fields.get("account")),
-            underlying_symbol=_coalesce(_get(item, "symbol"), raw_fields.get("symbol")),
-            option_type=_coalesce(_get(item, "option_type"), raw_fields.get("option_type")),
-            position_side=position_side,
-            strike=_coalesce(_get(item, "strike"), raw_fields.get("strike")),
-            expiration_ymd=_coalesce(
-                _get(item, "expiration_ymd"),
-                raw_fields.get("expiration_ymd"),
-                effective_expiration_ymd(raw_fields) if raw_fields else None,
-            ),
-        )
-        event = TradeEvent(
-            event_id=event_id,
-            event_type=event_type,
-            event_time_ms=int(_get(item, "trade_time_ms") or raw_fields.get("opened_at") or 0),
-            contract_key=contract_key,
-            contracts=max(0, int(_get(item, "contracts") or raw_fields.get("contracts") or 0)),
-            price=float(_get(item, "price") or raw_fields.get("premium") or 0.0),
-            currency=str(_coalesce(_get(item, "currency"), raw_fields.get("currency"), "")),
-            source=str(_coalesce(_get(item, "source_name"), raw_payload.get("source"), "legacy_trade_events")),
-            multiplier=float(_coalesce(_get(item, "multiplier"), raw_fields.get("multiplier"), 100) or 100),
-            fees=float(raw_payload.get("fees") or 0.0),
-            target_lot_id=_legacy_target_lot_id(raw_payload),
-            target_event_id=_legacy_target_event_id(raw_payload),
-            lot_id=_legacy_open_lot_id(event_id=event_id, raw_payload=raw_payload),
-            raw_payload=raw_payload,
-        )
-    except Exception as exc:
-        diagnostics.append(
-            LedgerDiagnostic(
-                event_id=event_id,
-                severity="error",
-                code="legacy_event_import_failed",
-                message="legacy trade event import failed",
-                details={"error": str(exc)},
-            )
-        )
-        return None, diagnostics
-    return event, diagnostics
 
 
 def position_lot_snapshot_to_open_event(
@@ -350,76 +257,3 @@ def _contract_key_from_position_fields(fields: dict[str, Any]) -> ContractKey:
         strike=effective_strike(fields),
         expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
     )
-
-
-def _map_legacy_event_type(position_effect: str | None, raw_payload: dict[str, Any]) -> str | None:
-    if position_effect == "open":
-        return "open"
-    if position_effect == "close":
-        close_type = str(raw_payload.get("close_type") or raw_payload.get("mode") or "").strip().lower()
-        return "expire_close" if close_type == "expire_auto_close" else "close"
-    if position_effect in {"adjust", "void"}:
-        return position_effect
-    return None
-
-
-def _legacy_position_side(*, position_effect: str | None, trade_side: str | None, raw_side: Any = None) -> str | None:
-    if position_effect == "open":
-        if trade_side == "sell":
-            return "short"
-        if trade_side == "buy":
-            return "long"
-    if position_effect == "close":
-        if trade_side == "buy":
-            return "short"
-        if trade_side == "sell":
-            return "long"
-    if position_effect in {"adjust", "void"}:
-        normalized_side = normalize_side(raw_side)
-        if normalized_side:
-            return normalized_side
-        if trade_side == "sell":
-            return "short"
-        if trade_side == "buy":
-            return "long"
-    return None
-
-
-def _legacy_target_lot_id(raw_payload: dict[str, Any]) -> str | None:
-    record_id = str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip()
-    if record_id:
-        return record_id
-    source_event_id = str(raw_payload.get("close_target_source_event_id") or raw_payload.get("adjust_target_source_event_id") or "").strip()
-    return f"lot_{source_event_id}" if source_event_id else None
-
-
-def _legacy_target_event_id(raw_payload: dict[str, Any]) -> str | None:
-    target = str(raw_payload.get("target_event_id") or raw_payload.get("void_target_event_id") or "").strip()
-    return target or None
-
-
-def _legacy_open_lot_id(*, event_id: str, raw_payload: dict[str, Any]) -> str | None:
-    lot_record_id = str(raw_payload.get("lot_record_id") or "").strip()
-    if lot_record_id:
-        return lot_record_id
-    explicit = str(raw_payload.get("lot_id") or "").strip()
-    if explicit:
-        return explicit
-    return None if not event_id else f"lot_{event_id}"
-
-
-def _get(item: Any, key: str) -> Any:
-    if isinstance(item, dict):
-        return item.get(key)
-    return getattr(item, key, None)
-
-
-def _dict_or_empty(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _coalesce(*values: Any) -> Any:
-    for value in values:
-        if value not in (None, ""):
-            return value
-    return None

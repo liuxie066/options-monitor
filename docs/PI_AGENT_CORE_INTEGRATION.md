@@ -2632,7 +2632,9 @@ tests/test_inbound_control.py
 tests/test_install_script.py
 tests/test_pi_agent_process.py
 tests/test_release_test_plan.py
-tests/test_service_deploy.py
+tests/unit/test_service_deploy_unit.py
+tests/integration/test_service_deploy_integration.py
+tests/e2e/test_service_deploy_e2e.py
 tests/test_setup_check.py
 ```
 
@@ -2810,7 +2812,7 @@ bash scripts/pi_runtime_smoke.sh --root . --python ./.venv/bin/python
   tests/test_setup_check.py \
   tests/test_cli_operator_commands.py \
   tests/test_install_script.py \
-  tests/test_service_deploy.py \
+  tests/*/test_service_deploy_*.py \
   tests/test_release_check.py \
   tests/test_release_test_plan.py \
   tests/copilot_eval/test_answer_quality.py

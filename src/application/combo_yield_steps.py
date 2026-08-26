@@ -36,22 +36,22 @@ from src.application.candidate_scanning import (
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
 )
-from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+from src.application.render_combo_yield_alerts import render_combo_yield_alerts
 from src.application.report_labels import label_sell_put_candidates
-from src.application.report_summaries import summarize_yield_enhancement
+from src.application.report_summaries import summarize_combo_yield
 from src.application.scan_sell_put import run_sell_put_scan
 from src.application.sell_put_call_helper import (
-    build_yield_enhancement_rank_shadow,
-    find_sell_put_yield_enhancement_pairs,
-    get_yield_enhancement_pair_diagnostics,
-    select_best_yield_enhancement_pairs,
+    build_combo_yield_rank_shadow,
+    find_sell_put_combo_yield_pairs,
+    get_combo_yield_pair_diagnostics,
+    select_best_combo_yield_pairs,
 )
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-from src.application.yield_enhancement_config import (
-    YieldEnhancementPolicy,
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+from src.application.combo_yield_config import (
+    ComboYieldPolicy,
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
 
@@ -143,9 +143,9 @@ def run_combo_yield_scan_and_summarize(
     symbol: str,
     symbol_lower: str,
     symbol_cfg: dict[str, Any],
-    yield_enhancement_cfg: dict[str, Any],
+    combo_yield_cfg: dict[str, Any],
     yield_sp: dict[str, Any],
-    yield_enhancement_policy: YieldEnhancementPolicy,
+    combo_yield_policy: ComboYieldPolicy,
     required_data_dir: Path,
     report_dir: Path,
     yield_window: CandidateWindowDefaults,
@@ -155,9 +155,9 @@ def run_combo_yield_scan_and_summarize(
     top_n: int,
     is_scheduled: bool,
     run_put_scan_fn: Callable[..., Any] = run_sell_put_scan,
-    find_pairs_fn: Callable[..., pd.DataFrame] = find_sell_put_yield_enhancement_pairs,
-    select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_yield_enhancement_pairs,
-    render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
+    find_pairs_fn: Callable[..., pd.DataFrame] = find_sell_put_combo_yield_pairs,
+    select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_combo_yield_pairs,
+    render_alerts_fn: Callable[..., str] = render_combo_yield_alerts,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
     now_utc_fn: Callable[[], datetime] = _utc_now,
@@ -167,7 +167,7 @@ def run_combo_yield_scan_and_summarize(
     """Run the Combo Yield scan and return an optional summary row."""
 
     result = _empty_result()
-    if not bool(yield_enhancement_policy.enabled):
+    if not bool(combo_yield_policy.enabled):
         return result, None
 
     trace_path = (report_dir / "candidate_filter_trace.jsonl").resolve()
@@ -197,7 +197,7 @@ def run_combo_yield_scan_and_summarize(
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=COMBO_YIELD_FAMILY,
-        strategy_profile=yield_enhancement_policy.mode,
+        strategy_profile=combo_yield_policy.derived_from_sell_put_strategy,
         calculation_decision_sink_fn=funding_put_decisions.extend,
         required_data_frames=(
             {symbol: required_data_frame}
@@ -245,12 +245,12 @@ def run_combo_yield_scan_and_summarize(
         df_candidates=df_yield_put_candidates_for_pairs,
         symbol=symbol,
         input_root=required_data_dir,
-        yield_enhancement_cfg=yield_enhancement_cfg,
+        combo_yield_cfg=combo_yield_cfg,
         sell_put_cfg=yield_sp,
-        global_yield_enhancement_liquidity=(symbol_cfg.get("_global_yield_enhancement_liquidity") or {}),
+        global_combo_yield_liquidity=(symbol_cfg.get("_global_combo_yield_liquidity") or {}),
         required_data_frame=required_data_frame,
     )
-    pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
+    pair_diagnostics = get_combo_yield_pair_diagnostics(raw_yield_pairs_df)
     pair_diagnostics["run_id"] = scope.get("run_id")
     pair_diagnostics["account"] = scope.get("account")
 
@@ -265,7 +265,7 @@ def run_combo_yield_scan_and_summarize(
             run_id=occurrence_run_id,
             generated_at_utc=now_utc_fn(),
         )
-    rank_shadow = build_yield_enhancement_rank_shadow(raw_yield_pairs_df)
+    rank_shadow = build_combo_yield_rank_shadow(raw_yield_pairs_df)
 
     trace_rows = [
         build_candidate_filter_trace_row(
@@ -273,9 +273,8 @@ def run_combo_yield_scan_and_summarize(
             account=scope.get("account"),
             symbol=symbol,
             function=COMBO_YIELD_FAMILY,
-            mode=yield_enhancement_policy.mode,
             strategy_family=COMBO_YIELD_FAMILY,
-            strategy_profile=yield_enhancement_policy.mode,
+            strategy_profile=combo_yield_policy.derived_from_sell_put_strategy,
             status="rejected",
             stage="combo_pair_filter",
             rule=str(reason),
@@ -284,7 +283,7 @@ def run_combo_yield_scan_and_summarize(
             message=f"combo yield pair rejection count: {reason}",
             evidence_path=trace_evidence_path,
             config_values={
-                **yield_enhancement_policy.to_fields(),
+                **combo_yield_policy.to_fields(),
                 "funding_put_min_annualized_return": funding_put_min_annualized_return,
             },
         )
@@ -317,9 +316,8 @@ def run_combo_yield_scan_and_summarize(
             account=scope.get("account"),
             symbol=symbol,
             function=COMBO_YIELD_FAMILY,
-            mode=yield_enhancement_policy.mode,
             strategy_family=COMBO_YIELD_FAMILY,
-            strategy_profile=yield_enhancement_policy.mode,
+            strategy_profile=combo_yield_policy.derived_from_sell_put_strategy,
             status=yield_status,
             stage="post_filter",
             rule=yield_rule,
@@ -328,7 +326,7 @@ def run_combo_yield_scan_and_summarize(
             message="combo yield pair selection",
             evidence_path=trace_evidence_path,
             config_values={
-                **yield_enhancement_policy.to_fields(),
+                **combo_yield_policy.to_fields(),
                 "funding_put_min_annualized_return": funding_put_min_annualized_return,
             },
         )
@@ -373,7 +371,7 @@ def run_combo_yield_scan_and_summarize(
         evidence=evidence,
         candidate_count=len(final_result.recommended_pairs),
     )
-    summary = summarize_yield_enhancement(
+    summary = summarize_combo_yield(
         final_result.recommended_pairs,
         symbol,
         symbol_cfg=symbol_cfg,
@@ -385,7 +383,7 @@ def run_combo_yield_scan_and_summarize(
 
 
 def empty_combo_yield_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:
-    return summarize_yield_enhancement(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+    return summarize_combo_yield(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
 
 def run_combo_yield_for_symbol_and_summarize(
@@ -408,8 +406,8 @@ def run_combo_yield_for_symbol_and_summarize(
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
-    yield_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    policy = derive_yield_enhancement_policy(yield_cfg, market=symbol_market(symbol))
+    yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
+    policy = derive_combo_yield_policy(yield_cfg, market=symbol_market(symbol))
     if not policy.enabled:
         return None
 
@@ -435,9 +433,9 @@ def run_combo_yield_for_symbol_and_summarize(
         symbol=symbol,
         symbol_lower=symbol_lower,
         symbol_cfg=symbol_cfg,
-        yield_enhancement_cfg=yield_cfg,
+        combo_yield_cfg=yield_cfg,
         yield_sp=funding_put_cfg,
-        yield_enhancement_policy=policy,
+        combo_yield_policy=policy,
         required_data_dir=required_data_dir,
         report_dir=report_dir,
         yield_window=yield_window,
@@ -457,7 +455,7 @@ def run_cc_lp_variant(
     *,
     symbol: str,
     symbol_cfg: dict[str, Any],
-    policy: YieldEnhancementPolicy,
+    policy: ComboYieldPolicy,
     required_data_dir: Path,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
@@ -478,7 +476,7 @@ def run_cc_lp_variant(
         portfolio_ctx=portfolio_ctx,
         stock=stock,
         global_sell_call_liquidity=global_sell_call_liquidity,
-        strategy_profile=policy.mode,
+        strategy_profile="cc_lp_funding_call",
         required_data_frame=required_data_frame,
     )
     if combo_evidence_sink_fn is not None:

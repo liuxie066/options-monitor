@@ -672,7 +672,7 @@ def test_combo_evaluation_keeps_baseline_and_proposed_authorities_separate(tmp_p
     (dataset / "manifest.json").write_text(json.dumps(manifest))
 
     def pair_builder(**kwargs):
-        cfg = kwargs["yield_enhancement_cfg"]
+        cfg = kwargs["combo_yield_cfg"]
         is_superset = "_explicit_fields" in cfg
         if not is_superset:
             calls = [("NVDA-CBASE", 0.24, "2026-08-21")]

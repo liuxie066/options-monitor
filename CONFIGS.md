@@ -127,29 +127,10 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 
 不要提交 env-file，不要在 issue、日志或聊天中粘贴 secret。
 
-## 旧配置迁移
+## 已退役旧配置
 
-旧 layered JSON 不再支持 normal build / explain。唯一正式迁移入口是：
-
-```bash
-./om config migrate-yaml --output config.yaml
-```
-
-默认只预览。确认等价性和目标路径后才显式 `--apply`：
-
-```bash
-./om config migrate-yaml --output config.yaml --apply
-```
-
-迁移完成后：
-
-1. 只维护 `config.yaml`；
-2. 对 US/HK 分别 validate；
-3. 重新 build runtime JSON；
-4. 重新 build assistant JSON；
-5. 让 service profile 指向 YAML 与生成快照的持久路径。
-
-`scripts/migrate_runtime_config.py` 只服务特定历史 schedule 迁移，不是通用“升级到最新 schema”入口。
+旧 layered JSON authoring 和 `config migrate-yaml` 已删除。现有安装必须直接维护
+`config.yaml`，分别 validate 并重新 build US/HK runtime JSON 与 assistant JSON；当前版本不提供旧字段转换器。
 
 ## 数据配置边界
 

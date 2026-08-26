@@ -674,7 +674,8 @@ def test_projector_fingerprint_frames_paths_and_raw_bytes(tmp_path: Path) -> Non
 def test_full_writer_sources_use_shared_publication_and_no_full_delete() -> None:
     root = resolve_projector_source_root()
     writers = (
-        "src/application/ledger/writer.py",
+        "src/application/ledger/writer_trade_events.py",
+        "src/application/ledger/writer_lifecycle_allocation.py",
         "src/application/ledger/manual_trades.py",
         "src/application/ledger/interventions.py",
         "src/application/ledger/combo_reconciliation.py",
@@ -684,6 +685,8 @@ def test_full_writer_sources_use_shared_publication_and_no_full_delete() -> None
         source = (root / path).read_text(encoding="utf-8")
         assert "replace_position_lots(" not in source
         assert "run_position_projection_in_transaction" in source
-    repository_source = (root / "src/application/ledger/repository.py").read_text(encoding="utf-8")
+    repository_source = (
+        root / "src/application/ledger/repository_projection_tail.py"
+    ).read_text(encoding="utf-8")
     assert 'execute("DELETE FROM position_lots")' not in repository_source
     assert "DELETE FROM position_lots WHERE record_id = ?" in repository_source

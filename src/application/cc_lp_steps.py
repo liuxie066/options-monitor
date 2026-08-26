@@ -19,7 +19,7 @@ from domain.domain.engine.cc_lp import (
     rank_cc_lp_rows,
     validate_cc_lp_pair,
 )
-from domain.domain.engine.yield_enhancement import YieldEnhancementLeg
+from domain.domain.engine.combo_yield import ComboYieldLeg
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
@@ -64,8 +64,8 @@ def _load_required_data_puts(
     return df.loc[mask].copy()
 
 
-def _put_leg_from_required_data(row: pd.Series) -> YieldEnhancementLeg | None:
-    """Build a YieldEnhancementLeg for a long-put reversal leg from required-data row."""
+def _put_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
+    """Build a ComboYieldLeg for a long-put reversal leg from required-data row."""
 
     return _put_leg_from_sell_put_row(row)
 

@@ -15,9 +15,9 @@ from src.application.cc_lp_steps import (
     summarize_cc_lp_result,
 )
 from src.application.combo_yield_steps import run_cc_lp_variant
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -257,8 +257,8 @@ def test_run_cc_lp_variant_returns_summary(tmp_path: Path) -> None:
     summary = run_cc_lp_variant(
         symbol="NVDA",
         symbol_cfg=symbol_cfg,
-        policy=derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(symbol_cfg),
+        policy=derive_combo_yield_policy(
+            resolve_combo_yield_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
@@ -298,8 +298,8 @@ def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
     summary = run_cc_lp_variant(
         symbol="NVDA",
         symbol_cfg=symbol_cfg,
-        policy=derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(symbol_cfg),
+        policy=derive_combo_yield_policy(
+            resolve_combo_yield_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
@@ -341,8 +341,8 @@ def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
     summary = run_cc_lp_variant(
         symbol="NVDA",
         symbol_cfg=symbol_cfg,
-        policy=derive_yield_enhancement_policy(
-            resolve_yield_enhancement_cfg(symbol_cfg),
+        policy=derive_combo_yield_policy(
+            resolve_combo_yield_cfg(symbol_cfg),
             market="us",
         ),
         required_data_dir=required_data,
@@ -356,11 +356,11 @@ def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
 
 
 def test_variant_config_parses() -> None:
-    cfg = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True, "variant": "cc_lp"}})
-    policy = derive_yield_enhancement_policy(cfg)
+    cfg = resolve_combo_yield_cfg({"combo_yield": {"enabled": True, "variant": "cc_lp"}})
+    policy = derive_combo_yield_policy(cfg)
     assert policy.config["variant"] == "cc_lp"
-    cfg_default = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True}})
-    policy_default = derive_yield_enhancement_policy(cfg_default)
+    cfg_default = resolve_combo_yield_cfg({"combo_yield": {"enabled": True}})
+    policy_default = derive_combo_yield_policy(cfg_default)
     assert policy_default.config["variant"] == "sp_lc"
 
 

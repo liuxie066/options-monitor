@@ -328,13 +328,13 @@
   ],
   "declared_locators": [
     {
-      "path": "src/application/ledger/writer.py",
+      "path": "src/application/ledger/writer_trade_events.py",
       "locator": "list_trade_events",
       "owner": "ledger_projection_writer",
       "reason": "canonical full-replay reader"
     },
     {
-      "path": "src/application/ledger/repository.py",
+      "path": "src/application/ledger/repository_trade_events.py",
       "locator": "list_trade_events_page",
       "owner": "ledger",
       "reason": "canonical bounded keyset trade-event reader"
@@ -346,7 +346,7 @@
       "reason": "canonical diff-based position-lot publication boundary"
     },
     {
-      "path": "src/application/ledger/repository.py",
+      "path": "src/application/ledger/repository_lifecycle_schema.py",
       "locator": "trade_lifecycle_evidence",
       "owner": "ledger_lifecycle",
       "reason": "canonical lifecycle evidence storage"

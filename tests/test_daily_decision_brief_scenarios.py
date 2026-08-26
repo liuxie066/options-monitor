@@ -42,42 +42,6 @@ def _action(
     }
 
 
-def _scenario_event_risk(state: str, *, fetched_at: str = "") -> dict:
-    event = (
-        {
-            "event_id": "event-q2",
-            "event_series_id": "event-series-earnings",
-            "event_type": "earnings",
-            "event_date": "2026-08-05",
-            "occurrence_anchor": "2026|Q2",
-            "anchored": True,
-        }
-        if state == "confirmed_event"
-        else None
-    )
-    return {
-        "user_state": state,
-        "reason_code": state,
-        "reliable": state != "unknown",
-        "evidence_chain_id": "event-chain-futu",
-        "nearest_event": event,
-        "events": [event] if event else [],
-        "expiration_relations": (
-            {
-                "contract": {
-                    "expiration": "2026-08-21",
-                    "relation": "before_expiration",
-                    "days_before_expiration": 16,
-                }
-            }
-            if event
-            else {}
-        ),
-        "in_attention_window": bool(event),
-        **({"fetched_at": fetched_at} if fetched_at else {}),
-    }
-
-
 def _brief(
     *,
     run_id: str,
@@ -119,23 +83,6 @@ def _brief(
     }
 
 
-def _confirm(base: Path, lifecycle: dict) -> None:
-    from src.application.daily_decision_brief_repository import confirm_daily_decision_brief_delivery
-
-    brief = lifecycle["brief"]
-    confirm_daily_decision_brief_delivery(
-        base=base,
-        market=brief["market"],
-        market_trading_date=brief["market_trading_date"],
-        account=brief["account"],
-        revision=brief["revision"],
-        delivery_kind=lifecycle["delivery_kind"],
-        delivery_key=lifecycle["delivery_key"],
-        brief_digest=lifecycle["current_brief_digest"],
-        confirmed_at_utc=f"{brief['market_trading_date']}T13:41:00+00:00",
-    )
-
-
 def _schedule(*, full_day_break: bool = False) -> dict:
     return {
         "enabled": True,
@@ -161,47 +108,6 @@ def _empty_scheduler_state() -> dict:
         "last_notify_utc": None,
         "last_notify_utc_by_account": {},
     }
-
-
-def test_0940_first_success_is_full_for_lx_and_sy(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
-    from src.application.scan_scheduler import decide
-
-    now_utc = datetime(2026, 4, 1, 13, 40, tzinfo=timezone.utc)
-    decisions = {
-        account: decide(_schedule(), _empty_scheduler_state(), now_utc, account=account, schedule_key="schedule_us")
-        for account in ("lx", "sy")
-    }
-    lifecycles = {
-        account: prepare_daily_decision_brief(
-            base=tmp_path,
-            brief=_brief(run_id=f"run-{account}", account=account, actions=[_action(account=account)]),
-        )
-        for account in ("lx", "sy")
-    }
-
-    assert all(item.should_run_scan and item.is_notify_window_open for item in decisions.values())
-    assert all(item.now_market.endswith("09:40:00-04:00") for item in decisions.values())
-    assert {account: item["delivery_kind"] for account, item in lifecycles.items()} == {"lx": "full", "sy": "full"}
-    assert {account: item["current_revision"] for account, item in lifecycles.items()} == {"lx": 0, "sy": 0}
-
-
-def test_unchanged_same_day_is_silent_after_confirmed_full(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
-
-    first = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-full", actions=[_action()]),
-    )
-    _confirm(tmp_path, first)
-    unchanged = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-unchanged", actions=[_action(mid=9.9)]),
-    )
-
-    assert unchanged["last_delivered_revision"] == 0
-    assert unchanged["delivery_kind"] == "none"
-    assert unchanged["diff"]["material"] is False
 
 
 def test_new_and_upgraded_p0_are_material() -> None:
@@ -235,25 +141,6 @@ def test_main_action_invalidation_is_material() -> None:
 
     assert diff["material"] is True
     assert "candidate_invalidated" in {item["change_type"] for item in diff["changes"]}
-
-
-def test_stable_high_priority_action_recovery_is_material(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
-
-    blocked = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-action-blocked", actions=[_action(priority="P0", state="blocked")]),
-    )
-    _confirm(tmp_path, blocked)
-
-    recovered = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-action-active", actions=[_action(priority="P0", state="active")]),
-    )
-
-    assert recovered["delivery_kind"] == "delta"
-    assert recovered["diff"]["material"] is True
-    assert "candidate_added" in {item["change_type"] for item in recovered["diff"]["changes"]}
 
 
 def test_blocked_to_recovery_is_material() -> None:
@@ -312,38 +199,11 @@ def test_capacity_changes_only_on_whole_contract_boundary() -> None:
     assert "candidate_capacity_changed" in {item["change_type"] for item in contract_diff["changes"]}
 
 
-def test_failed_delta_is_retained_against_last_delivered_revision(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
-
-    first = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-full", actions=[_action(priority="P1")]),
-    )
-    _confirm(tmp_path, first)
-
-    failed_delta = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-failed-delta", actions=[_action(priority="P0")]),
-    )
-    retry_latest = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="run-retry", actions=[_action(priority="P0", mid=2.5)]),
-    )
-
-    assert failed_delta["delivery_kind"] == "delta"
-    assert failed_delta["last_delivered_revision"] == 0
-    assert retry_latest["current_revision"] == 2
-    assert retry_latest["last_delivered_revision"] == 0
-    assert retry_latest["diff"]["from_revision"] == 0
-    assert retry_latest["delivery_kind"] == "delta"
-    assert "candidate_priority_upgraded_to_p0" in {item["change_type"] for item in retry_latest["diff"]["changes"]}
-
-
 def test_post_close_read_is_effectively_planning_only(tmp_path: Path) -> None:
     from src.application.agent_tools.daily_brief import read_daily_brief_view
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
-    prepare_daily_decision_brief(
+    persist_daily_decision_brief_success(
         base=tmp_path,
         brief=_brief(
             run_id="run-close",
@@ -487,66 +347,3 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
     assert completions == [
         {"status": "completed", "message": "non_scheduled_ordinary_notification_disabled"}
     ]
-
-
-def test_event_change_reuses_confirmed_pointer_and_freshness_only_is_silent(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
-
-    baseline_action = _action(event_risk=_scenario_event_risk("confirmed_none"))
-    baseline_action.update(
-        {
-            "expiration": "2026-08-21",
-            "contract_symbol": "NVDA260821P00100000",
-        }
-    )
-    baseline = _brief(run_id="run-event-none", actions=[baseline_action])
-    baseline.update(
-        {
-            "market_trading_date": "2026-07-21",
-            "generated_at_utc": "2026-07-21T13:40:00+00:00",
-            "data_as_of_utc": "2026-07-21T13:39:00+00:00",
-            "valid_until_utc": "2026-07-21T20:00:00+00:00",
-        }
-    )
-    first = prepare_daily_decision_brief(base=tmp_path, brief=baseline)
-    _confirm(tmp_path, first)
-
-    event_action = _action(event_risk=_scenario_event_risk("confirmed_event"))
-    event_action.update(
-        {
-            "expiration": "2026-08-21",
-            "contract_symbol": "NVDA260821P00100000",
-        }
-    )
-    changed = {**baseline, "run_id": "run-event-added", "actions": [event_action]}
-    second = prepare_daily_decision_brief(base=tmp_path, brief=changed)
-
-    assert second["delivery_kind"] == "delta"
-    assert second["last_delivered_revision"] == 0
-    assert "candidate_event_added" in {item["change_type"] for item in second["diff"]["changes"]}
-    _confirm(tmp_path, second)
-
-    fresh_action = _action(
-        event_risk=_scenario_event_risk(
-            "confirmed_event",
-            fetched_at="2026-07-21T15:00:00+00:00",
-        )
-    )
-    fresh_action.update(
-        {
-            "expiration": "2026-08-21",
-            "contract_symbol": "NVDA260821P00100000",
-        }
-    )
-    freshness_only = {
-        **baseline,
-        "run_id": "run-event-freshness",
-        "generated_at_utc": "2026-07-21T15:00:00+00:00",
-        "data_as_of_utc": "2026-07-21T14:59:00+00:00",
-        "actions": [fresh_action],
-    }
-    third = prepare_daily_decision_brief(base=tmp_path, brief=freshness_only)
-
-    assert third["delivery_kind"] == "none"
-    assert third["last_delivered_revision"] == second["current_revision"]
-    assert third["diff"]["material"] is False

@@ -84,9 +84,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_trade*.py",
         ),
         reason="ledger, position, or trade state files changed",
-        commands=(
-            "./.venv/bin/python -m pytest tests/test_option_positions*.py tests/test_trade*.py",
-        ),
+        commands=("./.venv/bin/python -m pytest tests/test_option_positions*.py tests/test_trade*.py",),
         risk="full",
     ),
     TestRule(
@@ -109,7 +107,8 @@ TEST_RULES: tuple[TestRule, ...] = (
             "src/application/service_deploy.py",
             "src/interfaces/cli/service_ops.py",
             "tests/test_release_test_plan.py",
-            "tests/test_service_deploy.py",
+            "tests/service_deploy_test_support.py",
+            "tests/*/test_service_deploy_*.py",
             "tests/test_release_version_recommendation.py",
             "tests/test_version_check.py",
             "tests/test_install_script.py",
@@ -118,7 +117,8 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
-            "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
+            "./.venv/bin/python -m pytest tests/*/test_service_deploy_*.py "
+            "tests/test_release_check.py "
             "tests/test_release_delta_coverage.py "
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
@@ -149,7 +149,8 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_setup_check.py",
             "tests/test_cli_operator_commands.py",
             "tests/test_install_script.py",
-            "tests/test_service_deploy.py",
+            "tests/service_deploy_test_support.py",
+            "tests/*/test_service_deploy_*.py",
             "tests/test_release_check.py",
             "tests/test_release_test_plan.py",
             "tests/copilot_eval/**",
@@ -162,7 +163,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_copilot_conversation_memory.py tests/test_copilot_p1_eval.py "
             "tests/test_inbound_control.py "
             "tests/test_setup_check.py tests/test_cli_operator_commands.py "
-            "tests/test_install_script.py tests/test_service_deploy.py "
+            "tests/test_install_script.py tests/*/test_service_deploy_*.py "
             "tests/test_release_check.py tests/test_release_test_plan.py "
             "tests/copilot_eval/test_answer_quality.py",
         ),
@@ -218,9 +219,7 @@ def build_release_test_plan(
     selected_mode = _normalize_mode(mode)
     files = _normalize_changed_files(changed_files)
     release_metadata_changed = (
-        "VERSION" in files
-        or "CHANGELOG.md" in files
-        or any(path.startswith("release/coverage/") for path in files)
+        "VERSION" in files or "CHANGELOG.md" in files or any(path.startswith("release/coverage/") for path in files)
     )
     commands = [
         _release_check_command(

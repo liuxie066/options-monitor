@@ -348,7 +348,7 @@ def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
     assert "全账户Sell Put占用" not in out
 
 
-def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
+def test_notify_symbols_markdown_combo_yield_layout() -> None:
     out = _render_via_alert_engine(
         {
             "symbol": "NVDA",
@@ -389,7 +389,7 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
     assert "目标价" not in out
 
 
-def test_yield_enhancement_notification_ignores_option_contract_display_name(tmp_path) -> None:
+def test_combo_yield_notification_ignores_option_contract_display_name(tmp_path) -> None:
     from domain.domain import normalize_processor_row
     from src.application.alert_engine import _load_symbol_display_map, build_alert_text
     from src.application.notify_symbols import build_notification

@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.settings import AssistantSettings
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
 from src.application.config_yaml_accounts import mutate_yaml_account_config
 from src.application.config_profiles import apply_profiles
@@ -19,9 +18,10 @@ from src.application.config_yaml import (
     explain_yaml_config_key,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
+    runtime_strategy_keys_to_yaml_authoring,
 )
 from src.application.config_yaml_init import init_yaml_config
-from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.config_yaml_symbols import mutate_yaml_symbol_config, set_yaml_symbol_config
 from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
@@ -273,22 +273,6 @@ def test_runtime_config_rejects_retired_ai_decision_advice_key() -> None:
     )
 
 
-def _write_migration_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
-    common_path = tmp_path / "user.common.json"
-    common_path.write_text(
-        json.dumps(
-            {"account_settings": {"lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}}}},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    us_path = tmp_path / "user.us.json"
-    us_path.write_text(json.dumps({"symbols": [{"symbol": "NVDA"}]}, ensure_ascii=False), encoding="utf-8")
-    hk_path = tmp_path / "user.hk.json"
-    hk_path.write_text(json.dumps({"symbols": [{"symbol": "0700.HK"}]}, ensure_ascii=False), encoding="utf-8")
-    return common_path, us_path, hk_path
-
-
 def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
 
@@ -339,6 +323,34 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg[RESOLVED_KEY]["default_source"] == DEFAULT_CONFIG_REF
 
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_config_rejects_string_combo_yield_enabled(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "        combo_yield: true",
+            '        combo_yield:\n          enabled: "false"',
+        ),
+    )
+
+    with pytest.raises(AgentToolError, match="combo_yield.enabled must be a boolean"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_yaml_config_rejects_retired_combo_yield_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace("        combo_yield: true", "        yield_enhancement: true"),
+    )
+
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_runtime_strategy_conversion_rejects_retired_combo_yield_key() -> None:
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        runtime_strategy_keys_to_yaml_authoring({"yield_enhancement": {"enabled": True}})
 
 
 def test_yaml_runtime_build_defaults_to_canonical_runtime_path(tmp_path: Path) -> None:
@@ -429,7 +441,7 @@ markets:
 
 
 def test_yaml_combo_yield_keeps_only_authored_fields_explicit(tmp_path: Path) -> None:
-    from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+    from src.application.combo_yield_config import derive_combo_yield_policy
 
     config_path = _write_yaml(
         tmp_path / "config.yaml",
@@ -462,7 +474,7 @@ markets:
             profiles=cfg["templates"],
             apply_profiles_fn=apply_profiles,
         )
-        policies[item["symbol"]] = derive_yield_enhancement_policy(
+        policies[item["symbol"]] = derive_combo_yield_policy(
             resolved["combo_yield"],
             market="us",
         )
@@ -705,6 +717,23 @@ def test_yaml_symbol_set_updates_combo_yield_enabled_as_dry_run(tmp_path: Path) 
     assert out["summary"]["entry"]["covered_call"]["enabled"] is True
     assert out["validation"]["hk"]["ok"] is True
     assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_yaml_symbol_edit_rejects_retired_combo_yield_path(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    with pytest.raises(AgentToolError, match="yield_enhancement has been removed; use combo_yield"):
+        mutate_yaml_symbol_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            payload={
+                "action": "edit",
+                "symbol": "FUTU",
+                "set": {"yield_enhancement.enabled": True},
+            },
+            config_path=config_path,
+            apply=False,
+        )
 
 
 def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
@@ -1654,248 +1683,3 @@ def test_config_validate_cli_supports_yaml_source(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["source_format"] == "yaml"
-
-
-def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> None:
-    from src.application.config_yaml_migration import preview_config_yaml_migration
-
-    common_path = tmp_path / "user.common.json"
-    common_path.write_text(
-        json.dumps(
-            {
-                "account_settings": {
-                    "lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}},
-                    "sy": {"type": "external_holdings", "holdings_account": "sy"},
-                },
-                "agent": {
-                    "runtime": {"enabled": True, "context_window_messages": 6},
-                    "llm": {
-                        "enabled": True,
-                        "provider": "deepseek",
-                        "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-flash",
-                        "api_key_env": "DEEPSEEK_API_KEY",
-                        "context_window_tokens": 24000,
-                    },
-                },
-                "inbound": {"feishu_ws": {"ack_reaction": "THUMBSUP"}},
-                "alert_policy": {"sell_call": {"medium_annual": 0.07}},
-                "templates": {"call_base": {"sell_call": {"min_strike_cost_multiplier": 1.05}}},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    us_path = tmp_path / "user.us.json"
-    us_path.write_text(
-        json.dumps(
-            {
-                "symbols": [
-                    {"symbol": "NVDA", "sell_put": {"max_strike": 150.0}},
-                    {
-                        "symbol": "PDD",
-                        "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 45, "min_strike": 120},
-                        "combo_yield": {"enabled": True},
-                    },
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    hk_path = tmp_path / "user.hk.json"
-    hk_path.write_text(
-        json.dumps({"symbols": [{"symbol": "0700.HK", "sell_put": {"max_strike": 450}}]}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    output_path = tmp_path / "config.yaml"
-
-    out = preview_config_yaml_migration(
-        repo_root=REPO_ROOT,
-        common_user_config_path=common_path,
-        us_user_config_path=us_path,
-        hk_user_config_path=hk_path,
-        output_config_yaml_path=output_path,
-    )
-
-    assert out["ok"] is True
-    assert out["dry_run"] is True
-    assert out["write_applied"] is False
-    assert not output_path.exists()
-    assert out["validation"]["us"]["equivalent_to_legacy_runtime"] is True
-    assert out["validation"]["hk"]["equivalent_to_legacy_runtime"] is True
-    assert out["validation"]["us"]["legacy_accounts"] == ["lx", "sy"]
-    assert any("markets.us.accounts inferred" in item for item in out["warnings"])
-
-    payload = yaml.safe_load(out["yaml"])
-    assert payload["accounts"]["lx"]["futu_account_id"] == "REAL_12345678"
-    assert "agent" not in payload
-    assert payload["assistant"]["enabled"] is True
-    assert payload["assistant"]["copilot"]["enabled"] is True
-    assert AssistantSettings.from_runtime_config(payload).enabled_copilot_toolsets == frozenset()
-    assert payload["assistant"]["context_window_messages"] == 6
-    assert payload["assistant"]["llm"] == {
-        "provider": "deepseek",
-        "base_url": "https://api.deepseek.com",
-        "model": "deepseek-v4-flash",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "context_window_tokens": 24000,
-    }
-    assert payload["markets"]["us"]["symbols"] == ["NVDA", "PDD"]
-    assert "sell_call" not in payload["markets"]["us"]["overrides"]["PDD"]
-    assert payload["markets"]["us"]["overrides"]["PDD"]["covered_call"]["min_strike"] == 120
-    assert payload["markets"]["us"]["overrides"]["PDD"]["combo_yield"] is True
-    assert "sell_call" not in payload["alert_policy"]
-    assert payload["alert_policy"]["covered_call"]["medium_annual"] == 0.07
-    assert "sell_call" not in payload["templates"]["call_base"]
-    assert payload["templates"]["call_base"]["covered_call"]["min_strike_cost_multiplier"] == 1.05
-    assert any("configs/user.common.json.agent migrated to assistant" in item for item in out["warnings"])
-
-    migrated_path = tmp_path / "generated.yaml"
-    migrated_path.write_text(out["yaml"], encoding="utf-8")
-    cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=migrated_path)
-    validate_config(json.loads(json.dumps(cfg)))
-    assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=migrated_path)
-    assert assistant_cfg["assistant"]["enabled"] is True
-    assert assistant_cfg["assistant"]["copilot"]["enabled"] is True
-    assert AssistantSettings.from_runtime_config(assistant_cfg).enabled_copilot_toolsets == frozenset()
-    assert "enabled" not in assistant_cfg["assistant"]["llm"]
-
-
-def test_config_migrate_yaml_preview_can_override_market_accounts(tmp_path: Path) -> None:
-    from src.application.config_yaml_migration import preview_config_yaml_migration
-
-    common_path = tmp_path / "user.common.json"
-    common_path.write_text(
-        json.dumps(
-            {
-                "account_settings": {
-                    "lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}},
-                    "sy": {"type": "external_holdings", "holdings_account": "sy"},
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    us_path = tmp_path / "user.us.json"
-    us_path.write_text(json.dumps({"symbols": [{"symbol": "NVDA"}]}, ensure_ascii=False), encoding="utf-8")
-    hk_path = tmp_path / "user.hk.json"
-    hk_path.write_text(json.dumps({"symbols": [{"symbol": "0700.HK"}]}, ensure_ascii=False), encoding="utf-8")
-
-    out = preview_config_yaml_migration(
-        repo_root=REPO_ROOT,
-        common_user_config_path=common_path,
-        us_user_config_path=us_path,
-        hk_user_config_path=hk_path,
-        hk_accounts=["lx"],
-    )
-
-    assert out["ok"] is True
-    assert out["validation"]["hk"]["legacy_accounts"] == ["lx", "sy"]
-    assert out["validation"]["hk"]["accounts"] == ["lx"]
-    assert out["validation"]["hk"]["equivalent_to_legacy_runtime"] is False
-    assert any("markets.hk.accounts overridden from lx, sy to lx" in item for item in out["warnings"])
-    payload = yaml.safe_load(out["yaml"])
-    assert payload["markets"]["hk"]["accounts"] == ["lx"]
-
-
-def test_config_migrate_yaml_cli_is_dry_run(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli.main import main
-
-    common_path, us_path, hk_path = _write_migration_sources(tmp_path)
-    output_path = tmp_path / "config.yaml"
-
-    rc = main([
-        "config",
-        "migrate-yaml",
-        "--common-user-config",
-        str(common_path),
-        "--us-user-config",
-        str(us_path),
-        "--hk-user-config",
-        str(hk_path),
-        "--hk-accounts",
-        "lx",
-        "--output",
-        str(output_path),
-    ])
-
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["ok"] is True
-    assert out["dry_run"] is True
-    assert out["write_applied"] is False
-    assert not output_path.exists()
-    assert "markets:" in out["yaml"]
-    assert out["validation"]["hk"]["accounts"] == ["lx"]
-
-
-def test_config_migrate_yaml_cli_apply_writes_backup_and_validates(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli.main import main
-
-    common_path, us_path, hk_path = _write_migration_sources(tmp_path)
-    output_path = tmp_path / "config.yaml"
-    output_path.write_text("old: true\n", encoding="utf-8")
-
-    rc = main([
-        "config",
-        "migrate-yaml",
-        "--common-user-config",
-        str(common_path),
-        "--us-user-config",
-        str(us_path),
-        "--hk-user-config",
-        str(hk_path),
-        "--output",
-        str(output_path),
-        "--apply",
-    ])
-
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["ok"] is True
-    assert out["dry_run"] is False
-    assert out["write_applied"] is True
-    assert out["backup_path"]
-    backup_path = Path(out["backup_path"])
-    assert backup_path.exists()
-    assert backup_path.read_text(encoding="utf-8") == "old: true\n"
-    assert output_path.exists()
-    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
-    assert payload["markets"]["us"]["symbols"] == ["NVDA"]
-    assert payload["markets"]["hk"]["symbols"] == ["0700.HK"]
-    assert out["post_write_validation"]["us"]["ok"] is True
-    assert out["post_write_validation"]["us"]["dry_run"] is True
-    assert out["post_write_validation"]["us"]["write_applied"] is False
-    assert out["post_write_validation"]["hk"]["ok"] is True
-
-
-def test_config_migrate_yaml_cli_apply_can_skip_backup(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli.main import main
-
-    common_path, us_path, hk_path = _write_migration_sources(tmp_path)
-    output_path = tmp_path / "config.yaml"
-    output_path.write_text("old: true\n", encoding="utf-8")
-
-    rc = main([
-        "config",
-        "migrate-yaml",
-        "--common-user-config",
-        str(common_path),
-        "--us-user-config",
-        str(us_path),
-        "--hk-user-config",
-        str(hk_path),
-        "--output",
-        str(output_path),
-        "--apply",
-        "--no-backup",
-    ])
-
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["dry_run"] is False
-    assert out["write_applied"] is True
-    assert out["backup_path"] is None
-    assert not list(tmp_path.glob("config.yaml.bak.*"))
