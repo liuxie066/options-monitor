@@ -64,7 +64,8 @@ flowchart LR
     E --> O["9 Outcome + deterministic evaluation\neconomics.py / statistics.py / outcome.py"]
     O --> RC["Research / Final Receipt"]
 
-    T["现有 advance timer"] -->|"预封 HK / US expectation；不新增 timer"| A
+    T["现有 HK / US tick-cron"] -->|"启动扫描前预封当前市场 expectation"| A
+    AT["现有 advance timer"] --> E
     C["Codex + 现有 ./om 入口"] --> R
     C --> E
     X["research/archive.py"] -->|"pull / inventory / verify 整个 output_shared/research"| A
@@ -147,20 +148,23 @@ run / account / target 和 producer 行为版本组成的不可变 source bindin
 source binding 变化时才发布第二个 content hash 并判为 conflict；已有多个 hash 时直接
 conflict，不覆盖、不仲裁。
 
-日 expectation 必须早于首个预期点封存。不新建 timer：现有 Strategy Lab advance timer 的
-scheduled handler 先运行 `seal_profile_formal_expectations()`，再打开 / migrate `ExperimentStore` 并仅对
-HK / `lx` 执行原 `advance_scheduled()`。前者从 service profile 的 `markets`、`accounts` 和
-`config_paths` 仅选 HK / US、`lx`，分别读取各市场 runtime schedule，用 `schedule.timezone`
-将 `occurred_at_utc` 转为当地 trading date，并读取对应的已绑定 calendar。它不读写
-`ExperimentStore`、不检查 `OM_STRATEGY_LAB_TOP1_AVAILABLE`、不请求 calendar provider，且按市场
-独立记录结果，HK 失败不阻止 US，反之亦然。缺 binding 或 coverage 不足时记录
-`market_calendar_binding_unavailable`，不在定时路径隐式刷新。
+日 expectation 必须早于首个预期点封存。不新建 timer：现有 HK / US `tick-cron` 在取得
+本市场锁、通过 runtime config preflight 后，于启动子进程扫描前调用
+`seal_profile_formal_expectations()`，且只传入当前 market、`lx` 和当前 config path。systemd 的
+两个 tick 均从当地 09:00 开始，早于 runtime schedule 的首个 09:40 正式点。只有显式
+`OM_RUNTIME_ROOT` 时才写正式事实；封存缺 binding、coverage 不足或其他失败时只记录
+`FORMAL_EXPECTATION_DEGRADED` 并继续普通扫描。
+
+helper 按 runtime schedule 的 `schedule.timezone` 将 `occurred_at_utc` 转为当地 trading date，并只读
+已绑定 calendar。它不读写 `ExperimentStore`、不检查 `OM_STRATEGY_LAB_TOP1_AVAILABLE`、不请求
+calendar provider。现有 Strategy Lab advance scheduled handler 仍可对 profile 做幂等复核，但不再
+承担跨市场首封的时间 owner；缺口不在定时路径隐式刷新 calendar。
 
 `seal_formal_day_expectation()` 在使用本次 `occurred_at_utc` 构造新 payload 前，先以
 market / account / trading date 取得 `exclusive_private_file_lock()`，再在同一临界区枚举、
 校验、采用或构造、发布和 readback 当日 expectation。唯一有效 artifact 的 `_expectation_denominator()`
 与当前 calendar / schedule / targets 一致时，直接返回它，保留首份 `sealed_at_utc`、
-`sealed_before_first_target` 和 hash；后续 timer 不得把迟到的首封修复为准时。只有目录为空
+`sealed_before_first_target` 和 hash；后续 scheduled writer 不得把迟到的首封修复为准时。只有目录为空
 时才使用本次时间创建首份 artifact；denominator 不同时发布第二 hash 并记录 conflict。
 多个 hash 或无法校验的已有 artifact 均 fail closed，不根据当前时间自动选择或覆盖。
 锁文件位于 artifact 枚举路径之外；它可持久存在，不是 corpus 事实，也不进入 hash、
@@ -546,7 +550,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 
 | PRD 模块 | 当前代码 owner | 处理 | 目标代码边界 |
 |---|---|---|---|
-| 1. 正式点定义与生产扫描 | `scan_scheduler.py`、`multi_account_tick.py`、`tick_notification_flow.py` | **复用 + 修改** | 复用 `scheduled_scan_targets_for_date()` 和 canonical tick；现有 timer 不依赖 Top1 store / 开关地预封 HK / US expectation，observer 在唯一候选 scan 和共享账户快照后归档，不增加 option-chain scan 或 timer |
+| 1. 正式点定义与生产扫描 | `tick_cron.py`、`scan_scheduler.py`、`multi_account_tick.py`、`tick_notification_flow.py` | **复用 + 修改** | 复用 `scheduled_scan_targets_for_date()` 和 canonical tick；各市场 tick 在扫描前预封本市场 expectation，observer 在唯一候选 scan 和共享账户快照后归档，不增加 option-chain scan 或 timer |
 | 2. 运行事实封存 | `opening_candidate_snapshot.py`、`required_data_blobs.py`、`prepared_option_positions_context.py` | **复用 + 修改条件** | opening snapshot 和 required-data blob 原样复用；prepared v2 保留现有 mark collector / payload，HK / US 正式 run 都为 `lx` 采集一次并直接使用本次返回的 facts；不新增 artifact 或 per-recipe 调用 |
 | 3. 正式点绑定与校验 | `recommendation_point.py` | **复用 + 修改** | 保留 point ID、write-once 及 validator；升级 v3 绑定 opening、required-data 和 prepared 三个 owner |
 | 4. Research Archive | `research/archive.py` 只有远端 pull / inventory / verify | **复用传输 + 确实新增** | 新增 `research/formal_corpus.py`、canonical JSON + deterministic gzip 读写；不加 DB、repository 抽象或对象存储 |
@@ -579,11 +583,12 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 
 | 文件 | 函数 | 最小修改 |
 |---|---|---|
+| `src/application/tick_cron.py` | `run_tick_cron()` | 在现有 market lock 内、生产 tick 前预封当前市场 expectation；只对显式 runtime root 写入，失败不阻断 tick |
 | `src/application/tick_account_execution.py` | `prepare_option_positions_contexts()` 调用条件 | 将 HK-only、Top1-available 的 mark scope 改为 HK / US canonical scheduled run 的 `lx`；每个 run / account 仍只调用一次，手工 run 不调用 |
 | `src/application/prepared_option_positions_context.py` | `prepare_option_positions_contexts()`、`_persist_current_option_marks()`、`build_option_market_evidence_payload()` / validator | 任何 provider 读前复用完整 ready / unavailable artifact；payload-only 时从已嵌入 authority 重建 manifest，其他部分状态 fail closed，均不重拉；collector 返回本次 mark facts 供 builder 直接使用并沿用 repository 持久化；formal run 覆盖全部 open option exact instruments，禁止从 repository 重选旧 mark |
 | `src/application/recommendation_point.py` | `build_recommendation_point()`、`validate_recommendation_point()`、`capture_scheduled_recommendation_point()`、`point_binding_from_recommendation_point()` | 增加 v3 三 owner 绑定和 `formal_point_time_coherence.v1`；point ID 保持不随 envelope 版本变化 |
 | `src/application/tick_notification_flow.py` | `_observe_recommendation_points()` | 去掉 HK-only 和 Top1 availability 对基础归档的限制；只处理 scheduled HK / US、`lx`，归档仍 best effort |
-| `src/application/strategy_lab/top1/advance.py`、`src/interfaces/cli/strategy_lab_top1.py` | `advance_scheduled()`、`handle_top1_command()`、`_profile_context()` | scheduled handler 在 store migrate 和 Top1 开关前先封存 profile 内 HK / US expectation，再推进 HK Top1；archive / calendar 操作可选 US，不被 HK recipe scope 拒绝 |
+| `src/application/strategy_lab/top1/advance.py`、`src/interfaces/cli/strategy_lab_top1.py` | `advance_scheduled()`、`handle_top1_command()`、`_profile_context()` | 保留 profile expectation 的幂等复核和 HK Top1 推进，但首封时间由各市场 tick 拥有；archive / calendar 操作可选 US，不被 HK recipe scope 拒绝 |
 | `src/application/strategy_lab/top1/ranking.py` | `build_ranking_projection()`、`validate_ranking_projection()`、`rerank_recommendation_point()` | 升级 v3 只保留 archive binding 和 recipe metric；重排仍调用 Candidate Engine |
 | `src/application/strategy_lab/top1/corpus.py` | `capture_recommendation_point()`、`read_validation_point_source()`、`preview_research_dataset()`、`freeze_research_dataset()` | 改读 formal corpus，以基础 expectation 构造 HK recipe index；不扫描 `output_runs`、不打开当前账本 / mark / FX |
 | `src/application/strategy_lab/top1/readiness.py`、`workspace.py` | `build_top1_readiness()`、`preview_sell_put_top1_research()` | 注入 Corpus Health Receipt 与 v3 projection；20 个连续完整日缺一即 blocked |
@@ -594,13 +599,14 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 文件 | 函数 | 职责 |
 |---|---|---|
 | `src/application/research/formal_corpus.py` | `seal_formal_day_expectation()` | 从现有 calendar + schedule 构造日 denominator；复用 `exclusive_private_file_lock()` 按 market / account / date 串行 compare-and-publish，只在空目录首封，denominator 变化才写第二 hash 并 conflict；不接受 `ExperimentStore` 或 Top1 `environ` |
-| 同上 | `seal_profile_formal_expectations()` | 从现有 service profile 和两份 runtime config 按各自 timezone 独立预封 HK / US `lx`；只读已绑定 calendar，不请求 provider |
+| 同上 | `seal_profile_formal_expectations()` | 按调用方给出的 market / config scope 和各自 timezone 预封 `lx`；只读已绑定 calendar，不请求 provider |
 | 同上 | `capture_formal_point_attempt()` | 从 recommendation point v3 绑定的三个 owner 构造紧凑 ready / not-evaluable record；复用同一文件锁按 point identity 串行 compare-and-publish，source binding 相同时采用首份 artifact，处理时间不产生新版本；只读本次共享快照，不再读 provider、repository 或当前状态 |
 | 同上 | `load_formal_point()` | 透明解压、校验 canonical bytes / hash；只有唯一 ready attempt 时返回 available |
 | 同上 | `build_corpus_health_receipt()` | 按 market / account / trading day 统计 expected / captured / missing / conflict / not-evaluable、freshness 和连续完整日；复用 storage baseline 输出容量 / 保留风险，并按当前实验 requirement 显示 fill / outcome 或 `not_required`；零事实也返回 unhealthy |
 | 同上 | `read_bound_market_calendar_snapshot()`、`read_market_calendar_binding()`、`refresh_market_calendar_binding()` | 将 Top1 `corpus.py` 中已有的 filesystem-backed calendar binding 校验 / 读写实现移入基础 owner；它们不使用 ExperimentStore，provider refresh 仍只由现有受控命令调用；Top1 改为 import |
 | `src/application/strategy_lab/top1/ranking.py` | `materialize_top1_recipe_input()` | 只在内存中合并 formal point 基础事实和 v3 recipe metric，校验 accepted universe 不变 |
 | `tests/test_formal_corpus.py` | 一个聚合测试文件 | 覆盖 expectation、gzip readback、幂等 / conflict、完全未采集的健康回执和不阻断 production flow |
+| `tests/test_tick_cron.py` | tick-cron 回归 | 覆盖当前市场封存严格早于 tick，且封存降级不阻断生产 tick |
 
 新增只有一个应用模块和一个测试文件。gzip 使用 Python 标准库的 deterministic `mtime=0`，
 私有路径、`exclusive_private_file_lock()` 和原子写入复用 `src/infrastructure/private_storage.py`；
@@ -765,10 +771,9 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
   但 `not_evaluable` 且不建 job；崩溃重试不重选汇率。
 - `test_strategy_lab_top1_store.py`：保持 schema v4、receipt、Proposal 和 4096-byte FX binding 回归，不新增
   formal corpus 表；新 expectation / health 在空 store 及 store 打开失败时仍工作，且未调用 corpus store API。
-- `test_strategy_lab_top1_readiness.py`、`test_strategy_lab_top1_advance.py`：现有 timer 在 store migrate 和 Top1
-  availability 前预封 HK / US `lx` expectation；两市场按 `Asia/Hong_Kong` / `America/New_York`
-  分别计算 trading date，一个市场的缺 calendar / coverage 不阻止另一个；定时路径不调用
-  calendar refresh/provider；Top1 service disabled 时只暂停 recipe 推进。
+- `test_tick_cron.py`：HK / US tick 只预封当前市场且严格先于生产 tick；缺 calendar /
+  coverage 只记录降级，不阻止生产 tick。`test_strategy_lab_top1_readiness.py`、
+  `test_strategy_lab_top1_advance.py` 保留 advance 的幂等复核与 Top1 service disabled 时只暂停 recipe 推进。
 - `test_strategy_lab_top1_research_runner.py`：移除 feature mock，保留幂等恢复和 OpenD 失败路径；
   只消费 confirmed preview 绑定的 terminal FX，缺失时 fail closed；revision 已持久化后重试
   不打开 repository 或重新拉 close。
@@ -819,8 +824,8 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 
 MVP 代码切片已完成，当前按以下顺序运行验收：
 
-1. 通过现有受控入口刷新并校验 HK / US calendar coverage；现有 timer 在 Top1 store / 开关前预封
-   HK / US `lx` expectation；
+1. 通过现有受控入口刷新并校验 HK / US calendar coverage；各市场现有 `tick-cron` 在启动生产 tick 前
+   预封本市场 `lx` expectation；
 2. ordinary scheduled tick 为 HK / US `lx` 采集一次共享持仓行情，写 recommendation point v3，
    归档后 readback；
 3. 先观察至少一个 HK 和一个 US 正式点，确认 hash、字段、压缩和健康回执；

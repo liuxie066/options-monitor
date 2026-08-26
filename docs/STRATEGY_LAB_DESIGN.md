@@ -56,7 +56,8 @@ flowchart TB
     G --> SR["Shadow Replay\ndataset / mark / outcome / candidate impact"]
 
     CLI --> W["Top1 Workspace\npreview / confirm / status / receipt"]
-    T["正式 scheduled tick"] --> P["recommendation point v2\nprepared option evidence"]
+    T["HK / US tick-cron"] --> E["首个正式点前封存\n本市场 expectation"]
+    E --> P["recommendation point v2\nprepared option evidence"]
     P --> CP["Top1 corpus"]
     A["现有 advance timer"] --> CP
     CP --> H["corpus 健康回执\ncurrent + 每日首次观察"]
@@ -106,8 +107,10 @@ flowchart TB
 ### 1. 正式事实积累
 
 - 只接收 canonical scheduled tick 的正式推荐点；手工扫描不能冒充正式点。
-- 每个交易日在首个预期点前封存 expectation；完整日当前按 12 个正式点校验，半日市按已绑定的
-  HK 交易日历校验实际时段。
+- HK / US 的现有 `tick-cron` 在启动本市场扫描前封存当日 expectation；没有显式受控 runtime root
+  时不写正式事实。封存失败只使当日实验事实降级，不阻断普通扫描和通知。
+- 每个交易日在首个预期点前完成封存；完整日当前按 12 个正式点校验，半日市按已绑定的
+  市场日历校验实际时段。
 - 每个点必须具有可验证的 recommendation point、opening snapshot、ranking projection、真实合约
   行情、当时未平仓期权 mark 和 FX 引用。
 - 任一预期点缺失、冲突或不可评估，整个交易日不进入研究窗口；不能跳过缺日后拼接 20 日。

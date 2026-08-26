@@ -7,15 +7,18 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.research.formal_corpus import seal_profile_formal_expectations
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     RuntimeConfigIdentityError,
     ensure_runtime_config_freshness,
     ensure_runtime_config_identity,
 )
+from src.application.runtime_paths import resolve_runtime_root
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,7 @@ def run_tick_cron(
     dry_run_command: bool = False,
     run_cmd: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     preflight_config_fn: Callable[..., Any] | None = _preflight_runtime_config,
+    seal_formal_expectations_fn: Callable[..., dict[str, Any]] | None = seal_profile_formal_expectations,
     stdout: Any = None,
     stderr: Any = None,
     environ: dict[str, str] | None = None,
@@ -277,6 +281,33 @@ def run_tick_cron(
 
         env = dict(environ if environ is not None else os.environ)
         env.update(plan.trigger_env)
+        if (
+            seal_formal_expectations_fn is not None
+            and str(env.get("OM_RUNTIME_ROOT") or "").strip()
+            and not plan.symbols
+            and (not plan.accounts or "lx" in {item.lower() for item in plan.accounts})
+        ):
+            try:
+                repo_root = Path(cwd).expanduser() if cwd is not None else Path.cwd()
+                runtime_root = resolve_runtime_root(
+                    repo_root=repo_root,
+                    environ=env,
+                ).runtime_root
+                expectation = seal_formal_expectations_fn(
+                    runtime_root,
+                    profile={
+                        "markets": [plan.market],
+                        "accounts": ["lx"],
+                        "config_paths": {plan.market: str(_resolve_config_for_preflight(plan, cwd=cwd))},
+                    },
+                    artifact_root=(runtime_root / "output_shared" / "research" / "strategy_lab"),
+                    occurred_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                )
+                if expectation.get("status") != "ok":
+                    _write_line(stderr, "FORMAL_EXPECTATION_DEGRADED")
+            except Exception as exc:
+                reason = str(getattr(exc, "reason_code", "formal_expectation_failed"))
+                _write_line(stderr, f"FORMAL_EXPECTATION_DEGRADED_{reason}")
         try:
             if run_cmd is None:
                 proc = _run_tick_process_group(

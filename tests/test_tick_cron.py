@@ -96,6 +96,62 @@ def test_run_tick_cron_invokes_tick_with_trigger_environment(tmp_path) -> None:
     assert calls[0]["env"]["OM_TIMEOUT_SECONDS"] == "700"
 
 
+def test_run_tick_cron_seals_current_market_expectation_before_tick(tmp_path) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    calls: list[str] = []
+
+    def _seal(runtime_root, **kwargs):
+        calls.append("seal")
+        assert runtime_root == tmp_path
+        assert kwargs["profile"] == {
+            "markets": ["us"],
+            "accounts": ["lx"],
+            "config_paths": {"us": str(tmp_path / "config.us.json")},
+        }
+        assert kwargs["artifact_root"] == (tmp_path / "output_shared" / "research" / "strategy_lab")
+        return {"status": "ok", "results": []}
+
+    def _run_cmd(command, **kwargs):
+        calls.append("tick")
+        return subprocess.CompletedProcess(command, 0)
+
+    rc = run_tick_cron(
+        market="us",
+        accounts=["lx", "sy"],
+        config_path=str(tmp_path / "config.us.json"),
+        lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=_run_cmd,
+        preflight_config_fn=None,
+        seal_formal_expectations_fn=_seal,
+        environ={"OM_RUNTIME_ROOT": str(tmp_path)},
+    )
+
+    assert rc == 0
+    assert calls == ["seal", "tick"]
+
+
+def test_formal_expectation_failure_does_not_block_tick(tmp_path, capsys) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    rc = run_tick_cron(
+        market="hk",
+        accounts=["lx"],
+        config_path=str(tmp_path / "config.hk.json"),
+        lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0),
+        preflight_config_fn=None,
+        seal_formal_expectations_fn=lambda *_args, **_kwargs: {
+            "status": "degraded",
+            "results": [],
+        },
+        environ={"OM_RUNTIME_ROOT": str(tmp_path)},
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().err.strip() == "FORMAL_EXPECTATION_DEGRADED"
+
+
 def test_run_tick_cron_reports_locked_without_running(monkeypatch, tmp_path, capsys) -> None:
     import src.application.tick_cron as mod
 
