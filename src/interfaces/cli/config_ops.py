@@ -14,7 +14,6 @@ from src.application.config_yaml import (
     validate_yaml_runtime_config,
 )
 from src.application.config_yaml_init import init_yaml_config
-from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_readiness import require_runtime_config_readiness
 
@@ -71,16 +70,6 @@ def add_config_commands(subparsers: Any) -> None:
     explain.add_argument("--market", required=True, choices=("us", "hk"))
     explain.add_argument("--key", required=True)
     explain.add_argument("--system-config", default=None)
-    migrate_yaml = config_sub.add_parser("migrate-yaml", help="preview migration from layered JSON user config to config.yaml")
-    migrate_yaml.add_argument("--common-user-config", default=None)
-    migrate_yaml.add_argument("--no-common-user-config", action="store_true")
-    migrate_yaml.add_argument("--us-user-config", default=None)
-    migrate_yaml.add_argument("--hk-user-config", default=None)
-    migrate_yaml.add_argument("--us-accounts", nargs="+", default=None)
-    migrate_yaml.add_argument("--hk-accounts", nargs="+", default=None)
-    migrate_yaml.add_argument("--output", default=None)
-    migrate_yaml.add_argument("--apply", action="store_true", help="write config.yaml; omitted means dry-run preview")
-    migrate_yaml.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
     get_config = config_sub.add_parser("get", help="read a runtime config value by dot path")
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
     get_config.add_argument("--config-path", default=None)
@@ -124,7 +113,7 @@ def _normalize_config_source(
             "source": source or None,
             "allowed": list(allowed),
         },
-        hint="Use `om config migrate-yaml` for old JSON configs, then use `om config build --source yaml`.",
+        hint="Create config.yaml, then use `om config build --source yaml`.",
     )
 
 
@@ -199,7 +188,6 @@ def handle_config_command(
     build_yaml_runtime_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_runtime_config_file,
     build_yaml_assistant_config_file_fn: Callable[..., dict[str, Any]] = build_yaml_assistant_config_file,
     explain_yaml_config_key_fn: Callable[..., dict[str, Any]] = explain_yaml_config_key,
-    preview_config_yaml_migration_fn: Callable[..., dict[str, Any]] = preview_config_yaml_migration,
     init_yaml_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
     set_yaml_symbol_config_fn: Callable[..., dict[str, Any]] = set_yaml_symbol_config,
@@ -283,20 +271,6 @@ def handle_config_command(
             key=args.key,
             config_path=args.config_yaml,
             system_config_path=args.system_config,
-        )
-
-    if args.config_command == "migrate-yaml":
-        return preview_config_yaml_migration_fn(
-            repo_root=repo_base_fn(),
-            common_user_config_path=args.common_user_config,
-            include_common_user_config=not bool(args.no_common_user_config),
-            us_user_config_path=args.us_user_config,
-            hk_user_config_path=args.hk_user_config,
-            us_accounts=args.us_accounts,
-            hk_accounts=args.hk_accounts,
-            output_config_yaml_path=args.output,
-            apply=bool(args.apply),
-            backup=not bool(args.no_backup),
         )
 
     if args.config_command == "init":

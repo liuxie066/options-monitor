@@ -67,9 +67,9 @@ from src.application.required_data_prefetch_planning import (
     estimate_prefetch_option_chain_calls,
     required_data_plan_id,
 )
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
 from src.infrastructure.io_utils import has_shared_required_data as _has_shared_required_data
@@ -327,11 +327,11 @@ def _build_single_prefetch_fetch_plan(
     sell_put_cfg = _as_dict(symbol_cfg.get("sell_put"))
     sell_call_cfg = _as_dict(symbol_cfg.get("sell_call"))
     wheel_call_cfg = _as_dict(symbol_cfg.get("_wheel_call"))
-    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
+    combo_yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
+    yield_policy = derive_combo_yield_policy(combo_yield_cfg)
     want_put = bool(sell_put_cfg.get("enabled", False))
     want_call = bool(sell_call_cfg.get("enabled", False))
-    want_yield_enhancement = bool(yield_policy.enabled)
+    want_combo_yield = bool(yield_policy.enabled)
     position_requirements = [
         dict(item)
         for item in list(
@@ -346,12 +346,12 @@ def _build_single_prefetch_fetch_plan(
         required_data_dir=shared_required,
         symbol=symbol,
         limit_expirations=limit_exp,
-        want_put=bool(want_put or want_yield_enhancement),
+        want_put=bool(want_put or want_combo_yield),
         want_call=want_call,
         sell_put_cfg=sell_put_cfg,
         sell_call_cfg=sell_call_cfg,
         wheel_call_cfg=wheel_call_cfg,
-        yield_enhancement_cfg=yield_enhancement_cfg,
+        combo_yield_cfg=combo_yield_cfg,
         position_requirements=position_requirements,
         symbol_cfg=symbol_cfg,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),

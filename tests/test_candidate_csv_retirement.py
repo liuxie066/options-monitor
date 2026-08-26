@@ -63,7 +63,7 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
     from src.application.scan_sell_call import run_sell_call_scan
     from src.application.scan_sell_put import run_sell_put_scan
     from src.application.sell_call_steps import run_sell_call_scan_and_summarize
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
     from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
     from src.application.sell_put_steps import run_sell_put_scan_and_summarize
 
@@ -96,7 +96,7 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
         },
         run_cc_lp_variant: {"report_dir", "output", "output_path"},
         run_cc_lp_scan: {"report_dir", "output", "output_path"},
-        find_sell_put_yield_enhancement_pairs: {"output", "output_path"},
+        find_sell_put_combo_yield_pairs: {"output", "output_path"},
         enrich_sell_put_candidates_with_cash: {"out_path", "output", "output_path"},
     }
     for callable_obj, forbidden in forbidden_by_callable.items():

@@ -27,10 +27,10 @@ def test_summarize_sell_put_tolerates_incomplete_ranked_candidate() -> None:
     assert summary["annualized_return"] is None
 
 
-def test_summarize_yield_enhancement_tolerates_incomplete_ranked_candidate() -> None:
-    from src.application.report_summaries import summarize_yield_enhancement
+def test_summarize_combo_yield_tolerates_incomplete_ranked_candidate() -> None:
+    from src.application.report_summaries import summarize_combo_yield
 
-    summary = summarize_yield_enhancement(
+    summary = summarize_combo_yield(
         pd.DataFrame(
             [
                 {

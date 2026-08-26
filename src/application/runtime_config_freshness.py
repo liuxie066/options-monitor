@@ -537,8 +537,6 @@ def format_runtime_config_freshness_error(result: dict[str, Any]) -> str:
             lines.append(f"changed_source: {first['role']} {first.get('path') or ''}".rstrip())
     if result.get("rebuild_command"):
         lines.append(f"rebuild: {result['rebuild_command']}")
-    if str(result.get("source_format") or "").strip().lower() == "legacy":
-        lines.append("migrate: ./om config migrate-yaml --output config.yaml --apply")
     return "\n".join(lines)
 
 

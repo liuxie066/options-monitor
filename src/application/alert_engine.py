@@ -24,17 +24,17 @@ from domain.domain.alert_rules import (
     SELL_PUT_NOTIFICATION_MEDIUM,
 )
 from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy, resolve_alert_policy
-from domain.domain.engine import yield_enhancement_rank_key
+from domain.domain.engine import combo_yield_rank_key
 from domain.domain.strategy_vocab import (
+    STRATEGY_COMBO_YIELD,
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
     canonical_strategy_id,
 )
 from domain.domain.symbol_identity import looks_like_option_contract_label
 from src.application.report_formatting import num, pct, strike_text
 
-YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
+COMBO_YIELD_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
 
 
 def _valid_symbol_display_name(name: str) -> bool:
@@ -112,7 +112,7 @@ POLICY = DEFAULT_POLICY.copy()
 _ALERT_STRATEGY_ORDER = {
     STRATEGY_SELL_PUT: 0,
     STRATEGY_COVERED_CALL: 1,
-    STRATEGY_YIELD_ENHANCEMENT: 2,
+    STRATEGY_COMBO_YIELD: 2,
 }
 
 
@@ -400,7 +400,7 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
     return parts
 
 
-def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
+def _build_combo_yield_extra_parts(row: pd.Series) -> list[str]:
     parts: list[str] = []
     _append_option_quote_parts(parts, row)
     try:
@@ -538,8 +538,8 @@ def top_pick_line(row: pd.Series) -> str:
             parts = _build_sell_put_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
-        elif strategy == STRATEGY_YIELD_ENHANCEMENT:
-            parts = _build_yield_enhancement_extra_parts(row)
+        elif strategy == STRATEGY_COMBO_YIELD:
+            parts = _build_combo_yield_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
     except Exception:
@@ -645,9 +645,9 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
             return 'medium', SELL_CALL_NOTIFICATION_MEDIUM
         return 'low', SELL_CALL_NOTIFICATION_LOW
 
-    if strategy == STRATEGY_YIELD_ENHANCEMENT:
+    if strategy == STRATEGY_COMBO_YIELD:
         if annual > 0:
-            return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
+            return 'high', COMBO_YIELD_NOTIFICATION_HIGH
         return 'low', '当前组合收益推荐未通过优先级阈值，仅供观察。'
 
     return None, ''
@@ -667,10 +667,10 @@ def _alert_row_sort_key(row: dict[str, Any]) -> tuple[object, ...]:
     strategy = canonical_strategy_id(str(row.get('strategy') or ''))
     symbol = str(row.get('symbol') or '').strip().upper()
     contract = str(row.get('top_contract') or '').strip()
-    if strategy == STRATEGY_YIELD_ENHANCEMENT:
+    if strategy == STRATEGY_COMBO_YIELD:
         return (
             _ALERT_STRATEGY_ORDER.get(strategy, 99),
-            *yield_enhancement_rank_key(row),
+            *combo_yield_rank_key(row),
         )
     return (
         _ALERT_STRATEGY_ORDER.get(strategy, 99),

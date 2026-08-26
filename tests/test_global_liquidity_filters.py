@@ -615,7 +615,7 @@ def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
     assert "account_settings contains duplicate labels" in str(exc.value)
 
 
-def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
+def test_validate_config_rejects_combo_yield_strategy_mode() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {

@@ -2016,11 +2016,27 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
     assert len(events) == 1
 
 
+@pytest.mark.parametrize(
+    ("legacy_snapshot", "retry_snapshot"),
+    [
+        (
+            {
+                "strategy": "yield_enhancement",
+                "yield_enhancement_mode": "vol_convexity_enhancement",
+            },
+            {"strategy": "combo_yield"},
+        ),
+        ({"yield_enhancement_mode": "vol_convexity_enhancement"}, None),
+    ],
+)
 def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects_reuse(
     tmp_path: Path,
+    legacy_snapshot: dict[str, str],
+    retry_snapshot: dict[str, str] | None,
 ) -> None:
     from dataclasses import replace
     from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import persist_manual_open_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     command = OpenPositionCommand(
@@ -2035,18 +2051,36 @@ def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects
         multiplier=100,
         expiration_ymd="2026-08-21",
         premium_per_share=2.5,
+        strategy_snapshot=legacy_snapshot,
         request_id="manual-open-request-001",
     )
 
-    first = ledger_manual_trades.persist_manual_open_event(repo, command)
-    second = ledger_manual_trades.persist_manual_open_event(repo, command)
+    first = persist_manual_open_event_with_ledger(repo, command)
+    stored_event = repo.list_trade_events()[0]
+    stored_event["raw_payload"]["strategy_snapshot"] = dict(command.strategy_snapshot or {})
+    stored_event["raw_payload"]["manual_request_intent_hash"] = (
+        ledger_manual_trades._manual_open_request_intent_hash(
+            command,
+            fields=ledger_manual_trades.build_position_lot_fields(command).to_dict(),
+            strategy_snapshot=dict(command.strategy_snapshot or {}),
+        )
+    )
+    with repo._connect() as conn:
+        conn.execute(
+            "UPDATE trade_events SET event_json=? WHERE event_id=?",
+            (json.dumps(stored_event, ensure_ascii=False), stored_event["event_id"]),
+        )
+    second = persist_manual_open_event_with_ledger(
+        repo,
+        replace(command, strategy_snapshot=retry_snapshot),
+    )
 
-    assert first.created is True
-    assert second.created is False
-    assert first.event_id == second.event_id
+    assert first.result.created is True
+    assert second.result.created is False
+    assert first.result.event_id == second.result.event_id
     assert len(repo.list_trade_events()) == 1
     with pytest.raises(ValueError, match="manual request conflict"):
-        ledger_manual_trades.persist_manual_open_event(
+        persist_manual_open_event_with_ledger(
             repo,
             replace(command, strike=101.0),
         )
@@ -2571,6 +2605,69 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
     assert adjusted["opened_at"] == 2000
     assert adjusted["position_id"] == "NVDA_20260717_105P_short"
     assert adjusted["cash_secured_amount"] == 21000.0
+
+
+def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: Path) -> None:
+    from src.application.strategy_policy import resolve_position_strategy
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id="legacy-combo-open",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="NVDA",
+                option_type="put",
+                position_side="short",
+                strike=100.0,
+                expiration_ymd="2026-06-19",
+            ),
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="legacy_import",
+            multiplier=100,
+            lot_id="legacy-combo-lot",
+            raw_payload={
+                "fields": {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "currency": "USD",
+                    "strike": 100.0,
+                    "multiplier": 100,
+                    "expiration": 1781827200000,
+                    "strategy": "combo_yield",
+                    "leg_role": "sell_put",
+                    "yield_enhancement_mode": "vol_convexity_enhancement",
+                }
+            },
+        )
+    )
+    projection = ledger_writer.project_stored_trade_events_to_position_lots(repo.list_trade_events())
+    repo.replace_position_lots(projection.lots)
+    lot = repo.list_position_lots()[0]
+
+    ledger_manual_trades.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        strategy_snapshot={"strategy_family": "sell_put", "strategy_profile": "return_first"},
+        as_of_ms=2000,
+    )
+
+    adjusted = repo.get_position_lot_fields(lot["record_id"])
+    assert "yield_enhancement_mode" not in adjusted
+    resolution = resolve_position_strategy(position=adjusted, config=None)
+    assert resolution.strategy_source == "position_snapshot"
+    assert resolution.strategy_profile == "return_first"
 
 
 def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> None:

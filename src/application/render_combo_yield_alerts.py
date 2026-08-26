@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.engine import rank_yield_enhancement_rows
+from domain.domain.engine import rank_combo_yield_rows
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.report_formatting import num, pct
 
@@ -46,11 +46,8 @@ def render_one(row: pd.Series) -> str:
     annualized_net_credit_yield = _safe_float(row.get("annualized_net_credit_yield"))
     call_cost_to_put_credit = _safe_float(row.get("call_cost_to_put_credit"))
     net_credit_retention = _safe_float(row.get("net_credit_retention"))
-    mode = str(row.get("yield_enhancement_mode") or "").strip()
     derived = str(row.get("derived_from_sell_put_strategy") or "").strip()
-    mode_line = None
-    if mode:
-        mode_line = f"策略模式: {mode}" + (f" | derived_from={derived}" if derived else "")
+    policy_line = f"Funding Put: {derived}" if derived else None
     upside_lift = _safe_float(row.get("upside_lift"))
     upside_lift_to_call_cost = _safe_float(row.get("upside_lift_to_call_cost"))
     upside_lift_to_put_credit = _safe_float(row.get("upside_lift_to_put_credit"))
@@ -63,7 +60,7 @@ def render_one(row: pd.Series) -> str:
             f"[组合收益推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",
             "",
             f"DTE: {int(dte) if dte is not None else '-'}",
-            *([mode_line] if mode_line else []),
+            *([policy_line] if policy_line else []),
             f"净权利金({option_ccy}): {num(row.get('net_credit'))}",
             f"净权利金年化: {('-' if annualized_net_credit_yield is None else pct(annualized_net_credit_yield))}",
             f"资金覆盖: Call成本/Put权利金={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))} | 净权利金保留={('-' if net_credit_retention is None else pct(net_credit_retention))}",
@@ -81,7 +78,7 @@ def render_one(row: pd.Series) -> str:
     )
 
 
-def render_yield_enhancement_alerts(
+def render_combo_yield_alerts(
     *,
     candidates: pd.DataFrame | list[dict[str, Any]],
     top: int = 5,
@@ -96,7 +93,7 @@ def render_yield_enhancement_alerts(
         atomic_write_text(output_file, text)
         return text
 
-    ranked = rank_yield_enhancement_rows(df.to_dict("records"))
+    ranked = rank_combo_yield_rows(df.to_dict("records"))
     top_df = pd.DataFrame(ranked[: int(top)]) if ranked else pd.DataFrame()
     if top_df.empty:
         text = "无候选提醒。"

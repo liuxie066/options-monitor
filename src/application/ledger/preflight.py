@@ -19,6 +19,7 @@ from domain.domain.ledger.position_fields import (
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
+    strip_retired_strategy_metadata,
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
@@ -106,7 +107,6 @@ def preflight_manual_adjust(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> LedgerPreflightResult:
@@ -123,7 +123,6 @@ def preflight_manual_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
         source="manual_adjust_preflight",
@@ -633,7 +632,6 @@ def _preflight_lot_adjust(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreflightResult:
     resolved_record_id = str(record_id or "").strip()
@@ -704,7 +702,6 @@ def _preflight_lot_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=event_time_ms,
     )
@@ -867,7 +864,11 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
 
 def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEvent]:
     event_time_ms = int(getattr(deal, "trade_time_ms", None) or now_ms())
-    resolved_deal = replace(deal, trade_time_ms=event_time_ms)
+    raw_payload = strip_retired_strategy_metadata(
+        dict(getattr(deal, "raw_payload", {}) or {})
+    )
+    raw_payload.pop("fields", None)
+    resolved_deal = replace(deal, trade_time_ms=event_time_ms, raw_payload=raw_payload)
     command = _open_command_from_trade_deal(resolved_deal)
     fields = build_position_lot_fields(command).to_dict()
     fields.update(strategy_metadata_fields_from_payload(getattr(resolved_deal, "raw_payload", None)))
@@ -884,7 +885,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
         source="opend_push",
         multiplier=float(effective_multiplier(fields) or 100),
         lot_id=f"lot_{event_id}",
-        raw_payload=dict(getattr(resolved_deal, "raw_payload", {}) or {}),
+        raw_payload=dict(raw_payload),
     )
     return resolved_deal, fields, event
 

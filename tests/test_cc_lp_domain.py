@@ -10,7 +10,7 @@ from domain.domain.engine.cc_lp import (
     rank_cc_lp_rows,
     validate_cc_lp_pair,
 )
-from domain.domain.engine.yield_enhancement import YieldEnhancementLeg
+from domain.domain.engine.combo_yield import ComboYieldLeg
 
 
 def _call_leg(strike: float = 110.0, **overrides):
@@ -35,7 +35,7 @@ def _call_leg(strike: float = 110.0, **overrides):
         spread_ratio=0.05,
     )
     base.update(overrides)
-    return YieldEnhancementLeg(**base)
+    return ComboYieldLeg(**base)
 
 
 def _put_leg(strike: float = 90.0, **overrides):
@@ -60,7 +60,7 @@ def _put_leg(strike: float = 90.0, **overrides):
         spread_ratio=0.10,
     )
     base.update(overrides)
-    return YieldEnhancementLeg(**base)
+    return ComboYieldLeg(**base)
 
 
 def test_validate_cc_lp_pair_accepts_call_above_put() -> None:

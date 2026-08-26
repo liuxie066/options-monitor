@@ -23,10 +23,10 @@ if str(repo_base) not in sys.path:
 
 from domain.domain import build_no_candidate_notification_text
 from domain.domain.strategy_vocab import (
+    STRATEGY_COMBO_YIELD,
     STRATEGY_COVERED_CALL,
     STRATEGY_OTHER,
     STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
     canonical_strategy_id,
     strategy_action_label,
     strategy_section_label,
@@ -111,7 +111,7 @@ def _present_compact(value: str | None) -> str:
     return v
 
 
-def _yield_enhancement_suggestion(put_bid: str | None, call_ask: str | None) -> str:
+def _combo_yield_suggestion(put_bid: str | None, call_ask: str | None) -> str:
     put_price = '' if _is_missing_value(put_bid) else _present_compact(put_bid)
     call_price = '' if _is_missing_value(call_ask) else _present_compact(call_ask)
     if put_price and call_price:
@@ -638,7 +638,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
+    if parsed.strategy == STRATEGY_COMBO_YIELD:
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
@@ -653,11 +653,11 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
-        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
+        enh_suggestion = _combo_yield_suggestion(put_bid, call_ask)
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
-            action_label=strategy_action_label(STRATEGY_YIELD_ENHANCEMENT),
+            action_label=strategy_action_label(STRATEGY_COMBO_YIELD),
             contract=parsed.contract,
             income_line=(
                 f"- 收益: 组合净权利金={_present_or_missing(net_credit, reason='告警未提供net_credit')} | "
@@ -758,7 +758,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
+    if parsed.strategy == STRATEGY_COMBO_YIELD:
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
@@ -773,10 +773,10 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
-        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
+        enh_suggestion = _combo_yield_suggestion(put_bid, call_ask)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
-            action_label=strategy_action_label(STRATEGY_YIELD_ENHANCEMENT),
+            action_label=strategy_action_label(STRATEGY_COMBO_YIELD),
             contract=parsed.contract,
             income_line=(
                 f"- 收益: 组合净权利金={_present_compact(net_credit)} | "
@@ -820,7 +820,7 @@ def _empty_strategy_groups() -> dict[str, list[str]]:
     return {
         STRATEGY_SELL_PUT: [],
         STRATEGY_COVERED_CALL: [],
-        STRATEGY_YIELD_ENHANCEMENT: [],
+        STRATEGY_COMBO_YIELD: [],
         STRATEGY_OTHER: [],
     }
 
@@ -833,7 +833,7 @@ def _select_notification_groups(
     total_limit: int = 6,
 ) -> dict[str, list[str]]:
     limit = max(1, int(total_limit or 1))
-    strategy_order = (STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL, STRATEGY_YIELD_ENHANCEMENT, STRATEGY_OTHER)
+    strategy_order = (STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL, STRATEGY_COMBO_YIELD, STRATEGY_OTHER)
     priority_groups = [
         _group_by_strategy(section_lines)
         for section_lines in (high_lines, medium_lines, low_lines)
@@ -951,11 +951,11 @@ def build_notification(
         if groups[STRATEGY_COVERED_CALL]:
             call_label = strategy_section_label(STRATEGY_COVERED_CALL)
             emit_fn('### Call' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
-        if groups[STRATEGY_YIELD_ENHANCEMENT]:
-            enhancement_label = strategy_section_label(STRATEGY_YIELD_ENHANCEMENT)
+        if groups[STRATEGY_COMBO_YIELD]:
+            enhancement_label = strategy_section_label(STRATEGY_COMBO_YIELD)
             emit_fn(
                 '### 组合' if use_compact else enhancement_label,
-                groups[STRATEGY_YIELD_ENHANCEMENT],
+                groups[STRATEGY_COMBO_YIELD],
             )
         if groups[STRATEGY_OTHER]:
             other_label = strategy_section_label(STRATEGY_OTHER)

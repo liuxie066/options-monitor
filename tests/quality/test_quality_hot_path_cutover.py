@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.benchmark_current_decision_projection_slice2 as current_decision_benchmark
 from scripts.benchmark_current_decision_projection_slice2 import (
     _forbidden_call_count,
 )
@@ -118,3 +119,39 @@ def test_quality_benchmark_counter_is_executable() -> None:
         return None
 
     assert _forbidden_call_count(build_ledger_datasets) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "domain/domain/combo_identity.py",
+        "domain/domain/lifecycle_allocation.py",
+        "domain/domain/symbol_identity.py",
+        "domain/domain/ledger/projection.py",
+        "src/application/ledger/current_decision_payload.py",
+        "src/application/ledger/event_codec.py",
+        "src/application/ledger/position_projection_publication.py",
+        "src/application/ledger/position_projection_runtime.py",
+        "src/application/ledger/projector_implementation.py",
+        "src/application/ledger/publisher.py",
+        "src/application/ledger/repository_trade_events.py",
+        "src/application/ledger/writer_trade_events.py",
+        "src/application/research/performance_baseline.py",
+        "src/infrastructure/quality/artifact_repository.py",
+    ),
+)
+def test_quality_benchmark_source_hash_tracks_split_implementation(
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    target = current_decision_benchmark.REPO_ROOT / relative_path
+    original_read_bytes = Path.read_bytes
+    baseline = current_decision_benchmark._source_sha256()
+
+    def changed_read_bytes(path: Path) -> bytes:
+        data = original_read_bytes(path)
+        return data + b"\n# benchmark source changed\n" if path == target else data
+
+    monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
+
+    assert current_decision_benchmark._source_sha256() != baseline

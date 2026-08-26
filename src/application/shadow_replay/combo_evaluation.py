@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterable
 import pandas as pd
 
 from domain.domain.insurance_underwriting import rank_underwriting_candidates
-from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 from src.application.shadow_replay.combo_variants import (
     attach_funding_put_rank_provenance,
     build_combo_pair_decisions,
@@ -28,7 +28,7 @@ def evaluate_combo_variant_pairs(
     sell_put_cfg_by_symbol: dict[str, dict[str, Any]] | None = None,
     global_liquidity_by_symbol: dict[str, dict[str, Any]] | None = None,
     write: bool = False,
-    pair_builder: Callable[..., pd.DataFrame] = find_sell_put_yield_enhancement_pairs,
+    pair_builder: Callable[..., pd.DataFrame] = find_sell_put_combo_yield_pairs,
 ) -> dict[str, Any]:
     """Evaluate baseline and proposed variants without changing production delegates."""
 
@@ -86,9 +86,9 @@ def evaluate_combo_variant_pairs(
             df_candidates=pd.DataFrame(puts),
             symbol=symbol,
             input_root=dataset_dir / "required_data",
-            yield_enhancement_cfg=baseline_cfg,
+            combo_yield_cfg=baseline_cfg,
             sell_put_cfg=dict(sell_put_cfg_by_symbol.get(symbol) or {}),
-            global_yield_enhancement_liquidity=dict(
+            global_combo_yield_liquidity=dict(
                 global_liquidity_by_symbol.get(symbol) or {}
             ),
         )
@@ -111,9 +111,9 @@ def evaluate_combo_variant_pairs(
                 df_candidates=pd.DataFrame(puts),
                 symbol=symbol,
                 input_root=dataset_dir / "required_data",
-                yield_enhancement_cfg=superset_cfg,
+                combo_yield_cfg=superset_cfg,
                 sell_put_cfg=dict(sell_put_cfg_by_symbol.get(symbol) or {}),
-                global_yield_enhancement_liquidity=dict(
+                global_combo_yield_liquidity=dict(
                     global_liquidity_by_symbol.get(symbol) or {}
                 ),
             )

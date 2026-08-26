@@ -9,10 +9,14 @@ import pytest
 
 from domain.domain.combo_identity import build_combo_identity
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.assigned_stock import project_assigned_stock_lifecycle
+from domain.domain.assigned_stock import (
+    assigned_stock_position_lot_row,
+    project_assigned_stock_lifecycle,
+)
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger import (
     combo_reconciliation,
+    current_decision_combo,
     current_decision_projection as current_projection_module,
     manual_trades,
     writer,
@@ -470,6 +474,7 @@ def _legacy_settlement_facts(
     stock = dict(transition["stock_settlement"])
     if transition.get("stock_lot_id"):
         stock["stock_lot_id"] = transition["stock_lot_id"]
+    strategy_fields = dict(transition.get("strategy_fields") or {})
     event = {
         "event_id": event_id,
         "event_type": transition["terminal_type"],
@@ -490,6 +495,11 @@ def _legacy_settlement_facts(
         "target_lot_id": target_lot_id,
         "raw_payload": {
             "close_type": transition["terminal_type"],
+            **{
+                key: value
+                for key, value in strategy_fields.items()
+                if key in {"strategy", "strategy_group_id"}
+            },
             "stock_settlement": {
                 **stock,
                 "fee_provenance": {"basis": "actual", "source": "test"},
@@ -522,6 +532,13 @@ def _legacy_settlement_facts(
         "multiplier": transition["multiplier"],
         "strike": transition["strike"],
         "expiration_ymd": "2026-06-19",
+        **{
+            key: value
+            for key, value in strategy_fields.items()
+            if key not in {"leg_role", "source_option_leg_role"}
+            and value not in (None, "", {})
+        },
+        "leg_role": strategy_fields.get("source_option_leg_role"),
     }
     return event, allocation, lot
 
@@ -1164,6 +1181,16 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
         terminal_event_id=f"{terminal_type}-{option_type}",
     )
     transition["broker"] = "富途"
+    for item in (seed, transition):
+        item["strategy_fields"].update(
+            {
+                "strategy": "combo_yield",
+                "leg_role": "assigned_stock",
+                "strategy_group_id": "combo-yield:lx:mixed-version",
+                "yield_enhancement_mode": "vol_convexity_enhancement",
+                "source_option_leg_role": "funding_put",
+            }
+        )
     if stock_side == "sell":
         transition = {
             key: value
@@ -1214,6 +1241,120 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
         report,
         account="lx",
         current_position_lots=current_lots,
+    ) == incremental
+
+
+def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-06-19",
+    )
+    projected = writer.project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="mixed-open",
+                event_type="open",
+                event_time_ms=1_000,
+                contract_key=key,
+                contracts=1,
+                price=1,
+                currency="USD",
+                source="legacy",
+                multiplier=100,
+                lot_id="mixed-lot",
+                raw_payload={
+                    "strategy": "combo_yield",
+                    "strategy_group_id": "combo-yield:lx:mixed-version",
+                },
+            ),
+            TradeEvent(
+                event_id="mixed-adjust",
+                event_type="adjust",
+                event_time_ms=2_000,
+                contract_key=key,
+                contracts=0,
+                price=0,
+                currency="USD",
+                source="legacy",
+                multiplier=100,
+                target_lot_id="mixed-lot",
+                raw_payload={
+                    "patch": {"yield_enhancement_mode": "vol_convexity_enhancement"}
+                },
+            ),
+        ]
+    )
+    current = projected.lots[0]
+    row = assigned_stock_position_lot_row(
+        projected.ledger_projection.lots[0],
+        current_fields=current.fields,
+        at_ms=3_000,
+    )
+
+    assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
+
+
+def test_assigned_oracle_does_not_restore_mode_absent_from_bound_source_lot() -> None:
+    transition = _buy_transition()
+    transition["broker"] = "富途"
+    transition["strategy_fields"].update(
+        {
+            "strategy": "combo_yield",
+            "leg_role": "assigned_stock",
+            "strategy_group_id": "combo-yield:lx:migrated",
+            "source_option_leg_role": "funding_put",
+        }
+    )
+    terminal, allocation, source_lot = _legacy_settlement_facts(transition)
+    source_open = {
+        "event_id": source_lot["open_event_id"],
+        "event_type": "open",
+        "trade_time_ms": 1_000,
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 1,
+        "price": 1,
+        "strike": 100,
+        "expiration_ymd": "2026-06-19",
+        "currency": "USD",
+        "multiplier": 100,
+        "raw_payload": {
+            "strategy": "combo_yield",
+            "strategy_group_id": "combo-yield:lx:migrated",
+            "yield_enhancement_mode": "vol_convexity_enhancement",
+        },
+    }
+    report = project_assigned_stock_lifecycle(
+        [source_open, terminal],
+        assignment_option_rows=[allocation],
+        option_open_lots=[source_lot],
+        assigned_stock_events=[],
+        quote_snapshots=[],
+        account_norm="lx",
+        broker_norm="富途",
+        month=None,
+        as_of_ms=5_000,
+    )
+    incremental = update_assigned_stock_fact(
+        empty_assigned_stock_fact("lx"),
+        transition=transition,
+        current_position_lots=[_final_option_lot(transition)],
+    )
+
+    assert "yield_enhancement_mode" not in report["assigned_stock_lots"][0]
+    assert compact_assigned_stock_view(
+        report,
+        account="lx",
+        current_position_lots=[_final_option_lot(transition)],
     ) == incremental
 
 
@@ -2240,7 +2381,7 @@ def test_fence_finalizer_does_not_scan_unreferenced_combo_identity_history(
     _bootstrap(repo, "lx")
     fence = capture_current_decision_projection_fence(repo, accounts=("lx",))
     validations = 0
-    original_validate = current_projection_module.validate_combo_identity
+    original_validate = current_decision_combo.validate_combo_identity
 
     def counted_validate(identity: dict[str, object]):
         nonlocal validations
@@ -2248,7 +2389,7 @@ def test_fence_finalizer_does_not_scan_unreferenced_combo_identity_history(
         return original_validate(identity)
 
     monkeypatch.setattr(
-        current_projection_module,
+        current_decision_combo,
         "validate_combo_identity",
         counted_validate,
     )
@@ -2294,7 +2435,7 @@ def test_fence_capture_reads_metadata_without_payload_decode(
 
     monkeypatch.setattr(repo, "_connect", traced_connect)
     monkeypatch.setattr(
-        "src.application.ledger.current_decision_projection._decode_projection_row_payload",
+        "src.application.ledger.current_decision_runtime._decode_projection_row_payload",
         lambda *_args, **_kwargs: pytest.fail("fence decoded payload"),
     )
     fence = capture_current_decision_projection_fence(repo, accounts=("lx",))

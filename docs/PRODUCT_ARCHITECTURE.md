@@ -285,10 +285,6 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
 - Close Advice 已收敛为固定 `strict_profit_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
 - Research / Shadow Replay 与生产执行保持分离。
 
-当前未完全对齐：
-
-- Combo Yield 仍有部分内部模块/函数名沿用 legacy `yield_enhancement`。
-
 下一步目标：
 
 ```text
@@ -301,4 +297,4 @@ position management
   -> ledger / lifecycle / close_advice / reports
 ```
 
-Combo Yield 详细开仓策略和 runtime key 已对齐；剩余差距是部分内部模块名、历史 artifact 读取和持仓退出适配仍保留 legacy `yield_enhancement`。
+Combo Yield 详细开仓策略、authoring/runtime key、内部模块和函数名已对齐。旧 `yield_enhancement` 只存在于历史 ledger/artifact 的只读解释边界；活动配置、策略和账本写路径均不再接受或生成旧字段。

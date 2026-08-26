@@ -15,6 +15,7 @@ from domain.domain.ledger import (
 )
 from domain.domain.ledger.events import validate_trade_event
 from domain.domain.ledger.position_fields import (
+    LEGACY_POSITION_LOT_PATCH_FIELDS,
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
     strategy_metadata_fields_from_payload,
 )
@@ -108,8 +109,11 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
 def _event_strategy_metadata(event: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(event, dict):
         return {}
-    metadata = strategy_metadata_fields_from_payload(_event_payload(event))
-    for key in ("strategy", "leg_role", "strategy_group_id", "yield_enhancement_mode"):
+    metadata = strategy_metadata_fields_from_payload(
+        _event_payload(event),
+        include_legacy=True,
+    )
+    for key in ("strategy", "leg_role", "strategy_group_id"):
         if key not in metadata and event.get(key) not in (None, ""):
             metadata[key] = str(event.get(key)).strip()
     return metadata
@@ -872,7 +876,7 @@ def assigned_stock_position_lot_row(
         "strike": lot.contract_key.strike,
         "expiration_ymd": lot.contract_key.expiration_ymd,
     }
-    for field in POSITION_LOT_STRATEGY_PATCH_FIELDS:
+    for field in (*POSITION_LOT_STRATEGY_PATCH_FIELDS, *LEGACY_POSITION_LOT_PATCH_FIELDS):
         if current_fields is not None and field in current_fields:
             value = current_fields[field]
             row[field] = dict(value) if isinstance(value, dict) else value
@@ -1198,9 +1202,13 @@ def project_assigned_stock_lifecycle(
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))
-        strategy_metadata = _event_strategy_metadata(event)
-        if not strategy_metadata.get("strategy_group_id"):
-            strategy_metadata = {**_event_strategy_metadata(source_open_event), **strategy_metadata}
+        strategy_metadata = {
+            **strategy_metadata_fields_from_payload(
+                source_option_lot,
+                include_legacy=True,
+            ),
+            **_event_strategy_metadata(event),
+        }
         source_option_leg_role = str(strategy_metadata.get("leg_role") or "").strip() or None
         stock_snapshot = (
             dict(strategy_metadata.get("strategy_snapshot"))
@@ -1216,11 +1224,11 @@ def project_assigned_stock_lifecycle(
                 "strategy": strategy_metadata.get("strategy"),
                 "leg_role": "assigned_stock" if strategy_metadata.get("strategy_group_id") else None,
                 "strategy_group_id": strategy_metadata.get("strategy_group_id"),
-                "yield_enhancement_mode": strategy_metadata.get("yield_enhancement_mode"),
                 "strategy_snapshot": stock_snapshot or None,
                 "structure_mode": stock_snapshot.get("structure_mode") if stock_snapshot else None,
                 "expiry_structure": stock_snapshot.get("expiry_structure") if stock_snapshot else None,
                 "source_option_leg_role": source_option_leg_role,
+                "yield_enhancement_mode": strategy_metadata.get("yield_enhancement_mode"),
             }.items()
             if value not in (None, "", {})
         }
@@ -1497,11 +1505,11 @@ def project_assigned_stock_lifecycle(
             "strategy",
             "leg_role",
             "strategy_group_id",
-            "yield_enhancement_mode",
             "strategy_snapshot",
             "structure_mode",
             "expiry_structure",
             "source_option_leg_role",
+            "yield_enhancement_mode",
         ):
             if lot.get(key) not in (None, "", {}):
                 sale_row[key] = lot.get(key)

@@ -15,7 +15,7 @@ from domain.domain.performance.cash_conversion import (
 )
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.cash_conversion import build_cash_conversion
-from src.application.ledger import writer as ledger_writer
+from src.application.ledger import writer_trade_events as ledger_writer
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import SQLiteOptionPositionsRepository

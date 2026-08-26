@@ -520,7 +520,7 @@ def test_combo_only_fetch_plan_requires_funding_put_realized_volatility(
         want_call=False,
         sell_put_cfg={"enabled": False},
         sell_call_cfg={"enabled": False},
-        yield_enhancement_cfg={"enabled": True},
+        combo_yield_cfg={"enabled": True},
         fetch_host="127.0.0.1",
         fetch_port=11111,
     )
