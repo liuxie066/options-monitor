@@ -325,6 +325,33 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_yaml_config_accepts_market_schedule_override(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "  us:\n    accounts: [lx, sy]\n",
+            "  us:\n"
+            "    accounts: [lx, sy]\n"
+            "    schedule:\n"
+            "      gates:\n"
+            "        - type: before\n"
+            "          timezone: Asia/Shanghai\n"
+            "          time: '03:10'\n"
+            "          day_offset_from_window_start: 1\n",
+            1,
+        ),
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert cfg["schedule"]["gates"][0]["time"] == "03:10"
+    validate_config(json.loads(json.dumps(cfg)))
+
+
 def test_yaml_config_rejects_string_combo_yield_enabled(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",

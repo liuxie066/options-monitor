@@ -55,6 +55,7 @@ PASSTHROUGH_KEYS = {
     "portfolio",
     "project_guard",
     "runtime",
+    "schedule",
     "symbol_defaults",
     "templates",
     "watchdog",
