@@ -83,8 +83,6 @@ def test_trade_event_writes_and_projection_publication_have_one_owner() -> None:
 
     raw_event_dml: list[str] = []
     for path in sorted(LEDGER_ROOT.glob("*.py")):
-        if path.name == "repository.py":
-            continue
         source = path.read_text(encoding="utf-8").upper()
         if any(
             statement in source
@@ -96,7 +94,11 @@ def test_trade_event_writes_and_projection_publication_have_one_owner() -> None:
             )
         ):
             raw_event_dml.append(str(path.relative_to(REPO_ROOT)))
-    assert raw_event_dml == []
+    assert raw_event_dml == [
+        "src/application/ledger/repository_projection.py",
+        "src/application/ledger/repository_trade_events.py",
+        "src/application/ledger/repository_trade_schema.py",
+    ]
 
 
 def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
@@ -154,27 +156,27 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
                 "mode",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_trade_events.py",
                 "rebuild_position_lots_from_trade_events>_run",
                 "'forced_full'",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_trade_events.py",
                 "persist_trade_event_object>_run",
                 "_projection_mode_for_events(storage_events)",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_trade_events.py",
                 "persist_trade_event_with_combo_identity>_run",
                 "'forced_full'",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_lifecycle_allocation.py",
                 "apply_lifecycle_allocation_atomically>_run",
                 "'forced_full'",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_trade_events.py",
                 "persist_trade_event_objects_atomically>_run",
                 "_projection_mode_for_events(storage_events, force_full=bool(case_update or allocation_rows))",
             ): 1,
@@ -210,7 +212,7 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "project_stored_trade_events_to_position_lots",
             ): 1,
                 (
-                    "src/application/ledger/current_decision_projection.py",
+                        "src/application/ledger/current_decision_oracle.py",
                     "_oracle_assigned_stock_report",
                     "project_stored_trade_events_to_position_lots",
                 ): 1,
@@ -255,7 +257,7 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "project_stored_trade_events_to_position_lots",
             ): 1,
             (
-                "src/application/ledger/writer.py",
+                "src/application/ledger/writer_trade_events.py",
                 "adopt_existing_combo_identity_atomically>_run",
                 "project_stored_trade_events_to_position_lots",
             ): 1,

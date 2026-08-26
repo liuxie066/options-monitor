@@ -87,7 +87,11 @@ def test_executed_fee_readers_do_not_import_fee_formulas() -> None:
         ROOT / "domain" / "domain" / "ledger" / "projection.py",
         ROOT / "domain" / "domain" / "performance" / "engine.py",
         ROOT / "src" / "application" / "cash_conversion.py",
-        ROOT / "src" / "application" / "ledger" / "current_decision_projection.py",
+        *sorted(
+            (ROOT / "src" / "application" / "ledger").glob(
+                "current_decision*.py"
+            )
+        ),
     )
     offenders = [
         str(path.relative_to(ROOT))

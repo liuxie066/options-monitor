@@ -34,9 +34,10 @@ trade_events -> deterministic projection -> position_lots
 | 非 ledger 模块的公共应用入口 | `src/application/ledger/api.py` |
 | 命令与维护动作 | `src/application/ledger/commands.py` |
 | 查询与读模型 | `src/application/ledger/queries.py`、`read_model.py` |
-| 事件写入与投影发布 | `src/application/ledger/writer.py` |
+| 事件写入与投影发布 | `src/application/ledger/writer.py` 公共 facade；实现按职责位于 `writer_*.py` |
 | 订单费用迁移与审计 | `src/application/ledger/order_fee_migration.py`；公共入口仍由 `ledger/api.py` 导出 |
-| SQLite repository | `src/application/ledger/repository.py` |
+| SQLite repository | `src/application/ledger/repository.py` 公共 facade；schema、trade events、position projection、assigned stock、lifecycle 与 strategy identity 分别由 `repository_*.py` 持有 |
+| 当前决策投影 | `src/application/ledger/current_decision_projection.py` 公共 facade；事实域、migration 与 runtime 分别由 `current_decision_*.py` 持有 |
 | lot 目标解析与 preflight | `src/application/ledger/lot_resolver.py`、`preflight.py` |
 | 人工持仓工作流 | `src/application/positions/` |
 | broker trade intake | `src/application/trades/` |
