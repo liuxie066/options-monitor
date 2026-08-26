@@ -21,9 +21,9 @@ from domain.domain.close_advice import (
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import PeriodRequest, PeriodWindow, normalize_period
 from domain.domain.strategy_vocab import (
+    STRATEGY_COMBO_YIELD,
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
     canonical_strategy_id,
 )
 from domain.domain.trade_contract_identity import (
@@ -262,7 +262,7 @@ def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[[Any], float | None]) -> dict[str, Any]:
-    strategy_counts = {STRATEGY_SELL_PUT: 0, STRATEGY_COVERED_CALL: 0, STRATEGY_YIELD_ENHANCEMENT: 0}
+    strategy_counts = {STRATEGY_SELL_PUT: 0, STRATEGY_COVERED_CALL: 0, STRATEGY_COMBO_YIELD: 0}
     account_counts: dict[str, int] = {}
     symbol_counts: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []

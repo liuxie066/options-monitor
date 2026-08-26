@@ -10,12 +10,10 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from domain.domain.daily_decision_brief import (
-    DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION,
     RETIRED_DAILY_BRIEF_FIELDS,
     build_daily_brief_candidate_identity,
     daily_brief_compatible_digests,
     daily_brief_digest,
-    diff_daily_decision_briefs,
     normalize_daily_decision_brief,
     reconcile_daily_decision_brief_evidence,
 )
@@ -24,7 +22,7 @@ from domain.domain.combo_candidate_evidence import (
     derive_combo_candidate_exposures,
 )
 from domain.storage import paths
-from domain.storage.json_io import atomic_write_json, atomic_write_text
+from domain.storage.json_io import atomic_write_json
 from src.application.channels.feishu_notification_renderer import (
     feishu_notification_envelope_sha256,
     normalize_feishu_notification_envelope,
@@ -32,8 +30,6 @@ from src.application.channels.feishu_notification_renderer import (
 
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
-DELIVERY_POINTER_SCHEMA_VERSION = "daily_decision_brief_delivery.v1"
-LEGACY_DELIVERY_POINTER_SCHEMA_VERSION = DELIVERY_POINTER_SCHEMA_VERSION
 DELIVERY_STATE_SCHEMA_VERSION = "daily_decision_brief_delivery.v2"
 DELIVERY_RECOVERY_SCHEMA_VERSION = "daily_decision_brief_delivery_recovery.v1"
 
@@ -1049,443 +1045,6 @@ def expire_daily_decision_brief_delivery_day(
         }
 
 
-def inspect_daily_decision_brief_delivery(
-    *,
-    base: Path,
-    account: str,
-    market: str,
-) -> dict[str, Any]:
-    """Inspect v1/v2 delivery state and preview a safe v1 migration."""
-
-    base_path = Path(base).resolve()
-    account_norm = _normalize_account(account)
-    market_norm = _normalize_market(market)
-    path = _delivery_path(base_path, account_norm, market_norm)
-    raw = _read_json_strict(path)
-    if raw is _MISSING:
-        return {
-            "available": False,
-            "reason": "not_found",
-            "account": account_norm,
-            "market": market_norm,
-            "path": path,
-        }
-    if not isinstance(raw, Mapping):
-        raise DailyDecisionBriefStateError(f"daily brief delivery state is not an object: {path}")
-    schema = str(raw.get("schema_version") or "")
-    if schema == DELIVERY_STATE_SCHEMA_VERSION:
-        state = _normalize_delivery_state(
-            raw,
-            base=base_path,
-            path=path,
-            account=account_norm,
-            market=market_norm,
-        )
-        return {
-            "available": True,
-            "reason": "already_v2",
-            "source_schema_version": schema,
-            "account": account_norm,
-            "market": market_norm,
-            "path": path,
-            "state": state,
-            "migration": None,
-        }
-    if schema != LEGACY_DELIVERY_POINTER_SCHEMA_VERSION:
-        raise DailyDecisionBriefStateError(f"unsupported daily brief delivery schema: {path}")
-    pointer = _normalize_delivery_pointer(raw, path=path, account=account_norm, market=market_norm)
-    migration = _build_v2_state_from_legacy_pointer(
-        base=base_path,
-        pointer=pointer,
-        pointer_path=path,
-    )
-    return {
-        "available": True,
-        "reason": "migration_available",
-        "source_schema_version": schema,
-        "account": account_norm,
-        "market": market_norm,
-        "path": path,
-        "legacy_pointer": pointer,
-        "migration": migration,
-    }
-
-
-def migrate_daily_decision_brief_delivery(
-    *,
-    base: Path,
-    account: str,
-    market: str,
-    confirm: bool = False,
-) -> dict[str, Any]:
-    """Explicitly migrate one validated v1 pointer; dry-run is the default."""
-
-    preview = inspect_daily_decision_brief_delivery(base=base, account=account, market=market)
-    if not confirm or preview.get("reason") != "migration_available":
-        return {**preview, "dry_run": not confirm, "write_applied": False, "backup_path": None}
-
-    base_path = Path(base).resolve()
-    account_norm = _normalize_account(account)
-    market_norm = _normalize_market(market)
-    state_dir = paths.account_state_dir(base_path, account_norm)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = state_dir / f"daily_decision_brief.{market_norm}.lock"
-    pointer_path = _delivery_path(base_path, account_norm, market_norm)
-    with _exclusive_lock(lock_path):
-        source_text = pointer_path.read_text(encoding="utf-8")
-        try:
-            source_raw = json.loads(source_text)
-        except json.JSONDecodeError as exc:
-            raise DailyDecisionBriefStateError(f"failed to read daily brief state: {pointer_path}: {exc}") from exc
-        pointer = _normalize_delivery_pointer(
-            source_raw,
-            path=pointer_path,
-            account=account_norm,
-            market=market_norm,
-        )
-        target_state = _build_v2_state_from_legacy_pointer(
-            base=base_path,
-            pointer=pointer,
-            pointer_path=pointer_path,
-        )["target_state"]
-        backup_path = _delivery_backup_path(pointer_path)
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        with backup_path.open("x", encoding="utf-8") as handle:
-            handle.write(source_text)
-        try:
-            atomic_write_json(pointer_path, target_state)
-            reread = _read_json_strict(pointer_path)
-            verified = _normalize_delivery_state(
-                reread,
-                base=base_path,
-                path=pointer_path,
-                account=account_norm,
-                market=market_norm,
-            )
-        except BaseException:
-            atomic_write_text(pointer_path, source_text)
-            raise
-        return {
-            "available": True,
-            "reason": "migrated",
-            "source_schema_version": LEGACY_DELIVERY_POINTER_SCHEMA_VERSION,
-            "target_schema_version": DELIVERY_STATE_SCHEMA_VERSION,
-            "account": account_norm,
-            "market": market_norm,
-            "path": pointer_path,
-            "dry_run": False,
-            "write_applied": True,
-            "backup_path": backup_path,
-            "state": verified,
-            "rollback": {
-                "backup_path": backup_path,
-                "target_path": pointer_path,
-                "requires_stopped_scheduler": True,
-            },
-        }
-
-
-def prepare_daily_decision_brief(
-    *,
-    base: Path,
-    brief: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Allocate and persist one revision, then prepare full/delta/none delivery state.
-
-    Revision and delivery state are serialized per account+market. Every JSON file
-    is replaced atomically. Existing malformed or incompatible state fails closed.
-    """
-
-    base_path = Path(base).resolve()
-    source = dict(brief or {})
-    market = _normalize_market(source.get("market"))
-    account = _normalize_account(source.get("account"))
-    market_date = _normalize_market_date(source.get("market_trading_date"))
-    run_id = str(source.get("run_id") or "").strip()
-    if not run_id:
-        raise ValueError("run_id is required for daily brief persistence")
-
-    account_dir = paths.account_state_dir(base_path, account)
-    account_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = account_dir / f"daily_decision_brief.{market}.lock"
-
-    with _exclusive_lock(lock_path):
-        current_path = _current_path(base_path, account, market)
-        current_raw = _read_json_strict(current_path)
-        current = None
-        if current_raw is not _MISSING:
-            current = _normalize_persisted_brief(
-                current_raw,
-                path=current_path,
-                account=account,
-                market=market,
-            )
-            current_revision_path = _revision_path(
-                base_path,
-                account,
-                market,
-                current["market_trading_date"],
-                int(current["revision"]),
-            )
-            current_revision_raw = _read_json_strict(current_revision_path)
-            if current_revision_raw is _MISSING:
-                raise DailyDecisionBriefStateError(
-                    f"daily brief current state references a missing revision: {current_revision_path}"
-                )
-            current_revision = _normalize_persisted_brief(
-                current_revision_raw,
-                path=current_revision_path,
-                account=account,
-                market=market,
-            )
-            if daily_brief_digest(current_revision) != daily_brief_digest(current):
-                raise DailyDecisionBriefStateError(
-                    f"daily brief current state digest mismatch: {current_path}"
-                )
-
-        existing_revisions = _list_revision_numbers(
-            base=base_path,
-            account=account,
-            market=market,
-            market_trading_date=market_date,
-        )
-        revision = (existing_revisions[-1] + 1) if existing_revisions else 0
-
-        candidate = dict(source)
-        candidate.update(
-            {
-                "market": market,
-                "market_trading_date": market_date,
-                "account": account,
-                "revision": revision,
-                "run_id": run_id,
-            }
-        )
-        normalized = normalize_daily_decision_brief(candidate)
-
-        revision_path = _revision_path(base_path, account, market, market_date, revision)
-        if revision_path.exists():
-            raise DailyDecisionBriefStateError(f"daily brief revision already exists: {revision_path}")
-
-        delivery_path = _delivery_path(base_path, account, market)
-        delivery_raw = _read_json_strict(delivery_path)
-        delivery = None
-        if delivery_raw is not _MISSING:
-            delivery = _normalize_delivery_pointer(
-                delivery_raw,
-                path=delivery_path,
-                account=account,
-                market=market,
-            )
-
-        last_delivered_brief = None
-        if delivery is not None and delivery["market_trading_date"] == market_date:
-            if int(delivery["revision"]) >= revision:
-                raise DailyDecisionBriefStateError(
-                    "daily brief delivery pointer is not behind the newly allocated revision"
-                )
-            delivered_path = _revision_path(
-                base_path,
-                account,
-                market,
-                market_date,
-                int(delivery["revision"]),
-            )
-            delivered_raw = _read_json_strict(delivered_path)
-            if delivered_raw is _MISSING:
-                raise DailyDecisionBriefStateError(
-                    f"daily brief delivery pointer references a missing revision: {delivered_path}"
-                )
-            last_delivered_brief = _normalize_persisted_brief(
-                delivered_raw,
-                path=delivered_path,
-                account=account,
-                market=market,
-            )
-            compatible_delivered_digests = set(
-                daily_brief_compatible_digests(delivered_raw)
-            )
-            pointer_digest = str(delivery.get("brief_digest") or "")
-            if pointer_digest not in compatible_delivered_digests:
-                raise DailyDecisionBriefStateError(
-                    f"daily brief delivery pointer digest mismatch: {delivery_path}"
-                )
-
-        if last_delivered_brief is None:
-            full_semantic_digest = _full_brief_semantic_digest(normalized)
-            diff = _initial_full_diff(
-                normalized,
-                full_semantic_digest=full_semantic_digest,
-            )
-            delivery_kind = "full"
-            delivery_key = _full_delivery_key(
-                market=market,
-                market_date=market_date,
-                account=account,
-                semantic_digest=full_semantic_digest,
-            )
-            last_delivered_revision = None
-            last_delivered_digest = None
-        else:
-            diff = diff_daily_decision_briefs(last_delivered_brief, normalized)
-            last_delivered_revision = int(last_delivered_brief["revision"])
-            last_delivered_digest = str(delivery["brief_digest"])
-            if bool(diff.get("material")):
-                delivery_kind = "delta"
-                delivery_key = (
-                    f"daily-brief:{market}:{market_date}:{account}:from:"
-                    f"{last_delivered_digest}:{diff['material_diff_digest']}"
-                )
-            else:
-                delivery_kind = "none"
-                delivery_key = ""
-
-        run_state_dir = paths.run_account_state_dir(base_path, run_id, account)
-        run_brief_path = run_state_dir / f"daily_decision_brief.{market}.json"
-        run_diff_path = run_state_dir / f"daily_decision_brief_diff.{market}.json"
-        shared_index_path = paths.shared_state_dir(base_path) / "current" / "daily_decision_briefs.current.json"
-        shared_lock_path = paths.shared_state_dir(base_path) / "current" / "daily_decision_briefs.current.lock"
-
-        with _exclusive_lock(shared_lock_path):
-            shared_index = _load_current_index(shared_index_path)
-            brief_digest = daily_brief_digest(normalized)
-            shared_index["items"][f"{market}/{account}"] = {
-                "market": market,
-                "market_trading_date": market_date,
-                "account": account,
-                "revision": revision,
-                "run_id": run_id,
-                "brief_digest": brief_digest,
-                "path": _relative_path(base_path, current_path),
-            }
-            shared_index["updated_at_utc"] = normalized.get("generated_at_utc") or _utc_now_iso()
-
-            atomic_write_json(revision_path, normalized)
-            atomic_write_json(current_path, normalized)
-            atomic_write_json(run_brief_path, normalized)
-            atomic_write_json(shared_index_path, shared_index)
-            atomic_write_json(run_diff_path, diff)
-
-        return {
-            "brief": normalized,
-            "diff": diff,
-            "delivery_kind": delivery_kind,
-            "delivery_key": delivery_key,
-            "last_delivered_revision": last_delivered_revision,
-            "last_delivered_brief_digest": last_delivered_digest,
-            "current_revision": revision,
-            "current_brief_digest": daily_brief_digest(normalized),
-            "paths": {
-                "revision": revision_path,
-                "current": current_path,
-                "run_brief": run_brief_path,
-                "run_diff": run_diff_path,
-                "delivery": delivery_path,
-                "shared_index": shared_index_path,
-            },
-        }
-
-
-def confirm_daily_decision_brief_delivery(
-    *,
-    base: Path,
-    market: str,
-    market_trading_date: str,
-    account: str,
-    revision: int,
-    delivery_kind: str,
-    delivery_key: str,
-    brief_digest: str | None = None,
-    confirmed_at_utc: datetime | str | None = None,
-) -> dict[str, Any]:
-    """Advance the delivery pointer after confirmed provider delivery only."""
-
-    base_path = Path(base).resolve()
-    market_norm = _normalize_market(market)
-    account_norm = _normalize_account(account)
-    date_norm = _normalize_market_date(market_trading_date)
-    revision_norm = _normalize_revision(revision)
-    kind_norm = str(delivery_kind or "").strip().lower()
-    if kind_norm not in {"full", "delta"}:
-        raise ValueError("delivery_kind must be full or delta")
-    key_norm = str(delivery_key or "").strip()
-    if not key_norm:
-        raise ValueError("delivery_key is required for confirmed delivery")
-
-    state_dir = paths.account_state_dir(base_path, account_norm)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = state_dir / f"daily_decision_brief.{market_norm}.lock"
-    pointer_path = _delivery_path(base_path, account_norm, market_norm)
-
-    with _exclusive_lock(lock_path):
-        revision_path = _revision_path(base_path, account_norm, market_norm, date_norm, revision_norm)
-        raw = _read_json_strict(revision_path)
-        if raw is _MISSING:
-            raise DailyDecisionBriefStateError(
-                f"cannot confirm missing daily brief revision: {revision_path}"
-            )
-        persisted = _normalize_persisted_brief(
-            raw,
-            path=revision_path,
-            account=account_norm,
-            market=market_norm,
-        )
-        if persisted["market_trading_date"] != date_norm or int(persisted["revision"]) != revision_norm:
-            raise DailyDecisionBriefStateError(f"daily brief revision identity mismatch: {revision_path}")
-        persisted_digest = daily_brief_digest(persisted)
-        compatible_persisted_digests = set(daily_brief_compatible_digests(raw))
-        requested_digest = (
-            str(brief_digest).strip()
-            if brief_digest is not None
-            else persisted_digest
-        )
-        if requested_digest not in compatible_persisted_digests:
-            raise DailyDecisionBriefStateError("confirmed daily brief digest does not match persisted revision")
-
-        existing_raw = _read_json_strict(pointer_path)
-        existing = None
-        if existing_raw is not _MISSING:
-            existing = _normalize_delivery_pointer(
-                existing_raw,
-                path=pointer_path,
-                account=account_norm,
-                market=market_norm,
-            )
-        if existing is not None:
-            existing_date = existing["market_trading_date"]
-            existing_revision = int(existing["revision"])
-            if existing_date > date_norm or (existing_date == date_norm and existing_revision > revision_norm):
-                return {"advanced": False, "reason": "stale_completion", "pointer": existing, "path": pointer_path}
-            if existing_date == date_norm and existing_revision == revision_norm:
-                if existing.get("brief_digest") != requested_digest:
-                    raise DailyDecisionBriefStateError("same delivery revision has a conflicting digest")
-                return {"advanced": False, "reason": "already_confirmed", "pointer": existing, "path": pointer_path}
-
-        expected = _prepared_delivery_expectation(
-            base=base_path,
-            brief=persisted,
-            delivery_key=key_norm,
-        )
-        if kind_norm != expected["delivery_kind"] or key_norm != expected["delivery_key"]:
-            raise DailyDecisionBriefStateError(
-                "confirmed daily brief delivery envelope does not match prepared lifecycle"
-            )
-
-        pointer = {
-            "schema_version": DELIVERY_POINTER_SCHEMA_VERSION,
-            "market": market_norm,
-            "market_trading_date": date_norm,
-            "account": account_norm,
-            "revision": revision_norm,
-            "brief_digest": requested_digest,
-            "delivery_kind": kind_norm,
-            "delivery_key": key_norm,
-            "confirmed_at_utc": _coerce_utc_iso(confirmed_at_utc),
-        }
-        atomic_write_json(pointer_path, pointer)
-        return {"advanced": True, "reason": "confirmed", "pointer": pointer, "path": pointer_path}
-
-
 def read_latest_daily_decision_brief(*, base: Path, account: str, market: str) -> dict[str, Any]:
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -1671,21 +1230,6 @@ def read_combo_candidate_exposures(
     }
 
 
-def read_daily_decision_brief_delivery(*, base: Path, account: str, market: str) -> dict[str, Any]:
-    base_path = Path(base).resolve()
-    account_norm = _normalize_account(account)
-    market_norm = _normalize_market(market)
-    path = _delivery_path(base_path, account_norm, market_norm)
-    try:
-        raw = _read_json_strict(path)
-        if raw is _MISSING:
-            return {"available": False, "reason": "not_found", "pointer": None, "path": path}
-        pointer = _normalize_delivery_pointer(raw, path=path, account=account_norm, market=market_norm)
-    except DailyDecisionBriefStateError as exc:
-        return {"available": False, "reason": "state_invalid", "error": str(exc), "pointer": None, "path": path}
-    return {"available": True, "reason": "ok", "pointer": pointer, "path": path}
-
-
 def _read_brief_result(
     *,
     path: Path,
@@ -1768,7 +1312,6 @@ def _empty_delivery_state(*, account: str, market: str) -> dict[str, Any]:
         "account": account,
         "market": market,
         "days": {},
-        "legacy_last_confirmation": None,
     }
 
 
@@ -2048,7 +1591,7 @@ def _normalize_delivery_state(
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate is invalid: {path}: {exc}") from exc
             delivery_key = str(raw_alerted.get("delivery_key") or "").strip()
             via = str(raw_alerted.get("via") or "").strip().lower()
-            if not delivery_key or via not in {"fixed_report", "candidate_alert", "legacy_delivery"}:
+            if not delivery_key or via not in {"fixed_report", "candidate_alert"}:
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate metadata is invalid: {path}: {identity}")
             source_brief = _validate_successful_revision_source(
                 base=base,
@@ -2128,22 +1671,11 @@ def _normalize_delivery_state(
                 f"daily brief candidate cannot be both pending and alerted: {path}: {market_date}"
             )
 
-    legacy_raw = raw.get("legacy_last_confirmation")
-    legacy = None
-    if legacy_raw is not None:
-        legacy = _normalize_legacy_confirmation(
-            legacy_raw,
-            base=base,
-            path=path,
-            account=account,
-            market=market,
-        )
     return {
         "schema_version": DELIVERY_STATE_SCHEMA_VERSION,
         "account": account,
         "market": market,
         "days": days,
-        "legacy_last_confirmation": legacy,
     }
 
 
@@ -2312,45 +1844,6 @@ def _normalize_delivery_envelope(
         "render_context": dict(render_context),
         "first_prepared_at_utc": first_prepared,
         "last_attempt_at_utc": last_attempt,
-        "confirmed_at_utc": confirmed_at,
-    }
-
-
-def _normalize_legacy_confirmation(
-    raw: Any,
-    *,
-    base: Path,
-    path: Path,
-    account: str,
-    market: str,
-) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        raise DailyDecisionBriefStateError(f"legacy daily brief confirmation is invalid: {path}")
-    try:
-        market_date = _normalize_market_date(raw.get("market_trading_date"))
-        revision = _normalize_revision(raw.get("revision"))
-        brief_digest = _normalize_sha256(raw.get("brief_digest"), field="brief_digest")
-        confirmed_at = _normalize_required_utc_iso(raw.get("confirmed_at_utc"), field="confirmed_at_utc")
-    except ValueError as exc:
-        raise DailyDecisionBriefStateError(f"legacy daily brief confirmation is invalid: {path}: {exc}") from exc
-    delivery_kind = str(raw.get("delivery_kind") or "").strip().lower()
-    delivery_key = str(raw.get("delivery_key") or "").strip()
-    if delivery_kind not in {"full", "delta"} or not delivery_key:
-        raise DailyDecisionBriefStateError(f"legacy daily brief confirmation metadata is invalid: {path}")
-    _validate_successful_revision_source(
-        base=base,
-        account=account,
-        market=market,
-        market_trading_date=market_date,
-        revision=revision,
-        source_digest=brief_digest,
-    )
-    return {
-        "market_trading_date": market_date,
-        "revision": revision,
-        "delivery_kind": delivery_kind,
-        "delivery_key": delivery_key,
-        "brief_digest": brief_digest,
         "confirmed_at_utc": confirmed_at,
     }
 
@@ -2553,128 +2046,6 @@ def _delivery_envelope_content(envelope: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_v2_state_from_legacy_pointer(
-    *,
-    base: Path,
-    pointer: Mapping[str, Any],
-    pointer_path: Path,
-) -> dict[str, Any]:
-    account = str(pointer["account"])
-    market = str(pointer["market"])
-    market_date = str(pointer["market_trading_date"])
-    revision = int(pointer["revision"])
-    revision_path = _revision_path(base, account, market, market_date, revision)
-    raw = _read_json_strict(revision_path)
-    if raw is _MISSING:
-        raise DailyDecisionBriefStateError(f"daily brief delivery pointer references a missing revision: {revision_path}")
-    brief = _normalize_persisted_brief(raw, path=revision_path, account=account, market=market)
-    if brief["market_trading_date"] != market_date or int(brief["revision"]) != revision:
-        raise DailyDecisionBriefStateError(f"daily brief delivery pointer revision identity mismatch: {revision_path}")
-    recomputed_digest = daily_brief_digest(brief)
-    compatible_digests = set(daily_brief_compatible_digests(raw))
-    delivery_kind = str(pointer.get("delivery_kind") or "").strip().lower()
-    delivery_key = str(pointer.get("delivery_key") or "").strip()
-    try:
-        confirmed_at = _normalize_required_utc_iso(pointer.get("confirmed_at_utc"), field="confirmed_at_utc")
-    except ValueError as exc:
-        raise DailyDecisionBriefStateError(f"daily brief delivery confirmation time is invalid: {pointer_path}: {exc}") from exc
-    if delivery_kind == "full":
-        expected_prefix = f"daily-brief:{market}:{market_date}:{account}:full:"
-        if not _legacy_delivery_key_has_digests(delivery_key, prefix=expected_prefix, count=1):
-            raise DailyDecisionBriefStateError(f"legacy daily brief delivery key mismatch: {pointer_path}")
-        alerted_ids = _candidate_identity_set(brief)
-    elif delivery_kind == "delta":
-        expected_prefix = f"daily-brief:{market}:{market_date}:{account}:from:"
-        if not _legacy_delivery_key_has_digests(delivery_key, prefix=expected_prefix, count=2):
-            raise DailyDecisionBriefStateError(f"legacy daily brief delivery key mismatch: {pointer_path}")
-        alerted_ids = _legacy_delta_candidate_identities(base=base, brief=brief)
-    else:
-        raise DailyDecisionBriefStateError(f"legacy daily brief delivery kind is invalid: {pointer_path}")
-
-    state = _empty_delivery_state(account=account, market=market)
-    day = _delivery_day(state, market_date)
-    day["alerted_candidates"] = {
-        identity: {
-            "revision": revision,
-            "brief_digest": recomputed_digest,
-            "delivery_key": delivery_key,
-            "confirmed_at_utc": confirmed_at,
-            "via": "legacy_delivery",
-        }
-        for identity in sorted(alerted_ids)
-    }
-    state["legacy_last_confirmation"] = {
-        "market_trading_date": market_date,
-        "revision": revision,
-        "delivery_kind": delivery_kind,
-        "delivery_key": delivery_key,
-        "brief_digest": recomputed_digest,
-        "confirmed_at_utc": confirmed_at,
-    }
-    verified = _normalize_delivery_state(
-        state,
-        base=base,
-        path=pointer_path,
-        account=account,
-        market=market,
-    )
-    legacy_digest = str(pointer.get("brief_digest") or "").strip()
-    return {
-        "target_schema_version": DELIVERY_STATE_SCHEMA_VERSION,
-        "recomputed_brief_digest": recomputed_digest,
-        "legacy_brief_digest_matches_revision": legacy_digest in compatible_digests,
-        "alerted_candidate_identities": sorted(alerted_ids),
-        "target_state": verified,
-    }
-
-
-def _legacy_delta_candidate_identities(*, base: Path, brief: Mapping[str, Any]) -> set[str]:
-    run_id = str(brief.get("run_id") or "").strip()
-    if not run_id:
-        return set()
-    diff_path = (
-        paths.run_account_state_dir(base, run_id, str(brief["account"]))
-        / f"daily_decision_brief_diff.{brief['market']}.json"
-    )
-    try:
-        raw = _read_json_strict(diff_path)
-    except DailyDecisionBriefStateError:
-        return set()
-    if not isinstance(raw, Mapping) or raw.get("schema_version") != DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION:
-        return set()
-    try:
-        to_revision = _normalize_revision(raw.get("to_revision"))
-    except ValueError:
-        return set()
-    if (
-        str(raw.get("account") or "").strip().lower() != brief["account"]
-        or str(raw.get("market") or "").strip().upper() != brief["market"]
-        or str(raw.get("market_trading_date") or "").strip() != brief["market_trading_date"]
-        or to_revision != int(brief["revision"])
-    ):
-        return set()
-    eligible = _candidate_identity_set(brief)
-    out: set[str] = set()
-    for change in raw.get("changes") or []:
-        if not isinstance(change, Mapping) or change.get("change_type") != "candidate_added":
-            continue
-        action = change.get("action")
-        if not isinstance(action, Mapping):
-            continue
-        try:
-            identity = build_daily_brief_candidate_identity(
-                account=brief["account"],
-                market=brief["market"],
-                symbol=action.get("symbol"),
-                strategy_family=action.get("strategy_family"),
-            )
-        except ValueError:
-            continue
-        if identity in eligible:
-            out.add(identity)
-    return out
-
-
 def _fixed_delivery_key(
     *,
     market: str,
@@ -2683,13 +2054,6 @@ def _fixed_delivery_key(
     scheduled_target_market: str,
 ) -> str:
     return f"option-report:{market}:{market_date}:{account}:{scheduled_target_market}"
-
-
-def _legacy_delivery_key_has_digests(value: str, *, prefix: str, count: int) -> bool:
-    if not value.startswith(prefix):
-        return False
-    parts = value[len(prefix) :].split(":")
-    return len(parts) == count and all(_SHA256_RE.fullmatch(part) for part in parts)
 
 
 def _candidate_delivery_key(
@@ -2798,121 +2162,6 @@ def _normalize_optional_utc_iso(value: Any, *, field: str) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-def _delivery_backup_path(pointer_path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    return pointer_path.with_name(f"{pointer_path.name}.v1.backup.{stamp}")
-
-
-def _normalize_delivery_pointer(raw: Any, *, path: Path, account: str, market: str) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        raise DailyDecisionBriefStateError(f"daily brief delivery state is not an object: {path}")
-    pointer = dict(raw)
-    if pointer.get("schema_version") != DELIVERY_POINTER_SCHEMA_VERSION:
-        raise DailyDecisionBriefStateError(f"unsupported daily brief delivery schema: {path}")
-    try:
-        pointer_account = _normalize_account(pointer.get("account"))
-        pointer_market = _normalize_market(pointer.get("market"))
-        pointer_date = _normalize_market_date(pointer.get("market_trading_date"))
-        pointer_revision = _normalize_revision(pointer.get("revision"))
-    except ValueError as exc:
-        raise DailyDecisionBriefStateError(f"daily brief delivery state is incompatible: {path}: {exc}") from exc
-    if pointer_account != account or pointer_market != market:
-        raise DailyDecisionBriefStateError(f"daily brief delivery identity mismatch: {path}")
-    pointer["account"] = account
-    pointer["market"] = market
-    pointer["market_trading_date"] = pointer_date
-    pointer["revision"] = pointer_revision
-    pointer["brief_digest"] = str(pointer.get("brief_digest") or "").strip()
-    if not pointer["brief_digest"]:
-        raise DailyDecisionBriefStateError(f"daily brief delivery digest is missing: {path}")
-    return pointer
-
-
-def _prepared_delivery_expectation(
-    *,
-    base: Path,
-    brief: Mapping[str, Any],
-    delivery_key: str,
-) -> dict[str, str]:
-    account = str(brief["account"])
-    market = str(brief["market"])
-    market_date = str(brief["market_trading_date"])
-    revision = int(brief["revision"])
-    run_id = str(brief.get("run_id") or "").strip()
-    if not run_id:
-        raise DailyDecisionBriefStateError("persisted daily brief run_id is missing")
-
-    diff_path = (
-        paths.run_account_state_dir(base, run_id, account)
-        / f"daily_decision_brief_diff.{market}.json"
-    )
-    raw = _read_json_strict(diff_path)
-    if raw is _MISSING or not isinstance(raw, Mapping):
-        raise DailyDecisionBriefStateError(f"prepared daily brief diff is unavailable: {diff_path}")
-    diff = dict(raw)
-    if diff.get("schema_version") != DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION:
-        raise DailyDecisionBriefStateError(f"prepared daily brief diff schema is incompatible: {diff_path}")
-    try:
-        diff_to_revision = _normalize_revision(diff.get("to_revision"))
-    except ValueError as exc:
-        raise DailyDecisionBriefStateError(f"prepared daily brief diff revision is invalid: {diff_path}") from exc
-    if (
-        str(diff.get("market") or "").strip().upper() != market
-        or str(diff.get("market_trading_date") or "").strip() != market_date
-        or str(diff.get("account") or "").strip().lower() != account
-        or diff_to_revision != revision
-    ):
-        raise DailyDecisionBriefStateError(f"prepared daily brief diff identity mismatch: {diff_path}")
-
-    from_revision = diff.get("from_revision")
-    if from_revision is None:
-        full_semantic_digest = str(diff.get("full_semantic_digest") or "").strip()
-        if not _SHA256_RE.fullmatch(full_semantic_digest):
-            raise DailyDecisionBriefStateError(
-                f"prepared daily brief full semantic digest is invalid: {diff_path}"
-            )
-        if full_semantic_digest != _full_brief_semantic_digest(brief):
-            raise DailyDecisionBriefStateError(
-                f"prepared daily brief full semantic digest mismatch: {diff_path}"
-            )
-        return {
-            "delivery_kind": "full",
-            "delivery_key": _full_delivery_key(
-                market=market,
-                market_date=market_date,
-                account=account,
-                semantic_digest=full_semantic_digest,
-            ),
-        }
-    try:
-        from_revision_norm = _normalize_revision(from_revision)
-    except ValueError as exc:
-        raise DailyDecisionBriefStateError(f"prepared daily brief base revision is invalid: {diff_path}") from exc
-    if from_revision_norm >= revision or not bool(diff.get("material")):
-        raise DailyDecisionBriefStateError(f"prepared daily brief delta is not material: {diff_path}")
-    material_digest = str(diff.get("material_diff_digest") or "").strip()
-    if not material_digest:
-        raise DailyDecisionBriefStateError(f"prepared daily brief delta digest is missing: {diff_path}")
-
-    from_path = _revision_path(base, account, market, market_date, from_revision_norm)
-    from_raw = _read_json_strict(from_path)
-    if from_raw is _MISSING:
-        raise DailyDecisionBriefStateError(f"prepared daily brief base revision is missing: {from_path}")
-    _normalize_persisted_brief(from_raw, path=from_path, account=account, market=market)
-    compatible_from_digests = set(daily_brief_compatible_digests(from_raw))
-    delivery_key_prefix = f"daily-brief:{market}:{market_date}:{account}:from:"
-    key_suffix = str(delivery_key or "").removeprefix(delivery_key_prefix)
-    key_from_digest = key_suffix.split(":", 1)[0]
-    if key_from_digest not in compatible_from_digests:
-        key_from_digest = daily_brief_digest(from_raw)
-    return {
-        "delivery_kind": "delta",
-        "delivery_key": (
-            f"daily-brief:{market}:{market_date}:{account}:from:{key_from_digest}:{material_digest}"
-        ),
-    }
-
-
 def _validate_current_revision(*, base: Path, current: Mapping[str, Any], current_path: Path) -> None:
     revision_path = _revision_path(
         base,
@@ -2948,73 +2197,6 @@ def _load_current_index(path: Path) -> dict[str, Any]:
     out = dict(raw)
     out["items"] = dict(items)
     return out
-
-
-def _initial_full_diff(
-    brief: Mapping[str, Any],
-    *,
-    full_semantic_digest: str,
-) -> dict[str, Any]:
-    canonical = {
-        "change_type": "full_required",
-        "market": brief["market"],
-        "market_trading_date": brief["market_trading_date"],
-        "account": brief["account"],
-    }
-    raw = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return {
-        "schema_version": DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION,
-        "brief_id": brief["brief_id"],
-        "market": brief["market"],
-        "market_trading_date": brief["market_trading_date"],
-        "account": brief["account"],
-        "from_revision": None,
-        "to_revision": brief["revision"],
-        "material": True,
-        "changes": [{"change_type": "full_required", "priority": "P0", "material": True}],
-        "material_diff_digest": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        "full_semantic_digest": full_semantic_digest,
-    }
-
-
-def _full_delivery_key(
-    *,
-    market: str,
-    market_date: str,
-    account: str,
-    semantic_digest: str,
-) -> str:
-    return f"daily-brief:{market}:{market_date}:{account}:full:{semantic_digest}"
-
-
-def _full_brief_semantic_digest(brief: Mapping[str, Any]) -> str:
-    """Digest full-brief semantics while excluding revision and display/audit noise."""
-
-    normalized = normalize_daily_decision_brief(brief)
-    semantic = dict(normalized)
-    for field in RETIRED_DAILY_BRIEF_FIELDS:
-        semantic.pop(field, None)
-    semantic.update(
-        {
-            "revision": 0,
-            "run_id": "",
-            "generated_at_utc": "",
-            "data_as_of_utc": "",
-            "strategy_summary": "",
-            "source_artifacts": [],
-        }
-    )
-    semantic["actions"] = [
-        {
-            key: value
-            for key, value in action.items()
-            if key not in {"title", "reason", "source"}
-        }
-        for action in normalized["actions"]
-    ]
-    for field in ("positions", "candidates", "events"):
-        semantic[field] = _without_source_provenance(normalized[field])
-    return daily_brief_digest(semantic)
 
 
 def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
@@ -3157,20 +2339,13 @@ __all__ = [
     "CURRENT_INDEX_SCHEMA_VERSION",
     "DELIVERY_RECOVERY_SCHEMA_VERSION",
     "DELIVERY_STATE_SCHEMA_VERSION",
-    "DELIVERY_POINTER_SCHEMA_VERSION",
-    "LEGACY_DELIVERY_POINTER_SCHEMA_VERSION",
     "DailyDecisionBriefStateError",
-    "confirm_daily_decision_brief_delivery",
     "classify_retryable_daily_decision_brief_payload",
-    "inspect_daily_decision_brief_delivery",
     "list_daily_decision_brief_revisions",
-    "migrate_daily_decision_brief_delivery",
     "persist_daily_decision_brief_success",
-    "prepare_daily_decision_brief",
     "prepare_daily_decision_brief_delivery",
     "reconcile_daily_decision_brief_delivery_resolution",
     "read_daily_decision_brief",
-    "read_daily_decision_brief_delivery",
     "read_daily_decision_brief_delivery_state",
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",

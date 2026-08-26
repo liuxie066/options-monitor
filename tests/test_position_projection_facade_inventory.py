@@ -221,11 +221,6 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
             ): 1,
             (
                 "src/application/ledger/migration.py",
-                "shadow_replay_legacy_trade_events",
-                "project_trade_events",
-            ): 1,
-            (
-                "src/application/ledger/migration.py",
                 "shadow_replay_position_lot_snapshot",
                 "project_trade_events",
             ): 1,

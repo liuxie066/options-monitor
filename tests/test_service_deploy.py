@@ -6203,7 +6203,6 @@ def test_service_upgrade_requires_yaml_authoring_source_before_switch(monkeypatc
     assert current.resolve() == v100.resolve()
     assert out["remediation"] == [
         "rerender_service_profile: ./om service render ... --config-yaml <path>",
-        "migrate_legacy_json_once: ./om config migrate-yaml --apply --output config.yaml",
     ]
     assert not any(command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls

@@ -16,7 +16,7 @@ def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run
         "generated_at_utc": "2026-07-19T13:40:00+00:00",
         "data_as_of_utc": "2026-07-19T13:39:00+00:00",
         "valid_until_utc": valid_until,
-        "status": "completed",
+        "status": "ready",
         "actionability": "live_actionable",
         "strategy_summary": "test",
         "actions": [],
@@ -34,9 +34,9 @@ def test_read_view_supports_latest_day_revision_and_effective_planning_only(
     tmp_path: Path,
 ) -> None:
     from src.application.agent_tools.daily_brief import read_daily_brief_view
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
-    lifecycle = prepare_daily_decision_brief(base=tmp_path, brief=_brief())
+    lifecycle = persist_daily_decision_brief_success(base=tmp_path, brief=_brief())
     latest = read_daily_brief_view(
         base=tmp_path,
         account="LX",
@@ -73,10 +73,10 @@ def test_read_view_strips_retired_ai_overlay_from_historical_brief(
 
     from src.application.agent_tools.daily_brief import read_daily_brief_view
     from src.application.daily_decision_brief_repository import (
-        prepare_daily_decision_brief,
+        persist_daily_decision_brief_success,
     )
 
-    lifecycle = prepare_daily_decision_brief(base=tmp_path, brief=_brief())
+    lifecycle = persist_daily_decision_brief_success(base=tmp_path, brief=_brief())
     for path in (
         lifecycle["paths"]["revision"],
         lifecycle["paths"]["current"],
@@ -125,9 +125,12 @@ def test_read_view_reports_unavailable_and_revision_requires_date(tmp_path: Path
 
 def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.daily_brief as mod
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
-    prepare_daily_decision_brief(base=tmp_path, brief=_brief(valid_until="2026-07-20T20:00:00+00:00"))
+    persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=_brief(valid_until="2026-07-20T20:00:00+00:00"),
+    )
     monkeypatch.setattr(mod, "repo_base", lambda: tmp_path)
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
@@ -139,7 +142,7 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
     assert data["available"] is True
     assert data["brief"]["revision"] == 0
     assert data["coverage"] == {
-        "status": "completed",
+        "status": "ready",
         "reason": "ok",
         "action_count": 0,
         "position_count": 0,
@@ -213,13 +216,16 @@ def test_agent_tool_masks_state_invalid_source_path(monkeypatch, tmp_path: Path)
 
 def test_agent_tool_reads_env_runtime_root_then_repo_fallback(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.daily_brief as mod
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
     repo_root = tmp_path / "repo"
     runtime_root = tmp_path / "runtime"
-    prepare_daily_decision_brief(base=repo_root, brief=_brief(run_id="repo-r0"))
-    prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r0"))
-    runtime_r1 = prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r1"))
+    persist_daily_decision_brief_success(base=repo_root, brief=_brief(run_id="repo-r0"))
+    persist_daily_decision_brief_success(base=runtime_root, brief=_brief(run_id="runtime-r0"))
+    runtime_r1 = persist_daily_decision_brief_success(
+        base=runtime_root,
+        brief=_brief(run_id="runtime-r1"),
+    )
     monkeypatch.setattr(mod, "repo_base", lambda: repo_root)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
@@ -250,7 +256,7 @@ def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
     from copy import deepcopy
 
     import src.application.agent_tools.daily_brief as mod
-    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
     for account, market in (("lx", "HK"), ("lx", "US")):
         brief = deepcopy(_brief(run_id=f"run-{account}-{market.lower()}"))
@@ -262,7 +268,7 @@ def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
             "available": True,
             "reason": "ok",
         }
-        prepare_daily_decision_brief(base=tmp_path, brief=brief)
+        persist_daily_decision_brief_success(base=tmp_path, brief=brief)
 
     delivery_path = tmp_path / "output_accounts" / "lx" / "state" / "daily_decision_brief.US.delivery.json"
     delivery_path.write_bytes(b'{"sentinel":true}\n')

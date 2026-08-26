@@ -41,7 +41,6 @@ from src.interfaces.cli.config_ops import (
     get_runtime_config_value,
     handle_config_command,
     init_yaml_config,
-    preview_config_yaml_migration,
     set_yaml_symbol_config,
     validate_yaml_runtime_config,
 )
@@ -295,7 +294,6 @@ def main(argv: list[str] | None = None) -> int:
                 build_yaml_runtime_config_file_fn=build_yaml_runtime_config_file,
                 build_yaml_assistant_config_file_fn=build_yaml_assistant_config_file,
                 explain_yaml_config_key_fn=explain_yaml_config_key,
-                preview_config_yaml_migration_fn=preview_config_yaml_migration,
                 init_yaml_config_fn=init_yaml_config,
                 get_runtime_config_value_fn=get_runtime_config_value,
                 set_yaml_symbol_config_fn=set_yaml_symbol_config,

@@ -596,250 +596,6 @@ def test_ambiguous_envelope_is_frozen_and_tampered_hash_fails_closed(tmp_path: P
     assert "message digest mismatch" in read["error"]
 
 
-def test_v1_full_migration_is_dry_run_by_default_and_recomputes_digest(tmp_path: Path) -> None:
-    from domain.domain.daily_decision_brief import daily_brief_digest
-    from src.application.daily_decision_brief_repository import (
-        confirm_daily_decision_brief_delivery,
-        migrate_daily_decision_brief_delivery,
-        prepare_daily_decision_brief,
-    )
-
-    lifecycle = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="legacy-run", actions=[_action()]),
-    )
-    brief = lifecycle["brief"]
-    confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=brief["revision"],
-        delivery_kind=lifecycle["delivery_kind"],
-        delivery_key=lifecycle["delivery_key"],
-        brief_digest=lifecycle["current_brief_digest"],
-        confirmed_at_utc=datetime(2026, 7, 21, 14, 1, tzinfo=timezone.utc),
-    )
-    pointer_path = lifecycle["paths"]["delivery"]
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    pointer["brief_digest"] = "legacy-wrong-digest"
-    pointer["delivery_key"] = f"daily-brief:US:{MARKET_DATE}:lx:full:{'1' * 64}"
-    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
-    current_before = lifecycle["paths"]["current"].read_bytes()
-    revision_before = lifecycle["paths"]["revision"].read_bytes()
-    pointer_before = pointer_path.read_bytes()
-
-    dry_run = migrate_daily_decision_brief_delivery(
-        base=tmp_path,
-        account="lx",
-        market="US",
-    )
-    assert dry_run["dry_run"] is True
-    assert dry_run["write_applied"] is False
-    assert dry_run["migration"]["legacy_brief_digest_matches_revision"] is False
-    assert pointer_path.read_bytes() == pointer_before
-    assert list(pointer_path.parent.glob(f"{pointer_path.name}.v1.backup.*")) == []
-
-    applied = migrate_daily_decision_brief_delivery(
-        base=tmp_path,
-        account="lx",
-        market="US",
-        confirm=True,
-    )
-    assert applied["write_applied"] is True
-    assert applied["backup_path"].read_bytes() == pointer_before
-    assert applied["state"]["legacy_last_confirmation"]["brief_digest"] == daily_brief_digest(brief)
-    assert set(applied["state"]["days"][MARKET_DATE]["alerted_candidates"]) == {IDENTITY_NVDA}
-    assert lifecycle["paths"]["current"].read_bytes() == current_before
-    assert lifecycle["paths"]["revision"].read_bytes() == revision_before
-
-
-def test_v1_overlay_digest_remains_valid_for_next_prepare_and_migration(
-    tmp_path: Path,
-) -> None:
-    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
-    from src.application.daily_decision_brief_repository import (
-        confirm_daily_decision_brief_delivery,
-        migrate_daily_decision_brief_delivery,
-        prepare_daily_decision_brief,
-    )
-
-    lifecycle = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="legacy-overlay", actions=[_action()]),
-    )
-    confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=lifecycle["brief"]["revision"],
-        delivery_kind=lifecycle["delivery_kind"],
-        delivery_key=lifecycle["delivery_key"],
-        brief_digest=lifecycle["current_brief_digest"],
-        confirmed_at_utc="2026-07-21T14:01:00+00:00",
-    )
-    for path in (lifecycle["paths"]["revision"], lifecycle["paths"]["current"]):
-        historical = json.loads(path.read_text(encoding="utf-8"))
-        historical["ai_decision_advice"] = {
-            "status": "completed",
-            "summary": "historical-overlay",
-        }
-        historical["ai_decision_advice_evidence_index"] = {
-            "source": "historical-evidence",
-        }
-        path.write_text(json.dumps(historical), encoding="utf-8")
-    legacy_digest = daily_brief_compatible_digests(historical)[-1]
-    assert legacy_digest != lifecycle["current_brief_digest"]
-
-    pointer_path = lifecycle["paths"]["delivery"]
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    pointer["brief_digest"] = legacy_digest
-    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
-
-    preview = migrate_daily_decision_brief_delivery(
-        base=tmp_path,
-        account="lx",
-        market="US",
-    )
-    assert preview["migration"]["legacy_brief_digest_matches_revision"] is True
-
-    next_run = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="after-overlay", actions=[_action(symbol="AMD")]),
-    )
-    assert next_run["current_revision"] == 1
-    assert next_run["last_delivered_brief_digest"] == legacy_digest
-    assert next_run["delivery_key"].startswith(
-        f"daily-brief:US:{MARKET_DATE}:lx:from:{legacy_digest}:"
-    )
-    confirmed = confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=next_run["brief"]["revision"],
-        delivery_kind=next_run["delivery_kind"],
-        delivery_key=next_run["delivery_key"],
-        brief_digest=next_run["current_brief_digest"],
-        confirmed_at_utc="2026-07-21T14:02:00+00:00",
-    )
-    assert confirmed["advanced"] is True
-
-
-def test_v1_overlay_revision_can_be_confirmed_with_its_exact_historical_digest(
-    tmp_path: Path,
-) -> None:
-    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
-    from src.application.daily_decision_brief_repository import (
-        confirm_daily_decision_brief_delivery,
-        prepare_daily_decision_brief,
-    )
-
-    lifecycle = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="legacy-unconfirmed", actions=[_action()]),
-    )
-    revision_path = lifecycle["paths"]["revision"]
-    historical = json.loads(revision_path.read_text(encoding="utf-8"))
-    historical["ai_decision_advice"] = {"status": "completed"}
-    historical["ai_decision_advice_evidence_index"] = {"source": "legacy"}
-    revision_path.write_text(json.dumps(historical), encoding="utf-8")
-    legacy_digest = daily_brief_compatible_digests(historical)[-1]
-
-    confirmed = confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=lifecycle["brief"]["revision"],
-        delivery_kind=lifecycle["delivery_kind"],
-        delivery_key=lifecycle["delivery_key"],
-        brief_digest=legacy_digest,
-        confirmed_at_utc="2026-07-21T14:01:00+00:00",
-    )
-    assert confirmed["pointer"]["brief_digest"] == legacy_digest
-
-
-def test_v1_delta_without_persisted_diff_migrates_no_alerted_candidates(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import (
-        confirm_daily_decision_brief_delivery,
-        migrate_daily_decision_brief_delivery,
-        prepare_daily_decision_brief,
-    )
-
-    first = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="legacy-0"))
-    confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=first["brief"]["revision"],
-        delivery_kind=first["delivery_kind"],
-        delivery_key=first["delivery_key"],
-        brief_digest=first["current_brief_digest"],
-    )
-    second = prepare_daily_decision_brief(
-        base=tmp_path,
-        brief=_brief(run_id="legacy-1", actions=[_action()]),
-    )
-    assert second["delivery_kind"] == "delta"
-    confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=second["brief"]["revision"],
-        delivery_kind=second["delivery_kind"],
-        delivery_key=second["delivery_key"],
-        brief_digest=second["current_brief_digest"],
-    )
-    second["paths"]["run_diff"].unlink()
-
-    migrated = migrate_daily_decision_brief_delivery(
-        base=tmp_path,
-        account="lx",
-        market="US",
-        confirm=True,
-    )
-    assert migrated["state"]["days"][MARKET_DATE]["alerted_candidates"] == {}
-    assert migrated["state"]["legacy_last_confirmation"]["delivery_kind"] == "delta"
-
-
-def test_migration_missing_revision_fails_closed_without_backup_or_overwrite(tmp_path: Path) -> None:
-    from src.application.daily_decision_brief_repository import (
-        DailyDecisionBriefStateError,
-        confirm_daily_decision_brief_delivery,
-        migrate_daily_decision_brief_delivery,
-        prepare_daily_decision_brief,
-    )
-
-    lifecycle = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="legacy-run"))
-    confirm_daily_decision_brief_delivery(
-        base=tmp_path,
-        market="US",
-        market_trading_date=MARKET_DATE,
-        account="lx",
-        revision=lifecycle["brief"]["revision"],
-        delivery_kind=lifecycle["delivery_kind"],
-        delivery_key=lifecycle["delivery_key"],
-        brief_digest=lifecycle["current_brief_digest"],
-    )
-    pointer_path = lifecycle["paths"]["delivery"]
-    pointer_before = pointer_path.read_bytes()
-    lifecycle["paths"]["revision"].unlink()
-
-    with pytest.raises(DailyDecisionBriefStateError, match="missing revision"):
-        migrate_daily_decision_brief_delivery(
-            base=tmp_path,
-            account="lx",
-            market="US",
-            confirm=True,
-        )
-    assert pointer_path.read_bytes() == pointer_before
-    assert list(pointer_path.parent.glob(f"{pointer_path.name}.v1.backup.*")) == []
-
-
 def test_account_and_market_delivery_states_are_isolated(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
 
@@ -850,7 +606,7 @@ def test_account_and_market_delivery_states_are_isolated(tmp_path: Path) -> None
     assert read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="HK")["available"] is False
 
 
-def test_malformed_mixed_delivery_schema_fails_closed(tmp_path: Path) -> None:
+def test_retired_v1_delivery_schema_fails_closed(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
 
     state_dir = tmp_path / "output_accounts" / "lx" / "state"
@@ -941,7 +697,6 @@ def test_v2_delivery_accepts_exact_digest_from_retired_ai_overlay_revision(
     from domain.domain.daily_decision_brief import daily_brief_compatible_digests
     from src.application.daily_decision_brief_repository import (
         confirm_daily_decision_brief_delivery_v2,
-        inspect_daily_decision_brief_delivery,
         persist_daily_decision_brief_success,
         read_daily_decision_brief_delivery_state,
     )
@@ -983,12 +738,12 @@ def test_v2_delivery_accepts_exact_digest_from_retired_ai_overlay_revision(
         alerted["brief_digest"] = legacy_digest
     delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
 
-    inspected = inspect_daily_decision_brief_delivery(
+    inspected = read_daily_decision_brief_delivery_state(
         base=tmp_path,
         account="lx",
         market="US",
     )
-    assert inspected["reason"] == "already_v2"
+    assert inspected["available"] is True
     assert inspected["state"]["days"][MARKET_DATE]["fixed_reports"][TARGET_1000][
         "source_digest"
     ] == legacy_digest

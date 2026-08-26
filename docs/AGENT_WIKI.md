@@ -738,11 +738,11 @@ notifications, or mutate broker-facing state.
 
 - YAML authoring: `src/application/config_yaml.py`, `src/application/config_yaml_init.py`
 - Runtime snapshot validation: `src/application/config_validator.py`
-- Legacy JSON migration reader: `src/application/layered_config.py`
-- Examples: `configs/examples/config.yaml.example`, `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
+- Runtime config resolution: `src/application/layered_config.py`
+- Example: `configs/examples/config.yaml.example`
 - Full config docs: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`
 
-`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are one-time `config migrate-yaml` inputs only, not an upgrade-recovery path; production upgrade fails closed when the YAML authoring source is unavailable.
+`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON authoring and its migration command are retired; production upgrade fails closed when the YAML authoring source is unavailable.
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
@@ -921,8 +921,9 @@ Smallest remaining actions, with blockers called out.
 - Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads remain explicit operator queries requiring an account; market keeps the existing US default when omitted.
 - Query safety: query is byte-for-byte read-only with respect to delivery state and does not refresh data, scan, send, confirm, or mutate candidate state.
 - Delivery ambiguity: ambiguous envelopes are frozen. Later attempts either replay the exact message/key/hash under the provider idempotency contract or wait for explicit confirmation.
+- Delivery state cutoff: only `daily_decision_brief_delivery.v2` is accepted. Retired v1 state fails closed; the current release has no converter.
 - Multi-market: an explicit combined-market tick is terminal fail-closed before Daily Brief assemble, revision/current persistence, delivery-envelope creation, or provider work. Production scheduled runs remain single-market.
-- Rollout safety: release, remote upgrade, production pointer migration, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
+- Rollout safety: release, remote upgrade, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
 
 Read surfaces:
 
@@ -931,12 +932,4 @@ Read surfaces:
 ./om daily-brief day --account lx [--market US|HK] --date YYYY-MM-DD [--revision N] [--json]
 ./om-agent run --tool daily_decision_brief_read --input-json '{}'
 ./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
-```
-
-Delivery state inspection and migration remain explicit operator commands:
-
-```bash
-./om daily-brief delivery-inspect --account lx --market HK
-./om daily-brief delivery-migrate --account lx --market HK          # dry-run
-./om daily-brief delivery-migrate --account lx --market HK --confirm
 ```
