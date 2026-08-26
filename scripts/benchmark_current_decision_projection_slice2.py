@@ -38,7 +38,7 @@ from src.infrastructure.quality.artifact_repository import QualityArtifactReposi
 from src.infrastructure.quality.control_state_repository import (
     QualityControlStateRepository,
 )
-from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
+from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
 SCHEMA = "data_storage_current_decision_aggregate_benchmark.v1"

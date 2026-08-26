@@ -525,6 +525,14 @@ class _FutuAPIClient:
             )
         raise AttributeError("history_deal_list_query unavailable")
 
+    def get_order_fees(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "order_fee_query"):
+            return self._unwrap(
+                trade.order_fee_query(**self._trade_kwargs(kwargs))
+            )
+        raise AttributeError("order_fee_query unavailable")
+
     def get_trading_days(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().request_trading_days(**kwargs))
 
@@ -841,6 +849,13 @@ class FutuGateway:
             return self.client.get_history_deals(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_history_deals")
+        raise AssertionError("unreachable")
+
+    def get_order_fees(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_order_fees(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_order_fees")
         raise AssertionError("unreachable")
 
     def get_trading_days(self, **kwargs: Any) -> Any:

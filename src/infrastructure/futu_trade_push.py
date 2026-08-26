@@ -1,3 +1,5 @@
+"""Futu trade-push transport."""
+
 from __future__ import annotations
 
 import importlib

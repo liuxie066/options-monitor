@@ -1051,6 +1051,9 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
         def history_deal_list_query(self, **kwargs):
             return self._record("history_deals", kwargs, paginated=True)
 
+        def order_fee_query(self, **kwargs):
+            return self._record("order_fees", kwargs)
+
     class Backend:
         def __init__(self, **_kwargs):
             self.trade = Trade()
@@ -1068,6 +1071,7 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
     gateway.get_deal_list(**common)
     gateway.get_history_orders(**common)
     gateway.get_history_deals(**common)
+    gateway.get_order_fees(order_id_list=["order-1"], **common)
     gateway.get_positions_with_receipt(**common)
 
     assert [name for name, _kwargs in gateway.backend.trade.calls] == [
@@ -1078,6 +1082,7 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
         "deals",
         "history_orders",
         "history_deals",
+        "order_fees",
         "positions",
     ]
     assert all(

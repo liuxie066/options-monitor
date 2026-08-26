@@ -37,9 +37,9 @@ from src.application.trades.state import (
 from src.application.wheel.config import resolve_wheel_config
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.deal_identity import broker_deal_key_from_payload
-from src.application.trades.history_backfill import OpenDHistoryDealClient
+from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
-from src.application.trades.push_listener import (
+from src.infrastructure.futu_trade_push import (
     OpenDTradePushListener,
     TradeIntakeAuthRequired,
     TradeIntakeStartCancelled,

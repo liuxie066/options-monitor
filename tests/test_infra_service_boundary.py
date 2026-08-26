@@ -87,23 +87,46 @@ def test_trading_calendar_endpoint_fails_closed_on_route_conflict(monkeypatch) -
 
 
 def test_trading_day_via_futu_port_closed_returns_unavailable_without_sdk_context(monkeypatch) -> None:
-    import sys
     import time
-    from types import SimpleNamespace
 
     from src.infrastructure import external_services as svc
 
-    constructed: list[tuple[str, int]] = []
-
-    class _FakeQuote:
-        def __init__(self, host: str, port: int):
-            constructed.append((host, port))
-
-    monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(OpenQuoteContext=_FakeQuote))
+    monkeypatch.setattr(
+        svc,
+        "build_futu_gateway",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("closed port must not build a gateway")
+        ),
+    )
     monkeypatch.setattr(svc, "port_open", lambda host, port: False)
 
     t0 = time.monotonic()
     result = svc.trading_day_via_futu(host="127.0.0.9", port=11119, market="HK")
     assert result == (None, "HK")
     assert time.monotonic() - t0 < 1.0
-    assert constructed == []
+
+
+def test_trading_day_via_futu_uses_gateway(monkeypatch) -> None:
+    from datetime import date
+
+    from src.infrastructure import external_services as svc
+
+    calls: list[dict[str, object]] = []
+
+    class _Gateway:
+        def get_trading_days(self, **kwargs):  # noqa: ANN003, ANN201
+            calls.append(kwargs)
+            return [{"time": "2026-08-26", "trade_date_type": "WHOLE"}]
+
+        def close(self) -> None:
+            calls.append({"closed": True})
+
+    monkeypatch.setattr(svc, "port_open", lambda _host, _port: True)
+    monkeypatch.setattr(svc, "build_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(svc, "_trading_date", lambda _market: date(2026, 8, 26))
+
+    assert svc.trading_day_via_futu(host="127.0.0.1", port=11111, market="US") == (True, "US")
+    assert calls == [
+        {"market": "US", "start": "2026-08-26", "end": "2026-08-26"},
+        {"closed": True},
+    ]

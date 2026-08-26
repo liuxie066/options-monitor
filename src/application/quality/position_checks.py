@@ -23,7 +23,7 @@ from src.application.quality.model import (
     utc_iso,
 )
 from src.application.trades.lifecycle import PENDING_STATUSES
-from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
+from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
 def _decimal(value: Any) -> Decimal | None:

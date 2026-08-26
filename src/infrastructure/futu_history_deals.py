@@ -1,6 +1,7 @@
+"""Futu trade-history transport and response normalization."""
+
 from __future__ import annotations
 
-import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -8,8 +9,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.domain.option_position_identity import normalize_currency
-from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
-from src.infrastructure.opend_watchdog import port_open
+from src.infrastructure.futu_gateway import (
+    FutuGatewayUnreachableError,
+    build_futu_gateway,
+)
 
 
 def history_deal_query_dates(*, lookback_hours: float, now: datetime | None = None) -> tuple[str, str, str, str]:
@@ -44,13 +47,12 @@ def fetch_opend_history_deals(
 
 
 class OpenDHistoryDealClient:
-    """Reusable OpenD history context owned by one intake source loop."""
+    """Reusable Futu gateway owned by one intake source loop."""
 
     def __init__(self, *, host: str, port: int) -> None:
         self.host = str(host)
         self.port = int(port)
-        self._futu_mod: Any = None
-        self._ctx: Any = None
+        self._gateway: Any = None
 
     def fetch(
         self,
@@ -60,12 +62,10 @@ class OpenDHistoryDealClient:
         now: datetime | None = None,
         **_kwargs: Any,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        futu_mod = self._futu()
-        ctx = self._context()
+        gateway = self._gateway_client()
         try:
             rows, diagnostics = _query_history_deals(
-                futu_mod=futu_mod,
-                ctx=ctx,
+                gateway=gateway,
                 futu_account_ids=futu_account_ids,
                 lookback_hours=lookback_hours,
                 now=now,
@@ -82,9 +82,9 @@ class OpenDHistoryDealClient:
             raise
 
     def close(self) -> None:
-        ctx = self._ctx
-        self._ctx = None
-        close = getattr(ctx, "close", None)
+        gateway = self._gateway
+        self._gateway = None
+        close = getattr(gateway, "close", None)
         if callable(close):
             close()
 
@@ -100,20 +100,18 @@ class OpenDHistoryDealClient:
         if len(requested) > 400:
             raise ValueError("order query supports at most 400 order IDs")
         try:
-            futu_mod = self._futu()
-            ctx = self._context()
+            gateway = self._gateway_client()
             acc_id = _numeric_account_id(futu_account_id)
-            ret, data = ctx.history_order_list_query(
+            result = gateway.get_history_orders(
                 start=str(start),
                 end=str(end),
-                trd_env=futu_mod.TrdEnv.REAL,
+                trd_env="REAL",
                 acc_id=acc_id,
             )
-            if ret != futu_mod.RET_OK:
-                raise RuntimeError(f"history_order_list_query failed: {data}")
+            provider_rows = _gateway_rows(result)
             requested_set = set(requested)
             rows: dict[str, dict[str, Any]] = {}
-            for raw in _plain_records(data):
+            for raw in provider_rows:
                 order_id = str(raw.get("order_id") or raw.get("orderID") or "").strip()
                 if order_id not in requested_set:
                     continue
@@ -145,16 +143,13 @@ class OpenDHistoryDealClient:
         if len(requested) > 400:
             raise ValueError("order_fee_query supports at most 400 order IDs")
         try:
-            futu_mod = self._futu()
-            ctx = self._context()
+            gateway = self._gateway_client()
             acc_id = _numeric_account_id(futu_account_id)
-            ret, data = ctx.order_fee_query(
+            data = gateway.get_order_fees(
                 order_id_list=requested,
-                trd_env=futu_mod.TrdEnv.REAL,
+                trd_env="REAL",
                 acc_id=acc_id,
             )
-            if ret != futu_mod.RET_OK:
-                raise RuntimeError(f"order_fee_query failed: {data}")
             requested_set = set(requested)
             rows: dict[str, dict[str, Any]] = {}
             for raw in _plain_records(data):
@@ -178,29 +173,19 @@ class OpenDHistoryDealClient:
             self.close()
             raise
 
-    def _futu(self) -> Any:
-        if self._futu_mod is None:
-            self._futu_mod = importlib.import_module("futu")
-        return self._futu_mod
-
-    def _context(self) -> Any:
-        if self._ctx is None:
-            if not port_open(self.host, self.port):
-                raise FutuGatewayUnreachableError(
-                    f"OpenD unreachable: {self.host}:{self.port}; "
-                    "start FutuOpenD before history backfill"
-                )
-            self._ctx = self._futu().OpenSecTradeContext(
+    def _gateway_client(self) -> Any:
+        if self._gateway is None:
+            self._gateway = build_futu_gateway(
                 host=self.host,
                 port=self.port,
+                is_option_chain_cache_enabled=False,
             )
-        return self._ctx
+        return self._gateway
 
 
 def _query_history_deals(
     *,
-    futu_mod: Any,
-    ctx: Any,
+    gateway: Any,
     futu_account_ids: list[str],
     lookback_hours: float,
     now: datetime | None,
@@ -228,30 +213,32 @@ def _query_history_deals(
                 }
             )
             continue
-        ret, data = ctx.history_deal_list_query(
-            start=start_date,
-            end=end_date,
-            trd_env=futu_mod.TrdEnv.REAL,
-            acc_id=acc_id,
-        )
         account_result = {
             "futu_account_id": acc_id_text,
-            "ret": ret,
+            "ret": 0,
             "row_count": 0,
         }
-        if ret != futu_mod.RET_OK:
-            account_result["error"] = str(data)
+        try:
+            result = gateway.get_history_deals(
+                start=start_date,
+                end=end_date,
+                trd_env="REAL",
+                acc_id=acc_id,
+            )
+            account_rows = _gateway_rows(result)
+        except FutuGatewayUnreachableError:
+            raise
+        except Exception as exc:
+            account_result["ret"] = None
+            account_result["error"] = str(exc)
             account_results.append(account_result)
             continue
-        account_rows = data.to_dict("records") if hasattr(data, "to_dict") else []
-        if isinstance(account_rows, list):
-            for item in account_rows:
-                if isinstance(item, dict):
-                    payload = dict(item)
-                    payload.setdefault("futu_account_id", acc_id_text)
-                    payload.setdefault("trd_acc_id", acc_id_text)
-                    rows.append(payload)
-            account_result["row_count"] = len(account_rows)
+        for item in account_rows:
+            payload = dict(item)
+            payload.setdefault("futu_account_id", acc_id_text)
+            payload.setdefault("trd_acc_id", acc_id_text)
+            rows.append(payload)
+        account_result["row_count"] = len(account_rows)
         account_results.append(account_result)
 
     diagnostics = {
@@ -314,6 +301,12 @@ def _numeric_account_id(value: str) -> int:
 def _plain_records(value: Any) -> list[dict[str, Any]]:
     rows = value.to_dict("records") if hasattr(value, "to_dict") else value
     return [dict(row) for row in rows] if isinstance(rows, list) else []
+
+
+def _gateway_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict) and "rows" in value:
+        value = value.get("rows")
+    return _plain_records(value)
 
 
 def _decimal_text(value: Any, *, nonnegative: bool) -> str:

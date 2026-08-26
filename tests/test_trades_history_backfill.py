@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.application.trades.history_backfill import (
+from src.infrastructure.futu_history_deals import (
     OpenDHistoryDealClient,
     fetch_opend_history_deals,
     history_deal_query_dates,
@@ -17,9 +17,9 @@ from src.application.trades.history_backfill import (
 def _open_port(monkeypatch):
     """Tests mock the futu SDK; keep the port pre-check passing."""
 
-    from src.application.trades import history_backfill as mod
+    from src.infrastructure import futu_gateway
 
-    monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    monkeypatch.setattr(futu_gateway, "port_open", lambda host, port: True)
     yield
 
 
@@ -96,7 +96,7 @@ def test_fetch_opend_history_deals_skips_non_numeric_account_ids(monkeypatch) ->
 
         def history_deal_list_query(self, **kwargs):
             calls.append({"query": kwargs})
-            return 0, SimpleNamespace(to_dict=lambda _orient: [])
+            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
 
         def close(self):
             calls.append({"closed": True})
@@ -129,7 +129,7 @@ def test_fetch_opend_history_deals_skips_non_numeric_account_ids(monkeypatch) ->
             "reason": "non_numeric_account_id",
         }
     ]
-    assert calls == [{"init": {"host": "127.0.0.1", "port": 11111}}, {"closed": True}]
+    assert calls == []
 
 
 def test_history_deal_client_reuses_one_context_across_checks(monkeypatch) -> None:
@@ -141,7 +141,7 @@ def test_history_deal_client_reuses_one_context_across_checks(monkeypatch) -> No
 
         def history_deal_list_query(self, **kwargs):
             calls.append({"query": kwargs})
-            return 0, SimpleNamespace(to_dict=lambda _orient: [])
+            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
 
         def close(self):
             calls.append({"closed": True})
@@ -184,7 +184,7 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
             calls.append({"query": kwargs})
             if query_count == 1:
                 return -1, "OpenD disconnected"
-            return 0, SimpleNamespace(to_dict=lambda _orient: [])
+            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
 
         def close(self):
             calls.append({"closed": True})
@@ -212,7 +212,7 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
     )
     client.close()
 
-    assert first["account_results"][0]["error"] == "OpenD disconnected"
+    assert "OpenD disconnected" in first["account_results"][0]["error"]
     assert second["account_results"][0]["ret"] == 0
     assert len([item for item in calls if "init" in item]) == 2
     assert len([item for item in calls if "closed" in item]) == 2
@@ -285,11 +285,25 @@ def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypat
 
 
 def test_backfill_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
-    from src.application.trades import history_backfill as mod
+    from src.infrastructure import futu_gateway
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
-    monkeypatch.setattr(mod, "port_open", lambda host, port: False)
+    monkeypatch.setattr(futu_gateway, "port_open", lambda host, port: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            OpenSecTradeContext=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("closed port must not construct a trade context")
+            ),
+            RET_OK=0,
+        ),
+    )
 
     client = OpenDHistoryDealClient(host="127.0.0.9", port=11119)
     with pytest.raises(FutuGatewayUnreachableError):
-        client._context()
+        client.fetch(
+            futu_account_ids=["123"],
+            lookback_hours=6,
+            now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
+        )

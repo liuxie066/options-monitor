@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from src.application.opend_utils import normalize_underlier
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
 
 
@@ -60,6 +61,14 @@ def telnet_status(*, host: str = "127.0.0.1", port: int = 22222) -> dict[str, An
     }
 
 
+def _rows(value: Any) -> list[dict[str, Any]]:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict("records")
+    if isinstance(value, list):
+        return [dict(row) for row in value if isinstance(row, dict)]
+    return []
+
+
 def check_required_option_fields(
     *,
     symbols: list[str],
@@ -67,49 +76,56 @@ def check_required_option_fields(
     port: int,
     limit: int = 10,
 ) -> dict[str, Any]:
-    from futu import OpenQuoteContext, RET_OK
-
     results: list[SymbolFieldResult] = []
 
     for sym in symbols:
         underlier = None
-        ctx = None
+        gateway = None
         try:
-            ctx = OpenQuoteContext(host=host, port=int(port))
             underlier = normalize_underlier(sym)
-            ret, chain = ctx.get_option_chain(underlier.code)
-            if ret != RET_OK or chain is None or chain.empty:
+            gateway = build_ready_futu_quote_gateway(
+                host=host,
+                port=int(port),
+                is_option_chain_cache_enabled=False,
+            )
+            chain = _rows(gateway.get_option_chain(code=underlier.code))
+            if not chain:
                 results.append(
                     SymbolFieldResult(
                         symbol=sym,
                         underlier_code=underlier.code,
                         ok=False,
-                        error=f"get_option_chain ret={ret} empty",
+                        error="get_option_chain ret=0 empty",
                     )
                 )
                 continue
 
-            codes = [str(x) for x in chain["code"].astype(str).head(int(limit)).tolist() if x]
-            ret2, snap = ctx.get_market_snapshot(codes)
-            if ret2 != RET_OK or snap is None or snap.empty:
+            codes = [
+                str(row.get("code"))
+                for row in chain[: int(limit)]
+                if row.get("code")
+            ]
+            snap = _rows(gateway.get_snapshot(codes))
+            if not snap:
                 results.append(
                     SymbolFieldResult(
                         symbol=sym,
                         underlier_code=underlier.code,
                         ok=False,
                         chain_rows=int(len(chain)),
-                        error=f"get_market_snapshot ret={ret2} empty",
+                        error="get_market_snapshot ret=0 empty",
                     )
                 )
                 continue
 
-            missing = [col for col in REQUIRED_SNAPSHOT_COLS if col not in snap.columns]
+            snapshot_columns = {key for row in snap for key in row}
+            missing = [col for col in REQUIRED_SNAPSHOT_COLS if col not in snapshot_columns]
             spot = None
             try:
                 if underlier.market != "US":
-                    ret3, spot_df = ctx.get_market_snapshot([underlier.code])
-                    if ret3 == RET_OK and spot_df is not None and not spot_df.empty:
-                        raw_spot = spot_df.iloc[0].get("last_price")
+                    spot_rows = _rows(gateway.get_snapshot([underlier.code]))
+                    if spot_rows:
+                        raw_spot = spot_rows[0].get("last_price")
                         spot = float(raw_spot) if raw_spot is not None else None
             except Exception:
                 spot = None
@@ -142,11 +158,8 @@ def check_required_option_fields(
                 )
             )
         finally:
-            if ctx is not None:
-                try:
-                    ctx.close()
-                except Exception:
-                    pass
+            if gateway is not None:
+                gateway.close()
 
     return {
         "host": str(host),

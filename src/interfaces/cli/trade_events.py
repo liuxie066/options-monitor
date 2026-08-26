@@ -14,7 +14,7 @@ from src.application.ledger.api import (
 from src.application.account_config import resolve_account_broker_binding_sets
 from src.application.agent_tool_config import load_runtime_config
 from domain.domain.performance.period import PeriodRequest, normalize_period
-from src.application.trades.history_backfill import OpenDHistoryDealClient
+from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
     apply_repair_trade_event,

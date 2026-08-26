@@ -18,7 +18,7 @@ from src.application.trades.close_reason_evidence import (
 )
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
-from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
+from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
 class _OpenD:
