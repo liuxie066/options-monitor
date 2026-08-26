@@ -75,6 +75,7 @@ from src.application.ledger.order_fee_migration import (
     ActualOrderFee,
     enrich_order_fees,
 )
+from src.application.ledger.order_fee_semantics import is_unexecuted_expire_close
 from src.application.ledger.queries import (
     AssignedStockEventLog,
     assigned_stock_event_log,
@@ -276,6 +277,7 @@ __all__ = [
     "ActualOrderFee",
     "backfill_cash_conversions",
     "enrich_order_fees",
+    "is_unexecuted_expire_close",
     "broker_external_event_key",
     "build_lifecycle_migration_inventory",
     "build_notification_intent",
