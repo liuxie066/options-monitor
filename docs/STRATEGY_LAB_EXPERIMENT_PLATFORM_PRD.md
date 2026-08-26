@@ -839,7 +839,7 @@ flowchart LR
    采用或创建、发布并 readback artifact。只有一份有效 artifact，且由 calendar、
    schedule 和 targets 组成的 denominator 不变时，才原样复用首份 artifact 及其 hash；只有
    denominator 变化才记录 conflict。
-   `sealed_at_utc` 和 `sealed_before_first_target` 以首次封存为准，后续 timer 调用不得生成新版本、
+   `sealed_at_utc` 和 `sealed_before_first_target` 以首次封存为准，后续 scheduled tick 调用不得生成新版本、
    覆盖首次时间或把迟到修复为正常。
 3. 每个点复用该次 run 已封存的 opening candidate snapshot 和 manifest；同一 run / account 只接受
    一份全部未平仓期权的共享持仓行情快照。已有完整 ready / unavailable artifact 或已写 payload 的重试必须先校验并
@@ -1111,11 +1111,12 @@ MVP 只有在真实完成一次 20 日研究和后续 10 日隐藏验证并生�
    直接读取、校验 canonical 内容 hash，并重建相同的当前 Top1 ranking projection；透明压缩不需要
    人工解压；
 7. HK / US、`lx` 均可在未创建实验、Top1 安全开关关闭或 ExperimentStore 为空时查询 Corpus Health Receipt；
-   现有 timer 使用各市场 runtime schedule 的 timezone 和已绑定 calendar 分别预封 HK / US expectation，一个市场失败不阻止
-   另一个，且定时路径不自动请求 calendar provider；回执能识别预期点完全未采集、
+   现有 HK / US `tick-cron` 使用本市场 runtime schedule 的 timezone 和已绑定 calendar，在启动
+   生产 tick 前只预封当前市场 expectation；封存失败不阻断普通扫描和通知，且不自动请求
+   calendar provider。回执能识别预期点完全未采集、
    部分缺失、内容冲突、不可评价、freshness 和保留期风险，不把 receipt 缺失显示为健康；同一日不同
-   `occurred_at_utc` 的多次 timer 调用在 denominator 未变时必须继续引用首份 expectation hash 和
-   `sealed_at_utc`，不得产生 conflict；timer 与手工 scheduled write 并发首封时，expectation 和 point
+   `occurred_at_utc` 的多次 scheduled 调用在 denominator 未变时必须继续引用首份 expectation hash 和
+   `sealed_at_utc`，不得产生 conflict；tick-cron 与手工 scheduled write 并发首封时，expectation 和 point
    均只能产生一份 artifact，另一调用必须返回 idempotent；
 8. 基础事实的最早可清理时间按 15.5 的 20 交易日窗口、最大支持 DTE 和版本化 outcome SLA 计算；
    Release、远端升级或普通 `output_runs` 清理不删除仍在保留期或被实验 / 回执引用的事实；
