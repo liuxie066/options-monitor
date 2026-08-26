@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.1.1 - 2026-08-27
+
+### Bug Fixes
+- Rejected unknown schedule fields during configuration validation instead of silently accepting misspelled or unsupported keys.
+- Validated persisted performance-evidence correction graphs independently of SQLite fact-ID ordering, allowing append-only superseding FX facts to remain readable after import.
+
 ## 2.1.0 - 2026-08-27
 
 ### New Features
