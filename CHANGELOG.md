@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.17.3 - 2026-08-26
+
+### Bug Fixes
+- Sealed each market's Strategy Lab formal expectation in its existing tick-cron before the production scan, preventing cross-market scheduler timing from leaving formal corpus days incomplete.
+
 ## 1.17.2 - 2026-08-26
 
 ### New Features

@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.17.3",
+  "base": {
+    "tag": "v1.17.2",
+    "commit": "5ac5715c13bc38bcf715acd04d89fce56fdb01a4"
+  },
+  "reviewed_head": "7d28f4beb7fc21fd142ec74dc9e619c7af924a31",
+  "commits": [
+    {
+      "sha": "60c31b2489a4ec7b6634c97d45d1d908e8dd162b",
+      "subject": "fix(strategy-lab): seal market expectation before tick"
+    },
+    {
+      "sha": "7d28f4beb7fc21fd142ec74dc9e619c7af924a31",
+      "subject": "docs(architecture): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Sealed each market's Strategy Lab formal expectation in its existing tick-cron before the production scan, preventing cross-market scheduler timing from leaving formal corpus days incomplete.",
+      "commits": [
+        "60c31b2489a4ec7b6634c97d45d1d908e8dd162b"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "7d28f4beb7fc21fd142ec74dc9e619c7af924a31",
+      "reason": "Generated dependency graph refresh only; no runtime, public contract, or operator behavior changed."
+    }
+  ]
+}
