@@ -351,6 +351,10 @@ def scheduler_status_tool(
     last_notify_by_account = state_data.get("last_notify_utc_by_account")
     data = {
         "decision": decision_payload,
+        "freshness": {
+            "status": "current",
+            "as_of": decision_payload["now_utc"],
+        },
         "state": {
             "state_path": mask_path(state_path),
             "last_run_utc_for_account": (

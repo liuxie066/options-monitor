@@ -1263,9 +1263,47 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     assert out["ok"] is True
     assert out["data"]["decision"]["schedule_key"] == "schedule"
     assert out["data"]["decision"]["schedule_enabled"] is True
+    assert out["data"]["freshness"] == {
+        "status": "current",
+        "as_of": out["data"]["decision"]["now_utc"],
+    }
     assert out["data"]["filters"]["account"] == "user1"
     assert out["meta"]["state_path"] == ".../scheduler_state.json"
     assert not state_path.exists()
+
+    from src.application.copilot import tools as copilot_tools
+    from src.application.copilot.result_admission import admit_submit_answer
+
+    observation = copilot_tools.compact_observation(
+        "scheduler_status",
+        out,
+        {"config_path": str(cfg_path), "account": "user1"},
+    )
+    admitted = admit_submit_answer(
+        {
+            "mode": "evidence",
+            "status": "complete",
+            "answer_markdown": "当前调度已启用。",
+            "claims": [
+                {
+                    "text": "当前调度已启用",
+                    "kind": "current_fact",
+                    "observation_ids": ["obv_scheduler"],
+                    "required_scope": "point",
+                }
+            ],
+        },
+        {
+            "obv_scheduler": {
+                "ok": True,
+                "authorized_read": True,
+                "observation_status": observation["status"],
+                "coverage": observation["coverage"],
+                "freshness": observation["freshness"],
+            }
+        },
+    )
+    assert admitted["observation"] == {"ok": True, "status": "answer_accepted"}
 
 
 def test_trade_event_cursor_key_uses_fixed_domain_derivation() -> None:

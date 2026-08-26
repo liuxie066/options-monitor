@@ -36,6 +36,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - `markets.us` / `markets.hk` 选择该市场的账户和 symbols；
 - symbol 使用规范代码，例如 `NVDA`、`0700.HK`、`9992.HK`；
 - per-symbol 策略 override 放在 `markets.<market>.overrides.<symbol>`；
+- US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
 - account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
