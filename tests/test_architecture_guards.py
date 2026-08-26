@@ -34,6 +34,46 @@ def _imported_modules_with_from_names(path: Path) -> list[str]:
     return modules
 
 
+def test_futu_sdk_imports_stay_in_canonical_infrastructure_adapters() -> None:
+    allowed = {
+        Path("src/infrastructure/futu_gateway.py"),
+        Path("src/infrastructure/futu_trade_push.py"),
+        Path("src/infrastructure/opend_watchdog.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports_futu = any(
+            module == "futu" or module.startswith("futu.")
+            for module in _imported_modules(path)
+        ) or any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "importlib"
+            and node.func.attr == "import_module"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "futu"
+            for node in ast.walk(tree)
+        )
+        if imports_futu and path.relative_to(ROOT) not in allowed:
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
+def test_infrastructure_quality_does_not_import_application() -> None:
+    offenders = [
+        f"{path.relative_to(ROOT)}:{module}"
+        for path in sorted((ROOT / "src" / "infrastructure" / "quality").rglob("*.py"))
+        for module in _imported_modules(path)
+        if module.startswith("src.application")
+    ]
+
+    assert offenders == []
+
+
 def test_position_lot_does_not_read_compatibility_fee_field() -> None:
     assert "event.fees" not in (ROOT / "domain" / "domain" / "ledger" / "lots.py").read_text(
         encoding="utf-8"

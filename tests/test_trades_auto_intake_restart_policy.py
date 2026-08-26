@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from src.application.trades import auto_intake
-from src.application.trades.push_listener import TradeIntakeAuthRequired
+from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
 
 def _source(tmp_path: Path, *, reconnect_sec: int = 5) -> dict:
@@ -167,7 +167,7 @@ def test_multi_source_auth_stops_sibling_and_propagates_exit_code() -> None:
 
 
 def test_source_loop_treats_start_cancellation_as_clean_stop(tmp_path: Path, monkeypatch) -> None:
-    from src.application.trades.push_listener import TradeIntakeStartCancelled
+    from src.infrastructure.futu_trade_push import TradeIntakeStartCancelled
 
     class _Listener:
         def __init__(self, **_kwargs):

@@ -23,7 +23,7 @@ from src.application.quality.position_checks import (
     normalize_opend_positions,
 )
 from src.application.quality.runtime_checks import build_runtime_checks
-from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
+from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
 def test_current_quality_datasets_fail_closed_without_history() -> None:

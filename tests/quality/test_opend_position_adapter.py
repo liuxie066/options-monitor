@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-import src.infrastructure.quality.opend_position_adapter as adapter_module
-from src.infrastructure.quality.opend_position_adapter import (
+import src.application.quality.opend_position_adapter as adapter_module
+from src.application.quality.opend_position_adapter import (
     OpenDOptionPositionAdapter,
 )
 
@@ -101,11 +101,6 @@ def test_adapter_scopes_contract_term_snapshot_to_requested_market(
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
-    )
     monkeypatch.setattr(adapter_module, "_MARKET_SNAPSHOT_BATCH_SIZE", 1)
 
     snapshot = OpenDOptionPositionAdapter().fetch(
@@ -153,11 +148,6 @@ def test_adapter_fails_closed_when_current_option_terms_are_missing(
         adapter_module,
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
     )
 
     snapshot = OpenDOptionPositionAdapter().fetch(
@@ -249,11 +239,6 @@ def test_adapter_requires_explicit_boolean_option_valid(
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
-    )
 
     snapshot = OpenDOptionPositionAdapter().fetch(
         cfg=_config(),
@@ -299,11 +284,6 @@ def test_adapter_requires_snapshot_stock_owner_without_code_fallback(
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
-    )
 
     snapshot = OpenDOptionPositionAdapter().fetch(
         cfg=_config(),
@@ -348,11 +328,6 @@ def test_adapter_fails_closed_when_current_option_multiplier_is_missing(
         adapter_module,
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
     )
 
     snapshot = OpenDOptionPositionAdapter().fetch(
@@ -402,11 +377,6 @@ def test_adapter_fails_closed_when_current_option_multiplier_fields_conflict(
         adapter_module,
         "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "market_to_futu_trade_date_market",
-        lambda market: market.upper(),
     )
 
     snapshot = OpenDOptionPositionAdapter().fetch(

@@ -13,7 +13,6 @@ from src.application.account_config import resolve_futu_account_ids
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.opend_normalize import normalize_opend_option_type
 from src.application.futu_quote_routing import resolve_futu_quote_route
-from src.application.opend_utils import market_to_futu_trade_date_market
 from src.infrastructure.futu_gateway import (
     build_ready_futu_broker_gateway,
     build_ready_futu_quote_gateway,
@@ -185,11 +184,8 @@ class OpenDOptionPositionAdapter:
             )
             start = calendar_start or (datetime.now(timezone.utc).date() - timedelta(days=45))
             end = calendar_end or (datetime.now(timezone.utc).date() + timedelta(days=14))
-            trade_market = market_to_futu_trade_date_market(market)
-            if trade_market is None:
-                raise ValueError(f"unsupported market calendar: {market}")
             raw_days = quote_gateway.get_trading_days(
-                market=trade_market,
+                market=market,
                 start=start.isoformat(),
                 end=end.isoformat(),
             )

@@ -66,7 +66,7 @@ from src.application.quality.runtime_status_facade import read_runtime_status
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
-from src.infrastructure.quality.opend_position_adapter import (
+from src.application.quality.opend_position_adapter import (
     OpenDOptionPositionAdapter,
     OpenDOptionSnapshot,
 )

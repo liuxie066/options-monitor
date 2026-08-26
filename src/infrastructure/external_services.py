@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.infrastructure.futu_gateway import build_futu_gateway
 from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
 
 
@@ -285,43 +286,32 @@ def trading_day_via_futu(
     """
     market_used = str(market or '').upper().strip() or 'US'
 
-    try:
-        from futu import OpenQuoteContext
-    except Exception:
-        return (None, market_used)
-
-    # 等价于 FutuGatewayUnreachableError: 调用方按既有契约以 (None, market)
-    # 表示外部依赖不可用，不阻断主流程。
     if not port_open(str(host), int(port)):
         return (None, market_used)
 
+    gateway = None
     try:
-        ctx = OpenQuoteContext(host=str(host), port=int(port))
+        gateway = build_futu_gateway(
+            host=str(host),
+            port=int(port),
+            is_option_chain_cache_enabled=False,
+        )
+        trading_date_text = _trading_date(market_used).isoformat()
+        rows = gateway.get_trading_days(
+            market=market_used,
+            start=trading_date_text,
+            end=trading_date_text,
+        )
+        return _is_trading_day_rows(
+            rows,
+            market=market_used,
+            trading_date_text=trading_date_text,
+        )
     except Exception:
         return (None, market_used)
-
-    try:
-        return _is_trading_day_via_futu(ctx, market_used)
     finally:
-        try:
-            ctx.close()
-        except Exception:
-            pass
-
-
-def _market_to_futu_trade_date_market(market: str) -> Any:
-    try:
-        from futu import TradeDateMarket
-    except Exception:
-        return None
-
-    mapping = {
-        "HK": "HK",
-        "US": "US",
-        "CN": "CN",
-    }
-    key = mapping.get(str(market or "").upper().strip())
-    return getattr(TradeDateMarket, key, None) if key else None
+        if gateway is not None:
+            gateway.close()
 
 
 def _trading_date(market: str) -> date:
@@ -335,22 +325,13 @@ def _trading_date(market: str) -> date:
     return datetime.now(ZoneInfo("UTC")).date()
 
 
-def _is_trading_day_via_futu(ctx: Any, market: str) -> tuple[bool | None, str]:
+def _is_trading_day_rows(
+    data: Any,
+    *,
+    market: str,
+    trading_date_text: str,
+) -> tuple[bool, str]:
     market_used = str(market or "").upper().strip()
-    futu_market = _market_to_futu_trade_date_market(market_used)
-    if futu_market is None:
-        return (None, market_used)
-
-    trading_date = _trading_date(market_used)
-    trading_date_text = trading_date.strftime("%Y-%m-%d")
-    try:
-        ret, data = ctx.request_trading_days(market=futu_market, start=trading_date_text, end=trading_date_text)
-    except Exception:
-        return (None, market_used)
-
-    if ret != 0:
-        return (None, market_used)
-
     rows = []
     if isinstance(data, list):
         rows = data

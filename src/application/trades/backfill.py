@@ -10,7 +10,7 @@ from src.application.trades.deal_identity import (
     completed_ledger_deal_ids,
     completed_ledger_deal_keys,
 )
-from src.application.trades.history_backfill import fetch_opend_history_deals
+from src.infrastructure.futu_history_deals import fetch_opend_history_deals
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.inbox import (

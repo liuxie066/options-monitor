@@ -7,14 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.application.trades.push_listener import OpenDTradePushListener
+from src.infrastructure.futu_trade_push import OpenDTradePushListener
 
 
 @pytest.fixture(autouse=True)
 def _open_port(monkeypatch):
     """Tests mock the futu SDK; keep the port pre-check passing."""
 
-    from src.application.trades import push_listener as mod
+    from src.infrastructure import futu_trade_push as mod
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: True)
     yield
@@ -100,7 +100,7 @@ def test_trade_push_listener_health_uses_existing_trade_context(monkeypatch) -> 
 
 
 def test_trade_push_listener_health_raises_terminal_phone_verification(monkeypatch) -> None:
-    from src.application.trades.push_listener import TradeIntakeAuthRequired
+    from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
     class _FakeHandlerBase:
         pass
@@ -171,7 +171,7 @@ def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> N
 
 
 def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) -> None:
-    from src.application.trades.push_listener import TradeIntakeAuthRequired
+    from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
     release_constructor = threading.Event()
 
@@ -206,7 +206,7 @@ def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) 
 
 
 def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(monkeypatch) -> None:
-    from src.application.trades.push_listener import TradeIntakeStartCancelled
+    from src.infrastructure.futu_trade_push import TradeIntakeStartCancelled
 
     release_constructor = threading.Event()
 
@@ -266,7 +266,7 @@ def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> N
 
 
 def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
-    from src.application.trades import push_listener as mod
+    from src.infrastructure import futu_trade_push as mod
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: False)
