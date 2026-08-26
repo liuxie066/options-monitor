@@ -107,7 +107,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application | 24 |
 | src.application.inbound | src.application | 21 |
 | src.application.trades | src.application | 21 |
-| src.application.trades | src.application.ledger | 20 |
+| src.application.trades | src.application.ledger | 19 |
 | src.application.multi_tick | src.application | 18 |
 | src.application | src.application.multi_tick | 15 |
 | src.application | src.application.settings | 15 |
@@ -199,8 +199,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
+| src.application.ledger.api | 32 |
 | src.application.trades.auto_intake | 32 |
-| src.application.ledger.api | 31 |
 | src.interfaces.cli.main | 28 |
 | src.application.pipeline_watchlist | 27 |
 | src.interfaces.cli.option_positions | 27 |
