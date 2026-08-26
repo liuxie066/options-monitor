@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "2.1.1",
+  "base": {
+    "tag": "v2.1.0",
+    "commit": "a1b6c9772d503efa68b4b66fa1723bf4f68e6164"
+  },
+  "reviewed_head": "22f59e07267376a6797fe970eec4785f3b77b8c5",
+  "commits": [
+    {
+      "sha": "6e79913d6606feba387d258122c0229074cbb96a",
+      "subject": "fix(config): reject unknown schedule fields"
+    },
+    {
+      "sha": "22f59e07267376a6797fe970eec4785f3b77b8c5",
+      "subject": "fix(performance): validate persisted correction graphs"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Rejected unknown schedule fields during configuration validation instead of silently accepting misspelled or unsupported keys.",
+      "commits": [
+        "6e79913d6606feba387d258122c0229074cbb96a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Validated persisted performance-evidence correction graphs independently of SQLite fact-ID ordering, allowing append-only superseding FX facts to remain readable after import.",
+      "commits": [
+        "22f59e07267376a6797fe970eec4785f3b77b8c5"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
