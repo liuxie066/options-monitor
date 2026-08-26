@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 2.1.0 - 2026-08-27
+
+### New Features
+- Added a confirmed, audited cash-conversion correction path that replaces observed event-time CNY snapshots only when append-only FX evidence explicitly supersedes their bound rate fact.
+
+### Bug Fixes
+- Allowed authored US schedule gates to pass from YAML into runtime configuration and marked scheduler-status observations as current evidence for admitted operator answers.
+
 ## 2.0.0 - 2026-08-26
 
 ### Breaking Changes

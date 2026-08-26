@@ -1,0 +1,45 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "2.1.0",
+  "base": {
+    "tag": "v2.0.0",
+    "commit": "4c5d8aca760f0f06863bde5e9b357703e92742aa"
+  },
+  "reviewed_head": "741344c5050ee4bd9cf06d011bc16bdff417e0d9",
+  "commits": [
+    {
+      "sha": "a39ba4836ffdb619a22f078e6ab0786788704188",
+      "subject": "fix(performance): correct superseded cash conversions"
+    },
+    {
+      "sha": "91b110f056f1ac2534cff14c6cd5b1183138f6e9",
+      "subject": "fix(scheduler): support authored cutoff and current evidence"
+    },
+    {
+      "sha": "741344c5050ee4bd9cf06d011bc16bdff417e0d9",
+      "subject": "docs(repo): refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a confirmed, audited cash-conversion correction path that replaces observed event-time CNY snapshots only when append-only FX evidence explicitly supersedes their bound rate fact.",
+      "commits": [
+        "a39ba4836ffdb619a22f078e6ab0786788704188"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed authored US schedule gates to pass from YAML into runtime configuration and marked scheduler-status observations as current evidence for admitted operator answers.",
+      "commits": [
+        "91b110f056f1ac2534cff14c6cd5b1183138f6e9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "741344c5050ee4bd9cf06d011bc16bdff417e0d9",
+      "reason": "Regenerated dependency graph metadata for the reviewed source tree; no additional runtime or operator behavior."
+    }
+  ]
+}
