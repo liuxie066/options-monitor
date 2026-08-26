@@ -7,20 +7,19 @@ import pandas as pd
 import pytest
 
 
-def test_yield_enhancement_defaults_match_system_template() -> None:
-    from src.application.yield_enhancement_config import yield_enhancement_defaults_for_market
+def test_combo_yield_defaults_match_system_template() -> None:
+    from src.application.combo_yield_config import combo_yield_defaults_for_market
 
     system_config = json.loads((Path(__file__).resolve().parents[1] / "configs" / "system.json").read_text())
     for market in ("us", "hk"):
         template = system_config["markets"][market]["symbol_defaults"]["combo_yield"]
-        assert template == yield_enhancement_defaults_for_market(market)
+        assert template == combo_yield_defaults_for_market(market)
 
 
-def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
-    from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
+def test_combo_yield_policy_is_isolated_from_sell_put_strategy() -> None:
+    from src.application.combo_yield_config import derive_combo_yield_policy, resolve_combo_yield_cfg
 
-    income = derive_yield_enhancement_policy({"enabled": True})
-    assert income.mode == "income_upside_enhancement"
+    income = derive_combo_yield_policy({"enabled": True})
     assert income.derived_from_sell_put_strategy == "insurance_underwriting"
     assert income.enabled is True
     assert income.config["enabled"] is True
@@ -29,8 +28,7 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert income.config["call"]["min_delta"] == 0.05
     assert income.config["call"]["max_delta"] == 0.20
 
-    isolated = derive_yield_enhancement_policy({"enabled": True})
-    assert isolated.mode == "income_upside_enhancement"
+    isolated = derive_combo_yield_policy({"enabled": True})
     assert isolated.derived_from_sell_put_strategy == "insurance_underwriting"
     assert isolated.enabled is True
     assert isolated.config["min_net_credit_annualized"] == 0.08
@@ -38,19 +36,19 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert isolated.config["call"]["min_delta"] == 0.05
     assert isolated.config["call"]["max_delta"] == 0.20
 
-    partial = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.18}}})
-    partial_policy = derive_yield_enhancement_policy(partial)
+    partial = resolve_combo_yield_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.18}}})
+    partial_policy = derive_combo_yield_policy(partial)
     assert partial_policy.config["call"]["min_delta"] == 0.18
     assert partial_policy.config["call"]["max_delta"] == 0.20
     assert "max_otm_pct" not in partial_policy.config["call"]
 
-    income_partial = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.10}}})
-    income_partial_policy = derive_yield_enhancement_policy(income_partial)
+    income_partial = resolve_combo_yield_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.10}}})
+    income_partial_policy = derive_combo_yield_policy(income_partial)
     assert income_partial_policy.config["call"]["min_delta"] == 0.10
     assert income_partial_policy.config["call"]["max_delta"] == 0.20
     assert "max_otm_pct" not in income_partial_policy.config["call"]
 
-    hk = derive_yield_enhancement_policy(
+    hk = derive_combo_yield_policy(
         {"enabled": True},
         market="hk",
     )
@@ -58,9 +56,9 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert hk.config["min_volume"] == 0
 
 
-def test_yield_enhancement_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
-    from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+    from src.application.combo_yield_config import resolve_combo_yield_cfg
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
@@ -107,13 +105,13 @@ def test_yield_enhancement_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path
             }
         ]
     )
-    cfg = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True}})
+    cfg = resolve_combo_yield_cfg({"combo_yield": {"enabled": True}})
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=puts,
         symbol="0700.HK",
         input_root=tmp_path,
-        yield_enhancement_cfg=cfg,
+        combo_yield_cfg=cfg,
         sell_put_cfg={
             "enabled": True,
             "strategy": "insurance_underwriting",
@@ -193,10 +191,10 @@ def _single_put_df(
     return pd.DataFrame([row])
 
 
-def test_yield_enhancement_pair_preserves_funding_put_earnings_evidence(
+def test_combo_yield_pair_preserves_funding_put_earnings_evidence(
     tmp_path: Path,
 ) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(
         tmp_path,
@@ -233,7 +231,7 @@ def test_yield_enhancement_pair_preserves_funding_put_earnings_evidence(
         "earnings_artifact_path": "output_shared/earnings/NVDA.json",
     }
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(
             dte=44,
             funding_put_eligible=True,
@@ -241,7 +239,7 @@ def test_yield_enhancement_pair_preserves_funding_put_earnings_evidence(
         ),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -260,11 +258,11 @@ def test_yield_enhancement_pair_preserves_funding_put_earnings_evidence(
         assert pair[key] == expected
 
 
-def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Path) -> None:
+def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
-        build_yield_enhancement_rank_shadow,
-        find_sell_put_yield_enhancement_pairs,
-        select_best_yield_enhancement_pairs,
+        build_combo_yield_rank_shadow,
+        find_sell_put_combo_yield_pairs,
+        select_best_combo_yield_pairs,
     )
 
     parsed = tmp_path / "parsed"
@@ -334,11 +332,11 @@ def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Pa
         ]
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_dte": 20,
             "max_dte": 90,
@@ -353,8 +351,8 @@ def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Pa
         },
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 90},
     )
-    selected = select_best_yield_enhancement_pairs(pairs)
-    shadow = build_yield_enhancement_rank_shadow(pairs)
+    selected = select_best_combo_yield_pairs(pairs)
+    shadow = build_combo_yield_rank_shadow(pairs)
 
     assert len(selected) == 1
     assert selected.iloc[0]["call_contract_symbol"] == "NVDA_C112"
@@ -374,8 +372,8 @@ def test_yield_enhancement_selects_best_call_and_builds_rank_shadow(tmp_path: Pa
     )
 
 
-def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
@@ -422,11 +420,11 @@ def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Pa
         ]
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -443,8 +441,8 @@ def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Pa
     assert bool(row["funding_accepted"]) is True
 
 
-def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
@@ -493,11 +491,11 @@ def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> N
         ]
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -508,8 +506,8 @@ def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> N
     assert pairs.empty
 
 
-def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_accepts_premium_funded_call_with_clear_upside(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
@@ -558,11 +556,11 @@ def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_pat
         ]
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -579,12 +577,12 @@ def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_pat
     assert float(row["upside_lift_to_put_credit"]) >= 0.5
     assert float(row["annualized_net_credit_yield"]) >= 0.08
     assert float(row["premium_funding_score"]) > 0
-    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert "yield_enhancement_mode" not in row
     assert row["derived_from_sell_put_strategy"] == "insurance_underwriting"
 
 
-def test_yield_enhancement_does_not_inherit_underwriting_call_funding(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_does_not_inherit_underwriting_call_funding(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(
         tmp_path,
@@ -597,11 +595,11 @@ def test_yield_enhancement_does_not_inherit_underwriting_call_funding(tmp_path: 
         delta=0.20,
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -609,8 +607,8 @@ def test_yield_enhancement_does_not_inherit_underwriting_call_funding(tmp_path: 
     assert float(pairs.iloc[0]["net_credit_retention"]) >= 0.60
 
 
-def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_underwriting_requires_min_annualized_net_credit(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(
         tmp_path,
@@ -630,18 +628,18 @@ def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_p
     }
     sell_put_cfg = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60}
 
-    rejected = find_sell_put_yield_enhancement_pairs(
+    rejected = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg=base_cfg,
+        combo_yield_cfg=base_cfg,
         sell_put_cfg=sell_put_cfg,
     )
-    accepted = find_sell_put_yield_enhancement_pairs(
+    accepted = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={**base_cfg, "min_net_credit_annualized": 0.0},
+        combo_yield_cfg={**base_cfg, "min_net_credit_annualized": 0.0},
         sell_put_cfg=sell_put_cfg,
     )
 
@@ -658,8 +656,8 @@ def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_p
     assert float(accepted.iloc[0]["annualized_net_credit_yield"]) < 0.08
 
 
-def test_yield_enhancement_policy_accepts_income_upside_pair(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_policy_accepts_income_upside_pair(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(
         tmp_path,
@@ -672,32 +670,32 @@ def test_yield_enhancement_policy_accepts_income_upside_pair(tmp_path: Path) -> 
         delta=0.15,
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert len(pairs) == 1
     row = pairs.iloc[0]
-    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert "yield_enhancement_mode" not in row
     assert row["derived_from_sell_put_strategy"] == "insurance_underwriting"
     assert float(row["call_cost_to_put_credit"]) <= 0.20
     assert float(row["net_credit_retention"]) >= 0.80
     assert float(row["annualized_net_credit_yield"]) >= 0.08
 
 
-def test_yield_enhancement_aggregates_call_prefilter_rejections(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_aggregates_call_prefilter_rejections(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(tmp_path, dte=44, delta=0.30)
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={"enabled": True},
+        combo_yield_cfg={"enabled": True},
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -717,16 +715,16 @@ def test_yield_enhancement_aggregates_call_prefilter_rejections(tmp_path: Path) 
     assert put_join_reject["reject_reasons"] == "call_expiration_unavailable"
 
 
-def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(tmp_path, dte=10)
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=10),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -738,9 +736,9 @@ def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> 
     assert int(pairs.iloc[0]["dte"]) == 10
 
 
-def test_yield_enhancement_retention_is_the_only_call_cost_constraint(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
-    from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+def test_combo_yield_retention_is_the_only_call_cost_constraint(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+    from src.application.combo_yield_config import resolve_combo_yield_cfg
 
     _write_single_call(
         tmp_path,
@@ -752,9 +750,9 @@ def test_yield_enhancement_retention_is_the_only_call_cost_constraint(tmp_path: 
         implied_volatility=0.80,
         delta=0.45,
     )
-    cfg = resolve_yield_enhancement_cfg(
+    cfg = resolve_combo_yield_cfg(
         {
-            "yield_enhancement": {
+            "combo_yield": {
                 "enabled": True,
                 "min_net_credit_annualized": None,
                 "min_net_credit_retention": 0.60,
@@ -764,22 +762,22 @@ def test_yield_enhancement_retention_is_the_only_call_cost_constraint(tmp_path: 
             }
         }
     )
-    cfg = resolve_yield_enhancement_cfg({"yield_enhancement": cfg})
+    cfg = resolve_combo_yield_cfg({"combo_yield": cfg})
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg=cfg,
+        combo_yield_cfg=cfg,
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert pairs.empty
 
 
-def test_yield_enhancement_retention_allows_positive_credit_with_low_retention(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
-    from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+def test_combo_yield_retention_allows_positive_credit_with_low_retention(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+    from src.application.combo_yield_config import resolve_combo_yield_cfg
 
     _write_single_call(
         tmp_path,
@@ -791,9 +789,9 @@ def test_yield_enhancement_retention_allows_positive_credit_with_low_retention(t
         implied_volatility=0.80,
         delta=0.45,
     )
-    cfg = resolve_yield_enhancement_cfg(
+    cfg = resolve_combo_yield_cfg(
         {
-            "yield_enhancement": {
+            "combo_yield": {
                 "enabled": True,
                 "min_net_credit_annualized": None,
                 "min_net_credit_retention": 0.10,
@@ -804,11 +802,11 @@ def test_yield_enhancement_retention_allows_positive_credit_with_low_retention(t
         }
     )
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg=cfg,
+        combo_yield_cfg=cfg,
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -820,8 +818,8 @@ def test_yield_enhancement_retention_allows_positive_credit_with_low_retention(t
     assert float(row["net_credit_retention"]) < 0.60
 
 
-def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_exposes_put_only_counterfactual_and_tail_payoff(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(
         tmp_path,
@@ -833,7 +831,7 @@ def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_p
         implied_volatility=0.80,
         delta=0.15,
     )
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(
             dte=44,
             implied_volatility=0.80,
@@ -844,7 +842,7 @@ def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_p
         ),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
         sell_put_cfg={
             "enabled": True,
             "strategy": "insurance_underwriting",
@@ -880,8 +878,8 @@ def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_p
     assert abs(float(row["call_payoff_multiple_at_2_0_sigma"]) - expected_2_0) < 1e-6
 
 
-def test_yield_enhancement_shadow_rank_tolerates_missing_expected_move() -> None:
-    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+def test_combo_yield_shadow_rank_tolerates_missing_expected_move() -> None:
+    from src.application.sell_put_call_helper import build_combo_yield_rank_shadow
 
     rows = pd.DataFrame(
         [
@@ -920,14 +918,14 @@ def test_yield_enhancement_shadow_rank_tolerates_missing_expected_move() -> None
         ]
     )
 
-    shadow = build_yield_enhancement_rank_shadow(rows)
+    shadow = build_combo_yield_rank_shadow(rows)
 
     assert shadow.loc[shadow["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
     assert shadow.loc[shadow["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
 
 
-def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() -> None:
-    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+def test_combo_yield_shadow_rank_orders_selected_pairs_by_put_quality() -> None:
+    from src.application.sell_put_call_helper import build_combo_yield_rank_shadow
 
     rows = pd.DataFrame(
         [
@@ -972,7 +970,7 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
         ]
     )
 
-    shadow = build_yield_enhancement_rank_shadow(rows)
+    shadow = build_combo_yield_rank_shadow(rows)
     baseline_order = shadow.dropna(subset=["baseline_rank"]).sort_values("baseline_rank")
     shadow_order = shadow.dropna(subset=["shadow_rank"]).sort_values("shadow_rank")
 
@@ -981,8 +979,8 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
     assert shadow["rank_changed"].all()
 
 
-def test_yield_enhancement_rank_shadow_emits_nullable_int_ranks() -> None:
-    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+def test_combo_yield_rank_shadow_emits_nullable_int_ranks() -> None:
+    from src.application.sell_put_call_helper import build_combo_yield_rank_shadow
 
     rows = pd.DataFrame(
         [
@@ -1028,7 +1026,7 @@ def test_yield_enhancement_rank_shadow_emits_nullable_int_ranks() -> None:
             },
         ]
     )
-    shadow = build_yield_enhancement_rank_shadow(rows)
+    shadow = build_combo_yield_rank_shadow(rows)
 
     assert str(shadow["baseline_rank"].dtype) == "Int64"
     assert str(shadow["shadow_rank"].dtype) == "Int64"
@@ -1041,16 +1039,16 @@ def test_yield_enhancement_rank_shadow_emits_nullable_int_ranks() -> None:
             assert value is None or (isinstance(value, int) and not isinstance(value, bool))
 
 
-def test_yield_enhancement_rejects_crossed_call_quote(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_rejects_crossed_call_quote(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     _write_single_call(tmp_path, dte=44, bid=1.20, ask=1.00)
 
-    pairs = find_sell_put_yield_enhancement_pairs(
+    pairs = find_sell_put_combo_yield_pairs(
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={
+        combo_yield_cfg={
             "enabled": True,
             "call": {"min_delta": 0.10, "max_delta": 0.45},
         },
@@ -1069,27 +1067,27 @@ def test_yield_enhancement_rejects_crossed_call_quote(tmp_path: Path) -> None:
     }
 
 
-def test_yield_enhancement_required_data_read_error_is_not_an_empty_universe(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+def test_combo_yield_required_data_read_error_is_not_an_empty_universe(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
     (parsed / "NVDA_required_data.csv").write_bytes(b"\xff")
 
     with pytest.raises(RuntimeError, match="failed to read Combo Yield required-data calls"):
-        find_sell_put_yield_enhancement_pairs(
+        find_sell_put_combo_yield_pairs(
             df_candidates=_single_put_df(dte=44),
             symbol="NVDA",
             input_root=tmp_path,
-            yield_enhancement_cfg={"enabled": True},
+            combo_yield_cfg={"enabled": True},
             sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
         )
 
 
-def test_yield_enhancement_rank_uses_retention_then_delta_not_premium_score() -> None:
-    from domain.domain.engine.yield_enhancement import (
-        rank_yield_enhancement_rows,
-        yield_enhancement_rank_key,
+def test_combo_yield_rank_uses_retention_then_delta_not_premium_score() -> None:
+    from domain.domain.engine.combo_yield import (
+        rank_combo_yield_rows,
+        combo_yield_rank_key,
     )
 
     higher_premium_lower_retention = {
@@ -1113,11 +1111,11 @@ def test_yield_enhancement_rank_uses_retention_then_delta_not_premium_score() ->
         "combo_spread_ratio": 0.20,
     }
 
-    key_high = yield_enhancement_rank_key(higher_premium_lower_retention)
-    key_low = yield_enhancement_rank_key(lower_premium_higher_retention)
+    key_high = combo_yield_rank_key(higher_premium_lower_retention)
+    key_low = combo_yield_rank_key(lower_premium_higher_retention)
     assert key_high > key_low
 
-    ranked = rank_yield_enhancement_rows(
+    ranked = rank_combo_yield_rows(
         [higher_premium_lower_retention, lower_premium_higher_retention]
     )
     assert ranked[0]["net_credit_retention"] == 0.80

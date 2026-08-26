@@ -744,3 +744,20 @@ def test_resolve_watchlist_item_runtime_config_revalidates_merged_dte_window() -
             profiles={"put_base": {"sell_put": {"min_dte": 60}}},
             apply_profiles_fn=_apply_profiles,
         )
+
+
+def test_resolve_watchlist_item_runtime_config_rejects_retired_combo_yield_key() -> None:
+    from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
+
+    item = {
+        "symbol": "NVDA",
+        "combo_yield": {"enabled": False},
+        "yield_enhancement": {"enabled": True},
+    }
+
+    with pytest.raises(SystemExit, match="yield_enhancement has been removed"):
+        resolve_watchlist_item_runtime_config(
+            item=item,
+            profiles={},
+            apply_profiles_fn=lambda value, _profiles: dict(value),
+        )

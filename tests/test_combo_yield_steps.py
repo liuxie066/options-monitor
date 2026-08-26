@@ -17,7 +17,7 @@ from src.application.combo_yield_steps import (
     run_combo_yield_for_symbol_and_summarize,
     run_combo_yield_scan_and_summarize,
 )
-from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+from src.application.combo_yield_config import derive_combo_yield_policy
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
@@ -144,19 +144,19 @@ def _run(
         return out
 
     yield_cfg = {"enabled": True}
-    policy = derive_yield_enhancement_policy(yield_cfg)
+    policy = derive_combo_yield_policy(yield_cfg)
     _result, summary = run_combo_yield_scan_and_summarize(
         sym="NVDA",
         symbol="NVDA",
         symbol_lower="nvda",
         symbol_cfg={"symbol": "NVDA", "combo_yield": {"enabled": True}},
-        yield_enhancement_cfg=yield_cfg,
+        combo_yield_cfg=yield_cfg,
         yield_sp={
             "strategy": "insurance_underwriting",
             "min_annualized_net_return": 0.10,
             **(yield_sp or {}),
         },
-        yield_enhancement_policy=policy,
+        combo_yield_policy=policy,
         required_data_dir=tmp_path / "required_data",
         report_dir=report_dir,
         yield_window=CandidateWindowDefaults(min_dte=7, max_dte=60),
@@ -553,7 +553,7 @@ def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_dis
         "enabled": False,
         "strategy": "insurance_underwriting",
     }
-    assert captured["yield_enhancement_policy"].requires_realized_volatility is True
+    assert captured["combo_yield_policy"].requires_realized_volatility is True
 
 
 def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -> None:
@@ -608,7 +608,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
 
 
 def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pairs(tmp_path: Path) -> None:
-    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
     parsed = tmp_path / "required_data" / "parsed"
     parsed.mkdir(parents=True)
@@ -639,7 +639,7 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
     _run(
         tmp_path,
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
-        find_pairs_fn=find_sell_put_yield_enhancement_pairs,
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
         combo_evidence_sink_fn=evidence.append,
     )
 
@@ -685,7 +685,7 @@ def test_combo_yield_traces_when_no_funding_put_is_eligible(tmp_path: Path) -> N
 
 def test_combo_yield_emits_shadow_rank_evidence_without_changing_selection(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
-        select_best_yield_enhancement_pairs,
+        select_best_combo_yield_pairs,
     )
 
     pairs = pd.DataFrame(
@@ -755,7 +755,7 @@ def test_combo_yield_emits_shadow_rank_evidence_without_changing_selection(tmp_p
         candidates=[_candidate(annualized_net_return_on_cash_basis=0.14)],
         find_pairs_fn=find_pairs,
         combo_evidence_sink_fn=evidence.append,
-        select_pairs_fn=select_best_yield_enhancement_pairs,
+        select_pairs_fn=select_best_combo_yield_pairs,
     )
 
     artifact = pd.DataFrame(evidence[0]["rank_records"])

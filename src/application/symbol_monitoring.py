@@ -19,10 +19,10 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
 )
 from src.application.strategy_scan_status import publish_strategy_scan_status
-from src.application.yield_enhancement_config import (
+from src.application.combo_yield_config import (
     COMBO_YIELD_CONFIG_KEY,
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
+    derive_combo_yield_policy,
+    resolve_combo_yield_cfg,
 )
 
 
@@ -120,7 +120,7 @@ def run_symbol_monitoring(
 
     sp: dict[str, Any] = dict(symbol_cfg.get("sell_put", {}) or {})
     cc: dict[str, Any] = dict(symbol_cfg.get("sell_call", {}) or {})
-    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    combo_yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
     configured_put = bool(sp.get("enabled", False))
     configured_call = bool(cc.get("enabled", False))
     want_put = configured_put
@@ -146,13 +146,12 @@ def run_symbol_monitoring(
     cc = dict(prefilters.cc)
     symbol_cfg["sell_put"] = sp
     symbol_cfg["sell_call"] = cc
-    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    if yield_enhancement_cfg:
-        symbol_cfg.pop("yield_enhancement", None)
-        symbol_cfg[COMBO_YIELD_CONFIG_KEY] = yield_enhancement_cfg
-    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
+    combo_yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
+    if combo_yield_cfg:
+        symbol_cfg[COMBO_YIELD_CONFIG_KEY] = combo_yield_cfg
+    combo_yield_policy = derive_combo_yield_policy(combo_yield_cfg)
     combo_variant = str(
-        (yield_enhancement_policy.config or {}).get("variant") or "sp_lc"
+        (combo_yield_policy.config or {}).get("variant") or "sp_lc"
     ).strip().lower()
     stock = prefilters.stock
     call_skip_reason = str(
@@ -167,10 +166,10 @@ def run_symbol_monitoring(
         if effective_min_strike is not None:
             cc["min_strike"] = effective_min_strike
             symbol_cfg["sell_call"] = cc
-    want_yield_enhancement = bool(yield_enhancement_policy.enabled)
-    fetch_want_put = bool(want_put or want_yield_enhancement)
-    fetch_want_call = bool(want_call or want_yield_enhancement)
-    fetch_sell_put_cfg = market_sp if want_yield_enhancement else sp
+    want_combo_yield = bool(combo_yield_policy.enabled)
+    fetch_want_put = bool(want_put or want_combo_yield)
+    fetch_want_call = bool(want_call or want_combo_yield)
+    fetch_sell_put_cfg = market_sp if want_combo_yield else sp
     runtime_config: dict[str, Any] = (
         inputs.runtime_config
         if isinstance(inputs.runtime_config, dict)
@@ -259,7 +258,7 @@ def run_symbol_monitoring(
             want_call=want_call,
             sell_put_cfg=fetch_sell_put_cfg,
             sell_call_cfg=cc,
-            yield_enhancement_cfg=yield_enhancement_cfg,
+            combo_yield_cfg=combo_yield_cfg,
             symbol_cfg=symbol_cfg,
             fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
             fetch_port=int(fetch_cfg.get("port") or 11111),
@@ -339,7 +338,7 @@ def run_symbol_monitoring(
 
         for family, enabled in (
             ("sell_put", want_put),
-            ("combo_yield", want_yield_enhancement),
+            ("combo_yield", want_combo_yield),
             ("covered_call", want_call),
         ):
             if enabled:
@@ -353,7 +352,7 @@ def run_symbol_monitoring(
             _unavailable_summary(
                 deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
-        if want_yield_enhancement:
+        if want_combo_yield:
             _unavailable_summary(
                 deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
@@ -374,7 +373,7 @@ def run_symbol_monitoring(
                             "quote_receipt_relpath": exc.receipt_relpath,
                         }
                     )
-            if want_yield_enhancement:
+            if want_combo_yield:
                 inputs.candidate_capture_status_sink_fn(
                     {
                         "symbol": symbol.upper(),
@@ -388,7 +387,7 @@ def run_symbol_monitoring(
                 )
         for family, enabled in (
             ("sell_put", want_put),
-            ("combo_yield", want_yield_enhancement),
+            ("combo_yield", want_combo_yield),
             ("covered_call", want_call),
         ):
             if enabled:
@@ -584,7 +583,7 @@ def run_symbol_monitoring(
     else:
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
-    if want_yield_enhancement:
+    if want_combo_yield:
         try:
             combo_result = deps.run_combo_yield_scan_fn(
                 sym=symbol,

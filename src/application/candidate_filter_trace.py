@@ -10,14 +10,13 @@ TRACE_SCHEMA_VERSION = "candidate_filter_trace.v1"
 FUNCTION_SELL_PUT = "sell_put"
 FUNCTION_SELL_CALL = "sell_call"
 FUNCTION_COMBO_YIELD = "combo_yield"
-FUNCTION_YIELD_ENHANCEMENT = FUNCTION_COMBO_YIELD
 FUNCTION_CASH_RESERVE = "cash_reserve"
 FUNCTION_SHARE_COVERAGE = "share_coverage"
 
 CANDIDATE_FILTER_FUNCTIONS: tuple[str, ...] = (
     FUNCTION_SELL_PUT,
     FUNCTION_SELL_CALL,
-    FUNCTION_YIELD_ENHANCEMENT,
+    FUNCTION_COMBO_YIELD,
     FUNCTION_CASH_RESERVE,
     FUNCTION_SHARE_COVERAGE,
 )
@@ -233,7 +232,7 @@ def _number_or_none(value: Any) -> float | None:
 
 
 def _default_strategy_family(function_norm: str) -> str | None:
-    if function_norm in {FUNCTION_SELL_PUT, FUNCTION_SELL_CALL, FUNCTION_YIELD_ENHANCEMENT}:
+    if function_norm in {FUNCTION_SELL_PUT, FUNCTION_SELL_CALL, FUNCTION_COMBO_YIELD}:
         return function_norm
     return None
 
@@ -262,7 +261,7 @@ def _clean_strategy_family(value: Any) -> str | None:
     if text in {"sell_call", "covered_call", "call"}:
         return FUNCTION_SELL_CALL
     if text in {"combo_yield", "yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
-        return FUNCTION_YIELD_ENHANCEMENT
+        return FUNCTION_COMBO_YIELD
     return text or None
 
 

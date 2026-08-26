@@ -1142,7 +1142,6 @@ def execute_manual_adjust(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -1161,7 +1160,6 @@ def execute_manual_adjust(
                 strategy=strategy,
                 leg_role=leg_role,
                 strategy_group_id=strategy_group_id,
-                yield_enhancement_mode=yield_enhancement_mode,
                 strategy_snapshot=strategy_snapshot,
             ).to_payload(),
         }
@@ -1177,7 +1175,6 @@ def execute_manual_adjust(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
     ).to_payload()
     result = adjust_payload["result"]

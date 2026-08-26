@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
+    strip_retired_strategy_metadata,
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
@@ -91,6 +92,24 @@ def manual_open_request_intent_hash(
     fields: dict[str, Any] | None = None,
 ) -> str:
     resolved_fields = dict(fields or build_position_lot_fields(command).to_dict())
+    snapshot = (
+        dict(resolved_fields["strategy_snapshot"])
+        if isinstance(resolved_fields.get("strategy_snapshot"), dict)
+        else None
+    )
+    return _manual_open_request_intent_hash(
+        command,
+        fields=resolved_fields,
+        strategy_snapshot=snapshot,
+    )
+
+
+def _manual_open_request_intent_hash(
+    command: OpenPositionCommand,
+    *,
+    fields: dict[str, Any],
+    strategy_snapshot: dict[str, Any] | None,
+) -> str:
     payload = {
         "broker": normalize_broker(command.broker),
         "account": normalize_account(command.account),
@@ -100,16 +119,12 @@ def manual_open_request_intent_hash(
         "contracts": int(command.contracts),
         "currency": resolve_open_currency(command.symbol, command.currency),
         "strike": float(command.strike) if command.strike is not None else None,
-        "multiplier": float(effective_multiplier(resolved_fields) or 100),
+        "multiplier": float(effective_multiplier(fields) or 100),
         "expiration_ymd": str(command.expiration_ymd or "").strip() or None,
-        "premium_per_share": float(resolved_fields.get("premium")),
+        "premium_per_share": float(fields.get("premium")),
         "underlying_share_locked": command.underlying_share_locked,
         "note": command.note,
-        "strategy_snapshot": (
-            dict(command.strategy_snapshot)
-            if isinstance(command.strategy_snapshot, dict)
-            else None
-        ),
+        "strategy_snapshot": strategy_snapshot,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -121,6 +136,8 @@ def assert_manual_request_event_matches(
     event_id: str,
     request_id: str,
     intent_hash: str,
+    command: OpenPositionCommand,
+    fields: dict[str, Any],
 ) -> None:
     candidate = getattr(repo, "primary_repo", repo)
     getter = getattr(candidate, "get_trade_events_by_ids", None)
@@ -136,12 +153,24 @@ def assert_manual_request_event_matches(
     for item in rows:
         raw = item.get("raw_payload")
         payload = raw if isinstance(raw, dict) else {}
-        if (
-            str(payload.get("manual_request_id") or "").strip() != request_id
-            or str(payload.get("manual_request_intent_hash") or "").strip() != intent_hash
-        ):
+        if str(payload.get("manual_request_id") or "").strip() != request_id:
             raise ValueError(f"manual request conflict for request_id={request_id}")
-        return
+        stored_hash = str(payload.get("manual_request_intent_hash") or "").strip()
+        if stored_hash == intent_hash:
+            return
+        stored_snapshot = payload.get("strategy_snapshot")
+        current_snapshot = fields.get("strategy_snapshot")
+        if isinstance(stored_snapshot, dict):
+            canonical_stored = strip_retired_strategy_metadata(
+                {"strategy_snapshot": stored_snapshot}
+            ).get("strategy_snapshot") or None
+            if canonical_stored == current_snapshot and stored_hash == _manual_open_request_intent_hash(
+                command,
+                fields=fields,
+                strategy_snapshot=dict(stored_snapshot),
+            ):
+                return
+        raise ValueError(f"manual request conflict for request_id={request_id}")
 
 
 def _stable_manual_event_id(prefix: str, payload: dict[str, Any]) -> str:
@@ -329,6 +358,8 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
                 event_id=event_id,
                 request_id=request_id,
                 intent_hash=intent_hash,
+                command=command,
+                fields=fields,
             )
         return existing_result
     strategy_payload = strategy_metadata_fields_from_payload(
@@ -477,7 +508,6 @@ def _build_manual_adjust_event(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> tuple[TradeEvent, PositionLotPatch]:
@@ -500,7 +530,6 @@ def _build_manual_adjust_event(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     )
@@ -568,7 +597,6 @@ def persist_manual_adjust_event(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
@@ -585,7 +613,6 @@ def persist_manual_adjust_event(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     )

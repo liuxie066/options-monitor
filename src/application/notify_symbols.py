@@ -111,7 +111,7 @@ def _present_compact(value: str | None) -> str:
     return v
 
 
-def _yield_enhancement_suggestion(put_bid: str | None, call_ask: str | None) -> str:
+def _combo_yield_suggestion(put_bid: str | None, call_ask: str | None) -> str:
     put_price = '' if _is_missing_value(put_bid) else _present_compact(put_bid)
     call_price = '' if _is_missing_value(call_ask) else _present_compact(call_ask)
     if put_price and call_price:
@@ -653,7 +653,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
-        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
+        enh_suggestion = _combo_yield_suggestion(put_bid, call_ask)
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
@@ -773,7 +773,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
-        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
+        enh_suggestion = _combo_yield_suggestion(put_bid, call_ask)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
             action_label=strategy_action_label(STRATEGY_COMBO_YIELD),

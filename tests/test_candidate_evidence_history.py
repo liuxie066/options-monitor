@@ -75,7 +75,7 @@ def _write_legacy_combo_bundle(base: Path, *, variant: str = "sp_lc") -> str:
                 {
                     "symbol": "NVDA",
                     "broker": "US",
-                    "combo_yield": {
+                    "yield_enhancement": {
                         "enabled": True,
                         "variant": variant,
                     },

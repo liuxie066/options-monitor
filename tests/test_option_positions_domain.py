@@ -712,18 +712,25 @@ def test_build_open_adjustment_patch_updates_strategy_metadata() -> None:
         strategy="yield_enhancement",
         leg_role="enhancement_call",
         strategy_group_id="ye_9992_20260730",
-        yield_enhancement_mode="income_upside_enhancement",
-        strategy_snapshot={"strategy_family": "sell_put", "strategy_profile": "return_first"},
+        strategy_snapshot={
+            "strategy": "yield_enhancement",
+            "strategy_family": "sell_put",
+            "strategy_profile": "return_first",
+            "yield_enhancement_mode": "vol_convexity_enhancement",
+        },
         as_of_ms=4000,
     )
 
     assert patch == {
         "last_action_at": 4000,
-        "strategy": "yield_enhancement",
+        "strategy": "combo_yield",
         "leg_role": "enhancement_call",
         "strategy_group_id": "ye_9992_20260730",
-        "yield_enhancement_mode": "income_upside_enhancement",
-        "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+        "strategy_snapshot": {
+            "strategy": "combo_yield",
+            "strategy_family": "sell_put",
+            "strategy_profile": "return_first",
+        },
     }
 
 

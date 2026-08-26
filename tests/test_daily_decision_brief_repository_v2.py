@@ -125,6 +125,47 @@ def test_success_persistence_advances_only_reliable_current_and_returns_identity
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]["revision"] == 1
 
 
+def test_v2_delivery_reads_existing_legacy_delivery_candidate(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        record_daily_decision_brief_candidates,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=persisted["current_revision"],
+        brief_digest=persisted["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+        observed_at_utc="2026-07-21T14:00:01+00:00",
+    )
+    state_path = tmp_path / "output_accounts/lx/state/daily_decision_brief.US.delivery.json"
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    day = raw["days"][MARKET_DATE]
+    day["pending_candidates"] = {}
+    day["alerted_candidates"] = {
+        IDENTITY_NVDA: {
+            "revision": persisted["current_revision"],
+            "brief_digest": persisted["current_brief_digest"],
+            "delivery_key": "legacy:daily-report:lx:US:2026-07-21",
+            "confirmed_at_utc": "2026-07-21T14:00:02+00:00",
+            "via": "legacy_delivery",
+        }
+    }
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+
+    assert state["days"][MARKET_DATE]["alerted_candidates"][IDENTITY_NVDA]["via"] == "legacy_delivery"
+
+
 def test_success_persistence_uses_empty_candidate_baseline_on_new_market_date(tmp_path: Path) -> None:
     first = _persist(tmp_path, run_id="day-1", actions=[_action()])
     from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success

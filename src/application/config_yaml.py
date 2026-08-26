@@ -25,8 +25,8 @@ from src.application.config_primitives import (
 )
 from src.application.config_validator import (
     OPENING_STRATEGY_ALLOWED_FIELDS,
-    YIELD_ENHANCEMENT_ALLOWED_FIELDS,
-    YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS,
+    COMBO_YIELD_ALLOWED_FIELDS,
+    COMBO_YIELD_CALL_ALLOWED_FIELDS,
     validate_assistant_config,
     validate_config,
 )
@@ -78,10 +78,10 @@ WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write",
 COVERED_CALL_AUTHORING_KEY = "covered_call"
 SELL_CALL_LEGACY_AUTHORING_KEY = STRATEGY_COVERED_CALL
 COMBO_YIELD_AUTHORING_KEY = "combo_yield"
-YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY = "yield_enhancement"
+COMBO_YIELD_RETIRED_AUTHORING_KEY = "yield_enhancement"
 OPENING_STRATEGY_AUTHORING_FIELDS = OPENING_STRATEGY_ALLOWED_FIELDS | {"dte", "strike"}
-YIELD_ENHANCEMENT_AUTHORING_FIELDS = {
-    key for key in YIELD_ENHANCEMENT_ALLOWED_FIELDS if not key.startswith("_")
+COMBO_YIELD_AUTHORING_FIELDS = {
+    key for key in COMBO_YIELD_ALLOWED_FIELDS if not key.startswith("_")
 }
 WHEEL_AUTHORING_FIELDS = {
     "enabled",
@@ -348,14 +348,14 @@ def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
         raw,
         path=path,
         allow_ranges=False,
-        allowed_keys=YIELD_ENHANCEMENT_AUTHORING_FIELDS,
+        allowed_keys=COMBO_YIELD_AUTHORING_FIELDS,
     )
     out["_explicit_fields"] = [key for key in out if not str(key).startswith("_")]
     call_cfg = out.get("call")
     if isinstance(call_cfg, dict):
         _reject_unknown_authoring_keys(
             call_cfg,
-            allowed=YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS,
+            allowed=COMBO_YIELD_CALL_ALLOWED_FIELDS,
             path=f"{path}.call",
         )
         out["_explicit_call_fields"] = [key for key in call_cfg if not str(key).startswith("_")]
@@ -366,8 +366,11 @@ def _canonical_strategy_authoring_key(raw_key: Any) -> str:
     key = str(raw_key or "").strip()
     if key == COVERED_CALL_AUTHORING_KEY:
         return SELL_CALL_LEGACY_AUTHORING_KEY
-    if key == YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY:
-        return COMBO_YIELD_AUTHORING_KEY
+    if key == COMBO_YIELD_RETIRED_AUTHORING_KEY:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"{key} has been removed; use {COMBO_YIELD_AUTHORING_KEY}",
+        )
     return key
 
 
@@ -391,12 +394,6 @@ def _normalize_strategy_authoring_container(
                 code="CONFIG_ERROR",
                 message=f"{path} cannot define both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY}",
                 hint="Use covered_call in config.yaml; sell_call is kept as the generated runtime/internal key.",
-            )
-        if canonical_key == COMBO_YIELD_AUTHORING_KEY and canonical_key in out:
-            raise AgentToolError(
-                code="CONFIG_ERROR",
-                message=f"{path} cannot define both {COMBO_YIELD_AUTHORING_KEY} and {YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}",
-                hint="Use combo_yield in config.yaml.",
             )
         if normalize_strategy_values and canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
             out[canonical_key] = _normalize_strategy(
@@ -437,12 +434,6 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
                 allowed_keys=OPENING_STRATEGY_AUTHORING_FIELDS,
             )
         elif canonical_key == COMBO_YIELD_AUTHORING_KEY:
-            if canonical_key in out:
-                raise AgentToolError(
-                    code="CONFIG_ERROR",
-                    message=f"{path} cannot define both {COMBO_YIELD_AUTHORING_KEY} and {YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}",
-                    hint="Use combo_yield in config.yaml.",
-                )
             out[canonical_key] = _normalize_combo_yield(raw_value, path=f"{path}.{key}")
         else:
             out[key] = deepcopy(raw_value)
@@ -474,7 +465,7 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
             close_advice = _normalize_strategy(raw_value, path=f"{path}.close_advice", allow_ranges=False)
             out["close_advice"] = close_advice
             continue
-        if key in {COMBO_YIELD_AUTHORING_KEY, YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}:
+        if key == COMBO_YIELD_AUTHORING_KEY:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message=f"{path}.{key} is not a global feature switch",
@@ -615,8 +606,11 @@ def runtime_strategy_keys_to_yaml_authoring(raw: Any) -> Any:
             key = str(raw_key or "").strip()
             if key == SELL_CALL_LEGACY_AUTHORING_KEY:
                 yaml_key: Any = COVERED_CALL_AUTHORING_KEY
-            elif key == YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY:
-                yaml_key = COMBO_YIELD_AUTHORING_KEY
+            elif key == COMBO_YIELD_RETIRED_AUTHORING_KEY:
+                raise AgentToolError(
+                    code="CONFIG_ERROR",
+                    message=f"{key} has been removed; use {COMBO_YIELD_AUTHORING_KEY}",
+                )
             else:
                 yaml_key = raw_key
             if yaml_key in out:

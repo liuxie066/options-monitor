@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_lots import parse_exp_to_ms
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
@@ -219,6 +221,72 @@ def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
     assert fields["leg_role"] == "enhancement_call"
     assert fields["strategy_group_id"] == "ye_nvda_1"
     assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected_retired_mode"),
+    [
+        ({"strategy_family": "sell_put", "strategy_profile": "return_first"}, None),
+        ({"strategy_family": "sell_put", "strategy_profile": "return"}, None),
+        ({"structure_mode": "same_expiry_pair"}, "vol_convexity_enhancement"),
+    ],
+)
+def test_fallback_strategy_snapshot_patch_preserves_risk_semantics(
+    snapshot: dict[str, str],
+    expected_retired_mode: str | None,
+) -> None:
+    key = _key(strike=100.0, expiration_ymd="2026-06-19")
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="legacy-open",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=key,
+                contracts=1,
+                price=2.5,
+                currency="USD",
+                source="legacy",
+                multiplier=100,
+                lot_id="legacy-lot",
+                raw_payload={
+                    "strategy": "combo_yield",
+                    "yield_enhancement_mode": "vol_convexity_enhancement",
+                },
+            ),
+            TradeEvent(
+                event_id="new-adjust",
+                event_type="adjust",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=0,
+                price=0,
+                currency="USD",
+                source="cli_manual_adjust",
+                multiplier=100,
+                target_lot_id="legacy-lot",
+                raw_payload={
+                    "patch": {"strategy_snapshot": snapshot}
+                },
+            ),
+            TradeEvent(
+                event_id="unrelated-invalid-close",
+                event_type="close",
+                event_time_ms=3000,
+                contract_key=key,
+                contracts=1,
+                price=1,
+                currency="USD",
+                source="legacy",
+                multiplier=100,
+                target_lot_id="missing-lot",
+            ),
+        ]
+    )
+
+    assert [item.code for item in projection.diagnostics] == ["target_lot_not_found"]
+    assert projection.lots[0].fields.get("yield_enhancement_mode") == expected_retired_mode
+    assert projection.lots[0].fields["strategy_snapshot"] == snapshot
 
 
 def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:

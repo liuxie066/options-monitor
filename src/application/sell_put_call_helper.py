@@ -11,21 +11,21 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from domain.domain.engine import (
-    YieldEnhancementFundingDecision,
-    YieldEnhancementLeg,
-    compute_yield_enhancement_funding_decision,
-    compute_yield_enhancement_metrics,
-    rank_yield_enhancement_call_lottery_rows,
-    rank_yield_enhancement_calls_for_put,
-    rank_yield_enhancement_rows,
-    rank_yield_enhancement_shadow_rows,
-    select_best_yield_enhancement_per_symbol,
-    validate_yield_enhancement_pair,
+    ComboYieldFundingDecision,
+    ComboYieldLeg,
+    compute_combo_yield_funding_decision,
+    compute_combo_yield_metrics,
+    rank_combo_yield_call_lottery_rows,
+    rank_combo_yield_calls_for_put,
+    rank_combo_yield_rows,
+    rank_combo_yield_shadow_rows,
+    select_best_combo_yield_per_symbol,
+    validate_combo_yield_pair,
 )
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
-    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY,
-    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+    DEFAULT_SELL_PUT_COMBO_YIELD_LIQUIDITY,
+    DEFAULT_SELL_PUT_COMBO_YIELD_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
 )
@@ -34,8 +34,8 @@ from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_models import CandidateContractInput
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
+from src.application.combo_yield_config import (
+    derive_combo_yield_policy,
 )
 
 
@@ -76,7 +76,7 @@ def _spread_values(contract: CandidateContractInput) -> tuple[float | None, floa
     return spread, spread / mid
 
 
-def _call_leg_from_required_data(row: pd.Series) -> YieldEnhancementLeg | None:
+def _call_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
     contract = CandidateContractInput.from_row(row, mode="call")
     dte = contract.dte
     strike = contract.strike
@@ -108,7 +108,7 @@ def _call_leg_from_required_data(row: pd.Series) -> YieldEnhancementLeg | None:
     ):
         return None
     spread, spread_ratio = _spread_values(contract)
-    return YieldEnhancementLeg(
+    return ComboYieldLeg(
         symbol=contract.symbol,
         option_type="call",
         expiration=contract.expiration,
@@ -130,7 +130,7 @@ def _call_leg_from_required_data(row: pd.Series) -> YieldEnhancementLeg | None:
     )
 
 
-def _put_leg_from_sell_put_row(row: pd.Series) -> YieldEnhancementLeg | None:
+def _put_leg_from_sell_put_row(row: pd.Series) -> ComboYieldLeg | None:
     contract_symbol = str(row.get("contract_symbol") or "").strip()
     expiration = str(row.get("expiration") or "").strip()
     currency = str(row.get("currency") or row.get("option_ccy") or "").strip().upper()
@@ -150,7 +150,7 @@ def _put_leg_from_sell_put_row(row: pd.Series) -> YieldEnhancementLeg | None:
         return None
     spread = ask - bid if ask >= bid else None
     spread_ratio = (spread / mid) if spread is not None and mid > 0 else None
-    return YieldEnhancementLeg(
+    return ComboYieldLeg(
         symbol=symbol,
         option_type="put",
         expiration=expiration,
@@ -181,7 +181,7 @@ def _passes_range(value: float, min_value: float | None, max_value: float | None
 
 
 def _liquidity_reject_reason(
-    leg: YieldEnhancementLeg,
+    leg: ComboYieldLeg,
     *,
     min_open_interest: float,
     min_volume: float,
@@ -211,7 +211,7 @@ def _mean_canonical_iv(*values: Any) -> float | None:
     return sum(parsed) / float(len(parsed))
 
 
-def _funding_decision_row_fields(decision: YieldEnhancementFundingDecision) -> dict[str, Any]:
+def _funding_decision_row_fields(decision: ComboYieldFundingDecision) -> dict[str, Any]:
     components = ";".join(
         f"{name}={value:.6f}"
         for name, value in sorted(decision.score_components.items())
@@ -241,8 +241,8 @@ def _funding_decision_row_fields(decision: YieldEnhancementFundingDecision) -> d
 
 def _build_pair_row(
     *,
-    put_leg: YieldEnhancementLeg,
-    call_leg: YieldEnhancementLeg,
+    put_leg: ComboYieldLeg,
+    call_leg: ComboYieldLeg,
     expected_move_iv: float | None,
     min_combo_notional_floor: float,
     enhancement_cfg: dict[str, Any],
@@ -252,7 +252,7 @@ def _build_pair_row(
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
     call_buy_fee = calc_futu_option_fee(call_leg.currency, call_leg.ask, contracts=1, multiplier=multiplier, is_sell=False)
-    metrics = compute_yield_enhancement_metrics(
+    metrics = compute_combo_yield_metrics(
         put_leg=put_leg,
         call_leg=call_leg,
         put_sell_fee=put_sell_fee,
@@ -358,7 +358,7 @@ def _build_pair_row(
         "risk_label": risk.risk_label,
     }
     min_combo_net_credit = _safe_float(enhancement_cfg.get("min_combo_net_credit"))
-    decision = compute_yield_enhancement_funding_decision(
+    decision = compute_combo_yield_funding_decision(
         put_leg=put_leg,
         call_leg=call_leg,
         put_sell_fee=put_sell_fee,
@@ -418,7 +418,6 @@ def _empty_pairs_df() -> pd.DataFrame:
             "upside_lift_to_put_credit",
             "premium_funding_score",
             "funding_score_components",
-            "yield_enhancement_mode",
             "derived_from_sell_put_strategy",
             "put_strategy_profile",
             "put_strategy_source",
@@ -498,7 +497,7 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
     }
 
 
-def _put_leg_passes_assignment_bounds(put_leg: YieldEnhancementLeg, sell_put_cfg: dict[str, Any] | None) -> bool:
+def _put_leg_passes_assignment_bounds(put_leg: ComboYieldLeg, sell_put_cfg: dict[str, Any] | None) -> bool:
     cfg = sell_put_cfg if isinstance(sell_put_cfg, dict) else {}
     min_strike = _safe_float(cfg.get("min_strike"))
     max_strike = _safe_float(cfg.get("max_strike"))
@@ -541,7 +540,7 @@ _PAIR_DIAGNOSTIC_COLUMNS = (
     "net_credit_retention call_cost_to_put_credit annualized_net_credit_yield combo_spread_ratio funding_accepted "
     "funding_reject_reasons expected_move lottery_budget_ratio residual_premium_ratio "
     "call_payoff_multiple_at_1_5_sigma call_payoff_multiple_at_2_0_sigma funding_put_min_annualized_return "
-    "put_only_annualized_net_return yield_enhancement_mode put_strategy_profile "
+    "put_only_annualized_net_return put_strategy_profile "
     "policy_call_min_delta policy_call_max_delta policy_call_min_strike policy_call_max_strike "
     "policy_call_min_open_interest policy_call_min_volume policy_call_max_spread_ratio "
     "policy_min_net_credit_retention policy_min_net_credit_annualized "
@@ -549,7 +548,7 @@ _PAIR_DIAGNOSTIC_COLUMNS = (
 ).split()
 
 
-def _leg_diagnostic_fields(leg: YieldEnhancementLeg, *, prefix: str) -> dict[str, Any]:
+def _leg_diagnostic_fields(leg: ComboYieldLeg, *, prefix: str) -> dict[str, Any]:
     return {
         f"{prefix}_contract_symbol": leg.contract_symbol,
         f"{prefix}_strike": leg.strike,
@@ -569,8 +568,8 @@ def _diagnostic_row(
     stage: str,
     accepted: bool,
     reject_reasons: tuple[str, ...] = (),
-    put_leg: YieldEnhancementLeg | None = None,
-    call_leg: YieldEnhancementLeg | None = None,
+    put_leg: ComboYieldLeg | None = None,
+    call_leg: ComboYieldLeg | None = None,
     candidate: dict[str, Any] | None = None,
     raw_call: pd.Series | None = None,
 ) -> dict[str, Any]:
@@ -630,14 +629,14 @@ def _pair_diagnostics_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return diagnostics.reindex(columns=columns)
 
 
-def get_yield_enhancement_pair_diagnostics(pairs_df: pd.DataFrame) -> pd.DataFrame:
+def get_combo_yield_pair_diagnostics(pairs_df: pd.DataFrame) -> pd.DataFrame:
     diagnostics = pairs_df.attrs.get("pair_diagnostics")
     if isinstance(diagnostics, pd.DataFrame):
         return diagnostics.copy()
     return _pair_diagnostics_df([])
 
 
-def _load_yield_enhancement_call_legs_by_expiration(
+def _load_combo_yield_call_legs_by_expiration(
     *,
     input_root: Path,
     symbol: str,
@@ -646,13 +645,13 @@ def _load_yield_enhancement_call_legs_by_expiration(
     liquidity: Any,
     diagnostics: list[dict[str, Any]],
     required_data_frame: pd.DataFrame | None = None,
-) -> tuple[dict[str, list[YieldEnhancementLeg]], Counter[str]]:
+) -> tuple[dict[str, list[ComboYieldLeg]], Counter[str]]:
     raw_calls = _load_required_data_calls(
         input_root=input_root,
         symbol=symbol,
         required_data_frame=required_data_frame,
     )
-    call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
+    call_legs_by_expiration: dict[str, list[ComboYieldLeg]] = {}
     reject_counts: Counter[str] = Counter()
     if raw_calls.empty:
         reject_counts["call_universe_empty"] += 1
@@ -775,10 +774,10 @@ def _candidate_pair_reject_reasons(
     return tuple(dict.fromkeys(reasons))
 
 
-def _build_yield_enhancement_pair_rows(
+def _build_combo_yield_pair_rows(
     *,
     df: pd.DataFrame,
-    call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]],
+    call_legs_by_expiration: dict[str, list[ComboYieldLeg]],
     put_window: Any,
     sell_put_cfg: dict[str, Any] | None,
     min_combo_notional_floor: float,
@@ -854,7 +853,7 @@ def _build_yield_enhancement_pair_rows(
             )
             continue
         for call_leg in call_legs:
-            pair_rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+            pair_rejects = validate_combo_yield_pair(put_leg, call_leg)
             if pair_rejects:
                 reject_counts.update(pair_rejects)
                 diagnostics.append(
@@ -928,19 +927,19 @@ def _build_yield_enhancement_pair_rows(
     return pair_rows
 
 
-def find_sell_put_yield_enhancement_pairs(
+def find_sell_put_combo_yield_pairs(
     *,
     df_candidates: pd.DataFrame,
     symbol: str,
     input_root: Path,
-    yield_enhancement_cfg: dict[str, Any] | None,
+    combo_yield_cfg: dict[str, Any] | None,
     sell_put_cfg: dict[str, Any] | None = None,
-    global_yield_enhancement_liquidity: dict[str, Any] | None = None,
+    global_combo_yield_liquidity: dict[str, Any] | None = None,
     required_data_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
-    policy = derive_yield_enhancement_policy(
-        yield_enhancement_cfg,
+    policy = derive_combo_yield_policy(
+        combo_yield_cfg,
         market=symbol_market(symbol),
     )
     cfg = policy.to_config()
@@ -951,19 +950,19 @@ def find_sell_put_yield_enhancement_pairs(
         return pairs_df
 
     call_cfg = dict(cfg.get("call") or {})
-    liquidity_cfg = _merged_dict(global_yield_enhancement_liquidity, cfg)
-    liquidity = resolve_candidate_liquidity(liquidity_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY)
+    liquidity_cfg = _merged_dict(global_combo_yield_liquidity, cfg)
+    liquidity = resolve_candidate_liquidity(liquidity_cfg, defaults=DEFAULT_SELL_PUT_COMBO_YIELD_LIQUIDITY)
     put_strategy_fields = _sell_put_strategy_fields(sell_put_cfg)
     put_window = resolve_candidate_window(
         sell_put_cfg if sell_put_cfg is not None else cfg,
-        defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+        defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_COMBO_YIELD_WINDOW,
     )
     call_window = put_window
 
     min_net_credit_retention = _safe_float(cfg.get("min_net_credit_retention"))
     min_combo_notional_floor = 1.0
 
-    call_legs_by_expiration, reject_counts = _load_yield_enhancement_call_legs_by_expiration(
+    call_legs_by_expiration, reject_counts = _load_combo_yield_call_legs_by_expiration(
         input_root=Path(input_root),
         symbol=symbol,
         call_cfg=call_cfg,
@@ -973,7 +972,7 @@ def find_sell_put_yield_enhancement_pairs(
         required_data_frame=required_data_frame,
     )
 
-    pair_rows = _build_yield_enhancement_pair_rows(
+    pair_rows = _build_combo_yield_pair_rows(
         df=df,
         call_legs_by_expiration=call_legs_by_expiration,
         put_window=put_window,
@@ -987,14 +986,14 @@ def find_sell_put_yield_enhancement_pairs(
         diagnostics=diagnostics,
     )
 
-    ranked_pairs = rank_yield_enhancement_rows(pair_rows)
+    ranked_pairs = rank_combo_yield_rows(pair_rows)
     pairs_df = pd.DataFrame(ranked_pairs) if ranked_pairs else _empty_pairs_df()
     pairs_df.attrs["reject_counts"] = dict(sorted(reject_counts.items()))
     pairs_df.attrs["pair_diagnostics"] = _pair_diagnostics_df(diagnostics)
     return pairs_df
 
 
-def select_best_yield_enhancement_pairs(
+def select_best_combo_yield_pairs(
     pairs_df: pd.DataFrame,
 ) -> pd.DataFrame:
     if pairs_df.empty:
@@ -1002,16 +1001,16 @@ def select_best_yield_enhancement_pairs(
 
     selected_rows: list[dict[str, Any]] = []
     for _put_contract_symbol, group in pairs_df.groupby("put_contract_symbol", sort=False):
-        top = rank_yield_enhancement_calls_for_put(group.to_dict("records"))[0]
+        top = rank_combo_yield_calls_for_put(group.to_dict("records"))[0]
         selected = dict(top)
         selected["call_candidate_count"] = int(len(group))
         selected_rows.append(selected)
 
-    best_by_symbol = select_best_yield_enhancement_per_symbol(selected_rows)
+    best_by_symbol = select_best_combo_yield_per_symbol(selected_rows)
     return pd.DataFrame(best_by_symbol) if best_by_symbol else _empty_pairs_df()
 
 
-def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
+def build_combo_yield_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         *pairs_df.columns,
         "baseline_rank",
@@ -1036,18 +1035,18 @@ def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
     source = pd.DataFrame(rows)
     for _put_contract_symbol, group in source.groupby("put_contract_symbol", sort=False):
         group_rows = group.to_dict("records")
-        baseline_selected_rows.append(rank_yield_enhancement_rows(group_rows)[0])
-        shadow_selected_rows.append(rank_yield_enhancement_call_lottery_rows(group_rows)[0])
+        baseline_selected_rows.append(rank_combo_yield_rows(group_rows)[0])
+        shadow_selected_rows.append(rank_combo_yield_call_lottery_rows(group_rows)[0])
 
-    ranked_baseline_selected = rank_yield_enhancement_rows(baseline_selected_rows)
-    ranked_shadow_selected = rank_yield_enhancement_shadow_rows(shadow_selected_rows)
+    ranked_baseline_selected = rank_combo_yield_rows(baseline_selected_rows)
+    ranked_shadow_selected = rank_combo_yield_shadow_rows(shadow_selected_rows)
     baseline_rank = {pair_key(row): index for index, row in enumerate(ranked_baseline_selected, start=1)}
     shadow_rank = {pair_key(row): index for index, row in enumerate(ranked_shadow_selected, start=1)}
     baseline_selected = set(baseline_rank)
     shadow_selected = set(shadow_rank)
 
     out: list[dict[str, Any]] = []
-    for row in rank_yield_enhancement_rows(rows):
+    for row in rank_combo_yield_rows(rows):
         key = pair_key(row)
         baseline_is_selected = key in baseline_selected
         shadow_is_selected = key in shadow_selected

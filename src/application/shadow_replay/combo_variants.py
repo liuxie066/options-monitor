@@ -15,9 +15,9 @@ from domain.domain.engine import (
     combo_yield_proposed_gate_reasons,
     combo_yield_proposed_rank_key,
     rank_combo_yield_proposed_rows,
-    rank_yield_enhancement_rows,
+    rank_combo_yield_rows,
     select_best_combo_yield_proposed_pairs,
-    select_best_yield_enhancement_per_symbol,
+    select_best_combo_yield_per_symbol,
 )
 from domain.domain.insurance_underwriting import underwriting_rank_key
 from src.application.shadow_replay.common import (
@@ -552,10 +552,10 @@ def _baseline_selected_keys(
         grouped.setdefault(text(row.get("put_contract_symbol")), []).append(row)
     for group in grouped.values():
         if group:
-            per_put.append(rank_yield_enhancement_rows(group)[0])
+            per_put.append(rank_combo_yield_rows(group)[0])
     return {
         _pair_key(row)
-        for row in select_best_yield_enhancement_per_symbol(per_put)
+        for row in select_best_combo_yield_per_symbol(per_put)
     }
 
 
@@ -577,7 +577,7 @@ def _baseline_rank_map(
     return {
         _pair_key(row): index
         for index, row in enumerate(
-            rank_yield_enhancement_rows(eligible),
+            rank_combo_yield_rows(eligible),
             start=1,
         )
     }

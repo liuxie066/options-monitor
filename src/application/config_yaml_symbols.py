@@ -350,7 +350,10 @@ def _authoring_edit_path(override: dict[str, Any], path: str) -> str:
     if parts[0] == "sell_call":
         parts[0] = "sell_call" if "sell_call" in override else "covered_call"
     elif parts[0] == "yield_enhancement":
-        parts[0] = "combo_yield"
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="yield_enhancement has been removed; use combo_yield",
+        )
     return ".".join(parts)
 
 

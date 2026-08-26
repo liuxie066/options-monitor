@@ -5425,6 +5425,15 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
     assert missing["data"]["missing_reason"] == "field_not_configured"
     assert "sell_put.min_delta" in missing["data"]["message"]
 
+    retired = run_tool(
+        "symbol_config_read",
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "yield_enhancement"},
+    )
+
+    assert retired["ok"] is False
+    assert retired["error"]["code"] == "INPUT_ERROR"
+    assert "combo_yield" in retired["error"]["message"]
+
 
 def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool

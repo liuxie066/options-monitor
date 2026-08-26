@@ -44,7 +44,7 @@ def test_build_symbols_summary_tolerates_missing_annualized_return_column(tmp_pa
     assert pd.isna(df.loc[0, 'net_income'])
 
 
-def test_build_symbols_digest_deduplicates_symbols_with_yield_enhancement_section(tmp_path: Path) -> None:
+def test_build_symbols_digest_deduplicates_symbols_with_combo_yield_section(tmp_path: Path) -> None:
 
     from src.application.report_builders import build_symbols_digest
 

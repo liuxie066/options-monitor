@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     SELL_TO_CLOSE,
     OpenPositionCommand,
+    LEGACY_POSITION_LOT_PATCH_FIELDS,
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
     build_position_id,
     build_position_lot_fields,
@@ -576,12 +577,19 @@ def _apply_strategy_patch_fields(
     fields: dict[str, Any],
     event: TradeEvent,
 ) -> dict[str, Any]:
-    out = dict(fields)
     payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     patch = payload.get("patch")
     if not isinstance(patch, dict):
-        return out
-    for key in POSITION_LOT_STRATEGY_PATCH_FIELDS:
+        return dict(fields)
+    return _apply_strategy_patch_payload(fields, patch)
+
+
+def _apply_strategy_patch_payload(
+    fields: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(fields)
+    for key in (*POSITION_LOT_STRATEGY_PATCH_FIELDS, *LEGACY_POSITION_LOT_PATCH_FIELDS):
         if key not in patch:
             continue
         value = patch.get(key)
@@ -590,6 +598,19 @@ def _apply_strategy_patch_fields(
         elif key == "strategy_snapshot":
             if isinstance(value, dict):
                 out[key] = dict(value)
+                family = str(value.get("strategy_family") or value.get("family") or "").strip().lower()
+                profile = str(
+                    value.get("strategy_profile") or value.get("profile") or value.get("strategy") or ""
+                ).strip().lower()
+                if family in {"", "sell_put"} and profile in {
+                    "legacy",
+                    "return",
+                    "return_first",
+                    "short_vol",
+                    "insurance_underwriting",
+                    "yield_first",
+                }:
+                    out.pop("yield_enhancement_mode", None)
         else:
             out[key] = str(value).strip()
     return out
@@ -633,7 +654,7 @@ def _base_fields_for_lot(
                 strategy_snapshot=_strategy_snapshot_from_payload(raw_payload),
             )
         ).to_dict()
-    fields.update(strategy_metadata_fields_from_payload(raw_payload))
+    fields.update(strategy_metadata_fields_from_payload(raw_payload, include_legacy=True))
     fields["source_event_id"] = lot.open_event_id
     fields["event_source_type"] = str(legacy_open_event.get("source_type") or "").strip()
     fields["event_source_name"] = str(legacy_open_event.get("source_name") or (open_event.source if open_event else "")).strip()
@@ -765,17 +786,7 @@ def _apply_adjust_strategy_patch_fields(
         patch = payload.get("patch")
         if not isinstance(patch, dict):
             continue
-        for key in POSITION_LOT_STRATEGY_PATCH_FIELDS:
-            if key not in patch:
-                continue
-            value = patch.get(key)
-            if value in (None, ""):
-                out.pop(key, None)
-            elif key == "strategy_snapshot":
-                if isinstance(value, dict):
-                    out[key] = dict(value)
-            else:
-                out[key] = str(value).strip()
+        out = _apply_strategy_patch_payload(out, patch)
     return out
 
 

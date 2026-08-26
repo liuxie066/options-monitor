@@ -732,7 +732,7 @@ def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkey
     assert captured["fetch_plan"]["symbol"] == "0700.HK"
 
 
-def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monkeypatch, tmp_path: Path) -> None:
+def test_run_symbol_monitoring_fetches_calls_for_sell_put_combo_yield(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
 
     captured_plan: dict[str, object] = {}
@@ -802,14 +802,14 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
 
     assert len(out) == 3
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
-    assert captured_plan["yield_enhancement_cfg"]["enabled"] is True
-    assert captured_plan["yield_enhancement_cfg"]["objective"] == "premium_funded_long_call"
-    assert "output_mode" not in captured_plan["yield_enhancement_cfg"]
+    assert captured_plan["combo_yield_cfg"]["enabled"] is True
+    assert captured_plan["combo_yield_cfg"]["objective"] == "premium_funded_long_call"
+    assert "output_mode" not in captured_plan["combo_yield_cfg"]
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True
 
 
-def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_account_prefilter(
+def test_run_symbol_monitoring_keeps_combo_yield_market_put_scope_after_account_prefilter(
     monkeypatch,
     tmp_path: Path,
 ) -> None:

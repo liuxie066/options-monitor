@@ -1733,7 +1733,7 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
     assert len(called) == 1
 
 
-def test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cache_has_only_puts() -> None:
+def test_ensure_required_data_fetches_combo_yield_call_side_when_local_cache_has_only_puts() -> None:
     import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
