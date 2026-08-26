@@ -70,6 +70,7 @@ from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.cash_conversion_migration import (
     CashConversionBackfillResult,
     backfill_cash_conversions,
+    correct_superseded_cash_conversions,
 )
 from src.application.ledger.order_fee_migration import (
     ActualOrderFee,
@@ -276,6 +277,7 @@ __all__ = [
     "CashConversionBackfillResult",
     "ActualOrderFee",
     "backfill_cash_conversions",
+    "correct_superseded_cash_conversions",
     "enrich_order_fees",
     "is_unexecuted_expire_close",
     "broker_external_event_key",

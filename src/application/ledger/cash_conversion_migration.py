@@ -135,6 +135,55 @@ def backfill_cash_conversions(
     apply: bool = False,
     migrated_at_ms: int,
 ) -> CashConversionBackfillResult:
+    return _migrate_cash_conversions(
+        repo,
+        evidence_repo,
+        account=account,
+        broker=broker,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        apply=apply,
+        migrated_at_ms=migrated_at_ms,
+        replace_superseded=False,
+    )
+
+
+def correct_superseded_cash_conversions(
+    repo: Any,
+    evidence_repo: Any,
+    *,
+    account: str | None = None,
+    broker: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    apply: bool = False,
+    migrated_at_ms: int,
+) -> CashConversionBackfillResult:
+    return _migrate_cash_conversions(
+        repo,
+        evidence_repo,
+        account=account,
+        broker=broker,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        apply=apply,
+        migrated_at_ms=migrated_at_ms,
+        replace_superseded=True,
+    )
+
+
+def _migrate_cash_conversions(
+    repo: Any,
+    evidence_repo: Any,
+    *,
+    account: str | None,
+    broker: str | None,
+    start_ms: int | None,
+    end_ms: int | None,
+    apply: bool,
+    migrated_at_ms: int,
+    replace_superseded: bool,
+) -> CashConversionBackfillResult:
     evidence = evidence_repo.read_all()
     if evidence.schema_state != "initialized_v1":
         raise ValueError(
@@ -158,6 +207,7 @@ def backfill_cash_conversions(
             fx_rates=fx_rates,
             scope=scope,
             migrated_at_ms=int(migrated_at_ms),
+            replace_superseded=replace_superseded,
         )
         return _result_from_plan(
             plan,
@@ -178,14 +228,20 @@ def backfill_cash_conversions(
             fx_rates=fx_rates,
             scope=scope,
             migrated_at_ms=int(migrated_at_ms),
+            replace_superseded=replace_superseded,
             conn=conn,
         )
-        batch_id = _batch_id(plan, migrated_at_ms=int(migrated_at_ms))
+        batch_id = _batch_id(
+            plan,
+            migrated_at_ms=int(migrated_at_ms),
+            prefix="cashfxcorr" if replace_superseded else "cashfxmig",
+        )
         _apply_plan(
             conn,
             plan,
             batch_id=batch_id,
             migrated_at_ms=int(migrated_at_ms),
+            correction=replace_superseded,
         )
         return plan
 
@@ -205,6 +261,7 @@ def _build_plan(
     fx_rates: Sequence[FXRateFact],
     scope: Mapping[str, Any],
     migrated_at_ms: int,
+    replace_superseded: bool = False,
     conn: Any | None = None,
 ) -> _Plan:
     raw_trade_events = repo.list_trade_events(conn=conn)
@@ -256,6 +313,30 @@ def _build_plan(
             existing = conversions.get(fact.fact_kind)
             if _existing_conversion_is_observed(existing, fact=fact):
                 existing_observed += 1
+                if not replace_superseded:
+                    continue
+                conversion = _conversion_from_evidence(
+                    cash_fact_id=fact.fact_id,
+                    amount=fact.amount,
+                    currency=str(fact.currency or ""),
+                    effective_at_ms=fact.effective_at_ms,
+                    fx_rates=fx_rates,
+                    migrated_at_ms=int(migrated_at_ms),
+                )
+                if not _is_superseding_conversion(existing, conversion, fx_rates=fx_rates):
+                    continue
+                conversions[fact.fact_kind] = conversion
+                conversion_changes.append(
+                    CashConversionChange(
+                        event_kind="trade_event",
+                        event_id=event.event_id,
+                        cash_fact_id=fact.fact_id,
+                        previous_status="observed",
+                        conversion=conversion,
+                    )
+                )
+                continue
+            if replace_superseded:
                 continue
             if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
                 "",
@@ -350,8 +431,24 @@ def _build_plan(
         for fact_kind, conversion in candidates.items():
             cash_fact_id = str(conversion.get("cash_fact_id") or "")
             existing = existing_conversions.get(fact_kind)
-            if _existing_conversion_matches(existing, conversion):
+            if _existing_conversion_is_observed_for_candidate(existing, conversion):
                 existing_observed += 1
+                if not replace_superseded:
+                    continue
+                if not _is_superseding_conversion(existing, conversion, fx_rates=fx_rates):
+                    continue
+                updated_conversions[fact_kind] = conversion
+                conversion_changes.append(
+                    CashConversionChange(
+                        event_kind="assigned_stock_event",
+                        event_id=event_id,
+                        cash_fact_id=cash_fact_id,
+                        previous_status="observed",
+                        conversion=conversion,
+                    )
+                )
+                continue
+            if replace_superseded:
                 continue
             if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
                 "",
@@ -628,7 +725,10 @@ def _existing_conversion_is_observed(existing: Any, *, fact: Any) -> bool:
     return issue is None and amount_cny is not None
 
 
-def _existing_conversion_matches(existing: Any, candidate: Mapping[str, Any]) -> bool:
+def _existing_conversion_is_observed_for_candidate(
+    existing: Any,
+    candidate: Mapping[str, Any],
+) -> bool:
     if not isinstance(existing, Mapping):
         return False
     amount_cny, issue = validate_observed_cash_conversion(
@@ -638,12 +738,33 @@ def _existing_conversion_matches(existing: Any, candidate: Mapping[str, Any]) ->
         native_currency=str(candidate.get("native_currency") or ""),
         effective_at_ms=int(candidate.get("effective_at_ms") or 0),
     )
-    return (
-        issue is None
-        and amount_cny is not None
-        and str(existing.get("conversion_id") or "")
-        == str(candidate.get("conversion_id") or "")
-    )
+    return issue is None and amount_cny is not None
+
+
+def _is_superseding_conversion(
+    existing: Any,
+    candidate: Mapping[str, Any],
+    *,
+    fx_rates: Sequence[FXRateFact],
+) -> bool:
+    if not isinstance(existing, Mapping) or str(candidate.get("status") or "") != "observed":
+        return False
+    old_fact_id = str(existing.get("rate_evidence_fact_id") or "").strip()
+    new_fact_id = str(candidate.get("rate_evidence_fact_id") or "").strip()
+    if not old_fact_id or not new_fact_id or old_fact_id == new_fact_id:
+        return False
+    by_id = {str(item.fact_id): item for item in fx_rates}
+    cursor = by_id.get(new_fact_id)
+    seen: set[str] = set()
+    while cursor is not None and cursor.supersedes_fact_id:
+        target_id = str(cursor.supersedes_fact_id)
+        if target_id == old_fact_id:
+            return True
+        if target_id in seen:
+            return False
+        seen.add(target_id)
+        cursor = by_id.get(target_id)
+    return False
 
 
 def _conversion_status(value: Any) -> str:
@@ -666,7 +787,7 @@ def _unresolved(
     }
 
 
-def _batch_id(plan: _Plan, *, migrated_at_ms: int) -> str:
+def _batch_id(plan: _Plan, *, migrated_at_ms: int, prefix: str = "cashfxmig") -> str:
     identities = [
         (item.event_kind, item.event_id, item.cash_fact_id, item.conversion.get("conversion_id"))
         for item in plan.conversion_changes
@@ -674,7 +795,7 @@ def _batch_id(plan: _Plan, *, migrated_at_ms: int) -> str:
     digest = hashlib.sha256(
         json.dumps(identities, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
-    return f"cashfxmig_{int(migrated_at_ms)}_{digest}"
+    return f"{prefix}_{int(migrated_at_ms)}_{digest}"
 
 
 def _apply_plan(
@@ -683,10 +804,21 @@ def _apply_plan(
     *,
     batch_id: str,
     migrated_at_ms: int,
+    correction: bool = False,
 ) -> None:
+    audit_table = (
+        "cash_conversion_correction_audit"
+        if correction
+        else "cash_conversion_backfill_audit"
+    )
+    primary_key = (
+        "UNIQUE(event_kind, event_id, cash_fact_id, rate_evidence_fact_id)"
+        if correction
+        else "PRIMARY KEY(event_kind, event_id, cash_fact_id)"
+    )
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cash_conversion_backfill_audit(
+        f"""
+        CREATE TABLE IF NOT EXISTS {audit_table}(
           batch_id TEXT NOT NULL,
           event_kind TEXT NOT NULL,
           event_id TEXT NOT NULL,
@@ -697,7 +829,7 @@ def _apply_plan(
           new_event_sha256 TEXT NOT NULL,
           rate_evidence_fact_id TEXT,
           migrated_at_ms INTEGER NOT NULL,
-          PRIMARY KEY(event_kind, event_id, cash_fact_id)
+          {primary_key}
         )
         """
     )
@@ -745,8 +877,8 @@ def _apply_plan(
                 fact_kind = conversion_change.cash_fact_id.split(":", 1)[0]
                 previous = before_conversions.get(fact_kind)
             conn.execute(
-                """
-                INSERT INTO cash_conversion_backfill_audit(
+                f"""
+                INSERT INTO {audit_table}(
                   batch_id, event_kind, event_id, cash_fact_id,
                   previous_conversion_json, new_conversion_json,
                   previous_event_sha256, new_event_sha256,
@@ -797,4 +929,8 @@ def _result_from_plan(
     )
 
 
-__all__ = ["CashConversionBackfillResult", "backfill_cash_conversions"]
+__all__ = [
+    "CashConversionBackfillResult",
+    "backfill_cash_conversions",
+    "correct_superseded_cash_conversions",
+]

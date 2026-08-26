@@ -7,7 +7,10 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.cash_conversion import build_cash_conversion
-from src.application.ledger.cash_conversion_migration import backfill_cash_conversions
+from src.application.ledger.cash_conversion_migration import (
+    backfill_cash_conversions,
+    correct_superseded_cash_conversions,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.performance.service import build_option_period_performance
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
@@ -58,28 +61,41 @@ def _import_rate(
     *,
     effective_at_ms: int = RATE_MS,
     quality: dict | None = None,
+    rate: str = "7.2",
+    source: str = "pbc_central_parity",
+    source_id: str = "pbc:2026-07-03",
+    supersedes_fact_id: str | None = None,
 ) -> str:
+    rates = []
+    if supersedes_fact_id:
+        rates.extend(
+            item.normalized_payload()
+            for item in evidence_repo.read_all().fx_rates
+            if str(item.fact_id) == supersedes_fact_id
+        )
     payload = {
         "schema_version": "option_performance_evidence.v1",
         "valuation_marks": [],
         "fx_rates": [
+            *rates,
             {
                 "base_currency": "USD",
                 "quote_currency": "CNY",
-                "rate": "7.2",
+                "rate": rate,
                 "rate_kind": "central_parity",
                 "effective_at_ms": effective_at_ms,
                 "observed_at_ms": MIGRATION_MS,
-                "source": "pbc_central_parity",
-                "source_id": "pbc:2026-07-03",
+                "source": source,
+                "source_id": source_id,
                 "revision": 1,
+                "supersedes_fact_id": supersedes_fact_id,
                 "quality": quality or {"backfill": True},
                 "raw": {},
             }
         ],
     }
     result = evidence_repo.import_envelope(payload, apply=True, migrated_at_ms=MIGRATION_MS)
-    return str(result.envelope.fx_rates[0].fact_id)
+    return str(result.envelope.fx_rates[-1].fact_id)
 
 
 def _has_table(path: Path, name: str) -> bool:
@@ -356,3 +372,106 @@ def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
     assert replay.changed_event_count == 0
     assert replay.preview_conversion_count == 0
     assert replay.existing_observed_count == 2
+
+
+def test_correction_requires_explicit_superseding_evidence_and_is_auditable(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    repo.upsert_trade_event(_event("correct-trade"))
+    repo.upsert_assigned_stock_event(
+        {
+            "stock_event_id": "correct-sale",
+            "event_type": "sale",
+            "trade_time_ms": EVENT_MS,
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "shares": 100,
+            "price": 105,
+            "fees": 1,
+            "fee_provenance": {"basis": "actual", "source": "test"},
+        }
+    )
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    old_fact_id = _import_rate(evidence_repo)
+    backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS,
+    )
+    _import_rate(
+        evidence_repo,
+        rate="7.3",
+        source="official_close",
+        source_id="unrelated:2026-07-03",
+    )
+    preserved = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS + 1,
+    )
+
+    unrelated = correct_superseded_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS + 1,
+    )
+
+    assert preserved.migrated_conversion_count == 0
+    assert unrelated.preview_conversion_count == 0
+    corrected_fact_id = _import_rate(
+        evidence_repo,
+        rate="7.0",
+        source="manual_correction",
+        source_id="pbc-correction:2026-07-03",
+        supersedes_fact_id=old_fact_id,
+    )
+    preview = correct_superseded_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS + 2,
+    )
+    assert preview.preview_conversion_count == 4
+    assert not _has_table(db_path, "cash_conversion_correction_audit")
+
+    applied = correct_superseded_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS + 2,
+    )
+    repeated = correct_superseded_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS + 3,
+    )
+
+    assert applied.migrated_conversion_count == 4
+    assert repeated.preview_conversion_count == 0
+    trade_conversions = repo.list_trade_events()[0]["raw_payload"]["cash_conversions"]
+    stock_conversions = repo.list_assigned_stock_events()[0]["cash_conversions"]
+    assert trade_conversions["option_trade_cash_gross"]["amount_cny"] == "1400"
+    assert stock_conversions["assigned_stock_sale_cash_gross"]["amount_cny"] == "73500"
+    assert all(
+        conversion["rate_evidence_fact_id"] == corrected_fact_id
+        for conversions in (trade_conversions, stock_conversions)
+        for conversion in conversions.values()
+    )
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM cash_conversion_correction_audit"
+        ).fetchone()[0] == 4
