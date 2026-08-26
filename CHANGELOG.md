@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.0 - 2026-08-26
+
+### Breaking Changes
+- Removed the retired legacy configuration and Daily Brief delivery migration CLI surfaces; installations must already use YAML authoring and current delivery state before upgrading.
+- Removed active `yield_enhancement` naming and configuration aliases in favor of `combo_yield`, while preserving read-only interpretation of historical ledger and artifact data.
+
 ### Bug Fixes
 - Allowed a failed Copilot answer-admission turn to collect fresh read-only evidence before its single resubmission, so option-performance replies no longer fail by reusing stale observations.
 - Classified lifecycle-only option expiries as actual zero-fee events while keeping broker expiries with missing order identity explicitly incomplete until OpenD supplies authoritative fees.
@@ -17,7 +23,6 @@
 - Added production-bound HK/US Strategy Lab formal corpus capture with deterministic gzip, source-hash readback, corpus health diagnostics, and fail-closed 20-day research gating while preserving ordinary scan and notification outcomes.
 
 ### Improvements
-- Retired active `yield_enhancement` compatibility naming and configuration aliases in favor of `combo_yield`, while preserving read-only interpretation of historical ledger and artifact data.
 - Made persisted broker actual fees, including actual zero, the canonical executed-trade fee evidence for option cash-flow returns; controlled backfill freezes formula estimates only when actual fees are unavailable and preserves missing evidence as partial.
 - Tightened OpenD and Futu integration boundaries by moving provider adapters into their owning application and infrastructure modules and extending architecture regressions without changing public CLI behavior.
 
