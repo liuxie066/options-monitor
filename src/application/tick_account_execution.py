@@ -42,7 +42,6 @@ from src.application.prepared_option_positions_context import (
     load_prepared_option_positions_context_receipt,
     prepare_option_positions_contexts,
 )
-from src.application.recommendation_point import strategy_lab_top1_available
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
     merge_close_advice_requirements_into_prefetch_config,
@@ -623,8 +622,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                             str(market or "").strip().lower()
                             for market in request.markets_to_run
                         }
-                        == {"hk"}
-                        and strategy_lab_top1_available()
+                        in ({"hk"}, {"us"})
                     )
                     else ()
                 ),

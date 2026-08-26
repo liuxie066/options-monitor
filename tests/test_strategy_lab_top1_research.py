@@ -33,6 +33,7 @@ from src.application.strategy_lab.top1.contracts import (
     VALIDATION_FILL_CONTRACT_VERSION,
     VALIDATION_METRIC_CONTRACT_VERSION,
     VALIDATION_REQUIRED_DAYS,
+    build_current_behavior_binding,
     build_sell_put_top1_research_spec,
 )
 from src.application.strategy_lab.top1.corpus import (
@@ -54,7 +55,9 @@ from src.application.strategy_lab.top1.lifecycle import (
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_ARTIFACT_KIND,
     RANKING_PROJECTION_SCHEMA_V2,
+    RANKING_PROJECTION_SCHEMA_V3,
     build_ranking_projection,
+    recipe_projection_behavior_sha256,
 )
 from src.application.strategy_lab.top1.research import (
     INTERNAL_RESEARCH_QUOTA_DECISION_SCHEMA,
@@ -318,6 +321,7 @@ def _spec(
         topic_id="topic-concentration",
         experiment_id="experiment-w5-evaluator",
         market_calendar_version=manifest["market_calendar_version"],
+        ranking_projection_schema_version=RANKING_PROJECTION_SCHEMA_V2,
         research_source={
             "mode": "sealed_historical_dataset",
             "dataset_ref": "strategy_lab/top1/research-w5.json",
@@ -609,6 +613,108 @@ def test_selects_unique_leader_and_aggregates_two_points_by_day(
         "pnl_non_inferiority_passed",
         "hard_risk_passed",
     ]
+
+
+def test_compact_v3_recipe_projection_produces_same_research_result(
+    research_case: dict[str, Any],
+) -> None:
+    case = deepcopy(research_case)
+    points = {
+        point["projection_ref"]: point
+        for day in case["sealed_dataset"]["days"]
+        for point in day["points"]
+    }
+    for item in case["ranking_projections"]:
+        projection = item["projection"]
+        old_ref = item["projection_ref"]
+        point = points[old_ref]
+        formal_hash = canonical_sha256({"projection_ref": old_ref})
+        formal_ref = (
+            "output_shared/research/formal_corpus/v1/hk/lx/points/"
+            f"{point['recommendation_point_id']}/{formal_hash}.json.gz"
+        )
+        compact = {
+            "schema_version": RANKING_PROJECTION_SCHEMA_V3,
+            "formal_point_ref": formal_ref,
+            "formal_point_content_sha256": formal_hash,
+            "recipe_id": "sell_put_top1_option_market_concentration",
+            "recipe_version": "v1",
+            "behavior_binding_sha256": recipe_projection_behavior_sha256(),
+            "materialized_input_content_sha256": projection[
+                "artifact_provenance"
+            ]["content_sha256"],
+            "producer_accepted_candidate_ids": list(
+                projection["producer_accepted_candidate_ids"]
+            ),
+            "candidates": [
+                {
+                    key: deepcopy(candidate[key])
+                    for key in (
+                        "candidate_id",
+                        "option_market_concentration_after",
+                        "option_market_value_cny",
+                        "option_market_concentration_metric_version",
+                        "option_market_evidence_refs",
+                        "opening_fx_binding",
+                    )
+                }
+                for candidate in projection["candidates"]
+            ],
+        }
+        attach_artifact_provenance(
+            compact,
+            artifact_kind=RANKING_PROJECTION_ARTIFACT_KIND,
+            source_generation={
+                "generation_id": f"formal_point:{formal_hash}",
+                "revision": 1,
+                "source_ref": formal_ref,
+                "source_sha256": formal_hash,
+            },
+        )
+        point.update(
+            {
+                "projection_ref": formal_ref,
+                "projection_content_sha256": compact["artifact_provenance"][
+                    "content_sha256"
+                ],
+                "projection_file_sha256": _file_sha256(compact),
+            }
+        )
+        item.update(
+            {
+                "projection_ref": formal_ref,
+                "recipe_projection": compact,
+            }
+        )
+    case["sealed_dataset"][
+        "ranking_projection_schema_version"
+    ] = RANKING_PROJECTION_SCHEMA_V3
+    _refresh_case(case)
+    spec = case["experiment_spec"]
+    spec["baseline"][
+        "ranking_projection_schema_version"
+    ] = RANKING_PROJECTION_SCHEMA_V3
+    spec["baseline"]["behavior_binding_sha256"] = build_current_behavior_binding(spec)
+
+    result = evaluate_research(case, _receipts(), _fee_contract())
+
+    assert result["selection"] == "research_leader"
+    assert result["leader_variant_id"] == "concentration-0.002"
+    assert result["effective_days"] == RESEARCH_REQUIRED_DAYS
+
+    projection = case["ranking_projections"][0]["projection"]
+    source_generation = deepcopy(
+        projection.pop("artifact_provenance")["source_generation"]
+    )
+    projection["candidates"][0]["sell_limit"] += 0.01
+    attach_artifact_provenance(
+        projection,
+        artifact_kind=RANKING_PROJECTION_ARTIFACT_KIND,
+        source_generation=source_generation,
+    )
+    with pytest.raises(ResearchEvaluationError) as exc_info:
+        evaluate_research(case, _receipts(), _fee_contract())
+    assert exc_info.value.reason_code == "research_corpus_conflict"
 
 
 def test_same_or_empty_top1_needs_no_close_or_fee_plan(

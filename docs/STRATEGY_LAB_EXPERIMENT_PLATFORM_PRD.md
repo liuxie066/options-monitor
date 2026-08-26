@@ -1,7 +1,7 @@
 # Strategy Lab 统一策略实验平台 PRD
 
-- **状态**：已确认；MVP 代码已实现，真实价值验收进行中
-- **日期**：2026-08-25
+- **状态**：已确认；实验内核已实现，正式实验事实底座补齐中
+- **日期**：2026-08-26
 - **产品范围**：Agent 可接入、基于历史证据和未来隐藏验证的策略实验工作流
 - **首个实验配方**：Sell Put Top1 推荐优化（HK / lx）
 - **后续策略**：Covered Call、Combo Yield
@@ -9,7 +9,8 @@
 
 本文是统一实验平台的产品权威。当前运行状态见 `docs/STRATEGY_LAB_DESIGN.md`，已落地技术合同见
 `docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md`。本 PRD 描述产品范围和验收门槛，不用来
-判断某个运行环境已经积累了多少正式数据；动态状态以 readiness 和不可变回执为准。
+判断某个运行环境已经积累了多少正式数据；
+动态状态以 readiness 和不可变回执为准。
 
 ## 1. 产品摘要
 
@@ -22,8 +23,10 @@
   能力缺失、数据阻塞和功能停用必须明确区分，不生成代码或降低证据标准绕过。
 - **验证流程**：先运行过去 20 个交易日研究；只有产生可信 `research_leader`，并经用户再次
   确认，才进入未来 10 个正式推荐日隐藏验证。
-- **数据连续性**：线上每个正式推荐点都保存当前已注册 recipe 所需的紧凑事实；实施时优先迁移
-  已有归档中的可验证历史事实，不能迁移的缺口明确阻断对应交易日，不用当前行情补造。
+- **数据连续性**：HK / US 每个正式推荐点都在同一 canonical scheduled run 内保存两类互补事实：
+  一次生产候选扫描，以及一次共享的账户持仓行情快照；首期覆盖 `lx`。两类事实还必须通过
+  300 秒的时间一致性合同，同一 run 本身不等于同一时点。所有 recipe 复用该快照，不单独请求行情；
+  重试必须复用已封存事实。不能验证的历史缺口明确阻断对应交易日，不用当前行情补造。
 - **采用边界**：challenger 通过后生成与证据绑定的 Strategy Adoption Proposal；配置、发布、
   部署和启用分别授权，上线后继续观察实际收益和安全指标。
 - **产品形态与交付**：MVP 复用现有 Codex 项目控制和受控本地入口，不开发 Agent 接入；先用
@@ -45,8 +48,11 @@ PRD 立项时的主要缺口是：
 5. 实验结论尚未稳定衔接配置采用、受控上线和实际收益观察，无法完整回答优化是否在线上有效。
 
 当前主线已经补齐 Top1 的两次确认、20 日研究、10 日隐藏验证、评价和终态回执代码，并删除账户级
-实验 feature gate。尚未完成的是连续正式事实、真实 Research / Final Receipt 和价值证明；MCP、Skill、
-跨机 Agent 与飞书仍在 MVP 外。不要继续从上述立项缺口推断当前代码状态。
+实验 feature gate。现有 Top1 corpus 只保存 HK / `lx` accepted candidates，足以支持当前 Top1 排序
+case，但不是可支持后续筛选实验的通用事实底座；完整候选快照仍主要位于短期 `output_runs`。尚未
+完成的是把 HK / US 正式点的完整候选决策集合持久化到既有 Research Archive、形成可查询的每日健康
+回执、积累连续正式事实，以及生成真实 Research / Final Receipt。MCP、Skill、跨机 Agent 与飞书仍在
+MVP 外。不要继续从上述立项缺口推断当前代码状态。
 
 本 PRD 不重写既有研究和策略内核，而是在它们之上建立一个权威 Strategy Lab Workspace，
 完成“Agent 构造假设—平台验证—采用建议—受控上线—结果观察”的统一闭环。产品统一过程中，
@@ -173,17 +179,20 @@ Strategy Lab 的核心用户只有一类：实验决策者。MVP 不建设多角
    已声明能力和安全边界内的方案。
 2. 复用 OM 的权威事实、Canonical Candidate Engine 和确定性回放能力，完成可复现的历史研究
    与未来隐藏验证，并生成可审计回执。
-3. 将通过验证的结果转换为包含证据、风险、回滚和观察要求的 Strategy Adoption Proposal，
+3. 在不重复生产扫描的前提下，持续保存 HK / US 正式推荐点中可复算的候选决策事实，使新假设
+   能先基于已积累事实判断是否可执行，而不是每次升级后重新等待数据。
+4. 将通过验证的结果转换为包含证据、风险、回滚和观察要求的 Strategy Adoption Proposal，
    交给 OM 既有受控流程另行决定是否采用。
-4. 以 Workspace 作为唯一实验合同和状态权威，使当前本地入口与未来 Agent 接入共享同一套
+5. 以 Workspace 作为唯一实验合同和状态权威，使当前本地入口与未来 Agent 接入共享同一套
    能力判断、状态和结论。
-5. 在统一流程完成替代后，删除或合并重复入口、状态、存储、调度和兼容代码，降低维护成本。
+6. 在统一流程完成替代后，删除或合并重复入口、状态、存储、调度和兼容代码，降低维护成本。
 
 ### 5.1 MVP 目标
 
-MVP 不开发新的 Agent 接入，复用当前 Codex 项目控制和受控本地入口，以 Sell Put Top1 种子
-recipe 完成一次完整实验验证：在最近 20 个有效交易日上产生可信 `research_leader`，经用户再次
-确认后完成未来 10 个正式推荐日隐藏验证，并生成最终回执。
+MVP 不开发新的 Agent 接入，复用当前 Codex 项目控制和受控本地入口。先补齐 HK / US、`lx` 的
+正式实验事实积累和每日健康回执；实验执行仍只使用 Sell Put Top1 种子 recipe，在 HK / `lx` 最近
+20 个有效交易日上产生可信 `research_leader`，经用户再次确认后完成未来 10 个正式推荐日隐藏
+验证，并生成最终回执。
 
 没有可信 `research_leader` 时，本轮应正确停止，但不能据此认定产品价值已经成立，也不进入
 Agent 接口产品化。
@@ -197,7 +206,7 @@ Agent 接口产品化。
 ### 6.1 MVP 不包含
 
 - 新的本地 Agent 接入、专用 Skill、MCP、跨机认证、飞书入口或多 Agent 适配；
-- 多实验并行、共享事实优化，或 Top1 之外 recipe 的产品化；
+- 多实验并行、跨实验投影缓存优化，或 Top1 之外 recipe 的产品化；
 - 多用户、角色账号、RBAC 或用户和账户级实验室开关；
 - 根据实验结果修改生产配置或策略源码，以及后续发布、部署、启用和上线收益观察。
 
@@ -210,6 +219,7 @@ Agent 接口产品化。
 - 让 LLM 代替确定性指标计算、安全判断或实验结论；
 - 执行任意 Python、SQL、表达式或动态代码；
 - 用 OpenD 等数据源事后补造当时不存在的 option chain、精确 Bid/Ask 或账户状态；
+- 为了支持未知的未来假设而保存完整 provider raw payload、全部 option chain 或无限期行情时序；
 - 建设第二套 Candidate Engine，或为不同入口复制实验状态机和业务判断；
 - 把实验通过直接等同于线上收益已经提高，或因 challenger 收益更高而放宽硬风控；
 - 以简化代码为名重写既有研究或策略内核，或在替代流程可用前删除兼容入口。
@@ -748,52 +758,188 @@ MVP 不把现有本地入口包装成新的 Agent 产品。
 
 ## 15. 数据与存储要求
 
-### 15.1 最小存储
+Research Archive 是正式实验事实的长期 owner；Top1 corpus 只是首个 recipe 的派生索引和投影，
+`output_runs` 是短期运行产物。不得让实验可用性依赖 `output_runs` 的保留周期，也不新建第二套
+扫描、事实平台或对象存储。
 
-MVP 只持久化完成实验、恢复状态和审计结论所需的内容：
+### 15.1 实验数据获取、保存与使用流程
 
-- 冻结的 Experiment Spec、行为版本及确认引用；
-- 20 日窗口、10 日验证计划、来源引用和内容 hash；
-- challenger 定义、生命周期状态和必要进度；
-- Research Receipt、Final Receipt，以及通过时的 Strategy Adoption Proposal；
-- 证明上述回执所需的最小审计记录。
+```mermaid
+flowchart LR
+    subgraph G["1. 获取：正式 run 内共享取证"]
+        S["Scheduler 正式推荐点<br/>HK / US · lx"] --> T["候选 production scan<br/>每个 run 唯一一次"]
+        S --> A["共享账户持仓行情快照<br/>positions / exact marks / FX<br/>每个 run / account 一次"]
+        T --> LIVE["普通扫描与通知<br/>沿用原成功标准"]
+        T --> O["output_runs 封存来源<br/>opening snapshot<br/>accepted + rejected decisions"]
+    end
 
-每个正式推荐点只增加当前已注册 recipe 可执行所需的紧凑事实：
+    subgraph P["2. 校验与保存"]
+        O --> B["按 point / run / account / config / policy / hash 绑定"]
+        A --> B
+        B --> C{"事实合同完整且无冲突?"}
+        C -- "否" --> GAP["point gap / conflict<br/>明确 reason"]
+        C -- "是" --> RA["Research Archive<br/>透明压缩的长期基础事实"]
+        RA --> H["Corpus Health Receipt<br/>market / account / trading day"]
+        GAP --> H
+        RA --> TP["Top1 corpus<br/>recipe 投影与索引"]
+        O -. "归档 readback + hash 校验后" .-> CLEAN["原 owner 按策略清理<br/>短期重复副本"]
+        A -.-> CLEAN
+    end
 
-- 推荐点身份、run / account / config / policy 绑定和来源 hash；
-- producer accepted candidates 的合约身份、Bid / Ask、盘口量、Last、`sell_limit`、IV、Greeks、
-  Open Interest、成交量、标的价格、报价时间和数据状态；
-- 同账户全部未平仓期权的合约与数量，以及该时点选中的 `ValuationMarkFact`；
-- 计算所需的 `FXRateFact` 引用和来源 hash；
-- producer 已作出的选择、排序和价格决定。
+    subgraph U["3. 使用：只读确定性实验"]
+        RA --> R["Capability / readiness<br/>判断当前能验证什么"]
+        H --> R
+        R -- "连续 20 日完整" --> R20["20 日历史研究<br/>baseline 与 challengers 共用事实"]
+        R -- "缺失或超出能力" --> STOP["blocked / unsupported<br/>返回明确缺口"]
+        TP --> R20
+        R20 --> SELECT["只为实际选中合约<br/>应用 t0_assumed_fill 并读取 outcome"]
+        SELECT --> RR["Research Receipt"]
+        RR -- "有 leader + 第二次确认" --> V10["未来 10 个正式推荐日<br/>读取新点事实并保存选中 arm 报价序列"]
+        RA --> V10
+        V10 --> VF["ExperimentStore<br/>选中 arm 的 Bid / Ask observations"]
+        VF --> OUT["现有 outcome owner<br/>补充选中合约终态"]
+        OUT --> FR["Final Receipt"]
+    end
+```
 
-字段是否为 blocker 由冻结的 recipe capability 声明：当前 recipe 必需字段缺失时该 point 不可评价；
-已注册但当前 recipe 未使用的可选字段缺失时显式记为 unavailable，不阻断本次研究。不得为了让旧
-数据通过而把必需字段改成可选。
+实线表示权威事实和实验消费链。虚线只表示短期来源完成 durable readback 后可以由原 owner 清理，
+不是从 `output_runs` 反向重建长期事实。Top1 corpus 可重建，不拥有基础候选事实；point 缺失或冲突
+只阻断对应实验能力，不改变普通扫描与通知结果。候选扫描回答“当时可以选择什么”，账户持仓行情
+快照回答“当时账户持有什么、值多少”；二者属于同一个 canonical run，但不是同一次 provider 查询。
+
+### 15.2 数据模块目标与边界
+
+以下是逻辑数据模块，不要求一一对应新的代码目录、进程、表或服务。系统设计必须把每项责任映射
+到一个现有或明确新增的 owner；同一事实不得由两个模块分别计算、修补或持久化。
+
+| 数据模块 | 核心目标 | 成功信号 | 不负责 |
+|---|---|---|---|
+| 1. 正式点定义与生产扫描 | 由市场日历和 scheduler 在扫描前确定应出现的 market / account / point，并在该点执行唯一一次候选 production scan | expectation 在首个预期点前封存；每个 point 只绑定一个 canonical run，竞争内容进入 conflict；普通扫描与通知按原合同完成 | 不为实验二次扫描 option chain，不判断实验是否 ready |
+| 2. 运行事实封存 | 在同一 run 保存不可事后重建的 opening candidate snapshot，并为同账户全部未平仓期权采集一次共享行情快照和 FX | accepted + rejected、positions、exact marks 和 FX 均可按 run / account / hash 验证；重试复用已封存快照，每个 recipe 不再请求 provider | `output_runs` 不承担长期保留、实验状态或评价结论；候选扫描不负责覆盖持仓合约 |
+| 3. 正式点绑定与校验 | 把候选快照和账户事实绑定成一个可审计的正式推荐点，校验身份、来源、时间跨度、完整性和冲突 | 每次处理确定地产生 ready point、gap 或 conflict；候选与 mark 的全体观察时点跨度不超过 300 秒；重复输入幂等 | 不读取当前事实修补旧点，不选择一个冲突版本继续 |
+| 4. Research Archive | 长期保存经校验的紧凑基础事实，使其跨 Release、升级和 `output_runs` 清理仍可使用 | 透明压缩可直接读取；canonical hash、readback 和保留保护通过；归档点可独立重建 | 不保存实验生命周期，不执行 recipe 投影或评价，不复制 provider raw 大对象 |
+| 5. Corpus Health Receipt | 对比 scheduler expectation 与 Research Archive，回答每个市场、账户和交易日是否正在健康积累 | 能报告 expected / captured / missing / conflict / not-evaluable、freshness、连续完整日和保留风险；完全未采集也可识别 | 不创建或修复事实，不把部分可用合并成整体健康，不替代 recipe readiness |
+| 6. Recipe Projection | 从基础事实生成某个版本化 recipe 所需的确定性输入；Top1 corpus 是首个实例 | 相同 archive refs 和行为版本重建相同投影；投影可删除重建且不影响基础事实 | 不复制基础候选事实，不扩大 snapshot 范围，不让 rejected 硬风控候选重新进入 |
+| 7. Capability / Readiness | 结合 recipe、指标、评价合同、projection 和健康回执，判断某个假设当前能否执行 | 相同输入返回相同的 `available` / `blocked` / `unsupported` / `disabled` 及精确 reason | 不写 archive、不回填缺口、不生成代码或降低证据标准 |
+| 8. ExperimentStore 与验证观察 | 保存已确认实验的冻结引用、生命周期、future commitment，以及隐藏验证中选中 arms 的 Bid / Ask observations | Agent 断开或服务升级后可恢复；重复推进幂等；观察与确认对象、point 和时间窗口完整绑定 | 不成为市场基础事实 owner，不保存全部候选报价时序，不修改生产状态 |
+| 9. Outcome 与确定性评价 | 只为实验实际选中合约取得或读取终态事实，结合冻结经济和评价合同生成 Research / Final Receipt | 相同冻结输入产生相同回执；未成熟、缺失或冲突 outcome 明确等待或证据不足 | 不为全部候选预抓 outcome，不动态生成公式，不自动采用胜者 |
+
+模块 1 至 4 形成基础事实链；模块 5 和 6 从 Research Archive 分别生成健康视图与 recipe 投影，
+模块 7 至 9 只消费这些只读结果。下游模块可以保存来源 ref、hash 和必要派生结果，但不能反向
+改写上游事实；发现上游缺口时只返回稳定 gap reason。模块 3 至 9 的实验处理失败不得把已经完成的
+普通扫描或通知改成失败，也不得触发持仓、交易或 broker 补偿写入。
+
+### 15.3 正式实验事实积累
+
+1. 首期对 HK / US、`lx` 的正式生产扫描积累事实；这不代表 US recipe 已可执行，首个实验仍只在
+   HK / `lx` 运行。其他账户出现明确实验需求后再纳入正式覆盖。
+2. 采集粒度是 scheduler 定义的每一个正式推荐点，不是每天一份快照。完整交易日必须覆盖当天
+   全部预期点；半日市按市场日历和 scheduler 合同计算预期点。expectation 必须先按
+   market / account / trading date 取得单主机互斥锁，再在同一临界区枚举、校验、
+   采用或创建、发布并 readback artifact。只有一份有效 artifact，且由 calendar、
+   schedule 和 targets 组成的 denominator 不变时，才原样复用首份 artifact 及其 hash；只有
+   denominator 变化才记录 conflict。
+   `sealed_at_utc` 和 `sealed_before_first_target` 以首次封存为准，后续 timer 调用不得生成新版本、
+   覆盖首次时间或把迟到修复为正常。
+3. 每个点复用该次 run 已封存的 opening candidate snapshot 和 manifest；同一 run / account 只接受
+   一份全部未平仓期权的共享持仓行情快照。已有完整 ready / unavailable artifact 或已写 payload 的重试必须先校验并
+   复用该快照，不得以同一 run identity 重新请求 mark 或 FX。只有两个 durable artifact 都不存在时才能首次
+   采集。不得再次扫描 option chain，不得按 recipe 重复请求 provider，也不得使用稍后的行情或
+   repository 旧 mark 替换本次事实。
+4. ready point 必须通过 `formal_point_time_coherence.v1`：将 required-data 每个 ready symbol 的
+   `source_observed_at`、每条候选决策的 `snapshot_received_at_utc`，以及本次持仓 mark 的
+   `effective_at_ms` / `observed_at_ms` 纳入同一时间范围。全体最晚与最早时点相差不得超过既有
+   opening quote freshness 合同的 300 秒；缺时间或超界都写 not-evaluable，不因同属一个 run 而放行。
+5. 同一推荐点写入必须幂等。相同身份和内容重复到达时复用既有事实；内容或来源 hash 不一致时
+   标记 conflict，不覆盖先前版本，也不选择一个版本继续研究。写入前必须先按 point identity
+   取得单主机互斥锁，并在持锁期间完成枚举、校验、采用或创建、发布和 readback。
+   三个 owner 的不可变 source binding 相同时原样复用首份 artifact、hash 和
+   首次归档时间。重试的处理时间不得单独产生新 hash；只有 source binding 或确定性内容变化
+   才能形成第二个版本并进入 conflict。
+6. 事实归档失败只使对应市场、账户和推荐点不可用于实验；普通扫描、通知、持仓和交易流程继续
+   使用原有成功标准。
+
+### 15.4 最小事实合同
+
+每个正式推荐点保存以下紧凑、可复算事实：
+
+- 推荐点、交易日和预期点身份，以及 market、account、run、config、calendar、scheduler、policy、
+  producer 行为版本、来源 artifact 与内容 hash；
+- Canonical Candidate Engine 在该点产出的完整候选决策集合，包括 accepted 和 rejected rows；每行
+  保留真实合约身份、option type、expiry、strike、multiplier、currency、Bid / Ask 及盘口量、Last、
+  quote time、IV、Delta 等已有 Greeks、Open Interest、成交量、标的价格、数据状态、决策阶段、
+  reason codes、accepted / rank / `sell_limit` 结果，以及重放已声明筛选或排序规则所需的其他现有
+  规范化输入；
+- 同账户全部未平仓期权的合约与数量，以及本次 run 共享采集返回并按 exact instrument identity 选中的
+  `ValuationMarkFact`；每条 mark 必须绑定本次采集的 fact ID、`effective_at_ms`、`observed_at_ms`、
+  来源和内容 hash，不能只因
+  repository 中存在较早事实就判为 ready；
+- `formal_point_time_coherence.v1`、参与校验的最早 / 最晚时点、`skew_ms = max - min`
+  和固定上限 300000 ms；
+- 计算所需的 `FXRateFact` 引用、事实时点、来源和 hash；
+- producer 已作出的选择、排序、价格决定及其行为版本。
+
+完整候选决策集合不等于允许 challenger 选择所有 rejected rows。recipe 必须声明哪些筛选变量允许
+变化；现有硬风控拒绝、候选生成范围和未进入 snapshot 的合约始终不可被实验重新纳入。请求超出已
+归档候选集合、现有字段或允许变化范围时返回 `unsupported`，不能由 Agent 猜测或补全。
+
+每个候选在推荐点保存一次 Bid / Ask，足以支持当前 20 日研究的 `t0_assumed_fill`，但不能冒充
+日内报价时序。10 日隐藏验证只对当时实际选出的 baseline 和 challenger 合约，按 Experiment Spec
+冻结的观察窗口和频率保存连续 Bid / Ask observation；缺少任一预期 observation 时，对应 arm 不可
+评价。到期结果只为实验实际选中的合约通过现有 outcome owner 补充，不预先为全部候选抓取结果。
 
 DTE、Mid、spread、年化收益率、期权市场集中度等可由上述事实确定性重算的值不重复保存；需要
-保留的派生结果必须有版本化指标合同。完整 opening candidate snapshot、option chain、provider raw
-payload 和整个 performance evidence history 继续由原 owner 按既有保留策略管理，不复制到长期
-Strategy Lab corpus。MVP 直接读取紧凑 JSON，不为这些小型逐点事实增加压缩包、解压流程、新表或
-新对象存储；只有实际冷数据增长超过保留预算时，才另行设计归档压缩。
+保留的派生结果必须绑定版本化指标合同。归档保存规范化字段，不复制完整 option chain、provider raw
+payload、日志或整个 performance evidence history。
 
-### 15.2 来源与缺失事实
+### 15.5 存储、压缩与保留
+
+- 正式点事实写入既有 Research Archive，并以 canonical 内容 hash 和来源引用校验；Top1 corpus
+  只保存 recipe 投影、点状态和索引，不复制基础候选事实。
+- 允许使用标准透明压缩降低磁盘占用；受控入口、研究和校验器必须能够直接读写，不要求操作员
+  手工解压，也不能因压缩改变 canonical 内容 hash 或审计结果。
+- 每个点的最早可清理时间取以下较晚者：该点离开最近 20 个完整交易日窗口的时间，或该点捕获
+  时间加当前支持 recipe 的最大 DTE 和版本化 outcome SLA；被未完成实验、Research Receipt 或
+  Final Receipt 引用的事实不得清理。
+- Release、远端升级、普通 `output_runs` 清理和 recipe 投影重建不得删除基础事实。只有完成归档
+  readback 和 hash 校验后，原 owner 才能按既有策略清理重复的短期大对象。
+- 不为 MVP 增加自定义压缩协议、冷数据服务、新数据库或新对象存储；实际容量或读取性能超出
+  单机 Research Archive 边界后再设计升级。
+
+### 15.6 积累健康回执
+
+平台必须提供按 market / account 查询的 `Corpus Health Receipt`，不需要先创建实验。每个正式点
+完成后更新当前交易日状态，最后一个预期点结束后形成当日不可变结果；即使某次采集完全未运行，
+查询也必须根据 scheduler expectation 显示缺失，不能因没有写出 receipt 而显示健康。
+
+回执至少包含：
+
+- market、account、trading date、calendar / scheduler 版本和生成时间；
+- expected、captured、missing、conflict、not-evaluable point 数及逐点 reason；
+- 最新成功点、最新来源观察时间、数据 freshness 和每点时间跨度；
+- 当前连续完整交易日数、最早和最新完整日期；
+- Research Archive 占用、可用磁盘、最早保留日期和保留期风险；
+- 基础候选事实、本次 run 的共享账户持仓行情快照、FX，以及当前实验已经声明为必需的 fill
+  observation 和 outcome 各自的 readiness；尚无实验要求的后两项显示 `not_required`，不把部分
+  可用合并成整体健康。
+
+readiness 只有在所需连续窗口全部完整、无 conflict、时间跨度通过、来源 hash 可验证且保留期安全时才能允许研究。
+连续天数不足但已捕获事实完整时显示正在积累；缺点、冲突、不可评价、归档写入失败或保留期风险
+必须明确阻断对应能力。飞书提醒不属于 MVP，操作员先通过现有受控入口读取该回执。
+
+### 15.7 来源、迁移与回执保留
 
 每个补充事实必须记录来源、观察时间、适用账户或对象和内容 hash。OpenD 或其他 provider 只能
 补充当前能够验证的事实，不能补造当时的推荐点、账户状态、通知或交易。缺失和冲突必须写入
 状态及回执，不能解释为零效果。
 
-历史迁移必须先提供零写入 preview，并保留原始 artifact。preview 只能把旧归档中已经存在且可校验的
-scheduler decision、candidate snapshot、持仓、mark、FX 和 outcome 标为 `ready`；不得用开仓权利金、
-当天最后一次报价、当前持仓或当前 FX 替代缺失的事实时点证据。只有 `ready > 0` 时才建设并执行显式、
-幂等的 apply；`ready = 0` 时以 preview 和稳定 gap 原因完成审计，不增加空写入流程。只有缺少当前
-recipe 必需事实时，对应交易日才不得计入该 recipe 的正式样本。
-
-### 15.3 状态与回执保留
+现有旧运行已经确认缺少等价事实，不建设历史 migration apply。不得从旧 `output_runs`、当前账本、
+repository 旧 mark、当天最后报价、开仓权利金、Shadow Replay 或当前 FX 拼出历史正式点；正式窗口
+从新 writer 启用后的可验证推荐点重新积累。旧 artifact 保持原样，只作为历史诊断材料。
 
 实验状态和回执保存在平台一侧，不依赖 Codex 会话或客户端缓存。删除账户级实验功能管理代码、
-停用 recipe 或清理临时 artifact 时，已有 Experiment Spec、Research Receipt 和 Final Receipt
-仍须保持可读；临时缓存和重复投影可以按维护策略清理。
+停用 recipe 或清理临时 artifact 时，已有 Experiment Spec、Corpus Health Receipt、Research Receipt
+和 Final Receipt 仍须保持可读；临时缓存和重复投影可以按维护策略清理。
 
 ## 16. 确认与安全边界
 
@@ -819,10 +965,12 @@ Strategy Lab 永远不得写生产策略配置、交易、持仓、broker state 
 - 复用当前 Codex 项目控制和现有受控本地入口，不开发 Agent 接入；
 - 使用 HK / lx / Sell Put Top1，冻结明确的 baseline、challenger、评价规则和安全边界；
 - 实现第 11 节通用 Top1 评价合同，只比较年化收益率变化和收益金额变化；
-- 将现有行情证据采集接入全部正式推荐点，保存 15.1 定义的紧凑事实；普通扫描和通知在实验
+- 复用 HK / US、`lx` 的现有正式生产扫描，在每个 scheduler 推荐点向 Research Archive 保存
+  15.4 定义的完整候选决策集合；同一 run / account 额外执行一次共享持仓行情采集，所有 recipe
+  复用，不增加第二次 option chain 扫描或按实验重复的 provider 请求；
+- 提供 15.6 定义的按市场、账户和交易日查询的 Corpus Health Receipt；普通扫描和通知在实验
   取证失败时继续运行；
-- 对已有归档执行一次零写入历史迁移审计，输出逐点 ready / conflict / gap 清单；只有存在 ready 点时
-  才增加并执行幂等 apply；
+- 不建设历史 migration apply，从新 writer 启用后的正式点重新积累；
 - 对真实来源完成最近 20 个有效交易日研究，不伪造或替换缺日；
 - 没有可信 `research_leader` 时生成 Research Receipt 并停止；
 - 有可信 leader 时，经第二次确认完成未来 10 个正式推荐日隐藏验证；
@@ -880,7 +1028,8 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 
 - MCP Server、本地 Agent 适配、跨机认证、专用 Skill、Claude 适配或飞书；
 - GitHub Issue 自动创建、多个实验并行或共享事实平台；
-- 新增策略族、账户、市场或通用自定义实验代码；
+- 新增策略族、账户或通用自定义实验代码，以及在 US 执行 recipe；US / `lx` 只提前积累正式
+  实验事实；
 - 自动调整排序、修改配置、开始下一轮实验或实时暴露隐藏效果；
 - 投资组合收益、仓位分配、回撤、风险调整收益或其他新增评价维度；
 - 配置采用、源码交付、发布、部署、生产启用和上线观察。
@@ -891,7 +1040,8 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 
 1. 完成 20 日研究、10 日隐藏验证和 Final Receipt，证明闭环有价值后，再讨论 MCP 和参考 Skill；
 2. 有新的可执行假设时，再增加对应 recipe、事实合同和安全不变量；
-3. 确认存在真实并行实验和重复存储后，再建设共享事实或并行调度能力；
+3. 确认存在真实并行实验和重复计算后，再优化 recipe 投影、outcome 复用或并行调度；基础事实
+   仍由同一个 Research Archive 提供；
 4. 出现稳定的跨设备或沟通需求后，再选择远程连接、飞书或其他适配面。
 
 下游配置采用和线上观察始终使用 OM 既有流程，不因 Strategy Lab 扩展而成为其产品模块。
@@ -899,8 +1049,9 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 ## 19. 现有实现的收敛与简化要求
 
 代码简化是 MVP 的伴随目标，但不做与闭环无关的通用重构。MVP 应复用现有 Top1 生命周期、
-存储、Research Archive、Shadow Replay 和 Candidate Engine，不再增加平行入口、状态库、corpus
-或调度器。
+ExperimentStore、Research Archive、Shadow Replay 和 Candidate Engine，不再增加平行入口、状态库、
+基础事实 corpus 或调度器。Top1 corpus 收敛为 Research Archive 之上的 recipe 投影，不承担通用
+事实保存责任。
 
 ### 19.1 当前实现与剩余验收
 
@@ -911,15 +1062,17 @@ annualized_return = economic_pnl_cny / return_capital_basis_cny / holding_calend
 | 操作入口 | `top1-loop` 已提供 readiness、历史 preview、研究 preview/start、验证 preview/start、status、receipt 和 scheduled advance | 由操作员按两次确认流程完成真实验收；不新增 Agent、MCP 或第二套业务 API |
 | 实验范围 | HK / `lx` / Sell Put Top1 是 formal MVP recipe；通用 `strategy-lab` 命令仅保留为本地探索入口 | 不扩展旧通用入口；只有真实第二个 recipe 出现时再提炼共享原语 |
 | 20 / 10 日内核 | 冻结 spec、研究授权、leader、未来 commitment、fill、outcome、评价和 Final Receipt 均已实现并有测试 | 先积累连续 20 个完整交易日；真实研究有可信 leader 后，才能确认并等待未来 10 日验证 |
-| 正式点事实 | recommendation point v2、prepared option evidence、真实合约行情、持仓 mark 和 FX 已接入 existing owner | 运行环境必须持续证明每日 expectation 完整；缺日不能用历史或当前值补造 |
-| 历史迁移 | corpus owner 只提供零写入 preview；不能通过当前 validator 的旧点明确记为 gap | `ready = 0` 时不实现 apply；以后首次出现真实 ready 点再评审最小幂等 apply |
-| 存储 | ExperimentStore、Top1 corpus 和现有 performance-evidence repository 分别保存状态、索引和事实；未增加第二套 FX / corpus 存储 | 继续守住引用与 hash 边界，不复制 provider 大对象 |
+| 正式点事实 | 当前 Top1 projection 只保存 HK / `lx` accepted candidates；HK 已在正式 run 采集当前持仓 mark，US prepared evidence 会复用 repository 旧 mark；完整 candidate snapshot 主要位于短期 `output_runs` | 复用 candidate snapshot；HK / US 每个正式 run 为 `lx` 采集一次共享账户持仓行情，并将 accepted + rejected、exact marks 和 FX 持久化到 Research Archive；不重扫 option chain、不按 recipe 请求行情、不补造 |
+| 历史事实 | 已确认旧运行缺少等价的完整候选、同 run 持仓 mark 和来源绑定 | 不建设 migration apply，不补造旧点；从 formal writer 启用后重新积累 |
+| 存储 | ExperimentStore 保存生命周期，performance-evidence repository 保存 mark / FX，Top1 corpus 保存 recipe 投影；`output_runs` 不能作为长期事实合同 | Research Archive 成为基础候选事实 owner；增加透明压缩、保留保护和 readback 校验，但不新增 store |
+| 积累健康 | Top1 readiness 能展示当前 HK / `lx` corpus 缺口，但没有覆盖 HK / US 基础事实的统一每日回执 | 按 15.6 输出可独立查询的 Corpus Health Receipt，区分正在积累、缺失、冲突、不可评价和保留风险 |
 | 账户功能开关 | `strategy_lab_features`、`user_opt_in`、feature command 和相关 blocker 已删除；只保留维护方安全停机 | 无 |
 | 评价逻辑 | 真实合约、期权市场集中度、0.2% / 0.4% / 0.6% 容差带、CNY 收益金额和年化收益率评价已由确定性 owner 实现 | 用真实 Research / Final Receipt 证明指标可用，不由 Agent 改公式 |
 | Agent 与沟通面 | Codex 通过现有项目控制协助操作；专用 MCP、Skill、跨机认证和飞书未建设 | 只有 MVP 证明价值后再单独立项 |
 
 Research Archive、Shadow Replay、Candidate Engine 和 performance-evidence repository 继续作为底层
-权威，不因产品入口收敛而删除。代码实现完成不改变第 20 节的真实回执验收门槛。
+权威，不因产品入口收敛而删除。现有 accepted-only Top1 projection 可继续服务首个 recipe，但不能
+再被表述为通用实验事实底座。代码实现完成不改变第 20 节的真实回执验收门槛。
 
 ### 19.2 删除账户级实验功能管理
 
@@ -947,17 +1100,40 @@ MVP 只有在真实完成一次 20 日研究和后续 10 日隐藏验证并生�
 1. Codex 通过现有受控入口完成操作，不新增 Skill、MCP 或本地 Agent 适配；
 2. 用户确认前只生成无副作用 preview，不创建实验或研究回执；
 3. 20 日研究使用真实、连续、可验证的有效交易日和冻结来源，不伪造或替换缺日；
-4. HK / lx 完整日的 12 个正式推荐点均按同一 scheduler expectation 进入或明确缺失；任一预期点
+4. HK / US、`lx` 的每个正式推荐点都绑定同一个 canonical run：accepted + rejected 候选事实来自
+   唯一一次 production option-chain scan；全部未平仓期权的 exact marks 来自该 run / account 唯一一次
+   共享持仓行情采集，并连同 FX 和来源 hash 写入 Research Archive；两类行情的全体时点跨度不超过
+   300 秒，超界不写 ready；实验执行不再请求 provider；
+5. 对同一 run / account 注入“payload 已写、manifest 未写”的崩溃后重试，平台仅从该 payload 恢复并发布
+   manifest，不再请求 mark 或 FX；已完成的 unavailable manifest 直接复用，ready manifest-only、
+   hash 或 authority 不一致时 fail closed 且同样零 provider 请求；
+6. 任取一个已归档点，在隔离验收中不提供其短期 `output_runs` 副本，仍可从 Research Archive
+   直接读取、校验 canonical 内容 hash，并重建相同的当前 Top1 ranking projection；透明压缩不需要
+   人工解压；
+7. HK / US、`lx` 均可在未创建实验、Top1 安全开关关闭或 ExperimentStore 为空时查询 Corpus Health Receipt；
+   现有 timer 使用各市场 runtime schedule 的 timezone 和已绑定 calendar 分别预封 HK / US expectation，一个市场失败不阻止
+   另一个，且定时路径不自动请求 calendar provider；回执能识别预期点完全未采集、
+   部分缺失、内容冲突、不可评价、freshness 和保留期风险，不把 receipt 缺失显示为健康；同一日不同
+   `occurred_at_utc` 的多次 timer 调用在 denominator 未变时必须继续引用首份 expectation hash 和
+   `sealed_at_utc`，不得产生 conflict；timer 与手工 scheduled write 并发首封时，expectation 和 point
+   均只能产生一份 artifact，另一调用必须返回 idempotent；
+8. 基础事实的最早可清理时间按 15.5 的 20 交易日窗口、最大支持 DTE 和版本化 outcome SLA 计算；
+   Release、远端升级或普通 `output_runs` 清理不删除仍在保留期或被实验 / 回执引用的事实；
+9. HK / lx 完整日的 12 个正式推荐点均按同一 scheduler expectation 进入或明确缺失；任一预期点
    缺失时整日不计入样本，半日市按交易日历校验；
-5. 已有归档完成零写入迁移审计并输出 ready / conflict / gap 清单；只有存在 ready 点时才完成幂等
-   apply；缺失的历史 mark、Bid / Ask、持仓或 FX 未被补造；
-6. 研究只执行已支持的候选范围；事实或能力不足时返回明确状态和原因；
-7. 至少一次真实 20 日研究按第 11 节冻结的评价合同产生可信 `research_leader`；
-8. 用户第二次确认后，隐藏验证完整使用之后 10 个正式推荐日，不泄露中间效果；
-9. Final Receipt 给出第 11 节定义的结论，并绑定 spec、来源、限制和反例；通过时附 Proposal；
-10. Codex 断开后，仍可通过现有入口继续检查同一实验状态和回执；
-11. 研究和验证不修改生产配置、交易、持仓、通知或 broker state；
-12. 账户级实验 opt-in、`feature.status`、feature blocker 和 `strategy_lab_features` 已删除，既有
+10. 旧运行不迁移为正式点；缺失的历史 mark、Bid / Ask、持仓或 FX 未被当前事实补造，20 日窗口
+   只从 formal writer 启用后的连续完整日选择；
+11. 研究只执行已支持的候选范围；rejected row 只有在 recipe 明确声明对应筛选变量可变时才可
+    重新进入候选，硬风控拒绝和 snapshot 外合约始终不可选；
+12. 当前 20 日研究仍只在同一点 accepted Sell Put 候选内执行；事实或能力不足时返回明确状态
+    和原因；
+13. 至少一次真实 20 日研究按第 11 节冻结的评价合同产生可信 `research_leader`；
+14. 用户第二次确认后，隐藏验证完整使用之后 10 个正式推荐日，并按冻结频率保存 baseline 和
+    challenger 的 Bid / Ask observations；缺 observation 时不伪造 fill，也不泄露中间效果；
+15. Final Receipt 给出第 11 节定义的结论，并绑定 spec、来源、限制和反例；通过时附 Proposal；
+16. Codex 断开后，仍可通过现有入口继续检查同一实验状态和回执；
+17. 研究和验证不修改生产配置、交易、持仓、通知或 broker state；
+18. 账户级实验 opt-in、`feature.status`、feature blocker 和 `strategy_lab_features` 已删除，既有
     实验与回执仍可读取；
-13. 实验流程停止或故障时，OM 核心扫描和通知继续正常运行；
-14. 未新增第二套 corpus、实验状态库、调度器或未来接口占位实现。
+19. 实验事实归档、研究或验证停止或故障时，OM 核心扫描和通知继续正常运行；
+20. 未新增第二套基础事实 corpus、实验状态库、扫描器、调度器或未来接口占位实现。
