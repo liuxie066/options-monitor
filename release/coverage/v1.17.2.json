@@ -1,0 +1,61 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.17.2",
+  "base": {
+    "tag": "v1.17.1",
+    "commit": "4135c0dae68885f671fea823d4f1fcf3ab8133c0"
+  },
+  "reviewed_head": "b599e456f446255fa795c7418c53d15c05921d62",
+  "commits": [
+    {
+      "sha": "d99416c0bb7d78ac4da270a966d918909afaa698",
+      "subject": "feat(performance): enrich option cashflow fees"
+    },
+    {
+      "sha": "9a452849a09297fd2ee5d6d99cec48290d253d40",
+      "subject": "test(wheel): cover combo assignment handoff"
+    },
+    {
+      "sha": "7e5a2f25d7ef492ea6041b10ca511a76029c68f2",
+      "subject": "feat(strategy-lab): implement formal research corpus"
+    },
+    {
+      "sha": "8b65ff415497eba002a7f4b423d19ddad430c66c",
+      "subject": "feat(strategy-lab): merge formal research corpus"
+    },
+    {
+      "sha": "b599e456f446255fa795c7418c53d15c05921d62",
+      "subject": "refactor(infra): tighten external integration boundaries"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added production-bound HK/US Strategy Lab formal corpus capture with deterministic gzip, source-hash readback, corpus health diagnostics, and fail-closed 20-day research gating while preserving ordinary scan and notification outcomes.",
+      "commits": [
+        "7e5a2f25d7ef492ea6041b10ca511a76029c68f2",
+        "8b65ff415497eba002a7f4b423d19ddad430c66c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Made persisted broker actual fees, including actual zero, the canonical executed-trade fee evidence for option cash-flow returns; controlled backfill freezes formula estimates only when actual fees are unavailable and preserves missing evidence as partial.",
+      "commits": [
+        "d99416c0bb7d78ac4da270a966d918909afaa698"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Tightened OpenD and Futu integration boundaries by moving provider adapters into their owning application and infrastructure modules and extending architecture regressions without changing public CLI behavior.",
+      "commits": [
+        "b599e456f446255fa795c7418c53d15c05921d62"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9a452849a09297fd2ee5d6d99cec48290d253d40",
+      "reason": "Test-only Wheel assignment-handoff coverage; no runtime, public contract, or operator behavior changed."
+    }
+  ]
+}
