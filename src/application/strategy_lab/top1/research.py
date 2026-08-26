@@ -25,6 +25,7 @@ from src.application.strategy_lab.top1.economics import (
 )
 from src.application.strategy_lab.top1.ranking import (
     RANKING_PROJECTION_SCHEMA_V2,
+    RANKING_PROJECTION_SCHEMA_V3,
     Top1RankingError,
     rerank_recommendation_point,
     validate_ranking_projection,
@@ -92,7 +93,20 @@ _POINT_KEYS = frozenset(
         "projection_file_sha256",
     }
 )
-_MATERIALIZED_PROJECTION_KEYS = frozenset({"projection_ref", "projection"})
+_MATERIALIZED_PROJECTION_KEYS_V2 = frozenset({"projection_ref", "projection"})
+_MATERIALIZED_PROJECTION_KEYS_V3 = frozenset(
+    {"projection_ref", "recipe_projection", "projection"}
+)
+_RECIPE_CANDIDATE_KEYS = frozenset(
+    {
+        "candidate_id",
+        "option_market_concentration_after",
+        "option_market_value_cny",
+        "option_market_concentration_metric_version",
+        "option_market_evidence_refs",
+        "opening_fx_binding",
+    }
+)
 _CLOSE_KEYS = frozenset(
     {
         "schema_version",
@@ -259,7 +273,11 @@ def _validate_dataset(
         )
     if item["recommendation_point_selector"] != RECOMMENDATION_POINT_SELECTOR:
         _fail("research_corpus_conflict", "sealed dataset selector is unsupported")
-    if item["ranking_projection_schema_version"] != RANKING_PROJECTION_SCHEMA_V2:
+    baseline = _mapping(spec["baseline"], "experiment_spec.baseline")
+    if (
+        item["ranking_projection_schema_version"]
+        != baseline["ranking_projection_schema_version"]
+    ):
         _fail("research_corpus_conflict", "sealed dataset projection schema changed")
 
     source = _mapping(spec["research_source"], "experiment_spec.research_source")
@@ -381,21 +399,51 @@ def _validate_projections(
     point_rows: list[dict[str, str]],
     market: str,
     account: str,
+    projection_schema_version: object,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(value, list):
         _fail("research_input_invalid", "ranking_projections must be a list")
     supplied: dict[str, dict[str, Any]] = {}
+    compact_by_ref: dict[str, dict[str, Any]] = {}
+    if projection_schema_version not in {
+        RANKING_PROJECTION_SCHEMA_V2,
+        RANKING_PROJECTION_SCHEMA_V3,
+    }:
+        _fail("research_corpus_conflict", "sealed dataset projection schema changed")
     for index, raw in enumerate(cast(list[object], value)):
         item = _mapping(raw, f"ranking_projections[{index}]")
-        _exact_keys(item, _MATERIALIZED_PROJECTION_KEYS, f"ranking_projections[{index}]")
+        expected_keys = (
+            _MATERIALIZED_PROJECTION_KEYS_V3
+            if projection_schema_version == RANKING_PROJECTION_SCHEMA_V3
+            else _MATERIALIZED_PROJECTION_KEYS_V2
+        )
+        _exact_keys(item, expected_keys, f"ranking_projections[{index}]")
         ref = _relative_ref(item["projection_ref"], "ranking_projection.projection_ref")
         if ref in supplied:
             _fail("research_corpus_conflict", "materialized projection ref is duplicated")
+        if projection_schema_version == RANKING_PROJECTION_SCHEMA_V3:
+            compact_mapping = _mapping(
+                item["recipe_projection"], "ranking_projection.recipe_projection"
+            )
+            try:
+                compact = validate_ranking_projection(
+                    cast(Mapping[str, Any], compact_mapping)
+                )
+            except Top1RankingError as exc:
+                _fail(exc.reason_code, str(exc))
+            if (
+                compact["schema_version"] != RANKING_PROJECTION_SCHEMA_V3
+                or compact["formal_point_ref"] != ref
+            ):
+                _fail("research_corpus_conflict", "recipe projection binding changed")
+            compact_by_ref[ref] = compact
         projection_mapping = _mapping(item["projection"], "ranking_projection.projection")
         try:
             projection = validate_ranking_projection(cast(Mapping[str, Any], projection_mapping))
         except Top1RankingError as exc:
             _fail(exc.reason_code, str(exc))
+        if projection["schema_version"] != RANKING_PROJECTION_SCHEMA_V2:
+            _fail("research_corpus_conflict", "materialized ranking input changed")
         supplied[ref] = projection
 
     expected_refs = {point["projection_ref"] for point in point_rows}
@@ -403,15 +451,30 @@ def _validate_projections(
         _fail("research_corpus_conflict", "materialized projections do not match dataset")
     for point in point_rows:
         projection = supplied[point["projection_ref"]]
+        compact = compact_by_ref.get(point["projection_ref"])
+        binding = compact if compact is not None else projection
         if (
             projection["recommendation_point_id"] != point["recommendation_point_id"]
             or projection["market"] != market
             or projection["account"] != account
-            or projection["artifact_provenance"]["content_sha256"]
+            or binding["artifact_provenance"]["content_sha256"]
             != point["projection_content_sha256"]
-            or _canonical_file_sha256(projection) != point["projection_file_sha256"]
+            or _canonical_file_sha256(binding) != point["projection_file_sha256"]
         ):
             _fail("research_corpus_conflict", "materialized projection binding changed")
+        if compact is not None:
+            expected_candidates = [
+                {key: candidate[key] for key in _RECIPE_CANDIDATE_KEYS}
+                for candidate in projection["candidates"]
+            ]
+            if (
+                compact["producer_accepted_candidate_ids"]
+                != projection["producer_accepted_candidate_ids"]
+                or compact["candidates"] != expected_candidates
+                or compact["materialized_input_content_sha256"]
+                != projection["artifact_provenance"]["content_sha256"]
+            ):
+                _fail("research_corpus_conflict", "recipe projection input changed")
     return supplied
 
 
@@ -623,6 +686,9 @@ def _validated_research_input(
         point_rows=point_rows,
         market=str(spec["market"]),
         account=str(spec["account"]),
+        projection_schema_version=sealed_dataset[
+            "ranking_projection_schema_version"
+        ],
     )
     return spec, dataset_ref, sealed_dataset, point_rows, projections
 

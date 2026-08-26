@@ -64,10 +64,11 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.candidate_snapshot_contract import utc_timestamp
 from src.application.recommendation_point import (
+    RECOMMENDATION_POINT_SCHEMA_V3,
     RecommendationPointError,
     capture_scheduled_recommendation_point,
-    strategy_lab_top1_available,
 )
+from src.application.research.formal_corpus import capture_formal_point_attempt
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
     build_per_account_delivery_batch,
@@ -802,17 +803,16 @@ def _run_post_delivery_sidecars_best_effort(
 
 
 def _observe_recommendation_points(request: TickNotificationRequest) -> None:
+    markets = {
+        str(market or "").strip().lower() for market in request.markets_to_run
+    }
     if (
         request.delivery_only
         or str(request.trigger_kind or "manual").strip().lower() != "scheduled"
-        or {
-            str(market or "").strip().lower()
-            for market in request.markets_to_run
-        }
-        != {"hk"}
-        or not strategy_lab_top1_available()
+        or markets not in ({"hk"}, {"us"})
     ):
         return
+    market = next(iter(markets)).upper()
     decisions = request.scheduler_decisions_by_account or {}
     targets = request.scheduled_scan_targets_by_account or {}
     eligible: list[tuple[str, Mapping[str, Any]]] = []
@@ -850,12 +850,19 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
         return
     source_sha = source_commit_sha((request.repo_root or request.base).resolve())
     if source_sha is None:
-        for account, _decision in eligible:
+        for account, decision in eligible:
             _audit_recommendation_point(
                 request,
                 "recommendation_point_gap",
                 status="degraded",
                 account=account,
+                reason_code="official_point_source_unavailable",
+            )
+            _archive_formal_point(
+                request,
+                market=market,
+                account=account,
+                decision=decision,
                 reason_code="official_point_source_unavailable",
             )
         return
@@ -868,6 +875,7 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
                 decision,
                 source_commit_sha=source_sha,
                 require_option_market_evidence=True,
+                require_formal_contract=True,
             )
         except RecommendationPointError as exc:
             _audit_recommendation_point(
@@ -877,6 +885,13 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
                 account=account,
                 reason_code=exc.reason_code,
                 message=str(exc),
+            )
+            _archive_formal_point(
+                request,
+                market=market,
+                account=account,
+                decision=decision,
+                reason_code=exc.reason_code,
             )
             continue
         except Exception as exc:
@@ -888,7 +903,21 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
                 reason_code="official_point_observer_failed",
                 message=str(exc),
             )
+            _archive_formal_point(
+                request,
+                market=market,
+                account=account,
+                decision=decision,
+                reason_code="official_point_observer_failed",
+            )
             continue
+        _archive_formal_point(
+            request,
+            market=market,
+            account=account,
+            decision=decision,
+            recommendation_point=point,
+        )
         _audit_recommendation_point(
             request,
             "recommendation_point_captured",
@@ -897,6 +926,71 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
             publication=publication,
             recommendation_point_id=point.get("recommendation_point_id"),
         )
+
+
+def _archive_formal_point(
+    request: TickNotificationRequest,
+    *,
+    market: str,
+    account: str,
+    decision: Mapping[str, Any],
+    recommendation_point: Mapping[str, Any] | None = None,
+    reason_code: str | None = None,
+) -> None:
+    target = _canonical_recommendation_target(
+        decision.get("scheduled_scan_target_market")
+    )
+    if target is None:
+        return
+    timezone_name = "Asia/Hong_Kong" if market == "HK" else "America/New_York"
+    trading_date = (
+        datetime.fromisoformat(target.replace("Z", "+00:00"))
+        .astimezone(ZoneInfo(timezone_name))
+        .date()
+        .isoformat()
+    )
+    try:
+        result = capture_formal_point_attempt(
+            request.base,
+            request.base,
+            market=market,
+            account=account,
+            trading_date=trading_date,
+            run_id=request.run_id,
+            scheduled_scan_target_market=target,
+            captured_at_utc=datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            producer_behavior_version=RECOMMENDATION_POINT_SCHEMA_V3,
+            recommendation_point=recommendation_point,
+            reason_code=reason_code,
+        )
+    except Exception as exc:
+        _audit_recommendation_point(
+            request,
+            "formal_point_archive_failed",
+            status="degraded",
+            account=account,
+            reason_code=str(
+                getattr(exc, "reason_code", "formal_point_archive_failed")
+            ),
+            message=str(exc),
+        )
+        return
+    _audit_recommendation_point(
+        request,
+        "formal_point_archived",
+        status=(
+            "ok"
+            if result.get("status") != "conflict"
+            and result.get("reason_code") is None
+            else "degraded"
+        ),
+        account=account,
+        reason_code=result.get("reason_code"),
+        publication=str(result.get("status") or ""),
+        recommendation_point_id=result.get("recommendation_point_id"),
+    )
 
 
 def _canonical_recommendation_target(value: Any) -> str | None:

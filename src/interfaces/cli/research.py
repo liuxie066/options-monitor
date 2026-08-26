@@ -110,6 +110,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     storage_baseline.add_argument("--output", default=None)
     storage_baseline.add_argument("--allow-external-ledger", action="store_true")
     storage_baseline.add_argument("--overwrite", action="store_true")
+    corpus_health = research_sub.add_parser(
+        "corpus-health",
+        help="inspect formal recommendation-point corpus completeness",
+    )
+    corpus_health.add_argument("--runtime-root", required=True)
+    corpus_health.add_argument("--market", required=True, choices=("hk", "us"))
+    corpus_health.add_argument("--account", required=True, choices=("lx",))
     storage_gc = research_sub.add_parser(
         "storage-gc-preview",
         help="preview reachable and orphaned canonical scan blobs without deleting",
@@ -884,6 +891,19 @@ def handle_research_command(
     research_collect_fn: ResearchCollectFn | None = None,
     repo_base_fn: Callable[[], Path] = repo_base,
 ) -> dict[str, Any]:
+    if args.research_command == "corpus-health":
+        from src.application.research.formal_corpus import (
+            build_corpus_health_receipt,
+        )
+
+        data = build_corpus_health_receipt(
+            args.runtime_root,
+            market=args.market,
+            account=args.account,
+            repo_root=repo_base_fn(),
+        )
+        return build_response(tool_name="research.corpus-health", ok=True, data=data)
+
     if args.research_command == "storage-cleanup-preview":
         from src.application.research.historical_cleanup import (
             build_historical_cleanup_preview,

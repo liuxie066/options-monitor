@@ -43,6 +43,7 @@ from src.application.strategy_lab.top1.workspace import (
     start_confirmed_research,
     start_confirmed_validation,
 )
+from src.application.research.formal_corpus import seal_profile_formal_expectations
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.infrastructure.futu_gateway import (
     FutuGatewayError,
@@ -65,8 +66,8 @@ _TOP1_PROFILE_FIELDS = {
 }
 
 
-def _add_identity(parser: Any) -> None:
-    parser.add_argument("--market", required=True, choices=("hk",))
+def _add_identity(parser: Any, *, markets: tuple[str, ...] = ("hk",)) -> None:
+    parser.add_argument("--market", required=True, choices=markets)
     parser.add_argument("--account", required=True, choices=("lx",))
     parser.add_argument("--profile-path", required=True)
 
@@ -83,12 +84,12 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
     advance.add_argument("--scheduled", action="store_true")
     advance.add_argument("--write", action="store_true")
 
-    calendar = commands.add_parser("calendar", help="manage HK calendar evidence")
+    calendar = commands.add_parser("calendar", help="manage market calendar evidence")
     calendar_commands = calendar.add_subparsers(required=True)
     calendar_refresh = calendar_commands.add_parser(
         "refresh", help="collect and publish HK calendar evidence"
     )
-    _add_identity(calendar_refresh)
+    _add_identity(calendar_refresh, markets=("hk", "us"))
     calendar_refresh.add_argument("--coverage-start", required=True)
     calendar_refresh.add_argument("--coverage-end", required=True)
     calendar_refresh.add_argument("--calendar-version", required=True)
@@ -180,7 +181,7 @@ def _profile_context(
     runtime_root = _path_from_profile(profile, "runtime_root")
     top1_raw = profile.get("strategy_lab_top1")
     top1 = dict(top1_raw) if isinstance(top1_raw, Mapping) else {}
-    if top1 and (
+    if require_top1 and top1 and (
         top1.get("market") != args.market or top1.get("account") != args.account
     ):
         raise AgentToolError(
@@ -269,7 +270,13 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
     corpus: dict[str, Any] | None = None
     if schema.get("status") == "ready":
         try:
-            corpus = read_corpus_status(store, market="HK", account="lx")
+            corpus = read_corpus_status(
+                store,
+                market="HK",
+                account="lx",
+                artifact_root=context["artifact_root"],
+                repo_root=context["repo_root"],
+            )
         except Exception as exc:
             errors.append({"reason_code": "top1_status_unavailable", "message": str(exc)})
     try:
@@ -357,6 +364,7 @@ def _store_not_ready(tool_name: str, store: ExperimentStore) -> dict[str, Any]:
 def _research_inputs(
     context: Mapping[str, Any],
     args: argparse.Namespace,
+    store: ExperimentStore,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     top1 = context["top1"]
     try:
@@ -400,6 +408,16 @@ def _research_inputs(
     except Exception:
         config = {}
         evidence_bundle = EvidenceReadBundle(schema_state="not_initialized")
+    try:
+        corpus_status = read_corpus_status(
+            store,
+            market="HK",
+            account="lx",
+            artifact_root=context["artifact_root"],
+            repo_root=context["repo_root"],
+        )
+    except Exception:
+        corpus_status = None
     preview_inputs = {
         "market": args.market.upper(),
         "account": args.account,
@@ -408,6 +426,7 @@ def _research_inputs(
         "market_calendar": calendar,
         "fee_contract": fee_contract,
         "capability_facts": capability_facts_from_receipt(capability),
+        "corpus_status": corpus_status,
         "evidence_bundle": evidence_bundle,
         "environ": None,
     }
@@ -419,7 +438,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     context = _profile_context(
         args,
         require_top1=command
-        in {"advance", "calendar", "capabilities", "research", "validation"},
+        in {"advance", "capabilities", "research", "validation"},
     )
 
     if command == "calendar":
@@ -428,7 +447,19 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 code="INPUT_ERROR", message="Top1 calendar refresh requires --write"
             )
         top1 = context["top1"]
-        binding = top1["opend_binding"]
+        raw_binding = top1.get("opend_binding")
+        binding = dict(raw_binding) if isinstance(raw_binding, Mapping) else {}
+        if (
+            not isinstance(binding.get("host"), str)
+            or not str(binding["host"]).strip()
+            or isinstance(binding.get("port"), bool)
+            or not isinstance(binding.get("port"), int)
+            or not 0 < int(binding["port"]) <= 65535
+        ):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="profile OpenD binding is required for calendar refresh",
+            )
         gateway = None
         try:
             gateway = build_ready_futu_quote_gateway(
@@ -540,6 +571,23 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             },
         )
 
+    expectation_batch: dict[str, Any] | None = None
+    occurred_at_utc: str | None = None
+    if command == "advance":
+        if not args.scheduled or not args.write:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="Top1 advance requires --scheduled and --write",
+            )
+        occurred_at_utc = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        expectation_batch = seal_profile_formal_expectations(
+            context["runtime_root"],
+            profile=context["profile"],
+            artifact_root=context["artifact_root"],
+            occurred_at_utc=occurred_at_utc,
+        )
     store = ExperimentStore(context["store_path"])
 
     if command == "research":
@@ -547,7 +595,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             raise AgentToolError(
                 code="INPUT_ERROR", message="Top1 research start requires --write"
             )
-        preview_inputs, config = _research_inputs(context, args)
+        preview_inputs, config = _research_inputs(context, args, store)
         tool_name = (
             "research.strategy-lab.top1-loop.research."
             f"{args.top1_research_command}"
@@ -722,12 +770,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
 
     if command != "advance":
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported Top1 command: {command}")
-    if not args.scheduled or not args.write:
-        raise AgentToolError(
-            code="INPUT_ERROR", message="Top1 advance requires --scheduled and --write"
-        )
-
-    occurred_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    assert occurred_at_utc is not None
     store.migrate(migrated_at_utc=occurred_at_utc)
     top1 = context["top1"]
     gateway_box: dict[str, Any] = {}
@@ -774,6 +817,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
         gateway = gateway_box.get("gateway")
         if gateway is not None:
             gateway.close()
+    data["formal_expectations"] = expectation_batch
     return build_response(
         tool_name="research.strategy-lab.top1-loop.advance",
         ok=data.get("status") in {"ok", "disabled"},

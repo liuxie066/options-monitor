@@ -738,7 +738,6 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     observer_calls: list[str] = []
-    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
     monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
     monkeypatch.setattr(
         mod,
@@ -790,7 +789,6 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
     _patch_assembler(monkeypatch)
     order: list[str] = []
     _patch_sender(monkeypatch, order=order)
-    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
     monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
 
     def capture(*_args, **_kwargs):
@@ -886,10 +884,9 @@ def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
 
 
 @pytest.mark.parametrize(
-    "case",
-    (
-        "disabled",
-        "manual",
+        "case",
+        (
+            "manual",
         "force",
         "delivery_only",
         "not_run",
@@ -927,11 +924,6 @@ def test_recommendation_point_observer_excludes_ineligible_paths(
     calls: list[str] = []
     monkeypatch.setattr(
         mod,
-        "strategy_lab_top1_available",
-        lambda: case != "disabled",
-    )
-    monkeypatch.setattr(
-        mod,
         "source_commit_sha",
         lambda _root: None if case == "source_unavailable" else "c" * 40,
     )
@@ -946,9 +938,11 @@ def test_recommendation_point_observer_excludes_ineligible_paths(
     assert calls == []
 
 
-def test_recommendation_point_observer_scopes_first_recipe_to_hk_lx(
+@pytest.mark.parametrize("market", ("HK", "US"))
+def test_recommendation_point_observer_scopes_base_corpus_to_lx(
     monkeypatch,
     tmp_path: Path,
+    market: str,
 ) -> None:
     import src.application.tick_notification_flow as mod
 
@@ -956,14 +950,13 @@ def test_recommendation_point_observer_scopes_first_recipe_to_hk_lx(
         tmp_path,
         run_id="observer-account-isolation",
         accounts=("lx", "sy"),
-        markets_to_run=("HK",),
+        markets_to_run=(market,),
     )
     bundle.request = replace(
         bundle.request,
         ran_pipeline_accounts=("lx", "lx", "sy"),
     )
     calls: list[str] = []
-    monkeypatch.setattr(mod, "strategy_lab_top1_available", lambda: True)
     monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
 
     def capture(_base, _run_id, account, _decision, **_kwargs):
