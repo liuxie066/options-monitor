@@ -92,6 +92,12 @@ def test_ledger_facades_keep_existing_production_imports() -> None:
         assert not (names - set(vars(module))), module_name
 
 
+def test_current_decision_facade_binds_every_declared_export() -> None:
+    module = import_module("src.application.ledger.current_decision_projection")
+
+    assert set(module.__all__) <= set(vars(module))
+
+
 def test_repository_facade_keeps_core_aggregate_reads(tmp_path) -> None:
     repository = import_module("src.application.ledger.repository")
     repo = repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")

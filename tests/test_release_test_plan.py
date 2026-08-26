@@ -25,13 +25,26 @@ def test_release_test_plan_maps_service_changes_without_retired_event_suite() ->
     assert "git diff --check" in plan["commands"]
     assert not any("test_event_prefetch.py" in command for command in plan["commands"])
     assert (
-        "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
+        "./.venv/bin/python -m pytest tests/*/test_service_deploy_*.py "
+        "tests/test_release_check.py "
         "tests/test_release_delta_coverage.py "
         "tests/test_release_version_recommendation.py tests/test_version_check.py "
         "tests/test_install_script.py tests/test_release_test_plan.py"
     ) in plan["commands"]
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in plan["commands"]
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"service_release"}
+
+
+def test_release_test_plan_maps_service_deploy_support_to_both_runtime_gates() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(
+        changed_files=["tests/service_deploy_test_support.py"],
+        mode="standard",
+    )
+
+    assert {"service_release", "pi_runtime"} <= {rule["name"] for rule in plan["matched_rules"]}
+    assert any("tests/*/test_service_deploy_*.py" in command for command in plan["commands"])
 
 
 def test_release_test_plan_requires_full_pytest_for_ledger_changes() -> None:
@@ -108,7 +121,10 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
         "tests/test_install_script.py",
-        "tests/test_service_deploy.py",
+        "tests/service_deploy_test_support.py",
+        "tests/unit/test_service_deploy_unit.py",
+        "tests/integration/test_service_deploy_integration.py",
+        "tests/e2e/test_service_deploy_e2e.py",
         "tests/test_release_check.py",
         "tests/test_release_test_plan.py",
         "tests/copilot_eval/test_answer_quality.py",
@@ -150,8 +166,7 @@ def test_release_test_plan_requires_current_taxonomy_when_version_changes() -> N
     )
 
     assert plan["commands"][0] == (
-        "./.venv/bin/python scripts/release_check.py --tag v1.5.0 "
-        "--require-current-taxonomy --require-delta-coverage"
+        "./.venv/bin/python scripts/release_check.py --tag v1.5.0 --require-current-taxonomy --require-delta-coverage"
     )
 
 
@@ -164,9 +179,7 @@ def test_release_test_plan_requires_delta_coverage_for_manifest_change() -> None
         version="1.5.0",
     )
 
-    assert plan["commands"][0] == (
-        "./.venv/bin/python scripts/release_check.py --tag v1.5.0 --require-delta-coverage"
-    )
+    assert plan["commands"][0] == ("./.venv/bin/python scripts/release_check.py --tag v1.5.0 --require-delta-coverage")
     assert {rule["name"] for rule in plan["matched_rules"]} == {"service_release"}
 
 
@@ -268,7 +281,7 @@ def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
         "tests/test_config_template_inheritance.py",
         "tests/test_config_authoring_transaction.py",
         "tests/test_runtime_config_identity.py",
-        "tests/test_service_deploy.py",
+        "tests/*/test_service_deploy_*.py",
         "tests/test_inbound_control.py",
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
@@ -299,7 +312,7 @@ def test_required_pr_and_release_workflows_pin_and_gate_pi_runtime() -> None:
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
         "tests/test_install_script.py",
-        "tests/test_service_deploy.py",
+        "tests/*/test_service_deploy_*.py",
         "tests/test_release_check.py",
         "tests/test_release_test_plan.py",
         "tests/copilot_eval/test_answer_quality.py",
@@ -315,9 +328,11 @@ def test_required_pr_and_release_workflows_pin_and_gate_pi_runtime() -> None:
             '--python "${{ github.workspace }}/.venv/bin/python"'
         ) in text
         assert "npm view" not in text
-        assert text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") < text.index(
-            "scripts/pi_runtime_smoke.sh"
-        ) < text.index("tests/test_pi_agent_process.py")
+        assert (
+            text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
+            < text.index("scripts/pi_runtime_smoke.sh")
+            < text.index("tests/test_pi_agent_process.py")
+        )
         for suite in required_suites:
             assert suite in text, f"{workflow.name} is missing Pi suite {suite}"
 
@@ -338,8 +353,7 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     assert 'cd "${ARCHIVE_ROOT}"' in verify
     assert 'npm ci --omit=dev --ignore-scripts --prefix "${ARCHIVE_ROOT}/agent-runtime"' in verify
     assert (
-        'bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" '
-        '--python "${CHECKOUT_PYTHON}"'
+        'bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" --python "${CHECKOUT_PYTHON}"'
     ) in verify
     assert "--prefix agent-runtime" not in verify
     assert '--python ".venv/bin/python"' not in verify
@@ -369,6 +383,7 @@ def _run_release_preflight_with_fake_python(
     *args: str,
     node_version: str = "v22.19.0",
     loopback_bind_denied: bool = False,
+    cwd: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     root = Path(__file__).resolve().parents[1]
     log_path = tmp_path / "python-commands.log"
@@ -428,8 +443,8 @@ printf 'npm %s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
     )
 
     proc = subprocess.run(
-        ["bash", "scripts/release_preflight.sh", "--allow-dirty", *args],
-        cwd=root,
+        ["bash", str(root / "scripts" / "release_preflight.sh"), "--allow-dirty", *args],
+        cwd=cwd or root,
         env=env,
         capture_output=True,
         text=True,
@@ -470,7 +485,9 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
             "tests/test_copilot_p1_eval.py tests/test_inbound_control.py "
             "tests/test_setup_check.py "
             "tests/test_cli_operator_commands.py tests/test_install_script.py "
-            "tests/test_service_deploy.py tests/test_release_check.py "
+            "tests/e2e/test_service_deploy_e2e.py "
+            "tests/integration/test_service_deploy_integration.py "
+            "tests/unit/test_service_deploy_unit.py tests/test_release_check.py "
             "tests/test_release_test_plan.py tests/copilot_eval/test_answer_quality.py"
         ),
         "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
@@ -486,6 +503,21 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
     ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
     assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+
+
+def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path, cwd=outside)
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    pytest_commands = [command for command in commands if command.startswith("-m pytest")]
+    service_command = next(command for command in pytest_commands if "test_service_deploy" in command)
+    assert "tests/unit/test_service_deploy_unit.py" in service_command
+    assert "tests/integration/test_service_deploy_integration.py" in service_command
+    assert "tests/e2e/test_service_deploy_e2e.py" in service_command
+    assert "tests/*/test_service_deploy_*.py" not in service_command
 
 
 def test_release_preflight_rejects_old_node_before_npm(tmp_path: Path) -> None:
@@ -505,8 +537,7 @@ def test_release_preflight_rejects_sandbox_loopback_denial_before_npm(tmp_path: 
 
     assert proc.returncode == 1
     assert (
-        "loopback bind denied: 127.0.0.1 socket.bind() returned "
-        "PermissionError: [Errno 1] Operation not permitted"
+        "loopback bind denied: 127.0.0.1 socket.bind() returned PermissionError: [Errno 1] Operation not permitted"
     ) in proc.stderr
     assert "Rerun this unchanged preflight outside the sandbox" in proc.stderr
     assert "do not skip or xfail the tests" in proc.stderr

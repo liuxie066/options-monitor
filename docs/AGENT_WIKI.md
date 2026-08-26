@@ -854,7 +854,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Close Advice frozen snapshot | `python3.12 -m pytest -q -p no:cacheprovider tests/test_close_advice_required_data.py tests/test_close_advice_runner.py tests/test_account_run.py tests/test_tick_account_execution_barrier.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
-| Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
+| Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/*/test_service_deploy_*.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 
