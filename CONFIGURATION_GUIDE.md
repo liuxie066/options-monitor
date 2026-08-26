@@ -311,21 +311,9 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 
 不要分享 app secret、user token、webhook secret 或 LLM API key。
 
-## 旧 layered JSON 迁移
+## 已退役旧配置
 
-旧 `configs/user.*.json` 只通过以下入口迁移：
-
-```bash
-./om config migrate-yaml --output config.yaml
-```
-
-默认 dry-run。核对 accounts、markets、symbols 和等价性后：
-
-```bash
-./om config migrate-yaml --output config.yaml --apply
-```
-
-CLI 不支持用 `--source legacy` 继续 build / explain。迁移后重新生成所有 runtime snapshot。
+旧 `configs/user.*.json` authoring 和迁移命令已删除。直接维护 `config.yaml`，再重新生成所有 runtime snapshot。
 
 ## 变更检查清单
 

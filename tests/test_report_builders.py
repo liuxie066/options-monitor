@@ -52,7 +52,7 @@ def test_build_symbols_digest_deduplicates_symbols_with_yield_enhancement_sectio
     report_dir = Path(td)
     (report_dir / "nvda_sell_put_alerts.txt").write_text("put alert\n", encoding="utf-8")
     (report_dir / "nvda_sell_call_alerts.txt").write_text("call alert\n", encoding="utf-8")
-    (report_dir / "nvda_yield_enhancement_alerts.txt").write_text("enhance alert\n", encoding="utf-8")
+    (report_dir / "nvda_combo_yield_alerts.txt").write_text("enhance alert\n", encoding="utf-8")
 
     build_symbols_digest(["NVDA", "NVDA", "NVDA"], report_dir)
 

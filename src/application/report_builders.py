@@ -12,9 +12,9 @@ from pathlib import Path
 import pandas as pd
 
 from domain.domain.strategy_vocab import (
+    STRATEGY_COMBO_YIELD,
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
     strategy_display_name,
 )
 from src.application.summary_formatting import apply_summary_defaults, format_summary_row
@@ -57,9 +57,6 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
         sp_path = report_dir / f'{symbol.lower()}_sell_put_alerts.txt'
         cc_path = report_dir / f'{symbol.lower()}_sell_call_alerts.txt'
         ye_path = report_dir / f'{symbol.lower()}_combo_yield_alerts.txt'
-        legacy_ye_path = report_dir / f'{symbol.lower()}_yield_enhancement_alerts.txt'
-        if not ye_path.exists() and legacy_ye_path.exists():
-            ye_path = legacy_ye_path
 
         lines.append(f'### {strategy_display_name(STRATEGY_SELL_PUT)}')
         if sp_path.exists() and sp_path.stat().st_size > 0:
@@ -75,7 +72,7 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
             lines.append('无候选。')
         lines.append('')
 
-        lines.append(f'### {strategy_display_name(STRATEGY_YIELD_ENHANCEMENT)}')
+        lines.append(f'### {strategy_display_name(STRATEGY_COMBO_YIELD)}')
         if ye_path.exists() and ye_path.stat().st_size > 0:
             lines.append(ye_path.read_text(encoding='utf-8').strip())
         else:

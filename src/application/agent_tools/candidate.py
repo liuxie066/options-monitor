@@ -8,7 +8,6 @@ from domain.domain.strategy_vocab import (
     STRATEGY_CLOSE_ADVICE,
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
     strategy_key_help,
 )
 from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool

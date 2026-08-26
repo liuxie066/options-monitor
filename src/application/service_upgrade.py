@@ -1101,7 +1101,6 @@ def _rebuild_and_validate_runtime_configs(
                 f"missing YAML authoring source for runtime config target {market}: {config_path}",
                 remediation=[
                     "rerender_service_profile: ./om service render ... --config-yaml <path>",
-                    "migrate_legacy_json_once: ./om config migrate-yaml --apply --output config.yaml",
                 ],
             )
         build_command = [

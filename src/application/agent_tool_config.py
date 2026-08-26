@@ -99,10 +99,7 @@ def load_runtime_config(
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message=str(exc),
-                hint=(
-                    "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
-                    "`om config build --source yaml --market <market>`."
-                ),
+                hint="Create config.yaml, then rebuild with `om config build --source yaml --market <market>`.",
                 details=exc.result,
             ) from exc
     cfg["config_source_path"] = str(path)

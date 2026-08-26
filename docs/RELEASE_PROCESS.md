@@ -305,7 +305,7 @@ VERSION="$(cat VERSION)"
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
 
-升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。profile 必须记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config。旧 profile 缺少 YAML authoring source 时会 fail closed；先用 `config migrate-yaml` 完成一次性迁移，再重新 `service render --config-yaml <path>`。切换 symlink 前缺失来源或 rebuild/validate 失败时会在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
+升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。profile 必须记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config。旧 profile 缺少 YAML authoring source 时会 fail closed；直接建立 `config.yaml`，再执行 `service render --config-yaml <path>`。切换 symlink 前缺失来源或 rebuild/validate 失败时会在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
 
 切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
 

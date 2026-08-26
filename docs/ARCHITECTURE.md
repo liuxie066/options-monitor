@@ -365,9 +365,8 @@ Market runtime configs are generated snapshots:
 
 Runtime execution consumes those JSON snapshots rather than editing
 `config.yaml` directly. First-run setup uses `src.application.config_yaml_init`
-to create a starter YAML file and build market snapshots. Legacy JSON overlays
-under `configs/` are one-time `config migrate-yaml` inputs only, not an
-authoring or upgrade-recovery path. Production upgrade requires a usable YAML
+to create a starter YAML file and build market snapshots. Legacy JSON authoring
+and its migration command are retired. Production upgrade requires a usable YAML
 authoring source and fails closed before switching releases when it is absent.
 
 Shared config section helpers such as symbol/watchlist and templates live in
