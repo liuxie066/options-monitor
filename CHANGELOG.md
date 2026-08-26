@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Allowed a failed Copilot answer-admission turn to collect fresh read-only evidence before its single resubmission, so option-performance replies no longer fail by reusing stale observations.
+- Classified lifecycle-only option expiries as actual zero-fee events while keeping broker expiries with missing order identity explicitly incomplete until OpenD supplies authoritative fees.
+
 ## 1.17.3 - 2026-08-26
 
 ### Bug Fixes

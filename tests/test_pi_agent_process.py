@@ -869,6 +869,7 @@ def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
     assert "historical_fact" in description["description"]
 
     runtime = (REPO / "agent-runtime/main.ts").read_text(encoding="utf-8")
+    assert "call the required read-only business tool first" in runtime
     assert "successful observation IDs returned during the current request" in runtime
     assert "never reuse observation IDs from prior conversation turns" in runtime
 
@@ -879,24 +880,52 @@ def test_s8_answer_admission_and_activation_names_are_explicit():
     assert all(item["pagination"].get("mode") == "none" for item in payload["catalog_snapshot"] if "pagination" in item)
 
 
-def test_s8_plain_final_uses_one_repair_then_accepted_terminal():
-    payload = _start_payload(
-        tools=[_SUBMIT_TOOL],
-        debug={"fixture_turns": [
+def test_s8_plain_final_repair_can_fetch_current_evidence_then_submit():
+    business = dict(_READ_TOOL)
+    payload = _directory_payload(
+        [business],
+        [
             {"text": "plain bypass"},
+            _directory_turn("repair_directory", "runtime_status"),
+            _tool_turn(call_id="read_current"),
             {"tool_calls": [{"call_id": "answer_1", "tool_name": "submit_answer", "arguments": {
-                "mode": "conceptual", "status": "complete", "answer_markdown": "repaired", "claims": []
+                "mode": "evidence", "status": "partial", "answer_markdown": "repaired", "claims": []
             }}]},
-        ], "delay_ms": 0},
+        ],
     )
     calls = []
-    result = run_pi_agent(payload, request_id="req_s8_repair", run_id="run_s8_repair", timeout_seconds=60,
-                          on_tool_call=lambda call: calls.append(call) or {
-                              "observation": {"ok": True, "status": "answer_accepted"},
-                              "approved_answer": {"status": "complete", "text": "repaired", "text_sha256": "sha256:" + hashlib.sha256(b"repaired").hexdigest()},
-                          }, on_proposed=lambda _: "commit")
+
+    def callback(call):
+        calls.append(call)
+        if call["tool_name"] == "tool_directory":
+            return _tool_activation(payload, [business])
+        if call["tool_name"] == "runtime_status":
+            return {"observation": {"ok": True, "status": "read"}}
+        return {
+            "observation": {"ok": True, "status": "answer_accepted"},
+            "approved_answer": {
+                "status": "partial",
+                "text": "repaired",
+                "text_sha256": "sha256:"
+                + hashlib.sha256(b"repaired").hexdigest(),
+            },
+        }
+
+    result = run_pi_agent(
+        payload,
+        request_id="req_s8_repair",
+        run_id="run_s8_repair",
+        timeout_seconds=60,
+        on_tool_call=callback,
+        on_proposed=lambda _: "commit",
+    )
+
     assert result["ok"] is True, result
-    assert [call["tool_name"] for call in calls] == ["submit_answer"]
+    assert [call["tool_name"] for call in calls] == [
+        "tool_directory",
+        "runtime_status",
+        "submit_answer",
+    ]
     assert result["result"]["text"] == "repaired"
 
 

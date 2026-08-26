@@ -69,6 +69,7 @@ from .writer_lifecycle_support import (
     _combo_leg_from_projected_record,
     _existing_combo_adoption_leg,
 )
+from .order_fee_semantics import is_unexecuted_expire_close
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> ProjectionRefreshResult:
@@ -730,6 +731,40 @@ def _freeze_formula_fee_group(
     return [by_id[event.event_id] for event in events]
 
 def _freeze_new_event_fee(event: TradeEvent, *, frozen_at_ms: int) -> TradeEvent:
+    if event.event_type == "expire_close":
+        resolution = _incoming_fee_resolution(event)
+        if resolution["status"] == "actual":
+            return _event_with_actual_fee(
+                event,
+                amount=resolution["amount"],
+                source=str(resolution["source"]),
+                frozen_at_ms=frozen_at_ms,
+            )
+        if resolution["status"] == "explicit_missing":
+            return replace(event, fees=0.0)
+        if resolution["status"] == "missing":
+            return _event_with_missing_fee(
+                event,
+                reason=str(resolution["reason"]),
+                diagnostics=list(resolution.get("diagnostics") or []),
+            )
+        payload = event.raw_payload or {}
+        if is_unexecuted_expire_close(event):
+            return _event_with_actual_fee(
+                event,
+                amount=Decimal(0),
+                source="option_expiry_lifecycle",
+                reason="expired_without_executed_order",
+                frozen_at_ms=frozen_at_ms,
+            )
+        return _event_with_missing_fee(
+            event,
+            reason=(
+                "broker_order_fee_pending"
+                if str(payload.get("order_id") or "").strip()
+                else "broker_order_identity_missing"
+            ),
+        )
     if event.event_type not in {"open", "close"}:
         return event
     if normalize_broker(event.contract_key.broker) != "富途":
@@ -957,6 +992,7 @@ def _event_with_actual_fee(
     amount: Decimal,
     source: str,
     frozen_at_ms: int,
+    reason: str = "broker_receipt_fee",
 ) -> TradeEvent:
     payload = dict(event.raw_payload or {})
     incoming = payload.get("fee_provenance")
@@ -973,7 +1009,7 @@ def _event_with_actual_fee(
         "basis": "actual",
         "amount": canonical_decimal_text(amount),
         "source": source,
-        "reason": "broker_receipt_fee",
+        "reason": reason,
         "frozen_at_ms": int(frozen_at_ms),
         **provenance,
     }
