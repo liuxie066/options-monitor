@@ -34,6 +34,62 @@ def _imported_modules_with_from_names(path: Path) -> list[str]:
     return modules
 
 
+def _private_production_attribute_accesses(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    production_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            production_aliases.update(
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in node.names
+                if alias.name.startswith(("src.", "domain."))
+            )
+        elif isinstance(node, ast.ImportFrom) and str(node.module or "").startswith(
+            ("src.", "domain.")
+        ):
+            production_aliases.update(alias.asname or alias.name for alias in node.names)
+    return sorted(
+        f"{node.lineno}:{node.value.id}.{node.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr.startswith("_")
+        and isinstance(node.value, ast.Name)
+        and node.value.id in production_aliases
+    )
+
+
+def test_service_deploy_integration_tests_use_public_production_entries() -> None:
+    path = ROOT / "tests" / "integration" / "test_service_deploy_integration.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = sorted(
+        f"{node.lineno}:{node.module}.{alias.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and str(node.module or "").startswith(("src.", "domain."))
+        for alias in node.names
+        if alias.name.startswith("_")
+    )
+
+    assert offenders == []
+    assert _private_production_attribute_accesses(path) == []
+
+
+def test_private_production_attribute_guard_tracks_module_aliases(tmp_path: Path) -> None:
+    path = tmp_path / "test_private_entry.py"
+    path.write_text(
+        "from src.application import service_upgrade\n"
+        "import src.application.service_cleanup as cleanup\n"
+        "service_upgrade._private()\n"
+        "cleanup._delete_path\n",
+        encoding="utf-8",
+    )
+
+    assert _private_production_attribute_accesses(path) == [
+        "3:service_upgrade._private",
+        "4:cleanup._delete_path",
+    ]
+
+
 def test_futu_sdk_imports_stay_in_canonical_infrastructure_adapters() -> None:
     allowed = {
         Path("src/infrastructure/futu_gateway.py"),

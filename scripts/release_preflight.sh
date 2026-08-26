@@ -175,7 +175,9 @@ if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
       tests/test_setup_check.py \
       tests/test_cli_operator_commands.py \
       tests/test_install_script.py \
-      tests/test_service_deploy.py \
+      tests/e2e/test_service_deploy_e2e.py \
+      tests/integration/test_service_deploy_integration.py \
+      tests/unit/test_service_deploy_unit.py \
       tests/test_release_check.py \
       tests/test_release_test_plan.py \
       tests/copilot_eval/test_answer_quality.py

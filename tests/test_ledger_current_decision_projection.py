@@ -16,6 +16,7 @@ from domain.domain.assigned_stock import (
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger import (
     combo_reconciliation,
+    current_decision_combo,
     current_decision_projection as current_projection_module,
     manual_trades,
     writer,
@@ -2380,7 +2381,7 @@ def test_fence_finalizer_does_not_scan_unreferenced_combo_identity_history(
     _bootstrap(repo, "lx")
     fence = capture_current_decision_projection_fence(repo, accounts=("lx",))
     validations = 0
-    original_validate = current_projection_module.validate_combo_identity
+    original_validate = current_decision_combo.validate_combo_identity
 
     def counted_validate(identity: dict[str, object]):
         nonlocal validations
@@ -2388,7 +2389,7 @@ def test_fence_finalizer_does_not_scan_unreferenced_combo_identity_history(
         return original_validate(identity)
 
     monkeypatch.setattr(
-        current_projection_module,
+        current_decision_combo,
         "validate_combo_identity",
         counted_validate,
     )
@@ -2434,7 +2435,7 @@ def test_fence_capture_reads_metadata_without_payload_decode(
 
     monkeypatch.setattr(repo, "_connect", traced_connect)
     monkeypatch.setattr(
-        "src.application.ledger.current_decision_projection._decode_projection_row_payload",
+        "src.application.ledger.current_decision_runtime._decode_projection_row_payload",
         lambda *_args, **_kwargs: pytest.fail("fence decoded payload"),
     )
     fence = capture_current_decision_projection_fence(repo, accounts=("lx",))

@@ -202,7 +202,7 @@ VERSION="$(cat VERSION)"
   tests/test_config_template_inheritance.py \
   tests/test_config_authoring_transaction.py \
   tests/test_runtime_config_identity.py \
-  tests/test_service_deploy.py \
+  tests/*/test_service_deploy_*.py \
   tests/test_inbound_control.py \
   tests/test_setup_check.py \
   tests/test_cli_operator_commands.py

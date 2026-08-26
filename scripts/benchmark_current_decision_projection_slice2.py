@@ -937,38 +937,16 @@ def _history_measurement(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _source_sha256() -> str:
     digest = hashlib.sha256()
-    for relative in (
-        "domain/domain/assigned_stock.py",
-        "domain/domain/decision_state_fingerprint.py",
-        "domain/domain/option_lifecycle.py",
-        "src/application/agent_tools/quality.py",
-        "src/application/ledger/api.py",
-        "src/application/ledger/commands.py",
-        "src/application/ledger/combo_reconciliation.py",
-        "src/application/ledger/current_decision_projection.py",
-        "src/application/ledger/decision_snapshot.py",
-        "src/application/ledger/lifecycle_overlay.py",
-        "src/application/ledger/manual_trades.py",
-        "src/application/ledger/read_only_evidence.py",
-        "src/application/ledger/repository.py",
-        "src/application/ledger/sqlite_row_codec.py",
-        "src/application/ledger/writer.py",
-        "src/application/performance/adapters.py",
-        "src/application/pipeline_context.py",
-        "src/application/positions/workflows.py",
-        "src/application/prepared_option_positions_context.py",
-        "src/application/quality/gate.py",
-        "src/application/quality/cutover.py",
-        "src/application/quality/ledger_checks.py",
-        "src/application/quality/lifecycle_checks.py",
-        "src/application/quality/paths.py",
-        "src/application/quality/service.py",
-        "src/application/trades/lifecycle.py",
-        "src/application/trades/lifecycle_timing.py",
-        "src/interfaces/cli/option_positions.py",
-        "src/interfaces/quality/cli.py",
-        "scripts/benchmark_current_decision_projection_slice2.py",
+    source_files = {"scripts/benchmark_current_decision_projection_slice2.py"}
+    for pattern in (
+        "domain/domain/**/*.py",
+        "src/**/*.py",
     ):
+        source_files.update(
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in REPO_ROOT.glob(pattern)
+        )
+    for relative in sorted(source_files):
         data = (REPO_ROOT / relative).read_bytes()
         digest.update(relative.encode())
         digest.update(len(data).to_bytes(8, "big"))
