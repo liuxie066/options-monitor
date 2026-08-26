@@ -112,6 +112,28 @@ missing/pending snapshots, never overwrites an observed conversion, and records
 before/after hashes plus the selected FX fact ID in
 `cash_conversion_backfill_audit`.
 
+An observed snapshot is corrected only through a separate, high-risk path:
+
+```bash
+./om option-performance cash-conversion correct \
+  --config-key us --account lx \
+  --start-date 2026-01-01 --end-date 2026-08-26
+./om option-performance cash-conversion correct \
+  --config-key us --account lx \
+  --start-date 2026-01-01 --end-date 2026-08-26 \
+  --apply --confirm
+```
+
+The correction defaults to dry-run and does not fill missing or pending
+snapshots. It replaces a valid observed conversion only when the newly selected
+FX fact has an append-only `supersedes_fact_id` chain that reaches the exact FX
+fact ID stored by that conversion. The evidence import envelope must include
+the referenced old fact before its correction so the complete same-identity
+chain validates without relying on hidden repository state. Apply uses one
+ledger transaction, records event hashes and both conversion payloads in
+`cash_conversion_correction_audit`, and requires `--apply --confirm` (or
+`--apply --yes`). A repeated preview after apply has no corrections.
+
 Premium activity, PnL, and valuation CNY use the separate
 `option_performance_evidence.v1` FX facts. Therefore
 `activity.premium_collected_gross.cny` and
@@ -443,6 +465,9 @@ than attributing them to the requested account or treating them as zero.
 - Event-time `cash_conversion.v1` snapshots own direct-cash CNY conversion.
 - Historical direct-cash snapshots can be filled only through the audited,
   dry-run-first `option-performance cash-conversion backfill` entry point.
+- Observed direct-cash snapshots can be replaced only through the confirmed,
+  superseding-evidence-gated `option-performance cash-conversion correct`
+  entry point.
 - Scheduled tick preparation persists auditable USD/CNY and HKD/CNY evidence
   without adding writes to report reads.
 - Deterministic valuation evidence, no-write current quote collection,

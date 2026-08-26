@@ -19,10 +19,16 @@ from src.application.agent_tools.runtime_helpers import (
 )
 from src.application.ledger.api import (
     backfill_cash_conversions,
+    correct_superseded_cash_conversions,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config,
 )
 from src.application.performance.service import build_option_period_performance
+from src.interfaces.cli.ledger_write_safety import (
+    add_write_flags,
+    guard_ledger_write,
+    resolve_cli_write_control,
+)
 
 
 _REPORT_TZ = ZoneInfo("Asia/Shanghai")
@@ -107,6 +113,15 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
         backfill,
         apply_help="atomically enrich canonical ledger events and write an audit receipt",
     )
+    correct = cash_conversion_sub.add_parser(
+        "correct",
+        help="replace observed conversions only when persisted FX evidence explicitly supersedes their rate fact",
+    )
+    _add_config_scope_args(correct)
+    correct.add_argument("--start-date", default=None, help="inclusive event date YYYY-MM-DD")
+    correct.add_argument("--end-date", default=None, help="inclusive event date YYYY-MM-DD")
+    correct.add_argument("--include-rows", action="store_true", help="include per-fact corrections")
+    add_write_flags(correct, high_risk=True)
 
 
 def _scope_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -197,7 +212,20 @@ def _date_boundary_ms(value: str | None, *, end: bool) -> int | None:
     return int(instant.timestamp() * 1000)
 
 
-def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
+def _migrate_cash_conversion(args: argparse.Namespace, *, correct: bool) -> dict[str, Any]:
+    if correct and (bool(args.confirm) or bool(args.yes)) and not bool(args.apply):
+        raise SystemExit(
+            "cash-conversion correct writes require --apply together with --confirm or --yes"
+        )
+    apply = bool(args.apply)
+    if correct:
+        apply = bool(
+            resolve_cli_write_control(
+                args,
+                command_name="option-performance cash-conversion correct",
+                high_risk=True,
+            )["write_requested"]
+        )
     payload = {
         "config_key": args.config_key,
         "config_path": args.config_path,
@@ -209,6 +237,12 @@ def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
     )
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
+    if correct and apply and guard_ledger_write(
+        data_config=data_config_path,
+        args=args,
+        as_json=True,
+    ) is None:
+        raise SystemExit(2)
     _resolved_data_config, repo = open_position_ledger_from_data_config(
         base=repo_base(),
         data_config=data_config_path,
@@ -220,14 +254,19 @@ def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
         raise AgentToolError("INVALID_ARGUMENT", "start-date must be on or before end-date")
     migrated_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     try:
-        result = backfill_cash_conversions(
+        migrate = (
+            correct_superseded_cash_conversions
+            if correct
+            else backfill_cash_conversions
+        )
+        result = migrate(
             repo,
             evidence_repo,
             account=str(args.account or "").strip().lower() or None,
             broker=str(args.broker or "").strip() or None,
             start_ms=start_ms,
             end_ms=end_ms,
-            apply=bool(args.apply),
+            apply=apply,
             migrated_at_ms=migrated_at_ms,
         )
     except (TypeError, ValueError) as exc:
@@ -245,8 +284,16 @@ def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
     if not args.include_rows:
         data.pop("unresolved", None)
         data.pop("changes", None)
-    data["schema_version"] = "option_performance_cash_conversion_backfill.output.v1"
-    data["dry_run"] = not bool(args.apply)
+    data["schema_version"] = (
+        "option_performance_cash_conversion_correction.output.v1"
+        if correct
+        else "option_performance_cash_conversion_backfill.output.v1"
+    )
+    data["dry_run"] = not apply
+    if correct:
+        data["correctable_conversion_count"] = data["preview_conversion_count"]
+        data["corrected_conversion_count"] = data["migrated_conversion_count"]
+        data["audit_id"] = data.get("batch_id") if apply else None
     data["scope"] = {
         "config_key": payload["config_key"],
         "account": str(args.account or "").strip().lower() or None,
@@ -259,6 +306,14 @@ def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
         "data_config": mask_path(data_config_path),
     }
     return data
+
+
+def _backfill_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
+    return _migrate_cash_conversion(args, correct=False)
+
+
+def _correct_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
+    return _migrate_cash_conversion(args, correct=True)
 
 
 def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -298,6 +353,12 @@ def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any
         and args.cash_conversion_command == "backfill"
     ):
         return _backfill_cash_conversion(args)
+
+    if (
+        args.option_performance_command == "cash-conversion"
+        and args.cash_conversion_command == "correct"
+    ):
+        return _correct_cash_conversion(args)
 
     raise AgentToolError("INVALID_ARGUMENT", "unsupported option-performance command")
 

@@ -210,3 +210,125 @@ def test_cash_conversion_backfill_apply_and_dry_run_are_mutually_exclusive() -> 
                 "--apply",
             ]
         )
+
+
+def test_cash_conversion_correction_defaults_to_dry_run_and_preserves_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def _correct(args):
+        captured.update(vars(args))
+        return {
+            "schema_version": "option_performance_cash_conversion_correction.output.v1",
+            "dry_run": True,
+        }
+
+    monkeypatch.setattr(option_performance, "_correct_cash_conversion", _correct)
+    args = parse_args(
+        [
+            "option-performance",
+            "cash-conversion",
+            "correct",
+            "--account",
+            "lx",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-08-26",
+        ]
+    )
+
+    result = option_performance.handle_option_performance_command(args)
+
+    assert result["dry_run"] is True
+    assert captured["apply"] is False
+    assert captured["account"] == "lx"
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--apply"], "use --confirm or --yes"),
+        (["--confirm"], "require --apply together"),
+        (["--dry-run", "--apply", "--confirm"], "cannot be combined"),
+    ],
+)
+def test_cash_conversion_correction_requires_explicit_apply_and_confirmation(
+    flags: list[str],
+    message: str,
+) -> None:
+    args = parse_args(
+        ["option-performance", "cash-conversion", "correct", *flags]
+    )
+    with pytest.raises(SystemExit, match=message):
+        option_performance.handle_option_performance_command(args)
+
+
+def test_cash_conversion_correction_confirmed_apply_uses_guard_and_returns_audit_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = {}
+
+    class _Result:
+        def to_dict(self):
+            return {
+                "applied": True,
+                "batch_id": "cashfxcorr_test",
+                "preview_conversion_count": 2,
+                "migrated_conversion_count": 2,
+                "unresolved": [],
+                "changes": [],
+            }
+
+    monkeypatch.setattr(
+        option_performance,
+        "load_runtime_config",
+        lambda **_kwargs: (tmp_path / "config.us.json", {"portfolio": {}}),
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "resolve_public_data_config_path",
+        lambda _payload, _portfolio: tmp_path / "portfolio.runtime.json",
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "guard_ledger_write",
+        lambda **kwargs: calls.setdefault("guard", kwargs) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "open_position_ledger_from_data_config",
+        lambda **_kwargs: (tmp_path / "portfolio.runtime.json", object()),
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "open_performance_evidence_repository",
+        lambda _repo: object(),
+    )
+
+    def _correct(*_args, **kwargs):
+        calls["correct"] = kwargs
+        return _Result()
+
+    monkeypatch.setattr(option_performance, "correct_superseded_cash_conversions", _correct)
+    args = parse_args(
+        [
+            "option-performance",
+            "cash-conversion",
+            "correct",
+            "--account",
+            "lx",
+            "--apply",
+            "--confirm",
+        ]
+    )
+
+    result = option_performance.handle_option_performance_command(args)
+
+    assert calls["guard"]["data_config"] == tmp_path / "portfolio.runtime.json"
+    assert calls["correct"]["apply"] is True
+    assert result["dry_run"] is False
+    assert result["corrected_conversion_count"] == 2
+    assert result["audit_id"] == "cashfxcorr_test"
