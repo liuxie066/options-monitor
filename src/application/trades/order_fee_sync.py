@@ -16,6 +16,7 @@ from domain.domain.ledger import (
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import FeeBasis, FeeComponent, quantize_money, to_decimal
 from src.application.ledger.api import enrich_order_fees
+from src.application.ledger.order_fee_semantics import is_unexecuted_expire_close
 
 
 _PROVIDER_CUTOFF_MS = int(
@@ -258,7 +259,8 @@ def _select_candidates(
         if (
             event.event_id in voided
             or event.contract_key.account != account
-            or event.event_type not in {"open", "close", "assignment", "exercise"}
+            or event.event_type
+            not in {"open", "close", "expire_close", "assignment", "exercise"}
         ):
             continue
         if normalize_broker(event.contract_key.broker) != "富途":
@@ -279,6 +281,8 @@ def _select_candidates(
             raw.get("order_id"),
         )
         if identity is None:
+            if is_unexecuted_expire_close(event):
+                continue
             if _in_range(event.event_time_ms, start_ms, end_exclusive_ms):
                 issues.append(
                     {

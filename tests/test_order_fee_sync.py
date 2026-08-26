@@ -71,6 +71,46 @@ class _Provider:
         }, {}
 
 
+def _expiry_event(
+    *, order_id: str | None = None, broker_execution: bool = False
+) -> TradeEvent:
+    if order_id is not None or broker_execution:
+        raw_payload = {
+            "futu_account_id": "123",
+            "source_type": (
+                "system_trade_event" if broker_execution else "broker_trade_event"
+            ),
+            "source_deal_id": "expiry-deal-1",
+        }
+        if order_id is not None:
+            raw_payload["order_id"] = order_id
+        source = "opend_push"
+    else:
+        raw_payload = {"source_type": "system_trade_event"}
+        source = "option_lifecycle_decision"
+    return TradeEvent(
+        event_id="expiry-1",
+        event_type="expire_close",
+        event_time_ms=EVENT_MS,
+        contract_key=ContractKey.from_values(
+            broker="富途",
+            account="lx",
+            underlying_symbol="NVDA",
+            option_type="put",
+            position_side="short",
+            strike=100,
+            expiration_ymd="2026-06-19",
+        ),
+        contracts=1,
+        price=0,
+        currency="USD",
+        source=source,
+        multiplier=100,
+        target_lot_id="lot-1",
+        raw_payload=raw_payload,
+    )
+
+
 @pytest.mark.parametrize("fee_amount", ["0.000000", "1.230000"])
 def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
     tmp_path: Path,
@@ -108,6 +148,187 @@ def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
     assert event.raw_payload["fee_provenance"]["source"] == "opend.order_fee_query"
     with repo._connect() as conn:  # noqa: SLF001 - audit proof
         assert conn.execute("SELECT COUNT(*) FROM broker_fee_enrichment_audit").fetchone()[0] == 1
+
+
+def test_order_backed_expiry_reaches_actual_fee_provider(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "expiry-order.sqlite3")
+    repo.upsert_trade_event(_expiry_event(order_id="expiry-order-1"))
+    provider = _Provider(fee_amount="0.50")
+
+    receipt = sync_order_fees(
+        repo,
+        account="lx",
+        start_ms=EVENT_MS - 1,
+        end_exclusive_ms=EVENT_MS + 1,
+        provider=provider,
+        apply=False,
+        observed_at_ms=EVENT_MS + 10,
+        allowed_futu_account_ids=("123",),
+    )
+
+    assert receipt["actual_observation_count"] == 1
+    assert provider.terminal_calls == provider.fee_calls == 1
+
+
+def test_expiry_without_executed_order_is_frozen_as_actual_zero(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "expiry-writer.sqlite3")
+    expiry = _expiry_event()
+    persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="open-for-expiry",
+            event_type="open",
+            event_time_ms=EVENT_MS - 1,
+            contract_key=expiry.contract_key,
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            lot_id="lot-1",
+        ),
+    )
+
+    persist_trade_event_object(repo, expiry)
+
+    event = next(
+        TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+        if row["event_id"] == "expiry-1"
+    )
+    fee = fee_fact_for_event(event)
+    assert fee.basis.value == "actual"
+    assert fee.amount == 0
+    provenance = event.raw_payload["fee_provenance"]
+    assert provenance["source"] == "option_expiry_lifecycle"
+    assert provenance["reason"] == "expired_without_executed_order"
+    conversion = event.raw_payload["cash_conversions"]["option_fee_cash"]
+    assert conversion["status"] == "observed"
+    assert conversion["method"] == "zero_identity"
+
+
+def test_legacy_expiry_without_executed_order_migrates_to_actual_zero(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "expiry-migration.sqlite3")
+    expiry = _expiry_event()
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id="legacy-open-for-expiry",
+            event_type="open",
+            event_time_ms=EVENT_MS - 2,
+            contract_key=expiry.contract_key,
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="legacy",
+            multiplier=100,
+            lot_id="lot-1",
+            raw_payload={
+                "fee_provenance": {
+                    "basis": "actual",
+                    "amount": "0",
+                    "source": "test",
+                }
+            },
+        )
+    )
+    repo.upsert_trade_event(expiry)
+
+    receipt = enrich_order_fees(
+        repo,
+        account="lx",
+        start_ms=EVENT_MS - 1,
+        end_exclusive_ms=EVENT_MS + 1,
+        apply=True,
+        applied_at_ms=EVENT_MS + 10,
+    )
+
+    assert receipt["status_counts"] == {"committed": 1}
+    assert receipt["basis_counts"] == {"actual": 1, "estimated": 0, "missing": 0}
+    assert receipt["reason_counts"] == {}
+    event = next(
+        TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+        if row["event_id"] == "expiry-1"
+    )
+    assert fee_fact_for_event(event).basis.value == "actual"
+    assert event.raw_payload["fee_provenance"]["reason"] == (
+        "expired_without_executed_order"
+    )
+    assert event.raw_payload["cash_conversions"]["option_fee_cash"]["status"] == (
+        "observed"
+    )
+
+
+def test_broker_expiry_without_order_identity_stays_missing(
+    tmp_path: Path,
+) -> None:
+    expiry = _expiry_event(broker_execution=True)
+    writer_repo = SQLiteOptionPositionsRepository(tmp_path / "broker-expiry-writer.sqlite3")
+    writer_repo.upsert_trade_event(
+        TradeEvent(
+            event_id="broker-open-for-expiry",
+            event_type="open",
+            event_time_ms=EVENT_MS - 2,
+            contract_key=expiry.contract_key,
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="legacy",
+            multiplier=100,
+            lot_id="lot-1",
+            raw_payload={
+                "fee_provenance": {
+                    "basis": "actual",
+                    "amount": "0",
+                    "source": "test",
+                }
+            },
+        )
+    )
+
+    persist_trade_event_object(writer_repo, expiry)
+
+    persisted = next(
+        TradeEvent.from_dict(row)
+        for row in writer_repo.list_trade_events()
+        if row["event_id"] == "expiry-1"
+    )
+    fee = fee_fact_for_event(persisted)
+    assert fee.basis.value == "missing"
+    assert fee.reason == "broker_order_identity_missing"
+    provider = _Provider()
+    sync_receipt = sync_order_fees(
+        writer_repo,
+        account="lx",
+        start_ms=EVENT_MS - 1,
+        end_exclusive_ms=EVENT_MS + 1,
+        provider=provider,
+        apply=False,
+        observed_at_ms=EVENT_MS + 10,
+        allowed_futu_account_ids=("123",),
+    )
+    assert sync_receipt["reason_counts"] == {"order_identity_missing": 1}
+    assert provider.terminal_calls == provider.fee_calls == 0
+
+    migration_repo = SQLiteOptionPositionsRepository(
+        tmp_path / "broker-expiry-migration.sqlite3"
+    )
+    migration_repo.upsert_trade_event(expiry)
+    migration_receipt = enrich_order_fees(
+        migration_repo,
+        account="lx",
+        start_ms=EVENT_MS - 1,
+        end_exclusive_ms=EVENT_MS + 1,
+        apply=True,
+        applied_at_ms=EVENT_MS + 10,
+    )
+    assert migration_receipt["unit_count"] == 0
+    migrated = TradeEvent.from_dict(migration_repo.list_trade_events()[0])
+    assert fee_fact_for_event(migrated).basis.value == "missing"
 
 
 def test_fee_sync_rejects_quantity_mismatch_before_fee_query(tmp_path: Path) -> None:

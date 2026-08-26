@@ -29,6 +29,7 @@ from src.application.ledger.current_decision_projection import (
     finalize_current_decision_projection,
 )
 from src.application.ledger.event_codec import encode_trade_event_for_storage
+from src.application.ledger.order_fee_semantics import is_unexecuted_expire_close
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
@@ -257,7 +258,8 @@ def _build_units(
         event
         for event in trade_events
         if event.event_id not in voided
-        and event.event_type in {"open", "close", "assignment", "exercise"}
+        and event.event_type
+        in {"open", "close", "expire_close", "assignment", "exercise"}
         and event.contract_key.account == account
     ]
     stock_events = [
@@ -369,6 +371,41 @@ def _build_units(
                     "after_basis": [FeeBasis.ACTUAL.value],
                 }
             )
+
+    for event in option_events:
+        if (
+            event.event_type != "expire_close"
+            or ("option_trade", event.event_id) in provider_observed_event_ids
+            or not _in_range(event, start_ms, end_exclusive_ms)
+            or not _is_bare_fee(event.raw_payload, event.fees)
+            or not is_unexecuted_expire_close(event)
+        ):
+            continue
+        updated = _option_event_with_fee(
+            event,
+            basis=FeeBasis.ACTUAL,
+            amount=Decimal(0),
+            provenance={
+                "source": "option_expiry_lifecycle",
+                "reason": "expired_without_executed_order",
+                "frozen_at_ms": int(applied_at_ms),
+            },
+            applied_at_ms=applied_at_ms,
+        )
+        units.append(
+            _Unit(
+                identity=f"actual-zero:option:{event.event_id}",
+                changes=(
+                    _trade_change(
+                        event,
+                        updated,
+                        before_basis=FeeBasis.MISSING.value,
+                        after_basis=FeeBasis.ACTUAL.value,
+                    ),
+                ),
+            )
+        )
+
     formula_option_groups = _formula_option_groups(option_events)
     for identity, events in sorted(formula_option_groups.items()):
         if any(
