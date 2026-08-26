@@ -259,7 +259,7 @@ class PerformanceEvidenceSQLiteRepository:
     def _read_all_conn(self, conn: sqlite3.Connection) -> EvidenceReadBundle:
         marks = tuple(_mark_from_row(row) for row in conn.execute(_MARK_SELECT).fetchall())
         rates = tuple(_rate_from_row(row) for row in conn.execute(_FX_SELECT).fetchall())
-        validate_evidence_facts(marks, rates)
+        validate_evidence_facts((), (), existing_marks=marks, existing_rates=rates)
         return EvidenceReadBundle("initialized_v1", valuation_marks=marks, fx_rates=rates)
 
 
