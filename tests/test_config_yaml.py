@@ -352,6 +352,27 @@ def test_yaml_config_accepts_market_schedule_override(tmp_path: Path) -> None:
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_yaml_config_rejects_schedule_typo(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        _minimal_yaml().replace(
+            "  us:\n    accounts: [lx, sy]\n",
+            "  us:\n"
+            "    accounts: [lx, sy]\n"
+            "    schedule:\n"
+            "      gtaes: []\n",
+            1,
+        ),
+    )
+
+    with pytest.raises(AgentToolError, match="schedule contains unsupported keys: gtaes"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+
 def test_yaml_config_rejects_string_combo_yield_enabled(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",

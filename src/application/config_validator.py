@@ -808,6 +808,11 @@ def _validate_schedule_cfg(raw, path: str) -> None:
             f"{path} has removed schedule fields: {', '.join(removed)}; "
             "use timezone, cron_interval_min, run_window, run_points, and gates"
         )
+    _reject_unknown_keys(
+        raw,
+        {'enabled', 'timezone', 'beijing_timezone', 'cron_interval_min', 'run_window', 'run_points', 'gates'},
+        path,
+    )
 
     if 'timezone' in raw:
         _validate_timezone(raw.get('timezone'), f'{path}.timezone')
@@ -820,6 +825,7 @@ def _validate_schedule_cfg(raw, path: str) -> None:
     if run_window is not None:
         if not isinstance(run_window, dict):
             die(f'{path}.run_window must be an object')
+        _reject_unknown_keys(run_window, {'start', 'end', 'breaks'}, f'{path}.run_window')
         _validate_hhmm(run_window.get('start'), f'{path}.run_window.start')
         _validate_hhmm(run_window.get('end'), f'{path}.run_window.end')
         breaks = run_window.get('breaks', [])
@@ -830,6 +836,7 @@ def _validate_schedule_cfg(raw, path: str) -> None:
         for index, item in enumerate(breaks):
             if not isinstance(item, dict):
                 die(f'{path}.run_window.breaks[{index}] must be an object')
+            _reject_unknown_keys(item, {'start', 'end'}, f'{path}.run_window.breaks[{index}]')
             _validate_hhmm(item.get('start'), f'{path}.run_window.breaks[{index}].start')
             _validate_hhmm(item.get('end'), f'{path}.run_window.breaks[{index}].end')
 
@@ -837,6 +844,11 @@ def _validate_schedule_cfg(raw, path: str) -> None:
     if run_points is not None:
         if not isinstance(run_points, dict):
             die(f'{path}.run_points must be an object')
+        _reject_unknown_keys(
+            run_points,
+            {'start_plus_min', 'hourly_minute', 'end_minus_min'},
+            f'{path}.run_points',
+        )
         for key in ('start_plus_min', 'end_minus_min'):
             if key in run_points and run_points.get(key) is not None:
                 validate_non_negative_integer(run_points.get(key), f'{path}.run_points.{key}')
@@ -852,6 +864,11 @@ def _validate_schedule_cfg(raw, path: str) -> None:
         for index, gate in enumerate(gates):
             if not isinstance(gate, dict):
                 die(f'{path}.gates[{index}] must be an object')
+            _reject_unknown_keys(
+                gate,
+                {'type', 'timezone', 'time', 'day_offset_from_window_start'},
+                f'{path}.gates[{index}]',
+            )
             gate_type = str(gate.get('type') or '').strip().lower()
             if gate_type != 'before':
                 die(f'{path}.gates[{index}].type must be before')
