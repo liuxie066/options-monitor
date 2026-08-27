@@ -315,7 +315,9 @@ Persisted actual and frozen formula-estimated fees both participate in this cash
 `cashflow_return.coverage.fee_basis_by_currency` preserves their quality. A missing fee leaves gross
 trade cash visible but makes the affected net cash-flow return null/partial. Stock settlement
 principal and fees, assigned-stock sale proceeds and fees, dividends, interest, margin movements,
-and market-value changes are excluded.
+and market-value changes are excluded. A confirmed short-option assignment and a confirmed expiry
+without an executed option order carry an actual-zero option fee; any real open or close execution
+still requires its option-order fee evidence.
 
 The numerator includes every canonical option trade event in the scoped period exactly once, whether
 or not strategy attribution is present. Sell-open and long-option sell-close cash are positive;

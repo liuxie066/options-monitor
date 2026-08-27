@@ -3670,5 +3670,60 @@ def test_manual_assignment_request_retry_returns_original_result_after_lot_close
     assert first["result"]["event_id"] == second["result"]["event_id"]
     assert repo.get_position_lot_fields(lot_id)["status"] == "close"
     assert len(repo.list_trade_events()) == 2
+    assignment = next(
+        TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+        if row["event_type"] == "assignment"
+    )
+    fee = fee_fact_for_event(assignment)
+    assert fee.basis.value == "actual"
+    assert fee.amount == 0
+    assert assignment.raw_payload["fee_provenance"]["reason"] == (
+        "assignment_without_option_trade"
+    )
+    repair = ledger_interventions.build_manual_repair_preview(
+        repo,
+        target_event_id=assignment.event_id,
+        overrides={"currency": "USD"},
+        repair_reason="preserve lifecycle type",
+        as_of_ms=3000,
+    )
+    assert repair.repair_event is not None
+    assert repair.repair_event["event_type"] == "assignment"
     with pytest.raises(ValueError, match="manual request conflict"):
         record_manual_assignment(repo, **(kwargs | {"stock_qty": 200}))
+
+
+def test_trade_event_repair_recovers_assignment_type_from_lifecycle_payload() -> None:
+    repaired = ledger_interventions._repair_trade_event(
+        event_id="repair-assignment",
+        core={
+            "event_type": "close",
+            "position_effect": "close",
+            "trade_time_ms": 2000,
+            "broker": "富途",
+            "account": "sy",
+            "symbol": "PDD",
+            "option_type": "put",
+            "side": "buy",
+            "contracts": 1,
+            "price": 0,
+            "strike": 100,
+            "multiplier": 100,
+            "expiration_ymd": "2026-08-21",
+            "currency": "USD",
+        },
+        raw_payload={
+            "close_type": "assignment",
+            "target_lot_id": "lot-pdd",
+            "stock_settlement": {
+                "side": "buy",
+                "shares": 100,
+                "price": 100,
+                "currency": "USD",
+            },
+        },
+    )
+
+    assert repaired.event_type == "assignment"
+    assert repaired.target_lot_id == "lot-pdd"

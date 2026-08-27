@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Treated confirmed option assignments and no-execution expiries as actual zero-fee lifecycle events, while preserving real executed-order fees and fail-closed evidence handling.
+
 ## 2.1.1 - 2026-08-27
 
 ### Bug Fixes
