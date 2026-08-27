@@ -237,7 +237,21 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     repo, event_id = _repo_with_open_event(tmp_path)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--dry-run", "--format", "json"]) == 0
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            "--strike",
+            "500",
+            "--futu-account-id",
+            "123",
+            "--order-id",
+            "order-1",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    ) == 0
 
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
@@ -247,6 +261,8 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     assert out["audit_id"].startswith("audit_")
     assert out["target_event"]["event_id"] == event_id
     assert out["repair_event"]["contract_key"]["strike"] == 500.0
+    assert out["repair_event"]["raw_payload"]["futu_account_id"] == "123"
+    assert out["repair_event"]["raw_payload"]["order_id"] == "order-1"
     assert out["ledger_preflight"]["status"] == "ok"
     assert out["ledger_preflight"]["event_type"] == "repair"
     assert out["ledger_preflight"]["target_event_id"] == event_id
