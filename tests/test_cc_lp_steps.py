@@ -216,6 +216,37 @@ def test_run_cc_lp_scan_skips_without_stock(tmp_path: Path) -> None:
     assert df.empty
 
 
+def test_run_cc_lp_scan_demo_capacity_uses_covered_call_owner_without_stock(
+    tmp_path: Path,
+) -> None:
+    required_data = _write_required_data(
+        tmp_path,
+        call_rows=[_call_row()],
+        put_rows=[_put_row()],
+    )
+    captured: dict[str, Any] = {}
+
+    def _scan(**kwargs: Any) -> pd.DataFrame:
+        captured.update(kwargs)
+        return pd.DataFrame([_scan_call_row()])
+
+    df = run_cc_lp_scan(
+        symbol="NVDA",
+        required_data_dir=required_data,
+        sell_call_cfg={"enabled": True},
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=None,
+        stock=None,
+        run_sell_call_scan_fn=_scan,
+        demo_capacity=True,
+    )
+
+    assert not df.empty
+    assert captured["demo_capacity"] is True
+    assert df.iloc[0]["capacity_source"] == "demo_scenario"
+    assert int(df.iloc[0]["max_new_contracts"]) == 1
+
+
 def test_run_cc_lp_scan_rejects_retention_below_floor(tmp_path: Path) -> None:
     # expensive put -> retention below 0.20
     put = _put_row(ask=4.0)

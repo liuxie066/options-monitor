@@ -15,6 +15,11 @@ from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
 )
+from src.application.experience_candidate_snapshot import (
+    EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+    ExperienceCandidateSnapshotError,
+    load_experience_candidate_snapshot_bundle,
+)
 from src.application.cc_lp_candidate_snapshot import (
     CC_LP_CANDIDATE_SNAPSHOT_FILE,
     CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -49,6 +54,7 @@ UNSUPPORTED_LEGACY_CSV_ONLY = "unsupported_legacy_csv_only"
 UNSUPPORTED_SNAPSHOT_MISSING = "unsupported_snapshot_missing"
 UNSUPPORTED_SNAPSHOT_SCHEMA = "unsupported_snapshot_schema"
 NOT_SCANNED = "not_scanned"
+NON_CONTRIBUTING_EXPERIENCE = "non_contributing_experience"
 CANDIDATE_EVIDENCE_STATES = frozenset(
     {
         SUPPORTED,
@@ -57,6 +63,7 @@ CANDIDATE_EVIDENCE_STATES = frozenset(
         UNSUPPORTED_SNAPSHOT_MISSING,
         UNSUPPORTED_SNAPSHOT_SCHEMA,
         NOT_SCANNED,
+        NON_CONTRIBUTING_EXPERIENCE,
     }
 )
 
@@ -145,7 +152,39 @@ def load_account_candidate_evidence(
     }
 
     manifest_path = state_dir / CANDIDATE_SNAPSHOT_MANIFEST_FILE
-    if manifest_path.exists():
+    experience_manifest_path = state_dir / EXPERIENCE_CANDIDATE_MANIFEST_FILE
+    if experience_manifest_path.exists() or experience_manifest_path.is_symlink():
+        if manifest_path.exists() or manifest_path.is_symlink():
+            return _result(
+                account_dir=account_dir,
+                common=common,
+                status=UNSUPPORTED_SNAPSHOT_SCHEMA,
+                reason_code="formal_and_experience_manifests_conflict",
+            )
+        try:
+            bundle = load_experience_candidate_snapshot_bundle(
+                base=authority_base,
+                run_id=run_id_norm,
+                account=account_norm,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            return _result(
+                account_dir=account_dir,
+                common=common,
+                status=UNSUPPORTED_SNAPSHOT_SCHEMA,
+                reason_code="experience_candidate_manifest_invalid",
+                detail=str(exc),
+            )
+        return _result(
+            account_dir=account_dir,
+            common=common,
+            status=NON_CONTRIBUTING_EXPERIENCE,
+            reason_code="experience_candidate_not_executable",
+            owners=dict(bundle["owners"]),
+            status_index=dict(bundle["status_index"]),
+            manifest=dict(bundle["manifest"]),
+        )
+    if manifest_path.exists() or manifest_path.is_symlink():
         try:
             bundle = load_candidate_snapshot_bundle(
                 base=authority_base,
@@ -387,6 +426,7 @@ def _result(
         "reason_code": reason_code,
         "strict_replay_authority": status == SUPPORTED,
         "contributes_snapshot_facts": status in {SUPPORTED, SUPPORTED_LIMITED_LEGACY_SNAPSHOT},
+        "contributes_evidence": status in {SUPPORTED, SUPPORTED_LIMITED_LEGACY_SNAPSHOT},
         "owner_snapshots": sorted((owners or {}).keys()),
     }
     if detail:
@@ -726,6 +766,7 @@ __all__ = [
     "CANDIDATE_EVIDENCE_STATES",
     "CandidateEvidenceHistoryError",
     "NOT_SCANNED",
+    "NON_CONTRIBUTING_EXPERIENCE",
     "SUPPORTED",
     "SUPPORTED_LIMITED_LEGACY_SNAPSHOT",
     "UNSUPPORTED_LEGACY_CSV_ONLY",

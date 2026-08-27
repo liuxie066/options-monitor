@@ -11,8 +11,8 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
-    load_candidate_snapshot_bundle,
-    load_latest_candidate_snapshot_bundle,
+    load_candidate_snapshot_bundle_readonly,
+    load_latest_candidate_snapshot_bundle_readonly,
 )
 from src.application.notification_perception_read import (
     iter_notification_perception_events,
@@ -162,7 +162,7 @@ def candidate_filter_explain_tool(
     run_resolution: dict[str, Any] | None = None
     try:
         if str(payload.get("run_id") or "").strip():
-            bundle = load_candidate_snapshot_bundle(
+            bundle = load_candidate_snapshot_bundle_readonly(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
@@ -203,7 +203,7 @@ def candidate_filter_explain_tool(
                     },
                 )
             try:
-                bundle = load_candidate_snapshot_bundle(
+                bundle = load_candidate_snapshot_bundle_readonly(
                     base=base,
                     run_id=resolved["run_id"],
                     account=account,
@@ -229,7 +229,7 @@ def candidate_filter_explain_tool(
                 ),
             }
         else:
-            bundle = load_latest_candidate_snapshot_bundle(
+            bundle = load_latest_candidate_snapshot_bundle_readonly(
                 base=base,
                 account=account,
             )
@@ -292,6 +292,9 @@ def candidate_filter_explain_tool(
             "content_sha256"
         ),
         "authority": "terminal_manifest_bound_opening_candidate_snapshot",
+        "scan_mode": snapshot.get("scan_mode"),
+        "account_display_name": snapshot.get("account_display_name"),
+        "executable": snapshot.get("executable"),
     }
     if run_resolution is not None:
         source["run_resolution"] = run_resolution

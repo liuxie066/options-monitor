@@ -21,7 +21,7 @@ from numbers import Integral, Real
 from pathlib import Path
 import random
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
@@ -750,6 +750,69 @@ class FutuGateway:
             }
         except Exception as exc:
             self._raise_mapped(exc, action="ensure_broker_ready")
+        raise AssertionError("unreachable")
+
+    def get_account_metadata(
+        self,
+        *,
+        expected_account_id: str,
+        trd_env: str,
+        expected_market: str,
+    ) -> dict[str, Any]:
+        """Read one redacted account-list match without querying account assets."""
+
+        trade = self._trade_client()
+        expected = _normalize_observed_account_id(expected_account_id)
+        environment = _normalize_trade_environment(trd_env)
+        market = str(expected_market or "").strip().upper()
+        if not expected or not environment or market not in {"US", "HK"}:
+            raise FutuGatewayError(
+                "get_account_metadata failed: account identity is incomplete"
+            )
+        try:
+            rows = self.client._rows(self.client._unwrap(trade.get_acc_list()))
+
+            def supports_market(row: Mapping[str, Any]) -> bool:
+                raw = row.get("trdmarket_auth")
+                values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+                return any(
+                    str(value or "").strip().upper() in {market, f"TrdMarket.{market}".upper()}
+                    for value in values
+                )
+
+            eligible = [
+                row
+                for row in rows
+                if _normalize_trade_environment(row.get("trd_env") or row.get("env"))
+                == environment
+                and supports_market(row)
+            ]
+            matched = next(
+                (
+                    row
+                    for row in eligible
+                    if _normalize_observed_account_id(row.get("acc_id")) == expected
+                ),
+                None,
+            )
+            if matched is None:
+                return {"matched": False, "trd_env": environment}
+            sim_type = str(matched.get("sim_acc_type") or "").strip().upper()
+            same_type_count = sum(
+                1
+                for row in eligible
+                if str(row.get("sim_acc_type") or "").strip().upper() == sim_type
+            )
+            return {
+                "matched": True,
+                "trd_env": environment,
+                "sim_acc_type": sim_type or None,
+                "trdmarket_auth": matched.get("trdmarket_auth"),
+                "account_id_tail": expected[-4:],
+                "same_type_count": same_type_count,
+            }
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_account_metadata")
         raise AssertionError("unreachable")
 
     def get_option_expiration_dates(self, code: str) -> Any:

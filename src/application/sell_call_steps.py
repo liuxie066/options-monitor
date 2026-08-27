@@ -73,6 +73,7 @@ def run_sell_call_scan_and_summarize(
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> dict[str, Any]:
     """Run the Covered Call opening policy in memory and summarize it."""
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
@@ -87,7 +88,7 @@ def run_sell_call_scan_and_summarize(
         and isinstance(portfolio_ctx.get("capacity_authority"), dict)
         else {}
     )
-    if (
+    if not demo_capacity and (
         portfolio_source != "futu"
         or str(authority.get("status") or "").strip().lower() != "available"
     ):
@@ -97,7 +98,7 @@ def run_sell_call_scan_and_summarize(
             status="unavailable",
             reason="physical_account_capacity_authority_unavailable",
         )
-    if not stock:
+    if not demo_capacity and not stock:
         return _empty_sell_call_result(
             symbol=symbol,
             symbol_cfg=symbol_cfg,
@@ -105,24 +106,31 @@ def run_sell_call_scan_and_summarize(
             reason="stock_context_missing",
         )
 
-    try:
-        shares_raw = stock.get('shares')
-        shares_can_sell_raw = stock.get('can_sell_qty')
-        avg_cost_raw = stock.get('avg_cost')
-        if shares_raw is None or shares_can_sell_raw is None or avg_cost_raw is None:
-            raise ValueError("missing stock context")
-        shares_total = int(shares_raw)
-        shares_can_sell = int(shares_can_sell_raw)
-        avg_cost = float(avg_cost_raw)
-    except Exception:
-        return _empty_sell_call_result(
-            symbol=symbol,
-            symbol_cfg=symbol_cfg,
-            status="not_applicable",
-            reason="stock_context_invalid",
-        )
+    shares_total = 0
+    shares_can_sell = 0
+    avg_cost = 0.0
+    if not demo_capacity:
+        try:
+            assert stock is not None
+            shares_raw = stock.get('shares')
+            shares_can_sell_raw = stock.get('can_sell_qty')
+            avg_cost_raw = stock.get('avg_cost')
+            if shares_raw is None or shares_can_sell_raw is None or avg_cost_raw is None:
+                raise ValueError("missing stock context")
+            shares_total = int(shares_raw)
+            shares_can_sell = int(shares_can_sell_raw)
+            avg_cost = float(avg_cost_raw)
+        except Exception:
+            return _empty_sell_call_result(
+                symbol=symbol,
+                symbol_cfg=symbol_cfg,
+                status="not_applicable",
+                reason="stock_context_invalid",
+            )
 
-    if shares_total <= 0 or shares_can_sell < 0 or avg_cost <= 0:
+    if not demo_capacity and (
+        shares_total <= 0 or shares_can_sell < 0 or avg_cost <= 0
+    ):
         return _empty_sell_call_result(
             symbol=symbol,
             symbol_cfg=symbol_cfg,
@@ -131,48 +139,52 @@ def run_sell_call_scan_and_summarize(
         )
 
     locked = 0
-    try:
-        symbol_key = canonical_symbol(symbol) or str(symbol).upper()
-        if (
-            str(locked_shares_status or "").strip().lower() != "available"
-            or not isinstance(locked_shares_by_symbol, dict)
-            or not isinstance(locked_shares_unavailable_by_symbol, dict)
-        ):
-            reason = str(
-                locked_shares_unavailable_reason
-                or "option_positions_context_unavailable"
-            )
+    if not demo_capacity:
+        try:
+            assert stock is not None
+            symbol_key = canonical_symbol(symbol) or str(symbol).upper()
+            if (
+                str(locked_shares_status or "").strip().lower() != "available"
+                or not isinstance(locked_shares_by_symbol, dict)
+                or not isinstance(locked_shares_unavailable_by_symbol, dict)
+            ):
+                reason = str(
+                    locked_shares_unavailable_reason
+                    or "option_positions_context_unavailable"
+                )
+                return _empty_sell_call_result(
+                    symbol=symbol,
+                    symbol_cfg=symbol_cfg,
+                    status="unavailable",
+                    reason=reason,
+                )
+            if symbol_key in locked_shares_unavailable_by_symbol:
+                reason = str(
+                    locked_shares_unavailable_by_symbol.get(symbol_key)
+                    or "locked shares unavailable"
+                )
+                return _empty_sell_call_result(
+                    symbol=symbol,
+                    symbol_cfg=symbol_cfg,
+                    status="unavailable",
+                    reason=reason,
+                )
+            locked = int((locked_shares_by_symbol or {}).get(symbol_key, 0) or 0)
+        except Exception:
             return _empty_sell_call_result(
                 symbol=symbol,
                 symbol_cfg=symbol_cfg,
                 status="unavailable",
-                reason=reason,
+                reason="share_coverage_calc_failed",
             )
-        if locked_shares_unavailable_by_symbol and symbol_key in locked_shares_unavailable_by_symbol:
-            reason = str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable")
-            return _empty_sell_call_result(
-                symbol=symbol,
-                symbol_cfg=symbol_cfg,
-                status="unavailable",
-                reason=reason,
-            )
-        if locked_shares_by_symbol and symbol:
-            locked = int(locked_shares_by_symbol.get(symbol_key, 0) or 0)
-    except Exception:
+    if not demo_capacity and locked < 0:
         return _empty_sell_call_result(
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="unavailable",
             reason="share_coverage_calc_failed",
         )
-    if locked < 0:
-        return _empty_sell_call_result(
-            symbol=symbol,
-            symbol_cfg=symbol_cfg,
-            status="unavailable",
-            reason="share_coverage_calc_failed",
-        )
-    if locked > min(shares_total, shares_can_sell):
+    if not demo_capacity and locked > min(shares_total, shares_can_sell):
         return _empty_sell_call_result(
             symbol=symbol,
             symbol_cfg=symbol_cfg,
@@ -190,21 +202,21 @@ def run_sell_call_scan_and_summarize(
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
         shares_locked=int(locked),
-        capacity_facts={
+        capacity_facts=({"capacity_source": "demo_scenario"} if demo_capacity else {
             "capacity_identity_hash": stock.get("capacity_identity_hash"),
             "futu_account_id": stock.get("futu_account_id"),
             "capacity_trd_env": stock.get("trd_env"),
             "capacity_market": stock.get("market"),
             "capacity_source_observed_at": stock.get("source_observed_at"),
             "capacity_authority_status": stock.get("capacity_authority_status"),
-        },
+        }),
         min_dte=window.min_dte,
         max_dte=window.max_dte,
-        min_strike=resolve_effective_sell_call_min_strike(
+        min_strike=(cc.get('min_strike') if demo_capacity else resolve_effective_sell_call_min_strike(
             min_strike=cc.get('min_strike'),
             avg_cost=avg_cost,
             cost_multiplier=cc.get('min_strike_cost_multiplier', 1.02),
-        ),
+        )),
         max_strike=_optional_float(cc, 'max_strike'),
         # Underwriting applies return/income thresholds once, after CNY enrichment.
         min_annualized_net_return=0.0,
@@ -221,6 +233,7 @@ def run_sell_call_scan_and_summarize(
             if required_data_frame is not None
             else None
         ),
+        demo_capacity=demo_capacity,
     )
 
     if not df_cc.empty:

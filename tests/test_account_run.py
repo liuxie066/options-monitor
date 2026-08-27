@@ -304,6 +304,87 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
 
+def test_experience_account_run_uses_local_report_and_skips_notification_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import run_one_account
+
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True, close_advice_enabled=True),
+        experience=True,
+        account_display_name="美股模拟期权账户",
+    )
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "experience",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_should_notify",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("notification eligibility must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "run_close_advice",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Close Advice must not run")
+        ),
+    )
+
+    def _run_pipeline_script(**kwargs):
+        assert kwargs["experience"] is True
+        assert kwargs["account_display_name"] == "美股模拟期权账户"
+        kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
+        (kwargs["report_dir"] / "experience_report.md").write_text(
+            "体验模式报告\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {"returncode": kwargs["returncode"]},
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "experience",
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **_kwargs: None,
+    )
+
+    assert outcome.result.should_notify is False
+    assert outcome.result.notification_text == "体验模式报告"
+    assert outcome.acct_metrics["scan_mode"] == "experience"
+    assert not any(
+        event.get("action") == "write_run_account_text:symbols_notification.txt"
+        for event in env["audit_events"]
+    )
+
+
 def test_run_one_account_fails_closed_when_prepared_option_context_changes_after_pipeline(
     monkeypatch,
     tmp_path: Path,

@@ -7,18 +7,27 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("watchdog_cfg", "expected_retry_enabled", "expected_timeout_sec"),
+    (
+        "watchdog_cfg",
+        "allow_operational_side_effects",
+        "expected_retry_enabled",
+        "expected_timeout_sec",
+        "expected_ensure",
+    ),
     [
-        (None, True, 60),
-        ({"retry_enabled": False}, False, 35),
+        (None, True, True, 60, True),
+        ({"retry_enabled": False}, True, False, 35, True),
+        (None, False, True, 60, False),
     ],
 )
 def test_watchdog_retry_defaults_to_enabled_but_allows_explicit_disable(
     fake_runlog_factory,
     tmp_path,
     watchdog_cfg,
+    allow_operational_side_effects,
     expected_retry_enabled,
     expected_timeout_sec,
+    expected_ensure,
 ) -> None:
     from src.application.multi_tick_watchdog import run_multi_tick_watchdog
 
@@ -56,12 +65,14 @@ def test_watchdog_retry_defaults_to_enabled_but_allows_explicit_disable(
         send_opend_alert=lambda *_args, **_kwargs: None,
         send_opend_recovery_notice=lambda *_args, **_kwargs: None,
         state_repo=object(),
+        allow_operational_side_effects=allow_operational_side_effects,
     )
 
     assert outcome.should_continue is True
     assert len(calls) == 1
     assert calls[0]["retry_enabled"] is expected_retry_enabled
     assert calls[0]["timeout_sec"] == expected_timeout_sec
+    assert calls[0]["ensure"] is expected_ensure
 
 
 def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(

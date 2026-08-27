@@ -466,6 +466,7 @@ def build_pipeline_context(
     log,
     no_context: bool,
     want_scan: bool,
+    market_data_only: bool = False,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_run_id: str | None = None,
     prepared_portfolio_context_account_config_sha256: str | None = None,
@@ -476,7 +477,17 @@ def build_pipeline_context(
     prepared_option_positions_context_manifest_sha256: str | None = None,
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
     """Load portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate."""
-    if (not want_scan) or bool(no_context):
+    if not want_scan:
+        return None, None, None, None
+    if market_data_only:
+        usd_per_cny, cny_per_hkd = load_exchange_rates(
+            base=base,
+            state_dir=state_dir,
+            shared_state_dir=shared_state_dir,
+            log=log,
+        )
+        return None, None, usd_per_cny, cny_per_hkd
+    if bool(no_context):
         return None, None, None, None
 
     portfolio_cfg = cfg.get('portfolio', {}) or {}

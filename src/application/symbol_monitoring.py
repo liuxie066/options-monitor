@@ -71,6 +71,7 @@ class SymbolMonitoringInputs:
     combo_evidence_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None
+    experience: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,7 @@ def run_symbol_monitoring(
         want_put=want_put,
         want_call=bool(want_call or combo_requires_stock),
         portfolio_ctx=inputs.portfolio_ctx,
+        demo_capacity=inputs.experience,
     )
     want_put = bool(prefilters.want_put)
     want_call = bool(configured_call and prefilters.want_call)
@@ -573,6 +575,7 @@ def run_symbol_monitoring(
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
+                demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
             )
             _append_summary_result(
@@ -643,6 +646,7 @@ def run_symbol_monitoring(
                 stock=stock,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 combo_evidence_sink_fn=inputs.combo_evidence_sink_fn,
+                demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
             )
             _append_summary_result(
@@ -745,6 +749,7 @@ def run_symbol_monitoring(
                 global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
                 final_candidates_sink_fn=inputs.final_candidates_sink_fn,
                 candidate_decisions_sink_fn=inputs.candidate_decisions_sink_fn,
+                demo_capacity=inputs.experience,
                 **frozen_frame_kwargs,
             )
             call_status = "completed"

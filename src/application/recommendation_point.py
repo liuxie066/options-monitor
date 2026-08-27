@@ -16,8 +16,10 @@ from src.application.candidate_snapshot_contract import (
 )
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
+    load_candidate_snapshot_bundle_readonly,
     validate_candidate_snapshot_manifest,
 )
 from src.application.opening_candidate_snapshot import (
@@ -953,16 +955,26 @@ def capture_scheduled_recommendation_point(
     require_option_market_evidence: bool = False,
     require_formal_contract: bool = False,
 ) -> tuple[str, dict[str, Any]]:
+    run_id_norm = _identity(run_id, "run_id")
+    account_norm = _account(account)
     try:
-        bundle = load_candidate_snapshot_bundle(
+        bundle = load_candidate_snapshot_bundle_readonly(
             base=Path(base),
-            run_id=run_id,
-            account=account,
+            run_id=run_id_norm,
+            account=account_norm,
         )
+    except CandidateSnapshotManifestError as exc:
+        _fail("official_point_invalid", f"candidate bundle is invalid: {exc}")
+    if bundle["manifest"].get("schema_version") != CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA:
+        _fail(
+            "experience_candidate_not_executable",
+            "experience candidates cannot become a scheduled recommendation point",
+        )
+    try:
         manifest_bytes = read_account_run_state_bytes_safely(
             base=Path(base),
-            run_id=run_id,
-            account=account,
+            run_id=run_id_norm,
+            account=account_norm,
             name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
         )
     except (AccountRunConfigError, CandidateSnapshotManifestError) as exc:

@@ -28,12 +28,13 @@ def apply_prefilters(
     want_put: bool,
     want_call: bool,
     portfolio_ctx: dict | None,
+    demo_capacity: bool = False,
 ) -> PrefilterResult:
     # Pre-filter (call): sell_call must be based on account-level portfolio context.
     # If portfolio_ctx is unavailable for this account, skip sell_call entirely.
     stock = None
     call_skip_reason = None
-    if want_call:
+    if want_call and not demo_capacity:
         if not isinstance(portfolio_ctx, dict):
             want_call = False
             call_skip_reason = "covered_call_portfolio_context_unavailable"

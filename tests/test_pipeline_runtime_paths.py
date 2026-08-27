@@ -346,3 +346,67 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(
         + 1
     ] == "b" * 64
     assert "OM_ACCOUNT_CONFIG_CANONICAL_B64" in observed["env"]
+
+
+def test_pipeline_subprocess_command_forwards_experience_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.infrastructure import external_services as mod
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "run_command",
+        lambda command, **kwargs: observed.update(
+            {"command": list(command), **kwargs}
+        )
+        or object(),
+    )
+
+    mod.run_pipeline_script(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        config=tmp_path / "config.override.json",
+        report_dir=tmp_path / "reports",
+        state_dir=tmp_path / "state",
+        experience=True,
+        account_display_name="美股模拟期权账户",
+    )
+
+    command = observed["command"]
+    assert command[command.index("--mode") + 1] == "scheduled"
+    assert command[command.index("--account-display-name") + 1] == (
+        "美股模拟期权账户"
+    )
+    assert "--experience" in command
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--mode", "dev", "--stage", "fetch"],
+        ["--mode", "dev", "--stage-only", "notify"],
+    ],
+)
+def test_experience_pipeline_rejects_incomplete_stage(
+    tmp_path: Path,
+    extra: list[str],
+) -> None:
+    from src.application import pipeline_runtime
+
+    with pytest.raises(SystemExit, match="manual full scan"):
+        pipeline_runtime.main(
+            [
+                "--config",
+                str(tmp_path / "unused.json"),
+                "--report-dir",
+                str(tmp_path / "report"),
+                "--state-dir",
+                str(tmp_path / "state"),
+                "--experience",
+                "--account-display-name",
+                "美股模拟期权账户",
+                *extra,
+            ]
+        )

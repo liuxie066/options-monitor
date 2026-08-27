@@ -40,6 +40,7 @@ from src.application.config_validator import validate_resolved_watchlist_item_ru
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
     load_strategy_scan_status_index_v2,
+    load_strategy_scan_status_index_v3,
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
 )
@@ -58,6 +59,10 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.candidate_snapshot_manifest import (
     publish_candidate_snapshot_manifest,
 )
+from src.application.experience_candidate_snapshot import (
+    seal_experience_candidate_bundle,
+)
+from src.application.experience_mode import experience_fields
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
@@ -255,6 +260,7 @@ def _index_owner_statuses(
                 ),
                 "variant": None if owner == "opening" else owner,
                 "owner": owner,
+                "candidate_count": item.get("candidate_count"),
             }
         )
     for owner in statuses_by_owner:
@@ -546,6 +552,8 @@ def run_watchlist_pipeline(
     prepared_option_positions_context_manifest: Path | None = None,
     prepared_option_positions_context_manifest_sha256: str | None = None,
     account_config_sha256: str | None = None,
+    experience: bool = False,
+    account_display_name: str | None = None,
 ) -> list[dict]:
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
@@ -563,6 +571,7 @@ def run_watchlist_pipeline(
         "log": log,
         "no_context": no_context,
         "want_scan": want_fn('scan'),
+        "market_data_only": experience,
     }
     if prepared_portfolio_context_manifest is not None:
         context_kwargs["prepared_portfolio_context_manifest"] = (
@@ -628,6 +637,7 @@ def run_watchlist_pipeline(
                 want_put=bool(sp.get("enabled", False)),
                 want_call=bool(cc.get("enabled", False)),
                 portfolio_ctx=portfolio_ctx,
+                demo_capacity=experience,
             )
             market = str(
                 symbol_market(symbol) or resolved.get("broker") or ""
@@ -794,6 +804,7 @@ def run_watchlist_pipeline(
                     is_scheduled=is_scheduled,
                     runtime_config=cfg,
                     fetch_only=True,
+                    experience=experience,
                 )
                 return []
 
@@ -808,6 +819,7 @@ def run_watchlist_pipeline(
                 timeout_sec=symbol_timeout_sec,
                 is_scheduled=is_scheduled,
                 runtime_config=cfg,
+                experience=experience,
                 **advice_scan_kwargs,
             )
             validated_rows = normalize_processor_rows(processor_rows)
@@ -866,6 +878,11 @@ def run_watchlist_pipeline(
                     account=str(portfolio_cfg.get("account") or ""),
                     account_config_sha256=str(account_config_sha256),
                     expected=expected_strategy_statuses,
+                    experience_fields=(
+                        experience_fields(str(account_display_name or ""))
+                        if experience
+                        else None
+                    ),
                 )
 
     return summary_rows
@@ -896,6 +913,8 @@ def run_watchlist_pipeline_default(
     prepared_option_positions_context_manifest: Path | None = None,
     prepared_option_positions_context_manifest_sha256: str | None = None,
     account_config_sha256: str | None = None,
+    experience: bool = False,
+    account_display_name: str | None = None,
 ) -> list[dict]:
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
@@ -1033,6 +1052,8 @@ def run_watchlist_pipeline_default(
             prepared_option_positions_context_manifest_sha256
         ),
         account_config_sha256=account_config_sha256,
+        experience=experience,
+        account_display_name=account_display_name,
     )
     if not candidate_capture_enabled:
         return result
@@ -1053,8 +1074,17 @@ def run_watchlist_pipeline_default(
         portfolio_snapshot = {}
     if not isinstance(option_snapshot, dict):
         option_snapshot = {}
-    status_index_path = Path(report_dir) / "strategy_scan_status_index.v2.json"
-    status_index = load_strategy_scan_status_index_v2(
+    status_index_path = Path(report_dir) / (
+        "strategy_scan_status_index.v3.json"
+        if experience
+        else "strategy_scan_status_index.v2.json"
+    )
+    status_loader = (
+        load_strategy_scan_status_index_v3
+        if experience
+        else load_strategy_scan_status_index_v2
+    )
+    status_index = status_loader(
         status_index_path,
         expected_run_id=account_run_id,
         expected_account=account,
@@ -1074,6 +1104,8 @@ def run_watchlist_pipeline_default(
             ],
         }
     if (
+        not experience
+        and
         isinstance(wheel_read_model, Mapping)
         and list(wheel_read_model.get("batches") or [])
         and required_data_snapshot_batch is not None
@@ -1236,6 +1268,54 @@ def run_watchlist_pipeline_default(
     )
     normalized_statuses = statuses_by_owner["opening"]
     policy_hash = strategy_policy_hash(cfg)
+    if experience:
+        required_dependency = dependency_from_file(
+            kind="required_data",
+            path=Path(required_data_snapshot_manifest),
+            base=base,
+        )
+        rate_cache_path = (
+            Path(shared_state_dir or state_dir) / "rate_cache.json"
+        ).resolve()
+        fx_dependency = (
+            dependency_from_file(kind="fx", path=rate_cache_path, base=base)
+            if rate_cache_path.is_file() and not rate_cache_path.is_symlink()
+            else dependency_from_hash(
+                kind="fx",
+                sha256=canonical_sha256({"status": "unavailable"}),
+            )
+        )
+        index_markets = sorted(
+            {
+                str(item.get("market") or "").strip().upper()
+                for item in status_index["items"]
+                if str(item.get("market") or "").strip()
+            }
+        )
+        seal_experience_candidate_bundle(
+            base=base,
+            run_id=account_run_id,
+            account=account,
+            market=(index_markets[0] if len(index_markets) == 1 else "MULTI"),
+            account_config_sha256=str(account_config_sha256 or ""),
+            strategy_policy_sha256=policy_hash,
+            dependencies=[
+                required_dependency,
+                fx_dependency,
+                dependency_from_hash(
+                    kind="earnings_rv",
+                    sha256=str(required_dependency["sha256"]),
+                ),
+            ],
+            status_index=status_index,
+            statuses_by_owner=statuses_by_owner,
+            opening_candidates=captured_final_candidates,
+            opening_decisions=captured_candidate_decisions,
+            combo_evidence_by_owner=combo_evidence_by_owner,
+            account_display_name=str(account_display_name or ""),
+            sealed_at=captured_at,
+        )
+        return result
     if not any(expected_scopes_by_owner.values()):
         publish_candidate_snapshot_manifest(
             base=base,

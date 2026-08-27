@@ -33,6 +33,7 @@ def build_tick_idempotency_context(
     trigger_kind: str = "manual",
     symbols: str | None = None,
     no_send: bool = False,
+    experience: bool = False,
     trigger_job_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> TickIdempotencyContext:
@@ -49,6 +50,7 @@ def build_tick_idempotency_context(
         (
             str(symbols or "").strip().upper(),
             "no_send" if no_send else "send",
+            "experience" if experience else "standard",
             str(trigger_job_id or "").strip(),
         )
     )

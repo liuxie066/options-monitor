@@ -79,6 +79,7 @@ from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
     build_tick_scheduler_context,
 )
+from src.application.experience_mode import validate_experience_request
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.infrastructure.external_services import (
     run_opend_watchdog,
@@ -110,6 +111,22 @@ def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[
         if isinstance(item, dict) and item.get("should_run") is True:
             return True
     return False
+
+
+def _experience_scan_completed(
+    *, requested_accounts: list[str], ran_pipeline_accounts: list[str]
+) -> bool:
+    requested = {
+        str(value).strip().lower()
+        for value in requested_accounts
+        if str(value).strip()
+    }
+    completed = {
+        str(value).strip().lower()
+        for value in ran_pipeline_accounts
+        if str(value).strip()
+    }
+    return requested == completed
 
 
 def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
@@ -210,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--default-account', default=None)
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
+    ap.add_argument('--experience', action='store_true', help='Run a non-executable simulated-account experience scan.')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
     ap.add_argument('--force', action='store_true', help='Force the scan pipeline outside normal run points; force runs do not auto-send ordinary Tick notifications.')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
@@ -220,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     set_debug(bool(getattr(args, 'debug', False)))
 
     no_send = bool(getattr(args, 'no_send', False))
+    experience = bool(getattr(args, 'experience', False))
     smoke = bool(getattr(args, 'smoke', False))
     force_mode = bool(getattr(args, 'force', False))
     symbols_arg = ",".join(str(item) for item in (getattr(args, 'symbols', None) or []) if str(item).strip()) or None
@@ -280,6 +299,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
     args.default_account = _resolve_default_account(args.default_account, args.accounts)
     trigger_context = build_trigger_context()
+    if experience:
+        try:
+            validate_experience_request(
+                config=base_cfg,
+                accounts=list(args.accounts or []),
+                no_send=no_send,
+                smoke=smoke,
+                trigger_context=trigger_context,
+                opend_phone_verify_continue=bool(
+                    getattr(args, 'opend_phone_verify_continue', False)
+                ),
+            )
+        except ValueError as exc:
+            raise SystemExit(f"[INVALID_REQUEST] {exc}") from exc
     trigger_kind = _resolve_daily_brief_trigger_kind(
         force_mode=force_mode,
         trigger_context=trigger_context,
@@ -322,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             'no_send': no_send,
             'smoke': bool(smoke),
             'force': force_mode,
+            'experience': experience,
         }),
     )
     idempotency = build_tick_idempotency_context(
@@ -331,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         trigger_kind=trigger_kind,
         symbols=symbols_arg,
         no_send=no_send,
+        experience=experience,
         trigger_job_id=str(trigger_context.get("job_id") or ""),
     )
     market_cfg = idempotency.market_config
@@ -464,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
             mark_opend_phone_verify_pending_fn=mark_opend_phone_verify_pending,
             send_opend_alert_fn=send_opend_alert,
             send_opend_recovery_notice_fn=send_opend_recovery_notice,
+            allow_operational_side_effects=(not experience),
         )
     )
     if not guard_outcome.should_continue:
@@ -484,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
             base_cfg=base_cfg,
             accounts=[str(a).strip() for a in (args.accounts or []) if str(a).strip()],
             market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
-            force_mode=force_mode,
+            force_mode=(force_mode or experience),
             smoke=smoke,
             run_id=run_id,
             runlog=runlog,
@@ -699,6 +735,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_helper=audit_helper,
         symbols_arg=symbols_arg,
         trigger_kind=trigger_kind,
+        experience=experience,
     )
     account_execution = run_tick_account_execution(account_execution_request)
     tick_metrics['accounts'].extend(account_execution.account_metrics)
@@ -715,6 +752,65 @@ def main(argv: list[str] | None = None) -> int:
         account_execution.prepared_context_metrics
     )
     results.extend(account_execution.results)
+
+    if experience:
+        experience_ok = _experience_scan_completed(
+            requested_accounts=account_ids,
+            ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
+        )
+        experience_reason = (
+            "experience_mode" if experience_ok else "experience_scan_failed"
+        )
+        tick_metrics["scan_mode"] = "experience"
+        tick_metrics["capacity_source"] = "demo_scenario"
+        tick_metrics["executable"] = False
+        tick_metrics["sent"] = False
+        tick_metrics["reason"] = experience_reason
+        tick_metrics["requested_account_count"] = len(account_ids)
+        tick_metrics["completed_account_count"] = len(
+            account_execution.ran_pipeline_accounts
+        )
+        try:
+            state_repo.write_tick_metrics(base, run_id, tick_metrics)
+            state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+            audit_helper.audit(
+                "write",
+                "write_tick_metrics",
+                run_id=run_id,
+                status=("ok" if experience_ok else "error"),
+                message=experience_reason,
+            )
+        except Exception as exc:
+            runlog.safe_event(
+                "finalize",
+                "degraded",
+                message="write_tick_metrics failed",
+                data=_safe_runlog_data({"error": str(exc)}),
+            )
+        runlog.safe_event(
+            "run_end",
+            "ok" if experience_ok else "error",
+            error_code=(None if experience_ok else "EXPERIENCE_SCAN_FAILED"),
+            data=_safe_runlog_data(
+                {
+                    "scan_mode": "experience",
+                    "sent": False,
+                    "requested_account_count": len(account_ids),
+                    "completed_account_count": len(
+                        account_execution.ran_pipeline_accounts
+                    ),
+                }
+            ),
+        )
+        if experience_ok:
+            audit_helper.guard_mark_success()
+        complete_tick_idempotency(
+            status=("completed" if experience_ok else "failed"),
+            message=experience_reason,
+            ok=experience_ok,
+            error_code=(None if experience_ok else "EXPERIENCE_SCAN_FAILED"),
+        )
+        return 0 if experience_ok else 2
 
     post_delivery_sidecars_finished = False
 

@@ -321,6 +321,112 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     assert len(set(summaries)) == 1
 
 
+def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = replace(
+        _request(
+            tmp_path,
+            accounts=["paper"],
+            workers=1,
+            force=False,
+        ),
+        experience=True,
+    )
+    captured = []
+
+    def _forbidden(name):
+        return lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(f"{name} must not run")
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "resolve_experience_account_display_name",
+        lambda **_kwargs: "美股模拟期权账户",
+    )
+    monkeypatch.setattr(
+        mod, "prepare_portfolio_contexts", _forbidden("portfolio preparation")
+    )
+    monkeypatch.setattr(
+        mod,
+        "prepare_option_positions_contexts",
+        _forbidden("option-position preparation"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "merge_wheel_requirements_into_prefetch_config",
+        _forbidden("Wheel planning"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_build_close_advice_barrier_plan",
+        _forbidden("Close Advice planning"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_publish_runtime_portfolio_snapshot_shadow",
+        _forbidden("runtime portfolio shadow"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_required_data",
+        lambda **_kwargs: {
+            "schema_version": "1.0",
+            "errors": 0,
+            "symbols": [],
+            "results": {},
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+            "quote_receipts": {},
+        },
+    )
+
+    def _seal(**kwargs):
+        payload = {
+            "schema_version": "required_data_snapshot_manifest.v1",
+            "run_id": kwargs["run_id"],
+            "status": "complete",
+            "plan_id": "a" * 64,
+            "symbols": {},
+            "summary": {},
+        }
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+
+    def _run_one_account(*, request, **_kwargs):
+        captured.append(request)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "experience", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    assert outcome.ran_pipeline_accounts == ["paper"]
+    assert len(captured) == 1
+    child = captured[0]
+    assert child.experience is True
+    assert child.account_display_name == "美股模拟期权账户"
+    assert child.prepared_portfolio_context_manifest is None
+    assert child.prepared_option_positions_context_manifest is None
+    assert child.has_wheel_scope is False
+    assert child.allow_mutations is False
+    assert child.allow_notifications is False
+
+
 def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch(
     monkeypatch,
     tmp_path: Path,

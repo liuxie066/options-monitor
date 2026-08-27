@@ -131,6 +131,19 @@ def test_current_run_id_is_reexported_from_multi_tick_main() -> None:
     assert callable(mod.current_run_id)
 
 
+def test_experience_completion_requires_every_requested_account_pipeline() -> None:
+    from src.application.multi_account_tick import _experience_scan_completed
+
+    assert _experience_scan_completed(
+        requested_accounts=["paper", "paper_hk"],
+        ran_pipeline_accounts=["paper_hk", "paper"],
+    )
+    assert not _experience_scan_completed(
+        requested_accounts=["paper", "paper_hk"],
+        ran_pipeline_accounts=["paper"],
+    )
+
+
 def test_explicit_empty_cli_account_fails_before_run_artifacts(
     monkeypatch,
     tmp_path: Path,
