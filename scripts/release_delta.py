@@ -86,15 +86,19 @@ def main() -> int:
         for note in manifest["release_notes"]
         for sha in note["commits"]
     } | {item["commit"] for item in manifest["no_release_note"]}
+    design_attached = {item["commit"] for item in manifest["design_evidence"]}
     total = len(manifest["commits"])
     print(f"[OK] wrote {output_path}")
     print(
         f"[RELEASE_DELTA] commits={total} reviewed={len(assigned)} "
-        f"unreviewed={total - len(assigned)} notes={len(manifest['release_notes'])}",
+        f"unreviewed={total - len(assigned)} notes={len(manifest['release_notes'])} "
+        f"design_attached={len(design_attached)} "
+        f"design_missing={total - len(design_attached)}",
     )
     print(
         "[NEXT] map every release note to commit SHA(s), and give every remaining commit "
-        "a no_release_note reason",
+        "a no_release_note reason; attach every commit to a tracked Markdown design or "
+        "GitHub PR URL in design_evidence",
     )
     return 0
 

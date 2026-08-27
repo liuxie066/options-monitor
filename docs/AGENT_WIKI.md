@@ -827,7 +827,8 @@ When the user explicitly asks to publish a release, execute the full publication
 2. Review all commits since the latest release tag against `CHANGELOG.md / Unreleased`.
 3. Preview the automatic version recommendation.
 4. Generate `release/coverage/v<version>.json` with `scripts/release_delta.py`; map every release
-   note to commit SHA(s), and give every truly non-user-visible commit an explicit reason.
+   note to commit SHA(s), give every truly non-user-visible commit an explicit reason, and attach
+   every commit to the tracked design or GitHub PR required by [Release Process](RELEASE_PROCESS.md).
 5. Move `Unreleased` items into the dated target-version section and update `VERSION`.
 6. Preview rendered release notes and run focused tests plus strict release checks with
    `--require-delta-coverage`.

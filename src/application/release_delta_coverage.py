@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 import json
 from functools import cmp_to_key
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from typing import Any, Callable
@@ -16,9 +16,19 @@ from src.application.release_notes import (
 from src.application.release_target import TAG_RE, VERSION_RE, compare_versions, parse_version
 
 
-SCHEMA_VERSION = "release_delta_coverage.v1"
+SCHEMA_VERSION = "release_delta_coverage.v2"
+LEGACY_SCHEMA_VERSION = "release_delta_coverage.v1"
+LEGACY_DESIGN_EVIDENCE_MAX_VERSION = "2.1.3"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+GITHUB_PR_URL_RE = re.compile(
+    r"^https://github\.com/liuxie066/options-monitor/pull/[1-9][0-9]*(?:#[^\s]+)?$",
+)
 RELEASE_METADATA_PATHS = {"VERSION", "CHANGELOG.md"}
+PROCESS_ARTIFACT_DIRS = {
+    PurePosixPath("docs/gateflow"),
+    PurePosixPath("docs/plans"),
+    PurePosixPath("docs/reviews"),
+}
 RunCommand = Callable[..., Any]
 
 
@@ -58,7 +68,7 @@ def build_release_delta_manifest(
     )
     release_notes = _declared_release_notes(base=base, target_version=version)
 
-    preserved_note_commits, preserved_no_note = _preserved_assignments(existing)
+    preserved_note_commits, preserved_no_note, preserved_design = _preserved_assignments(existing)
     commit_shas = {item["sha"] for item in commits}
     for note in release_notes:
         key = (note["category"], note["text"])
@@ -69,6 +79,11 @@ def build_release_delta_manifest(
     no_release_note = [
         item for item in preserved_no_note if item["commit"] in commit_shas
     ]
+    design_evidence = [
+        {"commit": item["sha"], "references": preserved_design[item["sha"]]}
+        for item in commits
+        if item["sha"] in preserved_design
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "target_version": version,
@@ -77,6 +92,7 @@ def build_release_delta_manifest(
         "commits": commits,
         "release_notes": release_notes,
         "no_release_note": no_release_note,
+        "design_evidence": design_evidence,
     }
 
 
@@ -93,9 +109,9 @@ def validate_release_delta_coverage(
     path = (manifest_path or default_manifest_path(base, target_version)).resolve()
     relative_manifest = _relative_manifest_path(base=base, manifest_path=path)
     manifest = _load_manifest(path)
-    _require_exact_keys(
-        manifest,
-        {
+    schema_version = str(manifest.get("schema_version") or "").strip()
+    if schema_version == SCHEMA_VERSION:
+        expected_manifest_keys = {
             "schema_version",
             "target_version",
             "base",
@@ -103,14 +119,34 @@ def validate_release_delta_coverage(
             "commits",
             "release_notes",
             "no_release_note",
-        },
-        context="manifest",
-    )
-    if manifest["schema_version"] != SCHEMA_VERSION:
+            "design_evidence",
+        }
+    elif schema_version == LEGACY_SCHEMA_VERSION:
+        if compare_versions(target_version, LEGACY_DESIGN_EVIDENCE_MAX_VERSION) > 0:
+            _fail(
+                "RELEASE_DELTA_DESIGN_SCHEMA_REQUIRED",
+                f"release {target_version} requires schema_version {SCHEMA_VERSION} with per-commit design evidence",
+            )
+        expected_manifest_keys = {
+            "schema_version",
+            "target_version",
+            "base",
+            "reviewed_head",
+            "commits",
+            "release_notes",
+            "no_release_note",
+        }
+    else:
         _fail(
             "UNSUPPORTED_RELEASE_DELTA_SCHEMA",
-            f"expected schema_version {SCHEMA_VERSION}",
+            f"expected schema_version {SCHEMA_VERSION}"
+            f" (or legacy {LEGACY_SCHEMA_VERSION} through {LEGACY_DESIGN_EVIDENCE_MAX_VERSION})",
         )
+    _require_exact_keys(
+        manifest,
+        expected_manifest_keys,
+        context="manifest",
+    )
     if manifest["target_version"] != target_version:
         _fail(
             "RELEASE_DELTA_VERSION_MISMATCH",
@@ -187,8 +223,30 @@ def validate_release_delta_coverage(
             f"commits without a release-note mapping or explicit no-release-note reason: {_short_shas(uncovered)}",
         )
 
+    design_refs = (
+        _validate_design_evidence(
+            manifest["design_evidence"],
+            base=base,
+            reviewed_head=reviewed_head,
+            commit_shas=all_commit_shas,
+            run_cmd=run_cmd,
+        )
+        if schema_version == SCHEMA_VERSION
+        else set()
+    )
+    missing_design = (
+        sorted(all_commit_shas - design_refs)
+        if schema_version == SCHEMA_VERSION
+        else []
+    )
+    if missing_design:
+        _fail(
+            "RELEASE_DELTA_DESIGN_EVIDENCE_MISSING",
+            f"commits without a repository design document or GitHub PR reference: {_short_shas(missing_design)}",
+        )
+
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "manifest_path": relative_manifest,
         "base_tag": expected_base_tag,
         "base_commit": expected_base_commit,
@@ -196,6 +254,7 @@ def validate_release_delta_coverage(
         "commit_count": len(actual_commits),
         "release_note_count": len(expected_notes),
         "no_release_note_count": len(no_note_refs),
+        "design_evidence_count": len(design_refs),
     }
 
 
@@ -230,9 +289,13 @@ def _notes_from_evidence(evidence: dict[str, Any]) -> list[dict[str, str]]:
 
 def _preserved_assignments(
     existing: dict[str, Any] | None,
-) -> tuple[dict[tuple[str, str], list[str]], list[dict[str, str]]]:
+) -> tuple[
+    dict[tuple[str, str], list[str]],
+    list[dict[str, str]],
+    dict[str, list[str]],
+]:
     if existing is None:
-        return {}, []
+        return {}, [], {}
     if not isinstance(existing, dict):
         _fail("MALFORMED_RELEASE_DELTA", "existing manifest must be an object")
 
@@ -265,7 +328,26 @@ def _preserved_assignments(
         reason = str(item.get("reason") or "").strip()
         if FULL_SHA_RE.fullmatch(commit) and reason:
             no_note.append({"commit": commit, "reason": reason})
-    return by_note, no_note
+
+    design_by_commit: dict[str, list[str]] = {}
+    raw_design = existing.get("design_evidence", [])
+    if not isinstance(raw_design, list):
+        _fail("MALFORMED_RELEASE_DELTA", "existing design_evidence must be an array")
+    for item in raw_design:
+        if not isinstance(item, dict):
+            continue
+        commit = str(item.get("commit") or "").strip().lower()
+        references = item.get("references")
+        if not FULL_SHA_RE.fullmatch(commit) or not isinstance(references, list):
+            continue
+        preserved = [
+            str(reference).strip()
+            for reference in references
+            if str(reference).strip()
+        ]
+        if preserved:
+            design_by_commit[commit] = preserved
+    return by_note, no_note, design_by_commit
 
 
 def _validate_commit_inventory(value: Any) -> list[dict[str, str]]:
@@ -385,6 +467,107 @@ def _validate_no_release_note(value: Any, *, commit_shas: set[str]) -> set[str]:
             _fail("MALFORMED_RELEASE_DELTA", f"duplicate no_release_note entry: {sha}")
         referenced.add(sha)
     return referenced
+
+
+def _validate_design_evidence(
+    value: Any,
+    *,
+    base: Path,
+    reviewed_head: str,
+    commit_shas: set[str],
+    run_cmd: RunCommand,
+) -> set[str]:
+    if not isinstance(value, list):
+        _fail("MALFORMED_RELEASE_DELTA", "design_evidence must be an array")
+    referenced: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            _fail("MALFORMED_RELEASE_DELTA", f"design_evidence[{index}] must be an object")
+        _require_exact_keys(
+            item,
+            {"commit", "references"},
+            context=f"design_evidence[{index}]",
+        )
+        sha = _full_sha(item["commit"], field=f"design_evidence[{index}].commit")
+        if sha not in commit_shas:
+            _fail(
+                "RELEASE_DELTA_UNKNOWN_COMMIT",
+                f"design evidence references a commit outside the reviewed delta: {sha}",
+            )
+        if sha in referenced:
+            _fail("MALFORMED_RELEASE_DELTA", f"duplicate design_evidence entry: {sha}")
+
+        references = item["references"]
+        if not isinstance(references, list) or not references:
+            _fail(
+                "RELEASE_DELTA_DESIGN_REFERENCE_REQUIRED",
+                f"design_evidence[{index}] requires at least one reference",
+            )
+        seen_references: set[str] = set()
+        for reference_index, raw_reference in enumerate(references):
+            reference = str(raw_reference or "").strip()
+            if not reference or "\n" in reference or "\r" in reference:
+                _fail(
+                    "RELEASE_DELTA_DESIGN_REFERENCE_REQUIRED",
+                    f"design_evidence[{index}].references[{reference_index}] must be one non-empty line",
+                )
+            if reference in seen_references:
+                _fail(
+                    "MALFORMED_RELEASE_DELTA",
+                    f"design_evidence[{index}] contains duplicate reference {reference!r}",
+                )
+            _validate_design_reference(
+                reference,
+                base=base,
+                reviewed_head=reviewed_head,
+                run_cmd=run_cmd,
+            )
+            seen_references.add(reference)
+        referenced.add(sha)
+    return referenced
+
+
+def _validate_design_reference(
+    reference: str,
+    *,
+    base: Path,
+    reviewed_head: str,
+    run_cmd: RunCommand,
+) -> None:
+    if GITHUB_PR_URL_RE.fullmatch(reference):
+        return
+    if "://" in reference:
+        _fail(
+            "RELEASE_DELTA_DESIGN_REFERENCE_INVALID",
+            f"design reference must be a tracked Markdown path or GitHub PR URL: {reference!r}",
+        )
+
+    raw_path, _separator, _anchor = reference.partition("#")
+    design_path = PurePosixPath(raw_path)
+    if (
+        not raw_path
+        or design_path.is_absolute()
+        or design_path.suffix.lower() != ".md"
+        or ".." in design_path.parts
+        or ":" in raw_path
+        or "\\" in raw_path
+        or any(directory == design_path or directory in design_path.parents for directory in PROCESS_ARTIFACT_DIRS)
+    ):
+        _fail(
+            "RELEASE_DELTA_DESIGN_REFERENCE_INVALID",
+            f"design reference must be a stable repository Markdown path: {reference!r}",
+        )
+
+    result = _git_result(
+        base,
+        ["cat-file", "-e", f"{reviewed_head}:{design_path.as_posix()}"],
+        run_cmd=run_cmd,
+    )
+    if result.returncode != 0:
+        _fail(
+            "RELEASE_DELTA_DESIGN_PATH_MISSING",
+            f"design document is not tracked at reviewed_head: {design_path.as_posix()}",
+        )
 
 
 def _validate_reviewed_head_boundary(

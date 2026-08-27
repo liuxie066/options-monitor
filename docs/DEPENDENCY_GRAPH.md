@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1044 (`src`: 569, `domain`: 76, `scripts`: 12, `tests`: 387)
-- Internal import edges: 6945 total, 3036 production/script edges excluding tests
+- Internal import edges: 6955 total, 3035 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|453| domain
+  application -->|452| domain
   application -->|4| domain_services
   application -->|152| infrastructure
   application -->|41| storage
@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|2| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2878| application
+  tests -->|2886| application
   tests -->|461| domain
   tests -->|2| domain_services
-  tests -->|222| infrastructure
+  tests -->|225| infrastructure
   tests -->|250| interfaces
   tests -->|19| scripts
   tests -->|18| storage
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 453 |
+| application | domain | 452 |
 | interfaces | application | 165 |
 | application | infrastructure | 152 |
 | application | storage | 41 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2878 |
+| tests | application | 2886 |
 | tests | domain | 461 |
 | tests | interfaces | 250 |
-| tests | infrastructure | 222 |
+| tests | infrastructure | 225 |
 | tests | scripts | 19 |
 | tests | storage | 18 |
 | tests | domain_services | 2 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 237 |
+| src.application | domain.domain | 236 |
 | src.interfaces | src.application | 129 |
 | src.application | src.infrastructure | 109 |
 | src.application.ledger | domain.domain | 64 |
