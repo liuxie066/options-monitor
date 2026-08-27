@@ -52,6 +52,7 @@ def _repair_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "expiration_ymd": args.exp,
         "currency": args.currency,
         "trade_time_ms": args.trade_time_ms,
+        "futu_account_id": args.futu_account_id,
         "order_id": args.order_id,
         "record_id": args.record_id,
         "close_target_source_event_id": args.close_target_source_event_id,
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--exp", default=None, help="YYYY-MM-DD")
     p_repair.add_argument("--currency", default=None, choices=["USD", "HKD", "CNY"])
     p_repair.add_argument("--trade-time-ms", type=int, default=None)
+    p_repair.add_argument("--futu-account-id", default=None)
     p_repair.add_argument("--order-id", default=None)
     p_repair.add_argument("--record-id", default=None, help="explicit close target record_id for repaired close events")
     p_repair.add_argument("--close-target-source-event-id", default=None)
