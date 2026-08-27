@@ -109,7 +109,8 @@ def main() -> int:
             f"from {coverage_summary['base_tag']}: "
             f"{coverage_summary['commit_count']} commits, "
             f"{coverage_summary['release_note_count']} notes, "
-            f"{coverage_summary['no_release_note_count']} no-note dispositions",
+            f"{coverage_summary['no_release_note_count']} no-note dispositions, "
+            f"{coverage_summary['design_evidence_count']} design dispositions",
         )
     print(f"[OK] release metadata valid for {version}")
     return 0

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Required every release-delta commit to reference a tracked design document or GitHub Pull Request so reviewers can recover the decisions behind the change before publication.
+
 ## 2.1.3 - 2026-08-27
 
 ### Bug Fixes

@@ -9,9 +9,10 @@
 每个完整开发单元应当：
 
 1. 在独立分支实现并通过对应测试；
-2. 在 `CHANGELOG.md / Unreleased` 中记录需要对外说明的变化；
-3. 提交、推送并合并到 `main`；
-4. 不修改 `VERSION`，不创建 tag 或 GitHub Release，也不升级生产。
+2. 在仓库 living design 文档或 Pull Request 中记录设计细节与决策点；
+3. 在 `CHANGELOG.md / Unreleased` 中记录需要对外说明的变化；
+4. 提交、推送并合并到 `main`；
+5. 不修改 `VERSION`，不创建 tag 或 GitHub Release，也不升级生产。
 
 积累到一个完整批次后再执行独立发布。默认可以按一个完整主题、2–5 个有意义的变化或不超过
 一周的等待时间组成批次；生产阻断、安全问题和高严重度缺陷可以单独走 hotfix。
@@ -111,8 +112,43 @@ Delta coverage manifest 不是从 commit message 猜 Release Notes。它先确�
 - 为每条 `release_notes[]` 填入一个或多个对应的完整 commit SHA；
 - 对确实没有用户、配置、runtime 或运营影响的 commit，在 `no_release_note[]` 中写完整 SHA
   和非空理由；
+- 为每个 commit 在 `design_evidence[]` 中写入同一个完整 SHA，并至少附一个设计引用；
 - 不得把有对外影响的 commit 归入 `no_release_note`；
 - 如果审阅后 `HEAD` 或 Changelog 又变化，使用 `--refresh` 重新生成 inventory 并复核。
+
+### Design evidence
+
+`release_delta_coverage.v2` 对 `2.1.3` 之后的版本要求每个待发布 commit 都有设计证据。允许两类引用：
+
+- reviewed HEAD 中已跟踪的稳定 Markdown，例如
+  `docs/candidate_strategy.md#63-covered-call-容量`；
+- GitHub Pull Request URL，例如
+  `https://github.com/liuxie066/options-monitor/pull/123`。
+
+`docs/reviews/`、`docs/plans/` 和 `docs/gateflow/` 是阶段性过程材料，不能作为稳定 design 引用。
+普通网页、未跟踪文件和 reviewed HEAD 之后才补入的文档同样会被拒绝。一个 design 可以服务多个
+commit，但 manifest 中仍须逐 commit 显式登记：
+
+```json
+"design_evidence": [
+  {
+    "commit": "<full commit SHA>",
+    "references": [
+      "docs/candidate_strategy.md#63-covered-call-容量",
+      "https://github.com/liuxie066/options-monitor/pull/123"
+    ]
+  }
+]
+```
+
+Design 或 PR 必须让 reviewer 能独立还原：问题与范围、约束和权威来源、采用的方案、关键决策点、
+被拒绝的替代方案、风险/回滚边界和验证证据。门禁校验引用类型、逐 commit 覆盖及仓库文档在
+reviewed HEAD 中的存在性；内容质量仍由 reviewer 明确确认，不能由 commit message 自动推断。
+
+本门禁复用 release delta manifest，而不解析 commit body 或在本地预检时调用 GitHub API：manifest
+已经是逐 commit 的发布审阅真源，并且必须支持离线、可复现验证。仓库 design 在 reviewed HEAD
+校验实际文件；PR 引用只校验本仓库 URL 形状，PR 内容完整性由 reviewer 确认。v1 manifest 仅保留
+到 `2.1.3` 的历史重验，之后的版本必须使用 v2，避免为旧 release 回填并改写历史证据。
 
 准备 manifest：
 
@@ -126,8 +162,8 @@ TARGET_VERSION="1.6.1"
   --refresh
 ```
 
-发布门禁会双向核对：上一稳定 tag 到审阅 `HEAD` 的每个 commit 都必须有处置，目标
-Changelog 的每条 Release Note 也必须映射到 commit。审阅后最多只能再有一个严格命名为
+发布门禁会双向核对：上一稳定 tag 到审阅 `HEAD` 的每个 commit 都必须有 Release Note 处置和
+design evidence，目标 Changelog 的每条 Release Note 也必须映射到 commit。审阅后最多只能再有一个严格命名为
 `chore: release <version>` 的直接子提交，而且它只能修改 `VERSION`、`CHANGELOG.md` 和对应
 coverage manifest；这可以阻止审阅完成后夹带代码。
 
@@ -219,7 +255,7 @@ VERSION="$(cat VERSION)"
 - `VERSION` 正确
 - `CHANGELOG.md` 中存在对应版本段落
 - `release/coverage/v<version>.json` 完整覆盖上一稳定 tag 以来的所有 commit 和目标版本所有
-  Changelog 条目
+  Changelog 条目，并为每个 commit 附有有效 design evidence
 - README 与 Agent / Tool Gateway 文档没有明显过期命令
 - 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
 

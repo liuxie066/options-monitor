@@ -63,7 +63,12 @@ def _prepared_repo(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     _git(repo, "tag", "v1.0.0")
 
     (repo / "feature.py").write_text("FEATURE = True\n", encoding="utf-8")
-    _git(repo, "add", "feature.py")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "reviewed-feature.md").write_text(
+        "# Reviewed feature\n\n## Decision points\n\n- Keep one implementation.\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "feature.py", "docs/reviewed-feature.md")
     _git(repo, "commit", "-m", "feat: add reviewed feature")
     (repo / "internal.txt").write_text("test fixture\n", encoding="utf-8")
     _git(repo, "add", "internal.txt")
@@ -78,6 +83,16 @@ def _prepared_repo(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             "commit": internal_sha,
             "reason": "Test-only fixture with no user or operator-visible behavior.",
         }
+    ]
+    manifest["design_evidence"] = [
+        {
+            "commit": feature_sha,
+            "references": ["docs/reviewed-feature.md#decision-points"],
+        },
+        {
+            "commit": internal_sha,
+            "references": ["https://github.com/liuxie066/options-monitor/pull/123"],
+        },
     ]
     _write_changelog(repo, released=True)
     (repo / "VERSION").write_text("1.1.0\n", encoding="utf-8")
@@ -109,6 +124,7 @@ def test_manifest_builder_inventory_and_unreleased_notes_are_deterministic(tmp_p
     assert regenerated["commits"] == reviewed["commits"]
     assert regenerated["release_notes"] == reviewed["release_notes"]
     assert regenerated["no_release_note"] == reviewed["no_release_note"]
+    assert regenerated["design_evidence"] == reviewed["design_evidence"]
 
 
 def test_manifest_builder_rejects_target_older_than_latest_stable_ancestor(
@@ -138,6 +154,7 @@ def test_delta_coverage_accepts_complete_review_before_and_after_release_commit(
     assert summary["commit_count"] == 2
     assert summary["release_note_count"] == 1
     assert summary["no_release_note_count"] == 1
+    assert summary["design_evidence_count"] == 2
 
     _git(repo, "add", "VERSION", "CHANGELOG.md", "release/coverage/v1.1.0.json")
     _git(repo, "commit", "-m", "chore: release 1.1.0")
@@ -173,6 +190,7 @@ def test_release_check_cli_enforces_delta_coverage(
     assert release_check.main() == 0
     output = capsys.readouterr().out
     assert "release delta coverage valid from v1.0.0" in output
+    assert "2 design dispositions" in output
     assert "release metadata valid for 1.1.0" in output
 
 
@@ -192,6 +210,135 @@ def test_delta_coverage_rejects_unreviewed_commit(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_UNREVIEWED_COMMITS"
+
+
+def test_delta_coverage_rejects_commit_without_design_evidence(tmp_path: Path) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["design_evidence"] = manifest["design_evidence"][:1]
+    default_manifest_path(repo, "1.1.0").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
+        validate_release_delta_coverage(
+            base_dir=repo,
+            version="1.1.0",
+            release_evidence=_release_evidence(repo),
+        )
+
+    assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_EVIDENCE_MISSING"
+
+
+def test_delta_coverage_rejects_untracked_design_document(tmp_path: Path) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["design_evidence"][0]["references"] = ["docs/missing-design.md"]
+    default_manifest_path(repo, "1.1.0").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
+        validate_release_delta_coverage(
+            base_dir=repo,
+            version="1.1.0",
+            release_evidence=_release_evidence(repo),
+        )
+
+    assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_PATH_MISSING"
+
+
+@pytest.mark.parametrize("references", [[], [""]])
+def test_delta_coverage_rejects_empty_design_references(
+    tmp_path: Path,
+    references: list[str],
+) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["design_evidence"][0]["references"] = references
+    default_manifest_path(repo, "1.1.0").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
+        validate_release_delta_coverage(
+            base_dir=repo,
+            version="1.1.0",
+            release_evidence=_release_evidence(repo),
+        )
+
+    assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_REFERENCE_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.com/design/123",
+        "https://github.com/example/options-monitor/pull/123",
+        "docs/reviews/code-review.md",
+        "../outside.md",
+    ],
+)
+def test_delta_coverage_rejects_invalid_design_reference(
+    tmp_path: Path,
+    reference: str,
+) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["design_evidence"][0]["references"] = [reference]
+    default_manifest_path(repo, "1.1.0").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
+        validate_release_delta_coverage(
+            base_dir=repo,
+            version="1.1.0",
+            release_evidence=_release_evidence(repo),
+        )
+
+    assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_REFERENCE_INVALID"
+
+
+def test_delta_coverage_accepts_legacy_manifest_before_design_cutover(tmp_path: Path) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["schema_version"] = "release_delta_coverage.v1"
+    manifest.pop("design_evidence")
+    default_manifest_path(repo, "1.1.0").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = validate_release_delta_coverage(
+        base_dir=repo,
+        version="1.1.0",
+        release_evidence=_release_evidence(repo),
+    )
+
+    assert summary["schema_version"] == "release_delta_coverage.v1"
+    assert summary["design_evidence_count"] == 0
+
+
+@pytest.mark.parametrize("target_version", ["2.1.4", "2.1.4-beta.1"])
+def test_delta_coverage_requires_design_schema_after_2_1_3(
+    tmp_path: Path,
+    target_version: str,
+) -> None:
+    repo, manifest = _prepared_repo(tmp_path)
+    manifest["schema_version"] = "release_delta_coverage.v1"
+    manifest["target_version"] = target_version
+    manifest.pop("design_evidence")
+    path = default_manifest_path(repo, target_version)
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
+        validate_release_delta_coverage(
+            base_dir=repo,
+            version=target_version,
+            release_evidence=_release_evidence(repo),
+        )
+
+    assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_SCHEMA_REQUIRED"
 
 
 def test_delta_coverage_rejects_changelog_note_without_exact_mapping(tmp_path: Path) -> None:
