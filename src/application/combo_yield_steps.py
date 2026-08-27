@@ -122,6 +122,7 @@ def enrich_combo_funding_cash(
     symbol: str,
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
+    demo_capacity: bool = False,
 ) -> pd.DataFrame:
     """Attach Funding Put cash facts without pre-empting Candidate Engine."""
 
@@ -130,6 +131,7 @@ def enrich_combo_funding_cash(
         symbol=symbol,
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
+        demo_capacity=demo_capacity,
     )
 
 
@@ -163,6 +165,7 @@ def run_combo_yield_scan_and_summarize(
     now_utc_fn: Callable[[], datetime] = _utc_now,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -224,11 +227,16 @@ def run_combo_yield_scan_and_summarize(
         )
     df_yield_put_cash_enriched = df_yield_put_universe
     if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
+        cash_kwargs = {
+            "df_labeled": df_yield_put_universe.copy(),
+            "symbol": symbol,
+            "portfolio_ctx": portfolio_ctx,
+            "exchange_rate_converter": exchange_rate_converter,
+        }
+        if demo_capacity:
+            cash_kwargs["demo_capacity"] = True
         df_yield_put_cash_enriched = cash_filter_put_candidates_fn(
-            df_labeled=df_yield_put_universe.copy(),
-            symbol=symbol,
-            portfolio_ctx=portfolio_ctx,
-            exchange_rate_converter=exchange_rate_converter,
+            **cash_kwargs,
         )
     df_yield_put_candidates_for_pairs = df_yield_put_cash_enriched
     if not df_yield_put_cash_enriched.empty:
@@ -356,7 +364,7 @@ def run_combo_yield_scan_and_summarize(
             }
         )
 
-    if not is_scheduled:
+    if not is_scheduled and not demo_capacity:
         render_alerts_fn(
             candidates=final_result.recommended_pairs,
             top=int(top_n),
@@ -404,6 +412,7 @@ def run_combo_yield_for_symbol_and_summarize(
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> dict[str, Any] | None:
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
@@ -424,6 +433,7 @@ def run_combo_yield_for_symbol_and_summarize(
             stock=stock,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
             required_data_frame=required_data_frame,
+            demo_capacity=demo_capacity,
         )
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
@@ -449,6 +459,7 @@ def run_combo_yield_for_symbol_and_summarize(
         cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
         combo_evidence_sink_fn=combo_evidence_sink_fn,
         required_data_frame=required_data_frame,
+        demo_capacity=demo_capacity,
     )
     return summary
 
@@ -465,6 +476,7 @@ def run_cc_lp_variant(
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
@@ -478,7 +490,9 @@ def run_cc_lp_variant(
         and isinstance(portfolio_ctx.get("capacity_authority"), dict)
         else {}
     )
-    if (
+    if demo_capacity:
+        prepared_stock = {}
+    elif (
         not isinstance(portfolio_ctx, dict)
         or str(portfolio_ctx.get("portfolio_source_name") or "").strip().lower()
         != "futu"
@@ -544,16 +558,21 @@ def run_cc_lp_variant(
 
     df = pd.DataFrame()
     if prepared_stock is not None:
+        scan_kwargs = {
+            "symbol": symbol,
+            "required_data_dir": required_data_dir,
+            "sell_call_cfg": sell_call_cfg,
+            "exchange_rate_converter": exchange_rate_converter,
+            "portfolio_ctx": portfolio_ctx,
+            "stock": prepared_stock,
+            "global_sell_call_liquidity": global_sell_call_liquidity,
+            "strategy_profile": "cc_lp_funding_call",
+            "required_data_frame": required_data_frame,
+        }
+        if demo_capacity:
+            scan_kwargs["demo_capacity"] = True
         df = run_cc_lp_scan_fn(
-            symbol=symbol,
-            required_data_dir=required_data_dir,
-            sell_call_cfg=sell_call_cfg,
-            exchange_rate_converter=exchange_rate_converter,
-            portfolio_ctx=portfolio_ctx,
-            stock=prepared_stock,
-            global_sell_call_liquidity=global_sell_call_liquidity,
-            strategy_profile="cc_lp_funding_call",
-            required_data_frame=required_data_frame,
+            **scan_kwargs,
         )
     if combo_evidence_sink_fn is not None:
         combo_evidence_sink_fn(

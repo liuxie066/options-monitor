@@ -101,6 +101,8 @@ def run_pipeline_script(
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
+    experience: bool = False,
+    account_display_name: str | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     cmd = [
         str(vpy),
@@ -127,6 +129,17 @@ def run_pipeline_script(
             [
                 "--source-account-run-id",
                 str(source_account_run_id).strip(),
+            ]
+        )
+    if experience:
+        display_name = str(account_display_name or "").strip()
+        if not display_name:
+            raise ValueError("experience pipeline requires an account display name")
+        cmd.extend(
+            [
+                "--experience",
+                "--account-display-name",
+                display_name,
             ]
         )
     if required_data_snapshot_manifest is not None:

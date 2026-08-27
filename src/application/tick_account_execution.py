@@ -75,6 +75,9 @@ from src.application.runtime_portfolio_snapshot import (
     publish_runtime_portfolio_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.experience_mode import (
+    resolve_experience_account_display_name,
+)
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
@@ -186,6 +189,7 @@ class TickAccountExecutionRequest:
     repo_root: Path | None = None
     symbols_arg: str | None = None
     trigger_kind: str = "manual"
+    experience: bool = False
 
 
 @dataclass(frozen=True)
@@ -454,6 +458,34 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     wheel_scope_by_account: dict[str, bool] = {
         account: False for account in account_ids
     }
+    account_display_names: dict[str, str] = {}
+
+    if request.experience:
+        for account in scanning_accounts:
+            try:
+                account_display_names[account] = (
+                    resolve_experience_account_display_name(
+                        config=account_configs[account],
+                        account=account,
+                    )
+                )
+                request.audit_helper.audit(
+                    "read",
+                    "account_metadata",
+                    run_id=request.run_id,
+                    account=account,
+                    status="ok",
+                )
+            except Exception as exc:
+                account_display_names[account] = "模拟账户名称不可用"
+                request.audit_helper.audit(
+                    "read",
+                    "account_metadata_unavailable",
+                    run_id=request.run_id,
+                    account=account,
+                    status="degraded",
+                    extra={"error_type": type(exc).__name__},
+                )
 
     if scanning_accounts and not request.prefetch_done:
         run_started_at_utc = datetime.now(timezone.utc)
@@ -487,7 +519,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             runtime.get("portfolio_timeout_sec", 60) or 60
         )
         try:
-            prepared = prepare_portfolio_contexts(
+            prepared = {} if request.experience else prepare_portfolio_contexts(
                 base=request.base,
                 repo_root=(request.repo_root or request.base),
                 run_id=request.run_id,
@@ -591,7 +623,18 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             }
 
         try:
-            prepared_options = prepare_option_positions_contexts(
+            prepared_options = (
+                PreparedOptionPositionsBatch(
+                    manifests={},
+                    position_records_by_account={},
+                    unavailable_by_account={},
+                    observed_at_utc=datetime.now(timezone.utc).isoformat(),
+                    ledger_read_count=0,
+                    fx_observation_count=0,
+                    fx_evidence_status="disabled",
+                )
+                if request.experience
+                else prepare_option_positions_contexts(
                 base=request.base,
                 run_id=request.run_id,
                 config_path=request.cfg_path,
@@ -626,6 +669,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     )
                     else ()
                 ),
+                )
             )
         except Exception as exc:
             prepared_options = PreparedOptionPositionsBatch(
@@ -652,6 +696,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         )
         invalid_prepared_option_accounts: set[str] = set()
         for account in sorted(scanning_configs):
+            if request.experience:
+                continue
             manifest = prepared_options.manifests.get(account)
             if (
                 not isinstance(manifest, Mapping)
@@ -760,24 +806,26 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             base_config=request.base_cfg,
             account_configs=scanning_configs,
             prepared_portfolio_contexts=prepared_contexts,
+            demo_capacity=request.experience,
         )
-        union_cfg = merge_wheel_requirements_into_prefetch_config(
-            base_config=request.base_cfg,
-            candidate_config=union_cfg,
-            account_configs=scanning_configs,
-            wheel_read_models=prepared_options.wheel_read_models_by_account,
-            allowed_symbols=(
-                {
-                    item.strip()
-                    for item in str(request.symbols_arg).split(",")
-                    if item.strip()
-                }
-                if request.symbols_arg
-                else None
-            ),
-        )
+        if not request.experience:
+            union_cfg = merge_wheel_requirements_into_prefetch_config(
+                base_config=request.base_cfg,
+                candidate_config=union_cfg,
+                account_configs=scanning_configs,
+                wheel_read_models=prepared_options.wheel_read_models_by_account,
+                allowed_symbols=(
+                    {
+                        item.strip()
+                        for item in str(request.symbols_arg).split(",")
+                        if item.strip()
+                    }
+                    if request.symbols_arg
+                    else None
+                ),
+            )
         try:
-            if scanning_configs:
+            if scanning_configs and not request.experience:
                 (
                     union_cfg,
                     close_advice_required_data_plan_path,
@@ -1089,8 +1137,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     accounts_root=request.accounts_root,
                     prefetch_done=prefetch_done,
                     force_mode=request.force_mode,
-                    allow_mutations=(not request.smoke),
-                    allow_notifications=(not request.no_send),
+                    allow_mutations=(not request.smoke and not request.experience),
+                    allow_notifications=(not request.no_send and not request.experience),
                     prefetch_lock=shared_event_prefetch_lock,
                     prefetch_state=shared_event_prefetch_state,
                     scan_decision_by_account=request.scan_decision_by_account,
@@ -1118,6 +1166,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         close_advice_required_data_plan_path
                         if acct in scanning_accounts
                         else None
+                    ),
+                    experience=request.experience,
+                    account_display_name=account_display_names.get(
+                        acct,
+                        "模拟账户名称不可用",
                     ),
                 ),
                 runlog=request.runlog,
@@ -1220,7 +1273,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             ran_pipeline_accounts.append(account)
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
-        if outcome.ran_pipeline:
+        if outcome.ran_pipeline and not request.experience:
             runtime_portfolio_snapshot_shadow_tasks.append(
                 RuntimePortfolioSnapshotShadowTask(
                     account=account,

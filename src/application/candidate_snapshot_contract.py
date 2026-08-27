@@ -116,6 +116,7 @@ def normalize_dependencies(
     rows: Iterable[Mapping[str, Any]],
     *,
     verify_root: Path | None = None,
+    required_kinds: frozenset[str] = REQUIRED_CANDIDATE_DEPENDENCIES,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -154,12 +155,12 @@ def normalize_dependencies(
                     f"candidate dependency hash mismatch: {kind}"
                 )
         out.append({"kind": kind, "relpath": relpath, "sha256": digest})
-    missing = sorted(REQUIRED_CANDIDATE_DEPENDENCIES - seen)
+    missing = sorted(required_kinds - seen)
     if missing:
         raise CandidateSnapshotContractError(
             "candidate dependencies are incomplete: " + ",".join(missing)
         )
-    extra = sorted(seen - REQUIRED_CANDIDATE_DEPENDENCIES)
+    extra = sorted(seen - required_kinds)
     if extra:
         raise CandidateSnapshotContractError(
             "candidate dependencies contain unknown kinds: " + ",".join(extra)

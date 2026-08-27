@@ -29,6 +29,11 @@ def add_run_commands(subparsers: Any) -> None:
     tick.add_argument("--default-account", default=None)
     tick.add_argument("--market-config", default="auto", choices=["auto", "hk", "us", "all"])
     tick.add_argument("--no-send", action="store_true")
+    tick.add_argument(
+        "--experience",
+        action="store_true",
+        help="run a non-executable simulated-account experience scan; requires --no-send",
+    )
     tick.add_argument("--smoke", action="store_true")
     tick.add_argument("--force", action="store_true", help="force scanning outside normal run points; does not auto-send ordinary Tick notifications")
     tick.add_argument("--debug", action="store_true")
@@ -89,6 +94,8 @@ def _tick_argv(args: argparse.Namespace) -> list[str]:
         tick_argv.extend(["--market-config", str(args.market_config)])
     if args.no_send:
         tick_argv.append("--no-send")
+    if args.experience:
+        tick_argv.append("--experience")
     if args.smoke:
         tick_argv.append("--smoke")
     if args.force:

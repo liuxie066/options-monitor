@@ -57,6 +57,40 @@ def test_cli_run_tick_delegates_to_application_tick(
     ]
 
 
+def test_cli_run_tick_forwards_experience_only_on_manual_entry(
+    example_config_path: Path,
+    monkeypatch,
+) -> None:
+    from src.interfaces.cli import main as cli_main
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli_main, "run_tick", lambda argv: seen.append(list(argv)) or 0)
+
+    assert cli_main.main(
+        [
+            "run",
+            "tick",
+            "--config",
+            str(example_config_path),
+            "--accounts",
+            "paper",
+            "--experience",
+            "--no-send",
+        ]
+    ) == 0
+    assert seen[0][-2:] == ["--no-send", "--experience"]
+    with pytest.raises(SystemExit):
+        cli_main.main(
+            [
+                "run",
+                "tick-cron",
+                "--market",
+                "us",
+                "--experience",
+            ]
+        )
+
+
 def test_cli_run_tick_cron_dry_run_outputs_plan(capsys) -> None:
     from src.interfaces.cli import main as cli_main
 

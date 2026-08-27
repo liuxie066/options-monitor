@@ -47,6 +47,7 @@ def build_cross_account_prefetch_config(
     base_config: dict[str, Any],
     account_configs: dict[str, dict[str, Any]],
     prepared_portfolio_contexts: dict[str, dict[str, Any] | None],
+    demo_capacity: bool = False,
 ) -> dict[str, Any]:
     """Build an order-independent union of effective per-account market demand."""
 
@@ -108,6 +109,7 @@ def build_cross_account_prefetch_config(
                 want_put=bool(sp.get("enabled", False)),
                 want_call=bool(cc.get("enabled", False)),
                 portfolio_ctx=context,
+                demo_capacity=demo_capacity,
             )
             effective = deepcopy(resolved)
             sp = dict(filtered.sp)

@@ -17,6 +17,8 @@ from src.infrastructure.io_utils import atomic_write_json
 STRATEGY_SCAN_STATUS_SCHEMA = "strategy_scan_status.v1"
 STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA = "strategy_scan_status_index.v2"
 STRATEGY_SCAN_STATUS_INDEX_V2_FILE = "strategy_scan_status_index.v2.json"
+STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA = "strategy_scan_status_index.v3"
+STRATEGY_SCAN_STATUS_INDEX_V3_FILE = "strategy_scan_status_index.v3.json"
 _TERMINAL = frozenset({"completed", "unavailable", "failed", "not_applicable"})
 _COMPLETED_REASONS = frozenset({"no_candidate", "partial_data", "market_closed"})
 
@@ -118,6 +120,7 @@ def publish_strategy_scan_status_index_v2(
     account: str,
     account_config_sha256: str,
     expected: Iterable[Mapping[str, str]],
+    experience_fields: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish the CSV-independent terminal scope index for one account run."""
 
@@ -182,8 +185,13 @@ def publish_strategy_scan_status_index_v2(
         status: sum(1 for item in items if item.get("status") == status)
         for status in ("completed", "unavailable", "failed", "not_applicable")
     }
+    experience = dict(experience_fields or {})
     payload: dict[str, Any] = {
-        "schema_version": STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
+        "schema_version": (
+            STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA
+            if experience
+            else STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA
+        ),
         "run_id": run_id_norm,
         "account": account_norm,
         "account_config_sha256": config_hash,
@@ -191,16 +199,32 @@ def publish_strategy_scan_status_index_v2(
         "expected_count": len(items),
         "counts": counts,
         "items": items,
+        **experience,
     }
     payload["content_sha256"] = sha256_bytes(_canonical_index_content(payload))
-    path = (root / STRATEGY_SCAN_STATUS_INDEX_V2_FILE).resolve()
+    path = (
+        root
+        / (
+            STRATEGY_SCAN_STATUS_INDEX_V3_FILE
+            if experience
+            else STRATEGY_SCAN_STATUS_INDEX_V2_FILE
+        )
+    ).resolve()
     atomic_write_json(path, payload)
-    validate_strategy_scan_status_index_v2(
-        payload,
-        expected_run_id=run_id_norm,
-        expected_account=account_norm,
-        expected_account_config_sha256=config_hash,
-    )
+    if experience:
+        validate_strategy_scan_status_index_v3(
+            payload,
+            expected_run_id=run_id_norm,
+            expected_account=account_norm,
+            expected_account_config_sha256=config_hash,
+        )
+    else:
+        validate_strategy_scan_status_index_v2(
+            payload,
+            expected_run_id=run_id_norm,
+            expected_account=account_norm,
+            expected_account_config_sha256=config_hash,
+        )
     return {**payload, "index_path": str(path)}
 
 
@@ -227,6 +251,73 @@ def load_strategy_scan_status_index_v2(
         expected_account_config_sha256=expected_account_config_sha256,
     )
     return payload
+
+
+def load_strategy_scan_status_index_v3(
+    path: Path,
+    *,
+    expected_run_id: str | None = None,
+    expected_account: str | None = None,
+    expected_account_config_sha256: str | None = None,
+) -> dict[str, Any]:
+    target = Path(path)
+    if not target.is_file() or target.is_symlink():
+        raise StrategyScanStatusError("strategy status v3 index is unavailable")
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StrategyScanStatusError("strategy status v3 index is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise StrategyScanStatusError("strategy status v3 index is invalid")
+    validate_strategy_scan_status_index_v3(
+        payload,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+    )
+    return payload
+
+
+def validate_strategy_scan_status_index_v3(
+    payload: Mapping[str, Any],
+    *,
+    expected_run_id: str | None = None,
+    expected_account: str | None = None,
+    expected_account_config_sha256: str | None = None,
+) -> None:
+    from src.application.experience_mode import validate_experience_fields
+
+    item = dict(payload or {})
+    if item.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA:
+        raise StrategyScanStatusError("strategy status v3 index schema mismatch")
+    try:
+        validate_experience_fields(item)
+    except ValueError as exc:
+        raise StrategyScanStatusError(str(exc)) from exc
+    content_hash = _sha256(item.get("content_sha256"), "content_sha256")
+    content = {key: value for key, value in item.items() if key != "content_sha256"}
+    if sha256_bytes(_canonical_index_content(content)) != content_hash:
+        raise StrategyScanStatusError("strategy status v3 index content hash mismatch")
+    formal = {
+        key: value
+        for key, value in item.items()
+        if key
+        not in {
+            "scan_mode",
+            "capacity_source",
+            "account_display_name",
+            "executable",
+            "content_sha256",
+        }
+    }
+    formal["schema_version"] = STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA
+    formal["content_sha256"] = sha256_bytes(_canonical_index_content(formal))
+    validate_strategy_scan_status_index_v2(
+        formal,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+    )
 
 
 def validate_strategy_scan_status_index_v2(
@@ -432,11 +523,15 @@ def _sha256(value: Any, field: str) -> str:
 __all__ = [
     "STRATEGY_SCAN_STATUS_INDEX_V2_FILE",
     "STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA",
+    "STRATEGY_SCAN_STATUS_INDEX_V3_FILE",
+    "STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA",
     "STRATEGY_SCAN_STATUS_SCHEMA",
     "StrategyScanStatusError",
     "load_strategy_scan_status_index_v2",
+    "load_strategy_scan_status_index_v3",
     "publish_strategy_scan_status",
     "publish_strategy_scan_status_index_v2",
     "strategy_status_path",
     "validate_strategy_scan_status_index_v2",
+    "validate_strategy_scan_status_index_v3",
 ]

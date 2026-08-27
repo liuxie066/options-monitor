@@ -209,6 +209,58 @@ def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Pa
     assert int(out.iloc[0]["covered_contracts_available"]) == 1
 
 
+def test_scan_sell_call_demo_capacity_uses_multiplier_and_spot(tmp_path: Path) -> None:
+    from src.application.scan_sell_call import run_sell_call_scan
+
+    frame = pd.DataFrame(
+        [
+            phase2_opening_row(
+                {
+                    "symbol": "DEMO",
+                    "option_type": "call",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "contract_symbol": "DEMO_CALL",
+                    "multiplier": 10,
+                    "currency": "USD",
+                    "strike": 110.0,
+                    "spot": 100.0,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "last_price": 1.1,
+                    "mid": 1.1,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "implied_volatility": 0.3,
+                    "delta": 0.2,
+                }
+            )
+        ]
+    )
+    out = run_sell_call_scan(
+        symbols=["DEMO"],
+        input_root=tmp_path,
+        avg_cost=None,
+        shares=None,
+        shares_can_sell=None,
+        shares_locked=None,
+        min_annualized_net_return=0.01,
+        min_net_income=1,
+        min_open_interest=1,
+        min_volume=1,
+        quote_freshness_now_utc=_SCAN_NOW,
+        required_data_frames={"DEMO": frame},
+        demo_capacity=True,
+    )
+
+    assert list(out["contract_symbol"]) == ["DEMO_CALL"]
+    assert int(out.iloc[0]["shares_total"]) == 10
+    assert int(out.iloc[0]["shares_can_sell"]) == 10
+    assert int(out.iloc[0]["covered_contracts_available"]) == 1
+    assert float(out.iloc[0]["avg_cost"]) == 100.0
+    assert out.iloc[0]["capacity_source"] == "demo_scenario"
+
+
 def test_scan_sell_call_defers_cost_multiplier_strike_floor_to_policy(tmp_path: Path) -> None:
     from src.application.scan_sell_call import run_sell_call_scan
 

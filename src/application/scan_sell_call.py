@@ -86,21 +86,31 @@ def explain_metrics_rejection(
 
 
 def _make_compute_metrics(
-    avg_cost: float,
+    avg_cost: float | None,
     now_utc: datetime | None = None,
+    *,
+    demo_capacity: bool = False,
 ) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
     def _compute(contract: CandidateContractInput) -> dict[str, Any] | None:
-        return compute_metrics(contract, avg_cost, now_utc=now_utc)
+        effective_cost = contract.spot if demo_capacity else avg_cost
+        if effective_cost is None:
+            return None
+        return compute_metrics(contract, float(effective_cost), now_utc=now_utc)
 
     return _compute
 
 
 def _make_explain_metrics_rejection(
-    avg_cost: float,
+    avg_cost: float | None,
     now_utc: datetime | None = None,
+    *,
+    demo_capacity: bool = False,
 ) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
     def _explain(contract: CandidateContractInput) -> dict[str, Any] | None:
-        return explain_metrics_rejection(contract, avg_cost, now_utc=now_utc)
+        effective_cost = contract.spot if demo_capacity else avg_cost
+        if effective_cost is None:
+            return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
+        return explain_metrics_rejection(contract, float(effective_cost), now_utc=now_utc)
 
     return _explain
 
@@ -127,35 +137,55 @@ def _resolve_sell_call_contract_capacity(
 
 def _build_candidate_row_factory(
     *,
-    avg_cost: float,
-    shares: int,
-    shares_can_sell: int,
-    shares_locked: int,
+    avg_cost: float | None,
+    shares: int | None,
+    shares_can_sell: int | None,
+    shares_locked: int | None,
     capacity_facts: Mapping[str, Any] | None,
+    demo_capacity: bool = False,
 ) -> Callable[[CandidateContractInput, CandidateBaseValues, dict[str, Any]], dict[str, Any] | None]:
     def _build(
         contract: CandidateContractInput,
         base_values: CandidateBaseValues,
         metrics: dict[str, Any],
     ) -> dict[str, Any] | None:
+        contract_multiplier = float(contract.multiplier or 0)
+        if demo_capacity and (
+            contract_multiplier <= 0 or not contract_multiplier.is_integer()
+        ):
+            return None
+        if demo_capacity:
+            effective_shares = int(contract_multiplier)
+            effective_sellable = int(contract_multiplier)
+            effective_locked = 0
+            effective_cost = float(contract.spot)
+        else:
+            assert avg_cost is not None
+            assert shares is not None
+            assert shares_can_sell is not None
+            assert shares_locked is not None
+            effective_shares = shares
+            effective_sellable = shares_can_sell
+            effective_locked = shares_locked
+            effective_cost = avg_cost
         available, covered_contracts_available, is_fully_covered_available = _resolve_sell_call_contract_capacity(
             multiplier=contract.multiplier,
-            shares=shares,
-            shares_can_sell=shares_can_sell,
-            shares_locked=shares_locked,
+            shares=effective_shares,
+            shares_can_sell=effective_sellable,
+            shares_locked=effective_locked,
         )
-        shares_total = int(shares)
-        shares_locked_value = int(shares_locked)
+        shares_total = int(effective_shares)
+        shares_locked_value = int(effective_locked)
         payload = contract.to_gate_payload()
         payload.pop("mode", None)
         payload.update(
             {
             "dte": base_values.dte,
             "strike": base_values.strike,
-            "avg_cost": avg_cost,
+            "avg_cost": effective_cost,
             "shares_total": shares_total,
-            "shares_can_sell": int(shares_can_sell),
-            "shares_eligible": min(shares_total, int(shares_can_sell)),
+            "shares_can_sell": int(effective_sellable),
+            "shares_eligible": min(shares_total, int(effective_sellable)),
             "shares_locked": shares_locked_value,
             "shares_available_for_cover": available,
             "covered_contracts_available": covered_contracts_available,
@@ -163,6 +193,14 @@ def _build_candidate_row_factory(
             "is_fully_covered_available": is_fully_covered_available,
             "shares": shares_total,
             **dict(capacity_facts or {}),
+            **(
+                {
+                    "capacity_source": "demo_scenario",
+                    "share_pool_additive_across_candidates": False,
+                }
+                if demo_capacity
+                else {}
+            ),
             "open_interest": base_values.open_interest,
             "volume": base_values.volume,
             **metrics,
@@ -177,10 +215,10 @@ def run_sell_call_scan(
     *,
     symbols: list[str],
     input_root: Path,
-    avg_cost: float,
-    shares: int,
-    shares_can_sell: int,
-    shares_locked: int,
+    avg_cost: float | None,
+    shares: int | None,
+    shares_can_sell: int | None,
+    shares_locked: int | None,
     capacity_facts: Mapping[str, Any] | None = None,
     min_dte: int = DEFAULT_SELL_CALL_WINDOW.min_dte,
     max_dte: int = DEFAULT_SELL_CALL_WINDOW.max_dte,
@@ -199,6 +237,7 @@ def run_sell_call_scan(
     ) = None,
     quote_freshness_now_utc: datetime | None = None,
     required_data_frames: Mapping[str, pd.DataFrame] | None = None,
+    demo_capacity: bool = False,
 ) -> pd.DataFrame:
     """计算 Covered Call 候选，并返回类型化内存结果。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
@@ -213,11 +252,15 @@ def run_sell_call_scan(
         for name, value in share_facts.items()
         if isinstance(value, bool) or not isinstance(value, int) or value < 0
     ]
-    if invalid_share_facts:
+    if not demo_capacity and invalid_share_facts:
         raise ValueError(
             f"{', '.join(invalid_share_facts)} must be non-negative integers"
         )
-    if shares_locked > min(shares, shares_can_sell):
+    if not demo_capacity:
+        assert shares is not None
+        assert shares_can_sell is not None
+        assert shares_locked is not None
+    if not demo_capacity and shares_locked > min(shares, shares_can_sell):
         raise ValueError("shares_locked exceeds eligible underlying shares")
     threshold = validate_min_annualized_net_premium_return(
         min_annualized_net_return,
@@ -227,10 +270,14 @@ def run_sell_call_scan(
         min_strike_cost_multiplier,
         source="--min-strike-cost-multiplier",
     )
-    effective_min_strike = resolve_effective_sell_call_min_strike(
-        min_strike=min_strike,
-        avg_cost=avg_cost,
-        cost_multiplier=cost_multiplier,
+    effective_min_strike = (
+        min_strike
+        if demo_capacity
+        else resolve_effective_sell_call_min_strike(
+            min_strike=min_strike,
+            avg_cost=avg_cost,
+            cost_multiplier=cost_multiplier,
+        )
     )
     scan_now_utc = quote_freshness_now_utc or datetime.now(timezone.utc)
     return run_candidate_scan(
@@ -252,15 +299,24 @@ def run_sell_call_scan(
             required_data_frames=required_data_frames,
         ),
         deps=CandidateScanDependencies(
-            compute_metrics_fn=_make_compute_metrics(avg_cost, now_utc=scan_now_utc),
+            compute_metrics_fn=_make_compute_metrics(
+                avg_cost,
+                now_utc=scan_now_utc,
+                demo_capacity=demo_capacity,
+            ),
             build_row_fn=_build_candidate_row_factory(
                 avg_cost=avg_cost,
                 shares=shares,
                 shares_can_sell=shares_can_sell,
                 shares_locked=shares_locked,
                 capacity_facts=capacity_facts,
+                demo_capacity=demo_capacity,
             ),
-            metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost, now_utc=scan_now_utc),
+            metric_reject_reason_fn=_make_explain_metrics_rejection(
+                avg_cost,
+                now_utc=scan_now_utc,
+                demo_capacity=demo_capacity,
+            ),
         ),
         calculation_decision_sink_fn=calculation_decision_sink_fn,
     )

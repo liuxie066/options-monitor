@@ -41,6 +41,7 @@ from src.application.tick_run_workspace import (
     load_account_run_config,
     load_retained_account_run_config,
 )
+from src.application.experience_mode import experience_fields
 
 from domain.storage.repositories import run_repo, state_repo
 
@@ -80,6 +81,8 @@ class AccountRunRequest:
     close_advice_required_data_plan: Path | None = None
     account_config_generation_frozen: bool = False
     has_wheel_scope: bool = False
+    experience: bool = False
+    account_display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +238,10 @@ def run_one_account(
         "meaningful": False,
         "reason": "",
     }
+    if request.experience:
+        acct_metrics.update(
+            experience_fields(str(request.account_display_name or ""))
+        )
     ensure_account_output_dir(acct_out)
 
     acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
@@ -300,6 +307,8 @@ def run_one_account(
             "snapshot_manifest_sha256": request.required_data_snapshot_sha256,
             "account_config_sha256": request.account_config_authority.account_config_sha256,
         }
+        if request.experience:
+            payload.update(experience_fields(str(request.account_display_name or "")))
         _write_acct_run_state("account_metrics.json", payload)
 
     def _prepared_option_integrity_failure(
@@ -348,17 +357,20 @@ def run_one_account(
     for key, value in (request.notify_decision_by_account or {}).items():
         if value is not None:
             notify_decisions[key] = value
-    should_notify_raw = decide_should_notify(
+    should_notify_raw = False if request.experience else decide_should_notify(
         account=acct,
         notify_decision_by_account=notify_decisions,
         scheduler_decision=request.scheduler_view,
     )
-    scan_should_run, scan_reason = _resolve_account_scan_decision(
-        account=acct,
-        scan_decision_by_account=request.scan_decision_by_account,
-        should_run_global=request.should_run_global,
-        reason_global=request.reason_global,
-    )
+    if request.experience:
+        scan_should_run, scan_reason = True, "experience"
+    else:
+        scan_should_run, scan_reason = _resolve_account_scan_decision(
+            account=acct,
+            scan_decision_by_account=request.scan_decision_by_account,
+            should_run_global=request.should_run_global,
+            reason_global=request.reason_global,
+        )
     try:
         decision = Decision.from_payload(
             {
@@ -387,7 +399,7 @@ def run_one_account(
         has_symbols=(
             (not request.markets_to_run)
             or bool(resolve_watchlist_config(cfg))
-            or request.has_wheel_scope
+            or (request.has_wheel_scope and not request.experience)
         ),
         reason=reason,
     )
@@ -460,6 +472,8 @@ def run_one_account(
         capture_output=True,
         text=True,
         env=dict(os.environ, PYTHONPATH=str(repo_root)),
+        experience=request.experience,
+        account_display_name=request.account_display_name,
     )
     acct_metrics["pipeline_ms"] = int((monotonic() - t_pipe0) * 1000)
     audit_fn(
@@ -545,7 +559,10 @@ def run_one_account(
     )
 
     prepared_option_context: dict[str, Any] | None = None
-    if request.prepared_option_positions_context_manifest is not None:
+    if (
+        not request.experience
+        and request.prepared_option_positions_context_manifest is not None
+    ):
         try:
             prepared_option_context = load_prepared_option_positions_context(
                 manifest_path=(
@@ -565,10 +582,15 @@ def run_one_account(
         except PreparedOptionPositionsContextError as exc:
             return _prepared_option_integrity_failure(exc)
 
-    text = notif_path.read_text(encoding="utf-8", errors="replace").strip() if notif_path.exists() else ""
+    text_path = (
+        (acct_report_dir / "experience_report.md").resolve()
+        if request.experience
+        else notif_path
+    )
+    text = text_path.read_text(encoding="utf-8", errors="replace").strip() if text_path.exists() else ""
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
-    if bool(close_advice_cfg.get("enabled", False)):
+    if not request.experience and bool(close_advice_cfg.get("enabled", False)):
         try:
             raw_close_result = run_close_advice(
                 config=cfg,
@@ -674,24 +696,25 @@ def run_one_account(
             )
             runlog.safe_event("close_advice", "error", message=f"close advice failed for {acct}: {exc}")
 
-    try:
-        run_repo.write_run_account_text(
-            request.base,
-            request.run_id,
-            acct,
-            "symbols_notification.txt",
-            text + "\n",
-        )
-        audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="write_run_account_artifacts",
-            exc=exc,
-        )
+    if not request.experience:
+        try:
+            run_repo.write_run_account_text(
+                request.base,
+                request.run_id,
+                acct,
+                "symbols_notification.txt",
+                text + "\n",
+            )
+            audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
+        except Exception as exc:
+            _record_account_run_degraded(
+                runlog=runlog,
+                audit_fn=audit_fn,
+                run_id=request.run_id,
+                account=acct,
+                action="write_run_account_artifacts",
+                exc=exc,
+            )
 
     acct_metrics["ran_scan"] = True
     acct_metrics["ran_pipeline"] = True
@@ -699,7 +722,7 @@ def run_one_account(
     acct_metrics["reason"] = str(reason)
     _write_account_metrics_state()
     return AccountRunOutcome(
-        result=AccountResult(acct, True, bool(should_notify), reason, text),
+        result=AccountResult(acct, True, False if request.experience else bool(should_notify), reason, text),
         acct_metrics=acct_metrics,
         prefetch_done=prefetch_done,
         ran_pipeline=True,

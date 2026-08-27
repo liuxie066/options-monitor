@@ -1141,6 +1141,67 @@ def test_broker_readiness_requires_every_identity_in_requested_environment() -> 
     assert "****" in str(exc)
 
 
+def test_account_metadata_reads_only_exact_simulated_account_list_match() -> None:
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class Trade:
+        calls = 0
+
+        def get_acc_list(self):
+            self.calls += 1
+            return 0, [
+                {
+                    "acc_id": "90000001",
+                    "trd_env": "SIMULATE",
+                    "sim_acc_type": "OPTION",
+                    "trdmarket_auth": ["US"],
+                },
+                {
+                    "acc_id": "90000002",
+                    "trd_env": "SIMULATE",
+                    "sim_acc_type": "OPTION",
+                    "trdmarket_auth": ["HK"],
+                },
+                {"acc_id": "90000001", "trd_env": "REAL"},
+            ]
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            self._trade_client = Trade()
+
+        def _ensure_trade_client(self):
+            return self._trade_client
+
+    class Client:
+        def __init__(self, backend, **_kwargs):
+            self.backend = backend
+
+        @staticmethod
+        def _unwrap(value):
+            return value[1]
+
+        @staticmethod
+        def _rows(value):
+            return list(value)
+
+    gateway = build_futu_gateway(backend_cls=Backend, client_cls=Client)
+    metadata = gateway.get_account_metadata(
+        expected_account_id="90000001",
+        trd_env="SIMULATE",
+        expected_market="US",
+    )
+
+    assert metadata == {
+        "matched": True,
+        "trd_env": "SIMULATE",
+        "sim_acc_type": "OPTION",
+        "trdmarket_auth": ["US"],
+        "account_id_tail": "0001",
+        "same_type_count": 1,
+    }
+    assert gateway.backend._trade_client.calls == 1
+
+
 def test_broker_readiness_rejects_missing_explicit_global_state_facts() -> None:
     from src.infrastructure.futu_gateway import FutuGatewayError, build_ready_futu_broker_gateway
 

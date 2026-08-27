@@ -36,6 +36,7 @@ def run_multi_tick_watchdog(
     send_opend_alert,
     send_opend_recovery_notice,
     state_repo,
+    allow_operational_side_effects: bool = True,
 ) -> MultiTickWatchdogOutcome:
     t_watchdog0 = monotonic()
     runlog.safe_event("watchdog", "start")
@@ -72,7 +73,7 @@ def run_multi_tick_watchdog(
                         base=base,
                         host=str(host),
                         port=int(port),
-                        ensure=True,
+                        ensure=allow_operational_side_effects,
                         timeout_sec=watchdog_timeout_sec,
                         retry_enabled=retry_enabled,
                         retry_interval_sec=retry_interval_sec,
@@ -152,7 +153,10 @@ def run_multi_tick_watchdog(
                 )
                 alert_message_text = str(opend_plan.get("alert_message_text") or msg)
                 alert_detail = str(opend_plan.get("alert_detail") or detail)
-                if bool(opend_plan.get("should_mark_phone_verify_pending")):
+                if (
+                    bool(opend_plan.get("should_mark_phone_verify_pending"))
+                    and allow_operational_side_effects
+                ):
                     mark_opend_phone_verify_pending(base, detail=alert_detail)
                     send_opend_alert(
                         base,
@@ -180,35 +184,36 @@ def run_multi_tick_watchdog(
                     )
                     return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
 
-                send_opend_alert(
-                    base,
-                    base_cfg,
-                    error_code=error_code,
-                    message_text=alert_message_text,
-                    detail=alert_detail,
-                    no_send=no_send,
-                )
-                on_guard_failure(error_code, "opend_watchdog")
-                now = utc_now_fn()
-                for acct in accounts:
-                    acct0 = str(acct).strip().lower()
-                    if not acct0:
-                        continue
-                    try:
-                        state_repo.write_account_last_run(
-                            base,
-                            acct0,
-                            {
-                                "last_run_utc": now,
-                                "sent": False,
-                                "reason": "opend_unhealthy",
-                                "error_code": error_code,
-                                "detail": msg,
-                            },
-                        )
-                        audit_fn("write", "write_account_last_run", account=acct0, error_code=error_code)
-                    except Exception:
-                        pass
+                if allow_operational_side_effects:
+                    send_opend_alert(
+                        base,
+                        base_cfg,
+                        error_code=error_code,
+                        message_text=alert_message_text,
+                        detail=alert_detail,
+                        no_send=no_send,
+                    )
+                    on_guard_failure(error_code, "opend_watchdog")
+                    now = utc_now_fn()
+                    for acct in accounts:
+                        acct0 = str(acct).strip().lower()
+                        if not acct0:
+                            continue
+                        try:
+                            state_repo.write_account_last_run(
+                                base,
+                                acct0,
+                                {
+                                    "last_run_utc": now,
+                                    "sent": False,
+                                    "reason": "opend_unhealthy",
+                                    "error_code": error_code,
+                                    "detail": msg,
+                                },
+                            )
+                            audit_fn("write", "write_account_last_run", account=acct0, error_code=error_code)
+                        except Exception:
+                            pass
 
                 runlog.safe_event(
                     "watchdog",
@@ -236,14 +241,16 @@ def run_multi_tick_watchdog(
                 return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
             else:
                 # OpenD healthy: reset consecutive failure counter and send recovery notice if applicable.
-                try:
-                    send_opend_recovery_notice(base, base_cfg, no_send=no_send)
-                except Exception:
-                    pass
+                if allow_operational_side_effects:
+                    try:
+                        send_opend_recovery_notice(base, base_cfg, no_send=no_send)
+                    except Exception:
+                        pass
     except SystemExit:
         raise
     except Exception as exc:
-        on_guard_failure("WATCHDOG_EXCEPTION", "opend_watchdog")
+        if allow_operational_side_effects:
+            on_guard_failure("WATCHDOG_EXCEPTION", "opend_watchdog")
         runlog.safe_event(
             "watchdog",
             "error",

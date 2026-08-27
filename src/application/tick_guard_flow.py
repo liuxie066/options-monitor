@@ -41,6 +41,7 @@ class TickGuardRequest:
     runlog: Any
     audit_helper: Any
     complete_tick_idempotency_fn: Callable[..., None]
+    allow_operational_side_effects: bool = True
     admit_project_run_fn: Callable[..., dict[str, Any]] = admit_project_run
     apply_project_load_shed_fn: Callable[..., list[str]] = apply_project_load_shed
     clear_opend_phone_verify_pending_fn: Callable[..., None] = clear_opend_phone_verify_pending
@@ -166,6 +167,7 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
         send_opend_alert=request.send_opend_alert_fn,
         send_opend_recovery_notice=request.send_opend_recovery_notice_fn,
         state_repo=state_repo,
+        allow_operational_side_effects=request.allow_operational_side_effects,
     )
     if not watchdog_outcome.should_continue:
         request.complete_tick_idempotency_fn(

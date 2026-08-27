@@ -206,12 +206,47 @@ def enrich_sell_put_candidates_with_cash(
     symbol: str,
     portfolio_ctx: dict | None,
     exchange_rate_converter: CurrencyConverter,
+    demo_capacity: bool = False,
 ) -> pd.DataFrame:
     """Add cash secured usage / cash available / cash required columns."""
 
     df_sp_lab = df_labeled
     if df_sp_lab is None or df_sp_lab.empty:
         return df_sp_lab
+
+    if demo_capacity:
+        out = df_sp_lab.copy()
+        strike = pd.to_numeric(
+            out["strike"] if "strike" in out else pd.Series(index=out.index, dtype=float),
+            errors="coerce",
+        )
+        multiplier = pd.to_numeric(
+            out["multiplier"]
+            if "multiplier" in out
+            else pd.Series(index=out.index, dtype=float),
+            errors="coerce",
+        )
+        required = strike * multiplier
+        valid = strike.gt(0) & multiplier.gt(0)
+        out["cash_required_native"] = required.where(valid, pd.NA)
+        out["cash_free_effective_native"] = required.where(valid, pd.NA)
+        out["cash_available_effective_native"] = required.where(valid, pd.NA)
+        out["cash_native_currency"] = out.get("currency", pd.NA)
+        out["cash_capacity_basis"] = "demo_scenario"
+        out["capacity_source"] = "demo_scenario"
+        out["max_new_contracts"] = valid.astype(int)
+        out["cash_pool_additive_across_candidates"] = False
+        out["cash_secured_used_usd_total"] = 0.0
+        out["cash_secured_used_usd_symbol"] = 0.0
+        out["cash_secured_used_usd"] = 0.0
+        out["cash_secured_used_cny_total"] = 0.0
+        out["cash_secured_used_cny_symbol"] = 0.0
+        out["cash_secured_used_cny"] = 0.0
+        out["cash_requirement_unavailable_reason"] = pd.NA
+        out.loc[~valid, "cash_requirement_unavailable_reason"] = (
+            "assignment_requirement_invalid"
+        )
+        return out
 
     if not portfolio_ctx:
         return df_sp_lab

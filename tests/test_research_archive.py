@@ -246,6 +246,25 @@ def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
     assert json.loads(latest_path.read_text(encoding="utf-8"))["verified_at_utc"] == "2026-06-04T12:00:00Z"
 
 
+def test_experience_manifest_is_not_replay_evidence() -> None:
+    from src.application.research.archive import _has_replay_evidence
+
+    assert not _has_replay_evidence(
+        {
+            "candidate_manifest_files": [
+                "accounts/paper/state/candidate_snapshot_manifest.v2.json"
+            ],
+            "candidate_snapshot_files": [
+                "accounts/paper/state/opening_candidate_snapshot.json"
+            ],
+            "candidate_status_files": [
+                "accounts/paper/strategy_scan_status_index.v3.json"
+            ],
+            "trace_files": ["accounts/paper/reports/candidate_filter_trace.jsonl"],
+        }
+    )
+
+
 def test_archive_pull_defaults_to_rsync_dry_run_and_filters_local_runs(tmp_path: Path) -> None:
     from src.application.research.archive import archive_pull
 

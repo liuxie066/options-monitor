@@ -95,6 +95,45 @@ def test_load_exchange_rates_falls_back_to_stale_cache(
     assert round(hkd or 0.0, 4) == 0.93
 
 
+def test_market_data_only_context_never_reads_account_authority(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_context as ctx
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("experience context must not read account authority")
+
+    for name in (
+        "load_portfolio_context",
+        "load_option_positions_context",
+        "load_prepared_portfolio_context",
+        "load_prepared_option_positions_context",
+        "load_global_option_positions_risk_context",
+    ):
+        monkeypatch.setattr(ctx, name, _forbidden)
+    monkeypatch.setattr(
+        ctx,
+        "load_exchange_rates",
+        lambda **_kwargs: (0.14, 0.93),
+    )
+
+    assert ctx.build_pipeline_context(
+        py="python",
+        base=tmp_path,
+        cfg={"portfolio": {"account": "paper"}},
+        report_dir=tmp_path / "reports",
+        portfolio_timeout_sec=1,
+        runtime={},
+        is_scheduled=True,
+        state_dir=tmp_path / "state",
+        log=lambda _message: None,
+        no_context=False,
+        want_scan=True,
+        market_data_only=True,
+    ) == (None, None, 0.14, 0.93)
+
+
 def test_fetch_opend_exchange_rate_observation_uses_market_fetch(
     monkeypatch,
 ) -> None:

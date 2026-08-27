@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
@@ -625,13 +625,63 @@ def load_candidate_snapshot_bundle(
     return {"manifest": manifest, "status_index": index, "owners": owners}
 
 
-def load_latest_candidate_snapshot_bundle(
+def load_candidate_snapshot_bundle_readonly(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+) -> dict[str, Any]:
+    """Load formal or explicitly non-executable experience evidence."""
+
+    from src.application.experience_candidate_snapshot import (
+        EXPERIENCE_CANDIDATE_MANIFEST_FILE,
+        ExperienceCandidateSnapshotError,
+        load_experience_candidate_snapshot_bundle,
+    )
+
+    try:
+        run_id_norm = required_text(run_id, "run_id")
+        account_norm = required_text(account, "account").lower()
+    except CandidateSnapshotContractError as exc:
+        raise CandidateSnapshotManifestError(str(exc)) from exc
+    if (
+        run_id_norm in {".", ".."}
+        or Path(run_id_norm).name != run_id_norm
+        or account_norm in {".", ".."}
+        or Path(account_norm).name != account_norm
+    ):
+        raise CandidateSnapshotManifestError("candidate snapshot identity is invalid")
+    state_dir = _run_account_dir(base, run_id_norm, account_norm) / "state"
+    formal_path = state_dir / CANDIDATE_SNAPSHOT_MANIFEST_FILE
+    experience_path = state_dir / EXPERIENCE_CANDIDATE_MANIFEST_FILE
+    formal_present = formal_path.exists() or formal_path.is_symlink()
+    experience_present = experience_path.exists() or experience_path.is_symlink()
+    if formal_present and experience_present:
+        raise CandidateSnapshotManifestError(
+            "formal and experience candidate manifests conflict"
+        )
+    if experience_present:
+        try:
+            return load_experience_candidate_snapshot_bundle(
+                base=base,
+                run_id=run_id_norm,
+                account=account_norm,
+            )
+        except ExperienceCandidateSnapshotError as exc:
+            raise CandidateSnapshotManifestError(str(exc)) from exc
+    return load_candidate_snapshot_bundle(
+        base=base,
+        run_id=run_id_norm,
+        account=account_norm,
+    )
+
+
+def _load_latest_candidate_snapshot_bundle(
     *,
     base: Path,
     account: str,
+    loader: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
-    """Resolve one account's latest run and require its terminal manifest."""
-
     root = Path(base).resolve()
     try:
         account_norm = required_text(account, "account").lower()
@@ -657,7 +707,7 @@ def load_latest_candidate_snapshot_bundle(
             pointed = pointed.resolve()
         if pointed.parent != runs_root:
             raise CandidateSnapshotManifestError("last-run pointer is outside output_runs")
-        return load_candidate_snapshot_bundle(
+        return loader(
             base=root,
             run_id=pointed.name,
             account=account_norm,
@@ -685,7 +735,7 @@ def load_latest_candidate_snapshot_bundle(
             continue
         # The newest run containing the requested account is authoritative.
         # Do not skip an incomplete run and silently return stale evidence.
-        return load_candidate_snapshot_bundle(
+        return loader(
             base=root,
             run_id=run_dir.name,
             account=account_norm,
@@ -695,12 +745,42 @@ def load_latest_candidate_snapshot_bundle(
     )
 
 
+def load_latest_candidate_snapshot_bundle(
+    *,
+    base: Path,
+    account: str,
+) -> dict[str, Any]:
+    """Resolve one account's latest run and require its formal terminal manifest."""
+
+    return _load_latest_candidate_snapshot_bundle(
+        base=base,
+        account=account,
+        loader=load_candidate_snapshot_bundle,
+    )
+
+
+def load_latest_candidate_snapshot_bundle_readonly(
+    *,
+    base: Path,
+    account: str,
+) -> dict[str, Any]:
+    """Resolve the latest run for read-only formal or experience inspection."""
+
+    return _load_latest_candidate_snapshot_bundle(
+        base=base,
+        account=account,
+        loader=load_candidate_snapshot_bundle_readonly,
+    )
+
+
 __all__ = [
     "CANDIDATE_SNAPSHOT_MANIFEST_FILE",
     "CANDIDATE_SNAPSHOT_MANIFEST_SCHEMA",
     "CandidateSnapshotManifestError",
     "load_candidate_snapshot_bundle",
+    "load_candidate_snapshot_bundle_readonly",
     "load_latest_candidate_snapshot_bundle",
+    "load_latest_candidate_snapshot_bundle_readonly",
     "publish_candidate_snapshot_manifest",
     "validate_candidate_snapshot_manifest",
 ]

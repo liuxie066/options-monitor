@@ -47,6 +47,7 @@ def _enrich_sell_put_cash(
     symbol: str,
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
+    demo_capacity: bool = False,
 ) -> pd.DataFrame:
     if df_labeled.empty:
         return df_labeled
@@ -55,6 +56,7 @@ def _enrich_sell_put_cash(
         symbol=symbol,
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
+        demo_capacity=demo_capacity,
     )
 
 
@@ -72,6 +74,7 @@ def run_sell_put_scan_and_summarize(
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> list[dict[str, Any]]:
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
 
@@ -108,6 +111,7 @@ def run_sell_put_scan_and_summarize(
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
+            demo_capacity=demo_capacity,
         )
     if not df_sp_lab.empty:
         df_sp_lab = enrich_and_filter_sell_put_underwriting(

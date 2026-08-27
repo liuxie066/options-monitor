@@ -68,6 +68,7 @@ def process_symbol(
     combo_evidence_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
+    experience: bool = False,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
     if report_dir is None:
@@ -101,6 +102,7 @@ def process_symbol(
             final_candidates_sink_fn=final_candidates_sink_fn,
             candidate_decisions_sink_fn=candidate_decisions_sink_fn,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
+            experience=experience,
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,

@@ -29,6 +29,11 @@ from src.application.tick_run_workspace import (
     AccountRunConfigError,
     load_retained_account_run_config,
 )
+from src.application.experience_candidate_snapshot import (
+    load_experience_candidate_snapshot_bundle,
+)
+from src.application.experience_mode import render_experience_report
+from src.infrastructure.io_utils import write_text
 
 from domain.storage.repositories import report_repo
 
@@ -109,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--account-config-sha256", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--experience", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--account-display-name", default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -187,11 +194,23 @@ def main(argv: list[str] | None = None) -> int:
     global runtime_mode, is_scheduled, stage, stage_only, shared_required_data
 
     args = build_parser().parse_args(argv)
+    experience = bool(getattr(args, "experience", False))
+    account_display_name = str(
+        getattr(args, "account_display_name", None) or ""
+    ).strip()
+    if experience and not account_display_name:
+        raise SystemExit(
+            "[CONFIG_ERROR] experience pipeline requires an account display name"
+        )
 
     runtime_mode = str(args.mode)
     is_scheduled = runtime_mode == "scheduled"
     stage = str(args.stage)
     stage_only = str(args.stage_only) if args.stage_only else None
+    if experience and (stage != "all" or stage_only is not None):
+        raise SystemExit(
+            "[INVALID_REQUEST] experience pipeline requires a manual full scan"
+        )
     shared_required_data = str(args.shared_required_data) if getattr(args, "shared_required_data", None) else None
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -401,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 account_config_sha256=account_config_sha256,
+                experience=experience,
+                account_display_name=account_display_name,
             )
         except PreparedOptionPositionsContextError as exc:
             raise SystemExit(
@@ -416,6 +437,37 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         build_symbols_summary(summary_rows, report_dir, is_scheduled=is_scheduled)
+
+        if experience:
+            portfolio_cfg = (
+                cfg.get("portfolio")
+                if isinstance(cfg.get("portfolio"), dict)
+                else {}
+            )
+            bundle = load_experience_candidate_snapshot_bundle(
+                base=runtime_root,
+                run_id=str(args.source_account_run_id or ""),
+                account=str(portfolio_cfg.get("account") or ""),
+            )
+            owner_statuses = {
+                str(item.get("candidate_owner") or ""): str(
+                    item.get("opening_status") or ""
+                )
+                for item in bundle["manifest"].get("owner_snapshots") or []
+            }
+            write_text(
+                report_dir / "experience_report.md",
+                render_experience_report(
+                    rows=summary_rows,
+                    account_display_name=account_display_name,
+                    internal_account_label=str(
+                        portfolio_cfg.get("account") or ""
+                    ),
+                    owner_statuses=owner_statuses,
+                ),
+            )
+            log("[INFO] experience report generated")
+            return 0
 
         if not is_scheduled:
             build_symbols_digest(symbols, report_dir)

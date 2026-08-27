@@ -121,6 +121,7 @@ def _run(
     combo_evidence_sink_fn=None,
     select_pairs_fn=None,
     account_run_scope: bool = False,
+    demo_capacity: bool = False,
 ):
     report_dir = (
         tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
@@ -181,6 +182,7 @@ def _run(
             if combo_evidence_sink_fn is not None
             else {}
         ),
+        demo_capacity=demo_capacity,
     )
     trace = [
         json.loads(line)
@@ -197,6 +199,23 @@ def _run(
     if "cash_df" in captured:
         captured["scan_kwargs"]["_cash_output"] = captured["cash_df"]
     return captured["df"], trace, captured["scan_kwargs"], summary
+
+
+def test_combo_yield_demo_capacity_reuses_sell_put_capacity_owner(
+    tmp_path: Path,
+) -> None:
+    rows, _trace, scan, _summary = _run(
+        tmp_path,
+        candidates=[_candidate()],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        cash_filter_put_candidates_fn=enrich_combo_funding_cash,
+        demo_capacity=True,
+    )
+
+    assert rows.iloc[0]["capacity_source"] == "demo_scenario"
+    assert float(rows.iloc[0]["cash_required_native"]) == 10_000.0
+    assert int(rows.iloc[0]["max_new_contracts"]) == 1
+    assert scan["_cash_output"].equals(rows)
 
 
 def test_combo_yield_trace_links_account_run_snapshot_when_capture_is_enabled(
@@ -803,6 +822,22 @@ def test_combo_yield_manual_render_failure_propagates(tmp_path: Path) -> None:
             is_scheduled=False,
             render_alerts_fn=fail_render,
         )
+
+
+def test_combo_yield_demo_capacity_does_not_render_manual_alert(
+    tmp_path: Path,
+) -> None:
+    def fail_render(**_kwargs) -> str:
+        raise AssertionError("experience mode must not render alerts")
+
+    _run(
+        tmp_path,
+        candidates=[_candidate()],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        is_scheduled=False,
+        render_alerts_fn=fail_render,
+        demo_capacity=True,
+    )
 
 
 def test_empty_combo_yield_does_not_materialize_candidate_csv(tmp_path: Path) -> None:

@@ -39,6 +39,8 @@
 - [Product Architecture](PRODUCT_ARCHITECTURE.md)：产品域、模块责任和依赖。
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Sell Put、Covered Call、Combo Yield 的开仓边界。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
+- [Futu Simulate Account Experience Scan PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)：
+  面向富途模拟账户用户的 Sell Put、Covered Call、Combo Yield 手动体验模式合同。
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
 - [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：已发布 Wheel V1 的产品合同、批次级 Covered Call 监控、共享覆盖和生命周期边界。
@@ -48,6 +50,8 @@
 ## 技术架构与核心合同
 
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
+- [Futu Simulate Account Experience Scan System Design](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md)：
+  模拟账户手动体验扫描的 owner、数据合同、副作用门禁和验收映射。
 - [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：已落地 MVP 的技术架构、函数 owner 和存储收敛边界。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
 - [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。

@@ -7,8 +7,8 @@ from domain.domain.engine import normalize_strategy_mode
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
-    load_candidate_snapshot_bundle,
-    load_latest_candidate_snapshot_bundle,
+    load_candidate_snapshot_bundle_readonly,
+    load_latest_candidate_snapshot_bundle_readonly,
 )
 from src.application.opening_candidate_snapshot import ranked_opening_candidates
 from src.application.runtime_paths import resolve_runtime_root
@@ -45,13 +45,13 @@ def _snapshot(
     ).runtime_root
     try:
         if str(payload.get("run_id") or "").strip():
-            bundle = load_candidate_snapshot_bundle(
+            bundle = load_candidate_snapshot_bundle_readonly(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
             )
         else:
-            bundle = load_latest_candidate_snapshot_bundle(
+            bundle = load_latest_candidate_snapshot_bundle_readonly(
                 base=base,
                 account=account,
             )
@@ -94,14 +94,13 @@ def candidate_rank_explain_tool(
         ranked: list[dict[str, Any]] = []
         for item in source_rows[:top_n]:
             explanation = dict(item.get("ranking") or {})
+            facts = dict(item.get("facts") or item)
             explanation.update(
                 {
                     "candidate_id": item.get("candidate_id"),
                     "rank": item.get("rank"),
-                    "symbol": dict(item.get("facts") or {}).get("symbol"),
-                    "contract_symbol": dict(item.get("facts") or {}).get(
-                        "contract_symbol"
-                    ),
+                    "symbol": facts.get("symbol"),
+                    "contract_symbol": facts.get("contract_symbol"),
                     "source_file": "state/opening_candidate_snapshot.json",
                 }
             )
@@ -114,6 +113,19 @@ def candidate_rank_explain_tool(
             ),
             {},
         )
+        if not strategy_result and snapshot.get("scan_mode") == "experience":
+            strategy_scope = next(
+                (
+                    dict(item)
+                    for item in snapshot.get("scope_results") or []
+                    if isinstance(item, dict) and item.get("strategy_mode") == mode
+                ),
+                {},
+            )
+            strategy_result = {
+                "strategy_status": strategy_scope.get("status"),
+                "capacity_status": "demo_scenario",
+            }
         groups.append(
             {
                 "mode": mode,
@@ -132,6 +144,9 @@ def candidate_rank_explain_tool(
         "content_sha256": snapshot.get("content_sha256"),
         "manifest_content_sha256": manifest.get("content_sha256"),
         "authority": "terminal_manifest_bound_opening_candidate_snapshot",
+        "scan_mode": snapshot.get("scan_mode"),
+        "account_display_name": snapshot.get("account_display_name"),
+        "executable": snapshot.get("executable"),
     }
     data = {
         "mode": mode_filter,

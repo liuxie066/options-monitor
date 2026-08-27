@@ -86,38 +86,46 @@ def run_cc_lp_scan(
     now_utc_fn: Callable[[], datetime] = _utc_now,
     strategy_profile: str = "cc_lp_funding_call",
     required_data_frame: pd.DataFrame | None = None,
+    demo_capacity: bool = False,
 ) -> pd.DataFrame:
     """Run the CC+LP opening scan: independent Sell Call scan + Long Put pairing."""
 
-    if not stock:
-        return pd.DataFrame()
-    try:
-        shares_raw = stock.get("shares")
-        shares_can_sell_raw = stock.get("can_sell_qty")
-        shares_locked_raw = stock.get("shares_locked")
-        avg_cost_raw = stock.get("avg_cost")
-        if (
-            shares_raw is None
-            or shares_can_sell_raw is None
-            or shares_locked_raw is None
-            or avg_cost_raw is None
-        ):
+    shares_total = shares_can_sell = shares_locked = 0
+    avg_cost = 0.0
+    if not demo_capacity:
+        if not stock:
             return pd.DataFrame()
-        shares_total = int(shares_raw)
-        shares_can_sell = int(shares_can_sell_raw)
-        shares_locked = int(shares_locked_raw)
-        avg_cost = float(avg_cost_raw)
-    except Exception:
-        return pd.DataFrame()
-    if shares_total <= 0 or shares_can_sell < 0 or shares_locked < 0 or avg_cost <= 0:
-        return pd.DataFrame()
+        try:
+            shares_raw = stock.get("shares")
+            shares_can_sell_raw = stock.get("can_sell_qty")
+            shares_locked_raw = stock.get("shares_locked")
+            avg_cost_raw = stock.get("avg_cost")
+            if (
+                shares_raw is None
+                or shares_can_sell_raw is None
+                or shares_locked_raw is None
+                or avg_cost_raw is None
+            ):
+                return pd.DataFrame()
+            shares_total = int(shares_raw)
+            shares_can_sell = int(shares_can_sell_raw)
+            shares_locked = int(shares_locked_raw)
+            avg_cost = float(avg_cost_raw)
+        except Exception:
+            return pd.DataFrame()
+        if shares_total <= 0 or shares_can_sell < 0 or shares_locked < 0 or avg_cost <= 0:
+            return pd.DataFrame()
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
     window = resolve_candidate_window(sell_call_cfg, defaults=DEFAULT_SELL_CALL_WINDOW)
-    effective_min_strike = resolve_effective_sell_call_min_strike(
-        min_strike=_optional_float(sell_call_cfg, "min_strike"),
-        avg_cost=avg_cost,
-        cost_multiplier=_optional_float(sell_call_cfg, "min_strike_cost_multiplier") or 1.02,
+    effective_min_strike = (
+        _optional_float(sell_call_cfg, "min_strike")
+        if demo_capacity
+        else resolve_effective_sell_call_min_strike(
+            min_strike=_optional_float(sell_call_cfg, "min_strike"),
+            avg_cost=avg_cost,
+            cost_multiplier=_optional_float(sell_call_cfg, "min_strike_cost_multiplier") or 1.02,
+        )
     )
     df_calls = run_sell_call_scan_fn(
         symbols=[symbol],
@@ -126,14 +134,14 @@ def run_cc_lp_scan(
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
         shares_locked=int(shares_locked),
-        capacity_facts={
+        capacity_facts=({"capacity_source": "demo_scenario"} if demo_capacity else {
             "capacity_identity_hash": stock.get("capacity_identity_hash"),
             "futu_account_id": stock.get("futu_account_id"),
             "capacity_trd_env": stock.get("trd_env"),
             "capacity_market": stock.get("market"),
             "capacity_source_observed_at": stock.get("source_observed_at"),
             "capacity_authority_status": stock.get("capacity_authority_status"),
-        },
+        }),
         min_dte=window.min_dte,
         max_dte=window.max_dte,
         min_strike=effective_min_strike,
@@ -157,6 +165,7 @@ def run_cc_lp_scan(
             if required_data_frame is not None
             else None
         ),
+        demo_capacity=demo_capacity,
     )
     if df_calls.empty:
         return pd.DataFrame()
@@ -272,6 +281,14 @@ def run_cc_lp_scan(
                     "gap_width_pct": metrics.gap_width_pct,
                     "combo_spread_ratio": metrics.combo_spread_ratio,
                     "generated_at_utc": now_utc_fn().isoformat(),
+                    **(
+                        {
+                            "capacity_source": "demo_scenario",
+                            "max_new_contracts": 1,
+                        }
+                        if demo_capacity
+                        else {}
+                    ),
                 }
             )
     ranked = rank_cc_lp_rows(rows)
