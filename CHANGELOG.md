@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.1.3 - 2026-08-27
+
 ### Bug Fixes
 - Allowed audited trade-event repairs to correct broker account and order identities, enabling canonical OpenD fee enrichment for legacy events with incomplete identity evidence.
 

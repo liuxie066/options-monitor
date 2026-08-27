@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "2.1.3",
+  "base": {
+    "tag": "v2.1.2",
+    "commit": "43ae4f0566b66168b5d6daef424bea3543bb733c"
+  },
+  "reviewed_head": "ee1210909372a09a2f1ed6475ca262ca19c9e527",
+  "commits": [
+    {
+      "sha": "ee1210909372a09a2f1ed6475ca262ca19c9e527",
+      "subject": "fix(trades): repair broker order identity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed audited trade-event repairs to correct broker account and order identities, enabling canonical OpenD fee enrichment for legacy events with incomplete identity evidence.",
+      "commits": [
+        "ee1210909372a09a2f1ed6475ca262ca19c9e527"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
