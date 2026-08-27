@@ -151,7 +151,17 @@ def _void_trade_event(
 
 
 def _repair_trade_event(*, event_id: str, core: dict[str, Any], raw_payload: dict[str, Any]) -> TradeEvent:
-    event_type = _event_type_from_position_effect(core.get("position_effect"))
+    original_event_type = str(core.get("event_type") or "").strip().lower()
+    lifecycle_close_type = str(raw_payload.get("close_type") or "").strip().lower()
+    event_type = (
+        original_event_type
+        if original_event_type in {"expire_close", "assignment", "exercise"}
+        else (
+            lifecycle_close_type
+            if lifecycle_close_type in {"expire_close", "assignment", "exercise"}
+            else _event_type_from_position_effect(core.get("position_effect"))
+        )
+    )
     target_lot_id = None
     if event_type in {"close", "expire_close", "assignment", "exercise", "adjust"}:
         target_lot_id = str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip() or None

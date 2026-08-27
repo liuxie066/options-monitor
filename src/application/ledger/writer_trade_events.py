@@ -69,7 +69,7 @@ from .writer_lifecycle_support import (
     _combo_leg_from_projected_record,
     _existing_combo_adoption_leg,
 )
-from .order_fee_semantics import is_unexecuted_expire_close
+from .order_fee_semantics import zero_option_fee_lifecycle_reason
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> ProjectionRefreshResult:
@@ -731,6 +731,29 @@ def _freeze_formula_fee_group(
     return [by_id[event.event_id] for event in events]
 
 def _freeze_new_event_fee(event: TradeEvent, *, frozen_at_ms: int) -> TradeEvent:
+    zero_reason = zero_option_fee_lifecycle_reason(event)
+    if zero_reason and event.event_type == "assignment":
+        resolution = _incoming_fee_resolution(event)
+        if resolution["status"] == "actual":
+            return _event_with_actual_fee(
+                event,
+                amount=resolution["amount"],
+                source=str(resolution["source"]),
+                frozen_at_ms=frozen_at_ms,
+            )
+        if resolution["status"] == "missing":
+            return _event_with_missing_fee(
+                event,
+                reason=str(resolution["reason"]),
+                diagnostics=list(resolution.get("diagnostics") or []),
+            )
+        return _event_with_actual_fee(
+            event,
+            amount=Decimal(0),
+            source="option_assignment_lifecycle",
+            reason=zero_reason,
+            frozen_at_ms=frozen_at_ms,
+        )
     if event.event_type == "expire_close":
         resolution = _incoming_fee_resolution(event)
         if resolution["status"] == "actual":
@@ -749,12 +772,12 @@ def _freeze_new_event_fee(event: TradeEvent, *, frozen_at_ms: int) -> TradeEvent
                 diagnostics=list(resolution.get("diagnostics") or []),
             )
         payload = event.raw_payload or {}
-        if is_unexecuted_expire_close(event):
+        if zero_reason:
             return _event_with_actual_fee(
                 event,
                 amount=Decimal(0),
                 source="option_expiry_lifecycle",
-                reason="expired_without_executed_order",
+                reason=zero_reason,
                 frozen_at_ms=frozen_at_ms,
             )
         return _event_with_missing_fee(

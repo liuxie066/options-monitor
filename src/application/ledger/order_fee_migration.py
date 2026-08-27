@@ -29,7 +29,7 @@ from src.application.ledger.current_decision_projection import (
     finalize_current_decision_projection,
 )
 from src.application.ledger.event_codec import encode_trade_event_for_storage
-from src.application.ledger.order_fee_semantics import is_unexecuted_expire_close
+from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
@@ -373,21 +373,26 @@ def _build_units(
             )
 
     for event in option_events:
+        zero_reason = zero_option_fee_lifecycle_reason(event)
         if (
-            event.event_type != "expire_close"
-            or ("option_trade", event.event_id) in provider_observed_event_ids
+            ("option_trade", event.event_id) in provider_observed_event_ids
             or not _in_range(event, start_ms, end_exclusive_ms)
             or not _is_bare_fee(event.raw_payload, event.fees)
-            or not is_unexecuted_expire_close(event)
+            or not zero_reason
         ):
             continue
+        source = (
+            "option_assignment_lifecycle"
+            if event.event_type == "assignment"
+            else "option_expiry_lifecycle"
+        )
         updated = _option_event_with_fee(
             event,
             basis=FeeBasis.ACTUAL,
             amount=Decimal(0),
             provenance={
-                "source": "option_expiry_lifecycle",
-                "reason": "expired_without_executed_order",
+                "source": source,
+                "reason": zero_reason,
                 "frozen_at_ms": int(applied_at_ms),
             },
             applied_at_ms=applied_at_ms,

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event
 from src.application.ledger.order_fee_migration import enrich_order_fees
+from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades import order_fee_sync as order_fee_sync_module
@@ -72,9 +74,20 @@ class _Provider:
 
 
 def _expiry_event(
-    *, order_id: str | None = None, broker_execution: bool = False
+    *,
+    order_id: str | None = None,
+    broker_execution: bool = False,
+    settlement_observation: bool = False,
 ) -> TradeEvent:
-    if order_id is not None or broker_execution:
+    if settlement_observation:
+        raw_payload = {
+            "schema_version": "lifecycle_terminal_event.v2",
+            "source_type": "broker_settlement_observation",
+            "close_type": "expire_auto_close",
+            "stock_settlement": {},
+        }
+        source = "lifecycle_reconciliation"
+    elif order_id is not None or broker_execution:
         raw_payload = {
             "futu_account_id": "123",
             "source_type": (
@@ -108,6 +121,29 @@ def _expiry_event(
         multiplier=100,
         target_lot_id="lot-1",
         raw_payload=raw_payload,
+    )
+
+
+def _assignment_event() -> TradeEvent:
+    return TradeEvent(
+        event_id="assignment-1",
+        event_type="assignment",
+        event_time_ms=EVENT_MS,
+        contract_key=_expiry_event().contract_key,
+        contracts=1,
+        price=0,
+        currency="USD",
+        source="option_lifecycle_decision",
+        multiplier=100,
+        target_lot_id="lot-1",
+        raw_payload={
+            "stock_settlement": {
+                "side": "buy",
+                "shares": 100,
+                "price": 100,
+                "currency": "USD",
+            }
+        },
     )
 
 
@@ -207,6 +243,100 @@ def test_expiry_without_executed_order_is_frozen_as_actual_zero(
     conversion = event.raw_payload["cash_conversions"]["option_fee_cash"]
     assert conversion["status"] == "observed"
     assert conversion["method"] == "zero_identity"
+
+
+def test_broker_settlement_expiry_is_frozen_as_actual_zero(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "settled-expiry.sqlite3")
+    expiry = _expiry_event(settlement_observation=True)
+    persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="open-for-settled-expiry",
+            event_type="open",
+            event_time_ms=EVENT_MS - 1,
+            contract_key=expiry.contract_key,
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            lot_id="lot-1",
+        ),
+    )
+
+    persist_trade_event_object(repo, expiry)
+
+    event = next(
+        TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+        if row["event_id"] == "expiry-1"
+    )
+    fee = fee_fact_for_event(event)
+    assert fee.basis.value == "actual"
+    assert fee.amount == 0
+    assert event.raw_payload["fee_provenance"]["reason"] == (
+        "expired_without_executed_order"
+    )
+    assert zero_option_fee_lifecycle_reason(
+        replace(
+            expiry,
+            raw_payload=expiry.raw_payload
+            | {"stock_settlement": {"side": "buy", "shares": 100}},
+        )
+    ) is None
+
+
+def test_legacy_assignment_migrates_to_actual_zero(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "assignment-migration.sqlite3")
+    assignment = _assignment_event()
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id="open-for-assignment",
+            event_type="open",
+            event_time_ms=EVENT_MS - 1,
+            contract_key=assignment.contract_key,
+            contracts=1,
+            price=2.5,
+            currency="USD",
+            source="legacy",
+            multiplier=100,
+            lot_id="lot-1",
+            raw_payload={
+                "fee_provenance": {
+                    "basis": "actual",
+                    "amount": "0",
+                    "source": "test",
+                }
+            },
+        )
+    )
+    repo.upsert_trade_event(assignment)
+
+    receipt = enrich_order_fees(
+        repo,
+        account="lx",
+        start_ms=EVENT_MS - 1,
+        end_exclusive_ms=EVENT_MS + 1,
+        apply=True,
+        applied_at_ms=EVENT_MS + 10,
+    )
+
+    assert receipt["status_counts"] == {"committed": 1}
+    event = next(
+        TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+        if row["event_id"] == "assignment-1"
+    )
+    fee = fee_fact_for_event(event)
+    assert fee.basis.value == "actual"
+    assert fee.amount == 0
+    assert event.raw_payload["fee_provenance"] == {
+        "basis": "actual",
+        "amount": "0",
+        "source": "option_assignment_lifecycle",
+        "reason": "assignment_without_option_trade",
+        "frozen_at_ms": EVENT_MS + 10,
+    }
 
 
 def test_legacy_expiry_without_executed_order_migrates_to_actual_zero(
